@@ -140,7 +140,7 @@ async function settle(millis = 300): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, millis))
 }
 
-test('B2: the submit callback observes an EMPTY composer (clear-before-callback ordering)', async () => {
+test('the submit callback observes an EMPTY composer (clear-before-callback ordering)', async () => {
   const seen: Array<{ text: string; draftAtCallback: string }> = []
   const harness = await mountPane((text) => {
     seen.push({ text, draftAtCallback: harness.renderer.composer.getDraft() })
@@ -158,7 +158,7 @@ test('B2: the submit callback observes an EMPTY composer (clear-before-callback 
   }
 })
 
-test('B2: a refusal that merges the draft back becomes live content and is re-submittable', async () => {
+test('a refusal that merges the draft back becomes live content and is re-submittable', async () => {
   // The refusal path the real controller uses for an unsupported builtin or a
   // `!` line: merge the submitted text into the live draft and notify. The
   // renderer must show that merged draft again (no stale pre-callback
@@ -193,7 +193,7 @@ test('B2: a refusal that merges the draft back becomes live content and is re-su
   }
 })
 
-test('B2: an accepted submit leaves an empty composer, so a second Enter cannot double-send', async () => {
+test('an accepted submit leaves an empty composer, so a second Enter cannot double-send', async () => {
   // The receiver mirrors the existing application admission: an EMPTY
   // serialized draft is a silent no-op (`dispatchUserInput`'s guard), so a
   // second Enter on the already-cleared composer can never produce a second
@@ -218,7 +218,7 @@ test('B2: an accepted submit leaves an empty composer, so a second Enter cannot 
 
 // ── The session/hydration input fence (§3.4 row 1) ──────────────────────────
 
-test('B2: the hydration window accepts NO composer key and never submits', async () => {
+test('the hydration window accepts NO composer key and never submits', async () => {
   const submissions: string[] = []
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
@@ -241,7 +241,7 @@ test('B2: the hydration window accepts NO composer key and never submits', async
   }
 })
 
-test('B2: the fence lifts when the new subject commits, and the composer works again', async () => {
+test('the fence lifts when the new subject commits, and the composer works again', async () => {
   const submissions: string[] = []
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
@@ -266,7 +266,7 @@ test('B2: the fence lifts when the new subject commits, and the composer works a
   }
 })
 
-test('B2: a key HELD across a generation bump cannot submit when the bind replays it', async () => {
+test('a key HELD across a generation bump cannot submit when the bind replays it', async () => {
   // The reviewer's exact shape: hold text + Enter, THEN the surface reports a
   // generation bump, THEN the bind replays the queue. The replay must honour
   // the SAME fence as the live path — previously it called the dispatcher
@@ -292,7 +292,7 @@ test('B2: a key HELD across a generation bump cannot submit when the bind replay
   }
 })
 
-test('B2: a hydration that NEVER commits stays fail-closed (Loading retained, no submit, cancel still live)', async () => {
+test('a hydration that NEVER commits stays fail-closed (Loading retained, no submit, cancel still live)', async () => {
   // The never-commit terminal state the round-3 review asked to pin: when the
   // owner's hydrate fails BEFORE any new-subject frame, the renderer cannot
   // lift the fence itself (only a NEW source token commits it away). The
@@ -337,7 +337,7 @@ test('B2: a hydration that NEVER commits stays fail-closed (Loading retained, no
 
 // ── The genuine A→B draft isolation (§7.3; the B2 external review's F1) ─────
 
-test('B2: a GENUINE session switch clears the old draft — Enter into B never sends A\'s text', async () => {
+test('a GENUINE session switch clears the old draft — Enter into B never sends A\'s text', async () => {
   // The exact state sequence of the external review's P2: session A's
   // unsubmitted draft must not survive into B. The session-lifecycle
   // authority drops the active draft at the COMMITTED cross-owner
@@ -381,7 +381,7 @@ test('B2: a GENUINE session switch clears the old draft — Enter into B never s
   }
 })
 
-test('B2 §7.3 (F1): the FIRST-session creation and a generation bump WITHOUT a committed switch never drop the draft', async () => {
+test('the FIRST-session creation and a generation bump WITHOUT a committed switch never drop the draft', async () => {
   // The round-6 review's discriminator: the generation reset alone is an
   // INVALIDATION signal, not a confirmed A→B. The first-session creation
   // (commit shape C) bumps too, and a pre-publication failure bumps while
@@ -421,7 +421,7 @@ test('B2 §7.3 (F1): the FIRST-session creation and a generation bump WITHOUT a 
   }
 })
 
-test('B2: a SAME-SESSION rehydrate preserves the unsubmitted draft', async () => {
+test('a SAME-SESSION rehydrate preserves the unsubmitted draft', async () => {
   // §7.3's other half: ordinary hydration of the SAME session keeps the
   // unsubmitted main-composer text Client-local. `initLiveSession` calls
   // `beginSessionHydration` on the SAME generation (no generation reset, no
@@ -453,7 +453,7 @@ test('B2: a SAME-SESSION rehydrate preserves the unsubmitted draft', async () =>
   }
 })
 
-test('B2: a FAILED switch (hydration raised, never cleared, no new subject) preserves the draft', async () => {
+test('a FAILED switch (hydration raised, never cleared, no new subject) preserves the draft', async () => {
   // The failure-adjacent path the external review asked to cover: a switch
   // that begins (hydration window raised) but never reaches its generation
   // boundary — the owner's failure handling keeps the OLD subject. No
@@ -481,7 +481,7 @@ test('B2: a FAILED switch (hydration raised, never cleared, no new subject) pres
   }
 })
 
-test('B2 §7.3 (F2): the TSP renderer declares the switch-dropping stale-restore contract', async () => {
+test('the TSP renderer declares the switch-dropping stale-restore contract', async () => {
   // The renderer-side half of the F2 contract: after a committed switch
   // dropped the outgoing draft, the renderer DECLARES that a stale
   // submission's restore must be suppressed (`retainsStaleDraftRestore()`
@@ -508,7 +508,7 @@ test('B2 §7.3 (F2): the TSP renderer declares the switch-dropping stale-restore
   }
 })
 
-test('B2 §7.3 (F1 atomicity): clearActiveDraft is PURE STATE — no render IO, no throw surface', async () => {
+test('(F1 atomicity): clearActiveDraft is PURE STATE — no render IO, no throw surface', async () => {
   // The external review's publication-atomicity finding: the drop runs
   // inside the synchronous publication block, where a throwing render would
   // turn the clear into a pre-publication failure with the draft already

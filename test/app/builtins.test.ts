@@ -446,7 +446,7 @@ test('builtins unload with their owner fiber (HMR parity)', async () => {
   }
 })
 
-test('P0-1: a plugin following the README example registers BEFORE any surface exists (advertised capabilities)', async () => {
+test('a plugin following the README example registers BEFORE any surface exists (advertised capabilities)', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -549,7 +549,7 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
   }
 })
 
-test('M3-5 PR1: the builtin todo dock renders the DISPLAY SUBJECT summary while a child viewer is mounted', async () => {
+test('the builtin todo dock renders the DISPLAY SUBJECT summary while a child viewer is mounted', async () => {
   // Contract decision (M3-5 PR1): `activity.todoSummary` keeps its v2 meaning
   // (the LIVE session's list). The chrome follows the display subject through
   // the ADDITIVE `session.displaySubject` projection, which the first-party

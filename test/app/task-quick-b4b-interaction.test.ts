@@ -257,7 +257,7 @@ async function startQuick(options: {
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
 /** S1 — hidden by default with live tasks; the badge survives. */
-test('B4B-01 live tasks: the accessory paints ZERO rows and the badge keeps its counts', async () => {
+test('live tasks: the accessory paints ZERO rows and the badge keeps its counts', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'), job('j4', 'review', 'running')],
   })
@@ -271,7 +271,7 @@ test('B4B-01 live tasks: the accessory paints ZERO rows and the badge keeps its 
 })
 
 /** S1b — hidden with NO tasks as well. */
-test('B4B-01b no tasks: the accessory paints nothing (0 rows, 0 header)', async () => {
+test('no tasks: the accessory paints nothing (0 rows, 0 header)', async () => {
   const h = await startQuick({})
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -281,7 +281,7 @@ test('B4B-01b no tasks: the accessory paints nothing (0 rows, 0 header)', async 
 })
 
 /** S2/S3 — the editor boundary drives the entry; the draft survives. */
-test('B4B-02/03 effective ↓ enters from the middle of the last visual line and preserves the draft', async () => {
+test('02/03 effective ↓ enters from the middle of the last visual line and preserves the draft', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
   })
@@ -371,7 +371,7 @@ test('B4B-02/03 effective ↓ enters from the middle of the last visual line and
   assert.ok(view(h.vt).includes('first line of the draft'), 'the editor is visible again')
 })
 
-test('B4B-05 Quick returns the scrolled editor viewport, cursor and mode unchanged', async () => {
+test('Quick returns the scrolled editor viewport, cursor and mode unchanged', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -403,7 +403,7 @@ test('B4B-05 Quick returns the scrolled editor viewport, cursor and mode unchang
 })
 
 /** S4 — ↑↓/Pg navigation; Up at the global first row exits. */
-test('B4B-04/05 Up/Down and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
+test('04/05 Up/Down and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
   const h = await startQuick({
     roster: [
       job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running'),
@@ -465,7 +465,7 @@ test('B4B-04/05 Up/Down and PgUp/PgDn move by painted task rows; Up at the globa
 
 /** S6 — Enter routes the typed selection into a REAL Job workspace (the
  *  literal Enter → accessory → app callback → runtime → Job Inspector sink). */
-test('B4B-06 Enter opens the real Job workspace; a refused value never disturbs it', async () => {
+test('Enter opens the real Job workspace; a refused value never disturbs it', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
   })
@@ -600,7 +600,7 @@ ${view(h.vt)}`)
 ${view(h.vt)}`)
 })
 
-test('B4B-06c a live SGR wheel keeps Enter on the selected painted Quick row', async () => {
+test('a live SGR wheel keeps Enter on the selected painted Quick row', async () => {
   const h = await startQuick({
     roster: [
       job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
@@ -635,7 +635,7 @@ test('B4B-06c a live SGR wheel keeps Enter on the selected painted Quick row', a
   assert.ok(view(h.vt).includes('j2'), `the opened workspace is the selected job:\n${view(h.vt)}`)
 })
 
-test('B4B-06d an async projection insertion keeps the surviving Enter selection painted', async () => {
+test('an async projection insertion keeps the surviving Enter selection painted', async () => {
   const h = await startQuick({
     roster: [
       job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
@@ -677,7 +677,7 @@ test('B4B-06d an async projection insertion keeps the surviving Enter selection 
   assert.ok(view(h.vt).includes('j2'), `the opened workspace is the selected job:\n${view(h.vt)}`)
 })
 
-test('B4B-06e a deleted Quick selection cannot open its fallback before paint', async () => {
+test('a deleted Quick selection cannot open its fallback before paint', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running')],
   })
@@ -713,7 +713,7 @@ test('B4B-06e a deleted Quick selection cannot open its fallback before paint', 
   assert.ok(view(h.vt).includes('j3'), `the opened workspace is the painted successor:\n${view(h.vt)}`)
 })
 
-test('B4B-06b Enter routes a Quick Subagent through the real typed enterView authority', async () => {
+test('Enter routes a Quick Subagent through the real typed enterView authority', async () => {
   const h = await startQuick({
     roster: [],
     descendants: [{
@@ -741,7 +741,7 @@ test('B4B-06b Enter routes a Quick Subagent through the real typed enterView aut
 })
 
 /** S8 — a parked Question row reaches the REAL attention.reopen. */
-test('B4B-08 a parked Question enters the projection; a refused reopen reports no surface', async () => {
+test('a parked Question enters the projection; a refused reopen reports no surface', async () => {
   const reopens: string[] = []
   let allowReopen = true
   const vt = new VirtualTerminal(120, 40)
@@ -849,7 +849,7 @@ test('B4B-08 a parked Question enters the projection; a refused reopen reports n
 
 /** S9 — Fullscreen native SGR press→release→synthesized click opens the
  *  typed detail for the SAME row; press A → release B never activates. */
-test('B4B-09-s9 fullscreen same-row SGR click opens; cross-row press/release refuses', async () => {
+test('s9 fullscreen same-row SGR click opens; cross-row press/release refuses', async () => {
   const h = await startQuick({
     roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
   })
@@ -934,7 +934,7 @@ test('B4B-09-s9 fullscreen same-row SGR click opens; cross-row press/release ref
 })
 
 /** S10 — shell mode / autocomplete / a non-last line never enter Quick. */
-test('B4B-10 shell mode and a non-last visual line fail the admission closed', async () => {
+test('shell mode and a non-last visual line fail the admission closed', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -961,7 +961,7 @@ test('B4B-10 shell mode and a non-last visual line fail the admission closed', a
   assert.equal(h.band().identity, -1, 'a non-last visual line never enters Quick')
 })
 
-test('B4B-10 owner displacement retires Quick before History, Settings, managed overlays and plugin editors', async () => {
+test('owner displacement retires Quick before History, Settings, managed overlays and plugin editors', async () => {
   const editorRegistry = new EditorRegistry()
   const h = await startQuick({
     roster: [job('j1', 'build', 'running')],
@@ -1035,7 +1035,7 @@ test('B4B-10 owner displacement retires Quick before History, Settings, managed 
   assert.equal(h.band().identity, -1, 'Quick paints no rows after the plugin editor takes the seat')
 })
 
-test('B4B-10b Job and Settings workspace leases retire active Quick and never restore it', async () => {
+test('Job and Settings workspace leases retire active Quick and never restore it', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1066,7 +1066,7 @@ test('B4B-10b Job and Settings workspace leases retire active Quick and never re
   assert.ok(!view(h.vt).includes('Task Quick'), 'the closed workspace leaves no Quick identity row')
 })
 
-test('B4B-10c a synchronous Footer callback workspace wins over an older Quick opener', async () => {
+test('a synchronous Footer callback workspace wins over an older Quick opener', async () => {
   let app: TuiApp | undefined
   let reenter = false
   let nestedSettings: { close: () => void } | undefined
@@ -1106,7 +1106,7 @@ test('B4B-10c a synchronous Footer callback workspace wins over an older Quick o
 })
 
 /** S11 — `app.tasks.open: false` drops the hint and the route; numbers stay. */
-test('B4B-11 a disabled action drops the hint and the route; the badge numbers survive', async () => {
+test('a disabled action drops the hint and the route; the badge numbers survive', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1131,7 +1131,7 @@ function appSettle(app: TuiApp): void {
 }
 
 /** S12 — the 44-col CJK soft-wrapped draft; a short frame declines. */
-test('B4B-12 the 44-col CJK wrapped draft enters; an extreme frame declines the entry', async () => {
+test('the 44-col CJK wrapped draft enters; an extreme frame declines the entry', async () => {
   // 44 cols with a CJK draft that soft-wraps into several visual lines.
   const h = await startQuick({
     cols: 44,
@@ -1183,7 +1183,7 @@ test('B4B-12 the 44-col CJK wrapped draft enters; an extreme frame declines the 
 })
 
 /** S13 — a session reset with Quick ACTIVE exits and leaves no stale rows. */
-test('B4B-13 a session reset with Quick ACTIVE exits and clears the projection', async () => {
+test('a session reset with Quick ACTIVE exits and clears the projection', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1206,7 +1206,7 @@ test('B4B-13 a session reset with Quick ACTIVE exits and clears the projection',
  *  pressed cell's physical y), a repaint, THEN the release on the same
  *  cell: the frame-fence clears the intent — nothing activates. A fresh
  *  same-cell gesture after the resize clicks the CURRENT row normally. */
-test('B4B-07-resize a held press across a width-only resize never activates; a fresh gesture does', async () => {
+test('resize a held press across a width-only resize never activates; a fresh gesture does', async () => {
   const h = await startQuick({
     roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
   })
@@ -1253,7 +1253,7 @@ test('B4B-07-resize a held press across a width-only resize never activates; a f
   await h.vt.waitForRender()
 })
 
-test('B4B-07-height a height-only terminal resize invalidates the held SGR row intent', async () => {
+test('height a height-only terminal resize invalidates the held SGR row intent', async () => {
   const h = await startQuick({
     roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
   })
@@ -1306,7 +1306,7 @@ test('B4B-07-height a height-only terminal resize invalidates the held SGR row i
 
 /** F4: an ACTIVE Quick resized below its grant retires — the editor gets
  *  the keyboard back instead of an invisible band consuming input. */
-test('B4B-resize-zero an ACTIVE Quick resized to 0 grant exits and returns the editor', async () => {
+test('resize-zero an ACTIVE Quick resized to 0 grant exits and returns the editor', async () => {
   const h = await startQuick({ cols: 120, rows: 40, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1325,7 +1325,7 @@ test('B4B-resize-zero an ACTIVE Quick resized to 0 grant exits and returns the e
 
 /** Selection-currentness (B4B-08): deleting the SELECTED row falls back to
  *  its successor (predecessor at the tail) — never to the head. */
-test('B4B-delete-fallback deleted selection lands on successor/predecessor', async () => {
+test('delete-fallback deleted selection lands on successor/predecessor', async () => {
   const h = await startQuick({ roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1351,7 +1351,7 @@ test('B4B-delete-fallback deleted selection lands on successor/predecessor', asy
 
 /** Screen-swap retirement (main §5): entering fullscreen while Quick is
  *  ACTIVE must hide the band and return the keyboard to the editor. */
-test('B4B-swap a fullscreen hand-off retires the ACTIVE Quick', async () => {
+test('swap a fullscreen hand-off retires the ACTIVE Quick', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1385,7 +1385,7 @@ test('B4B-swap a fullscreen hand-off retires the ACTIVE Quick', async () => {
 })
 
 /** S14 — /tasks Full works while the Quick stays hidden. */
-test('B4B-14 the /tasks Full browser opens and filters while the Quick stays hidden', async () => {
+test('the /tasks Full browser opens and filters while the Quick stays hidden', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1432,7 +1432,7 @@ test('B4B-14 the /tasks Full browser opens and filters while the Quick stays hid
 })
 
 /** F2 — a PRE-ABORTED approval request is never a blocking owner. */
-test('B4B-f2 a pre-aborted approval request does not retire the ACTIVE Quick', async () => {
+test('f2 a pre-aborted approval request does not retire the ACTIVE Quick', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1461,7 +1461,7 @@ test('B4B-f2 a pre-aborted approval request does not retire the ACTIVE Quick', a
 })
 
 /** F6 — the Down fast path measures the chrome ONCE per frame (plan §9.3). */
-test('B4B-f6 the admission probe measures the chrome once per render window', async () => {
+test('f6 the admission probe measures the chrome once per render window', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1519,7 +1519,7 @@ test('B4B-f6 the admission probe measures the chrome once per render window', as
  *  to the picker; Esc closes it, the close event recomposes, and the hint
  *  returns to its pre-dropdown value. Both directions are HARD assertions —
  *  a defect that skips either recompose fails here. */
-test('B4B-f7 an autocomplete open/close with unchanged visual state recomposes both ways', async () => {
+test('f7 an autocomplete open/close with unchanged visual state recomposes both ways', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1545,7 +1545,7 @@ test('B4B-f7 an autocomplete open/close with unchanged visual state recomposes b
 /** R9-F1/F4/F5 — ordinary same-layout edits neither compose Footer nor
  *  rebuild the wrap map; a rewrap refreshes the boundary, while X063 events
  *  share one compose and navigation reuses the event fact. */
-test('B4B-f8 onChange-only rewrap refreshes and coalesces the visual boundary', async () => {
+test('f8 onChange-only rewrap refreshes and coalesces the visual boundary', async () => {
   const h = await startQuick({ cols: 40, rows: 24, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1641,7 +1641,7 @@ test('B4B-f8 onChange-only rewrap refreshes and coalesces the visual boundary', 
   }
 })
 
-test('B4B-width4 TuiEditor admission uses the fork-clamped width at four columns', async () => {
+test('width4 TuiEditor admission uses the fork-clamped width at four columns', async () => {
   const h = await startQuick({ cols: 4, rows: 24, roster: [job('j1', 'build', 'running')] })
   h.app.setDraft('x')
   await h.vt.waitForRender()
@@ -1657,7 +1657,7 @@ test('B4B-width4 TuiEditor admission uses the fork-clamped width at four columns
 
 /** X063 jump transitions can change Down ownership while the raw visual-line
  *  truth is unchanged, so the production Footer must recompose in both ways. */
-test('B4B-f9 jump arm and no-match completion refresh an unchanged-boundary hint', async () => {
+test('f9 jump arm and no-match completion refresh an unchanged-boundary hint', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1675,7 +1675,7 @@ test('B4B-f9 jump arm and no-match completion refresh an unchanged-boundary hint
  *  Footer. The one-row actual/two-row candidate case must fail closed without
  *  oscillation; added height admits the same route; ACTIVE focus is governed by
  *  the actual painted geometry and survives Footer hint/preset changes. */
-test('B4B-f10 preflights the hint-enabled Footer and keeps ACTIVE Quick independent', async () => {
+test('f10 preflights the hint-enabled Footer and keeps ACTIVE Quick independent', async () => {
   const h = await startQuick({ cols: 30, rows: 7, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1753,7 +1753,7 @@ test('B4B-f10 preflights the hint-enabled Footer and keeps ACTIVE Quick independ
   }
 })
 
-test('B4B-f11 focused Quick consumes host submit and steer bindings', async () => {
+test('f11 focused Quick consumes host submit and steer bindings', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   const draft = 'hidden draft must not submit'
   h.app.setDraft(draft)
@@ -1778,7 +1778,7 @@ test('B4B-f11 focused Quick consumes host submit and steer bindings', async () =
   assert.equal(h.app.taskQuickFocusedForTest(), true, 'Quick remains the focused input owner')
 })
 
-test('B4B-f13 a resize before queued Footer compose refreshes from the new Editor layout', async () => {
+test('f13 a resize before queued Footer compose refreshes from the new Editor layout', async () => {
   const h = await startQuick({ cols: 40, rows: 24, roster: [job('j1', 'build', 'running')] })
   const app = h.app as unknown as {
     editor: {
@@ -1826,7 +1826,7 @@ test('B4B-f13 a resize before queued Footer compose refreshes from the new Edito
  * A green run means this shape is NOT a defect: the badge keeps its failure
  * attention AND still promises a trigger the Quick can serve.
  */
-test('B4B-f14 failure-only roster: the failure row reaches Quick and the footer keeps promising it', async () => {
+test('f14 failure-only roster: the failure row reaches Quick and the footer keeps promising it', async () => {
   // `descendants: []` installs the production `taskRead` seam, so the runtime's
   // RICH summary path is live (`refreshRuntime` early-returns without a catalog
   // key) — the failure count the badge and `tasksActive` are derived from.
@@ -1872,7 +1872,7 @@ test('B4B-f14 failure-only roster: the failure row reaches Quick and the footer 
  * Intermediate observations are witnesses of the window, never the verdict:
  * the assertions are the FINAL painted Footer and the real Down route.
  */
-test('B4B-f15 a compose before the Editor republishes its layout heals through the existing convergence', async () => {
+test('f15 a compose before the Editor republishes its layout heals through the existing convergence', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1946,7 +1946,7 @@ test('B4B-f15 a compose before the Editor republishes its layout heals through t
  * Assertion order is deliberate: the intermediate drop is only a witness, the
  * verdict is the FINAL painted Footer plus the REAL Down route.
  */
-test('B4B-f16 returning from history browse repaints the ↓ hint the real Down route admits', async () => {
+test('f16 returning from history browse repaints the ↓ hint the real Down route admits', async () => {
   const h = await startQuick({ cols: 40, rows: 24, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -2006,7 +2006,7 @@ test('B4B-f16 returning from history browse repaints the ↓ hint the real Down 
  * Driven by the REAL Ctrl+T toggle; the grant is only MEASURED, never edited,
  * and `renderFooter()` is never called to help.
  */
-test('B4B-f17 opening the Todo panel removes the grant and the ↓ hint stops promising the refused route', async () => {
+test('f17 opening the Todo panel removes the grant and the ↓ hint stops promising the refused route', async () => {
   const h = await startQuick({ cols: 60, rows: 12, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -2056,7 +2056,7 @@ test('B4B-f17 opening the Todo panel removes the grant and the ↓ hint stops pr
  * closing the panel returns the grant. The route admits Down again, so the
  * painted hint must return with it.
  */
-test('B4B-f18 closing the Todo panel restores the grant and the ↓ hint returns with the route', async () => {
+test('f18 closing the Todo panel restores the grant and the ↓ hint returns with the route', async () => {
   const h = await startQuick({ cols: 60, rows: 12, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -2112,7 +2112,7 @@ test('B4B-f18 closing the Todo panel restores the grant and the ↓ hint returns
  * to the EDITOR after such a click (the raw physical focus legitimately stays
  * on the forwarding seat mount).
  */
-test('B4B-f19 a fullscreen editor click leaves the editor as the input owner (hint and Down follow)', async () => {
+test('f19 a fullscreen editor click leaves the editor as the input owner (hint and Down follow)', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()

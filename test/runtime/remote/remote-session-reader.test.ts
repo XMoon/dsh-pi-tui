@@ -419,7 +419,7 @@ function pressureBinding(pressure: unknown, extra: Readonly<Record<string, unkno
   return binding({ contextPressure: pressure, ...extra })
 }
 
-test('R1/R2: measureContext reads projectedTokens first, then pressureTokens', () => {
+test('measureContext reads projectedTokens first, then pressureTokens', () => {
   const generation = createObservableGenerationHarness()
   const projected = remoteSource({
     state: state([], {}),
@@ -433,7 +433,7 @@ test('R1/R2: measureContext reads projectedTokens first, then pressureTokens', (
   assert.equal(new RemoteSessionReader(fallback, generation.source).measureContext('s'), 100)
 })
 
-test('R3: a binding without a contextPressure value reads unmeasured', () => {
+test('a binding without a contextPressure value reads unmeasured', () => {
   const generation = createObservableGenerationHarness()
   const source = remoteSource({
     state: state([], {}),
@@ -442,7 +442,7 @@ test('R3: a binding without a contextPressure value reads unmeasured', () => {
   assert.equal(new RemoteSessionReader(source, generation.source).measureContext('s'), undefined)
 })
 
-test('R4: no binding or no connection reads unmeasured with zero retain/open', () => {
+test('no binding or no connection reads unmeasured with zero retain/open', () => {
   const generation = createObservableGenerationHarness()
   const source = remoteSource({
     state: state([], {}),
@@ -460,7 +460,7 @@ test('R4: no binding or no connection reads unmeasured with zero retain/open', (
     'a disconnected generation reads unmeasured')
 })
 
-test('R5: Direct and Remote map the SAME projection snapshot to the same occupancy', async () => {
+test('Direct and Remote map the SAME projection snapshot to the same occupancy', async () => {
   const { contextPressureOccupancy } = await import('../../../src/runtime/session-reader-port.ts')
   const pressure = { pressureTokens: 100, projectedTokens: 125, contextWindow: 1000 }
   // The Direct mapping consumes the Host snapshot's value; the Remote
@@ -541,7 +541,7 @@ test('sessionStatus reads only the addressed session — no parent/main fallback
   assert.deepEqual(new RemoteSessionReader(bare, generation.source).sessionStatus('s'), { sessionId: 's' })
 })
 
-test('T8: the Remote branch never grows the Direct compat read — an absent binding face stays unknown', () => {
+test('the Remote branch never grows the Direct compat read — an absent binding face stays unknown', () => {
   // The Direct reader now falls back to the exact Session's own durable facts
   // while the official `modelSelection` unit is unregistered. The Remote branch
   // has an OFFICIAL binding face instead, so it must stay strictly

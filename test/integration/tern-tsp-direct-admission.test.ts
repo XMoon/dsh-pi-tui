@@ -76,7 +76,7 @@ test('B2/Direct: a GENUINE Host command with a TUI builtin name keeps its Host s
   }
 })
 
-test('B1-B/Direct: installed Session Browser capability never captures Host-owned command names', async (t) => {
+test('B/Direct: installed Session Browser capability never captures Host-owned command names', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const names = ['sessions', 'resume', 'search']
@@ -108,7 +108,7 @@ test('B1-B/Direct: installed Session Browser capability never captures Host-owne
   }
 })
 
-test('B1-B/Direct: /sessions without a negotiated Browser is refused and restores the draft', async (t) => {
+test('B/Direct: /sessions without a negotiated Browser is refused and restores the draft', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { sessionBrowser: false })
@@ -454,7 +454,7 @@ test('B2/Direct: an advertised Skill that is gone at execution is consumed with 
   }
 })
 
-test('B1-B/Direct: a resolvable Skill invocation keeps its agent-facing route while Browser capability is mounted', async (t) => {
+test('B/Direct: a resolvable Skill invocation keeps its agent-facing route while Browser capability is mounted', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // A real non-colliding Skill invocation exercises the production classifier

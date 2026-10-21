@@ -203,7 +203,7 @@ test('a constructed-but-not-started TuiApp never pollutes the shared global keyb
  * FILE in its own process with sequential top-level tests, so nothing in this
  * process can be poisoned. No product reset API is introduced.
  */
-test('M3-6 PR3: a failing final teardown keeps the process slot claimed (fail-closed)', (t) => {
+test('a failing final teardown keeps the process slot claimed (fail-closed)', (t) => {
   const app = newApp()
   app.start()
   assert.equal(liveTuiCountForTest(), 1, 'the started app owns the process slot')

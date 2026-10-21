@@ -466,7 +466,7 @@ test('a direct ask on an unknown call never fabricates an entry', async () => {
 
 // ── PR3-B B3 (finding C): the presentation-only withdrawal of a replaced flow ─
 
-test('PR3-B B3: a live flow whose Session no longer owns the surface is withdrawn WITHOUT settling its request', async () => {
+test('a live flow whose Session no longer owns the surface is withdrawn WITHOUT settling its request', async () => {
   const h = harness()
   h.attach()
   await settleFrames()
@@ -505,7 +505,7 @@ test('PR3-B B3: a live flow whose Session no longer owns the surface is withdraw
 
 // ── PR3-B B3: the same controller driving the REAL TSP interaction seat ──────
 
-test('PR3-B B3: the REAL TSP seat parks a continued form on Esc and reopens it with the preserved draft', async () => {
+test('the REAL TSP seat parks a continued form on Esc and reopens it with the preserved draft', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const seat = createTspInteractionSeat({
     render: () => {},
@@ -572,7 +572,7 @@ test('PR3-B B3: the REAL TSP seat parks a continued form on Esc and reopens it w
   }
 })
 
-test('PR3-B B3 finding F7: a held timed claim retired by a publication never mounts its form (and is not revived)', async () => {
+test('finding F7: a held timed claim retired by a publication never mounts its form (and is not revived)', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const seat = createTspInteractionSeat({
     render: () => {},

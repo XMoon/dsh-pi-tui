@@ -80,7 +80,7 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
   return (result.content ?? []).map(block => block.type === 'text' ? block.text ?? '' : '').join('')
 }
 
-test('B01 Agent Teams: real patch scopes, four preset rosters and one Lead→teammate loop', { skip }, async t => {
+test('Agent Teams: real patch scopes, four preset rosters and one Lead→teammate loop', { skip }, async t => {
   // B01-OFF baseline: the same four official presets without the Team bundle.
   // The real addition is then exactly the Team tool family, not a global claim.
   const baseline = await startS4D2Host(t, { bundles: [], presets: true })

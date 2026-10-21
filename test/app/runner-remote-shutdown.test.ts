@@ -251,7 +251,7 @@ function diagLogOf(host: HostFixture): string {
 
 /* ── L6-A ──────────────────────────────────────────────────────────────── */
 
-test('L6-A: a mounted Remote runner unloads totally and a fresh runner mounts in the same process', async (t) => {
+test('a mounted Remote runner unloads totally and a fresh runner mounts in the same process', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-6-pr3-shutdown-preset'
   const vt = virtualTerminal(life)
@@ -323,7 +323,7 @@ test('L6-A: a mounted Remote runner unloads totally and a fresh runner mounts in
 
 /* ── L6-B ──────────────────────────────────────────────────────────────── */
 
-test('L6-B: a throwing real generation unsubscribe cannot truncate the root teardown', async (t) => {
+test('a throwing real generation unsubscribe cannot truncate the root teardown', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-6-pr3-shutdown-preset'
   const vt = virtualTerminal(life)
@@ -402,7 +402,7 @@ test('L6-B: a throwing real generation unsubscribe cannot truncate the root tear
 
 /* ── L6-C ──────────────────────────────────────────────────────────────── */
 
-test('L6-C: a mounted startup fatal uses the same surface cleanup authority before retirement/transport', async (t) => {
+test('a mounted startup fatal uses the same surface cleanup authority before retirement/transport', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-6-pr3-shutdown-preset'
   const vt = virtualTerminal(life)
@@ -468,7 +468,7 @@ test('L6-C: a mounted startup fatal uses the same surface cleanup authority befo
  * leaving the slot claimed here cannot poison another test file; nothing after
  * this test in this file may start a TUI.
  */
-test('L6-D: a throwing mounted TuiApp.dispose() neither strands the later plugin/theme/extension releases nor releases the slot', async (t) => {
+test('a throwing mounted TuiApp.dispose() neither strands the later plugin/theme/extension releases nor releases the slot', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-6-pr3-shutdown-preset'
   const vt = virtualTerminal(life)

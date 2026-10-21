@@ -71,7 +71,7 @@ test('stable API: capabilities are feature-detected, never version-parsed', asyn
   for (const capability of capabilities) assert.ok(full.has(capability))
 })
 
-test('M11: extensionHealthRows reports the live registry counts', async () => {
+test('extensionHealthRows reports the live registry counts', async () => {
   const { extensionHealthRows } = await import('../../src/commands.ts')
   const { CommandBridge } = await import('../../src/extension/internal/command-bridge.ts')
   const { ThemeRegistry } = await import('../../src/extension/internal/theme-registry.ts')
@@ -111,7 +111,7 @@ test('M11: extensionHealthRows reports the live registry counts', async () => {
   assert.deepEqual(extensionHealthRows({ extensions: undefined } as never), [])
 })
 
-test('M11: the capability row reflects the real capability set across states (round-1 finding 1)', async () => {
+test('the capability row reflects the real capability set across states (round-1 finding 1)', async () => {
   const { extensionHealthRows } = await import('../../src/commands.ts')
   const { CommandBridge } = await import('../../src/extension/internal/command-bridge.ts')
   const { ThemeRegistry } = await import('../../src/extension/internal/theme-registry.ts')
@@ -142,7 +142,7 @@ test('M11: the capability row reflects the real capability set across states (ro
   assert.equal(strip(registries?.currentValue ?? ''), 'none', 'empty registries report none')
 })
 
-test('M11: a large transcript with extension renderers stays healthy (plan §23)', async () => {
+test('a large transcript with extension renderers stays healthy (plan §23)', async () => {
   const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
   const { TuiApp } = await import('../../src/tui-app.ts')
   const { RendererRegistry } = await import('../../src/extension/internal/renderer-registry.ts')

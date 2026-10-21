@@ -948,7 +948,7 @@ test('A-15 the workspace chrome paints the live palette tokens (dark → light)'
 
 // ── F1: the painted mouse path really navigates and copies ────────────────
 
-test('F1-01 narrow item clicks select and focus, never drill past the level', async () => {
+test('narrow item clicks select and focus, never drill past the level', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
@@ -976,7 +976,7 @@ test('F1-01 narrow item clicks select and focus, never drill past the level', as
   h.dispose()
 })
 
-test('F1-02 the painted Copy button copies while the row list owns the keyboard focus', async () => {
+test('the painted Copy button copies while the row list owns the keyboard focus', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.ok(!/c copy value/.test(h.rowsPlain().at(-1) ?? ''), 'c is never advertised outside the Detail level')
@@ -992,7 +992,7 @@ test('F1-02 the painted Copy button copies while the row list owns the keyboard 
   h.dispose()
 })
 
-test('F1-03 a click anywhere in a visible column takes that column focus', async () => {
+test('a click anywhere in a visible column takes that column focus', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
   assert.match(h.rowsPlain()[rowOf(h, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'the categories level owns focus at open')
@@ -1014,7 +1014,7 @@ test('F1-03 a click anywhere in a visible column takes that column focus', async
 
 // ── F2: the row grant and the actual paint/admission agree ────────────────
 
-test('F2-01 100x3 paints real content in its only body row, not pane headers', async () => {
+test('100x3 paints real content in its only body row, not pane headers', async () => {
   const h = setup({ columns: 100, rows: 3, doc: { theme: 'dark' } })
   await h.open()
   const painted = h.rowsPlain()
@@ -1024,7 +1024,7 @@ test('F2-01 100x3 paints real content in its only body row, not pane headers', a
   h.dispose()
 })
 
-test('F2-02 below the body floor Enter/Tab/arrows/C/R are inert; only Esc escapes', async () => {
+test('below the body floor Enter/Tab/arrows/C/R are inert; only Esc escapes', async () => {
   const h = setup({ columns: 72, rows: 2, doc: { theme: 'dark' } })
   await h.open()
   const before = h.view()
@@ -1038,7 +1038,7 @@ test('F2-02 below the body floor Enter/Tab/arrows/C/R are inert; only Esc escape
   h.dispose()
 })
 
-test('F2-03 72x3 paints no hidden Copy or Confirm action', async () => {
+test('72x3 paints no hidden Copy or Confirm action', async () => {
   const h = setup({ columns: 72, rows: 3, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // categories -> rows
@@ -1054,7 +1054,7 @@ test('F2-03 72x3 paints no hidden Copy or Confirm action', async () => {
 
 // ── F3: a gesture spanning a data change is refused ───────────────────────
 
-test('F3 a release after Refresh is refused instead of copying the newer value', async () => {
+test('a release after Refresh is refused instead of copying the newer value', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { iconStyle: 'minimal' } })
   await h.open()
   await key(h, '\r') // L0 -> L1
@@ -1082,7 +1082,7 @@ test('F3 a release after Refresh is refused instead of copying the newer value',
 
 // ── F4: the wheel owns its own viewport ───────────────────────────────────
 
-test('F4 the wheel scrolls the pane under the pointer without pulling the selection back', async () => {
+test('the wheel scrolls the pane under the pointer without pulling the selection back', async () => {
   const h = setup({ columns: 72, rows: 4, doc: { theme: 'dark' } })
   await h.open()
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Appearance')))
@@ -1101,7 +1101,7 @@ test('F4 the wheel scrolls the pane under the pointer without pulling the select
 
 // ── F5: unknown persistence is never presented as "not set" ───────────────
 
-test('F5 an unreadable document never fabricates a "not set" persisted preference', async () => {
+test('an unreadable document never fabricates a "not set" persisted preference', async () => {
   const missing = setup({ columns: 100, rows: 40, settingsService: false })
   await missing.open()
   await key(missing, '\x1b[B') // Appearance -> Display
@@ -1126,7 +1126,7 @@ test('F5 an unreadable document never fabricates a "not set" persisted preferenc
 
 // ── F6: raw values are escaped, never silently folded ─────────────────────
 
-test('F6 a raw source value with a line break renders a visible escape distinct from a space', async () => {
+test('a raw source value with a line break renders a visible escape distinct from a space', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'file:a\nb' } })
   await h.open()
   await key(h, '\r')
@@ -1218,7 +1218,7 @@ test('A-15c an unhandled printable key is inert inside the workspace', async () 
 
 // ── F1 residual: a real item click takes its column focus ─────────────────
 
-test('F1-04 a real category/row item click takes that level and selects the item', async () => {
+test('a real category/row item click takes that level and selects the item', async () => {
   const wide = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await wide.open()
   assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'the categories level owns focus at open')
@@ -1246,7 +1246,7 @@ test('F1-04 a real category/row item click takes that level and selects the item
 
 // ── F2 residual: the bar never advertises a floor-disabled key ────────────
 
-test('F2-04 below the body floor the Action Bar advertises only the Esc semantics', async () => {
+test('below the body floor the Action Bar advertises only the Esc semantics', async () => {
   for (const [columns, rows] of [[72, 2], [44, 2], [100, 2]] as const) {
     const h = setup({ columns, rows })
     await h.open()
@@ -1261,7 +1261,7 @@ test('F2-04 below the body floor the Action Bar advertises only the Esc semantic
 
 // ── F3 residual: a resize boundary refuses even an unchanged target ───────
 
-test('F3b a resize that keeps the target geometry still refuses the straddling press', async () => {
+test('a resize that keeps the target geometry still refuses the straddling press', async () => {
   const h = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   // Positive control first: an unchanged gesture selects the pressed row.
@@ -1287,7 +1287,7 @@ test('F3b a resize that keeps the target geometry still refuses the straddling p
 
 // ── F6 residual: the visual escape is unambiguous ─────────────────────────
 
-test('F6b a real newline and a literal backslash-n render differently', async () => {
+test('a real newline and a literal backslash-n render differently', async () => {
   const valueLine = (h: Harness): string => h.rowsPlain().find(line => line.includes('Source')) ?? ''
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'file:a\nb' } })
   await h.open()
@@ -1309,7 +1309,7 @@ test('F6b a real newline and a literal backslash-n render differently', async ()
 
 // ── F10: a shrinking viewport reveals the selection ───────────────────────
 
-test('F10 a viewport shrink reveals the selected row instead of hiding it', async () => {
+test('a viewport shrink reveals the selected row instead of hiding it', async () => {
   const medium = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
   await medium.open()
   await key(medium, '\r') // L0 -> L1
@@ -1332,7 +1332,7 @@ test('F10 a viewport shrink reveals the selected row instead of hiding it', asyn
 
 // ── F1 sibling: the retired Tab cycle and header arrows ───────────────────
 
-test('F1-05 Left/Right navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
+test('Left/Right navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
   for (const columns of [200, 100, 72] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' } })
     await h.open()
@@ -1456,7 +1456,7 @@ test('A-05b the decorative rules yield before readable content on short screens'
 
 // ── External UI review round 2 (PR #295): the narrow drill-down contract ───
 
-test('F11 narrow Left/Right enter exactly one level and never skip directly from Categories to detail', async () => {
+test('narrow Left/Right enter exactly one level and never skip directly from Categories to detail', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
@@ -1488,7 +1488,7 @@ test('F11 narrow Left/Right enter exactly one level and never skip directly from
   medium.dispose()
 })
 
-test('F12 / UX-10 pre-paint keys resolve the level, never the projection: the same walk at 72, 100 and 160', async () => {
+test('/ UX-10 pre-paint keys resolve the level, never the projection: the same walk at 72, 100 and 160', async () => {
   for (const [columns, rows] of [[72, 24], [100, 40], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     // Deliberately do NOT await a paint: the first keys arrive before the initial
@@ -1534,7 +1534,7 @@ test('F12 / UX-10 pre-paint keys resolve the level, never the projection: the sa
 // UX-12 (Job lease / Question / Approval / Save / session switch / legacy
 // handoff lifecycle) stays in `test/app/surface-lifecycle-closure.test.ts`.
 
-test('UX-01 every width opens at L0, ↑↓ changes the category and Enter enters the rows level', async () => {
+test('every width opens at L0, ↑↓ changes the category and Enter enters the rows level', async () => {
   for (const [columns, rows] of [[200, 40], [100, 40], [72, 24], [44, 8]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await h.open()
@@ -1548,7 +1548,7 @@ test('UX-01 every width opens at L0, ↑↓ changes the category and Enter enter
   }
 })
 
-test('UX-02 Esc walks one level back at every width; only L0 closes', async () => {
+test('Esc walks one level back at every width; only L0 closes', async () => {
   for (const [columns, rows] of [[200, 40], [100, 40], [72, 24]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await h.open()
@@ -1569,7 +1569,7 @@ test('UX-02 Esc walks one level back at every width; only L0 closes', async () =
   }
 })
 
-test('UX-03 the medium projection is a pure function of focus: L0 categories+rows, L1/L2 rows+detail', async () => {
+test('the medium projection is a pure function of focus: L0 categories+rows, L1/L2 rows+detail', async () => {
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
@@ -1592,7 +1592,7 @@ test('UX-03 the medium projection is a pure function of focus: L0 categories+row
   }
 })
 
-test('UX-04 the narrow projection keeps the inline choice across resize and preserves Detail copy', async () => {
+test('the narrow projection keeps the inline choice across resize and preserves Detail copy', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
@@ -1627,7 +1627,7 @@ test('UX-04 the narrow projection keeps the inline choice across resize and pres
   h.dispose()
 })
 
-test('UX-05 a resize keeps focus/category/row and invalidates the previous painted Confirm hit map', async () => {
+test('a resize keeps focus/category/row and invalidates the previous painted Confirm hit map', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\x1b[B') // Display
@@ -1646,7 +1646,7 @@ test('UX-05 a resize keeps focus/category/row and invalidates the previous paint
   h.dispose()
 })
 
-test('UX-05b a resize that has NOT repainted yet still refuses the straddling Confirm press', async () => {
+test('a resize that has NOT repainted yet still refuses the straddling Confirm press', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // L0 -> L1 (narrow)
@@ -1664,7 +1664,7 @@ test('UX-05b a resize that has NOT repainted yet still refuses the straddling Co
   h.dispose()
 })
 
-test('UX-05c a one-row choice cannot confirm invisibly and the first Enter only reveals its identity', async () => {
+test('a one-row choice cannot confirm invisibly and the first Enter only reveals its identity', async () => {
   const h = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // L0 -> L1
@@ -1687,7 +1687,7 @@ test('UX-05c a one-row choice cannot confirm invisibly and the first Enter only 
   h.dispose()
 })
 
-test('UX-05d clicking another category or row cancels an inline choice atomically', async () => {
+test('clicking another category or row cancels an inline choice atomically', async () => {
   const h = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // L0 -> L1
@@ -1720,7 +1720,7 @@ test('UX-05d clicking another category or row cancels an inline choice atomicall
   h.dispose()
 })
 
-test('UX-05e a Detail-pane or Change click enters the same one-step inline choice', async () => {
+test('a Detail-pane or Change click enters the same one-step inline choice', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // L0 -> L1; the medium Details pane is visible
@@ -1743,7 +1743,7 @@ test('UX-05e a Detail-pane or Change click enters the same one-step inline choic
   h.dispose()
 })
 
-test('UX-06 changing category refreshes the row selection and the detail; browsing never writes config', async () => {
+test('changing category refreshes the row selection and the detail; browsing never writes config', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.ok(h.view().includes('Configured theme'), 'the appearance rows are the L0 list')
@@ -1761,7 +1761,7 @@ test('UX-06 changing category refreshes the row selection and the detail; browsi
   h.dispose()
 })
 
-test('UX-07 the arrow hierarchy never leaks keys into the hidden editor', async () => {
+test('the arrow hierarchy never leaks keys into the hidden editor', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.vt.waitForRender()
   for (const ch of 'draft') await key(h, ch)
@@ -1780,7 +1780,7 @@ test('UX-07 the arrow hierarchy never leaks keys into the hidden editor', async 
   h.dispose()
 })
 
-test('UX-08 only visible panes publish hits: the hidden Detail band neither copies nor focuses', async () => {
+test('only visible panes publish hits: the hidden Detail band neither copies nor focuses', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.ok(!h.view().includes('Copy value [C]'), 'L0 paints no Detail button')
@@ -1793,7 +1793,7 @@ test('UX-08 only visible panes publish hits: the hidden Detail band neither copi
   h.dispose()
 })
 
-test('UX-09 C copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
+test('C copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
   await key(h, 'c')
@@ -1816,7 +1816,7 @@ test('UX-09 C copies only in a read-only Detail; R refreshes in place; browsing 
   h.dispose()
 })
 
-test('UX-11 a long CJK value wraps inside the narrow read-only Detail and copies byte-exact', async () => {
+test('a long CJK value wraps inside the narrow read-only Detail and copies byte-exact', async () => {
   const value = `file:${'汉'.repeat(40)}`
   const h = setup({ columns: 44, rows: 8, doc: { iconStyle: value } })
   await h.open()
@@ -1835,7 +1835,7 @@ test('UX-11 a long CJK value wraps inside the narrow read-only Detail and copies
 
 // ── UX-12: the frozen responsive projection table ─────────────────────────
 
-test('UX-12 the projection table is frozen: below 76 columns one pane, 76..107 two, 108 and up three', async () => {
+test('the projection table is frozen: below 76 columns one pane, 76..107 two, 108 and up three', async () => {
   for (const [columns, panes] of [[75, 1], [76, 2], [107, 2], [108, 3]] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' } })
     await h.open()
@@ -3341,7 +3341,7 @@ const toPlugins = async (h: Harness): Promise<void> => {
   await key(h, '\x1b[B')
 }
 
-test('D2-0 120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
+test('120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
   for (const [columns, rows] of [[120, 40], [80, 24]] as const) {
     const h = setup({ columns, rows, pluginPage: true })
     await h.open()
@@ -3373,7 +3373,7 @@ test('D2-0 120×40 and 80×24 paint the UI-only Plugins entry in the real Rows c
   }
 })
 
-test('D2-0 80×10 keeps the visible direct entry above the pinned bar', async () => {
+test('80×10 keeps the visible direct entry above the pinned bar', async () => {
   const h = setup({ columns: 80, rows: 10, pluginPage: true })
   await h.open()
   await toPlugins(h)
@@ -3385,7 +3385,7 @@ test('D2-0 80×10 keeps the visible direct entry above the pinned bar', async ()
   h.dispose()
 })
 
-test('D2-0 44×20 narrow paints no second-column affordance and keeps the direct key entry', async () => {
+test('44×20 narrow paints no second-column affordance and keeps the direct key entry', async () => {
   const h = setup({ columns: 44, rows: 20, pluginPage: true })
   await h.open()
   await toPlugins(h)
@@ -3398,7 +3398,7 @@ test('D2-0 44×20 narrow paints no second-column affordance and keeps the direct
   h.dispose()
 })
 
-test('D2-0 below the body floor the entry is not painted and every input is fail-closed', async () => {
+test('below the body floor the entry is not painted and every input is fail-closed', async () => {
   const h = setup({ columns: 120, rows: 40, pluginPage: true })
   await h.open()
   await toPlugins(h)

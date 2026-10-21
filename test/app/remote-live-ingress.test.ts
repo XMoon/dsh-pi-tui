@@ -194,7 +194,7 @@ test('append change routes durable events and synthesizes one start per attempt 
   handle.dispose()
 })
 
-test('R0: a Connection generation rollover NEVER delivers a partial increment as if it were whole', async () => {
+test('a Connection generation rollover NEVER delivers a partial increment as if it were whole', async () => {
   // The upstream eventSource contract (dsh-v0.2.1-rc.2
   // `api/session-controller/src/client/contract/events.ts`) defines the window
   // as the CURRENT complete contiguous window and `change` as the LAST
@@ -216,7 +216,7 @@ test('R0: a Connection generation rollover NEVER delivers a partial increment as
   handle.dispose()
 })
 
-test('R0: a same-generation revision discontinuity requires the full-window reconcile', async () => {
+test('a same-generation revision discontinuity requires the full-window reconcile', async () => {
   // A skipped revision means the intervening deltas are unobservable: the
   // window is authoritative, the latest change is not.
   const log: SinkLog = { durable: [], live: [], refolds: [] }
@@ -231,7 +231,7 @@ test('R0: a same-generation revision discontinuity requires the full-window reco
   handle.dispose()
 })
 
-test('R0: continuous same-generation appends stay incremental (no over-triggered refold)', async () => {
+test('continuous same-generation appends stay incremental (no over-triggered refold)', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 1, hasMore: false })
   const ingress = createRemoteLiveIngress(source.sessions, generationSource())
@@ -247,7 +247,7 @@ test('R0: continuous same-generation appends stay incremental (no over-triggered
   handle.dispose()
 })
 
-test('R0: the acknowledge resumes incremental delivery, and a stale revision never does', async () => {
+test('the acknowledge resumes incremental delivery, and a stale revision never does', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 1, hasMore: false })
   const generation = generationSource()
@@ -274,7 +274,7 @@ test('R0: the acknowledge resumes incremental delivery, and a stale revision nev
   handle.dispose()
 })
 
-test('R0: the acknowledge validates the EXACT binding and Connection generation identity', async () => {
+test('the acknowledge validates the EXACT binding and Connection generation identity', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 1, hasMore: false })
   const generation = generationSource()
@@ -297,7 +297,7 @@ test('R0: the acknowledge validates the EXACT binding and Connection generation 
   handle.dispose()
 })
 
-test('R0: a disposed handle acknowledges nothing and publishes nothing', async () => {
+test('a disposed handle acknowledges nothing and publishes nothing', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 1, hasMore: false })
   const generation = generationSource()
@@ -317,7 +317,7 @@ test('R0: a disposed handle acknowledges nothing and publishes nothing', async (
   assert.deepEqual(log.durable, [], 'a disposed handle never delivers')
 })
 
-test('R0: a rollover observed on the GENERATION channel wakes the owner without any publication', async () => {
+test('a rollover observed on the GENERATION channel wakes the owner without any publication', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 4, hasMore: false })
   const generation = generationSource()
@@ -332,7 +332,7 @@ test('R0: a rollover observed on the GENERATION channel wakes the owner without 
   handle.dispose()
 })
 
-test('R0: the loading→open transition re-arms an unsettled recovery at the same revision', async () => {
+test('the loading→open transition re-arms an unsettled recovery at the same revision', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 2, hasMore: false })
   const ingress = createRemoteLiveIngress(source.sessions, generationSource())
@@ -450,7 +450,7 @@ test('a replace change requires the window reconcile and re-seeds the tuple memo
   handle.dispose()
 })
 
-test('R0/C7: a missing transport yields a PENDING handle that attaches on the official generation', async () => {
+test('a missing transport yields a PENDING handle that attaches on the official generation', async () => {
   // A disconnect between the caller's hydrate and its subscription must leave an
   // explicit pending state that the OFFICIAL generation channel later completes —
   // never a missing ingress that no reconnect can wake (plan §2.2/§2.5).
@@ -485,7 +485,7 @@ test('R0/C7: a missing transport yields a PENDING handle that attaches on the of
   handle.dispose()
 })
 
-test('R0: a hydrate committed under another transport identity cannot start incrementally', async () => {
+test('a hydrate committed under another transport identity cannot start incrementally', async () => {
   // A rollover between the caller's read and this subscription: the hydrate
   // window belongs to the dead generation even when the revision is unchanged.
   const log: SinkLog = { durable: [], live: [], refolds: [] }
@@ -511,7 +511,7 @@ test('R0: a hydrate committed under another transport identity cannot start incr
   handle.dispose()
 })
 
-test('R0: a rollover during an in-flight re-fold re-arms the wakeup (no lost wakeup)', async () => {
+test('a rollover during an in-flight re-fold re-arms the wakeup (no lost wakeup)', async () => {
   // The first reconcile is requested at revision 5; while the owner is still
   // awaiting its read the Connection rolls over WITHOUT any revision/open
   // change. The in-flight read is already doomed by the transport fence, so the
@@ -605,7 +605,7 @@ test('R0/RFL-005: a prepend before the opening page still cannot shortcut the re
   handle.dispose()
 })
 
-test('R0: a COLD attach under a live generation recovers on the opening page replace', async () => {
+test('a COLD attach under a live generation recovers on the opening page replace', async () => {
   // The retained window can still be the previous generation's when a cold
   // hydrate runs under the new one (the upstream journal stream keeps it until the
   // opening page arrives). No prior handle observed the rollover, so no baseline
@@ -631,7 +631,7 @@ test('R0: a COLD attach under a live generation recovers on the opening page rep
   handle.dispose()
 })
 
-test('S3-R0: a prepend wakeup is PAGING, a replace/rollover wakeup is recovery', async () => {
+test('a prepend wakeup is PAGING, a replace/rollover wakeup is recovery', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [], refoldReasons: [] }
   const source = sourceWith({ entries: [], revision: 5, hasMore: false })
   const generation = generationSource()
@@ -774,7 +774,7 @@ test('TUPLE SETTLE: settling an attempt retires its tuple, so a later chunk may 
   handle.dispose()
 })
 
-test('S3-R0: an unavailable-transport hydrate arms the OFFICIAL-signal re-init (source lock)', async () => {
+test('an unavailable-transport hydrate arms the OFFICIAL-signal re-init (source lock)', async () => {
   // A hydrate dropped while the transport is gone must not complete as a
   // healthy init: without a transcript and without an ingress only an unrelated
   // owner commit could recover it. The composition root arms ONE re-init driven

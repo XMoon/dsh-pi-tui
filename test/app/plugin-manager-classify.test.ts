@@ -829,7 +829,7 @@ test('same-name official:false packages and standalone entries never inherit the
   assert.equal(fact(entry, 'TUI surface'), undefined)
 })
 
-test('B02/B06/B12 state their WEB_ONLY boundaries and expose no phantom terminal page action', () => {
+test('state their WEB_ONLY boundaries and expose no phantom terminal page action', () => {
   const model = experimentalModel()
   assert.match(fact(cardByName(model, B02)!, 'TUI surface')!.value, /not available in PiTui/)
   assert.match(fact(cardByName(model, B06)!, 'TUI surface')!.value, /not translated reasoning/)
@@ -841,7 +841,7 @@ test('B02/B06/B12 state their WEB_ONLY boundaries and expose no phantom terminal
   }
 })
 
-test('B04 keeps its WEB_ONLY/not-qualified host limit, B13/B14 state their verified provider boundaries, and B11 states foreground/no-guaranteed-Job', () => {
+test('keeps its WEB_ONLY/not-qualified host limit, B13/B14 state their verified provider boundaries, and B11 states foreground/no-guaranteed-Job', () => {
   const model = experimentalModel()
   const b04 = fact(cardByName(model, B04)!, 'Risk')
   assert.ok(b04 !== undefined, 'B04 states its WEB_ONLY host limitation')

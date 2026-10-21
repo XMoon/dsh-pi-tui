@@ -288,7 +288,7 @@ test('an aborted open signal releases the reference and returns undefined silent
   assert.deepEqual(fixture.releases, ['child-1'])
 })
 
-test('F6 regression: the official openState:error releases the reference and surfaces the REAL error, never an empty child', async () => {
+test('regression: the official openState:error releases the reference and surfaces the REAL error, never an empty child', async () => {
   const officialFailure = new Error('the Host history stream failed')
   // The official `Session.doOpen` records a real RemoteFailure as
   // `openState: 'error'` + `openError` and RESOLVES the promise, so `ready`
@@ -314,7 +314,7 @@ test('F6 regression: the official openState:error releases the reference and sur
   assert.deepEqual(fixture.releases, ['child-1'], 'a failed open releases its reference exactly once')
 })
 
-test('F6 regression: an errored window is never re-folded by rehydrate', async () => {
+test('regression: an errored window is never re-folded by rehydrate', async () => {
   let openState: 'open' | 'error' = 'open'
   const mutable: RemoteChildBinding = {
     session: {
@@ -339,7 +339,7 @@ test('F6 regression: an errored window is never re-folded by rehydrate', async (
   view.release()
 })
 
-test('S3-R0: the child fold commits through a last-moment proof (write refused when the window moved)', async () => {
+test('the child fold commits through a last-moment proof (write refused when the window moved)', async () => {
   // The child re-fold must not be able to write a fold the ingress would then
   // refuse to acknowledge: the identity/revision/eligibility checks and the
   // WRITE are one synchronous step.
@@ -389,7 +389,7 @@ test('S3-R0: the child fold commits through a last-moment proof (write refused w
   view.release()
 })
 
-test('S3-R0: the child fold refuses a window the ingress marks ineligible (retained pre-rollover window)', async () => {
+test('the child fold refuses a window the ingress marks ineligible (retained pre-rollover window)', async () => {
   // Provenance is checked BEFORE the write: the retained window of the dead
   // generation must never replace the child fold, even though it looks current.
   const fixture = childSessions('child-1', childBinding(true))

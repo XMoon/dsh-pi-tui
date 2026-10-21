@@ -88,7 +88,7 @@ function submit(app: unknown, text: string): void {
   a.submitDraft()
 }
 
-test('L6 PR5 §3.3: the Remote /model picker marks the EXACT session projection value current', async (t) => {
+test('the Remote /model picker marks the EXACT session projection value current', async (t) => {
   const life = testLifecycleOf(t)
   const mainId = 'm3-4-pr5-model-picker'
   const hostPreset = 'm3-4-pr2-preset'
@@ -137,7 +137,7 @@ test('L6 PR5 §3.3: the Remote /model picker marks the EXACT session projection 
     'the directory-default row does NOT carry the current marker (the projection owns it)')
 })
 
-test('L6 PR5 §3.4: the Remote /preset picker reads blankness + current from the official projections', async (t) => {
+test('the Remote /preset picker reads blankness + current from the official projections', async (t) => {
   const life = testLifecycleOf(t)
   const mainId = 'm3-4-pr5-preset-blank'
   const hostPreset = 'm3-4-pr2-preset'
@@ -175,7 +175,7 @@ test('L6 PR5 §3.4: the Remote /preset picker reads blankness + current from the
     'the official agentPreset projection carries the recorded preset')
 })
 
-test('L6 PR5 §3.4: a STARTED Remote session refuses /preset (blank=false, locked wording)', async (t) => {
+test('a STARTED Remote session refuses /preset (blank=false, locked wording)', async (t) => {
   const life = testLifecycleOf(t)
   const mainId = 'm3-4-pr5-preset-started'
   const hostPreset = 'm3-4-pr2-preset'
@@ -204,7 +204,7 @@ test('L6 PR5 §3.4: a STARTED Remote session refuses /preset (blank=false, locke
   assert.equal(fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.preset, hostPreset)
 })
 
-test('L6 PR5 §3.5: launch --preset applies to a BLANK resumed Remote session through the official write', async (t) => {
+test('launch --preset applies to a BLANK resumed Remote session through the official write', async (t) => {
   const life = testLifecycleOf(t)
   const mainId = 'm3-4-pr5-launch-blank'
   const hostPreset = 'm3-4-pr2-preset'
@@ -228,7 +228,7 @@ test('L6 PR5 §3.5: launch --preset applies to a BLANK resumed Remote session th
   assert.equal(selectedRows.length, 1, 'exactly one official preset selection, never a retry')
 })
 
-test('L6 PR5 §3.5: a STARTED resumed session keeps its recorded preset (no mutation, warning only)', async (t) => {
+test('a STARTED resumed session keeps its recorded preset (no mutation, warning only)', async (t) => {
   const life = testLifecycleOf(t)
   const mainId = 'm3-4-pr5-launch-started'
   const hostPreset = 'm3-4-pr2-preset'
@@ -264,7 +264,7 @@ function testLifecycleOf(t: unknown): TestLifecycle {
   return testLifecycle(t as Parameters<typeof testLifecycle>[0])
 }
 
-test('L6 PR5 §3.3: an official selectModel write owns the REOPENED picker current', async (t) => {
+test('an official selectModel write owns the REOPENED picker current', async (t) => {
   const life = testLifecycleOf(t)
   const mainId = 'm3-4-pr5-model-reopen'
   const hostPreset = 'm3-4-pr2-preset'
@@ -317,7 +317,7 @@ test('L6 PR5 §3.3: an official selectModel write owns the REOPENED picker curre
     'the previous value lost the current marker')
 })
 
-test('L6 PR5 §3.4: a /preset SWITCH on a blank Remote session commits through the official write', async (t) => {
+test('a /preset SWITCH on a blank Remote session commits through the official write', async (t) => {
   const life = testLifecycleOf(t)
   const mainId = 'm3-4-pr5-preset-switch'
   const hostPreset = 'm3-4-pr2-preset'
@@ -357,7 +357,7 @@ test('L6 PR5 §3.4: a /preset SWITCH on a blank Remote session commits through t
   assert.equal(selectedRows.length, 1, 'exactly one official selection row (never retried)')
 })
 
-test('L6 PR5 §3.3: a /model directory read pending across a session replacement never hydrates the stale panel (owner-fence regression)', async (t) => {
+test('a /model directory read pending across a session replacement never hydrates the stale panel (owner-fence regression)', async (t) => {
   const life = testLifecycleOf(t)
   const mainA = 'm3-4-pr5-model-fence-a'
   const mainB = 'm3-4-pr5-model-fence-b'

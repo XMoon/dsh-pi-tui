@@ -288,7 +288,7 @@ test('onlyDraft while idle falls back to a followup', async () => {
 
 // ── P0: empty-payload no-op (the empty-draft semantics, plan §6.3 Gate B) ──
 
-test('P0: empty draft + empty queue is a NO-OP (draftHasPayload=false) — never an empty followup/steer', async () => {
+test('empty draft + empty queue is a NO-OP (draftHasPayload=false) — never an empty followup/steer', async () => {
   const agent = fakeAgent([])
   agent.status = 'idle'
   const notices: string[] = []
@@ -303,7 +303,7 @@ test('P0: empty draft + empty queue is a NO-OP (draftHasPayload=false) — never
   assert.deepEqual(notices, [], 'no notice at all (a no-op is silent)')
 })
 
-test('P0: empty draft + empty queue with onlyDraft is a NO-OP too (busy-Enter steer)', async () => {
+test('empty draft + empty queue with onlyDraft is a NO-OP too (busy-Enter steer)', async () => {
   const agent = fakeAgent([])
   agent.status = 'running'
   const outcome = await steerAll(makeDeps({ agent: () => agent }), '', { onlyDraft: true, draftHasPayload: false })
@@ -311,7 +311,7 @@ test('P0: empty draft + empty queue with onlyDraft is a NO-OP too (busy-Enter st
   assert.deepEqual(agent.steered, [], 'onlyDraft + empty payload must never steer')
 })
 
-test('P0: empty QUEUE + non-empty draft still steers (the classic single-draft path)', async () => {
+test('empty QUEUE + non-empty draft still steers (the classic single-draft path)', async () => {
   const agent = fakeAgent([])
   agent.status = 'running'
   const outcome = await steerAll(makeDeps({ agent: () => agent }), 'hello', { draftHasPayload: true })
@@ -319,7 +319,7 @@ test('P0: empty QUEUE + non-empty draft still steers (the classic single-draft p
   assert.deepEqual(agent.steered.map(m => m.text), ['hello'])
 })
 
-test('P0: empty draft + NON-empty queue steers only while the turn accepts steering', async () => {
+test('empty draft + NON-empty queue steers only while the turn accepts steering', async () => {
   for (const status of ['idle', 'running'] as const) {
     const agent = fakeAgent(['A', 'B'])
     agent.status = status
@@ -607,7 +607,7 @@ test('a child queue sweep stops before the next occurrence after viewer exit', a
   assert.deepEqual(child.steered.map(message => message.id), ['a'], 'closing the viewer fences the next child write')
 })
 
-test('P0: non-empty draft takes priority over queue [A,B] and steers only draft C', async () => {
+test('non-empty draft takes priority over queue [A,B] and steers only draft C', async () => {
   const agent = fakeAgent(['A', 'B'])
   agent.status = 'running'
   const outcome = await steerAll(makeDeps({ agent: () => agent }), 'C', { draftHasPayload: true })
@@ -647,7 +647,7 @@ test('Gate A: an undefined verdict is a VERBATIM pass-through (legacy callers ke
   assert.equal(steerHasPayload(undefined, { onlyDraft: true, queuedCount: 0, liveAgent: true }), true)
 })
 
-test('P0: an EXPLICIT payload claim takes priority over the queue even with empty text', async () => {
+test('an EXPLICIT payload claim takes priority over the queue even with empty text', async () => {
   // The runner owns shell/image semantics: an attachment-only draft can have
   // text='' and still claim payload=TRUE. That payload-bearing draft is the
   // whole gesture; the queued occurrences remain untouched.
@@ -661,7 +661,7 @@ test('P0: an EXPLICIT payload claim takes priority over the queue even with empt
     'payload=true leaves the queue untouched')
 })
 
-test('P0: draftHasPayload=false + text non-empty + queue non-empty drops the draft (verdict wins)', async () => {
+test('draftHasPayload=false + text non-empty + queue non-empty drops the draft (verdict wins)', async () => {
   // The inverse contract: verdict=false wins over non-empty text (which the
   // runner would only pass for a whitespace-draft with images consuming it
   // elsewhere). queue keeps steering.
@@ -673,7 +673,7 @@ test('P0: draftHasPayload=false + text non-empty + queue non-empty drops the dra
     'verdict=false never rides the draft even when text is non-empty')
 })
 
-test('P0: draftHasPayload undefined derives an empty draft and sweeps the queue', async () => {
+test('draftHasPayload undefined derives an empty draft and sweeps the queue', async () => {
   const agent = fakeAgent(['a'])
   agent.status = 'running'
   // Direct callers without the runner verdict still derive an empty draft,
@@ -1030,7 +1030,7 @@ test('an indeterminate per-occurrence steer stops without retrying or prompting'
   assert.deepEqual(restored, [], 'there is no draft payload to restore')
 })
 
-test('P1: the empty-queue classic steer delivers through the SessionWriter, never a direct agent call', async () => {
+test('the empty-queue classic steer delivers through the SessionWriter, never a direct agent call', async () => {
   // The empty-queue path (queue == 0 + Ctrl+S + draft) previously called
   // now.steer/now.followup DIRECTLY, bypassing the semantic port. It must
   // go through the writer seam: writer.prompt with an explicit mode exactly once,
@@ -1097,7 +1097,7 @@ test('semantic steer indeterminate outcome stays absent and never retries', asyn
   assert.deepEqual(notices, ['error: the session write outcome is indeterminate — do not retry automatically'])
 })
 
-test('P1 lock: a proven rejection reaches the owner seam with its code/message and settles nothing itself', async () => {
+test('a proven rejection reaches the owner seam with its code/message and settles nothing itself', async () => {
   const agent = fakeAgent([])
   const restored: string[] = []
   const notices: string[] = []
@@ -1121,7 +1121,7 @@ test('P1 lock: a proven rejection reaches the owner seam with its code/message a
   assert.deepEqual(notices, [], 'the helper emits no user-facing notice for a proven refusal')
 })
 
-test('P1 lock: a queue-occurrence rejection carries the steered count to the owner seam', async () => {
+test('a queue-occurrence rejection carries the steered count to the owner seam', async () => {
   const agent = fakeAgent(['a', 'b'])
   const rejected: { code: string; count: number }[] = []
   const notices: string[] = []

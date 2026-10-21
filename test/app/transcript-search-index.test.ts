@@ -312,7 +312,7 @@ test('case-insensitivity: Unicode lowercases exactly like the legacy path', () =
   assertCorpusParity(folder, ['ünïcödé', 'ÜNÏCÖDÉ', 'ärchiv', 'overflow'])
 })
 
-test('G1: same-turn adjacent reads merge into ONE representative card, parity kept', () => {
+test('same-turn adjacent reads merge into ONE representative card, parity kept', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(0, 0),
@@ -337,7 +337,7 @@ test('G1: same-turn adjacent reads merge into ONE representative card, parity ke
   assert.equal(folder.search('src/b.ts').length, 0, 'member paths are NOT searchable: strict legacy parity')
 })
 
-test('G2: read grouping never crosses a turn boundary; each turn owns its card', () => {
+test('read grouping never crosses a turn boundary; each turn owns its card', () => {
   // Post-F6 PR B (§10.2/§12.11): a group never crosses turns, so every
   // Activity span's own facts stay attributable to the turn that renders
   // the card. The reads stay per-turn cards with per-turn search corpora.
@@ -361,7 +361,7 @@ test('G2: read grouping never crosses a turn boundary; each turn owns its card',
   assert.deepEqual([...new Set(matches.map(match => match.turn))].sort(), [0, 1], 'each match reports its own turn')
 })
 
-test('G3: a late non-tail result reflows the run; search text updates, no duplicate', () => {
+test('a late non-tail result reflows the run; search text updates, no duplicate', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(0, 0),
@@ -401,7 +401,7 @@ test('G3: a late non-tail result reflows the run; search text updates, no duplic
   assertCorpusParity(live, ['alpha payload', 'beta payload', 'gamma payload', 'payload', 'src/b.ts'])
 })
 
-test('G4: running -> settled read args searchable, then merged group text', () => {
+test('running -> settled read args searchable, then merged group text', () => {
   const folder = new TranscriptFolder()
   folder.hydrate([
     turnStart(0, 0),
@@ -419,7 +419,7 @@ test('G4: running -> settled read args searchable, then merged group text', () =
   assert.equal(new Set(matches.map(match => match.id)).size, 1)
 })
 
-test('G5: error results and synthetic error cards keep legacy semantics', () => {
+test('error results and synthetic error cards keep legacy semantics', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(0, 0),

@@ -300,7 +300,7 @@ test('an interleaved step derives the SAME Activity lifetime live and cold (revi
   assert.match(headerAt(coldSpan, coldClock, T0 + 60_000), /Activity 58s/u)
 })
 
-test('F6 parity: a same-step text-before-tool settlement derives the SAME Work partition live and cold', () => {
+test('parity: a same-step text-before-tool settlement derives the SAME Work partition live and cold', () => {
   // This test used to be the RED witness of the F6 divergence: the durable
   // settlement was appended at its own event index, so cold showed
   // `[Work c1+c2, assistant]` (ONE Activity, ending at the member floor) while
@@ -472,7 +472,7 @@ test('a Remote snapshot-only inactive flip never regresses a running Activity (r
   assert.equal(transcriptCommits, 1, 'the snapshot flip must not re-commit the transcript')
 })
 
-test('F4: an interaction that IS the Activity freezes at its own start, before and after it settles', () => {
+test('an interaction that IS the Activity freezes at its own start, before and after it settles', () => {
   for (const name of ['ask_user_question', 'exit_plan_mode'] as const) {
     const running = foldEvents([
       eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -504,7 +504,7 @@ test('F4: an interaction that IS the Activity freezes at its own start, before a
   }
 })
 
-test('F5: the owning turn/end caps the Activity — a later turn never rewrites a frozen end', () => {
+test('the owning turn/end caps the Activity — a later turn never rewrites a frozen end', () => {
   const folder = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall('c1', 'bash', T0 + 1_000, 1),
@@ -534,7 +534,7 @@ test('F5: the owning turn/end caps the Activity — a later turn never rewrites 
     beforeLine, 'the rendered duration is unchanged before and after the next prompt')
 })
 
-test('F8: a PRECEDING boundary never closes a later Activity (position-qualified lookup)', () => {
+test('a PRECEDING boundary never closes a later Activity (position-qualified lookup)', () => {
   // Live fold: a Preparing tool-call delta at +1s creates the call's earliest
   // start, an injected Context row lands at +2s, and the durable tool/call at
   // +3s reuses the +1s Preparing start. The canonical structure is therefore
@@ -561,7 +561,7 @@ test('F8: a PRECEDING boundary never closes a later Activity (position-qualified
   assert.equal(summarizeWorkSpan(span).timing?.startedAt, T0 + 1_000, 'the Preparing start is reused')
 })
 
-test('F5b: the final Activity end is capped by its turn even when a member settles late', () => {
+test('the final Activity end is capped by its turn even when a member settles late', () => {
   const folder = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall('c1', 'bash', T0 + 1_000, 1),
@@ -590,7 +590,7 @@ test('F5b: the final Activity end is capped by its turn even when a member settl
     'the rendered duration is unchanged by the late settlement')
 })
 
-test('F9: an EQUAL-time following Conversation closes the Activity (a coarse clock never leaves it live)', () => {
+test('an EQUAL-time following Conversation closes the Activity (a coarse clock never leaves it live)', () => {
   // A legitimate coarse clock stamps the whole step — the reasoning delta, its
   // block-end AND the first visible text — with the same millisecond. The
   // following Conversation is already visible at the Activity's own start, so it
@@ -641,7 +641,7 @@ test('F9: an EQUAL-time following Conversation closes the Activity (a coarse clo
   assert.ok(!/Activity \d/u.test(line), `a point Activity hides its duration:\n${line}`)
 })
 
-test('F9b (production): an equal-time Conversation switches the LIVE card to a closed point (viewport + cache state)', async (t) => {
+test('(production): an equal-time Conversation switches the LIVE card to a closed point (viewport + cache state)', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     displayState: { preset: 'compact' },
@@ -693,7 +693,7 @@ test('F9b (production): an equal-time Conversation switches the LIVE card to a c
   app.stop()
 })
 
-test('F7: the lifetime derivation reads the structure in bounded linear order', () => {
+test('the lifetime derivation reads the structure in bounded linear order', () => {
   const events: SessionEvent[] = []
   let seq = 0
   for (let turn = 0; turn < 60; turn += 1) {
@@ -743,7 +743,7 @@ test('a trailing retry point can keep counting while the Activity is live', () =
 
 // ── the committed display subject gates a cached card (plan §5.3) ───────────
 
-test('E4 (production pipeline): the settled Tool keeps counting through a real silent wait, then the assistant boundary freezes it without a jump', async (t) => {
+test('(production pipeline): the settled Tool keeps counting through a real silent wait, then the assistant boundary freezes it without a jump', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   // Fast injected frames keep the test short; the DURATION reads the real wall
   // clock (a fake clock could hide a jump).
@@ -825,7 +825,7 @@ test('E4 (production pipeline): the settled Tool keeps counting through a real s
   app.stop()
 })
 
-test('E5 (production pipeline): an injected Context closes the previous Activity; Reasoning closes at the visible assistant text; turn/end closes the rest', async (t) => {
+test('(production pipeline): an injected Context closes the previous Activity; Reasoning closes at the visible assistant text; turn/end closes the rest', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     displayState: { preset: 'compact' },
@@ -915,7 +915,7 @@ test('a normal shape has the SAME lifetime live and cold (live/cold parity)', ()
     'and the rendered duration is identical')
 })
 
-test('F1: a VISIBLE streamless settlement is the proven boundary; turn/end never overrides it', () => {
+test('a VISIBLE streamless settlement is the proven boundary; turn/end never overrides it', () => {
   const streamless = (content: readonly unknown[]): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: { id: 'm1', role: 'assistant', content, source: { kind: 'assistant' } },
@@ -978,7 +978,7 @@ test('F1: a VISIBLE streamless settlement is the proven boundary; turn/end never
     'the earliest proven first-visible time is preserved')
 })
 
-test('F2: a CACHED Activity card re-gates when a following structure block appears (production component cache)', async (t) => {
+test('a CACHED Activity card re-gates when a following structure block appears (production component cache)', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     displayState: { preset: 'compact' },

@@ -105,7 +105,7 @@ async function seedMigrationArtifact(
   return { id, sourcePath, sourceHash: hashOf(sourcePath), sessionDir, sourceName }
 }
 
-test('L5: a migration-required generation is listed read-only, refuses an explicit fork, and is never rewritten', async (t) => {
+test('a migration-required generation is listed read-only, refuses an explicit fork, and is never rewritten', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 's3-migration-preset')
   const { id, sourcePath, sourceHash, sessionDir, sourceName } = await seedMigrationArtifact(host)
@@ -164,7 +164,7 @@ test('L5: a migration-required generation is listed read-only, refuses an explic
  * its draft, release the failed reference exactly once, and never report a
  * committed switch.
  */
-test('L5: a failed Remote open never replaces the current Session, its draft, or reports success', async (t) => {
+test('a failed Remote open never replaces the current Session, its draft, or reports success', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 's3-open-failure-preset')
   const { id: migrationId } = await seedMigrationArtifact(host)

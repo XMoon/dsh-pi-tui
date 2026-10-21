@@ -386,7 +386,7 @@ test('a non-open history state keeps the selected identity, is never paged, and 
 
 // ── M3-3A: the official loadThrough jump (W5) ─────────────────────────────
 
-test('H1: loadThrough calls the official Session.loadThrough exactly once with the exact seq', async () => {
+test('loadThrough calls the official Session.loadThrough exactly once with the exact seq', async () => {
   const { source, loadThroughCalls } = harness({ loadThrough: async () => {} })
   const reader = new RemotePresentationReader(source, createSnapshotGenerationHarness().source)
   const snapshot = await reader.loadThrough('session', 42)
@@ -394,7 +394,7 @@ test('H1: loadThrough calls the official Session.loadThrough exactly once with t
   assert.deepEqual(loadThroughCalls, [42], 'ONE official jump call carrying the exact target seq')
 })
 
-test('H2: loadThrough never hand-rolls a loadOlder chain', async () => {
+test('loadThrough never hand-rolls a loadOlder chain', async () => {
   let olderCalls = 0
   const { source, loadThroughCalls } = harness({
     loadOlder: async () => { olderCalls += 1 },
@@ -406,7 +406,7 @@ test('H2: loadThrough never hand-rolls a loadOlder chain', async () => {
   assert.deepEqual(loadThroughCalls, [7])
 })
 
-test('H3: a stale connection result is dropped after the jump settles', async () => {
+test('a stale connection result is dropped after the jump settles', async () => {
   const generations = createSnapshotGenerationHarness()
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
@@ -418,7 +418,7 @@ test('H3: a stale connection result is dropped after the jump settles', async ()
   assert.equal(await pending, undefined)
 })
 
-test('H4: a same-id new binding generation cannot accept the old settle', async () => {
+test('a same-id new binding generation cannot accept the old settle', async () => {
   const generations = createSnapshotGenerationHarness()
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
@@ -432,7 +432,7 @@ test('H4: a same-id new binding generation cannot accept the old settle', async 
   assert.equal(await pending, undefined)
 })
 
-test('H5 (Direct): the Direct mapping is a cancellation check plus the FULL snapshot', async () => {
+test('(Direct): the Direct mapping is a cancellation check plus the FULL snapshot', async () => {
   const { DirectPresentationReader } = await import('../../../src/runtime/direct/presentation-read-direct.ts')
   let agents = 0
   const reader = new DirectPresentationReader({

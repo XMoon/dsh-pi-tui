@@ -703,7 +703,7 @@ test('A-11: a real SDK iterator failure routes the SAME error to the FATAL inten
 
 // ── PR4-0 audit: a non-modal native event has NO business sink ──────────────
 
-test('PR4-0: non-key SDK events reach no business action while no modal seat is up', async () => {
+test('non-key SDK events reach no business action while no modal seat is up', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   const calls = { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 }
@@ -1274,7 +1274,7 @@ test('the live harness OWNS its renderer release: a failed close surfaces, never
 
 // ── PR3-B B3: teardown order — the interaction owner retires FIRST ──────────
 
-test('B3: the surface withdraws the interaction owner BEFORE it starts the renderer release', async () => {
+test('the surface withdraws the interaction owner BEFORE it starts the renderer release', async () => {
   // The order of the two teardown owners in ONE synchronous batch: the modal
   // promises are withdrawn before the terminal release begins, so a live
   // question/approval is never classified by a terminal that vanished first.

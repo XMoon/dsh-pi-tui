@@ -5340,7 +5340,7 @@ test('observational: the CWD-level skip spans Sessions while the recall window k
     `the recall window still shows every input the user really submitted: ${JSON.stringify(hydrationCommits[0]?.recall)}`)
 })
 
-test('F2-R4 case 1: a policy-skipped occurrence keeps the rank its settlement gave it', async (t) => {
+test('case 1: a policy-skipped occurrence keeps the rank its settlement gave it', async (t) => {
   // A CWD anchor `a`; inside the fresh window the Enter `a` is SKIPPED by the
   // policy and a later Ctrl+S `z` writes a row. The skip settles BEFORE the
   // steer's append, so the steer's row is newer and the recall must be
@@ -5408,7 +5408,7 @@ test('F2-R4 case 1: a policy-skipped occurrence keeps the rank its settlement ga
   assert.equal(settlements[0]?.token !== undefined, true, 'the skipped occurrence is identified by token, never by text')
 })
 
-test('F2-R4 case 2: repeated identical submissions settle by token and keep every rank', async (t) => {
+test('case 2: repeated identical submissions settle by token and keep every rank', async (t) => {
   // CWD anchor `a`; in the fresh window: Enter a (skip) → Enter b (write) →
   // Enter a (write) → Ctrl+S z (write, no occurrence). The token — not the
   // text — attributes each settlement to its own occurrence, so the recall is

@@ -441,7 +441,7 @@ test('A-03b: TERM_PROGRAM=tern alone never selects the TSP renderer', async () =
 
 // ── L6 composition fallback: the FULL runner with the opt-in on a non-TSP tty ──
 
-test('L6 composition: DSH_PI_TUI_RENDERER=tsp on a non-TSP environment mounts PiTui end-to-end', async (t) => {
+test('composition: DSH_PI_TUI_RENDERER=tsp on a non-TSP environment mounts PiTui end-to-end', async (t) => {
   const { Context } = await import('@deepseek-ai/cordis')
   const { readFileSync } = await import('node:fs')
   const { join } = await import('node:path')
@@ -482,7 +482,7 @@ test('L6 composition: DSH_PI_TUI_RENDERER=tsp on a non-TSP environment mounts Pi
 
 // ── F1: the exit orchestration AWAITS the renderer release ─────────────────
 
-test('F1: the exit controller awaits the renderer release before the hint/appExit', async () => {
+test('the exit controller awaits the renderer release before the hint/appExit', async () => {
   const { createExitController } = await import('../../src/app/bootstrap/exit.ts')
   const order: string[] = []
   let release: (() => void) | undefined
@@ -507,7 +507,7 @@ test('F1: the exit controller awaits the renderer release before the hint/appExi
 
 // ── F8: the PUBLIC compaction settle contract is unchanged ──────────────────
 
-test('F8: the public settleCompactionSurface keeps its three-setter structural contract', async () => {
+test('the public settleCompactionSurface keeps its three-setter structural contract', async () => {
   const { settleCompactionSurface } = await import('../../src/index.ts')
   const calls: string[] = []
   let refreshes = 0
@@ -614,7 +614,7 @@ function mountLifecycle(options: {
   }
 }
 
-test('R2-1a: a SECOND cleanup awaits the SAME renderer release (never races to retirement)', async () => {
+test('a SECOND cleanup awaits the SAME renderer release (never races to retirement)', async () => {
   const { lifecycle, order, release } = mountLifecycle()
   const first = lifecycle.disposeSurface()
   const second = lifecycle.disposeSurface()
@@ -639,7 +639,7 @@ test('R2-1a: a SECOND cleanup awaits the SAME renderer release (never races to r
   assert.deepEqual(hintOrder, ['hint', 'exit'], 'the hint and appExit run only after the release')
 })
 
-test('R2-1b: a THROWING sibling still awaits the release before surfacing its failure', async () => {
+test('a THROWING sibling still awaits the release before surfacing its failure', async () => {
   const { lifecycle, order, release } = mountLifecycle({ throwInViewer: true })
   const released = lifecycle.disposeSurface()
   assert.ok(released instanceof Promise)
@@ -656,7 +656,7 @@ test('R2-1b: a THROWING sibling still awaits the release before surfacing its fa
   assert.ok(order.includes('tty-released'), 'the release actually ran')
 })
 
-test('R2-1c: the exit path with a throwing sibling still orders release -> hint -> exit', async () => {
+test('the exit path with a throwing sibling still orders release -> hint -> exit', async () => {
   const { lifecycle, release } = mountLifecycle({ throwInViewer: true })
   const seen: string[] = []
   const { requestExit } = createExitController({
@@ -677,7 +677,7 @@ test('R2-1c: the exit path with a throwing sibling still orders release -> hint 
 
 // ── R3-1: a SYNCHRONOUS re-entrant teardown shares the published transaction ──
 
-test('R3-1a: a synchronous re-entrant teardown cannot reach hint/appExit before the tty release', async () => {
+test('a synchronous re-entrant teardown cannot reach hint/appExit before the tty release', async () => {
   const holder: { requestExit(): void } = { requestExit: () => {} }
   // The re-entry trigger: the batch's `abortLifecycle` synchronously dispatches
   // the exit intent (the production shape — an abort listener reaching
@@ -705,7 +705,7 @@ test('R3-1a: a synchronous re-entrant teardown cannot reach hint/appExit before 
   await first
 })
 
-test('R3-1b: the first and the re-entrant caller observe the SAME complete teardown outcome', async () => {
+test('the first and the re-entrant caller observe the SAME complete teardown outcome', async () => {
   const { lifecycle, release } = mountLifecycle({ throwInViewer: true })
   const first = lifecycle.disposeSurface()
   const second = lifecycle.disposeSurface()
@@ -721,7 +721,7 @@ test('R3-1b: the first and the re-entrant caller observe the SAME complete teard
     'the SAME failure is surfaced to both callers')
 })
 
-test('R4-3: a sibling that throws `undefined` is a FAILURE, never a silent success', async () => {
+test('a sibling that throws `undefined` is a FAILURE, never a silent success', async () => {
   // `throw undefined` is legal JavaScript: the batch cannot use the thrown
   // VALUE as the presence test, or a broken disposer would report a clean
   // teardown to every caller.
@@ -740,7 +740,7 @@ test('R4-3: a sibling that throws `undefined` is a FAILURE, never a silent succe
   assert.equal(outcomes[1]!.reason, undefined)
 })
 
-test('R4-3b: a sibling `throw undefined` and a failing release aggregate BOTH', async () => {
+test('a sibling `throw undefined` and a failing release aggregate BOTH', async () => {
   const releaseFailure = new Error('tty release exploded')
   const { lifecycle, release } = mountLifecycle({
     throwInViewer: true,
@@ -758,7 +758,7 @@ test('R4-3b: a sibling `throw undefined` and a failing release aggregate BOTH', 
     'the batch failure keeps its position and the exact release failure is preserved')
 })
 
-test('R4-1: the teardown transaction WAITS for the ACQUISITION stage', async () => {
+test('the teardown transaction WAITS for the ACQUISITION stage', async () => {
   // The SDK renderer owns the tty from `connect` until the application ownership
   // transfer. A quit in that window must not print the hint / request `appExit`
   // while the renderer still owns the terminal, so the teardown transaction
@@ -783,7 +783,7 @@ test('R4-1: the teardown transaction WAITS for the ACQUISITION stage', async () 
     'the hint and appExit run only after BOTH the acquisition and the release settled')
 })
 
-test('R4-1b: the ACQUISITION stage alone still gates the exit after the release settled', async () => {
+test('the ACQUISITION stage alone still gates the exit after the release settled', async () => {
   const { lifecycle, order, release, acquire } = mountLifecycle({ holdAcquisition: true })
   const { requestExit } = createExitController({
     diag: { info: () => {}, error: () => {} },
@@ -807,7 +807,7 @@ test('R4-1b: the ACQUISITION stage alone still gates the exit after the release 
   assert.deepEqual(order.slice(-2), ['hint', 'exit'])
 })
 
-test('R5-2: a FAILED acquisition release rejects the shared teardown outcome', async () => {
+test('a FAILED acquisition release rejects the shared teardown outcome', async () => {
   // The transaction contract the bootstrap cancellation/rejected-handoff branches
   // depend on: when the acquired tty owner was NOT released, the published
   // teardown must REJECT — a fulfilled teardown with a live tty is exactly the
@@ -825,7 +825,7 @@ test('R5-2: a FAILED acquisition release rejects the shared teardown outcome', a
   assert.equal(outcome[0]!.reason, releaseError, 'the exact acquired-release failure is surfaced')
 })
 
-test('R5-2b: an acquisition release that rejects `undefined` is still a failure', async () => {
+test('an acquisition release that rejects `undefined` is still a failure', async () => {
   const { lifecycle, release, failAcquire } = mountLifecycle({ holdAcquisition: true })
   const released = lifecycle.disposeSurface()
   assert.ok(released instanceof Promise)

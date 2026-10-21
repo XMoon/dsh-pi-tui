@@ -290,7 +290,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
   return { vt, app, ctx, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
 }
 
-test('PR5 §1C-3 (R6-1): only the winner stamped with THIS surface\'s mirror id is subtracted', () => {
+test('§1C-3 (R6-1): only the winner stamped with THIS surface\'s mirror id is subtracted', () => {
   const t = setup()
   try {
     // The Direct compatibility mirror for /status carries the stamped
@@ -320,7 +320,7 @@ test('PR5 §1C-3 (R6-1): only the winner stamped with THIS surface\'s mirror id 
   }
 })
 
-test('PR5 §1C-3 (R6-2/R6-3): the sessionless origin derives from the PURE Host view; the advertised union may differ', () => {
+test('§1C-3 (R6-2/R6-3): the sessionless origin derives from the PURE Host view; the advertised union may differ', () => {
   const t = setup()
   try {
     // A genuine Host /export declares attachments; the TUI's own Client

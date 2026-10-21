@@ -2289,7 +2289,7 @@ test('viewport anchors distinguish duplicate messages and cloned Focus activitie
 const WHALE_MARKERS = [".--'---._", '.------._', '.-------.', ".---'--.", '/ /~~~~~~']
 const hasWhale = (view: string): boolean => WHALE_MARKERS.some(marker => view.includes(marker))
 
-test('F2: an ABSENT welcome-card model fact is OMITTED, never rendered as an authoritative "unconfigured"', async () => {
+test('an ABSENT welcome-card model fact is OMITTED, never rendered as an authoritative "unconfigured"', async () => {
   // The official `SessionReader.sessionStatus()` contract: an absent field means
   // the projection/capability is UNAVAILABLE and must not be guessed or replaced
   // with a definitive business value. The Remote welcome branch therefore passes

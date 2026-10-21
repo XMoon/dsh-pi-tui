@@ -497,7 +497,7 @@ async function flush(): Promise<void> {
 
 // ── P2-01 / P2-02: the real application event chain reaches the real sink ──
 
-test('P2-01/P2-02: a routed durable tool call reaches the real SDK sink through the live projection', async () => {
+test('02: a routed durable tool call reaches the real SDK sink through the live projection', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)
@@ -556,7 +556,7 @@ test('P2-01/P2-02: a routed durable tool call reaches the real SDK sink through 
 
 // ── P2-03: the live assistant input path ────────────────────────────────────
 
-test('P2-03: a live assistant delta routed by the real input path updates the same projection', async () => {
+test('a live assistant delta routed by the real input path updates the same projection', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)
@@ -599,7 +599,7 @@ test('P2-03: a live assistant delta routed by the real input path updates the sa
 
 // ── P2-04: the existing fences still decide ─────────────────────────────────
 
-test('P2-04: an event from a session the surface is not attached to publishes nothing', async () => {
+test('an event from a session the surface is not attached to publishes nothing', async () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -624,7 +624,7 @@ test('P2-04: an event from a session the surface is not attached to publishes no
 
 // ── P2-05: main <-> viewed child ────────────────────────────────────────────
 
-test('P2-05: the viewed child and the main session each publish their own scope', () => {
+test('the viewed child and the main session each publish their own scope', () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -673,7 +673,7 @@ test('P2-05: the viewed child and the main session each publish their own scope'
 
 // ── P2-10: a commit that switches the subject drops the stale frame ─────────
 
-test('P2-10: a subject switch performed synchronously inside setTranscript drops the stale frame', () => {
+test('a subject switch performed synchronously inside setTranscript drops the stale frame', () => {
   const seen: TranscriptProjectionFrame[] = []
   let child: TranscriptFolder | undefined
   const harness = mountHarness({
@@ -717,7 +717,7 @@ test('P2-10: a subject switch performed synchronously inside setTranscript drops
  * replacement and source re-scoping are covered by P2-06/P2-07 (and the real
  * hydration paths by P2-01/P2-07).
  */
-test('P2-10: an owner handover under the SAME fold/window drops the interrupted frame', () => {
+test('an owner handover under the SAME fold/window drops the interrupted frame', () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -751,7 +751,7 @@ test('P2-10: an owner handover under the SAME fold/window drops the interrupted 
 
 // ── P2-06 / P2-07: a replaced fold under the SAME session id ────────────────
 
-test('P2-06/P2-07: a replaced fold under the SAME session id is a new projection scope', () => {
+test('07: a replaced fold under the SAME session id is a new projection scope', () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -788,7 +788,7 @@ test('P2-06/P2-07: a replaced fold under the SAME session id is a new projection
 
 // ── P2-09: coalescing and the unchanged projection ──────────────────────────
 
-test('P2-09: coalesced repaints keep one commit per flush, and an unchanged projection sends no ops', async () => {
+test('coalesced repaints keep one commit per flush, and an unchanged projection sends no ops', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)
@@ -826,7 +826,7 @@ test('P2-09: coalesced repaints keep one commit per flush, and an unchanged proj
 
 // ── P2-11: dispose releases the observer ────────────────────────────────────
 
-test('P2-11: dispose releases the read-only observer, so no later projection reaches the sink', async () => {
+test('dispose releases the read-only observer, so no later projection reaches the sink', async () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -850,7 +850,7 @@ test('P2-11: dispose releases the read-only observer, so no later projection rea
 
 // ── P2-12 / P2-14: tty isolation and the product boundary ───────────────────
 
-test('P2-12/P2-14: the TSP sink owns its own tty and no product source imports the SDK', async () => {
+test('14: the TSP sink owns its own tty and no product source imports the SDK', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)
@@ -1135,7 +1135,7 @@ function mountPresentationHarness(options: {
   }
 }
 
-test('P2-01: the production Direct cold hydration publishes the first projection', async () => {
+test('the production Direct cold hydration publishes the first projection', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)
@@ -1172,7 +1172,7 @@ test('P2-01: the production Direct cold hydration publishes the first projection
   }
 })
 
-test('P2-07: the production Remote rehydrate publishes the widened window as a new scope', async () => {
+test('the production Remote rehydrate publishes the widened window as a new scope', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)
@@ -1234,7 +1234,7 @@ test('P2-07: the production Remote rehydrate publishes the widened window as a n
   }
 })
 
-test('P2-07: a stale Remote read installs no fold and publishes nothing', async () => {
+test('a stale Remote read installs no fold and publishes nothing', async () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountPresentationHarness({
     sessionId: REMOTE_ID,
@@ -1275,7 +1275,7 @@ test('P2-07: a stale Remote read installs no fold and publishes nothing', async 
 
 // ── F10: the pending refresh only scrolls for NEW OWN input (PiTui default) ──
 
-test('F10: a background pending refresh never yanks the reader; a new own echo does', async () => {
+test('a background pending refresh never yanks the reader; a new own echo does', async () => {
   const ownEcho = (requestId: string, text: string): SubmissionPresentationItem => ({
     requestId,
     placement: 'transcript',
@@ -1333,7 +1333,7 @@ test('F10: a background pending refresh never yanks the reader; a new own echo d
 
 // ── R2-2: ONE atomic display-subject commit on the PiTui branch ─────────────
 
-test('R2-2: surface.commitStatus publishes ONE atomic store transaction on PiTui', async () => {
+test('surface.commitStatus publishes ONE atomic store transaction on PiTui', async () => {
   const harness = mountHarness({ onTranscriptProjected: () => {} })
   try {
     // A MAIN commit first, so the store starts from a known subject.

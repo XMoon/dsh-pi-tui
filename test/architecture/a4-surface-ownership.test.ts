@@ -57,7 +57,7 @@ function surfaceSources(): Array<{ rel: string; source: string }> {
   return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
 }
 
-test('A4: the runner owns no surface construction or mount', () => {
+test('the runner owns no surface construction or mount', () => {
   // The mounted TuiApp, the status store and the opening journal are constructed
   // by the surface owner — never in the runner.
   assert.doesNotMatch(indexSource, /\bstartProcessTui\(/u,
@@ -105,14 +105,14 @@ test('A4: the runner owns no surface construction or mount', () => {
     'the Task Center owner must construct the Task Browser coordinator')
 })
 
-test('A4: the mounted TuiApp has exactly one lifetime owner', () => {
+test('the mounted TuiApp has exactly one lifetime owner', () => {
   // The runner borrows the mounted reference; only the surface owner releases it.
   assert.match(indexSource, /app = surface\.app/u, 'the runner borrows the mounted app from the surface owner')
   assert.doesNotMatch(indexSource, /app\?\.dispose\(\)/u, 'the runner must not dispose the mounted app')
   assert.doesNotMatch(indexSource, /app\.dispose\(\)/u, 'the runner must not dispose the mounted app')
 })
 
-test('A4: the runner releases the surface-owned resources in the documented order', () => {
+test('the runner releases the surface-owned resources in the documented order', () => {
   // Plan §12.2: the teardown order is behavior. The runner only orchestrates;
   // every release hook is surface-owned.
   const cleanupStart = indexSource.indexOf('const disposeSurface = (): Promise<void> | void => {')
@@ -134,7 +134,7 @@ test('A4: the runner releases the surface-owned resources in the documented orde
   }
 })
 
-test('A4: app/surface reads no Host business service and no Direct wiring', () => {
+test('app/surface reads no Host business service and no Direct wiring', () => {
   const sources = surfaceSources()
   assert.ok(sources.length > 0, 'src/app/surface must exist')
   for (const { rel, source } of sources) {
@@ -147,7 +147,7 @@ test('A4: app/surface reads no Host business service and no Direct wiring', () =
   }
 })
 
-test('A4: the opening journal instance is surface-owned', () => {
+test('the opening journal instance is surface-owned', () => {
   // The concrete state lives in the surface module; the runner only reads the
   // surface owner's instance (A4-1 module, A4-2 instance).
   assert.match(indexSource, /surface\.openingJournal\./u,
@@ -158,7 +158,7 @@ test('A4: the opening journal instance is surface-owned', () => {
   assert.match(journal, /export function createOpeningJournal</u, 'the surface module owns the journal implementation')
 })
 
-test('A4-7: the four presentation routing bodies live in app/surface, not the runner', () => {
+test('the four presentation routing bodies live in app/surface, not the runner', () => {
   // Plan §16: the runner keeps the Host registrations and the Direct install as
   // THIN delegations; the routing decisions/fences and the apply/paint calls
   // are surface-owned. Each routing body is pinned to BOTH sides: the runner
@@ -254,7 +254,7 @@ test('A4-7: the four presentation routing bodies live in app/surface, not the ru
     'the runner must not call refreshAgents inside the subagent tool/call branch')
 })
 
-test('A4-4: the status commit and the pending-input presentation are surface-owned', () => {
+test('the status commit and the pending-input presentation are surface-owned', () => {
   const surface = read('src/app/surface/runtime.ts')
 
   // Status COMMIT coordination: the runner keeps the semantic derivation and
@@ -315,7 +315,7 @@ test('A4-4: the status commit and the pending-input presentation are surface-own
     'no runner-local pending refresh remains')
 })
 
-test('A4-8: the active-target, repaint and search/transcript wiring are surface-owned', () => {
+test('the active-target, repaint and search/transcript wiring are surface-owned', () => {
   const surface = read('src/app/surface/runtime.ts')
 
   // The SELECTION policy (main vs viewed child).

@@ -347,7 +347,7 @@ function seedTurn(
   append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-test('L6: a Remote resumed session hydrates the real transcript and status through the official window', async (t) => {
+test('a Remote resumed session hydrates the real transcript and status through the official window', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-main'
   const hostPreset = 'm3-4-pr2-preset'
@@ -390,7 +390,7 @@ test('L6: a Remote resumed session hydrates the real transcript and status throu
   assert.equal(frame.includes('remote answer one'), true, 'the resumed assistant row is rendered')
 })
 
-test('L6: the resumed Remote startup keeps input accepted while its hydration read is held', async (t) => {
+test('the resumed Remote startup keeps input accepted while its hydration read is held', async (t) => {
   // The Remote startup resume awaits `remote.read` AFTER the terminal is already
   // accepting input. A submission accepted in that window is owned by the
   // resumed Session, and its own persistence is ordered behind the hydration
@@ -530,7 +530,7 @@ test('L6: the resumed Remote startup keeps input accepted while its hydration re
   }
 })
 
-test('L6: the Remote branch performs zero Direct graph construction', async (t) => {
+test('the Remote branch performs zero Direct graph construction', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountRemoteRunner(life, {})
   // The Direct factory is unreachable on the Remote selection: the selected
@@ -542,7 +542,7 @@ test('L6: the Remote branch performs zero Direct graph construction', async (t) 
   assert.equal(fixture.override.presentation.submissionPresentation !== undefined, true)
 })
 
-test('L6: sessionStatus serves the retained session facts and stays absent for unretained ids', async (t) => {
+test('sessionStatus serves the retained session facts and stays absent for unretained ids', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-status'
   const hostPreset = 'm3-4-pr2-preset'
@@ -594,7 +594,7 @@ test('L6: sessionStatus serves the retained session facts and stays absent for u
   assert.equal(fixture.override.presentation.submissionPresentation.snapshot('no-such-session'), undefined)
 })
 
-test('L6: live assistant transient output streams through the official eventSource ingress', async (t) => {
+test('live assistant transient output streams through the official eventSource ingress', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-live'
   const hostPreset = 'm3-4-pr2-preset'
@@ -623,7 +623,7 @@ test('L6: live assistant transient output streams through the official eventSour
   }, 15_000)
 })
 
-test('L6: history paging (loadOlder) extends the loaded window without replacing the subject', async (t) => {
+test('history paging (loadOlder) extends the loaded window without replacing the subject', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-page'
   const hostPreset = 'm3-4-pr2-preset'
@@ -693,7 +693,7 @@ test('L6: history paging (loadOlder) extends the loaded window without replacing
   }
 })
 
-test('L6 (SURFACE_REACHABLE): the real boundary gesture extends the loaded official history through the mounted surface', async (t) => {
+test('(SURFACE_REACHABLE): the real boundary gesture extends the loaded official history through the mounted surface', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-gesture'
   const hostPreset = 'm3-4-pr2-preset'
@@ -768,7 +768,7 @@ test('L6 (SURFACE_REACHABLE): the real boundary gesture extends the loaded offic
   }, 15_000)
 })
 
-test('L6: the official pendingSubmissions echo drives the pending-presentation join (user-visible rows)', async (t) => {
+test('the official pendingSubmissions echo drives the pending-presentation join (user-visible rows)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-pending'
   const hostPreset = 'm3-4-pr2-preset'
@@ -820,7 +820,7 @@ async function waitForApp(fixture: RemoteRunnerFixture): Promise<{
   throw new Error('the mounted TuiApp never exposed pendingInputForTest')
 }
 
-test('L6 §7.4-10/11 an edit tool card renders from RAW durable call/result facts (no Host presenter)', async (t) => {
+test('an edit tool card renders from RAW durable call/result facts (no Host presenter)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-toolcard'
   const hostPreset = 'm3-4-pr2-preset'
@@ -900,7 +900,7 @@ test('L6 §7.4-10/11 an edit tool card renders from RAW durable call/result fact
     'the settled result text renders for an unknown tool')
 })
 
-test('L6 §6.6: the Remote branch OMITS the Host-derived access section when the permission projection carries no value (no sandbox fact is painted)', async (t) => {
+test('the Remote branch OMITS the Host-derived access section when the permission projection carries no value (no sandbox fact is painted)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-access'
   const hostPreset = 'm3-4-pr2-preset'
@@ -925,7 +925,7 @@ test('L6 §6.6: the Remote branch OMITS the Host-derived access section when the
   assert.equal(access?.approval, undefined)
 })
 
-test('L6: current-value facts whose SOURCE EVENTS precede the bounded window still render (title/goal/lifetime usage)', async (t) => {
+test('current-value facts whose SOURCE EVENTS precede the bounded window still render (title/goal/lifetime usage)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-outside-window'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1041,7 +1041,7 @@ function seedTurns(
   }
 }
 
-test('L6/S3-R0: a failed/fence-dropped hydrate under a LIVE generation retries once (behavioral witness)', async (t) => {
+test('a failed/fence-dropped hydrate under a LIVE generation retries once (behavioral witness)', async (t) => {
   // RFL-002 behavioral seam — the IMMEDIATE retry branch, not the
   // transport-absent listener: the official Connection generation IS live here
   // (the fixture's wire is mounted), the FIRST cold read answers undefined, so
@@ -1100,7 +1100,7 @@ test('L6/S3-R0: a failed/fence-dropped hydrate under a LIVE generation retries o
   fixture.dispose()
 })
 
-test('L6 navigation: switch, same-id rollover and reconnect re-init the presentation without leaking the old subject', async (t) => {
+test('navigation: switch, same-id rollover and reconnect re-init the presentation without leaking the old subject', async (t) => {
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr2-nav-a'
   const sessionB = 'm3-4-pr2-nav-b'
@@ -1230,7 +1230,7 @@ test('L6 navigation: switch, same-id rollover and reconnect re-init the presenta
   void app
 })
 
-test('L6 pending: queued -> queue pane, steering -> tail lane, and the echo -> authoritative identity handoff', async (t) => {
+test('pending: queued -> queue pane, steering -> tail lane, and the echo -> authoritative identity handoff', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-pending-running'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1319,7 +1319,7 @@ test('L6 pending: queued -> queue pane, steering -> tail lane, and the echo -> a
   }, 20_000)
 })
 
-test('L5: a real Remote ordinary submit carries the Client-sampled request zone — not the Host zone — into the Host source and its time-context injection', async (t) => {
+test('a real Remote ordinary submit carries the Client-sampled request zone — not the Host zone — into the Host source and its time-context injection', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-request-zone'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1449,7 +1449,7 @@ test('L5: a real Remote ordinary submit carries the Client-sampled request zone 
   }
 })
 
-test('L6: a projection-owned value changed by ANOTHER writer reaches the surface through the official projection channel', async (t) => {
+test('a projection-owned value changed by ANOTHER writer reaches the surface through the official projection channel', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-projection-live'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1512,7 +1512,7 @@ class ToolCallLlmAdapter extends StubStreamingLlmAdapter {
   }
 }
 
-test('L6 §7.4-10/11 LIVE: a mounted Remote surface renders the tool call as it executes on the Host, then settles from the durable result', async (t) => {
+test('LIVE: a mounted Remote surface renders the tool call as it executes on the Host, then settles from the durable result', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-tool-live'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1619,7 +1619,7 @@ class EditToolLlmAdapter extends StubStreamingLlmAdapter {
   }
 }
 
-test('L6 §7.4-10 KNOWN tool LIVE: an in-flight edit renders the Client diff card BEFORE the result settles, then settles from the durable facts', async (t) => {
+test('KNOWN tool LIVE: an in-flight edit renders the Client diff card BEFORE the result settles, then settles from the durable facts', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-tool-known-live'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1693,7 +1693,7 @@ test('L6 §7.4-10 KNOWN tool LIVE: an in-flight edit renders the Client diff car
 
 /* ───────── §7.4-5 literal skill gesture + Host pre-step (review F8) ────── */
 
-test('L6 §7.4-5 literal skill gesture over a mounted Remote surface: the Client delivers the ORIGINAL line, the HOST pre-step injects the body', async (t) => {
+test('literal skill gesture over a mounted Remote surface: the Client delivers the ORIGINAL line, the HOST pre-step injects the body', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-skill-gesture'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1752,7 +1752,7 @@ test('L6 §7.4-5 literal skill gesture over a mounted Remote surface: the Client
 
 /* ───────── §7.4-7 mounted /status over a paged performance window (F8) ──── */
 
-test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; the RECENT figures come from the Session\'s own Host projection', async (t) => {
+test('mounted /status: lifetime totals render from the projections; the RECENT figures come from the Session\'s own Host projection', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-status-paged'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1934,7 +1934,7 @@ async function readDurableEventTypes(
   return (await readDurableEvents(host, sessionId)).map(event => event.type)
 }
 
-test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title and /preset recover structurally, and an explicit retry commits after the holder exits', async (t) => {
+test('a REAL two-process writer-held Remote Session — prompt, /title and /preset recover structurally, and an explicit retry commits after the holder exits', async (t) => {
   const life = testLifecycle(t)
   const heldId = 'm3-5-pr5-writer-held'
   const hostPreset = 'm3-4-pr2-preset'
@@ -2040,7 +2040,7 @@ test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title a
     'the settled successful /title command is consumed, not restored')
 })
 
-test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer settlement and never restored', async (t) => {
+test('a TRUE indeterminate Remote /preset <id> is consumed by the outer settlement and never restored', async (t) => {
   // The fact under test is the APPLICATION draft disposition after a genuine
   // indeterminate result, not Host writer ownership (plan §12 E5). The Remote
   // preset operation result is therefore controlled at the adapter port; the
@@ -2140,7 +2140,7 @@ test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer 
     'an indeterminate switch commits no durable preset selection')
 })
 
-test('L6 PR5: a TRUE indeterminate Remote /title <name> is consumed by the outer settlement and surfaces the no-retry notice', async (t) => {
+test('a TRUE indeterminate Remote /title <name> is consumed by the outer settlement and surfaces the no-retry notice', async (t) => {
   // External review F5: the `/title` indeterminate branch suppresses the draft
   // disposition, but the Remote Client-owned command path renders no command
   // card either — so without its own notice the user saw the command vanish

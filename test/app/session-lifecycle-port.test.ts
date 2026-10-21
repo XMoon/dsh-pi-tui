@@ -174,7 +174,7 @@ test('create and open report unavailable when the agents service is absent', asy
   assert.deepEqual(opened, { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } })
 })
 
-test('P1 regression: the ownership escape preserves the real AgentHandle so the runner can dispose it on retirement', async () => {
+test('regression: the ownership escape preserves the real AgentHandle so the runner can dispose it on retirement', async () => {
   // The runner stores liveHandle = handle.direct.ownerHandle and calls
   // dispose() when transitioning AWAY from the session. A lost handle
   // previously pinned the old lease (review finding). This pins the
@@ -197,7 +197,7 @@ test('P1 regression: the ownership escape preserves the real AgentHandle so the 
   assert.equal((handle.direct!.agent as { session: { id: string } }).session.id, 'session-a')
 })
 
-test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a SECOND transition disposes the FIRST exactly once', async () => {
+test('regression (round 3): transition commit stores the OWNER HANDLE, and a SECOND transition disposes the FIRST exactly once', async () => {
   // The exact chain that broke: transition A→B stores liveHandle from the
   // SessionHandle, then transition B→C disposes the OLD liveHandle. If the
   // commit had stored the SessionHandle (or the agent) instead of the real

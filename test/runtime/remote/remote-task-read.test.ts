@@ -332,7 +332,7 @@ test('a ready projection with an empty catalog is an authoritative empty members
   assert.equal(snapshot?.parentAvailable, true)
 })
 
-test('F4 regression: ready WITHOUT the catalog is a read failure, never an authoritative empty root', async () => {
+test('regression: ready WITHOUT the catalog is a read failure, never an authoritative empty root', async () => {
   const generations = createSnapshotGenerationHarness()
   // The official Client clears the projection store and still settles `ready`
   // when `session.projections` answers a null/missing Session (manager.ts), so
@@ -346,7 +346,7 @@ test('F4 regression: ready WITHOUT the catalog is a read failure, never an autho
   await assert.rejects(reader.readDescendants('parent'), /subagentCatalog projection is unavailable/)
 })
 
-test('F4 regression: ready without the catalog on a BRANCH becomes an unavailable diagnostic, never a normal child', async () => {
+test('regression: ready without the catalog on a BRANCH becomes an unavailable diagnostic, never a normal child', async () => {
   const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: { parent: { running: false }, child: { running: false } },
@@ -395,7 +395,7 @@ test('F4d/OWNER-RULED: a BRANCH whose projections are unavailable degrades BRANC
   ], 'the unreadable branch degrades locally and its sibling stays visible')
 })
 
-test('F4d: a `ready` baseline without the catalog stays branch-scoped for BOTH provenances (carrier cannot distinguish them)', async () => {
+test('a `ready` baseline without the catalog stays branch-scoped for BOTH provenances (carrier cannot distinguish them)', async () => {
   const generations = createSnapshotGenerationHarness()
   // The official handler returns NULL for a missing Session and a non-null
   // `{asOfSeq, values}` for a readable Session whose baseline omits the catalog;
@@ -446,7 +446,7 @@ test('rc.2 CARRIER shape: a REAL wire branch failure (RemoteError code=gateway/i
   ], 'the rc.2 carrier cannot express corrupt, so the honest diagnostic is unavailable')
 })
 
-test('F5 regression: a transient projection error re-enters the official retryable refresh ONCE, then succeeds', async () => {
+test('regression: a transient projection error re-enters the official retryable refresh ONCE, then succeeds', async () => {
   const generations = createSnapshotGenerationHarness()
   let client!: ReturnType<typeof sessionsFixture>
   client = sessionsFixture({
@@ -463,7 +463,7 @@ test('F5 regression: a transient projection error re-enters the official retryab
   assert.deepEqual(snapshot?.descendants, [])
 })
 
-test('F5 regression: a STILL-failing projection rejects after exactly ONE retry (no hot loop)', async () => {
+test('regression: a STILL-failing projection rejects after exactly ONE retry (no hot loop)', async () => {
   const generations = createSnapshotGenerationHarness()
   const failure = new Error('permanent projection failure')
   const client = sessionsFixture({

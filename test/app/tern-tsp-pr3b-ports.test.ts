@@ -38,7 +38,7 @@ const USER_SHELL_SOURCE = fileURLToPath(new URL('../../src/app/submission/user-s
 
 // ── Static: the submission owner reads the port, not TuiApp ─────────────────
 
-test('B0: the submission controller imports no TuiApp binding', () => {
+test('the submission controller imports no TuiApp binding', () => {
   const source = readFileSync(CONTROLLER_SOURCE, 'utf8')
   // Type-only compatibility re-exports are fine; a VALUE/TYPE binding of the
   // class itself would let PiTui-only members creep back in.
@@ -48,7 +48,7 @@ test('B0: the submission controller imports no TuiApp binding', () => {
   )
 })
 
-test('B0: the user shell keeps only the local-card TuiApp members', () => {
+test('the user shell keeps only the local-card TuiApp members', () => {
   const source = readFileSync(USER_SHELL_SOURCE, 'utf8')
   // The interrupt/failure notices must route through the injected
   // renderer-neutral `notify`, never `deps.app().notify`.
@@ -66,7 +66,7 @@ test('B0: the user shell keeps only the local-card TuiApp members', () => {
 
 // ── Structural: the app is the composer port; the presenter is the adapter ──
 
-test('B0/B3: the PiTui composer port is the live app and the presenter is the delegating adapter', () => {
+test('the PiTui composer port is the live app and the presenter is the delegating adapter', () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   app.start()
@@ -85,7 +85,7 @@ test('B0/B3: the PiTui composer port is the live app and the presenter is the de
   }
 })
 
-test('B3: the PiTui presenter forwards every member to the app receiver and withdraws nothing itself', async () => {
+test('the PiTui presenter forwards every member to the app receiver and withdraws nothing itself', async () => {
   const calls: string[] = []
   const app: PiTuiInteractionApp = {
     // `this` identity is the receiver witness: a spread copy (`{ ...app }`)
@@ -134,7 +134,7 @@ test('B3: the PiTui presenter forwards every member to the app receiver and with
 
 // ── Behavioral: all seven composer members work against a real TuiApp ───────
 
-test('B0: every SubmissionComposerPort member is live on a real PiTui app', () => {
+test('every SubmissionComposerPort member is live on a real PiTui app', () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   app.start()
@@ -163,7 +163,7 @@ test('B0: every SubmissionComposerPort member is live on a real PiTui app', () =
 
 // ── Behavioral: the UserShell interrupt notice is renderer-neutral ──────────
 
-test('B0: the UserShell interrupt error notice routes through the injected renderer-neutral notify', async () => {
+test('the UserShell interrupt error notice routes through the injected renderer-neutral notify', async () => {
   const notices: string[] = []
   const cardCalls: string[] = []
   // A minimal local-card app double: only the members the run()/card path

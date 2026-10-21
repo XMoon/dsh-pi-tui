@@ -104,7 +104,7 @@ test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
   )
 })
 
-test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () => {
+test('task, presentation, and closure smokes are Source Mode gates', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
   for (const [name, command] of [
     ['D1 closure gate', 'smoke:remote-d1-closure'],

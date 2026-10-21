@@ -469,7 +469,7 @@ test('running member click emits open-member; terminal member rows have no hit',
   assert.deepEqual(actions, [], `terminal member must never emit open-member`)
 })
 
-test('W8: Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open and reject)', async () => {
+test('Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open and reject)', async () => {
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
@@ -582,7 +582,7 @@ test('W8: Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open a
   assert.equal(entered.length, 1, 'a settled member must never open the viewer')
 })
 
-test('W9: a folded mid-run workflow renders running counts and keeps the scoped View route', async () => {
+test('a folded mid-run workflow renders running counts and keeps the scoped View route', async () => {
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
