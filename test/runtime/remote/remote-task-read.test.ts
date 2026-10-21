@@ -395,7 +395,7 @@ test('a BRANCH whose projections are unavailable degrades BRANCH-LOCALLY (siblin
   ], 'the unreadable branch degrades locally and its sibling stays visible')
 })
 
-test('F4d: a `ready` baseline without the catalog stays branch-scoped for BOTH provenances (carrier cannot distinguish them)', async () => {
+test('a `ready` baseline without the catalog stays branch-scoped for BOTH provenances (carrier cannot distinguish them)', async () => {
   const generations = createSnapshotGenerationHarness()
   // The official handler returns NULL for a missing Session and a non-null
   // `{asOfSeq, values}` for a readable Session whose baseline omits the catalog;

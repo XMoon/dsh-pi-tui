@@ -1101,7 +1101,7 @@ test('the wheel scrolls the pane under the pointer without pulling the selection
 
 // ── F5: unknown persistence is never presented as "not set" ───────────────
 
-test('F5 an unreadable document never fabricates a "not set" persisted preference', async () => {
+test('an unreadable document never fabricates a "not set" persisted preference', async () => {
   const missing = setup({ columns: 100, rows: 40, settingsService: false })
   await missing.open()
   await key(missing, '\x1b[B') // Appearance -> Display

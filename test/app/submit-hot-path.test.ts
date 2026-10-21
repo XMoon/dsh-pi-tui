@@ -3576,7 +3576,7 @@ test('whole-PR F4/F5 control: an ARGUED line of an input-declaring TUI name stay
     'the input-describing Client definition claims the argued line and runs locally')
   assert.equal(harness.host.followedUp.length, 0, 'and it is not delivered as a prompt')
 })
-test('AC-2/R7-1: a genuine Host leading-input collision next to the Client `/export` runs the Host execution exactly once', async (t) => {
+test('a genuine Host leading-input collision next to the Client `/export` runs the Host execution exactly once', async (t) => {
   // AC-2: given a real Host `/export` and this TUI's own Client `/export`, the
   // Host-ORIGIN name/line claim must decide the final command-plane ownership.
   // The Client descriptor is execute-kind, so the effective union reads
@@ -3603,7 +3603,7 @@ test('AC-2/R7-1: a genuine Host leading-input collision next to the Client `/exp
   assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
 })
 
-test('AC-2/R7-2: a genuine Host `/skill` collision owns the attachment policy (the skill syntax predicate must not outrank it)', async (t) => {
+test('a genuine Host `/skill` collision owns the attachment policy (the skill syntax predicate must not outrank it)', async (t) => {
   // R7-2: `/skill <name>` is syntactically a skill invocation, but a GENUINE
   // Host command owning that name outranks it (the classifier's Host precedence).
   // This Host descriptor declares no `attachments`, so the staged image must be
