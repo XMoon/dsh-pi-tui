@@ -8,6 +8,7 @@
  * @module @xmoon76/dsh-pi-tui/test/support/tsp-picker-wire
  */
 import assert from 'node:assert/strict'
+import type { Op } from '@stencil-hq/tern'
 import type { TspPane } from './tsp-terminal-fixture.ts'
 
 export interface WireNode {
@@ -20,6 +21,11 @@ export interface WireNode {
 /** Fold the pane's frame ops into the live node set (a retired receiver is
  *  gone, so it can never satisfy an assertion). */
 export function wireNodes(pane: TspPane): WireNode[] {
+  return foldWireNodes(pane.frames())
+}
+
+/** Fold a frame sequence into the live node set. */
+function foldWireNodes(frames: ReadonlyArray<{ readonly ops: readonly Op[] }>): WireNode[] {
   const live = new Map<string, WireNode>()
   const parents = new Map<string, string>()
   const remove = (id: string): void => {
@@ -33,7 +39,7 @@ export function wireNodes(pane: TspPane): WireNode[] {
     parents.set(node.id, parent)
     for (const child of node.c ?? []) add(child, node.id)
   }
-  for (const frame of pane.frames())
+  for (const frame of frames)
     for (const op of frame.ops) {
       if (op[0] === 'add') add(op[4] as unknown as WireNode, String(op[2]))
       if (op[0] === 'del') remove(String(op[1]))
@@ -55,6 +61,32 @@ export function wireNodes(pane: TspPane): WireNode[] {
       }
     }
   return [...live.values()]
+}
+
+/**
+ * The live text of EVERY frame the pane committed, in order.
+ *
+ * The FINAL live set answers "what is on the screen now"; it cannot answer
+ * "was a wrong row ever painted", because a row that was painted and later
+ * removed is gone from it. A negative guarantee ("this row never appears")
+ * needs every intermediate state, and that is what this returns: one entry
+ * per frame, each the live text after that frame.
+ *
+ * The text of each entry comes from the live nodes' OWN `p.text` — the
+ * nested `c` arrays are the snapshots the node was added with, and a `del`
+ * does not prune them, so a recursive walk would report a DELETED row.
+ */
+export function wireTextPerFrame(pane: TspPane): string[][] {
+  const frames = pane.frames()
+  const states: string[][] = []
+  for (let index = 0; index < frames.length; index += 1) {
+    states.push(
+      foldWireNodes(frames.slice(0, index + 1))
+        .map(node => node.p.text)
+        .filter((text): text is string => typeof text === 'string' && text !== ''),
+    )
+  }
+  return states
 }
 
 /** The `/model` layer's key prefix (the default of every helper below). */

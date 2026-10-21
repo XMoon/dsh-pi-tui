@@ -39,7 +39,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { wireNodes, wireTextPerFrame } from '../support/tsp-picker-wire.ts'
 
 interface RecordedPrompt {
   readonly sessionId: string
@@ -264,9 +264,17 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
       // steering row. The two are not the same fact — the steering row can
       // only be ruled out by an observation WINDOW, because a late
       // authoritative occurrence would paint it AFTER the queue row landed.
-      // So the window stays: the negative fact needs one, and it is the
-      // window the original fixed wait provided.
-      await directSettle()
+      // So the window stays, with the bound the original fixed wait had (a
+      // shorter one would need a causal reason, and none is known).
+      await directSettle(1_500)
+      // The exclusion is checked in EVERY frame the window produced, not only
+      // the last one: a steering row that was painted and later retracted is
+      // gone from the final live set, so the final set alone cannot rule it
+      // out.
+      for (const state of wireTextPerFrame(fixture.pane)) {
+        assert.equal(state.some(line => line.includes('parity busy follow-up') && line.includes('steering')), false,
+          'a queued submission never renders as a steering row, in any frame')
+      }
       const renderedDuringBusy = renderedLines(fixture)
       assert.ok(renderedDuringBusy.some(line => line.includes('queued (followup): parity busy follow-up')),
         `the busy submission must render as the ordinary queue row:\n${renderedDuringBusy.join('\n')}`)
