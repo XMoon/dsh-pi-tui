@@ -113,6 +113,21 @@ export function scanSource(filePath, sourceText) {
 /** Scan a whole test root: discovers scannable files, allows the whitelist, reports the rest. */
 export function scanTree(rootDir) {
   const violations = []
+  // The allowlist is checked for AMBIGUITY FIRST, and the ambiguity is a
+  // violation of its own.
+  //
+  // The allowlist names a file by its BASENAME, so a second file with the
+  // same basename inherits the exemption: the gate would stay green while
+  // a file nobody reviewed creates temp dirs. The CLI caught that, but the
+  // CLI is not what CI runs — the guard TEST is — so the check has to be
+  // in the scan itself.
+  for (const basename of ambiguousAllowlistEntries(rootDir)) {
+    violations.push({
+      file: basename,
+      line: 0,
+      api: 'ambiguous-allowlist-entry',
+    })
+  }
   for (const file of collectTestFiles(rootDir)) {
     if (isAllowedFile(rootDir, file)) continue
     violations.push(...scanSource(file, readFileSync(file, 'utf8')))
@@ -121,8 +136,15 @@ export function scanTree(rootDir) {
 }
 
 function printViolations(violations) {
-  console.error(`temp-hygiene-gate: ${violations.length} mkdtemp* token(s) outside the allowed files`)
+  console.error(`temp-hygiene-gate: ${violations.length} violation(s)`)
   for (const violation of violations) {
+    if (violation.api === 'ambiguous-allowlist-entry') {
+      console.error('')
+      console.error(`  ${violation.file}`)
+      console.error('    two files share an allowed basename, so the second one inherits the')
+      console.error('    exemption. Narrow the entry to a path, or rename one of the files.')
+      continue
+    }
     console.error('')
     console.error(`  ${violation.file}:${violation.line}`)
     console.error(`    hit: ${violation.api}`)
@@ -135,13 +157,6 @@ function printViolations(violations) {
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
   const rootDir = process.argv[2] ?? join(process.cwd(), 'test')
-  const ambiguous = ambiguousAllowlistEntries(rootDir)
-  if (ambiguous.length > 0) {
-    console.error(`temp-hygiene-gate: the allowlist is ambiguous: ${ambiguous.join(', ')}`)
-    console.error('  two files share an allowed basename, so the second one inherits the')
-    console.error('  exemption. Narrow the entry to a path, or rename one of the files.')
-    process.exit(1)
-  }
   const violations = scanTree(rootDir)
   if (violations.length > 0) {
     printViolations(violations)

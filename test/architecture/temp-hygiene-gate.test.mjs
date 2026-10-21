@@ -8,17 +8,19 @@
  */
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { ALLOWED_DIRECT_USAGE, collectTestFiles, scanSource, scanTree } from '../../scripts/temp-hygiene-gate.mjs'
+import { ALLOWED_DIRECT_USAGE, ambiguousAllowlistEntries, collectTestFiles, scanSource, scanTree } from '../../scripts/temp-hygiene-gate.mjs'
 
 // The WHOLE test tree, not this file's own directory: a violation in
 // `test/app/`, `test/tui/` or `test/tooling/` is a violation too, and
 // this test is the repository-level guard for them.
 const TEST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const REPO_ROOT = resolve(TEST_ROOT, '..')
 
 test('a plain test file calling mkdtempSync directly is a violation', () => {
   const violations = scanSource(
@@ -97,6 +99,44 @@ test('collectTestFiles only picks up source files', async (t) => {
   writeFileSync(join(root, 'nested', 'c.test.js'), '')
   const files = collectTestFiles(root).map((file) => file.slice(root.length + 1)).sort()
   assert.deepEqual(files, ['a.test.ts', 'b.test.mjs', join('nested', 'c.test.js')])
+})
+
+test('two files with the SAME allowlisted basename are reported', (t) => {
+  // The allowlist names a file by its BASENAME, so a second file with the
+  // same basename inherits the exemption: the gate would stay green while
+  // a file nobody reviewed creates temp dirs. The check has to be part of
+  // the SCAN, because the scan is what the guard test runs.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-gate-ambiguous-')
+  mkdirSync(join(root, 'app'), { recursive: true })
+  mkdirSync(join(root, 'tui'), { recursive: true })
+  for (const directory of ['app', 'tui']) {
+    writeFileSync(join(root, directory, 'temp-lifecycle.ts'), `import { mkdtempSync } from 'node:fs'\nexport const x = mkdtempSync('/tmp/a-')\n`)
+  }
+  const ambiguous = ambiguousAllowlistEntries(root)
+  assert.deepEqual(ambiguous, ['temp-lifecycle.ts'],
+    'the shared basename must be reported as ambiguous')
+  // And the scan reports it as a violation of its own.
+  const violations = scanTree(root)
+  assert.ok(violations.some(violation => violation.api === 'ambiguous-allowlist-entry'),
+    JSON.stringify(violations, null, 2))
+})
+
+test('the gate CLI fails closed on an ambiguous allowlist', (t) => {
+  // The CLI is what a developer runs; the SCAN is what the guard test
+  // runs. Both have to fail closed, or one of them is a hole.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-gate-cli-')
+  mkdirSync(join(root, 'app'), { recursive: true })
+  mkdirSync(join(root, 'tui'), { recursive: true })
+  for (const directory of ['app', 'tui']) {
+    writeFileSync(join(root, directory, 'temp-lifecycle.ts'), `import { mkdtempSync } from 'node:fs'\nexport const x = mkdtempSync('/tmp/a-')\n`)
+  }
+  const result = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'temp-hygiene-gate.mjs'), root], {
+    encoding: 'utf8',
+  })
+  assert.notEqual(result.status, 0, 'the CLI must fail on an ambiguous allowlist')
+  assert.match(result.stderr, /two files share an allowed basename/u)
 })
 
 test('a violation in ANOTHER owner directory is reported', (t) => {
