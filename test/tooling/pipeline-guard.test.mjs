@@ -385,3 +385,33 @@ test('the mode override exists and is one the resolver accepts', () => {
   const raw = readFileSync(join(ROOT, 'scripts', 'prototype-mode.txt'), 'utf8').trim()
   assert.ok(['resolved', 'npm', 'source'].includes(raw), `unexpected mode override: ${raw}`)
 })
+
+test('a job that needs the SKIPPED source pack still runs in npm mode', () => {
+  // GitHub skips a job whose `needs` job was skipped, unless the job says
+  // otherwise. `source-pack` is skipped in npm mode, so every consumer needs
+  // an explicit condition — and without it the whole npm path is skipped
+  // while `aggregate` and `summary` go red for a reason nobody can see.
+  //
+  // This was a real failure: adding `source-pack` to `needs` skipped the
+  // build, every shard, the candidate and the qualification.
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  const consumers = ['build', 'typecheck', 'product-shard', 'candidate', 'qualify', 'downstream']
+  for (const job of consumers) {
+    const start = source.indexOf(`\n  ${job}:\n`)
+    assert.notEqual(start, -1, `the workflow must define '${job}'`)
+    // The job's own header, up to its first step.
+    const header = source.slice(start, source.indexOf('    steps:', start))
+    assert.match(header, /needs:[\s\S]*source-pack/u, `${job} must wait for the source pack`)
+    assert.match(header, /if: \$\{\{ !cancelled\(\) && needs\.source-pack\.result != 'failure' \}\}/u,
+      `${job} must run when the source pack was SKIPPED (npm mode) and stop when it FAILED`)
+  }
+})
+
+test('the source pack is only built in source mode', () => {
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  const start = source.indexOf('\n  source-pack:\n')
+  assert.notEqual(start, -1)
+  const header = source.slice(start, source.indexOf('    steps:', start))
+  assert.match(header, /if: \$\{\{ needs\.context\.outputs\.mode == 'source' \}\}/u,
+    'the pinned distribution must not be built for an npm run')
+})

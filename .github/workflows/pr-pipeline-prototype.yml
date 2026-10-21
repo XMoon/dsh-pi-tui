@@ -179,9 +179,13 @@ jobs:
     needs:
       - context
       # In Source Mode the build consumes the pinned distribution, so it
-      # cannot start before that pack exists. A skipped dependency does not
-      # block a run, so the npm path is unaffected.
+      # cannot start before that pack exists.
       - source-pack
+    # `source-pack` is SKIPPED in npm mode, and a skipped dependency would
+    # otherwise skip this job too. The condition therefore says "run unless
+    # the pack failed": a source run whose distribution could not be built
+    # must not fall through to the registry.
+    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -327,6 +331,11 @@ jobs:
       - source-pack
       - context
       - build
+    # `source-pack` is SKIPPED in npm mode, and a skipped dependency would
+    # otherwise skip this job too. The condition therefore says "run unless
+    # the pack failed": a source run whose distribution could not be built
+    # must not fall through to the registry.
+    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -384,6 +393,11 @@ jobs:
       - source-pack
       - context
       - build
+    # `source-pack` is SKIPPED in npm mode, and a skipped dependency would
+    # otherwise skip this job too. The condition therefore says "run unless
+    # the pack failed": a source run whose distribution could not be built
+    # must not fall through to the registry.
+    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -617,6 +631,11 @@ jobs:
       - source-pack
       - context
       - build
+    # `source-pack` is SKIPPED in npm mode, and a skipped dependency would
+    # otherwise skip this job too. The condition therefore says "run unless
+    # the pack failed": a source run whose distribution could not be built
+    # must not fall through to the registry.
+    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -708,6 +727,11 @@ jobs:
       - typecheck
       - aggregate
       - candidate
+    # `source-pack` is SKIPPED in npm mode, and a skipped dependency would
+    # otherwise skip this job too. The condition therefore says "run unless
+    # the pack failed": a source run whose distribution could not be built
+    # must not fall through to the registry.
+    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -880,6 +904,11 @@ jobs:
       - source-pack
       - context
       - qualify
+    # `source-pack` is SKIPPED in npm mode, and a skipped dependency would
+    # otherwise skip this job too. The condition therefore says "run unless
+    # the pack failed": a source run whose distribution could not be built
+    # must not fall through to the registry.
+    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
