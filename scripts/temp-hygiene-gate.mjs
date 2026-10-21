@@ -21,9 +21,22 @@ import { pathToFileURL } from 'node:url'
 
 const FORBIDDEN_TOKEN = /\bmkdtemp(?:Sync)?\b/gu
 
-/** Files allowed to contain the tokens, relative to the test root. Each entry needs a reason. */
+/**
+ * Files allowed to contain the tokens. Each entry needs a reason.
+ *
+ * The entry names the file by its BASENAME, not by its path. The test tree
+ * is organised by production ownership, so a file moves between
+ * directories as the owners change — and a path-keyed allowlist breaks
+ * silently at every move: the gate then reports the allowlisted file as a
+ * violation, and the only way to make it green is to widen the list until
+ * it no longer means anything.
+ *
+ * A basename matches the file wherever it lives, so a move does not
+ * change the gate's verdict. The list stays tiny, and the reason explains
+ * why the file genuinely needs the token.
+ */
 export const ALLOWED_DIRECT_USAGE = [
-  { file: 'support/temp-lifecycle.ts', reason: 'the helper itself: the one place allowed to create test temp dirs' },
+  { file: 'temp-lifecycle.ts', reason: 'the helper itself: the one place allowed to create test temp dirs' },
   { file: 'temp-hygiene-gate.test.mjs', reason: 'the gate\'s own test fixtures must contain the forbidden tokens' },
   { file: 'dev-bootstrap-ephemeral.test.mjs', reason: 'embedded fake-pnpm child script must create real temp dirs to drive the real source-pack script (contained by the runner)' },
   { file: 'dsh-source-identity.test.mjs', reason: 'embedded fake-pnpm child script must create real temp dirs to drive the real source-pack script (contained by the runner)' },
@@ -44,9 +57,16 @@ export function collectTestFiles(rootDir, files = []) {
   return files
 }
 
+/**
+ * Whether a file is allowed to contain the tokens.
+ *
+ * The allowlist names files by their BASENAME, so a file that moves
+ * between ownership directories keeps its verdict.
+ */
 function isAllowedFile(rootDir, file) {
   const rel = relative(rootDir, file).split('\\').join('/')
-  return ALLOWED_DIRECT_USAGE.some((allowed) => allowed.file === rel)
+  const basename = rel.slice(rel.lastIndexOf('/') + 1)
+  return ALLOWED_DIRECT_USAGE.some((allowed) => allowed.file === basename)
 }
 
 /** Scan one source file's text; returns violations (file:line + matched token). */

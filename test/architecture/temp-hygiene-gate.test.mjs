@@ -15,7 +15,15 @@ import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { ALLOWED_DIRECT_USAGE, collectTestFiles, scanSource, scanTree } from '../../scripts/temp-hygiene-gate.mjs'
 
-const TEST_ROOT = dirname(fileURLToPath(import.meta.url))
+/**
+ * The WHOLE test tree, not this file's own directory.
+ *
+ * The gate's own test used to scan the directory it lives in, so it
+ * stayed green while the gate itself reported violations elsewhere in the
+ * tree. The test that proves the repository satisfies the policy must scan
+ * the repository's test tree.
+ */
+const TEST_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('a plain test file calling mkdtempSync directly is a violation', () => {
   const violations = scanSource(
@@ -78,7 +86,7 @@ test('scanTree walks the tree and allows only the whitelisted files', async (t) 
   assert.equal(violations[0].file, join(root, 'stray.test.ts'))
   assert.equal(violations[0].line, 1)
   assert.ok(ALLOWED_DIRECT_USAGE.every((entry) => entry.reason.length > 0), 'every whitelist entry must carry a reason')
-  assert.ok(ALLOWED_DIRECT_USAGE.some((entry) => entry.file === 'support/temp-lifecycle.ts'), 'the helper must be whitelisted')
+  assert.ok(ALLOWED_DIRECT_USAGE.some((entry) => entry.file === 'temp-lifecycle.ts'), 'the helper must be whitelisted')
 })
 
 test('collectTestFiles only picks up source files', async (t) => {
