@@ -174,16 +174,23 @@ jobs:
           retention-days: 3
 
   # ---------------------------------------------------------------------------
-  # TYPECHECK, ONCE, as a SIBLING of the shards.
+  # TYPECHECK, ONCE.
   #
-  # It reads `src` and `test` only (`tsconfig.json` includes those), so it
-  # does not need the build and does not need to run on four runners. Running
-  # the same full typecheck four times would add runner-minutes and prove
-  # nothing new.
+  # It DEPENDS on the build: `tsconfig.json` includes `src` and `test`, and
+  # those import `@xmoon76/pi-tui`, whose declarations live in the vendored
+  # fork's BUILD output. Running it before the build fails with
+  # "Cannot find module '@xmoon76/pi-tui' or its corresponding type
+  # declarations" — measured on the first run of this prototype, not guessed.
+  #
+  # So it downloads the same verified build and runs ONCE, in parallel with
+  # the shards. It is not repeated on four runners: the same full typecheck
+  # four times would add runner-minutes and prove nothing new.
   # ---------------------------------------------------------------------------
   typecheck:
     name: Bundle typecheck
-    needs: context
+    needs:
+      - context
+      - build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -205,6 +212,15 @@ jobs:
           PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
             PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
             pnpm install --frozen-lockfile
+
+      - name: Download the shared build
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-build
+          path: ${{ github.workspace }}
+
+      - name: Verify this typecheck holds the build the build job produced
+        run: node scripts/build-digest.mjs --verify build-digest.json
 
       - name: Typecheck the bundle
         run: pnpm typecheck:bundle
