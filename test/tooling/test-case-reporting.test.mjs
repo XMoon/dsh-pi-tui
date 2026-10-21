@@ -26,7 +26,7 @@ import { spawnSync } from 'node:child_process'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 import { parseShard } from '../../scripts/run-test-lane.mjs'
-import { stripCodePrefix, rewriteSource } from '../../scripts/strip-code-prefix.mjs'
+import { hasLeadingCodePrefix, stripCodePrefix, rewriteSource } from '../../scripts/strip-code-prefix.mjs'
 import { collectRunnerSpec } from '../../scripts/runner-spec.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
@@ -308,4 +308,38 @@ test('the title transform keeps a key name that looks like a code', () => {
     stripCodePrefix('S on a clean draft closes without persisting'),
     'S on a clean draft closes without persisting',
   )
+})
+
+test('the title audit and the title transform agree on what a code is', () => {
+  // The audit reports the titles that still lead with a code; the
+  // transform rewrites them. If the two used their own definitions, the
+  // audit could stop reporting the very titles the transform would
+  // change — and a "no code-led titles" report would then be a report
+  // about the narrower definition, not about the tree.
+  const cases = [
+    'A5b: the composition zone is one facade',
+    'A06/Focus: an idle compaction keeps the chronology',
+    'B3 F6.1: a real answer freezes the countdown',
+    'PR D: an unsaved draft never executes',
+    'E2–E5: per-card clicks layer over the preference',
+    'P1.1: ordinary prompt positions never open the dropdown',
+    '§18.1 the Remote route never hands over',
+    'PR5 §1C-3 (R6-1): only the winner is subtracted',
+    'RFL-005: a cold attach verifies the first publication',
+    'B/Direct: sessionless resume follows the lifecycle',
+  ]
+  for (const title of cases) {
+    assert.equal(hasLeadingCodePrefix(title), true, `the audit must report: ${title}`)
+    assert.notEqual(stripCodePrefix(title), title, `the transform must change: ${title}`)
+  }
+  const clear = [
+    'the composition zone is one facade',
+    'Focus Error sanitizes AUTH failure messages',
+    'S on a clean draft closes without persisting',
+    'B3',
+  ]
+  for (const title of clear) {
+    assert.equal(hasLeadingCodePrefix(title), false, `the audit must not report: ${title}`)
+    assert.equal(stripCodePrefix(title), title, `the transform must not change: ${title}`)
+  }
 })
