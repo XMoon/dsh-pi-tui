@@ -852,7 +852,7 @@ test('a same-owner generation bump expires the captured scope and retires the se
   assert.equal(h.captures[1]!.sessionId, 'session-a')
 })
 
-test('(first-session): the first published Session kills a sessionless History seat at the publication seam', async (t) => {
+test('the first published Session kills a sessionless History seat at the publication seam', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, { source: filterSource([{ content: 'sessionless row', ts: 3 }]) })
@@ -920,7 +920,7 @@ test('a pre-publication switch failure never retires a still-current History sea
   assert.ok(!panelVisible(h.vt))
 })
 
-test('(post-bump): a post-bump pre-publication failure keeps the owner and still retires through the generation contract', async (t) => {
+test('a post-bump pre-publication failure keeps the owner and still retires through the generation contract', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, { source: filterSource([{ content: 'post bump row', ts: 3 }]) })

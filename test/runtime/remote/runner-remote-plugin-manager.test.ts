@@ -275,7 +275,7 @@ test('the real Remote /plugins reads the real Host PluginManager through the gen
   assert.match(line, /\[disabled\]/, 'the fixture bundle starts disabled (Host truth)')
 })
 
-test('(M3-6 PR1): the REAL runner controller consumes the SELECTED Client service observations; a Host-context twin is never reported', async (t) => {
+test('the REAL runner controller consumes the SELECTED Client service observations; a Host-context twin is never reported', async (t) => {
   const life = testLifecycle(t)
   // The observation evidence is captured at the controller's OWN consumption
   // point (R1 F2 / R2 review): the test patches the production
@@ -602,7 +602,7 @@ test('the real forwarded install events reach the Remote adapter by exact reques
   assert.equal(events.length, 2, 'a disposed install subscription delivers nothing later')
 })
 
-test('(S5 A12): a Remote mutation reply carried by a superseded Connection generation never repaints success or re-dispatches', async (t) => {
+test('a Remote mutation reply carried by a superseded Connection generation never repaints success or re-dispatches', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const profile = fixture.host.pluginManager!

@@ -61,7 +61,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and
  * a few carry a letter separator (`AC-1`, `PR-A`).
  */
-const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|\d{1,3}\([a-z]\)?|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
+const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|\d{1,3}\([a-z]\)?|\b[a-z]\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
 
 /**
  * A SECTION marker: a pointer into the plan that wrote the test.
@@ -69,7 +69,8 @@ const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[
  * `§18.1`, `§1C-3`, `§D2`, `§6.4 (3)`. It is the same kind of local
  * label as a code: the reader of a CI log does not have the plan either.
  */
-const SECTION_TOKEN = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?)(?:\/§?\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?))*?(?:\s*\(\d+\))?$/u
+const SECTION_TOKEN = /^§\s*\d+(?:\.\d+)*(?:-\d+)*(?:\s*\/\s*§?\s*\d+(?:\.\d+)*(?:-\d+)*)*$/u
+const SECTION_TOKEN_SINGLE = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?)(?:\/§?\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?))*?(?:\s*\(\d+\))?$/u
 
 /**
  * A bracketed code: `(R6-1)`, `(F2)`, `(3)`, `(10)`.
@@ -94,6 +95,16 @@ const BRACKET_REVIEW_TOKEN = /^\((?:review\s+round\s+\d+\s+)?(?:ruling|review|ex
  * with the label.
  */
 const BRACKET_HARNESS_TOKEN = /^\([A-Za-z0-9 -]+ harness\)$/u
+
+/**
+ * A bracketed QUALIFIER label: `(Direct)`, `(Direct negative control)`,
+ * `(F1 atomicity)`, `(F1 atomicity, fork)`.
+ *
+ * The bracket names the VARIANT of the behaviour the case covers, and a
+ * case-number or a review label inside it (`F1`, `R6-1`) is the same
+ * kind of local label as the code outside it. It goes with the label.
+ */
+const BRACKET_QUALIFIER_TOKEN = /^\([A-Za-z0-9][A-Za-z0-9 ,._+-]*\)$/u
 
 /**
  * The word-suffix code form: `B4B-delete-fallback`, `B4B-07-height`.
@@ -167,9 +178,11 @@ function isLabelToken(token, first, colonForm = false) {
     || SINGLE_LETTER_SLASH_TOKEN.test(token)
     || WORD_SUFFIX_CODE_TOKEN.test(token)
     || SECTION_TOKEN.test(token)
+    || SECTION_TOKEN_SINGLE.test(token)
     || BRACKET_CODE_TOKEN.test(token)
     || BRACKET_REVIEW_TOKEN.test(token)
     || BRACKET_HARNESS_TOKEN.test(token)
+    || BRACKET_QUALIFIER_TOKEN.test(token)
     || LABEL_WORD.test(token)
 }
 
@@ -398,6 +411,19 @@ function isInsideAString(source, index) {
     const char = source[position]
     if (char === '\\') {
       position += 1
+      continue
+    }
+    // A COMMENT is not code: an apostrophe in a comment does not open a
+    // string, and counting it would make every `test(` after the comment
+    // look like text.
+    if (quote === null && char === '/' && source[position + 1] === '/') {
+      const newline = source.indexOf('\n', position)
+      position = newline === -1 ? source.length : newline
+      continue
+    }
+    if (quote === null && char === '/' && source[position + 1] === '*') {
+      const close = source.indexOf('*/', position)
+      position = close === -1 ? source.length : close + 1
       continue
     }
     if (quote === null) {

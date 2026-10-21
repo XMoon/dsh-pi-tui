@@ -69,14 +69,14 @@ function reader(
   return { direct, snapshotKeys: projections.snapshotKeys }
 }
 
-test('(Direct): measureContext reads projectedTokens first, then pressureTokens', () => {
+test('measureContext reads projectedTokens first, then pressureTokens', () => {
   const { direct } = reader({ s: { contextPressure: { pressureTokens: 100, projectedTokens: 125 } } })
   assert.equal(direct.measureContext('s'), 125, 'projectedTokens wins')
   const { direct: fallback } = reader({ s: { contextPressure: { pressureTokens: 100 } } })
   assert.equal(fallback.measureContext('s'), 100, 'pressureTokens is the fallback')
 })
 
-test('(Direct): an absent projection capability or value reads unmeasured', () => {
+test('an absent projection capability or value reads unmeasured', () => {
   const { direct } = reader({ s: { contextPressure: {} } })
   assert.equal(direct.measureContext('s'), undefined, 'no fields yet — absent until a provider reports usage')
   const noService = new DirectSessionReader({ get: () => undefined }, {
@@ -88,13 +88,13 @@ test('(Direct): an absent projection capability or value reads unmeasured', () =
   assert.equal(noAgent.measureContext('unknown'), undefined, 'no live agent = unavailable')
 })
 
-test('(Direct): the Direct mapping equals the one shared semantic numerator', () => {
+test('the Direct mapping equals the one shared semantic numerator', () => {
   const pressure = { pressureTokens: 100, projectedTokens: 125, contextWindow: 1000 }
   const { direct } = reader({ s: { contextPressure: pressure } })
   assert.equal(direct.measureContext('s'), contextPressureOccupancy(pressure))
 })
 
-test('(Direct): a throwing projection read is unmeasured, never a crash', () => {
+test('a throwing projection read is unmeasured, never a crash', () => {
   const direct = new DirectSessionReader({
     get: () => ({
       snapshot: () => { throw new Error('teardown race') },
@@ -108,14 +108,14 @@ test('(Direct): a throwing projection read is unmeasured, never a crash', () => 
   assert.equal(direct.sessionStatus('s'), undefined)
 })
 
-test('(Direct): turnOutline reads the official projection without paging', () => {
+test('turnOutline reads the official projection without paging', () => {
   const outline = [{ turn: 1, seq: 10, prompt: 'p1', response: 'r1' }]
   const { direct, snapshotKeys } = reader({ s: { turnOutline: outline } })
   assert.deepEqual(direct.turnOutline('s'), outline)
   assert.deepEqual(snapshotKeys.at(-1), ['turnOutline'], 'the read names the official key')
 })
 
-test('(Direct): sessionStatus maps every official projection fact with the session cwd', () => {
+test('sessionStatus maps every official projection fact with the session cwd', () => {
   const { direct } = reader({
     s: {
       modelSelection: { lastUsed: { provider: 'p', model: 'm1' }, next: { provider: 'p', model: 'm2', reasoningEffort: 'high' } },
@@ -139,7 +139,7 @@ test('(Direct): sessionStatus maps every official projection fact with the sessi
   })
 })
 
-test('(Direct): model falls back to lastUsed when next is null', () => {
+test('model falls back to lastUsed when next is null', () => {
   const { direct } = reader({
     s: { modelSelection: { lastUsed: { provider: 'p', model: 'used' }, next: null } },
   })
@@ -175,7 +175,7 @@ test('the official todos null (no write yet) stays null — distinct from capabi
     'an absent projection value reads capability-unavailable')
 })
 
-test('(Direct): malformed projection values stay absent — never coerced', () => {
+test('malformed projection values stay absent — never coerced', () => {
   const { direct } = reader({
     s: {
       modelSelection: { lastUsed: null, next: { provider: '', model: 'x' } },
