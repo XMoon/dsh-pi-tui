@@ -75,18 +75,24 @@ test('result: a settled view comes only from the TOOL-AUTHORED result metadata',
   assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: 'nope' }), undefined)
   // A payload that names a path but carries NO window is not the read shape.
   assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: { path: 'src/a.ts' } }), undefined)
-  // An EMPTY path proves no file. On the DIFF shape the path guard is what
-  // refuses it (the envelope guard only applies to the read shape).
-  assert.equal(presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
+  // The DIFF shape takes its paths from the diffs themselves, exactly like the
+  // tool's own `diffsFromMeta`, so an empty TOP-LEVEL path does not decide it.
+  const diffWithoutTopPath = presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
     content: [{ type: 'text', text: 'written' }],
     isError: false,
     meta: { path: '', diffs: [{ path: 'src/a.ts', oldText: 'a', newText: 'b' }] },
-  }), undefined)
-  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+  })
+  assert.equal(diffWithoutTopPath?.card, 'diff')
+  // The READ shape takes the metadata's own path, and like the tool's own
+  // `readMetaFromMeta` it accepts an EMPTY string (the Host does not special-case
+  // it). Adding a constraint the Host lacks would be a divergence, not a safety
+  // win: an empty path can never claim the `path` target kind afterwards.
+  const readWithoutPath = presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
     content: [{ type: 'text', text: READ_ENVELOPE }],
     isError: false,
     meta: { path: '', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 },
-  }), undefined)
+  })
+  assert.equal(readWithoutPath?.card, 'read')
   // A MALFORMED diff list proves no file: a foreign entry is refused like the
   // tool's own `diffsFromMeta` refuses it, and an empty list with no write
   // marker declines. (The empty list WITH the write marker legitimately
@@ -168,6 +174,7 @@ test('result: the read metadata must survive the same window validation the tool
   assert.equal(read({ ...base, offset: 1.5 }), undefined, 'fractional offset')
   assert.equal(read({ ...base, totalLines: -1 }), undefined, 'negative totalLines')
   assert.equal(read({ ...base, lang: 7 }), undefined, 'non-string lang')
+  assert.equal(read({ ...base, path: 42 }), undefined, 'non-string path')
 })
 
 test('result: an EMPTY diff list is rebuilt from the arguments for a create OR an unchanged overwrite', () => {
@@ -206,6 +213,30 @@ test('result: an EMPTY diff list is rebuilt from the arguments for a create OR a
     isError: false,
     meta: { operation: 'create', path: 'src/a.ts', diffs: [] },
   }), undefined)
+})
+
+test('result: an empty-diff write with OLD metadata still gets its path from the arguments', () => {
+  // A current write always projects a canonical `path`, so this arm is
+  // reachable only for OLD or malformed replay metadata. The Host presenter
+  // deliberately falls back to the call's `file_path` there, so declining it
+  // would make a replayed session diverge from Direct. The fallback is confined
+  // to the already-narrowed shape: a write marker, an empty list, and a string
+  // content argument.
+  for (const operation of ['create', 'update'] as const) {
+    const view = presenter.result('write', JSON.stringify({ file_path: 'src/a.ts', content: 'x' }), {
+      content: [{ type: 'text', text: 'written' }],
+      isError: false,
+      meta: { operation, diffs: [] } as never,
+    })
+    assert.equal(view?.card, 'diff', `${operation}: still rebuilt without a metadata path`)
+    assert.deepEqual(view?.card === 'diff' ? view.diffs : undefined, [{ path: 'src/a.ts', oldText: null, newText: 'x' }])
+  }
+  // Without the write marker it is not a write, whatever else the metadata says.
+  assert.equal(presenter.result('write', JSON.stringify({ file_path: 'src/a.ts', content: 'x' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { diffs: [] } as never,
+  }), undefined, 'no marker, no inference by name')
 })
 
 test('result: a malformed diff entry is refused instead of reaching the diff renderer', () => {
