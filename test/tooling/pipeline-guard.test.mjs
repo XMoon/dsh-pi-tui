@@ -407,7 +407,7 @@ test('a job that needs the SKIPPED source pack still runs in npm mode', () => {
     // The job's own header, up to its first step.
     const header = source.slice(start, source.indexOf('    steps:', start))
     assert.match(header, /needs:[\s\S]*source-pack/u, `${job} must wait for the source pack`)
-    assert.match(header, /if: \$\{\{ !cancelled\(\) && needs\.source-pack\.result != 'failure' \}\}/u,
+    assert.match(header, /needs\['source-pack'\]\.result != 'failure'/u,
       `${job} must run when the source pack was SKIPPED (npm mode) and stop when it FAILED`)
   }
 })
@@ -438,10 +438,64 @@ test('every job downstream of the source pack states its own condition', () => {
     const start = workflow.indexOf(`\n  ${name}:\n`)
     const header = workflow.slice(start, workflow.indexOf('    steps:', start))
     if (!header.includes('source-pack')) continue
-    const direct = /if: \$\{\{ !cancelled\(\) && needs\.source-pack\.result != 'failure' \}\}/u.test(header)
-    const viaBuild = /if: \$\{\{ !cancelled\(\) && needs\.build\.result == 'success' \}\}/u.test(header)
+    const direct = /needs\['source-pack'\]\.result != 'failure'/u.test(header)
+    const viaBuild = /needs\['build'\]\.result == 'success'/u.test(header)
     assert.ok(direct || viaBuild, `${name} depends on the source pack but has no condition`)
     overridden.push(name)
   }
   assert.ok(overridden.length >= 6, `the consumers must be covered, only found ${overridden.join(', ')}`)
+})
+
+test('every conditional job checks EVERY one of its needs', () => {
+  // The defect this protects is the sharpest one in the whole workflow.
+  //
+  // `!cancelled()` is a STATUS CHECK function: using it (like `always()` or
+  // `failure()`) SUPPRESSES the implicit `success()` requirement on the
+  // needs. A condition of `!cancelled() && needs.build.result == 'success'`
+  // therefore runs when the typecheck, the aggregate, the qualification or a
+  // downstream leg FAILED — as long as the build succeeded.
+  //
+  // The qualified-artifact job had exactly that condition, and its only
+  // steps are a digest re-check and an upload: a failed downstream leg would
+  // still have produced a "qualified" artifact. That is the one invariant the
+  // provisional/qualified split exists to guarantee.
+  const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  const jobNames = [...workflow.matchAll(/\n  ([a-z][a-z-]*):\n/gu)].map(match => match[1])
+  let inspected = 0
+  for (const name of jobNames) {
+    const start = workflow.indexOf(`\n  ${name}:\n`)
+    const header = workflow.slice(start, workflow.indexOf('    steps:', start))
+    const condition = /    if: \$\{\{([^\n]*)\}\}/u.exec(header)
+    if (condition === null) continue
+    if (!condition[1].includes('!cancelled()')) continue
+    inspected += 1
+    const needsBlock = /    needs:\n((?:      - [\w-]+\n)+)/u.exec(header)
+    assert.notEqual(needsBlock, null, `${name} has a condition but no readable needs list`)
+    const needs = [...needsBlock[1].matchAll(/- ([\w-]+)/gu)].map(match => match[1])
+    for (const need of needs) {
+      const escaped = need.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+      if (need === 'source-pack') {
+        // Skipped in npm mode, so it may not require success — but its
+        // FAILURE must still stop the job.
+        assert.match(condition[1], new RegExp(`needs\\['source-pack'\\]\\.result != 'failure'`, 'u'),
+          `${name} must stop when the pinned distribution could not be built`)
+      } else {
+        assert.match(condition[1], new RegExp(`needs\\['${escaped}'\\]\\.result == 'success'`, 'u'),
+          `${name} must require '${need}' to be success: !cancelled() suppresses the implicit success() check`)
+      }
+    }
+  }
+  assert.ok(inspected >= 7, `the conditional jobs must all be covered, found ${inspected}`)
+})
+
+test('the qualified artifact job cannot run on a failed downstream leg', () => {
+  // The concrete case: `downstream-fail` makes one matrix leg fail. The
+  // qualified job must then be SKIPPED, not run and upload.
+  const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  const start = workflow.indexOf('\n  qualified:\n')
+  const header = workflow.slice(start, workflow.indexOf('    steps:', start))
+  assert.match(header, /needs\['downstream'\]\.result == 'success'/u)
+  assert.match(header, /needs\['qualify'\]\.result == 'success'/u)
+  assert.match(header, /needs\['aggregate'\]\.result == 'success'/u)
+  assert.match(header, /needs\['typecheck'\]\.result == 'success'/u)
 })

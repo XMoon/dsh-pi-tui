@@ -179,7 +179,7 @@ jobs:
     # otherwise skip this job too. The condition therefore says "run unless
     # the pack failed": a source run whose distribution could not be built
     # must not fall through to the registry.
-    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
+    if: ${{ !cancelled() && needs['context'].result == 'success' && needs['source-pack'].result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -329,7 +329,7 @@ jobs:
     # otherwise skip this job too. The condition therefore says "run unless
     # the pack failed": a source run whose distribution could not be built
     # must not fall through to the registry.
-    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
+    if: ${{ !cancelled() && needs['source-pack'].result != 'failure' && needs['context'].result == 'success' && needs['build'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -391,7 +391,7 @@ jobs:
     # otherwise skip this job too. The condition therefore says "run unless
     # the pack failed": a source run whose distribution could not be built
     # must not fall through to the registry.
-    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
+    if: ${{ !cancelled() && needs['source-pack'].result != 'failure' && needs['context'].result == 'success' && needs['build'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -629,7 +629,7 @@ jobs:
     # otherwise skip this job too. The condition therefore says "run unless
     # the pack failed": a source run whose distribution could not be built
     # must not fall through to the registry.
-    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
+    if: ${{ !cancelled() && needs['source-pack'].result != 'failure' && needs['context'].result == 'success' && needs['build'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -725,7 +725,7 @@ jobs:
     # otherwise skip this job too. The condition therefore says "run unless
     # the pack failed": a source run whose distribution could not be built
     # must not fall through to the registry.
-    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
+    if: ${{ !cancelled() && needs['source-pack'].result != 'failure' && needs['context'].result == 'success' && needs['build'].result == 'success' && needs['typecheck'].result == 'success' && needs['aggregate'].result == 'success' && needs['candidate'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -902,7 +902,7 @@ jobs:
     # otherwise skip this job too. The condition therefore says "run unless
     # the pack failed": a source run whose distribution could not be built
     # must not fall through to the registry.
-    if: ${{ !cancelled() && needs.source-pack.result != 'failure' }}
+    if: ${{ !cancelled() && needs['source-pack'].result != 'failure' && needs['context'].result == 'success' && needs['qualify'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -1000,7 +1000,7 @@ jobs:
     # while every one of its direct dependencies had succeeded — and the
     # summary then failed on `qualified artifact is 'skipped'`, which points
     # at the wrong job.
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs['context'].result == 'success' && needs['build'].result == 'success' && needs['typecheck'].result == 'success' && needs['aggregate'].result == 'success' && needs['candidate'].result == 'success' && needs['qualify'].result == 'success' && needs['downstream'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
