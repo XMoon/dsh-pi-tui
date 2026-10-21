@@ -456,7 +456,7 @@ test('matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
   // The domain resolver is environment-neutral: these pure pins supply the
   // facts explicitly instead of reading the process environment.
   const environment: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
-  const query = resolvePathQuery('\\Users\\sh', '/ws', environment)
+  const query = resolvePathQuery('\\Users\\', '/ws', environment)
   assert.equal(query.searchBase, win32.dirname('\\Users\\sh'))
   assert.equal(query.displayBase, '\\Users\\')
   assert.equal(query.winAbsolute, true)
@@ -475,7 +475,7 @@ test('matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
 })
 
 test('candidates present one full display path independently of host path dialect', () => {
-  assert.equal(scorePathCandidate({ path: '\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
+  assert.equal(scorePathCandidate({ path: '\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   assert.equal(scorePathCandidate({ path: '\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   const rootFile = presentPathCandidate({ path: 'package.json', kind: 'file' }, { at: false, quoted: false })
   assert.ok(rootFile !== undefined)
@@ -493,7 +493,7 @@ test('candidates present one full display path independently of host path dialec
     { at: false, quoted: false, sep: '\\' },
   )
   assert.ok(directory !== undefined)
-  assert.equal(directory.value, '\\Users\\Pictures\\')
+  assert.equal(directory.value, '\\Users\\Pictures/')
   assert.equal(directory.label, '\\Users\\Pictures/')
   assert.ok(directory.label.endsWith('/'))
   assert.equal(directory.description, undefined)

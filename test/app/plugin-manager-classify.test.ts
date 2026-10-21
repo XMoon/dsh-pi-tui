@@ -146,7 +146,7 @@ test('two proven entryIds of ONE bundle aggregate into one TUI extension card', 
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue('foo'), bundleName: 'foo', entryIds: ['e-a', 'e-b'], availability: 'profile', installed: true, source: 'file:/foo' }]),
     [
-      observation({ owner: 'foo-a', entryId: 'e-a', contributionKinds: ['chrome.footer.item'], contributionCount: 1 }),
+      observation({ owner: 'foo-b', entryId: 'e-a', contributionKinds: ['chrome.footer.item'], contributionCount: 1 }),
       observation({ owner: 'foo-b', entryId: 'e-b', contributionKinds: ['command'], contributionCount: 2, usesAdvancedCapability: true }),
     ],
   )

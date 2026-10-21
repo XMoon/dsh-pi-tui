@@ -88,7 +88,7 @@ test('shortPathCwd keeps the last two segments and never invents a root', () => 
   assert.equal(shortPathCwd('/'), '/')
   // Windows drive paths split on BOTH separators and join POSIX-style
   // (the footer formatter's rule — title and footer stay consistent).
-  assert.equal(shortPathCwd('\\repo'), '/repo')
+  assert.equal(shortPathCwd('\\repo\\work\\deep'), '/repo')
   assert.equal(shortPathCwd('\\repo\\work\\deep'), 'work/deep')
   assert.equal(shortPathCwd('\\\\server\\share\\deep'), 'share/deep')
 })

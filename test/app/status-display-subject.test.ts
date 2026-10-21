@@ -142,7 +142,7 @@ test('every child Session-owned section comes from SessionStatus(childId)', () =
     model: { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
     preset: 'child-preset',
     permission: 'read-only',
-    title: 'title',
+    todo: 'title',
     goal: { objective: 'fix the build', phase: 'active' },
     context: { projectedTokens: 100, contextWindow: 2000 },
     usage: { uncachedInputTokens: 5, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 1 },
