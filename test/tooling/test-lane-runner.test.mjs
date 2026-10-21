@@ -83,15 +83,10 @@ test('the runner passes the file list RELATIVE to the repository root', () => {
   // list from the test-root-relative paths and set the child's working
   // directory to the repository root.
   const source = readFileSync(join(ROOT, 'scripts', 'run-test-lane.mjs'), 'utf8')
-  // The file list is RELATIVE: the test root's own name plus the file's
-  // path under it, so the child receives `<root-name>/<file>` and runs
-  // with the root's PARENT as its working directory.
-  assert.match(source, /const relativeFiles = files\.map\(rel => join\(testRootName, rel\)\)/u,
-    'the runner must pass the file list relative to the working directory')
-  assert.match(source, /cwd: workingDirectory/u,
-    "the child must run with the working directory the relative paths are based on")
-  assert.match(source, /const workingDirectory = testRoot === join\(ROOT, 'test'\) \? ROOT : testRootParent/u,
-    'the default working directory must be the repository root')
+  assert.match(source, /const relativeFiles = files\.map\(rel => join\('test', rel\)\)/u,
+    'the runner must pass the file list relative to the repository root')
+  assert.match(source, /cwd: ROOT/u,
+    "the child must run with the repository root as its working directory")
   assert.doesNotMatch(source, /files\.map\(rel => join\(TEST_ROOT, rel\)\)/u,
     'the runner must not pass absolute paths')
 })

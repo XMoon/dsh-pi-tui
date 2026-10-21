@@ -27,49 +27,19 @@
 import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-
-/**
- * Where the lanes are discovered.
- *
- * It is ALWAYS the repository's own `test/` directory for a QUALIFICATION
- * run: `pnpm test:product` must scan the repository's 491 product test
- * files, and nothing an environment variable says may change that set.
- * A qualification that silently scanned a different tree would report
- * green without having run the suite it claims to have run.
- *
- * `DSH_TEST_ROOT` therefore only applies when the caller ALSO passes
- * `--test-root`, which is the explicit opt-in a TEST uses to point the
- * runner at a disposable tree. The two have to agree, so a stray
- * environment variable cannot redirect a qualification run on its own.
- */
-export function resolveTestRoot(explicit, environment = process.env) {
-  const canonical = join(ROOT, 'test')
-  if (explicit === undefined) return canonical
-  const override = environment.DSH_TEST_ROOT
-  if (override === undefined) {
-    throw new Error('--test-root requires DSH_TEST_ROOT to name the same directory')
-  }
-  const resolved = resolve(override)
-  if (resolved !== resolve(explicit)) {
-    throw new Error(`--test-root (${explicit}) and DSH_TEST_ROOT (${override}) disagree`)
-  }
-  return resolved
-}
+const TEST_ROOT = join(ROOT, 'test')
 
 function main() {
   const laneName = process.argv[2]
-  const args = process.argv.slice(3)
-  const testRootIndex = args.indexOf('--test-root')
-  const explicitTestRoot = testRootIndex === -1 ? undefined : args[testRootIndex + 1]
   if (laneName === undefined) {
-    console.error(`usage: node scripts/run-test-lane.mjs <lane> [--test-root <dir>]\nlanes: ${Object.keys(LANES).join(', ')}`)
+    console.error(`usage: node scripts/run-test-lane.mjs <lane>\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
   const lane = LANES[laneName]
@@ -77,9 +47,8 @@ function main() {
     console.error(`unknown test lane: ${laneName}\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
-  const testRoot = resolveTestRoot(explicitTestRoot)
   // The lane's patterns are relative to the test root.
-  const files = resolveLane(testRoot, lane.patterns, lane.suffixes, lane.exclude ?? [])
+  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
   // The file list is passed RELATIVE to the repository root, and the child
   // runs with that root as its working directory.
   //
@@ -89,39 +58,12 @@ function main() {
   // The relative form is ~9,000 characters on every platform, and the
   // child's `cwd` keeps the repository root as the working directory —
   // which the tests rely on (22 of them read `process.cwd()`).
-  //
-  // The prefix is the test root's own name, so an overridden root keeps
-  // the same shape: the child is given `<root-name>/<file>` relative to
-  // the working directory, and the working directory is the root's
-  // PARENT.
-  const testRootParent = dirname(testRoot)
-  const testRootName = basename(testRoot)
-  const workingDirectory = testRoot === join(ROOT, 'test') ? ROOT : testRootParent
-  const relativeFiles = files.map(rel => join(testRootName, rel))
+  const relativeFiles = files.map(rel => join('test', rel))
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
-  // The MACHINE-READABLE reporter.
-  //
-  // It is opt-in: the destination variable is what turns it on. Without
-  // the variable the lane runs exactly as it always did, with Node's own
-  // reporter and no extra file. With it, the reporter is loaded and it
-  // writes the case records NEXT TO the human report.
-  //
-  // The reporter has to be named on the COMMAND LINE — the destination
-  // variable alone does not make Node load it, so a run that set the
-  // variable but not the flag would produce no records at all, and every
-  // consumer of them would fail later with a confusing "file not found".
-  const jsonl = process.env.DSH_TEST_JSONL
-  const reporterArgs = jsonl === undefined
-    ? []
-    : [`--test-reporter=${join(ROOT, 'scripts', 'test-case-reporter.mjs')}`]
-  const child = spawn(process.execPath, [
-    '--test',
-    ...reporterArgs,
-    ...relativeFiles,
-  ], {
-    cwd: workingDirectory,
+  const child = spawn(process.execPath, ['--test', ...relativeFiles], {
+    cwd: ROOT,
     stdio: 'inherit',
     shell: false,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
@@ -163,8 +105,4 @@ function main() {
   })
 }
 
-// The runner is a SCRIPT. Running it only when it IS the entry point keeps
-// importing it side-effect free.
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main()
-}
+main()

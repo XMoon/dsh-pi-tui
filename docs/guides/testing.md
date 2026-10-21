@@ -239,25 +239,16 @@ the context. Dropping the code is a rename with no loss.
 
 #### Checking the result
 
-Two reports, in this order:
-
-| Command | What it reports |
-|---|---|
-| `pnpm report:case-inventory` | the real case list of every lane, collected by running each lane through the same reporter the CI uses |
-| `pnpm report:case-titles` | the titles of those lists that still lead with a code, or that name a subject without naming a result |
-
-The inventory is collected from a RUN, not from a text scan: a table-driven
+The case list is collected from a RUN, not from a text scan: a table-driven
 case builds its title at run time, and a `describe()` chain contributes to
 the title the reader sees, so a regex cannot produce the list.
 
-The audit and the rewrite tool share ONE definition of what a code is, so
-they can never disagree: a title the audit does not report is a title the
-rewrite tool would not change.
-
-Both are REPORTS, not gates: the judgement "is this title clear" stays with
-the reviewer, exactly like rule 4 above. The audit's two verdicts are
-HINTS — a title it flags may be perfectly clear, and a title it does not
-flag may still be vague.
+The judgement "is this title clear" stays with the REVIEWER, exactly like
+rule 4 above. A mechanical pass can tell that a title no longer leads
+with a plan code; it cannot tell that the remaining words still say what
+the case does. So the evidence for a title change is the PAIRING of the
+old title with the new one, and it belongs in the pull request — not in a
+manifest that has to be kept in sync with the tree.
 
 ## 2. Running the tests
 
