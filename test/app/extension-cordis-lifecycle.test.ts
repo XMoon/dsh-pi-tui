@@ -902,7 +902,7 @@ test('a subscription record survives detach and re-binds on the next attach (no 
   }
 })
 
-test('3/P1-4: no-arg detach releases the current surface leases', async () => {
+test('no-arg detach releases the current surface leases', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)

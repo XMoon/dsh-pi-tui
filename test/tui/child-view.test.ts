@@ -33,7 +33,7 @@ test('childOwnEvents cuts seeded parent history after the inherited ownership ma
     event(7, 'session/end-seed', { inherited: true }),
     event(8, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }),
     event(9, 'turn/start', { turn: 1 }),
-    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } }),
+    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'closing' }] } }),
   ]
   const own = childOwnEvents(log)
   assert.deepEqual(own.map(candidate => candidate.seq), [8, 9, 10], 'only events after the ownership marker survive')
@@ -44,7 +44,7 @@ test('childOwnEvents keeps everything for an unseeded (spawned) child', () => {
   const log = [
     event(0, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }),
     event(1, 'turn/start', { turn: 1 }),
-    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } }),
+    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'closing' }] } }),
     event(3, 'session/end-seed', {}),
   ]
   assert.equal(childOwnEvents(log), log, 'without an inherited marker every event is the child\'s own')
@@ -55,7 +55,7 @@ test('childOwnEvents keeps child history across every untagged resume marker', (
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
     event(1, 'session/end-seed', { inherited: true }),
     event(2, 'user/message', { content: [{ type: 'text', text: 'third turn' }], source: { kind: 'user' } }),
-    event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'first reply' }] } }),
+    event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'first closing' }] } }),
     event(4, 'session/end-seed', {}),
     event(5, 'user/message', { content: [{ type: 'text', text: 'resumed turn' }], source: { kind: 'user' } }),
     event(6, 'assistant/message', { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'resumed reply' }] } }),
@@ -65,7 +65,7 @@ test('childOwnEvents keeps child history across every untagged resume marker', (
   const own = childOwnEvents(log)
   assert.deepEqual(own.map(candidate => candidate.seq), [2, 3, 4, 5, 6, 7, 8])
   const text = own.map(candidate => JSON.stringify(candidate.data)).join('\n')
-  assert.ok(text.includes('first turn'))
+  assert.ok(text.includes('third turn'))
   assert.ok(text.includes('first reply'))
   assert.ok(text.includes('resumed turn'))
   assert.ok(text.includes('resumed reply'))

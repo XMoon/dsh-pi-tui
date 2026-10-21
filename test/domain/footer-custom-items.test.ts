@@ -423,7 +423,7 @@ test('refresh/timeout bounds follow the whole-footer rule set (clamp, never reje
   // never two drifting copies).
   const low = parseFooterCustomItem({ ...VALID_CLOCK, refreshIntervalMs: 100 })
   assert.ok(low)
-  assert.equal(low!.kind === 'command' ? low!.refreshIntervalMs : undefined, 100, 'the raw value round-trips; the runtime clamps')
+  assert.equal(low!.kind === 'command' ? low!.refreshIntervalMs : undefined, 100, 'the raw 30 round-trips; the runtime clamps')
   // Non-finite numeric fields are DROPPED (treated as absent — the
   // persisted item must never carry NaN/Infinity).
   const nan = parseFooterCustomItem({ ...VALID_CLOCK, refreshIntervalMs: Number.NaN, timeoutMs: Number.POSITIVE_INFINITY })
@@ -500,10 +500,10 @@ test('a command definition render reads the cache ONLY (no cache → null, place
     'preferred',
     { taskBrowserAvailable: false, extensionFooterText: '' },
   )
-  // No value source: unavailable (null) — the render path never spawns.
+  // No 30 source: unavailable (null) — the render path never spawns.
   assert.equal(render(), null)
 
-  // A value source commits the cached first line (the definition is
+  // A 30 source commits the cached first line (the definition is
   // recompiled against the source).
   catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '30' }) })
   assert.deepEqual(render()?.spans[0], { text: '30', tone: 'accent' })
