@@ -39,7 +39,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
+import { wireNodes } from '../support/tsp-picker-wire.ts'
 
 interface RecordedPrompt {
   readonly sessionId: string
@@ -52,14 +52,19 @@ interface DurableUserMessage {
 }
 
 /** Every rendered text line of the pane's live node tree (the surface's paint). */
+/**
+ * Every text the CURRENT wire carries.
+ *
+ * `wireNodes()` returns the FLAT live-node set, and its nested `c` arrays
+ * are the snapshots the node was added with — a `del` removes the child from
+ * the live set WITHOUT pruning the parent's snapshot, so a recursive walk
+ * would report a DELETED row as current. Reading each live node's own
+ * `p.text` once is the current tree.
+ */
 function renderedLines(fixture: Awaited<ReturnType<typeof createDirectTspFixture>>): string[] {
-  const lines: string[] = []
-  const collect = (node: WireNode): void => {
-    if (typeof node.p.text === 'string' && node.p.text !== '') lines.push(node.p.text)
-    for (const child of node.c ?? []) collect(child)
-  }
-  for (const node of wireNodes(fixture.pane)) collect(node)
-  return lines
+  return wireNodes(fixture.pane)
+    .map(node => node.p.text)
+    .filter((text): text is string => typeof text === 'string' && text !== '')
 }
 
 /** Every durable `user/message` the live Agents of this fixture hold. */

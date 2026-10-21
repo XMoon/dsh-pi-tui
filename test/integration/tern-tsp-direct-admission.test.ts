@@ -16,7 +16,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { pickerNode, wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
+import { pickerNode, wireNodes } from '../support/tsp-picker-wire.ts'
 
 /** Every history file written under the fixture's isolated DSH home. */
 function historyFiles(workRoot: string): string[] {
@@ -39,15 +39,19 @@ async function awaitComposer(fixture: DirectTspFixture, text: string): Promise<v
 }
 
 /** The latest controlled editor text on the wire for `dock.composer`. */
-/** Every text line the CURRENT wire tree carries. */
+/**
+ * Every text the CURRENT wire carries.
+ *
+ * `wireNodes()` returns the FLAT live-node set, and its nested `c` arrays
+ * are the snapshots the node was added with — a `del` removes the child from
+ * the live set WITHOUT pruning the parent's snapshot, so a recursive walk
+ * would report a DELETED row as current. Reading each live node's own
+ * `p.text` once is the current tree.
+ */
 function renderedLines(fixture: DirectTspFixture): string[] {
-  const lines: string[] = []
-  const collect = (node: WireNode): void => {
-    if (typeof node.p.text === 'string' && node.p.text !== '') lines.push(node.p.text)
-    for (const child of node.c ?? []) collect(child)
-  }
-  for (const node of wireNodes(fixture.pane)) collect(node)
-  return lines
+  return wireNodes(fixture.pane)
+    .map(node => node.p.text)
+    .filter((text): text is string => typeof text === 'string' && text !== '')
 }
 
 function latestComposerText(wire: string): string | undefined {
@@ -335,12 +339,17 @@ for (const busyEnter of ['queue', 'steer'] as const) {
           .filter(line => line.includes('second prompt'))
         assert.equal(pendingRows.length, 1,
           `exactly ONE pending delivery row exists for the second submission:\n${pendingRows.join('\n')}`)
-        // The row's own mode is the delivery the case asserts above: this
-        // gesture delivered as `steer` renders a steering row, and as
-        // `queue` renders the queue row — the row must not carry BOTH.
-        assert.equal(pendingRows.filter(line => line.includes('steering')).length,
-          expected === 'steer' ? 1 : 0,
-          `the second submission renders exactly one row, carrying its own mode:\n${pendingRows.join('\n')}`)
+        // The row's own MODE is the delivery the case asserts above, and both
+        // markers are checked: a next-turn (`queue`) delivery renders the
+        // queue row and NO steering row, and a next-step (`steer`) delivery
+        // renders the steering row. Checking only one of them would let a
+        // row carry the WRONG marker (or both) and still pass.
+        const queueMarkers = pendingRows.filter(line => line.includes('queued (followup)')).length
+        const steeringMarkers = pendingRows.filter(line => line.includes('steering')).length
+        assert.equal(queueMarkers, expected === 'queue' ? 1 : 0,
+          `the second submission renders ${expected === 'queue' ? 'the queue row' : 'no queue row'}:\n${pendingRows.join('\n')}`)
+        assert.equal(steeringMarkers, expected === 'steer' ? 1 : 0,
+          `the second submission renders ${expected === 'steer' ? 'the steering row' : 'no steering row'}:\n${pendingRows.join('\n')}`)
         releaseStream()
         recorder.detach()
       } finally {
