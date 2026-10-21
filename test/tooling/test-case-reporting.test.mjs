@@ -435,6 +435,8 @@ test('the title transform removes a review finding and an assertion number', () 
   for (const [from, to] of [
     ['finding C (1): the real /new quiesce parks on a LIVE Question', 'the real /new quiesce parks on a LIVE Question'],
     ['finding F7: a held timed claim retired by a publication never mounts its form', 'a held timed claim retired by a publication never mounts its form'],
+    ['finding C/F6 (5): a real publication withdraws a live APPROVAL prompt', 'a real publication withdraws a live APPROVAL prompt'],
+    ['findings F6/F7: a lifetime retired BEFORE its slot exists never mounts', 'a lifetime retired BEFORE its slot exists never mounts'],
     ['assertion 7: a Remote adapter cannot import the Direct implementation', 'a Remote adapter cannot import the Direct implementation'],
     ['assertion 14: the startup island must not reach a repository implementation module', 'the startup island must not reach a repository implementation module'],
   ]) {
