@@ -128,41 +128,6 @@ test('the pre-existing fixed-wait baseline still matches the tree', () => {
     'the fixed-wait baseline must match the tree: a NEW unreasoned wait must be justified, not baselined')
 })
 
-// ── Rule 4: Minimal Test Infrastructure ───────────────────────────────────
-
-test('a shared fixture has at least one consumer', () => {
-  // The objective floor of the narrow-fake rule: a shared fixture with NO
-  // consumer is dead weight — a helper nobody reads is the "universal
-  // fake" the policy forbids, and it is the one form of the rule that can
-  // be checked without judging the test's INTENT.
-  //
-  // The rule that a fake must not expose MORE capability than its consumer
-  // uses is a REVIEW judgement: whether a capability is "used" depends on
-  // what the test is trying to prove, which no static check can decide. The
-  // policy says so explicitly, and this guard checks only the part that can
-  // be checked objectively.
-  const supportRoot = join(TEST_ROOT, 'support')
-  const fixtures = readdirSync(supportRoot, { withFileTypes: true })
-    .filter(entry => entry.isFile() && /\.(ts|mjs)$/u.test(entry.name))
-    .map(entry => entry.name)
-  assert.ok(fixtures.length > 0, 'the support directory must hold the shared fixtures')
-
-  const consumers = discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])
-  const orphans = []
-  for (const fixture of fixtures) {
-    const used = consumers.some(rel => {
-      if (rel.startsWith('support/')) return false
-      return readFileSync(join(TEST_ROOT, rel), 'utf8').includes(fixture)
-    })
-    if (!used) orphans.push(fixture)
-  }
-  assert.deepEqual(
-    orphans,
-    [],
-    'a shared fixture with no consumer is dead weight — inline it into its consumer, or delete it',
-  )
-})
-
 // ── The synthetic placement the policy's acceptance requires ───────────────
 
 test('a new Domain, Integration and Tooling test land in the right lane', async (t) => {

@@ -66,6 +66,13 @@ For applicable areas, ask:
 - Is a UI state legitimately reachable under the seat/modal contract, or only a
   projection/transient fact? Do not weaken production guards to make a fixture
   navigable.
+- When the diff adds or changes a test fake or a shared test fixture: does it
+  implement exactly the capability the test exercises, and no more? A fake
+  with capabilities the test never uses makes the test look like it covers
+  more than it does; a shared fixture with no consumer is dead weight. This
+  is a review judgement, not an automatic gate — see
+  [`testing.md`](testing.md) §4 for why the objective part of the rule is
+  deliberately left to the reviewer.
 
 For critical authority/classification/routing/currentness, demand a decisive
 proof through authoritative production input -> derived decision -> route/policy

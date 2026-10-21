@@ -56,6 +56,17 @@ function main() {
     console.error('\na test reads a production file that does not exist: the source lock points at nothing')
     process.exitCode = 1
   }
+  if (unresolved.length > 0) {
+    // A read the resolver could NOT follow is not covered by this gate: the
+    // gate's contract is that EVERY production read is verified, so an
+    // unresolvable one must fail it rather than pass quietly. A green
+    // gate must mean "every production read was checked".
+    console.error(
+      '\n'
+      + `${unresolved.length} production read(s) could NOT be resolved statically: the gate cannot claim they were verified.`,
+    )
+    process.exitCode = 1
+  }
 }
 
 main()
