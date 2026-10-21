@@ -1056,3 +1056,58 @@ test('a batched withdrawal commits ONE frame and never promotes a member of the 
   assert.deepEqual(settled, ['B:cancelled'], 'the successor settles for its own lifetime')
   seat.dispose()
 })
+
+test('the composer accepts input again only after the NEW projection scope commits', async () => {
+  // The session-switch HYDRATION FENCE: between `beginSessionHydration()` and
+  // the new subject's first committed frame the composer accepts NO key — the
+  // key is DROPPED, not held, so no later wait can recover it.
+  //
+  // The fence lifts exactly when the new projection scope commits (the
+  // renderer clears `hydrating` in the same commit that advances the scope
+  // epoch). A test that waits for the SESSION SWITCH to be "visually over"
+  // — for example for the Session Browser to disappear — can still be inside
+  // that window, and the command it types is then lost for good.
+  //
+  // This case proves both halves of that boundary: the input is dropped while
+  // the fence is up, and it is accepted as soon as the new scope commits.
+  const harness = await mountHarness()
+  try {
+    // A scope is showing, so the fence has something to retire.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'the outgoing subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'outgoing' },
+    )
+    await waitFor(() => harness.renderer.composer.getDraft() === '', 'the composer starts empty')
+
+    // The switch begins: the fence goes up and the input is dropped.
+    harness.renderer.display.beginSessionHydration()
+    harness.pane.key('a')
+    await new Promise(resolve => setTimeout(resolve, 40))
+    assert.equal(harness.renderer.composer.getDraft(), '',
+      'the hydration fence dropped the composer key (it is not held for replay)')
+
+    // The NEW subject commits: a new projection source re-scopes the
+    // presentation, and the fence lifts with it.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'the incoming subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'incoming' },
+    )
+    await waitFor(() => harness.renderer.composer.getDraft() === '', 'the new scope committed')
+
+    // The composer accepts the key again — the wait above is what makes the
+    // next command deliverable.
+    harness.pane.key('b')
+    await waitFor(() => harness.renderer.composer.getDraft() === 'b',
+      'the composer accepts input once the new scope has committed')
+  } finally {
+    await harness.dispose()
+  }
+})
