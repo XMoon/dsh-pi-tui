@@ -80,37 +80,44 @@ function relativize(text: string, cwd: string | undefined): string {
   return text
 }
 
+/** The paths ONE view proves, per its own shape. */
+function pathsOfView(view: ToolCallView | ToolResultView | undefined): string[] {
+  if (view === undefined) return []
+  const paths = new Set<string>()
+  // A call view carries `locations`; a diff view (either stage) carries
+  // `diffs`; a read RESULT carries a single `path`.
+  if ('locations' in view && view.locations !== undefined) {
+    for (const location of view.locations) {
+      if (typeof location.path === 'string' && location.path !== '') paths.add(location.path)
+    }
+  }
+  if (view.card === 'diff') {
+    for (const diff of view.diffs) {
+      if (typeof diff.path === 'string' && diff.path !== '') paths.add(diff.path)
+    }
+  }
+  if (view.card === 'read' && typeof view.path === 'string' && view.path !== '') paths.add(view.path)
+  return [...paths]
+}
+
 /**
- * EVERY path the tool's own views prove. A row may only claim `path` when
- * this set holds exactly ONE path: several proven paths mean the tool
- * touches several files, and the head shows one string that is not
- * identifiable as any one of them.
+ * The paths this row's tool proves, from ONE stage only.
+ *
+ * The two stages legitimately spell the SAME file differently: the call view
+ * repeats the argument the model wrote (`src/a.ts`), while the settled result
+ * reports the path the tool resolved (`/workspace/src/a.ts`). Unioning the two
+ * would read one file as two and refuse every settled call — the head would
+ * lose its `path` kind exactly when the call finishes.
+ *
+ * So the settled RESULT is the authority for what happened, and the call view
+ * is consulted only while no result view exists (a running call). Whichever
+ * stage answers, the "exactly one path" rule is applied WITHIN that stage, so
+ * a genuinely multi-file call still refuses.
  */
 function provenPaths(facts: ToolTargetFacts): string[] {
-  const paths = new Set<string>()
-  const call = facts.callView
-  if (call !== undefined) {
-    if ('locations' in call && call.locations !== undefined) {
-      for (const location of call.locations) {
-        if (typeof location.path === 'string' && location.path !== '') paths.add(location.path)
-      }
-    }
-    if (call.card === 'diff') {
-      for (const diff of call.diffs) {
-        if (typeof diff.path === 'string' && diff.path !== '') paths.add(diff.path)
-      }
-    }
-  }
-  const result = facts.resultView
-  if (result !== undefined) {
-    if (result.card === 'read' && typeof result.path === 'string' && result.path !== '') paths.add(result.path)
-    if (result.card === 'diff') {
-      for (const diff of result.diffs) {
-        if (typeof diff.path === 'string' && diff.path !== '') paths.add(diff.path)
-      }
-    }
-  }
-  return [...paths]
+  const settled = pathsOfView(facts.resultView)
+  if (settled.length > 0) return settled
+  return pathsOfView(facts.callView)
 }
 
 /**

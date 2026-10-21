@@ -91,42 +91,82 @@ function terminalView(args: Record<string, unknown>): TerminalCallView | undefin
   }
 }
 
+/** One read line, narrowed the way `dsh-tool-fs`'s own `isFileTextLine` does. */
+function isFileTextLine(value: unknown): value is ReadFileLine {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const { number, text } = value as { number?: unknown; text?: unknown }
+  return typeof number === 'number' && Number.isInteger(number) && number >= 1 && typeof text === 'string'
+}
+
 /**
- * The read-family result view derived from the TOOL-AUTHORED result metadata.
- *
- * The `tool/result` event carries the tool's own `presentationMeta` — a JSON
- * payload the TOOL wrote about ITS OWN call (`dsh-tool-fs` declares
- * `{ path, offset, lines, totalLines }`; its write/edit declare
- * `{ path, diffs }`). Unlike the raw args, that payload is not a guess: it is
- * the tool's own statement about what it operated on, and it reaches the
- * Client over the existing session event — no new Host field, no wire
- * change.
- *
- * This is what lets the Remote branch reach the SAME path semantics as the
- * Direct branch WITHOUT inferring by tool name. Inferring by name is unsafe:
- * a plugin may register its own tool under a built-in's name, and the
- * registry lets a scoped registration SHADOW a global one — so a name-keyed
- * guess would read a plugin's `url` parameter as a path.
- *
- * The Client derivation must stay in STEP with the tool's own Host
- * `presentResult`, which is the authority for the same view. That presenter
- * guards TWO things beyond the metadata itself:
- *
- * - the RESULT CONTENT must be the single block the view describes (a merged
- *   read group carries TWO envelopes and INHERITS the first read's metadata,
- *   so a metadata-only derivation would describe one file while the card shows
- *   two); and
- * - every field the view exposes must be narrowed, never cast (a malformed
- *   `diffs` entry would otherwise reach the diff renderer unvalidated).
- *
- * A view the Host presenter would NOT produce must not be produced here
- * either: the two branches have to agree, and the settled card is rendered
- * from whichever view comes first.
+ * Narrow the read metadata EXACTLY as the fs tool's own `readMetaFromMeta`
+ * does: integer window bounds, line numbers strictly increasing from the
+ * offset and inside the file, and a string-or-absent language hint. A shape
+ * the tool would reject must not become a view here.
  */
-function metaPathView(meta: unknown, content: readonly ContentBlock[], isError: boolean): ToolResultView | undefined {
-  // The tool's own Host `presentResult` returns no view for a FAILED call; the
-  // Client derivation must agree, or the two branches would render a failed
-  // call differently.
+function readMetaOf(record: Record<string, unknown>): { path: string; offset: number; lines: ReadFileLine[]; totalLines: number; lang?: string } | undefined {
+  const { path, offset, lines, totalLines, lang } = record
+  if (typeof path !== 'string' || typeof offset !== 'number' || typeof totalLines !== 'number') return undefined
+  if (!Number.isInteger(offset) || offset < 1) return undefined
+  if (!Number.isInteger(totalLines) || totalLines < 0) return undefined
+  if (!Array.isArray(lines) || !lines.every(isFileTextLine)) return undefined
+  if (lang !== undefined && typeof lang !== 'string') return undefined
+  let previous = offset - 1
+  for (const { number } of lines) {
+    if (number <= previous || number > totalLines) return undefined
+    previous = number
+  }
+  return { path, offset, lines, totalLines, ...lang === undefined ? {} : { lang } }
+}
+
+/**
+ * Narrow the diff metadata EXACTLY as the fs tool's own `diffsFromMeta` does:
+ * a NON-EMPTY array whose every entry is a whole `FileDiff`. An empty or
+ * malformed list is "no diffs", which each tool then handles its own way.
+ */
+function diffsOf(record: Record<string, unknown>): FileDiff[] | undefined {
+  const diffs = record['diffs']
+  if (!Array.isArray(diffs) || diffs.length === 0) return undefined
+  const narrowed: FileDiff[] = []
+  for (const diff of diffs) {
+    if (typeof diff !== 'object' || diff === null || Array.isArray(diff)) return undefined
+    const entry = diff as { path?: unknown; oldText?: unknown; newText?: unknown }
+    if (typeof entry.path !== 'string') return undefined
+    if (entry.oldText !== null && typeof entry.oldText !== 'string') return undefined
+    if (typeof entry.newText !== 'string') return undefined
+    narrowed.push({ path: entry.path, oldText: entry.oldText, newText: entry.newText })
+  }
+  return narrowed
+}
+
+/**
+ * The settled-result view derived from the TOOL-AUTHORED result metadata,
+ * mirroring the two Host `presentResult` implementations the Client cannot
+ * call:
+ *
+ * - the DIFF shape mirrors the mutation tools. `dsh-tool-fs` records
+ *   `{ operation, path, diffs }` for a write and `{ path, diffs }` for an
+ *   edit, and deliberately emits `diffs: []` when the write CREATED the file
+ *   (`before === null`). Its write presenter then falls back to a diff built
+ *   from the call arguments, while its edit presenter declines. The fallback
+ *   is keyed on the tool-authored `operation` field — NOT on the tool name,
+ *   which a plugin can shadow.
+ * - the READ shape mirrors the read tool: the metadata must survive the same
+ *   window validation, and the result content must be exactly one
+ *   `<type>file</type>` envelope. The envelope body comes back as `content`,
+ *   the degradation path the SDK documents for a UI without a rich read card.
+ *
+ * A shape the Host presenter would reject must not become a view here either:
+ * both branches have to agree, and the settled card renders whichever view
+ * comes first.
+ */
+function metaPathView(
+  meta: unknown,
+  content: readonly ContentBlock[],
+  isError: boolean,
+  args: Record<string, unknown> | undefined,
+): ToolResultView | undefined {
+  // The tool's own Host `presentResult` returns no view for a FAILED call.
   if (isError) return undefined
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return undefined
   const record = meta as Record<string, unknown>
@@ -138,56 +178,32 @@ function metaPathView(meta: unknown, content: readonly ContentBlock[], isError: 
   if (only === undefined || only.type !== 'text') return undefined
   const text = only.text
 
-  const diffs = record['diffs']
-  if (Array.isArray(diffs)) {
-    // Narrow EVERY entry the way the tool's own `diffsFromMeta` does: a path
-    // alone is not a `FileDiff` (it also carries `oldText` and `newText`),
-    // and an unvalidated entry would crash the diff renderer.
-    if (diffs.length === 0) return undefined
-    const narrowed: FileDiff[] = []
-    for (const diff of diffs) {
-      if (typeof diff !== 'object' || diff === null || Array.isArray(diff)) return undefined
-      const entry = diff as { path?: unknown; oldText?: unknown; newText?: unknown }
-      if (typeof entry.path !== 'string') return undefined
-      if (entry.oldText !== null && typeof entry.oldText !== 'string') return undefined
-      if (typeof entry.newText !== 'string') return undefined
-      narrowed.push({ path: entry.path, oldText: entry.oldText, newText: entry.newText })
-    }
+  const diffs = diffsOf(record)
+  if (diffs !== undefined) {
     // The diff view describes the files the call CHANGED; the result content
     // must be the one block those changes are reported in.
     if (text.trim() === '') return undefined
-    return { card: 'diff', diffs: narrowed }
+    return { card: 'diff', diffs }
+  }
+  // A write that CREATED the file records `diffs: []`. The tool's own write
+  // presenter rebuilds the diff from its arguments; `operation` is the
+  // tool-authored marker that this metadata came from a write-shaped call.
+  if (record['operation'] !== undefined && typeof args?.['content'] === 'string') {
+    return { card: 'diff', diffs: [{ path, oldText: null, newText: args['content'] }] }
   }
 
-  // The read shape: the tool states the path it read and the window it took.
-  // The result content must be EXACTLY ONE read envelope for that path, in the
-  // SAME shape the tool's own Host `presentResult` accepts. A merged group
-  // (two envelopes, inherited metadata) does not qualify, and the card falls
-  // back to the existing envelope rendering.
-  const envelope = /^<path>([^\n]*)<\/path>\n<type>[^<]*<\/type>\n<content>([\s\S]*)\n<\/content>$/u.exec(text)
+  const readMeta = readMetaOf(record)
+  if (readMeta === undefined) return undefined
+  const envelope = /^<path>[^\n]*<\/path>\n<type>file<\/type>\n<content>\n([\s\S]*)\n<\/content>$/u.exec(text)
   if (envelope === null) return undefined
-  if (envelope[1] !== path) return undefined
-
-  const offset = record['offset']
-  const totalLines = record['totalLines']
-  if (typeof offset !== 'number' || typeof totalLines !== 'number') return undefined
-  const lines = record['lines']
-  if (!Array.isArray(lines)) return undefined
-  const readLines: ReadFileLine[] = []
-  for (const line of lines) {
-    if (typeof line !== 'object' || line === null) return undefined
-    const entry = line as { number?: unknown; text?: unknown }
-    if (typeof entry.number !== 'number' || typeof entry.text !== 'string') return undefined
-    readLines.push({ number: entry.number, text: entry.text })
-  }
-  const lang = record['lang']
   return {
     card: 'read',
-    path,
-    offset,
-    lines: readLines,
-    totalLines,
-    ...(typeof lang === 'string' ? { lang } : {}),
+    path: readMeta.path,
+    offset: readMeta.offset,
+    lines: readMeta.lines,
+    totalLines: readMeta.totalLines,
+    ...readMeta.lang === undefined ? {} : { lang: readMeta.lang },
+    content: [{ type: 'text', text: envelope[1] ?? '' }],
   }
 }
 
@@ -223,9 +239,11 @@ export function createClientToolPresenter(): ToolPresenter {
       // a row whose args are not a JSON object (a merged read group's literal
       // `'2 files'`) never reaches a Host `presentResult` at all. The Client
       // derivation must apply the SAME gate, or the two branches would produce
-      // different views for the same row.
-      if (parseArgs(argsRaw) === undefined) return undefined
-      return metaPathView(result.meta, result.content, result.isError)
+      // different views for the same row. The parsed args are also what a
+      // write's create-fallback diff is rebuilt from.
+      const args = parseArgs(argsRaw)
+      if (args === undefined) return undefined
+      return metaPathView(result.meta, result.content, result.isError, args)
     },
   }
 }

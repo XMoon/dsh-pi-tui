@@ -76,7 +76,7 @@ test('result: a settled view comes only from the TOOL-AUTHORED result metadata',
   // A payload that names a path but carries NO window is not the read shape.
   assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: { path: 'src/a.ts' } }), undefined)
   // An EMPTY path proves no file. On the DIFF shape the path guard is what
-  // refuses it (the envelope-path equality only guards the read shape).
+  // refuses it (the envelope guard only applies to the read shape).
   assert.equal(presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
     content: [{ type: 'text', text: 'written' }],
     isError: false,
@@ -87,8 +87,10 @@ test('result: a settled view comes only from the TOOL-AUTHORED result metadata',
     isError: false,
     meta: { path: '', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 },
   }), undefined)
-  // An empty or foreign diff list proves no file either.
-  assert.equal(presenter.result('write', '{}', { content: [], isError: false, meta: { path: 'src/a.ts', diffs: [] } }), undefined)
+  // A MALFORMED diff list proves no file: a foreign entry is refused like the
+  // tool's own `diffsFromMeta` refuses it, and an empty list with no write
+  // marker declines. (The empty list WITH the write marker legitimately
+  // rebuilds a create diff; that case is covered on its own below.)
   assert.equal(presenter.result('write', '{}', { content: [], isError: false, meta: { path: 'src/a.ts', diffs: [{ foo: 1 }] } }), undefined)
   // The tool's OWN metadata: the read view the tool declared.
   const read = presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
@@ -126,20 +128,66 @@ test('result: a failed call yields no view', () => {
   }), undefined)
 })
 
-test('result: the result content must be the ONE envelope the view describes', () => {
+test('result: the result content must be the ONE file envelope the read tool writes', () => {
   const meta = { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 }
+  const read = (text: string): ReturnType<typeof presenter.result> => presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text }], isError: false, meta,
+  })
   // A content that is not a text block describes nothing.
   assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
     content: [{ type: 'image' } as never], isError: false, meta,
   }), undefined)
   // A content that is not an envelope at all describes nothing.
-  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
-    content: [{ type: 'text', text: 'ok' }], isError: false, meta,
-  }), undefined)
-  // An envelope for a DIFFERENT path than the metadata proves nothing.
-  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
-    content: [{ type: 'text', text: '<path>other.ts</path>\n<type>file</type>\n<content>\n1: a\n</content>' }],
-    isError: false, meta,
+  assert.equal(read('ok'), undefined)
+  // The tool's own presenter requires the literal `<type>file</type>`; any
+  // other type is a different card, not a read.
+  assert.equal(read('<path>src/a.ts</path>\n<type>directory</type>\n<content>\n1: a\n</content>'), undefined)
+  // The envelope body comes back as `content`, the degradation path the SDK
+  // documents for a UI without a rich read card.
+  const view = read(READ_ENVELOPE)
+  assert.equal(view?.card, 'read')
+  assert.deepEqual(view?.card === 'read' ? view.content : undefined, [{ type: 'text', text: '1: a' }])
+})
+
+test('result: the read metadata must survive the same window validation the tool applies', () => {
+  // The meta is deliberately malformed here, so it crosses the JSON boundary
+  // as `never`: feeding the bad shapes is exactly what this case proves.
+  const read = (meta: Record<string, unknown>): ReturnType<typeof presenter.result> => presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: READ_ENVELOPE }], isError: false, meta: meta as never,
+  })
+  const base = { path: 'src/a.ts', offset: 1, totalLines: 1, lines: [{ number: 1, text: 'a' }] }
+  assert.ok(read(base) !== undefined, 'the well-formed window is accepted')
+  // Every shape the tool's own `readMetaFromMeta` rejects must be rejected
+  // here too: a fractional window, a zero or out-of-range line, out-of-order
+  // lines, a fractional offset, a negative total and a non-string language.
+  assert.equal(read({ ...base, lines: [{ number: 1.5, text: 'a' }] }), undefined, 'fractional line number')
+  assert.equal(read({ ...base, lines: [{ number: 0, text: 'a' }] }), undefined, 'line number 0')
+  assert.equal(read({ ...base, lines: [{ number: 2, text: 'a' }] }), undefined, 'line beyond totalLines')
+  assert.equal(read({ ...base, offset: 1, totalLines: 3, lines: [{ number: 2, text: 'a' }, { number: 1, text: 'b' }] }), undefined, 'lines out of order')
+  assert.equal(read({ ...base, offset: 0 }), undefined, 'offset 0')
+  assert.equal(read({ ...base, offset: 1.5 }), undefined, 'fractional offset')
+  assert.equal(read({ ...base, totalLines: -1 }), undefined, 'negative totalLines')
+  assert.equal(read({ ...base, lang: 7 }), undefined, 'non-string lang')
+})
+
+test('result: a write that CREATED the file rebuilds its diff from the arguments', () => {
+  // `dsh-tool-fs` records `diffs: []` when a write creates a file (there is no
+  // before-image), and its own write presenter then rebuilds the diff from the
+  // call arguments. The Client keys that fallback on the tool-authored
+  // `operation` field, never on the tool name.
+  const created = presenter.result('write', JSON.stringify({ file_path: 'src/new.ts', content: 'fresh\n' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { operation: 'create', path: 'src/new.ts', diffs: [] },
+  })
+  assert.ok(created !== undefined && created.card === 'diff')
+  assert.deepEqual(created.diffs, [{ path: 'src/new.ts', oldText: null, newText: 'fresh\n' }])
+  // Without the write marker, an empty diff list proves no file: the edit
+  // presenter declines exactly the same shape.
+  assert.equal(presenter.result('edit', JSON.stringify({ file_path: 'src/a.ts', old_string: 'a', new_string: 'b' }), {
+    content: [{ type: 'text', text: 'edited' }],
+    isError: false,
+    meta: { path: 'src/a.ts', diffs: [] },
   }), undefined)
 })
 
