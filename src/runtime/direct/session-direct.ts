@@ -1,0 +1,492 @@
+/**
+ * The Direct session reader (M1.3) — the in-process implementation of
+ * `SessionReader` over the dsh `sessionPersistence` / `sessionQuery` /
+ * projection services. This is the ONLY module in the session-read
+ * path that touches `ctx`; the consumer (commands.ts) depends on the port,
+ * and the experimental D1.1 Remote adapter implements the same interface.
+ *
+ * The domain semantics live here: semantic session-query listing with
+ * capability-aware activity ordering and bounded content search; the combined
+ * `title`+`agentPreset` projection batch delegates to
+ * `session-projection-direct.ts` (the official projection/cache ladder).
+ *
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
+ * @module @xmoon76/dsh-pi-tui/runtime/direct/session-direct
+ */
+
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { turnBoundaryBlank } from './session-preset-direct.ts'
+import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import {
+  projectionBatch,
+  type SessionProjectionCacheLike,
+  type SessionProjectionReaderLike,
+} from './session-projection-direct.ts'
+import {
+  errorCodeOf,
+  normalizeSessionSearchQuery,
+  searchSessionContentPage,
+  type SessionSearchProviderLike,
+} from './session-search-direct.ts'
+import { cancellationError } from '../process/tasks.ts'
+import { contextPressureOccupancy, type SessionContentSearchPage, type SessionProjectionSummary, type SessionReader, type SessionStatusProjection, type SessionSummary } from '../session-reader-port.ts'
+import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
+import { directTurnOutlineCompat } from './turn-outline-compat.ts'
+import { detachedSessionStatus } from '../session-status-projection.ts'
+import { projectedWorkingDirectory } from './working-directory-direct.ts'
+import type { DurableModelSelectionReader } from './model-selection-direct.ts'
+
+/**
+ * The narrow session-query surface the reader's listing and semantic search
+ * use. Declared structurally instead of imported from
+ * `@deepseek-ai/dsh-session-query`: pulling that package's type graph into
+ * the program introduces a second physical copy of `dsh-session` that
+ * shadows the `session/title` event-map augmentation. The service itself is
+ * read off the live context at runtime.
+ */
+export interface SessionQueryLike {
+  /** Returns the semantic live-preferred Session corpus from sessionQuery.
+   * ApiSessionList-compatible visibility policy is applied by this adapter:
+   * live rows remain visible; cold rows require cwd. The official
+   * `SessionRecord.formatStatus` (on-disk format state) is carried through
+   * verbatim when the official read reports it — never inferred here. */
+  listSessions(signal?: AbortSignal): Promise<Array<{
+    header: SessionHeader
+    live: boolean
+    formatStatus?: 'current' | 'migration-required'
+  }>>
+  /** One exact live or prepared logical Session observation for explicit
+   * viewer/resume paths: header + complete validated event log, caller-owned.
+   * NOT the canonical export plane — a cold observation synthesizes
+   * interrupted-turn closers for read-only balance, which an export must
+   * never contain. */
+  observeSession?(
+    sessionId: SessionId,
+    options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
+  ): Promise<{
+    readonly header: SessionHeader
+    readonly events: readonly SessionEvent[]
+    /** The official projection baseline at the observation's cut, present
+     *  only when the read asked for (`projectionMode: 'all'`) and the
+     *  registry is mounted. */
+    readonly projections?: { readonly values?: Readonly<Record<string, unknown>> }
+    [Symbol.dispose](): void
+  }>
+  /**
+   * Official cross-session full-text search (master `ApiSessionList.search`
+   * parity). The method is optional so deployments without the semantic
+   * search capability can report an explicit unavailable result; the reader
+   * never falls back to raw persistence search.
+   */
+  searchSessions?: SessionSearchProviderLike['searchSessions']
+}
+
+/** The minimal Host context surface the adapter needs (structural — never
+ * a package dependency; the services resolve from the dsh installation). */
+export interface HostContextLike {
+  get(name: string): unknown
+}
+
+/** A live agent as the reader resolves it (structural projection). */
+export interface LiveAgentLike {
+  readonly session: Session
+  /** Agent scope context used by DSH's composedPreset() projection. */
+  readonly ctx?: unknown
+}
+
+/** Narrow live-registry lookups supplied by the Direct composition root. */
+export interface DirectSessionLiveResolvers {
+  sessionOf(id: SessionId): unknown | undefined
+  agentOf(id: SessionId): unknown | undefined
+  flushSession?(session: unknown): Promise<void>
+}
+
+/** Read the optional activity projection without activating a cold Session.
+ * A cold row reads the persisted cache by header alone (the cache owns
+ * lifecycle-identity matching); missing projection capability and
+ * derived-cache failures safely fall back to header creation time. */
+function activityTimestamp(
+  header: SessionHeader,
+  liveRow: boolean,
+  live: Session | undefined,
+  projections: SessionProjectionReaderLike | undefined,
+  cache: SessionProjectionCacheLike | undefined,
+): number {
+  let lastPromptAt: number | undefined
+  try {
+    if (liveRow && live !== undefined && projections !== undefined) {
+      const metadata = projections.cachedSnapshot(live, ['sessionListMetadata'])?.values?.sessionListMetadata
+      if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
+    } else if (!liveRow && live === undefined && cache !== undefined) {
+      const metadata = cache.cachedSnapshot(header, ['sessionListMetadata'])?.values?.sessionListMetadata
+      if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
+    }
+  } catch {
+    // Activity is an optional list capability; a stale/broken derived value
+    // must never make the semantic session roster unavailable.
+  }
+  return Math.max(header.createdAt, lastPromptAt ?? 0)
+}
+
+/**
+ * Re-exported for the adapter tests that inject this REQUIRED dependency; the
+ * capability itself is declared by its owner (`model-selection-direct.ts`).
+ */
+export type { DurableModelSelectionReader }
+
+/** The Direct backend's session reader: Host query/persistence services plus
+ * injected live-registry capabilities behind the semantic `SessionReader` interface. */
+export class DirectSessionReader implements SessionReader {
+  private readonly ctx: HostContextLike
+  private readonly liveResolvers: DirectSessionLiveResolvers | undefined
+  private readonly modelSelections: DurableModelSelectionReader
+  /**
+   * The most recent listing's complete `SessionHeader` values, keyed by
+   * session id. `projectionBatch` reads the projection-cache hint from these
+   * instead of re-listing the corpus (the port rows stay lightweight
+   * `SessionSummary` DTOs — raw headers never leak into the presentation
+   * surface). Refreshed on every `list()`; a batch caller that never listed
+   * simply gets cache-miss enrichment.
+   */
+  private headerSnapshot = new Map<string, SessionHeader>()
+
+  constructor(
+    ctx: HostContextLike,
+    /** The Direct-only live-registry resolvers; `undefined` for a reader whose
+     *  composition mounts no live registry. */
+    liveResolvers: DirectSessionLiveResolvers | undefined,
+    /**
+     * The Direct-only durable model-selection read (see
+     * {@link DurableModelSelectionReader}). REQUIRED: a composition that omits
+     * it must fail to compile rather than silently lose the viewed child's
+     * model with no error anywhere.
+     */
+    modelSelections: DurableModelSelectionReader,
+  ) {
+    this.ctx = ctx
+    this.liveResolvers = liveResolvers
+    this.modelSelections = modelSelections
+  }
+
+  private liveAgent(sessionId: string): LiveAgentLike | undefined {
+    return this.liveResolvers?.agentOf(SessionId(sessionId)) as LiveAgentLike | undefined
+  }
+
+  /** Resolve the attached Session independently from the current TUI owner. */
+  /** Host-authoritative blankness through the official turn-boundary
+   *  projection (v2 §0.6) — the Direct mapping of the semantic read. */
+  blank(sessionId: string): boolean | undefined {
+    const live = this.liveAgent(sessionId)
+    if (live === undefined) return undefined
+    const projections = this.ctx.get('sessionProjections') as {
+      stateOf(session: unknown, key: string): unknown
+    } | undefined
+    if (projections === undefined) return undefined
+    try {
+      return turnBoundaryBlank(projections.stateOf(live.session, 'turnBoundary'))
+    } catch {
+      // The semantic `SessionReader.blank` contract: an unavailable/broken
+      // projection authority is `undefined` (unknown), never a crash.
+      return undefined
+    }
+  }
+
+  private liveSession(sessionId: string): Session | undefined {
+    return this.liveResolvers?.sessionOf(SessionId(sessionId)) as Session | undefined
+  }
+
+  /** Resolve the actual preset of a currently loaded agent, when DSH exposes
+   * its composed roster entry. Cached projection fallback is handled by the
+   * live projection branch without materializing the Session. */
+  private livePreset(sessionId: string): string | undefined {
+    const live = this.liveAgent(sessionId)
+    if (live === undefined) return undefined
+    const presets = this.ctx.get('agentPresets') as {
+      composedPreset?: (agentCtx: unknown) => unknown
+    } | undefined
+    if (live.ctx !== undefined && typeof presets?.composedPreset === 'function') {
+      try {
+        const composed = presets.composedPreset(live.ctx)
+        if (typeof composed === 'string') return composed
+      } catch {
+        // A live composition that is being torn down is not a picker error.
+      }
+    }
+    return undefined
+  }
+
+  /** List the master-visible semantic session roster: live rows are retained
+   * even without cwd; cold rows require cwd before ordering/enrichment. */
+  async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
+    const query = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
+    signal?.throwIfAborted()
+    // The semantic corpus is the ONLY listing plane (master contract): the
+    // reader never falls back to raw persistence artifacts. An unmounted
+    // session-query service is an explicit unavailable, not a JSONL scan.
+    if (query === undefined) return undefined
+    // Listing is deliberately header/live-only. Cold projection replay is a
+    // separate projectionBatch() operation so /sessions can open its first
+    // picker frame without waiting on every historical session log.
+    const records = await query.listSessions(signal)
+    signal?.throwIfAborted()
+    // Match DSH master ApiSessionList.list(): re-read attachment after the
+    // semantic query await, then keep live rows visible even without cwd.
+    // An unmounted cold header still needs cwd to be a resolvable picker row.
+    const currentRecords = records.map(record => {
+      const live = this.liveSession(record.header.id)
+      return {
+        session: live,
+        header: live?.header ?? record.header,
+        live: live !== undefined,
+        ...(record.formatStatus === undefined ? {} : { formatStatus: record.formatStatus }),
+      }
+    })
+    // Keep filtered headers out of the enrichment snapshot so projectionBatch
+    // cannot resurrect them later.
+    const visibleRecords = currentRecords.filter(record => record.live || record.header.cwd !== undefined)
+    this.headerSnapshot = new Map(visibleRecords.map(record => [String(record.header.id), record.header]))
+    const projections = this.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
+    const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
+    const rows = visibleRecords.map(record => {
+      const updatedAt = activityTimestamp(record.header, record.live, record.session, projections, cache)
+      return {
+        row: {
+          id: record.header.id,
+          updatedAt,
+          createdAt: record.header.createdAt,
+          cwd: record.header.cwd,
+          parentSession: record.header.parentSession,
+          origin: record.header.origin,
+          // The official session-query corpus reports the durable record's
+          // on-disk format state; the picker renders it read-only.
+          ...(record.formatStatus === undefined ? {} : { formatStatus: record.formatStatus }),
+          live: record.live,
+        },
+        activity: updatedAt,
+      }
+    })
+    signal?.throwIfAborted()
+    rows.sort((a, b) => b.activity - a.activity)
+    return rows.map(({ row }) => row)
+  }
+
+  /**
+   * Enrich already-listed rows with the combined DSH projections (`title` +
+   * `agentPreset`) through the official ladder in
+   * `session-projection-direct.ts`: live cached projection → zero-I/O
+   * projection-cache checkpoint (`sessionProjectionCache.cachedSnapshot`,
+   * keyed by the header identity captured by the preceding `list()` — no
+   * second corpus listing). Cold cache misses remain unknown; the picker
+   * never activates a historical Session for labels.
+   */
+  projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>> {
+    return projectionBatch({
+      ctx: this.ctx,
+      rows,
+      headerOf: id => this.headerSnapshot.get(id),
+      liveSessionOf: id => this.liveSession(id),
+      livePresetOf: id => this.livePreset(id),
+    }, signal)
+  }
+
+  /**
+   * Search only the cwd-bearing semantic session roster (master
+   * `ApiSessionList.search()` parity): the official `searchSessions` seam
+   * with user/assistant-message + current-surface filters, authorization
+   * against the visible corpus, dedupe, cursor fill, and the official
+   * 20-result window. `undefined` = the content-search capability is
+   * unavailable or explicitly disabled — never a raw-persistence scan and
+   * never a listing failure. Cancellation is honored through `listSessions`
+   * and every provider call.
+   */
+  async search(query: string, signal?: AbortSignal): Promise<SessionContentSearchPage | undefined> {
+    // Cancellation preflight comes FIRST: an aborted signal must reject
+    // with an abort-shaped error even when the capability is missing —
+    // `undefined` only ever means "capability unavailable", never "aborted".
+    signal?.throwIfAborted()
+    // Query validation comes BEFORE capability detection (plan §6.3, master
+    // `ApiSessionList.search()` parity): an invalid query is a caller error
+    // and rejects regardless of whether the capability exists.
+    const normalizedQuery = normalizeSessionSearchQuery(query)
+    const sessionQuery = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
+    // The official search seam is `searchSessions` (master parity). An
+    // unmounted engine or a provider without the capability is an explicit
+    // unavailable — never a JSONL scan and never a `filterEvents` fallback.
+    if (sessionQuery === undefined || sessionQuery.searchSessions === undefined) return undefined
+    try {
+      // Search follows the master visibility contract: only cwd-bearing
+      // persisted sessions participate (live cwd-less rows stay list-visible
+      // but are outside the search contract).
+      const records = await sessionQuery.listSessions(signal)
+      signal?.throwIfAborted()
+      const visibleIds = new Set(records
+        .filter(record => record.header.cwd !== undefined)
+        .map(record => String(record.header.id)))
+      if (visibleIds.size === 0) return { items: [], hasMore: false }
+      // The provider method is invoked AS A METHOD of the query service
+      // (never extracted as a bare function): the real engine's
+      // `searchSessions` is a class method that reads `this` (search
+      // enablement, serialized execution, generation state).
+      return await searchSessionContentPage({
+        searchSessions: (request, exec) => sessionQuery.searchSessions!(request, exec),
+      }, visibleIds, normalizedQuery, signal)
+    } catch (error) {
+      signal?.throwIfAborted()
+      // An explicitly disabled search capability is an explicit unavailable
+      // (the shipped SQLite FTS provider is `openAt: never` by default).
+      if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return undefined
+      // A provider-side abort — from the listing OR the search provider —
+      // stays an abort (the UI treats it as a cancellation, never as a
+      // search failure).
+      if (errorCodeOf(error) === 'SESSION_QUERY_ABORTED') throw cancellationError('session search was aborted')
+      throw error
+    }
+  }
+
+  measureContext(sessionId: string): number | undefined {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return undefined
+    // The official `contextPressure` Session projection is the one context
+    // authority (M3-3A): the occupancy numerator `projectedTokens ??
+    // pressureTokens`, exactly what the Remote adapter reads off the wire.
+    // The historical `tokenMeter.measure()` total is NOT a second authority.
+    const projections = this.ctx.get('sessionProjections') as {
+      snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
+    } | undefined
+    if (projections === undefined) return undefined
+    try {
+      const snapshot = projections.snapshot(agent.session, ['contextPressure'])
+      return contextPressureOccupancy(snapshot?.values?.contextPressure)
+    } catch {
+      // The projection capability is best-effort here; the /status row falls
+      // back to unmeasured.
+      return undefined
+    }
+  }
+
+  turnOutline(sessionId: string): readonly TurnOutlineEntryDto[] | undefined {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return undefined
+    // The official whole-log `turnOutline` projection (M3-4 /rewind
+    // foundation): a detached read of the Host fold. The DIRECT-only
+    // compatibility fallback below (§18.4) exists so minimal compositions
+    // without the `session-turn-outline` Host row keep the SAME semantic
+    // through the exact attached Session's full snapshot — the Remote
+    // adapter has no fallback (projection-only, fail-closed).
+    const projections = this.sessionProjections()
+    if (projections === undefined) {
+      // CAPABILITY unavailable (no projection service at all): the Direct
+      // compatibility fold. NEVER taken for an authoritative empty `[]`.
+      return directTurnOutlineCompat(agent.session.snapshotEvents())
+    }
+    try {
+      const outline = detachedTurnOutline(projections.snapshot(agent.session, ['turnOutline'])?.values?.turnOutline)
+      if (outline !== undefined) return outline
+      // VALUE unavailable: the projection service exists but this key has
+      // no unit mounted (undefined value, never `[]`) — the compatibility
+      // fold over the EXACT same attachment.
+      return directTurnOutlineCompat(agent.session.snapshotEvents())
+    } catch {
+      // A THROWING projection read is a projection FAILURE, not an
+      // unavailable capability: surface it as unknown (`undefined`), never
+      // masked by the compatibility fold.
+      return undefined
+    }
+  }
+
+  /** Sessions whose LAST status read threw (see `sessionStatusFailed`). */
+  private readonly statusReadFailures = new Set<string>()
+
+  sessionStatusFailed(sessionId: string): boolean {
+    return this.statusReadFailures.has(sessionId)
+  }
+
+  sessionStatus(sessionId: string): SessionStatusProjection | undefined {
+    // The projection SUBJECT is the attached/retained Session identity, NOT
+    // the live Agent: a retained Session whose Agent is inactive (or was
+    // never mounted in this process) still owns its official projection
+    // facts. Requiring a live Agent here would read a valid retained Session
+    // as status-unavailable — and would force a cold-resume merely to answer
+    // a status question (M3-5 PR1 §9.1).
+    const session = this.liveSession(sessionId)
+    if (session === undefined) {
+      // No retained Session to cut: no VALUE was read (not a failure).
+      this.statusReadFailures.delete(sessionId)
+      return undefined
+    }
+    // ONE consistent cut over the official projection units of THIS exact
+    // session (M3-4/M3-5 foundation). No StatsFolder, no raw-log fold, no
+    // other session's values ever ride along.
+    const projections = this.sessionProjections()
+    if (projections === undefined) {
+      // No projection capability in this composition: no VALUE was read.
+      this.statusReadFailures.delete(sessionId)
+      return undefined
+    }
+    try {
+      const values = projections.snapshot(session, [
+        'modelSelection',
+        'contextPressure',
+        'contextBreakdown',
+        'tokenUsage',
+        'todos',
+        'agentPreset',
+        'title',
+        'goal',
+        // The official effective directory of THIS Session (S2/PR-B): the
+        // SAME projection the `working_directory` tool commits into and the
+        // official fs/shell tools read. The header below stays the ORIGINAL
+        // project and is only the fallback when the projection records none.
+        'workingDirectory',
+        // PR4 §6.1: the committed permission value on the SAME shared
+        // semantic (Direct reads the identical projection the Remote
+        // binding carries).
+        'permissions',
+        // The bundle's OWN Host performance projection (TPS plan PR-2): the
+        // single authority for the R5/All/TTFB facts, read off the same
+        // exact-session cut as every other status key.
+        'piTuiPerformance',
+      ])?.values
+      if (values === undefined) {
+        // A NON-throwing snapshot without values is "no recorded value", not a
+        // failure: the remembered failure of an EARLIER read must not stick.
+        this.statusReadFailures.delete(sessionId)
+        return undefined
+      }
+      // The official `modelSelection` unit is registered by the API
+      // SessionController row, which this profile does not compose, so the
+      // registry omits the key entirely. ABSENCE of the key — never a
+      // present-but-empty value, since the registered unit's legal
+      // `{ next: null, lastUsed: null }` must stay authoritative — is the one
+      // signal to read THIS Session's own durable selection facts as the
+      // compatible source. The shared DTO mapping is untouched: the compat value
+      // carries the official wire shape and loses to the official key whenever
+      // that key exists. Its approved scope is the latest USED route only (see
+      // `DurableModelSelectionReader`); the pending-intent slot is explicitly not
+      // part of this compat path.
+      const forDisplay = Object.prototype.hasOwnProperty.call(values, 'modelSelection')
+        ? values
+        : { ...values, modelSelection: this.modelSelections.durableProjectionForSession(session) }
+      // The EFFECTIVE directory of this exact Session, or (no recorded value)
+      // the header's original project. The two are NOT interchangeable: the
+      // header never follows a committed `working-directory/change`, so a
+      // consumer that executes/renders in the session's directory must read
+      // the projection.
+      const effectiveCwd = projectedWorkingDirectory(values.workingDirectory) ?? session.header.cwd
+      this.statusReadFailures.delete(sessionId)
+      return detachedSessionStatus(sessionId, forDisplay, effectiveCwd)
+    } catch {
+      // A projection authority failure is `undefined` (unknown), never a
+      // crash and never partially invented facts; the failure is REMEMBERED so
+      // a consumer cannot mistake it for "no recorded value".
+      this.statusReadFailures.add(sessionId)
+      return undefined
+    }
+  }
+
+  private sessionProjections(): {
+    snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
+  } | undefined {
+    return this.ctx.get('sessionProjections') as ReturnType<DirectSessionReader['sessionProjections']> | undefined
+  }
+}

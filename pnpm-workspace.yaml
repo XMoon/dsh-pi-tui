@@ -1,0 +1,28 @@
+packages:
+  - packages/*
+  - examples/plugins/*
+allowBuilds:
+  esbuild: true
+  koffi: false
+  # DSH 0.2.1-rc.2 pulls these install-time scripts into the dev graph. Each is
+  # decided explicitly instead of left to pnpm's implicit "ignored" state,
+  # which pnpm 12 turns into a hard ERR_PNPM_IGNORED_BUILDS failure.
+  # ALLOWED: the pinned dsh-subprocess-local script restores the executable bit
+  # on node-pty's prebuilt spawn-helper, which node-pty's Unix backend hands to
+  # fork; it only chmods an existing file and never compiles anything.
+  '@deepseek-ai/dsh-subprocess-local': true
+  # DENIED: node-pty uses its prebuilt binary where one exists and would
+  # compile otherwise. NOTE the unverified scope: a packaged prebuild is not
+  # evidence of PTY support — for this pinned node-pty the Windows postinstall
+  # copies conpty.dll/OpenConsole.exe, so Windows PTY is NOT established here,
+  # and no lane qualifies PTY on any platform today. Platforms without a usable
+  # prebuild need an explicit re-decision plus a PTY qualification lane.
+  # @google/genai's registry tarball already ships built `dist`, so its
+  # install-time `prepare` build is unnecessary; protobufjs only checks its
+  # dependency version scheme.
+  '@google/genai': false
+  node-pty: false
+  protobufjs: false
+verifyDepsBeforeRun: warn
+minimumReleaseAgeExclude:
+- '@deepseek-ai/*'

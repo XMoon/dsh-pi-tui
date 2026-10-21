@@ -1,0 +1,122 @@
+name: Test product diagnostics
+
+# A MANUAL, MEASUREMENT-ONLY workflow.
+#
+# It exists to answer one question with data instead of guesses: what does
+# the product lane actually cost on a GitHub runner, and where does the time
+# go?
+#
+# It is deliberately NOT a required pull-request check:
+#
+#   - it adds runner minutes to every PR, and
+#   - it measures the runner, not the code.
+#
+# It changes NOTHING about the qualification contract: the packaging
+# lifecycle (`prepack` / `postpack`), the lane definitions, the test
+# assertions and the published artifact are all untouched. It runs the SAME
+# `pnpm test:product` lane and adds measurement on top.
+#
+# Every comparison must use the SAME SHA, the same DSH mode, the same
+# lockfile and the same runner image — otherwise the numbers are not
+# comparable and the run proves nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'The commit SHA to measure (defaults to the dispatched ref)'
+        required: false
+        type: string
+      shard_total:
+        description: 'Number of product shards to split the measurement into'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+
+permissions:
+  contents: read
+
+jobs:
+  product-diagnostics:
+    name: Product lane diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
+
+    steps:
+      - name: Checkout the measured commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      # The SAME dependency environment the ordinary CI uses: the registry
+      # distribution, the frozen lockfile, the same environment variables.
+      # A measurement taken against a different dependency graph measures a
+      # different thing.
+      - name: Prepare DSH dependency environment
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      # The machine the measurement runs on. Every value is measured or
+      # reported as unavailable; a missing cgroup file is never replaced by
+      # the runner family's public label.
+      - name: Record the runner specification
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          node scripts/runner-spec.mjs --out diagnostics/runner-spec.json
+
+      # The build is a build INPUT to the bundle and to the tests, so it
+      # runs BEFORE the tests and never at the same time as them.
+      - name: Build the vendored fork and the bundle
+        run: pnpm build
+
+      # The measurement itself: the ordinary product lane, with the
+      # machine-readable case report added on top. The lane's file set, its
+      # temp root, its exit code and its signal contract are unchanged.
+      - name: Measure the product lane
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          start=$(date +%s)
+          node scripts/run-test-lane.mjs product --shard=1/${{ inputs.shard_total }}
+          end=$(date +%s)
+          echo "wall_clock_seconds=$((end - start))" | tee -a diagnostics/runner-spec.json
+
+      - name: Summarize the case distribution
+        run: |
+          set -euo pipefail
+          node scripts/case-distribution.mjs \
+            --jsonl diagnostics/cases.jsonl \
+            --out diagnostics/case-distribution.json
+
+      - name: Upload the diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-diagnostics
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7

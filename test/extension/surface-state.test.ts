@@ -1,0 +1,220 @@
+/**
+ * M2 contract gate: the surface state store and the first chrome outlets.
+ * Immutable snapshots, selector-aware batched subscriptions, deterministic
+ * outlet rendering from ledger contributions, and the host/chrome boundary
+ * (plugins never touch components or the root layout).
+ * @module @xmoon76/dsh-pi-tui/surface-state.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { Text } from '@xmoon76/pi-tui'
+import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
+import { SurfaceStateStore } from '../../src/extension/internal/surface-state.ts'
+import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
+import type { HeaderBadge, StyledSpan } from '../../src/extension/public-types.ts'
+
+/** A store whose render sink records calls. */
+function makeStore(): { store: SurfaceStateStore; renders: number[] } {
+  const renders: number[] = []
+  const store = new SurfaceStateStore({ requestRender: () => { renders.push(1) } })
+  return { store, renders }
+}
+
+const settle = async (): Promise<void> => {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
+test('snapshots are immutable and deep-frozen', () => {
+  const { store } = makeStore()
+  store.set({ activity: { working: true, queuedCount: 2, taskCount: 0, childAgentCount: 0, todoCount: 0 } })
+  const state = store.get()
+  const activity = state.activity
+  assert.equal(activity.working, true)
+  assert.throws(() => { (activity as { working: boolean }).working = false }, TypeError)
+  assert.ok(Object.isFrozen(activity))
+  // P2-1: the OUTER state object is frozen too, not just its slices — the
+  // public contract is "deeply frozen snapshots".
+  assert.ok(Object.isFrozen(state), 'the outer SurfaceStateValues must be frozen (P2-1)')
+  assert.throws(() => { (state as { surface: unknown }).surface = {} }, TypeError)
+})
+
+test('the nested display-subject snapshot is deep-frozen, content-stable and clear-aware (M3-5 PR1)', async () => {
+  // The additive `session.displaySubject` is the first NESTED snapshot on the
+  // Stable surface state: the "deeply frozen snapshots" contract must cover it,
+  // and a content-equal republish must not churn the slice identity.
+  const { store } = makeStore()
+  const base = {
+    workspaceRoot: '/w', cwd: '/w', planMode: false, busy: false, viewerMode: true, turns: 1, steps: 1,
+  }
+  const subject = () => ({
+    sessionId: 'child-1', title: 'child', workspaceRoot: '/w', cwd: '/w', turns: 1, steps: 1, todoCount: 1,
+  })
+  store.set({ session: { ...base, displaySubject: subject() } })
+  const first = store.get().session
+  const nested = first.displaySubject
+  assert.ok(nested !== undefined, 'the display subject must be published')
+  assert.ok(Object.isFrozen(nested), 'the nested displaySubject must be frozen (deep-frozen snapshots)')
+  assert.throws(() => { (nested as { todoCount: number }).todoCount = 9 }, TypeError)
+  assert.equal(first.displaySubject?.todoCount, 1, 'the rejected mutation must not reach later readers')
+  // A content-equal republish reuses the published nested object: the slice
+  // identity stays and no notification fires.
+  store.set({ session: { ...base, displaySubject: subject() } })
+  assert.equal(store.get().session, first, 'a content-equal nested republish must not break the slice identity')
+  // A REAL change still publishes.
+  store.set({ session: { ...base, displaySubject: { ...subject(), todoCount: 2 } } })
+  assert.notEqual(store.get().session, first, 'a real nested change must publish')
+  assert.equal(store.get().session.displaySubject?.todoCount, 2)
+  // Clearing the display subject publishes too (viewer exit).
+  store.set({ session: { ...base, viewerMode: false } })
+  assert.equal(store.get().session.displaySubject, undefined)
+
+  // A DELETION-ONLY republish is a REAL change (M3-5 PR1 review R8): the
+  // production snapshot encodes "fact unavailable" / "summary hidden" by
+  // OMITTING the optional key, so dropping `model`/`permission`/`branch`/
+  // `todoSummary` while the required facts stay identical must publish a fresh
+  // frozen nested object and NOT reuse the stale one.
+  const rich = {
+    sessionId: 'child-1', title: 'child', workspaceRoot: '/w', cwd: '/w',
+    model: 'deepseek/x', permission: 'read-only', branch: 'main',
+    turns: 1, steps: 1, todoCount: 2, todoSummary: '2 active · a',
+  }
+  store.set({ session: { ...base, displaySubject: rich } })
+  const richSlice = store.get().session
+  assert.equal(richSlice.displaySubject?.todoSummary, '2 active · a')
+  let notifications = 0
+  store.subscribe({ select: state => state.session, notify: () => { notifications += 1 } })
+  store.set({
+    session: {
+      ...base,
+      displaySubject: { sessionId: 'child-1', title: 'child', workspaceRoot: '/w', cwd: '/w', turns: 1, steps: 1, todoCount: 2 },
+    },
+  })
+  const clearedSlice = store.get().session
+  assert.notEqual(clearedSlice, richSlice, 'a deletion-only republish must publish a new slice')
+  assert.equal(clearedSlice.displaySubject?.model, undefined, 'the cleared model must not survive')
+  assert.equal(clearedSlice.displaySubject?.permission, undefined)
+  assert.equal(clearedSlice.displaySubject?.branch, undefined)
+  assert.equal(clearedSlice.displaySubject?.todoSummary, undefined, 'the hidden summary must not survive')
+  assert.ok(!('todoSummary' in (clearedSlice.displaySubject ?? {})), 'the stale optional key must be gone')
+  assert.ok(Object.isFrozen(clearedSlice.displaySubject))
+  await settle()
+  assert.ok(notifications >= 1, 'the deletion-only change must notify its subscribers')
+})
+
+test('selectors fire only on slice CHANGE and delivery is batched', async () => {
+  const { store, renders } = makeStore()
+  const seen: Array<{ working: boolean; queuedCount: number }> = []
+  let count = 0
+  const disposer = store.subscribe({
+    select: state => state.activity,
+    notify: (value) => { seen.push({ working: value.working, queuedCount: value.queuedCount }); count += 1 },
+  })
+  // First delivery is synchronous with the initial snapshot.
+  assert.equal(count, 1)
+  assert.equal(seen[0]?.working, false)
+  // Two writes in one tick → ONE batched notification with the final state.
+  store.set({ activity: { working: true, queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 } })
+  store.set({ activity: { working: true, queuedCount: 3, taskCount: 0, childAgentCount: 0, todoCount: 0 } })
+  assert.equal(count, 1, 'no notification before the microtask')
+  await settle()
+  assert.equal(count, 2, 'exactly one batched notification')
+  assert.deepEqual(seen[1], { working: true, queuedCount: 3 })
+  assert.ok(renders.length >= 1, 'a state change requests a render')
+  disposer()
+  // After dispose: no more notifications.
+  store.set({ activity: { working: false, queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 } })
+  await settle()
+  assert.equal(count, 2)
+})
+
+test('an identical slice write is a no-op (no notification)', async () => {
+  const { store } = makeStore()
+  let count = 0
+  store.subscribe({
+    select: state => state.activity,
+    notify: () => { count += 1 },
+  })
+  assert.equal(count, 1)
+  store.set({ activity: { working: false, queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 } })
+  await settle()
+  assert.equal(count, 1, 'identical slice must not notify')
+})
+
+test('header badge outlet renders ordered badges with tones', () => {
+  const ledger = new ExtensionLedger(() => {})
+  const surface = new SurfaceHost(ledger, () => {})
+  ledger.register('chrome.header.badge', { id: 'a', order: 0 }, { text: 'beta' } satisfies HeaderBadge, 'p1')
+  ledger.register('chrome.header.badge', { id: 'b', order: 1 }, { text: 'plan', tone: 'warning' } satisfies HeaderBadge, 'p2')
+  surface.refreshOutlets()
+  const text = surface.headerBadgeText()
+  assert.ok(text.includes('beta'), `badge a missing: ${text}`)
+  assert.ok(text.includes('plan'), `badge b missing: ${text}`)
+  // Ordered: a before b.
+  assert.ok(text.indexOf('beta') < text.indexOf('plan'), 'order ASC must hold')
+})
+
+test('dock outlet renders labels and details; empty contributions render nothing', () => {
+  const ledger = new ExtensionLedger(() => {})
+  const surface = new SurfaceHost(ledger, () => {})
+  assert.equal(surface.dockText(), '', 'empty dock renders nothing')
+  ledger.register('input.dock.item', { id: 't' }, {
+    label: [{ text: '☑  ', tone: 'textDim' }, { text: '2 active' }] satisfies StyledSpan[],
+  }, 'p1')
+  surface.refreshOutlets()
+  const text = surface.dockText()
+  assert.ok(text.includes('2 active'), `dock label missing: ${text}`)
+})
+
+test('footer outlet renders ordered segments; low-importance segments drop in compact mode', () => {
+  const ledger = new ExtensionLedger(() => {})
+  const surface = new SurfaceHost(ledger, () => {})
+  ledger.register('chrome.footer.status', { id: 'model', order: 0 }, {
+    spans: [{ text: '[model-x]' }] satisfies StyledSpan[],
+  }, 'p1')
+  ledger.register('chrome.footer.status', { id: 'hint', order: 1, priority: 0 }, {
+    spans: [{ text: 'press ? for help' }] satisfies StyledSpan[],
+    importance: -1,
+  }, 'p2')
+  surface.refreshOutlets()
+  const full = surface.footerText()
+  assert.ok(full.includes('[model-x]'), `model segment missing: ${full}`)
+  assert.ok(full.includes('press ? for help'), `hint segment missing: ${full}`)
+  // The host asks for compact: low-importance (-1) segments drop.
+  // (Compact handling lands with the host merge in Commit D; the outlet
+  // exposes refresh(compact) for it.)
+  const compactSurface = new SurfaceHost(ledger, () => {})
+  compactSurface.refreshOutlets()
+  assert.ok(compactSurface.footerText().includes('[model-x]'))
+})
+
+test('SurfaceHost attach publishes the surface snapshot and capabilities', () => {
+  const ledger = new ExtensionLedger(() => {})
+  const surface = new SurfaceHost(ledger, () => {})
+  const header = new Text('', 0, 0)
+  const dock = new Text('', 0, 0)
+  const footer = new Text('', 0, 0)
+  surface.attach({ header, dock, footer }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  assert.equal(surface.state().surface.surfaceId, 's1')
+  assert.ok(surface.capabilitiesOf().has('slot.chrome.header.badge'))
+  assert.ok(surface.capabilitiesOf().has('surface.snapshot'))
+  surface.dispose()
+  assert.equal(surface.isDisposed(), true)
+  assert.equal(surface.capabilitiesOf().size, 0)
+})
+
+test('SurfaceHost updates slices through immutable snapshots', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const surface = new SurfaceHost(ledger, () => {})
+  surface.updateSurface({ width: 100 })
+  surface.updateSession({ cwd: '/ws', model: 'm' })
+  surface.updateActivity({ working: true, queuedCount: 1, taskCount: 0, childAgentCount: 0, todoCount: 0 })
+  await settle()
+  assert.equal(surface.state().surface.width, 100)
+  assert.equal(surface.state().session.cwd, '/ws')
+  assert.equal(surface.state().activity.working, true)
+})

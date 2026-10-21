@@ -1,0 +1,210 @@
+/**
+ * The Direct combined session-projection batch reader — the ONE Host read
+ * path behind `SessionReader.projectionBatch()` for the /sessions picker.
+ *
+ * The DSH Harness owns both projections the picker needs: the `title`
+ * projection (`titleProjectionDefinition`, state `string | null`) and the
+ * `agentPreset` projection (`agentPresetProjectionDefinition`, initialized
+ * from the creation header and advanced by preset-selection events). This
+ * module consumes exactly those official semantics and never folds a second
+ * copy of either:
+ *
+ * 1. live session  → already-materialized values come from
+ *    `sessionProjections.cachedSnapshot()` (in-memory, zero I/O); the preset prefers the agent's CURRENT composed
+ *    roster entry (`agentPresets.composedPreset()`) — a deliberate
+ *    live-only exception: the running Agent's actual composition is the
+ *    authoritative effective preset even while it trails or leads the
+ *    durable projection mid-switch — with the projection value as the
+ *    fallback;
+ * 2. cold + cache  → `sessionProjectionCache.cachedSnapshot(header, keys)`
+ *    (a durable checkpoint read keyed by the `list()` header identity — no
+ *    full-log fold);
+ * 3. cold + miss   → leave the optional fields unknown. The picker must not
+ *    activate a historical Session or synthesize a cold observation merely to
+ *    fill a label.
+ *
+ * Per-row projection failures are isolated instead of hiding the picker: a
+ * live teardown race fail-softs silently to the other field, while a broken
+ * cache hint is omitted.
+ *
+ * @module @xmoon76/dsh-pi-tui/runtime/direct/session-projection-direct
+ */
+
+import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
+import type { SessionProjectionSummary, SessionSummary } from '../session-reader-port.ts'
+
+/** The projection keys this batch reads (the official registered units). */
+type ProjectionKey = typeof agentPresetProjectionDefinition.key | 'title' | 'sessionListMetadata'
+
+/** The list metadata capability is provided by the optional API controller;
+ * deployments without it simply fall back to header creation time. */
+export interface SessionListMetadataLike {
+  readonly blank?: boolean
+  readonly lastPromptAt?: number | null
+}
+
+/** The official live projection read surface (structural subset of
+ * `sessionProjections` — the value table carries both keys). */
+export interface SessionProjectionReaderLike {
+  /** Read only already-materialized cells; never fold the live Session. */
+  cachedSnapshot(
+    session: Session,
+    keys?: readonly ProjectionKey[],
+  ): { readonly values?: {
+    readonly title?: string | null
+    readonly agentPreset?: string | null
+    readonly sessionListMetadata?: SessionListMetadataLike
+  } } | undefined
+}
+
+/** The zero-I/O projection-cache hint (structural subset of
+ * `sessionProjectionCache`). The SessionHeader is the listing-side lifecycle
+ * identity witness: the cache itself matches lifecycle identity (seeded and
+ * unseeded alike), a row is possibly stale but never from an unrelated
+ * lifecycle, and no log read or inherited cut is involved. */
+export interface SessionProjectionCacheLike {
+  cachedSnapshot(
+    meta: SessionHeader,
+    keys?: readonly ProjectionKey[],
+  ): { readonly values?: {
+    readonly title?: string | null
+    readonly agentPreset?: string | null
+    readonly sessionListMetadata?: SessionListMetadataLike
+  } } | undefined
+  cachedPredecessorTitle?(
+    meta: SessionHeader,
+  ): { readonly values?: { readonly title?: string | null } } | undefined
+}
+
+/** The minimal Host context surface (structural — the services resolve from
+ * the dsh installation; never a package dependency). */
+export interface SessionProjectionContext {
+  get(name: string): unknown
+}
+
+/** The Host surfaces the batch needs, supplied by the Direct reader (which
+ * owns the `list()` header snapshot and the live-agent mapping). */
+export interface ProjectionBatchDeps {
+  readonly ctx: SessionProjectionContext
+  /** The rows to enrich (main rows only — the caller filters subagents). */
+  readonly rows: readonly SessionSummary[]
+  /** The header identity witness captured by the preceding `list()`. */
+  readonly headerOf: (sessionId: string) => SessionHeader | undefined
+  /** The currently attached Session for a session id, when live. */
+  readonly liveSessionOf: (sessionId: string) => Session | undefined
+  /** The authoritative live preset composition for a session id. */
+  readonly livePresetOf: (sessionId: string) => string | undefined
+}
+
+/**
+ * Read the projection-cache hint for one header - a header-only listing read.
+ * The cache owns lifecycle-identity matching, so the TUI neither computes an
+ * inherited cut nor rejects seeded headers; a current-lifecycle block wins and
+ * only its absence may consult the predecessor-title hint.
+ */
+function safeCachedSnapshot(
+  cache: SessionProjectionCacheLike | undefined,
+  header: SessionHeader,
+): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined {
+  if (cache === undefined) return undefined
+  try {
+    return cache.cachedSnapshot(header, ['title', 'agentPreset'])
+      ?? cache.cachedPredecessorTitle?.(header)
+  } catch {
+    return undefined
+  }
+}
+
+/** The live fast path: title and cached fallback preset from already-materialized
+ * projection cells (zero history folding), with preset first from the authoritative composed
+ * composition (a DELIBERATE live-only exception: the composed roster entry
+ * reflects the running Agent's actual composition, which can trail or lead
+ * the durable projection during a switch; the projection value remains the
+ * fallback). BOTH reads are per-row isolated — one throwing read degrades to
+ * the other field instead of failing the batch. Absent/`null` title means
+ * the session genuinely has none. */
+function liveProjection(
+  deps: ProjectionBatchDeps,
+  projections: SessionProjectionReaderLike | undefined,
+  sessionId: string,
+  liveSession: Session,
+): SessionProjectionSummary | undefined {
+  let preset: string | undefined
+  try {
+    preset = deps.livePresetOf(sessionId)
+  } catch {
+    // A composition read racing teardown is not a picker error; the title
+    // (or the short-id presentation) still applies.
+  }
+  let title: string | undefined
+  if (projections !== undefined) {
+    try {
+      const values = projections.cachedSnapshot(liveSession, ['title', 'agentPreset'])?.values
+      if (typeof values?.title === 'string') title = values.title
+      if (preset === undefined && typeof values?.agentPreset === 'string') preset = values.agentPreset
+    } catch {
+      // A live session being torn down is not a picker error; the preset or
+      // the short-id presentation still applies.
+    }
+  }
+  if (title === undefined && preset === undefined) return undefined
+  return {
+    ...(title === undefined ? {} : { title }),
+    ...(preset === undefined ? {} : { preset }),
+  }
+}
+
+/**
+ * The combined projection batch (the port's `projectionBatch` semantics):
+ * live fast path → zero-I/O cache fast path → unknown fields on a cold miss.
+ * A picker enrichment must never activate a historical Session or replay its
+ * full log merely to fill a label. Cancellation still rejects the whole batch.
+ */
+export async function projectionBatch(
+  deps: ProjectionBatchDeps,
+  signal?: AbortSignal,
+): Promise<Map<string, SessionProjectionSummary>> {
+  const result = new Map<string, SessionProjectionSummary>()
+  if (deps.rows.length === 0) return result
+  signal?.throwIfAborted()
+
+  const projections = deps.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
+  const cache = deps.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
+  // (1) Live rows: only the live branch may read live composed/cached values.
+  // A live row with no cached title must never fall through to a cold cache
+  // hint, which could expose stale persisted metadata.
+  const coldRows: SessionSummary[] = []
+  for (const row of deps.rows) {
+    let liveSession: Session | undefined
+    try {
+      liveSession = deps.liveSessionOf(row.id)
+    } catch {
+      // A live Session disappearing during a batch is treated as a cold miss.
+    }
+    if (liveSession !== undefined) {
+      const live = liveProjection(deps, projections, row.id, liveSession)
+      if (live !== undefined) result.set(row.id, live)
+    } else if (!row.live) {
+      coldRows.push(row)
+    }
+  }
+  if (coldRows.length === 0) return result
+
+  // (2) Zero-I/O cache hints. `title: null` means "no title yet" while the
+  // cached preset identity is already DSH's current V3 projection value;
+  // a cold cache miss does not trigger a historical observation or raw-log read.
+  for (const row of coldRows) {
+    const header = deps.headerOf(row.id)
+    const cached = header === undefined ? undefined : safeCachedSnapshot(cache, header)
+    if (cached === undefined) continue
+    const values = cached.values ?? {}
+    if (typeof values.title === 'string') {
+      result.set(row.id, { ...result.get(row.id), title: values.title })
+    }
+    if (typeof values.agentPreset === 'string') {
+      result.set(row.id, { ...result.get(row.id), preset: values.agentPreset })
+    }
+  }
+  return result
+}

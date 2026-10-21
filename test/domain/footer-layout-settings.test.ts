@@ -1,0 +1,395 @@
+/**
+ * Headless tests for the M2 footer settings integration (plan §14.2/§14.8):
+ * the app's custom-layout API, the mode mapping (default/compact/custom),
+ * and the fail-soft invalid-config path.
+ * @module @xmoon76/dsh-pi-tui/footer-layout-settings.test
+ */
+
+import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { afterEach, test } from 'node:test'
+import { TuiApp } from '../../src/tui-app.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../../src/domain/footer/presets.ts'
+import { StatusStore } from '../../src/domain/status/store.ts'
+import { initialStatusSnapshot } from '../../src/domain/status/snapshot.ts'
+import { FooterComposer } from '../../src/tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../../src/tui/footer/builtin-items.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../../src/domain/status/types.ts'
+
+/** Deep-mutable build shape (the snapshot is deeply readonly). */
+type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/tui/process-slot.ts). */
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+function startApp(): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+/** A screenshot-like custom layout (plan §14.6). */
+const SCREENSHOT_LAYOUT = {
+  schemaVersion: 1 as const,
+  rows: [{
+    left: [
+      { id: 'model' },
+      { id: 'cwd' },
+      { id: 'context', format: 'full' },
+      { id: 'turns-steps' },
+      { id: 'stats-line' },
+    ],
+    right: [],
+    separator: { text: ' │ ' },
+  }],
+}
+
+test('the app applies a custom layout and reports the custom mode', async () => {
+  const { vt, app } = startApp()
+  assert.equal(app.getFooterMode(), 'default')
+  app.setStatus({
+    model: 'deepseek/flash',
+    cwd: '/home/x/space4',
+    turns: 2,
+    steps: 5,
+    usage: {
+      tokens: { input: 160000, output: 0, cacheRead: 0, cacheWrite: 0 },
+      performance: { llmMs: 0, firstTokenMs: 0, tokensPerSec: 0 },
+      turns: 2,
+      steps: 5,
+    },
+  })
+  app.setStatus({ contextTokens: 160000, contextWindow: 1_000_000 })
+  app.setFooterLayout(SCREENSHOT_LAYOUT)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(app.getFooterMode(), 'custom')
+  // The custom separator and the full context formatter apply.
+  assert.ok(view.includes(' │ '), `custom separator missing:\n${view}`)
+  assert.ok(view.includes('160k/1.0M (16%)'), `full context formatter missing:\n${view}`)
+  // The default-only items (permission badge) are gone.
+  assert.ok(!view.includes('[workspace-write]'), `default-only item must not render:\n${view}`)
+  app.stop()
+})
+
+test('clearing the custom layout restores the builtin preset', async () => {
+  const { vt, app } = startApp()
+  app.setFooterLayout(SCREENSHOT_LAYOUT)
+  assert.equal(app.getFooterMode(), 'custom')
+  app.setFooterLayout(undefined)
+  assert.equal(app.getFooterMode(), 'default')
+  app.setFooterPreset('compact')
+  assert.equal(app.getFooterMode(), 'compact')
+  app.stop()
+})
+
+test('the custom layout renders the screenshot-like acceptance fixture', async () => {
+  // The version item reads the store's host section: wire a store stamped
+  // with the bundle version (the runner's store carries the real one).
+  const store = new StatusStore(initialStatusSnapshot('0.3.3'))
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store })
+  app.start()
+  startedApps.add(app)
+  app.setStatus({
+    model: 'deepseek-v4-flash',
+    cwd: '/home/x/space4',
+    turns: 12,
+    steps: 38,
+    usage: {
+      tokens: { input: 2579, output: 5507, cacheRead: 20000, cacheWrite: 0 },
+      cacheHitPct: 91.9,
+      performance: { llmMs: 2000, firstTokenMs: 2000, tokensPerSec: 40 },
+      turns: 12,
+      steps: 38,
+    },
+  })
+  app.setStatus({ contextTokens: 160000, contextWindow: 1_000_000 })
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'model' },
+        { id: 'cwd' },
+        { id: 'context', format: 'full' },
+        { id: 'cache-hit' },
+        { id: 'token-usage', format: 'io' },
+        { id: 'performance', format: 'full' },
+        { id: 'version', format: 'tui' },
+      ],
+      right: [{ id: 'focus-mode' }],
+      separator: { text: ' │ ', tone: 'textDim' },
+    }],
+  })
+  app.setFocusMode(true)
+  // The focus projection's store notify re-renders the footer (the
+  // unified render path) — no status refresh is needed.
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // The plan's screenshot-like line: model │ cwd │ context │ cache │
+  // tokens │ performance │ version ... focus. The M2 items render the
+  // structured facts (the plan's exact token spellings are formatter
+  // choices — the pi vocabulary applies, so 2000ms renders `2s`). The
+  // row is width-pressured at 100 columns, so the low-importance
+  // performance item renders its compact form (`2s R5 40t/s`) — its two
+  // facts (TTFB + the recent rate, labelled in TPS plan PR-3) survive.
+  assert.ok(view.includes('deepseek-v4-flash'), `model missing:\n${view}`)
+  assert.ok(view.includes('space4'), `project cwd missing:\n${view}`)
+  assert.ok(view.includes('160k/1.0M (16%)'), `context missing:\n${view}`)
+  assert.ok(view.includes('C 91.9%'), `cache-hit missing:\n${view}`)
+  assert.ok(view.includes('2579/5507'), `token-usage missing:\n${view}`)
+  assert.ok(view.includes('2s R5 40t/s'), `performance missing:\n${view}`)
+  assert.ok(view.includes('v0.3.3'), `version missing:\n${view}`)
+  assert.ok(view.includes('focus'), `focus-mode missing:\n${view}`)
+  app.stop()
+})
+
+test('layout overrides apply: prefix/suffix wrap the item, tone overrides the semantic tone, separator tone styles the separator', () => {
+  // The composer is the authority (the viewport strips ANSI).
+  const composer = new FooterComposer(createBuiltinFooterRegistry())
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{
+        left: [{ id: 'model', prefix: '‹ ', suffix: ' ›', tone: 'warning' }],
+        right: [],
+        separator: { text: ' │ ', tone: 'error' },
+      }],
+    },
+    width: 100,
+    context: { taskBrowserAvailable: true, extensionFooterText: '' },
+  })
+  assert.ok(text.includes('‹ '), `prefix must wrap the item: ${JSON.stringify(text)}`)
+  assert.ok(text.includes(' ›'), `suffix must wrap the item: ${JSON.stringify(text)}`)
+  // The tone override replaces the item's semantic tone (the model item is
+  // uncolored by default — the warning override must color it).
+  assert.ok(text.includes('\x1b[38;2;232;168;56m'), `the tone override must apply: ${JSON.stringify(text)}`)
+})
+
+test('a tone override applies to EMPHASIZED spans too (strong/dim/italic keep the override color)', () => {
+  const composer = new FooterComposer(createBuiltinFooterRegistry())
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{
+        left: [{ id: 'model', tone: 'warning' }],
+        right: [],
+      }],
+    },
+    width: 100,
+    context: { taskBrowserAvailable: true, extensionFooterText: '' },
+  })
+  // The model item's span is uncolored; the warning override must color
+  // it (the emphasis path is not involved here, but the override must
+  // reach the span render).
+  assert.ok(text.includes('\x1b[38;2;232;168;56m'), `the tone override must apply: ${JSON.stringify(text)}`)
+})
+
+test('the compact phase re-renders items at the compact density before dropping', () => {
+  const composer = new FooterComposer(createBuiltinFooterRegistry())
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.usage.context = { usedTokens: 25000, windowTokens: 100000, percent: 25 }
+  snap.usage.cacheHitPct = 91.9
+  snap.usage.tokens = { input: 2579, output: 5507, cacheRead: 20000, cacheWrite: 0 }
+  snap.usage.performance = { llmMs: 2000, firstTokenMs: 2000, tokensPerSec: 40 }
+  // A right zone pins 'focus'; the left zone must fit the remaining width.
+  // The context item's compact form ('25%') is much shorter than its
+  // preferred bar — the compact phase must keep it instead of dropping it.
+  snap.interaction.displayPreset = 'focus'
+  const text = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{
+        left: [
+          { id: 'context', format: 'bar' },
+          { id: 'cache-hit' },
+          { id: 'token-usage', format: 'io' },
+          { id: 'performance', format: 'full' },
+        ],
+        right: [{ id: 'focus-mode' }],
+        separator: { text: '  ' },
+      }],
+    },
+    width: 40,
+    context: { taskBrowserAvailable: true, extensionFooterText: '' },
+  })
+  const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(plain.includes('25%'), `the compact context form must survive:\n${plain}`)
+  assert.ok(plain.includes('focus'), `the right zone must survive:\n${plain}`)
+})
+
+test('the activity setters repaint the run-state item (no status refresh needed)', async () => {
+  const { vt, app } = startApp()
+  // A custom layout with the run-state item in view.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setStatus({})
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('working'), `idle must not badge working:\n${view}`)
+  // The activity setter projects the store AND repaints the footer — a
+  // direct caller (no runner refresh in between) must see the phase.
+  app.setWorking(true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `setWorking must repaint the run state:\n${view}`)
+  app.setWorking(false)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('working'), `idle must restore after setWorking(false):\n${view}`)
+  app.stop()
+})
+
+test('approval open/close repaint the run-state item IMMEDIATELY (the unified store-notify render path)', async () => {
+  const { vt, app } = startApp()
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setWorking(true)
+  app.setStatus({})
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `the run-state must show working:\n${view}`)
+  // Approval OPENS: run-state must switch to waiting-approval on the
+  // same frame — the old code projected the activity without a paired
+  // render, so the footer kept `working` until an unrelated event
+  // repainted (the review's P2).
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('waiting-approval'), `approval open must repaint run-state:\n${view}`)
+  // Approve: the dialog closes and run-state returns to working
+  // immediately (the old settle path re-rendered on the STALE snapshot
+  // and never again — it stayed waiting-approval).
+  vt.sendInput('y')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `approval close must repaint run-state:\n${view}`)
+  await decision
+  app.stop()
+})
+
+test('getEffectiveFooterLayout follows the ACTIVE MODE (custom, then compact, then default)', () => {
+  const { vt, app } = startApp()
+  // Default mode: the builtin default layout.
+  assert.equal(app.getEffectiveFooterLayout(), DEFAULT_FOOTER_LAYOUT)
+  assert.equal(app.getEffectiveFooterLayout().rows.length, 2)
+  // Custom mode: the custom layout wins.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  assert.equal(app.getEffectiveFooterLayout().rows[0]!.left[0]!.id, 'run-state')
+  // Compact mode: the compact preset, NOT the default (the /footer
+  // configurator's initialization source — the review's P2).
+  app.setFooterLayout(undefined)
+  app.setFooterPreset('compact')
+  assert.equal(app.getEffectiveFooterLayout().rows.length, 1, 'compact must resolve to the one-row compact preset')
+  assert.equal(app.getEffectiveFooterLayout().rows[0]!.left[0]!.id, 'view-scope')
+  app.stop()
+})
+
+test('command-mode fallback restores the user\'s custom layout, never the builtin default', async () => {
+  const { vt, app } = startApp()
+  // A user custom layout with an item the DEFAULT layout never shows.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setWorking(true)
+  app.setStatus({})
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `the custom run-state item must render:\n${view}`)
+  assert.equal(app.getFooterMode(), 'custom', 'the native mode must be custom')
+  // Command mode arms: the command surface overrides the composer, but
+  // the native layout state must stay untouched.
+  app.setFooterCommandRows(['command-status-line'])
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('command-status-line'), `the command surface must render:\n${view}`)
+  assert.equal(app.getFooterMode(), 'custom', 'command mode must not reset the native layout')
+  // The command FAILS (undefined rows — the runner's fallback): the user's
+  // OWN custom layout returns, not the builtin default.
+  app.setFooterCommandRows(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('working'), `the custom layout must return on failure:\n${view}`)
+  assert.ok(!view.includes('command-status-line'), `the command surface must clear:\n${view}`)
+  app.stop()
+})
+
+test('an emptied footer surface reflows with no stale content', async () => {
+  const { vt, app } = startApp()
+  // Fill the transcript so the fullscreen scroll pane overflows, then
+  // paint the two-row default footer.
+  const messages = Array.from({ length: 25 }, (_, i) => ({
+    kind: 'user' as const,
+    turn: i,
+    text: `message ${i} with a reasonably long line to consume width`,
+  }))
+  app.setTranscript(messages, new Map())
+  app.setStatus({ model: 'p/m', cwd: '/ws', turns: 2, steps: 3 })
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('t2/s3'), `the default footer must be painted in fullscreen:\n${view}`)
+  const before = vt.getViewport().join('\n')
+  // Switch to a custom layout whose ONLY item is unavailable (an
+  // unloaded extension item): the composer renders an empty surface. The
+  // old footer rows must not stay behind — the layout reflows and the
+  // transcript takes the freed rows (earlier messages become visible).
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'ext:gone/unknown' }], right: [] }],
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('t2/s3'), `the emptied footer must clear its rows:\n${view}`)
+  assert.ok(!view.includes('p/m'), `the emptied footer must clear its rows:\n${view}`)
+  const visibleNow = view
+  const revealed = messages.map(m => m.text).filter(text => !before.includes(text) && visibleNow.includes(text))
+  assert.ok(revealed.length >= 1, `the reflow must reveal earlier transcript rows:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('setFooterPreset clears an active custom layout (a preset switch means a builtin layout)', async () => {
+  const { vt, app } = startApp()
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'run-state' }], right: [] }],
+  })
+  app.setStatus({ model: 'p/m', cwd: '/ws' })
+  await vt.waitForRender()
+  assert.equal(app.getFooterMode(), 'custom', 'the custom layout must be active first')
+  // Switch back to compact: the custom layout must be CLEARED, so the
+  // builtin compact layout renders (the custom run-state item disappears).
+  app.setFooterPreset('compact')
+  await vt.waitForRender()
+  assert.equal(app.getFooterMode(), 'compact', 'a preset switch must leave custom mode')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('p/m'), `the builtin compact layout must render:\n${view}`)
+  assert.ok(!view.includes('working'), `the custom run-state item must be gone:\n${view}`)
+  app.stop()
+})

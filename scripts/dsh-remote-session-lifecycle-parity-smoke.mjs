@@ -1,0 +1,646 @@
+#!/usr/bin/env node
+/**
+ *
+ * Focused same-Host Session lifecycle/model/preset integration smoke over the
+ * installed official DSH Host and Client contracts at the checkout's declared
+ * target family. One real Host
+ * Context owns the Session store, the production AgentLoop with an in-process
+ * stub LLM route, the declarative agent preset registry, projections, the
+ * SQLite session query engine, the local fs service, the real workspace stack,
+ * the Session Controller, the Gateway and the forwarded-event source. An
+ * independent official Client Context reaches that Host through the official
+ * Connection/Gateway carrier, and the TUI's experimental Remote adapters drive
+ * it (never a mock): `RemoteSessionLifecycle`, `RemoteModelCatalog` and
+ * `RemotePresetCatalog`.
+ *
+ * Covered flows (sub-plan §8):
+ * - A ordinary create            (ClientSessions.create -> Host Session Controller)
+ * - B explicit-preset create     (the SAME ClientSessions.create({agentPreset}) entry)
+ * - C open / retain              (ClientSessions.retain, no invented resume RPC)
+ * - D model select               (session.modelCatalog / session.selectModel)
+ * - E preset select + locked     (agentPresets.select normal + refusal)
+ * - F real writer-held           (PR5 §12 Slice D: a real two-process kernel
+ *   write lease held by an external Node process -> Host cold-resume ->
+ *   SessionAlreadyOwnedError -> official `session/writer-held` -> the TUI
+ *   Remote SessionWriter/preset/model adapters settle a PROVEN rejection with
+ *   preserved details and the centralized guidance; SIGKILL the holder and an
+ *   explicit retry then commits)
+ *
+ * PRODUCTION PREREQUISITES REPRODUCED
+ * - exact DSH rc.2 JsonlSessionPersistence
+ * - real OS/kernel write lease (an independent Node holder process)
+ * - AgentLoop/session activation
+ * - SessionController / ApiSessionAgentController
+ * - Typert Gateway
+ * - real Host connection
+ * - independent official Client Context
+ * - generated Remote objects
+ * - TUI Remote SessionWriter/model/preset adapters
+ *
+ * TEST STAND-INS / SUBSTITUTIONS
+ * - temporary workRoot/persistence root
+ * - local stub LLM adapter/model registration
+ * - deterministic fixture preset(s)
+ * - process-local transport rather than external deployment
+ *
+ * DELIBERATELY ABSENT
+ * - external model provider/network/auth
+ * - public Remote backend selector
+ * - unrelated UI/plugins
+ * - reconnect/HMR scenarios
+ *
+ * @module dsh-remote-session-lifecycle-parity-smoke
+ */
+
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
+import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
+import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import { apply as applyApiRemotes, inject as apiRemotesInject } from '@deepseek-ai/dsh-api-remotes'
+import SessionController from '@deepseek-ai/dsh-api-session-controller'
+import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
+import commandsRemote from '@deepseek-ai/dsh-commands/remote'
+import presetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
+import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionTitle from '@deepseek-ai/dsh-session-title'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageJson from '@deepseek-ai/dsh-storage-json'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
+import { RemoteSessionLifecycle } from '../src/runtime/remote/session-lifecycle-remote.ts'
+import { RemoteModelCatalog } from '../src/runtime/remote/model-remote.ts'
+import { RemotePresetCatalog } from '../src/runtime/remote/preset-remote.ts'
+import { RemoteSessionWriter } from '../src/runtime/remote/session-writer-remote.ts'
+import { RemotePromptSerializerProduction } from '../src/runtime/remote/prompt-serializer-remote.ts'
+import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
+
+const PROVIDER = 'smoke'
+const MODEL = 'smoke'
+const ALT_MODEL = 'smoke-alt'
+const DEFAULT_SELECTION = Object.freeze({ provider: PROVIDER, model: MODEL })
+const PRESET = 'lifecycle-preset'
+const ALT_PRESET = 'lifecycle-preset-2'
+/** Flow F: the Session an EXTERNAL process holds the kernel write lease on. */
+const HELD_SESSION = 'lifecycle-held'
+/** The two-process holder fixture (plain Node, official rc.2 packages). */
+const HOLDER = fileURLToPath(new URL('../test/support/session-writer-holder.mjs', import.meta.url))
+
+const IMAGE_LIMITS = Object.freeze({
+  maxImageBytes: 5 * 1024 * 1024,
+  maxImagesPerMessage: 20,
+  maxMessageImageBytes: 100 * 1024 * 1024,
+  maxImagePixels: 40_000_000,
+  maxImageDimension: 2000,
+  mediaTypes: Object.freeze(['image/png']),
+})
+
+/** In-process stub LLM route: advertises two routable models and completes
+ * every turn with one plain text block so a continued session can settle. */
+class SmokeAdapter extends LlmAdapter {
+  resolveModel(provider, model) {
+    if (model !== MODEL && model !== ALT_MODEL) return Promise.reject(new Error(`unknown model ${model}`))
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  listModels(provider) {
+    return Promise.resolve([
+      { provider, id: MODEL, name: MODEL },
+      { provider, id: ALT_MODEL, name: ALT_MODEL },
+    ])
+  }
+
+  async * stream() {
+    const text = 'stub response'
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+function installModuleLoader() {
+  const nodeRequire = createRequire(import.meta.url)
+  const modules = new Map()
+  const previousWindow = globalThis.window
+  const previousLocation = globalThis.location
+  const previousTransport = globalThis.__DSH_TRANSPORT__
+  const requireModule = (specifier) => {
+    if (specifier.endsWith('/client')) {
+      const id = specifier.slice(0, -'/client'.length)
+      const module = modules.get(id)
+      if (module === undefined) throw new Error(`official Client module ${specifier} loaded before ${id}`)
+      return module
+    }
+    return nodeRequire(specifier)
+  }
+  globalThis.window = {
+    __ModuleLoader__: {
+      load({ id, factory }) {
+        if (modules.has(id)) throw new Error(`official Client module ${id} loaded twice`)
+        modules.set(id, factory(requireModule))
+      },
+    },
+  }
+  globalThis.location = { hostname: 'localhost', origin: 'http://dsh-prem3-lifecycle.local', search: '' }
+  /**
+   * Import one official Client bundle from whichever channel its published
+   * `./client` entry selects. DSH 0.2.1-rc.1+ splits that entry into a
+   * standalone Node ESM half (`node`, which never registers through
+   * `__ModuleLoader__`) and a browser loader factory (`browser`/`default`).
+   * A browser registration always wins; the Node namespace only fills a gap,
+   * into the SAME table the registering factories resolve `/client`
+   * dependencies from.
+   */
+  const importClient = async (specifier) => {
+    const id = specifier.slice(0, -'/client'.length)
+    const imported = await import(specifier)
+    if (!modules.has(id)) modules.set(id, imported)
+    return modules.get(id)
+  }
+  return {
+    modules,
+    importClient,
+    restore() {
+      if (previousWindow === undefined) delete globalThis.window
+      else globalThis.window = previousWindow
+      if (previousLocation === undefined) delete globalThis.location
+      else globalThis.location = previousLocation
+      if (previousTransport === undefined) delete globalThis.__DSH_TRANSPORT__
+      else globalThis.__DSH_TRANSPORT__ = previousTransport
+    },
+  }
+}
+
+function provideHostPeripheralServices(ctx) {
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ ...DEFAULT_SELECTION }),
+    // Deliberate: this lane does not persist the best-effort global-default
+    // save, so the deployment default stays fixed and the Session-local
+    // projection is observable. The Host save itself is a Session-Controller
+    // behavior, not a TUI one.
+    saveSelection: async () => {},
+  })
+  ctx.provide('attachments', {
+    imageLimits: IMAGE_LIMITS,
+    admitPromptContent: async content => content,
+  })
+  ctx.provide('fileUploads', {
+    registerAgentResolver: () => () => {},
+    resolve: () => undefined,
+    bindPrompt: () => ({ commit: () => {}, [Symbol.dispose]: () => {} }),
+    retirePrompt: () => {},
+  })
+  ctx.provide('webServer', {
+    registerUpgrade: () => () => {},
+  })
+}
+
+async function createHost(workRoot) {
+  const ctx = new Context()
+  let persistenceFiber
+  try {
+    await ctx.plugin(TypertRegistry)
+    // rc.2: the Gateway and the SessionController both inject the official
+    // access decider, so the Host mounts it before either is injected.
+    await ctx.plugin(RemoteAccessService)
+    await mountAgentLoopTestDependencies(ctx)
+    persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
+    const loop = await mountAgentLoopTestHarness(ctx)
+    await ctx.plugin(CommandRuntime)
+    // The official session-title service: the SessionController's `rename`
+    // verb requires it (Flow F's explicit-retry positive control renames after
+    // the holder exits).
+    await ctx.plugin(SessionTitle, {
+      fallbackMaxWords: 5,
+      fallbackMaxBytes: 40,
+      maxTitleBytes: 80,
+    })
+    provideHostPeripheralServices(ctx)
+    await ctx.plugin(Loader)
+    await ctx.plugin(AgentPresetRegistry, { default: PRESET })
+    const presets = ctx.get('agentPresets')
+    await presets.register({ id: PRESET, name: 'Lifecycle preset', plugins: [] })
+    await presets.register({ id: ALT_PRESET, name: 'Lifecycle preset 2', plugins: [] })
+    await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
+      new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
+    })
+    await ctx.plugin(LocalFileSystem)
+    await ctx.plugin(WorkingDirectory)
+    await ctx.plugin(Storage)
+    await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
+    await ctx.plugin(StorageDomain, { backend: 'json' })
+    await ctx.plugin(WorkspaceRegistry)
+    let sessionController
+    await ctx.inject(SessionController.inject, controllerCtx => {
+      sessionController = new SessionController(controllerCtx, { nativeOpen: false })
+    })
+    // Count every Host-side create dispatch: the pinned controller create is
+    // "create or idempotently adopt", so mere Session presence cannot prove the
+    // TUI dispatched exactly one Host create.
+    const hostCreateCalls = []
+    const originalCreate = sessionController.create.bind(sessionController)
+    sessionController.create = (request) => {
+      hostCreateCalls.push(String(request?.sessionId))
+      return originalCreate(request)
+    }
+    await ctx.plugin(hostCtx => {
+      new HostConnectionService(hostCtx, [], {})
+    })
+    await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
+      new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
+    })
+    await ctx.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
+
+    ctx.llm.registerAdapter([PROVIDER], new SmokeAdapter())
+    return { ctx, loop, persistenceRoot: join(workRoot, 'persistence'), persistenceFiber, hostCreateCalls }
+  } catch (error) {
+    if (persistenceFiber !== undefined) await persistenceFiber.dispose()
+    throw error
+  }
+}
+
+function hostTransport(host) {
+  const connection = host.ctx.get('connection')
+  const shared = connection.createSharedFetchHandler('/api')
+  // The official Gateway speaks for the Host Connection's own owner Peer on
+  // both carrier paths (DSH 0.2.1-rc.2 requires an explicit Peer).
+  const peer = connection.browserPeer
+  async function* emptyUplink() {}
+  return {
+    ownsHost: true,
+    fetch(input, init) {
+      const request = input instanceof Request
+        ? new Request(input, init)
+        : new Request(new URL(String(input), 'http://dsh-prem3-lifecycle.local'), init)
+      return shared.fetch(request, peer)
+    },
+    openStream(endpoint, payload, signal, uplink) {
+      return (async function* () {
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), peer, signal)
+      })()
+    },
+  }
+}
+
+async function waitFor(description, predicate, timeoutMs = 10_000) {
+  const started = Date.now()
+  for (;;) {
+    const value = await predicate()
+    if (value) return value
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${description}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+async function main() {
+  const flows = {}
+  const loader = installModuleLoader()
+  const workRoot = mkdtempSync(join(tmpdir(), 'dsh-prem3-lifecycle-'))
+  let client
+  let host
+  let holder
+  let holderExited
+  try {
+    const connectionClient = await loader.importClient('@deepseek-ai/dsh-client-connection/client')
+    const gatewayClient = await loader.importClient('@deepseek-ai/dsh-api-gateway/client')
+    const sessionClient = await loader.importClient('@deepseek-ai/dsh-api-session-controller/client')
+    assert.ok(connectionClient !== undefined, 'official Connection Client did not load')
+    assert.ok(gatewayClient !== undefined, 'official API Gateway Client did not load')
+    assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')
+
+    host = await createHost(workRoot)
+    const anchorDir = join(workRoot, 'anchor')
+    mkdirSync(anchorDir, { recursive: true })
+
+    // ---- Flow F prerequisite: start the external writer holder BEFORE the
+    // Client's first catalog read, so the cold JSONL Session is discoverable
+    // (readable/openable) while its kernel write lease is held elsewhere.
+    holder = spawn(process.execPath, [HOLDER, host.persistenceRoot, HELD_SESSION, anchorDir], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    })
+    holderExited = new Promise(resolve => { holder.once('exit', () => { resolve() }) })
+    await once(holder.stdout, 'data') // 'holding'
+
+    globalThis.__DSH_TRANSPORT__ = hostTransport(host)
+
+    client = new Context()
+    await client.plugin(TypertRegistry)
+    await client.plugin(connectionClient)
+    await client.plugin(gatewayClient)
+    for (const contribution of [commandsRemote, presetsRemote, sessionRemote, subagentsRemote]) {
+      await client.remote.$mount(contribution)
+    }
+    client.provide('fileUpload', { available: false })
+    await client.plugin(sessionClient)
+
+    const connection = client.get('connection')
+    const sessions = client.get('sessions')
+    const sessionRemoteFace = client.remote.session
+    const presetRemoteFace = client.remote.agentPresets
+    await waitFor('same-Host Client readiness', () => (
+      connection.generation.getSnapshot() !== undefined
+        && sessions.list.getSnapshot().phase === 'ready'
+    ))
+
+    const generation = connection.generation
+    const lifecycle = new RemoteSessionLifecycle(sessions, generation)
+    const models = new RemoteModelCatalog(sessionRemoteFace, sessions, generation)
+    const presets = new RemotePresetCatalog(presetRemoteFace, generation)
+    const hostSession = id => host.ctx.sessions.get(SessionId(id))
+    const catalogIds = () => sessions.list.getSnapshot().ids.map(String)
+    const presetOf = id => host.ctx.get('sessionProjections')
+      .snapshot(hostSession(id), ['agentPreset']).values.agentPreset
+    const appendedTypes = id => hostSession(id).snapshotEvents().map(event => event.type)
+
+    // ---- Flow A: ordinary create -----------------------------------------
+    {
+      const requested = 'lifecycle-ordinary'
+      const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      assert.equal(result.ownership, 'current', `Flow A ownership: ${result.ownership}/${result.outcome.kind}`)
+      assert.equal(result.outcome.kind, 'created', `Flow A create failed: ${result.ownership}/${result.outcome.kind}`)
+      const handle = result.outcome.handle
+      assert.equal(handle.session.id, requested)
+      assert.ok(handle.client !== undefined, 'Flow A must hand back the exact Client generation owner')
+      assert.ok(hostSession(requested) !== undefined, 'Flow A must create the Host Session')
+      assert.equal(host.hostCreateCalls.filter(id => id === requested).length, 1,
+        'Flow A must dispatch exactly one Host Session create (create-or-adopt cannot prove it by presence)')
+      assert.ok(catalogIds().includes(requested), 'Flow A result id must enter the Client catalog')
+      assert.ok(sessions.binding(requested) !== undefined, 'Flow A must retain a Client generation')
+      assert.notEqual(hostSession(requested).header.isSeeded, true, 'an ordinary create must not seed from a TUI resume')
+      const referenceCount = sessions.retainInfo(SessionId(requested)).getSnapshot().referenceCount
+      assert.ok(referenceCount > 0, 'Flow A retain must hold a reference')
+      handle.client.release()
+      assert.ok(sessions.retainInfo(SessionId(requested)).getSnapshot().referenceCount
+        < referenceCount, 'Flow A release must return the reference')
+      flows.ordinaryCreate = { status: 'covered', sessionId: requested }
+    }
+
+    // ---- Flow A2: a BLANK requested Session is reused ---------------------
+    {
+      const requested = 'lifecycle-blank-reuse'
+      const first = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      assert.equal(first.outcome.kind, 'created', `Flow A2 first create failed: ${first.ownership}/${first.outcome.kind}`)
+      first.outcome.handle.client?.release()
+      const second = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      assert.equal(second.outcome.kind, 'created', `Flow A2 reuse create failed: ${second.ownership}/${second.outcome.kind}`)
+      assert.equal(second.outcome.handle.session.id, requested,
+        'the Host REUSES a still-reusable blank Session and reports that identity')
+      assert.equal(host.hostCreateCalls.filter(id => id === requested).length, 2,
+        'each create dispatches its own Host request (the Host decides reuse)')
+      second.outcome.handle.client?.release()
+      flows.blankReuse = { status: 'covered', sessionId: requested }
+    }
+
+    // ---- Flow A3: a NON-BLANK requested id is never reused ---------------
+    {
+      // Flow A's Session is still blank; run one turn so the Host cannot reuse it.
+      const requested = 'lifecycle-ordinary'
+      const agent = host.ctx.agents.get(SessionId(requested))
+      assert.ok(agent !== undefined, 'Flow A3 needs the live Host Agent of the created Session')
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'make this Session non-blank' }],
+        source: { kind: 'user' },
+      }))
+      await waitFor('Flow A3 turn to settle', () =>
+        hostSession(requested).snapshotEvents().some(event => event.type === 'turn/end'), 20_000)
+
+      const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      assert.equal(result.outcome.kind, 'created', `Flow A3 create failed: ${result.ownership}/${result.outcome.kind}`)
+      const published = result.outcome.handle.session.id
+      assert.notEqual(published, requested,
+        'the Host publishes ANOTHER identity when the requested id is not reusable (returned id is the authority)')
+      assert.ok(hostSession(published) !== undefined, 'the returned identity names the real new Host Session')
+      assert.ok(catalogIds().includes(published), 'the returned identity is the Client catalog authority')
+      result.outcome.handle.client?.release()
+      flows.returnedIdDiffers = { status: 'covered', requested, published }
+    }
+
+    // ---- Flow B: explicit-preset create ----------------------------------
+    {
+      const requested = 'lifecycle-preset'
+      // The requested preset is deliberately NOT the Host default: if the
+      // adapter dropped `agentPreset`, the Host default would land instead and
+      // the assertion below would fail.
+      const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir, agentPreset: ALT_PRESET })
+      assert.equal(result.ownership, 'current', `Flow B ownership: ${result.ownership}/${result.outcome.kind}`)
+      assert.equal(result.outcome.kind, 'created', `Flow B create failed: ${result.ownership}/${result.outcome.kind}`)
+      const handle = result.outcome.handle
+      assert.equal(handle.session.id, requested)
+
+      // The preset is an ATOMIC creation-time input: no create-then-select
+      // (`agent-preset/selected`) step may have run.
+      assert.equal(appendedTypes(requested).includes('agent-preset/selected'), false,
+        'Flow B must pass the preset at creation time, never create + selectPreset')
+      assert.equal(presetOf(requested), ALT_PRESET, 'Flow B published id must carry the REQUESTED creation-time preset')
+      assert.equal(host.hostCreateCalls.filter(id => id === requested).length, 1,
+        'Flow B must dispatch exactly one Host Session create')
+      assert.ok(catalogIds().includes(requested), 'Flow B published id must be the catalog authority')
+      handle.client?.release()
+      flows.explicitPresetCreate = { status: 'covered', sessionId: requested, preset: ALT_PRESET }
+    }
+
+    // ---- Flow C: open / retain -------------------------------------------
+    {
+      const existing = 'lifecycle-preset'
+      const opened = await lifecycle.open({ sessionId: existing })
+      assert.equal(opened.ownership, 'current', `Flow C ownership: ${opened.ownership}/${opened.outcome.kind}`)
+      assert.equal(opened.outcome.kind, 'opened', `Flow C open failed: ${opened.ownership}/${opened.outcome.kind}`)
+      assert.equal(opened.outcome.handle.session.id, existing)
+      assert.ok(opened.outcome.handle.client !== undefined, 'Flow C must hand back a Client generation owner')
+      assert.ok(sessions.binding(existing) !== undefined, 'Flow C retain must produce a live binding')
+      const before = sessions.retainInfo(SessionId(existing)).getSnapshot().referenceCount
+      opened.outcome.handle.client.release()
+      assert.ok(sessions.retainInfo(SessionId(existing)).getSnapshot().referenceCount < before,
+        'Flow C release must return the reference')
+
+      const unknown = 'lifecycle-unknown'
+      const refused = await lifecycle.open({ sessionId: unknown })
+      assert.equal(refused.outcome.kind, 'unavailable', `Flow C unknown id must fail closed: ${refused.ownership}/${refused.outcome.kind}`)
+      assert.equal(hostSession(unknown), undefined, 'Flow C must never silently create an unknown Session')
+      flows.openRetain = { status: 'covered', sessionId: existing, unknownOutcome: refused.outcome.kind }
+    }
+
+    // ---- Flow D: model select --------------------------------------------
+    {
+      const directory = await models.loadDirectory()
+      assert.deepEqual(directory.default, DEFAULT_SELECTION,
+        'Flow D directory default must come from the Host')
+      assert.ok(directory.routableProviders.includes(PROVIDER), 'Flow D routable provider must include the stub route')
+
+      const target = 'lifecycle-model-target'
+      const other = 'lifecycle-model-other'
+      const createdTarget = await lifecycle.create({ sessionId: target, cwd: anchorDir })
+      const createdOther = await lifecycle.create({ sessionId: other, cwd: anchorDir })
+      assert.equal(createdTarget.outcome.kind, 'created', `Flow D target create failed: ${createdTarget.ownership}/${createdTarget.outcome.kind}`)
+      assert.equal(createdOther.outcome.kind, 'created', `Flow D other create failed: ${createdOther.ownership}/${createdOther.outcome.kind}`)
+      try {
+        const settled = await models.selectSessionModel(target, { provider: PROVIDER, model: ALT_MODEL })
+        assert.equal(settled.ownership, 'current', `Flow D ownership: ${settled.ownership}/${settled.outcome.kind}`)
+        assert.equal(settled.outcome.kind, 'committed', `Flow D select failed: ${settled.ownership}/${settled.outcome.kind}`)
+        assert.deepEqual(settled.outcome.value, { provider: PROVIDER, model: ALT_MODEL })
+        // The durable Client binding projection is the display authority.
+        assert.deepEqual(models.sessionSelection(target), { provider: PROVIDER, model: ALT_MODEL },
+          'Flow D final projection must match the selection')
+        // A Session-local write invalidates the adapter's cached global default
+        // (the Host may have saved it best-effort), so re-read it. This lane
+        // pins that deployment default (the stub does not persist the save), so
+        // the comparison is deterministic; it proves the OTHER Session follows
+        // the Host-authoritative default instead of a TUI-owned truth.
+        const refreshed = await models.loadDirectory()
+        assert.deepEqual(refreshed.default, DEFAULT_SELECTION)
+        assert.deepEqual(models.sessionSelection(other), refreshed.default,
+          'Flow D must not write a second TUI model truth across Sessions')
+      } finally {
+        createdTarget.outcome.handle.client?.release()
+        createdOther.outcome.handle.client?.release()
+      }
+      flows.modelSelect = { status: 'covered', sessionId: target, selection: { provider: PROVIDER, model: ALT_MODEL } }
+    }
+
+    // ---- Flow E: preset select + locked ----------------------------------
+    {
+      const roster = await presets.roster()
+      assert.deepEqual(roster.presets.map(row => row.id).sort(), [ALT_PRESET, PRESET].sort(),
+        'Flow E roster must list the Host presets')
+      assert.equal(roster.defaultId, PRESET, 'Flow E roster must carry the Host-effective default')
+
+      // Normal select on a BLANK Session.
+      const blank = 'lifecycle-blank'
+      const created = await lifecycle.create({ sessionId: blank, cwd: anchorDir, agentPreset: PRESET })
+      assert.equal(created.outcome.kind, 'created', `Flow E blank create failed: ${created.ownership}/${created.outcome.kind}`)
+      const selected = await presets.selectSessionPreset(blank, ALT_PRESET)
+      assert.equal(selected.ownership, 'current', `Flow E ownership: ${selected.ownership}/${selected.outcome.kind}`)
+      assert.equal(selected.outcome.kind, 'committed', `Flow E blank select failed: ${selected.ownership}/${selected.outcome.kind}`)
+      assert.equal(presetOf(blank), ALT_PRESET, 'Flow E blank select must commit the Host preset projection')
+      created.outcome.handle.client?.release()
+
+      // Locked / refusal: a Session that has already run a turn refuses the switch.
+      const locked = 'lifecycle-locked'
+      const lockedCreated = await lifecycle.create({ sessionId: locked, cwd: anchorDir, agentPreset: PRESET })
+      assert.equal(lockedCreated.outcome.kind, 'created', `Flow E locked create failed: ${lockedCreated.ownership}/${lockedCreated.outcome.kind}`)
+      lockedCreated.outcome.handle.client?.release()
+      const lockedSession = hostSession(locked)
+      const lockedAgent = host.ctx.agents.get(SessionId(locked))
+      assert.ok(lockedAgent !== undefined, 'Flow E locked Session has no live Agent to run its first turn')
+      const endsBefore = lockedSession.snapshotEvents().filter(event => event.type === 'turn/end').length
+      lockedAgent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'started' }],
+        source: { kind: 'user' },
+      }))
+      await waitFor('the locked Session first turn to complete', () =>
+        lockedSession.snapshotEvents().filter(event => event.type === 'turn/end').length > endsBefore ? true : undefined)
+      const refusal = await presets.selectSessionPreset(locked, ALT_PRESET)
+      assert.equal(refusal.outcome.kind, 'rejected', `Flow E locked select must refuse: ${refusal.ownership}/${refusal.outcome.kind}`)
+      if (refusal.outcome.kind === 'rejected') {
+        assert.equal(refusal.outcome.error.code, 'agent-preset/locked')
+      }
+      assert.equal(presetOf(locked), PRESET, 'Flow E refusal must not change the Host preset')
+      flows.presetSelectLocked = { status: 'covered', normalPreset: ALT_PRESET, lockedCode: 'agent-preset/locked' }
+    }
+
+    // ---- Flow F: real two-process writer-held (PR5 §12 Slice D) ----------
+    {
+      // The cold Session is READABLE while the external process holds the
+      // write lease, and merely retaining it must not activate a Host Agent.
+      const opened = await lifecycle.open({ sessionId: HELD_SESSION })
+      assert.equal(opened.ownership, 'current', `Flow F ownership: ${opened.ownership}/${opened.outcome.kind}`)
+      assert.equal(opened.outcome.kind, 'opened', `Flow F cold open failed: ${opened.ownership}/${opened.outcome.kind}`)
+      assert.ok(sessions.binding(HELD_SESSION) !== undefined,
+        'Flow F must retain a Client generation for the cold held Session (a real read of the shared root)')
+      assert.equal(host.ctx.agents.get(SessionId(HELD_SESSION)), undefined,
+        'Flow F must not activate a Host Agent merely by opening the cold Session')
+      assert.equal(host.ctx.sessions.get(SessionId(HELD_SESSION)), undefined,
+        'Flow F cold open must not materialize a Host Session')
+
+      // The TUI Remote SessionWriter: the official rename resolves the Agent
+      // first, so the held lease refuses the write before any title mutation.
+      const writer = new RemoteSessionWriter(
+        sessions,
+        generation,
+        RemotePromptSerializerProduction.overSessions(sessions),
+      )
+      const refusedRename = await writer.rename(HELD_SESSION, 'held-title')
+      assert.equal(refusedRename.kind, 'rejected', `Flow F rename must be refused: ${refusedRename.kind}`)
+      if (refusedRename.kind === 'rejected') {
+        assert.equal(refusedRename.error.code, 'session/writer-held', 'Flow F rename must keep the exact code')
+        assert.deepEqual(refusedRename.error.details, { sessionId: HELD_SESSION }, 'Flow F rename must keep the official details')
+        assert.equal(refusedRename.error.message, SESSION_WRITER_HELD_GUIDANCE, 'Flow F rename must carry the shared guidance')
+      }
+
+      // The preset adapter: exact `session/writer-held` is a proven rejection
+      // with preserved details + centralized guidance (PR5 Slice B fix).
+      const refusedPreset = await presets.selectSessionPreset(HELD_SESSION, ALT_PRESET)
+      assert.equal(refusedPreset.outcome.kind, 'rejected', `Flow F preset must be refused: ${refusedPreset.outcome.kind}`)
+      if (refusedPreset.outcome.kind === 'rejected') {
+        assert.equal(refusedPreset.outcome.error.code, 'session/writer-held', 'Flow F preset must keep the exact code')
+        assert.deepEqual(refusedPreset.outcome.error.details, { sessionId: HELD_SESSION }, 'Flow F preset must keep the official details')
+        assert.equal(refusedPreset.outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'Flow F preset must carry the shared guidance')
+      }
+
+      // The model adapter: the existing exact writer-held mapping.
+      const refusedModel = await models.selectSessionModel(HELD_SESSION, { provider: PROVIDER, model: ALT_MODEL })
+      assert.equal(refusedModel.outcome.kind, 'rejected', `Flow F model must be refused: ${refusedModel.outcome.kind}`)
+      if (refusedModel.outcome.kind === 'rejected') {
+        assert.equal(refusedModel.outcome.error.code, 'session/writer-held', 'Flow F model must keep the exact code')
+        assert.deepEqual(refusedModel.outcome.error.details, { sessionId: HELD_SESSION }, 'Flow F model must keep the official details')
+        assert.equal(refusedModel.outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'Flow F model must carry the shared guidance')
+      }
+
+      // EXPLICIT recovery positive control: only after the holder process is
+      // killed (the kernel releases the lease with it) does a second,
+      // user-initiated write commit. No automatic retry happened above.
+      holder.kill('SIGKILL')
+      await holderExited
+      holder = undefined
+      const takenOver = await writer.rename(HELD_SESSION, 'held-title')
+      assert.equal(takenOver.kind, 'committed', `Flow F explicit retry must commit after the holder exits: ${takenOver.kind}`)
+      if (takenOver.kind === 'committed') {
+        assert.equal(takenOver.value.title, 'held-title')
+      }
+      opened.outcome.handle.client?.release()
+      flows.writerHeld = {
+        status: 'covered',
+        sessionId: HELD_SESSION,
+        refusedCodes: ['session/writer-held'],
+        recovery: 'explicit retry committed after SIGKILL of the holder',
+      }
+    }
+
+    console.log(JSON.stringify({ ok: true, flows }))
+  } finally {
+    if (holder !== undefined && holder.exitCode === null) holder.kill('SIGKILL')
+    if (holderExited !== undefined) await holderExited
+    if (client !== undefined) await client.fiber.dispose()
+    if (host !== undefined) {
+      if (host.persistenceFiber !== undefined) await host.persistenceFiber.dispose()
+      await host.ctx.fiber.dispose()
+    }
+    rmSync(workRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+    loader.restore()
+  }
+}
+
+main().catch(error => {
+  console.error(`DSH_REMOTE_SESSION_LIFECYCLE_PARITY_FAILURE: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+  process.exitCode = 1
+})

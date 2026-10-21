@@ -1,0 +1,13 @@
+{
+  "name": "dsh-pi-example-vim",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@xmoon76/dsh-pi-tui": "workspace:*"
+  }
+}

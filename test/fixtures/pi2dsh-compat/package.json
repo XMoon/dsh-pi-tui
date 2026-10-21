@@ -1,0 +1,11 @@
+{
+  "name": "dsh-pi2dsh-compat-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "index.mjs"
+    ]
+  }
+}

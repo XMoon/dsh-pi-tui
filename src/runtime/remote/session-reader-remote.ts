@@ -1,0 +1,353 @@
+/**
+ * Read-only Remote implementation of the semantic SessionReader port.
+ *
+ * The input faces deliberately mirror the official DSH Client contracts without
+ * importing the Host packages into the runtime bundle. Production remains on
+ * Direct; this adapter is consumed by the diagnostic/integration shadow only.
+ * The official Client owns transport recovery, list projection, search policy,
+ * and Session activation. This module only maps those detached read facts.
+ *
+ * @module @xmoon76/dsh-pi-tui/runtime/remote/session-reader-remote
+ */
+
+import { cancellationError } from '../process/tasks.ts'
+import {
+  contextPressureOccupancy,
+  type SessionContentSearchPage,
+  type SessionProjectionSummary,
+  type SessionReader,
+  type SessionSummary,
+} from '../session-reader-port.ts'
+import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
+import { detachedSessionStatus } from '../session-status-projection.ts'
+import type { SessionStatusProjection } from '../session-reader-port.ts'
+
+/** The public generation identity exposed by the official Connection client. */
+export interface RemoteConnectionGeneration {
+  readonly id: string | number
+}
+
+/** The official Connection generation read/subscription face. */
+export interface RemoteConnectionGenerationSource {
+  getSnapshot(): RemoteConnectionGeneration | undefined
+  subscribe(listener: () => void): () => void
+}
+
+/** The detached projection values retained on an official Client list row. */
+export interface RemoteProjectionValues {
+  readonly title?: unknown
+  readonly agentPreset?: unknown
+}
+
+/** The official Client Session list row subset consumed by this adapter. */
+export interface RemoteSessionListRow {
+  readonly id: string
+  readonly cwd?: string
+  readonly parentId?: string
+  readonly origin?: 'subagent'
+  readonly running: boolean
+  readonly updatedAt: number
+  readonly projectionValues?: RemoteProjectionValues
+  /** Official Client on-disk format state (rc.2 `SessionListEntry.formatStatus`).
+   * Passed through verbatim; this adapter never infers it. */
+  readonly formatStatus?: 'current' | 'migration-required'
+  /** Official Client host-authoritative blank bit (v2 §0.6). */
+  readonly blank?: boolean
+}
+
+/** The official Client Session list snapshot subset consumed by this adapter. */
+export interface RemoteSessionListState {
+  readonly ids: readonly string[]
+  readonly byId: Readonly<Record<string, RemoteSessionListRow>>
+  readonly phase: 'pending' | 'ready'
+}
+
+/** Observable list snapshot face from the official Session Controller client. */
+export interface RemoteSessionListSnapshot {
+  getSnapshot(): RemoteSessionListState
+  subscribe(listener: () => void): () => void
+}
+
+/** The official Client Session projection face subset used for a fallback read. */
+export interface RemoteSessionProjectionFace {
+  getSnapshot(): unknown
+}
+
+/** The official Client Session binding projection subset used by this adapter. */
+export interface RemoteSessionBinding {
+  readonly session: {
+    readonly projections: {
+      faceOf(key: string): RemoteSessionProjectionFace
+    }
+  }
+}
+
+/** The official Client search result subset. */
+export interface RemoteSessionSearchPage {
+  readonly items: readonly {
+    readonly sessionId: string
+    readonly snippet: string
+  }[]
+  readonly hasMore: boolean
+}
+
+/** Structural form of the official RemoteResult. */
+export type RemoteReadResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: unknown }
+
+/** The official Client Session service read face. */
+export interface RemoteSessionsReadSource {
+  readonly list: RemoteSessionListSnapshot
+  refresh(): Promise<void>
+  search(query: string, signal: AbortSignal): Promise<RemoteReadResult<RemoteSessionSearchPage>>
+  binding(id: string): RemoteSessionBinding | undefined
+}
+
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { readonly code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
+const RC1_DISABLED_SEARCH_MESSAGE =
+  'session search failed: SessionQueryError: session search is disabled: '
+  + 'this deployment configures the session-query index with openAt "never"'
+
+function isSearchDisabled(error: unknown): boolean {
+  if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return true
+  // rc1 reports an unmounted dsh-session-query through the generic gateway
+  // error code; only the official capability-unavailable messages are mapped,
+  // never every gateway/internal failure.
+  if (errorCodeOf(error) !== 'gateway/internal') return false
+  const message = (error as { readonly message?: unknown }).message
+  return message === RC1_DISABLED_SEARCH_MESSAGE
+    || (typeof message === 'string' && message.startsWith('session search is unavailable:'))
+}
+
+function isRemoteAbort(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'AbortError') return true
+  const code = errorCodeOf(error)
+  return code === 'ABORT_ERR' || code === 'gateway/cancelled' || code === 'SESSION_QUERY_ABORTED'
+}
+
+function projectionValue(
+  values: RemoteProjectionValues | undefined,
+  key: 'title' | 'agentPreset',
+): unknown {
+  return key === 'title' ? values?.title : values?.agentPreset
+}
+
+function stringProjection(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * Maps the official DSH Client Session list/projection/search faces to the
+ * existing TUI semantic read contract. A generation is required so a lost
+ * Connection never becomes an authoritative empty list.
+ */
+/** The projection keys whose values this adapter presents as a session's
+ *  CURRENT facts (the official feature contract exposes per-key faces only, so
+ *  a live subscription must name the keys it follows). ONE list: the ingress's
+ *  change channel and these reads stay in step. */
+const STATUS_PROJECTION_KEYS = [
+  'modelSelection',
+  'contextPressure',
+  'contextBreakdown',
+  'tokenUsage',
+  'todos',
+  'agentPreset',
+  'title',
+  'goal',
+  // M3-4 PR4 §6.1: the committed permission value rides the SAME live
+  // channel — a successful permission write is committed by the pushed
+  // projection (the footer's preset row repaints from it, never an
+  // optimistic local install).
+  'permissions',
+  // TPS plan PR-2: the bundle's OWN Host performance projection (R5/All/TTFB)
+  // rides the SAME live channel and the SAME exact retained binding read, so
+  // a pushed frame refreshes the performance facts with every other status
+  // key — never a bounded-page re-fold and never `loadOlder()`.
+  'piTuiPerformance',
+] as const
+
+/** The projection keys the Remote STATUS/WELCOME current facts are read from:
+ *  EXACTLY what `sessionStatus()` reads (`STATUS_PROJECTION_KEYS`, the tuple
+ *  that drives those reads) plus `plan` (read by the plan source). The
+ *  ingress's live refresh follows THIS list, so a key that is read is always
+ *  subscribed and a key that is subscribed is always read — no static-read /
+ *  stale-UI drift. A projection whose change the status does NOT consume
+ *  (e.g. `turnOutline`, `sessionStats`) is deliberately absent: its own
+ *  consumer establishes the subscription it needs. */
+export const CURRENT_STATUS_PROJECTION_KEYS: readonly string[] = [...STATUS_PROJECTION_KEYS, 'plan']
+
+export class RemoteSessionReader implements SessionReader {
+  private readonly sessions: RemoteSessionsReadSource
+  private readonly generation: RemoteConnectionGenerationSource
+
+  constructor(sessions: RemoteSessionsReadSource, generation: RemoteConnectionGenerationSource) {
+    this.sessions = sessions
+    this.generation = generation
+  }
+
+  async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
+    void currentSessionId
+    signal?.throwIfAborted()
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) return undefined
+
+    // The official Client owns refresh single-flight and its failure state. A
+    // resolved refresh does not itself promise a new baseline; the snapshot's
+    // phase is the only list-arrival fact this adapter consumes.
+    await this.sessions.refresh()
+    signal?.throwIfAborted()
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) return undefined
+
+    const snapshot = this.sessions.list.getSnapshot()
+    if (snapshot.phase !== 'ready') return undefined
+    return snapshot.ids.map(id => {
+      const row = snapshot.byId[id]
+      return {
+        // `ids` is the official ordered membership/identity authority; the
+        // keyed row only supplies detached metadata for this id.
+        id,
+        updatedAt: row.updatedAt,
+        cwd: row.cwd,
+        ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
+        ...(row.origin === undefined ? {} : { origin: row.origin }),
+        // The official Client row's `formatStatus` is passed through VERBATIM:
+        // no header parsing, no `cwd`-missing inference, no client-side decoder.
+        ...(row.formatStatus === undefined ? {} : { formatStatus: row.formatStatus }),
+        // The Client row's `running` bit is not the Direct reader's attached
+        // Session-store bit. Keep Remote rows conservatively detached and let
+        // shadow parity mark the field non-comparable.
+        live: false,
+      }
+    })
+  }
+
+  /** Official Client Session-summary blank bit — the Remote mapping of the
+   *  semantic read (v2 §0.6). */
+  blank(sessionId: string): boolean | undefined {
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const snapshot = this.sessions.list.getSnapshot()
+    if (snapshot.phase !== 'ready') return undefined
+    return snapshot.byId[sessionId]?.blank
+  }
+
+  async projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>> {
+    signal?.throwIfAborted()
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) return new Map()
+
+    const snapshot = this.sessions.list.getSnapshot()
+    const result = new Map<string, SessionProjectionSummary>()
+    for (const row of rows) {
+      signal?.throwIfAborted()
+      const listed = snapshot.byId[row.id]
+      if (listed === undefined) continue
+
+      let title = stringProjection(projectionValue(listed.projectionValues, 'title'))
+      let preset = stringProjection(projectionValue(listed.projectionValues, 'agentPreset'))
+      if (title === undefined || preset === undefined) {
+        const binding = this.sessions.binding(row.id)
+        if (binding !== undefined) {
+          if (title === undefined) {
+            title = stringProjection(binding.session.projections.faceOf('title').getSnapshot())
+          }
+          if (preset === undefined) {
+            preset = stringProjection(binding.session.projections.faceOf('agentPreset').getSnapshot())
+          }
+        }
+      }
+      if (title !== undefined || preset !== undefined) {
+        result.set(row.id, {
+          ...(title === undefined ? {} : { title }),
+          ...(preset === undefined ? {} : { preset }),
+        })
+      }
+    }
+    signal?.throwIfAborted()
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) return new Map()
+    return result
+  }
+
+  async search(query: string, signal?: AbortSignal): Promise<SessionContentSearchPage | undefined> {
+    signal?.throwIfAborted()
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) return undefined
+    const requestSignal = signal ?? new AbortController().signal
+
+    let result: RemoteReadResult<RemoteSessionSearchPage>
+    try {
+      result = await this.sessions.search(query, requestSignal)
+      requestSignal.throwIfAborted()
+    } catch (error) {
+      requestSignal.throwIfAborted()
+      if (isSearchDisabled(error)) return undefined
+      if (isRemoteAbort(error)) throw cancellationError('remote session search was aborted')
+      throw error
+    }
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) return undefined
+    if (!result.ok) {
+      if (isSearchDisabled(result.error)) return undefined
+      if (isRemoteAbort(result.error)) throw cancellationError('remote session search was aborted')
+      throw result.error
+    }
+    return {
+      items: result.value.items.map(item => ({ sessionId: item.sessionId, snippet: item.snippet })),
+      hasMore: result.value.hasMore,
+    }
+  }
+
+  measureContext(sessionId: string): number | undefined {
+    // The official `contextPressure` Session projection off the EXACT
+    // retained binding (M3-3A): no retain/open is performed for a
+    // measurement, and an unretained session simply has no value. The
+    // mapping is the one shared semantic (`projectedTokens ??
+    // pressureTokens`) — no Remote token-meter call exists or is invented.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    return contextPressureOccupancy(
+      binding.session.projections.faceOf('contextPressure').getSnapshot(),
+    )
+  }
+
+  turnOutline(sessionId: string): readonly TurnOutlineEntryDto[] | undefined {
+    // The official `turnOutline` projection off the EXACT retained binding
+    // (M3-4 /rewind foundation): a projection read only — no history fetch,
+    // no client-side fold, no retain for an outline.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    return detachedTurnOutline(
+      binding.session.projections.faceOf('turnOutline').getSnapshot(),
+    )
+  }
+
+  sessionStatus(sessionId: string): SessionStatusProjection | undefined {
+    // The official projection values off the EXACT retained binding of THIS
+    // session (main or viewed child alike): no retain, no parent fallback,
+    // no zero-filled guesses — an unretained session simply has no facts.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    const projections = binding.session.projections
+    // The reads are driven by the SAME tuple the live refresh subscribes to:
+    // adding a key here (and to the DTO) cannot leave the live channel behind.
+    const values: Record<string, unknown> = {}
+    for (const key of STATUS_PROJECTION_KEYS) values[key] = projections.faceOf(key).getSnapshot()
+    return detachedSessionStatus(sessionId, values, this.cwdOf(sessionId))
+  }
+
+  /** The official Client list-row cwd fact for one session (undefined when
+   *  the row carries none — never a main-session or client-side guess). */
+  private cwdOf(sessionId: string): string | undefined {
+    const snapshot = this.sessions.list.getSnapshot()
+    if (snapshot.phase !== 'ready') return undefined
+    const cwd = snapshot.byId[sessionId]?.cwd
+    return typeof cwd === 'string' ? cwd : undefined
+  }
+}

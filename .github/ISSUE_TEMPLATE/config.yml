@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Open issues
+    url: https://github.com/XMoon/dsh-pi-tui/issues
+    about: >
+      Check the open issues before opening a new one — most work already has an
+      owning issue. Each one states its own scope, status and next trigger.
+  - name: dsh-pi-tui on npm
+    url: https://www.npmjs.com/package/@xmoon76/dsh-pi-tui
+    about: Published releases and their changelogs.

@@ -1,0 +1,18 @@
+{
+  "issue": 26,
+  "consumer": "pi2dsh",
+  "pi2dshVersion": "0.27.0",
+  "dshVersion": "0.2.1-rc.2",
+  "contracts": [
+    "root.LOCAL_COMMANDS",
+    "extensions/unstable.UNSTABLE_API_LEVEL=1",
+    "apiVersion=2",
+    "capability:unstable.surface.handle",
+    "chrome.footer.status",
+    "surface.mountComponent",
+    "component.render",
+    "component.input",
+    "component.done",
+    "component.dispose"
+  ]
+}

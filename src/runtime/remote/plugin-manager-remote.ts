@@ -1,0 +1,261 @@
+/**
+ * The experimental Remote Plugin Manager adapter (Pre-M3 PR2): the semantic
+ * {@link PluginManagerPort} over the official generated `pluginManager`
+ * Remote face, mapped through the SAME pure mapping as the Direct adapter.
+ *
+ * The generated Remote is the client half of the official Host service, so
+ * this adapter owns no package/profile truth, no install state machine and no
+ * retry: a `RemoteResult` refusal is normalized to ONE thrown Error (the
+ * controller's operation-failure entry point) and the official Host remains
+ * the only authority for installed/enabled truth.
+ *
+ * Composed by the experimental M3 Remote application runtime
+ * (`src/app/remote/m3a-semantics.ts`) and served through
+ * `Backend.pluginManager` to the one existing Plugin Manager surface. Direct
+ * remains the production/default backend and there is still no public Remote
+ * selector, so no normal startup reaches this adapter.
+ *
+ * Full contract: docs/architecture/host-client.md (Host authority and
+ * currentness) and docs/architecture/surface-behavior.md (controller/workspace).
+ * @module @xmoon76/dsh-pi-tui/runtime/remote/plugin-manager-remote
+ */
+
+import type {
+  BundleInfo,
+  ChangeResult,
+  InstallBundleOptions,
+  PluginChange,
+  PluginInfo,
+  PluginInstallCancellation,
+  PluginInstallLogChunk,
+  PluginInstallProgress,
+  PluginInstallRequestId,
+  PluginRegistries,
+  PluginSpecInspection,
+} from '@deepseek-ai/dsh-plugin-manager'
+import type {
+  PluginChangeFact,
+  PluginInstallCancellationFact,
+  PluginInstallEvent,
+  PluginInstallRequest,
+  PluginManagerPort,
+  PluginManagerSnapshot,
+  PluginSpecInspectionFact,
+} from '../plugin-manager-port.ts'
+import {
+  detachChange,
+  detachInspection,
+  detachLog,
+  detachPhase,
+  detachPluginManagerSnapshot,
+  pluginInstallRequestId,
+  type PluginExemptionsValue,
+} from '../plugin-manager-mapping.ts'
+import { PluginManagerStaleResultError } from '../plugin-manager-port.ts'
+import type { RemoteResultLike } from './session-writer-remote.ts'
+import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
+import { remoteFailureMessage } from './write-failure.ts'
+
+/**
+ * The official generated `pluginManager` Remote namespace: the same record
+ * types the Direct Host service exposes.
+ */
+export interface RemotePluginManagerNamespace {
+  listBundles(): Promise<RemoteResultLike<BundleInfo[]>>
+  listPlugins(): Promise<RemoteResultLike<PluginInfo[]>>
+  registries(): Promise<RemoteResultLike<PluginRegistries>>
+  listVersionExemptions(): Promise<RemoteResultLike<PluginExemptionsValue>>
+  inspect(
+    spec: string,
+    options?: { readonly registry?: string | null },
+    signal?: AbortSignal,
+  ): Promise<RemoteResultLike<PluginSpecInspection>>
+  setBundleEnabled(name: string, enabled: boolean): Promise<RemoteResultLike<ChangeResult>>
+  setPluginEnabled(id: string, enabled: boolean): Promise<RemoteResultLike<ChangeResult>>
+  removeBundle(name: string): Promise<RemoteResultLike<ChangeResult>>
+  installBundle(spec: string, options?: InstallBundleOptions): Promise<RemoteResultLike<ChangeResult>>
+  waitForInstall(requestId: PluginInstallRequestId): Promise<RemoteResultLike<ChangeResult | null>>
+  cancelInstall(requestId: PluginInstallRequestId): Promise<RemoteResultLike<PluginInstallCancellation>>
+}
+
+/**
+ * The official Client Remote face this adapter consumes: the generated
+ * `pluginManager` namespace (methods) plus the typed Remote's forwarded-event
+ * subscription (`$on`) — exactly the shape the Client assembly exposes, so the
+ * published `ClientRemote` satisfies it with no cast.
+ */
+export interface RemotePluginManagerSource {
+  readonly pluginManager: RemotePluginManagerNamespace
+  $on(event: 'plugin-manager/changed', listener: (payload: PluginChange) => void): () => void
+  $on(event: 'plugin-manager/install-state', listener: (payload: PluginInstallProgress) => void): () => void
+  $on(event: 'plugin-manager/install-log', listener: (payload: PluginInstallLogChunk) => void): () => void
+}
+
+/** One refused Remote call, normalized to the port's throw-based failure entry. */
+function unwrapRemote<T>(result: RemoteResultLike<T>, operation: string): T {
+  if (result.ok) return result.value
+  throw new Error(`pluginManager.${operation} failed: ${remoteFailureMessage(result.error)}`)
+}
+
+/** The experimental Remote Plugin Manager port over the generated Remote. */
+export class RemotePluginManagerPort implements PluginManagerPort {
+  private readonly remote: RemotePluginManagerSource
+  private readonly generation: RemoteConnectionGenerationSource
+
+  constructor(remote: RemotePluginManagerSource, generation: RemoteConnectionGenerationSource) {
+    this.remote = remote
+    this.generation = generation
+  }
+
+  async snapshot(): Promise<PluginManagerSnapshot> {
+    const [bundles, plugins, registries, exemptions] = await Promise.all([
+      this.remote.pluginManager.listBundles(),
+      this.remote.pluginManager.listPlugins(),
+      this.remote.pluginManager.registries(),
+      this.remote.pluginManager.listVersionExemptions(),
+    ])
+    return detachPluginManagerSnapshot({
+      bundles: unwrapRemote(bundles, 'listBundles'),
+      plugins: unwrapRemote(plugins, 'listPlugins'),
+      registries: unwrapRemote(registries, 'registries'),
+      exemptions: unwrapRemote(exemptions, 'listVersionExemptions'),
+    })
+  }
+
+  async inspect(spec: string, registry?: string | null, signal?: AbortSignal): Promise<PluginSpecInspectionFact> {
+    return detachInspection(await this.currentness(
+      'inspect',
+      () => this.remote.pluginManager.inspect(
+        spec,
+        registry === undefined ? undefined : { registry },
+        signal,
+      ),
+    ))
+  }
+
+  /**
+   * One Remote result (a read or a settlement) fenced to the Connection
+   * generation captured BEFORE dispatch. The fence covers success, an official
+   * refusal result and a transport rejection alike: a reply carried by a
+   * superseded generation is never presented as the new generation's definite
+   * outcome. The Host may already have applied a write (or advanced an
+   * install), so the caller's authoritative inventory reread / request-id
+   * reconcile decides the visible outcome. An unchanged generation preserves
+   * the original error and its real refusal taxonomy.
+   */
+  private async currentness<T>(operation: string, call: () => Promise<RemoteResultLike<T>>): Promise<T> {
+    const captured = this.generation.getSnapshot()
+    const stillCurrent = (): boolean => Object.is(captured, this.generation.getSnapshot())
+    let value: T
+    try {
+      value = unwrapRemote(await call(), operation)
+    } catch (error) {
+      // A refusal or a transport rejection is just as generation-bound as a
+      // success: a stale failure must never be presented as the new
+      // generation's definite outcome. Only an UNCHANGED generation preserves
+      // the original error (and its real refusal taxonomy).
+      if (!stillCurrent()) throw new PluginManagerStaleResultError(operation)
+      throw error
+    }
+    if (!stillCurrent()) throw new PluginManagerStaleResultError(operation)
+    return value
+  }
+
+  async setBundleEnabled(name: string, enabled: boolean): Promise<PluginChangeFact> {
+    return detachChange(await this.currentness('setBundleEnabled', () => this.remote.pluginManager.setBundleEnabled(name, enabled)))
+  }
+
+  async setPluginEnabled(id: string, enabled: boolean): Promise<PluginChangeFact> {
+    return detachChange(await this.currentness('setPluginEnabled', () => this.remote.pluginManager.setPluginEnabled(id, enabled)))
+  }
+
+  async removeBundle(name: string): Promise<PluginChangeFact> {
+    return detachChange(await this.currentness('removeBundle', () => this.remote.pluginManager.removeBundle(name)))
+  }
+
+  async startInstall(request: PluginInstallRequest): Promise<PluginChangeFact> {
+    const options: InstallBundleOptions = {
+      requestId: pluginInstallRequestId(request.requestId),
+      registry: request.registry,
+      ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
+      ...(request.approvedBuilds === undefined ? {} : { approvedBuilds: [...request.approvedBuilds] }),
+    }
+    return detachChange(await this.currentness('installBundle', () => this.remote.pluginManager.installBundle(request.spec, options)))
+  }
+
+  async waitForInstall(requestId: string): Promise<PluginChangeFact | null> {
+    const result = await this.currentness(
+      'waitForInstall',
+      () => this.remote.pluginManager.waitForInstall(pluginInstallRequestId(requestId)),
+    )
+    return result === null ? null : detachChange(result)
+  }
+
+  async cancelInstall(requestId: string): Promise<PluginInstallCancellationFact> {
+    const result = await this.currentness(
+      'cancelInstall',
+      () => this.remote.pluginManager.cancelInstall(pluginInstallRequestId(requestId)),
+    )
+    return Object.freeze({ status: result.status })
+  }
+
+  subscribeInstall(listener: (event: PluginInstallEvent) => void): () => void {
+    const owned: Array<() => void> = []
+    try {
+      owned.push(this.remote.$on('plugin-manager/install-state', (payload) => {
+        listener({ kind: 'phase', phase: detachPhase(payload) })
+      }))
+      owned.push(this.remote.$on('plugin-manager/install-log', (payload) => {
+        listener({ kind: 'log', log: detachLog(payload) })
+      }))
+    } catch (error) {
+      // Defensive structural hardening: the second subscription may fail
+      // synchronously, and the earlier subscription must not leak. (The
+      // forwarded-event allowlist is a compile-time constraint in the pinned
+      // rc.2, not a runtime guarantee this adapter may rely on.)
+      for (const off of owned.splice(0)) off()
+      throw error
+    }
+    return () => {
+      for (const off of owned.splice(0)) off()
+    }
+  }
+
+  /**
+   * Two invalidation sources, one hint:
+   *  1. the forwarded official `plugin-manager/changed` (a Host-side manager
+   *     operation or an external profile change);
+   *  2. a NEW Connection generation (the official Connection owns reconnection;
+   *     this adapter only tells the consumer to reread).
+   *
+   * A disconnect (`undefined`) never fabricates inventory and never starts a
+   * custom reconnect loop. The listener carries no business truth; the
+   * consumer's `snapshot()` remains the only authority.
+   */
+  subscribeInvalidation(listener: () => void): () => void {
+    const owned: Array<() => void> = []
+    try {
+      owned.push(this.remote.$on('plugin-manager/changed', () => { listener() }))
+      let previous = this.generation.getSnapshot()
+      owned.push(this.generation.subscribe(() => {
+        const current = this.generation.getSnapshot()
+        if (current === undefined) {
+          // A lost generation withdraws whatever it carried: the next DEFINED
+          // generation is a new one to reread, not a duplicate of the lost one.
+          previous = undefined
+          return
+        }
+        if (previous !== undefined && previous.id === current.id) return
+        previous = current
+        listener()
+      }))
+    } catch (error) {
+      // The second subscription may fail synchronously; the first must not leak.
+      for (const off of owned.splice(0)) off()
+      throw error
+    }
+    return () => {
+      for (const off of owned.splice(0)) off()
+    }
+  }
+}

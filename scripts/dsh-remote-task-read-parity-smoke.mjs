@@ -1,0 +1,422 @@
+#!/usr/bin/env node
+/**
+ * D1.3 same-Host direct-child catalog/job parity smoke over the pinned DSH
+ * Source Mode contracts. The fixture uses the real Host subagent/job services,
+ * Session Controller, Gateway, Connection, and official ClientSessions.
+ *
+ * @module dsh-remote-task-read-parity-smoke
+ */
+
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { Context } from '@deepseek-ai/cordis'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
+import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import commandsRemote from '@deepseek-ai/dsh-commands/remote'
+import { apply as applyApiRemotes, inject as apiRemotesInject } from '@deepseek-ai/dsh-api-remotes'
+import SessionController from '@deepseek-ai/dsh-api-session-controller'
+import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
+import SubagentRuntime, { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
+import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import JobController from '@deepseek-ai/dsh-api-job-controller'
+import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import { DirectTaskReader } from '../src/runtime/direct/task-read-direct.ts'
+import { RemoteTaskReader } from '../src/runtime/remote/task-read-remote.ts'
+import { RemoteTaskReadShadow } from '../src/runtime/remote/task-read-shadow.ts'
+
+function installModuleLoader() {
+  const nodeRequire = createRequire(import.meta.url)
+  const modules = new Map()
+  const previousWindow = globalThis.window
+  const previousLocation = globalThis.location
+  const previousTransport = globalThis.__DSH_TRANSPORT__
+  const requireModule = specifier => {
+    if (specifier.endsWith('/client')) {
+      const id = specifier.slice(0, -'/client'.length)
+      const module = modules.get(id)
+      if (module === undefined) throw new Error(`official Client module ${specifier} loaded before ${id}`)
+      return module
+    }
+    return nodeRequire(specifier)
+  }
+  globalThis.window = {
+    __ModuleLoader__: {
+      load({ id, factory }) {
+        if (modules.has(id)) throw new Error(`official Client module ${id} loaded twice`)
+        modules.set(id, factory(requireModule))
+      },
+    },
+  }
+  globalThis.location = { hostname: 'localhost', origin: 'http://dsh-task-parity.local', search: '' }
+  /**
+   * Import one official Client bundle from whichever channel its published
+   * `./client` entry selects. DSH 0.2.1-rc.1+ splits that entry into a
+   * standalone Node ESM half (`node`, which never registers through
+   * `__ModuleLoader__`) and a browser loader factory (`browser`/`default`).
+   * A browser registration always wins; the Node namespace only fills a gap,
+   * into the SAME table the registering factories resolve `/client`
+   * dependencies from.
+   */
+  const importClient = async (specifier) => {
+    const id = specifier.slice(0, -'/client'.length)
+    const imported = await import(specifier)
+    if (!modules.has(id)) modules.set(id, imported)
+    return modules.get(id)
+  }
+  return {
+    modules,
+    importClient,
+    restore() {
+      if (previousWindow === undefined) delete globalThis.window
+      else globalThis.window = previousWindow
+      if (previousLocation === undefined) delete globalThis.location
+      else globalThis.location = previousLocation
+      if (previousTransport === undefined) delete globalThis.__DSH_TRANSPORT__
+      else globalThis.__DSH_TRANSPORT__ = previousTransport
+    },
+  }
+}
+
+function provideHostPeripheralServices(ctx) {
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'fixture', model: 'fixture' }),
+    saveSelection: async () => {},
+  })
+  ctx.provide('llm', { listProviders: () => [{ id: 'fixture', name: 'fixture' }] })
+  ctx.provide('attachments', {
+    imageLimits: Object.freeze({
+      maxImageBytes: 5 * 1024 * 1024,
+      maxImagesPerMessage: 20,
+      maxMessageImageBytes: 100 * 1024 * 1024,
+      maxImagePixels: 40_000_000,
+      maxImageDimension: 2000,
+      mediaTypes: Object.freeze(['image/png']),
+    }),
+    admitPromptContent: async content => content,
+  })
+  ctx.provide('fileUploads', {
+    registerAgentResolver: () => () => {},
+    resolve: () => undefined,
+    bindPrompt: () => ({ commit: () => {}, [Symbol.dispose]: () => {} }),
+    retirePrompt: () => {},
+  })
+  ctx.provide('workspaceRegistry', {})
+  ctx.provide('webServer', { registerUpgrade: () => () => {} })
+}
+
+async function createHost() {
+  const ctx = new Context()
+  await ctx.plugin(TypertRegistry)
+  // rc.2: the Gateway and the SessionController both inject the official
+  // access decider, so the Host mounts it before either is injected.
+  await ctx.plugin(RemoteAccessService)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(LocalJobRegistry)
+  await ctx.plugin(SessionProjectionRegistry)
+  provideHostPeripheralServices(ctx)
+  // The fs service the Session Controller injects: without it the official
+  // controller (and its Remote stream exports) never constructs.
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(LocalFileSystem)
+  await ctx.plugin(WorkingDirectory)
+  // rc.2: the subagent runtime injects the working-directory owner, so it
+  // mounts after the filesystem/directory rows it depends on.
+  await ctx.plugin(SubagentRuntime)
+  await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
+    new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
+  })
+  await ctx.inject(SessionController.inject, controllerCtx => {
+    new SessionController(controllerCtx, { nativeOpen: false })
+  })
+  // rc.1 ClientJobs authority: the Host must serve the `job.list` roster
+  // stream the official client watch consumes.
+  await ctx.inject(JobController.inject, controllerCtx => {
+    new JobController(controllerCtx, {})
+  })
+  await ctx.plugin(hostCtx => { new HostConnectionService(hostCtx, [], {}) })
+  await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
+    new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
+  })
+  await ctx.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
+
+  const sessions = ctx.get('sessions')
+  const parent = sessions.create(SessionId('task-parent'), {
+    meta: { cwd: '/tmp/dsh-d1-3-task', createdAt: 3_000 },
+  })
+  const childContinuable = sessions.create(SessionId('task-child-continuable'), {
+    meta: {
+      cwd: '/tmp/dsh-d1-3-task',
+      parentSession: parent.id,
+      origin: 'subagent',
+      createdAt: 3_001,
+    },
+  })
+  childContinuable.append('subagent/descriptor', snapshotSubagentDescriptor({
+    mode: 'continuable',
+    provider: 'fixture',
+    label: 'task continuable child',
+  }))
+  const childOneShot = sessions.create(SessionId('task-child-one-shot'), {
+    meta: {
+      cwd: '/tmp/dsh-d1-3-task',
+      parentSession: parent.id,
+      origin: 'subagent',
+      createdAt: 3_002,
+    },
+  })
+  childOneShot.append('subagent/descriptor', snapshotSubagentDescriptor({
+    mode: 'one-shot',
+    provider: 'fixture',
+    label: 'task one-shot child',
+  }))
+  // The parent-owned discovery facts (the runtime appends these through its
+  // own establishCatalogChild on a real spawn; the fixture writes the same
+  // v0 catalog events directly so both read authorities see the children).
+  parent.append('subagent/catalog', {
+    version: 0,
+    childId: childContinuable.id,
+    childCreatedAt: 3_001,
+    mode: 'continuable',
+    label: 'task continuable child',
+  })
+  parent.append('subagent/catalog', {
+    version: 0,
+    childId: childOneShot.id,
+    childCreatedAt: 3_002,
+    mode: 'one-shot',
+    label: 'task one-shot child',
+  })
+  // M3-5 PR2 L5: a catalog entry whose CHILD SESSION DOES NOT EXIST is the real
+  // rc.2 carrier shape of an unreadable descendant branch. Upstream
+  // `listDescendants` reads the child catalog, `observeSession` throws
+  // `SESSION_QUERY_SESSION_NOT_FOUND` (NOT a SubagentError), so that branch
+  // becomes an `unavailable` diagnostic and its siblings survive; the Client's
+  // `session.projections` answers null for the missing Session, the projection
+  // store stays without the catalog key and settles `ready`, so the Remote
+  // adapter must classify that branch `unavailable` too — never as an
+  // authoritative empty child. This is the representable diagnostic both
+  // backends can agree on at the REAL wire level.
+  parent.append('subagent/catalog', {
+    version: 1,
+    childId: 'task-child-ghost',
+    childCreatedAt: 3_003,
+    mode: 'continuable',
+    label: 'task ghost child',
+  })
+
+  const parentFiber = ctx.plugin(() => {})
+  const emptyInbox = { nextTurn: [], nextStep: [] }
+  const parentAgent = { id: parent.id, session: parent, status: 'running', ctx: parentFiber.ctx, inbox: emptyInbox }
+  const childContinuableAgent = { id: childContinuable.id, session: childContinuable, status: 'running', ctx: parentFiber.ctx, inbox: emptyInbox }
+  const childOneShotAgent = { id: childOneShot.id, session: childOneShot, status: 'running', ctx: parentFiber.ctx, inbox: emptyInbox }
+  ctx.get('agents').register(parentAgent)
+  ctx.get('agents').register(childContinuableAgent)
+  ctx.get('agents').register(childOneShotAgent)
+
+  let settleJob
+  const done = new Promise(resolve => { settleJob = resolve })
+  await ctx.plugin({
+    inject: ['jobs'],
+    apply(jobCtx) {
+      jobCtx.jobs.attachController('task-parity')
+      jobCtx.jobs.start({
+        kind: 'bash',
+        label: 'task parity job',
+        // rc.1 JobSpec ownership: the owner is the parent SessionId (the
+        // registry resolves the live Agent under it), never the Agent object.
+        owner: parent.id,
+        run: () => ({ done, cancel: () => {} }),
+      })
+    },
+  })
+
+  return { ctx, parent, parentAgent, childOneShotAgent, settleJob }
+}
+
+function hostTransport(host) {
+  const connection = host.ctx.get('connection')
+  const shared = connection.createSharedFetchHandler('/api')
+  // The official Gateway speaks for the Host Connection's own owner Peer on
+  // both carrier paths (DSH 0.2.1-rc.2 requires an explicit Peer).
+  const peer = connection.browserPeer
+  /** The client stream carrier contract passes an optional uplink; the Host
+   * wire face always takes one, so an absent uplink is an empty one. */
+  async function* emptyUplink() {}
+  return {
+    ownsHost: true,
+    fetch(input, init) {
+      const request = input instanceof Request
+        ? new Request(input, init)
+        : new Request(new URL(String(input), 'http://dsh-task-parity.local'), init)
+      return shared.fetch(request, peer)
+    },
+    openStream(endpoint, payload, signal, uplink) {
+      return (async function* () {
+        // Wire face: (endpoint, payload, uplink, peer, signal) — the
+        // operator's in-process carrier has no peer scope.
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), peer, signal)
+      })()
+    },
+  }
+}
+
+async function waitFor(description, predicate) {
+  const started = Date.now()
+  while (!predicate()) {
+    if (Date.now() - started > 5_000) throw new Error(`timed out waiting for ${description}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+async function main() {
+  const loader = installModuleLoader()
+  let client
+  let host
+  let shadow
+  let remoteRef
+  try {
+    const connectionClient = await loader.importClient('@deepseek-ai/dsh-client-connection/client')
+    const gatewayClient = await loader.importClient('@deepseek-ai/dsh-api-gateway/client')
+    const sessionClient = await loader.importClient('@deepseek-ai/dsh-api-session-controller/client')
+    const jobClient = await loader.importClient('@deepseek-ai/dsh-api-job-controller/client')
+    assert.ok(connectionClient !== undefined, 'official Connection Client did not load')
+    assert.ok(gatewayClient !== undefined, 'official API Gateway Client did not load')
+    assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')
+    assert.ok(jobClient !== undefined, 'official Job Controller Client did not load')
+
+    host = await createHost()
+    globalThis.__DSH_TRANSPORT__ = hostTransport(host)
+
+    client = new Context()
+    await client.plugin(TypertRegistry)
+    await client.plugin(connectionClient)
+    await client.plugin(gatewayClient)
+    for (const contribution of [commandsRemote, subagentsRemote, sessionRemote, jobRemote]) {
+      await client.remote.$mount(contribution)
+    }
+    client.provide('fileUpload', { available: false })
+    await client.plugin(sessionClient)
+    await client.plugin(jobClient)
+
+    const connection = client.get('connection')
+    const sessions = client.get('sessions')
+    await waitFor('official Client readiness', () => connection.generation.getSnapshot() !== undefined && sessions.list.getSnapshot().phase === 'ready')
+    const clientJobs = client.get('jobs')
+    assert.ok(clientJobs !== undefined, 'official ClientJobs service did not load')
+
+    const direct = new DirectTaskReader({
+      agentFor: id => host.ctx.get('agents').get(SessionId(id)),
+      subagents: {
+        listDescendants: (id, signal) => host.ctx.get('subagents').listDescendants(SessionId(id), signal),
+      },
+      jobs: {
+        // DSH 0.1.7 JobRegistry ownership: the caller is the parent SessionId.
+        list: caller => host.ctx.get('jobs').list(SessionId(caller)),
+      },
+    })
+    const remote = new RemoteTaskReader(sessions, clientJobs, connection.generation)
+    remoteRef = remote
+    shadow = new RemoteTaskReadShadow(direct, remote, connection.generation)
+    // The ClientJobs roster's first frame is async: the reader's retained
+    // watch must be open and the official stream settled BEFORE the first
+    // parity compare (a first-frame-empty roster is not an authoritative
+    // empty set).
+    await remote.readDescendants('task-parent')
+    await waitFor('the official roster frame', () => (clientJobs.state.getSnapshot().rows['task-parent'] ?? []).length === 1)
+    const outcome = await shadow.compare({ parentSessionId: 'task-parent' })
+    assert.equal(outcome.status, 'compared')
+    assert.equal(outcome.report.comparable, true)
+    assert.deepEqual(outcome.report.mismatches, [])
+    // M3-5 PR2 closed the descendant-tree gap: the shadow now compares the full
+    // recursive catalog, so nothing is skipped.
+    assert.deepEqual(outcome.report.skipped, [])
+
+    const directSnapshot = await direct.readDescendants('task-parent')
+    const remoteSnapshot = await remote.readDescendants('task-parent')
+    assert.ok(directSnapshot !== undefined)
+    assert.ok(remoteSnapshot !== undefined)
+    assert.deepEqual(directSnapshot.descendants.map(entry => entry.id), [
+      'task-child-continuable',
+      'task-child-one-shot',
+      'task-child-ghost',
+    ])
+    assert.deepEqual(remoteSnapshot.descendants.map(entry => entry.id), [
+      'task-child-continuable',
+      'task-child-one-shot',
+      'task-child-ghost',
+    ])
+    assert.equal(directSnapshot.jobs.length, 1)
+    assert.equal(remoteSnapshot.jobs.length, 1)
+
+    // L5 (M3-5 PR2): the REAL unreadable-branch path through the official
+    // carrier — the missing child Session loses ONLY its own branch, and both
+    // backends classify that representable failure as `unavailable` (never as an
+    // authoritative empty child, never as `corrupt`).
+    const ghostDiagnostic = {
+      kind: 'diagnostic',
+      id: 'task-child-ghost',
+      reason: 'unavailable',
+      parentId: 'task-parent',
+      depth: 1,
+    }
+    for (const [label, snapshot] of [['direct', directSnapshot], ['remote', remoteSnapshot]]) {
+      assert.deepEqual(snapshot.descendants.at(-1), ghostDiagnostic,
+        `${label}: an unreadable branch must be an unavailable diagnostic, never an empty/normal child`)
+      assert.equal(snapshot.descendants.length, 3, `${label}: the siblings of the unreadable branch must survive`)
+    }
+
+    host.childOneShotAgent.status = 'idle'
+    host.settleJob({ status: 'completed', detail: 'fixture complete' })
+    await waitFor('remote job settlement', () => clientJobs.state.getSnapshot().rows['task-parent']?.[0]?.status === 'completed')
+    // The fixture mutates the fake Agent registry in place (no status
+    // events), so the Client's Session baseline is re-pulled through its
+    // official refresh face before the parity compare.
+    await sessions.refresh()
+    await waitFor('remote child inactivity', () => sessions.list.getSnapshot().byId['task-child-one-shot']?.running === false)
+    const updated = await shadow.compare({ parentSessionId: 'task-parent' })
+    assert.equal(updated.status, 'compared')
+    assert.equal(updated.report.comparable, true)
+    assert.deepEqual(updated.report.mismatches, [])
+    const updatedSnapshot = await remote.readDescendants('task-parent')
+    assert.ok(updatedSnapshot !== undefined)
+    const updatedChild = updatedSnapshot.descendants.find(entry => entry.id === 'task-child-one-shot')
+    assert.equal(updatedChild?.kind === 'child' && updatedChild.activity, 'inactive')
+    assert.equal(updatedSnapshot.jobs[0]?.status, 'completed')
+
+    console.log(JSON.stringify({
+      status: 'passed',
+      comparable: true,
+      mismatchCount: 0,
+      skipped: [],
+      mutationVerified: true,
+    }))
+  } finally {
+    shadow?.dispose()
+    // Release the reader's retained ClientJobs roster watch explicitly
+    // (the client fiber disposal would also reclaim it; this keeps the
+    // reader's own ownership contract observable).
+    remoteRef?.dispose()
+    if (client !== undefined) await client.fiber.dispose()
+    if (host !== undefined) {
+      host.settleJob?.({ status: 'completed' })
+      await host.ctx.fiber.dispose()
+    }
+    loader.restore()
+  }
+}
+
+main().catch(error => {
+  console.error(`DSH_REMOTE_TASK_READ_PARITY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+  process.exitCode = 1
+})

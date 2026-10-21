@@ -1,0 +1,716 @@
+/**
+ * The config domain port (M1.9) — the semantic contract between the TUI
+ * and the Host-owned CONFIGURATION it reads and mutates: the TUI settings
+ * document, provider profiles, credentials, authorization flows, permission
+ * presets and the saved preset default. Implemented by
+ * `src/runtime/direct/` (Direct, the production default) and by
+ * `src/runtime/remote/config-remote.ts` (the experimental Remote backend).
+ *
+ * The port deliberately exposes semantic operations, never generic
+ * settings/credentials/authorization service objects (no
+ * `settings.get(namespace)` / `settings.mutate(namespace, arbitraryPatch)`
+ * god API — the Direct adapter owns the Host schema knowledge, e.g. the
+ * `llm-pi-ai` / `permission` / `agent-preset-registry` namespaces). Host schema
+ * knowledge is NOT the consumer's business: a command handler never names
+ * a settings namespace or path — and the DTOs that cross the port carry
+ * SEMANTIC facts only (`CredentialProviderOption.canProvisionProfile`),
+ * never a namespace or a path (the adapter maps its schema knowledge to
+ * the flag; a Remote adapter computes the same flag from the wire).
+ *
+ * Wire mapping: `settings.*` / `credentials.*` remotes plus the Session
+ * `userQuestions` / Inbox projections. Operations with no 1:1 Remote are
+ * marked `INTENTIONAL_UNSUPPORTED_IN_M3` in the contract comments and in the
+ * current Remote composition's unsupported set (credential record read/delete,
+ * session approval-policy override, authorization flows).
+ *
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
+ * @module @xmoon76/dsh-pi-tui/runtime/config-port
+ */
+
+import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
+import type { FooterCustomItemsParseResult } from '../domain/footer/custom-items.ts'
+
+/** The TUI settings document (theme/iconStyle/footer/footerLayout/
+ * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
+ * displayPreset/wheelScrollLines). `displayPreset` is the canonical display
+ * authority (the DSH 0.1.7 profile-owned `tui-app` Config references are the
+ * runtime backend; `focusMode` retired to a legacy-migration input only).
+ * The old `history` field moved to $DSH_HOME/user-history/*.jsonl and is
+ * deliberately NOT part of the document anymore. `footerLayout` is the
+ * M2 versioned custom layout (nested settings object), absent when not
+ * configured. The user keybinding overrides (`keybindings`) ride as a
+ * whole-value RAW field of the profile-owned plugin Config — the field is
+ * deliberately not a semantic DTO: the keybinding shape is owned by
+ * src/tui/keybindings/config.ts (the only validator), and the settings
+ * document is the storage the Direct adapter passes through verbatim.
+ * A future Remote adapter MUST preserve this raw field verbatim too
+ * (get/replace round-trip), never reinterpret it — add a Remote-shaped
+ * contract test when the wire backend lands. */
+export interface TuiSettingsDoc {
+  theme: string
+  iconStyle: string
+  footer: string
+  footerFallbackMode?: string
+  footerLayout?: unknown
+  /** PR C: untrusted whole-document pass-through for custom definitions. The
+   * USER-owned semantic read is `ConfigPort.footerCustomItems`; consumers
+   * must not treat this merged/resolved value as an authority because a
+   * project layer may contribute it. It remains here so get/replace cycles
+   * preserve the stored field verbatim. */
+  footerCustomItems?: unknown
+  /** The M5 command status surface's TRUSTED configuration (the user-layer
+   * `footerCommand` value, validated by footer/command-trust). Part of the
+   * SEMANTIC document: a whole-document replace that drops it would wipe
+   * the trusted command config on the next get/replace cycle (the
+   * review's P2 — the same migration contract as the raw `keybindings`
+   * pass-through above; the value is re-validated by
+   * footer/command-trust on every read, so the field rides VERBATIM). */
+  footerCommand?: import('../domain/footer/command-trust.ts').FooterCommandSettings
+  fullscreen: string
+  busyEnter: string
+  localShellSandbox: string
+  homeEndKeys: string
+  /** Mid-turn progress-update cadence ('off' | 'milestones' | 'frequent');
+   * absent/invalid values resolve to milestones. */
+  progressUpdates?: string
+  /** Visible-answer density guidance ('default' | 'concise' |
+   * 'explanatory'); absent/invalid values resolve to default. */
+  responseStyle?: string
+  /** Git attribution guidance mode ('off' | 'product' | 'product-model');
+   * absent/invalid values resolve to off. Agent prompt policy only — no
+   * Git hooks, no command interception. */
+  gitAttribution?: string
+  displayPreset?: string
+  /** Completion-notification mode: 'unfocused' (default) | 'always' |
+   * 'off' — when the main agent's settlement notifies the terminal. */
+  notificationMode: string
+  /** Completion-notification method: 'auto' (default) | 'osc9' |
+   * 'osc777' | 'bell' — how the notification is delivered. */
+  notificationMethod: string
+  /** Terminal-progress protocol selection ('off' | '9;4' | '7501' | the
+   * '9;4+7501' default) for the native terminal status protocols. A
+   * presentation selection only — deliberately distinct from `progressUpdates`,
+   * which controls the Agent's narration cadence. */
+  terminalProgress: string
+  /** The fullscreen mouse-wheel step (`1/2/3/5/8`, default `1`). A
+   * Client preference persisted in the TUI settings document — never a
+   * Session / Agent state; a future Remote adapter round-trips it like
+   * every other TUI setting, with no dedicated RPC. */
+  wheelScrollLines: string
+  keybindings?: unknown
+}
+
+/** The TUI settings document surface (get/replace — the same shape the
+ * commands surface consumes; the runner wires the registered settings
+ * document). The port is deliberately get/replace ONLY: no watch /
+ * subscribe callback. Change observation is explicit on the consumer
+ * side — e.g. `/keybindings reload` re-reads the document — because a
+ * callback could not map across the process boundary in the future
+ * Remote adapter (migration rule: no callbacks across the wire). */
+export interface TuiSettingsConfig {
+  get(): TuiSettingsDoc
+  replace(doc: TuiSettingsDoc): unknown
+  /** Optional stable identity when several wrappers share one backend. */
+  readonly mutationQueueKey?: object
+}
+
+/**
+ * Serialize every whole-document TUI-settings transaction in this process.
+ * The port has no compare-and-swap token, so a queue keyed only by one wrapper
+ * object would still allow two adapters around the same backend to lose a
+ * get → modify → replace update. The shared fallback key closes that gap;
+ * future adapters may expose a stable object as `mutationQueueKey` when they
+ * need independent settings stores while preserving the same queue contract.
+ */
+const sharedTuiSettingsMutationKey = {}
+const tuiSettingsMutationQueues = new WeakMap<object, Promise<void>>()
+
+export function serializeTuiSettingsMutation<T>(
+  settings: TuiSettingsConfig,
+  task: () => T | PromiseLike<T>,
+): Promise<T> {
+  const key = settings.mutationQueueKey ?? sharedTuiSettingsMutationKey
+  const previous = tuiSettingsMutationQueues.get(key) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(task)
+  tuiSettingsMutationQueues.set(key, current.then(() => undefined, () => undefined))
+  return current
+}
+
+/** The USER-layer footer-command trust read (M5, plan §17.4): whether the
+ * USER layer of the settings document declares the footer command mode
+ * AND a trusted command. The adapter owns the settings descriptor access
+ * (a Remote adapter replays the same facts from the wire) — the runner
+ * never touches the raw settings service for the trust gate. PR D extends
+ * the same read with the SEMANTIC activation projection: the ids the USER
+ * layer authorizes for custom command item execution, derived from the
+ * USER's OWN mode declarations (never the merged value). */
+export interface FooterCommandTrust {
+  /** The user layer's declared footer mode ('command' when the user opted
+   * in), undefined when the user layer has no opinion. */
+  readonly userFooterMode: string | undefined
+  /** The trusted command config (the user layer's footerCommand, bounds
+   * validated), undefined when untrusted/absent. */
+  readonly command: FooterCommandConfig | undefined
+  /** The ids the USER layer AUTHORIZES to execute custom command items:
+   * the USER custom layout's refs, but ONLY while the USER layer itself
+   * declares `footer: custom`. A stale leftover layout under
+   * `footer: default/compact` authorizes nothing, and `footer: command`
+   * authorizes nothing while the whole-footer surface runs — a project
+   * merged layout can render user:* ids, but it can never activate a
+   * dormant USER command. */
+  readonly userCommandItemActivationIds: ReadonlySet<string>
+  /** The ids authorized for the native FALLBACK surface (a merged
+   * `footer: command` the USER layer does not own). The FULL semantic is
+   * encoded here — no caller can forget the outer mode gate:
+   * `USER footer === 'command'` AND `USER footerFallbackMode === 'custom'`
+   * AND a valid USER layout → its refs, otherwise empty. A USER who never
+   * opted into command mode authorizes nothing even with stale fallback
+   * metadata. */
+  readonly userCommandItemFallbackActivationIds: ReadonlySet<string>
+}
+
+/** The USER-layer Custom Text/Command definition read (PR C + PR D). The
+ * adapter reads the settings descriptor's user section. `get()` is the safe
+ * runtime projection; `rawForPersistence()` is a detached exact USER-layer
+ * storage projection and exists only for whole-document round-trips.
+ * Merged/project settings never reach either surface — a project-layer
+ * `kind:'command'` definition can therefore never reach the command item
+ * runtime (PR D §11: this read is the ONLY executable source). */
+export interface FooterCustomItemsConfig {
+  /** Valid Custom Text/Command definitions plus a fail-soft invalid-entry
+   * count. */
+  get(): FooterCustomItemsParseResult
+  /** A detached raw value, or `unavailable` when it cannot be read safely. */
+  rawForPersistence(): FooterCustomItemsRaw
+}
+
+/** Result of reading the USER-layer raw custom-item storage value. */
+export type FooterCustomItemsRaw =
+  | { readonly kind: 'available'; readonly value: unknown }
+  | { readonly kind: 'unavailable' }
+
+/** The TUI settings document surface as the commands surface names it
+ * (kept as the public commands-surface type — see commands.ts). Like
+ * TuiSettingsConfig: get/replace only, never a watch callback. */
+export interface TuiSettingsLike {
+  get(): TuiSettingsDoc
+  replace(doc: TuiSettingsDoc): unknown
+  /** Optional stable identity for shared-backend wrappers. */
+  readonly mutationQueueKey?: object
+}
+
+/** One /login credential target as the CLIENT sees it — a detached DTO
+ * with SEMANTIC facts only. The adapter owns every Host schema fact: a
+ * consumer never sees a settings namespace or path, only
+ * `canProvisionProfile` (whether a keyless profile write for this route
+ * would be accepted by the Host). A Remote adapter computes the same flag
+ * from the wire. */
+export interface CredentialProviderOption {
+  /** The provider route key (the settings dict key, e.g. `acme-gateway`). */
+  readonly route: string
+  /** The human label (the picker row). */
+  readonly label: string
+  /** The env-var reference this target names (to set or clear). */
+  readonly ref: string
+  /** Whether a user profile already exists for the route. */
+  readonly configured: boolean
+  /**
+   * Whether the owning adapter knows this route only because configuration
+   * declared it — a hand-written gateway the installed catalog ships nothing
+   * about. Only such routes need the full add wizard.
+   */
+  readonly declared: boolean
+  /**
+   * Whether the route's profile EXPLICITLY names a credential reference
+   * (`apiKeyEnv` set to a non-empty env-var name). False for a keyless
+   * profile (provider-native auth — an authorization flow owns the
+   * credential record), for a bare profile, and for the unconfigured case
+   * where the reference is only the derived convention. An explicitly
+   * named reference wins over any authorization flow for the same route.
+   */
+  readonly namesCredential: boolean
+  /** Group label for the picker (configured / available / custom). */
+  readonly group: 'configured' | 'available' | 'custom'
+  /** Whether a keyless profile write for this route would be ACCEPTED by
+   * the Host (a real writable slot exists — false for the deepseek
+   * official builtin, which has no provider-profile section, and for a
+   * route whose directory entry does not map to one). A directory race
+   * after the read is still reported by the write's explicit outcome. */
+  readonly canProvisionProfile: boolean
+}
+
+/** One provider profile's detached Host facts (the Models detail pane). All
+ * fields are semantic presentation facts; no settings namespace or path
+ * crosses the port. A route without a profile answers `configured: false`. */
+export interface ProviderProfileFacts {
+  readonly route: string
+  readonly configured: boolean
+  readonly api?: string
+  readonly baseURL?: string
+  readonly displayName?: string
+  readonly models: readonly string[]
+  /** The explicit `apiKeyEnv` reference, when the profile names one. */
+  readonly apiKeyEnv?: string
+}
+
+/** The safe manual-edit guidance for a complex profile: the confirmed USER
+ * profile patch path (never guessed), when the Host profile context exposes
+ * one. */
+export interface ProviderConfigGuide {
+  readonly profilePatchPath?: string
+}
+
+/** The provider-profile sub-domain: the add-provider wizard and the
+ * /login merge. The adapter owns the Host schema knowledge — a consumer
+ * names a ROUTE, never a settings namespace or path: the merged
+ * credential options (directory + per-entry sections + the settings-only
+ * fallback) arrive as one semantic read of detached DTOs, and the keyless
+ * profile write resolves the route's location internally. */
+export interface ProviderProfileConfig {
+  /** Whether the settings service (the persistence surface) is present. */
+  available(): boolean
+  /** The merged /login credential options: the llm configurable-provider
+   * directory over its PER-ENTRY settings sections when the llm service
+   * is present, the settings-only fallback otherwise (the pure
+   * domain/catalog/provider.ts merge, wired by the adapter). Detached DTOs with
+   * semantic flags only — no settings namespace or path ever crosses. */
+  listCredentialOptions(): readonly CredentialProviderOption[]
+  /** The detached profile facts of one route (the Models detail pane). */
+  readProfile(route: string): ProviderProfileFacts
+  /** The confirmed manual-edit guidance for complex profile fields. */
+  configGuide(): ProviderConfigGuide
+  /** Persist one provider profile (the add-provider wizard; the adapter
+   * owns the llm-pi-ai schema). */
+  writeProfile(route: string, profile: Record<string, unknown>): Promise<void>
+  /** After a successful authorization: write a MINIMAL keyless profile for
+   * a catalog route (never an apiKeyEnv — provider-native auth keeps the
+   * request path off an unset reference). The adapter resolves the
+   * route's profile location internally from the CURRENT directory. The
+   * outcome is EXPLICIT: a hostile route (or a route that vanished from
+   * the directory) is a `skipped` result with the reason — a caller can
+   * never present a non-write as a success. */
+  writeKeylessProfile(route: string): Promise<{ kind: 'written' } | { kind: 'skipped'; reason: string }>
+}
+
+/** The credentials sub-domain: API-key references and stored credential
+ * records. Common DTOs never carry secret values — a secret appears only
+ * as the explicit write parameter of `setReference`. */
+export interface CredentialConfig {
+  /** Whether the credentials service is available in this deployment. */
+  available(): boolean
+  /** Store one reference credential (the /login API-key path). */
+  setReference(ref: string, secret: string): Promise<void>
+  /** Clear one reference credential (/logout). */
+  unsetReference(ref: string): Promise<void>
+  /**
+   * Whether this backend can enumerate and delete stored credential RECORDS
+   * (plan §8.5). Direct: yes — the credentials service owns them. Remote
+   * rc.2: NO — the wire publishes no record read and no record delete, so
+   * `listRecords()` rejects and `deleteRecord()` fails closed.
+   *
+   * The distinction is the point: a consumer must present "this backend
+   * cannot list stored records" instead of treating a rejection as an empty
+   * list, and a SUPPORTED backend whose read really failed must still surface
+   * that failure rather than being reported as a capability gap.
+   */
+  recordsSupported(): boolean
+  /** Delete one stored credential record (/logout; the authorization
+   * flow's durable record). */
+  deleteRecord(key: string): Promise<void>
+  /** Whether one reference is configured (presence only). */
+  describeReference(ref: string): Promise<{ configured: boolean; source?: string }>
+  /** Every stored credential record (presence + kind only). */
+  listRecords(): Promise<readonly { key: string; kind?: string }[]>
+  /** Subscribe to credential surface changes (reference- and
+   * record-updated — the footer/welcome refresh; a listener is a LOCAL
+   * subscription callback, never a wire callback). Returns the
+   * UNSUBSCRIBE — a surface remount/HMR must dispose, never accumulate. */
+  onChanged(listener: () => void): () => void
+}
+
+/** One authorization flow as the /login surface sees it — a DETACHED DTO with
+ * semantic facts only (the application command layer's /login helpers consume
+ * it). `key` is the detached key identity, the same string form
+ * {@link AuthorizationConfig.begin} accepts; no Host credential object or Host
+ * package type crosses this port. The Direct adapter interprets the Host
+ * authorization entries into this shape. */
+export interface AuthorizationFlowTarget {
+  kind: 'authorization'
+  /** The provider route the flow authenticates, when the key's scope maps one
+   * (llm-pi-ai flows are keyed `llm-pi-ai/<route>`); undefined for flows owned
+   * by other plugins that no route profile addresses. */
+  route?: string
+  /** The detached key identity this flow writes. */
+  key: string
+  /** User-facing label of what is being authorized. */
+  label: string
+  /** The offered sign-in methods, most preferred first. */
+  methods: readonly { id: string; label: string }[]
+  /** Whether an attempt is running for this key right now. */
+  inFlight: boolean
+}
+
+/** A detached authorization notice (the message, and the page/code the
+ * human must act on — never a secret). */
+export interface AuthorizationNoticeEvent {
+  message: string
+  url?: string
+  code?: string
+}
+
+/** A detached authorization prompt: the QUESTION the human must answer.
+ * `select` answers with the chosen option's id. No callback, no signal —
+ * the answer rides `respond`, and a flow withdrawing a prompt arrives as
+ * a `prompt-withdrawn` event. */
+export type AuthorizationPromptEvent =
+  | { kind: 'text'; message: string; placeholder?: string }
+  | { kind: 'secret'; message: string; placeholder?: string }
+  | { kind: 'select'; message: string; options: readonly { id: string; label: string; description?: string }[] }
+
+/** One attempt event as the consumer sees it (detached DTOs only — a
+ * Remote adapter replays the same shapes from the wire). */
+export type AuthorizationFlowEvent =
+  | { kind: 'notice'; attemptId: string; notice: AuthorizationNoticeEvent }
+  | { kind: 'prompt'; attemptId: string; promptId: string; prompt: AuthorizationPromptEvent }
+  | { kind: 'prompt-withdrawn'; attemptId: string; promptId: string }
+  | { kind: 'settled'; attemptId: string; status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }
+
+/** The authorization sub-domain: provider sign-in flows. The seam owns
+ * the protocol/lifecycle; this port exposes the targets and an
+ * EVENT-DRIVEN attempt surface — the TUI never hands the Host a
+ * callback-bearing interaction (transport rule: only data, identities,
+ * methods and events cross the boundary). */
+export interface AuthorizationConfig {
+  /** Whether the authorization service is available in this deployment. */
+  available(): boolean
+  /** The registered flows as detached targets. */
+  listTargets(): readonly AuthorizationFlowTarget[]
+  /** Start one flow. The attempt's notices/prompts/settlement arrive on
+   * the event subscription; `respond`/`cancel` answer it. */
+  begin(request: {
+    key: string
+    method?: string
+    signal?: AbortSignal
+  }): Promise<{ kind: 'started'; attemptId: string } | { kind: 'unavailable' }>
+  /** Subscribe to attempt events (a LOCAL listener — never a wire
+   * callback); returns the unsubscribe. */
+  onEvent(listener: (event: AuthorizationFlowEvent) => void): () => void
+  /** Answer the pending prompt of an attempt (null = the human declined).
+   */
+  respond(attemptId: string, promptId: string, answer: string | null): Promise<void>
+  /** Withdraw one whole attempt (a Cancel action). */
+  cancel(attemptId: string): Promise<void>
+}
+
+/** The permission sub-domain: permission preset names, the persisted
+ * default, preset application (/yolo), and the session's approval-policy
+ * override. */
+export interface PermissionConfig {
+  /** The advertised preset names, in the preset table's declaration order. */
+  presetNames(): readonly string[]
+  /** The persisted default preset (settings), undefined when absent or
+   * unreadable. */
+  defaultPreset(): string | undefined
+  /** Persist the default preset for future sessions. */
+  setDefaultPreset(name: string): Promise<void>
+  /**
+   * Whether this backend READS and WRITES the session's independent
+   * approval-policy override at all. Direct: yes (the official approval
+   * service). Remote rc.2: NO — no public Client read of the override and no
+   * synchronous policy carrier exist, so the UI must hide/disable the row.
+   *
+   * This is what keeps `undefined` from `approvalOverrideOf` unambiguous: on a
+   * backend where the capability is absent, "undefined" is UNAVAILABLE and
+   * must never be rendered as the consumer's own `ask` default (the current
+   * Remote composition's unsupported set).
+   */
+  approvalOverrideAvailable(): boolean
+  /** The session's own approval-policy override, resolved from the EXACT
+   * live Agent of `sessionId` (the official approval service's
+   * `overrideOf(session)` read — alpha.4; the configured default is
+   * deliberately NOT applied, an override-less session answers undefined
+   * and the consumer shows its own default). Degrades to undefined when
+   * the approval service is absent or the session has no live Agent — which
+   * is only meaningful while `approvalOverrideAvailable()` is true. */
+  approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined
+  /** Apply one permission preset to a live session (/yolo applies
+   * `danger-full-access` through the OFFICIAL command line so the switch
+   * takes the exact host path — sandbox + approval writer + policy-change
+   * message + preset log).
+   *
+   * `signal` is REQUIRED: the official `/permission` command reads
+   * `signal.aborted` before it dispatches, so every real UI/runner caller
+   * must supply its own live lifetime signal (never a fake or orphan
+   * controller). */
+  applyPermissionPreset(
+    sessionId: string,
+    presetId: string,
+    signal: AbortSignal,
+  ): Promise<PermissionPresetApplyOutcome>
+}
+
+/** The semantic outcome of one permission-preset apply (PR4 §6.3). An
+ * `indeterminate` settle means the write was DISPATCHED but its result is
+ * unobservable (e.g. a post-dispatch transport cancellation): it stays
+ * observable as indeterminate — never silently downgraded to `unavailable`,
+ * never retried. */
+export type PermissionPresetApplyOutcome =
+  | { readonly kind: 'applied' }
+  | { readonly kind: 'unavailable'; readonly cause: 'commands' | 'permission' }
+  | { readonly kind: 'indeterminate'; readonly reason: string }
+
+/** One official allowed child-LLM route (the exact provider+model pair
+ * the official `subagent-model-selection-settings` section authorizes). */
+export interface SubagentAllowedModelRoute {
+  readonly provider: string
+  readonly model: string
+}
+
+/** The official subagent model-selection preference (the DSH
+ * `subagent-model-selection-settings` settings namespace, whose values the
+ * `subagent-model-selection` service owns Host-side). The TUI reads and writes
+ * the OFFICIAL section through this sub-domain — it never maintains a
+ * parallel TUI-owned subagent routing setting. Sampling is per NEW
+ * session composition: a settings change never rewrites the tool schema
+ * of an Agent that is already running. */
+export interface SubagentModelSelectionConfig {
+  /** Whether the Host settings section is present (it registers when the
+   * deployment mounts the subagent-model-selection-settings service). */
+  available(): boolean
+  /** The current official preference (defaults: disabled, empty list). */
+  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }
+  /** Persist the official section. Rejects with the official validation
+   * error when enabling without at least one route, or when the list
+   * repeats a provider+model pair. */
+  set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void>
+}
+
+/** The saved agent-preset default sub-domain (`/preset default`): the
+ * persisted default (settings `agent-preset-registry.selectedDefault`),
+ * falling back to the roster's own default. */
+export interface PresetDefaultConfig {
+  /** Whether the settings service (the persistence surface) is present. */
+  available(): boolean
+  /** The saved default preset id (settings), falling back to the roster
+   * default when no user value is saved. */
+  get(): string | undefined
+  /** Persist the default preset for future sessions. */
+  set(id: string): Promise<void>
+}
+
+/**
+ * The OFFICIAL web provider selection and DeepSeek Search/Fetch API options
+ * (the DSH `web` / `web-deepseek-api` settings sections, S2/PR-B §3.2).
+ *
+ * The provider ids are the OFFICIAL registered ones: the selection never
+ * accepts an arbitrary provider id, and a custom id already present in the Host
+ * configuration is read and reported as-is rather than silently replaced.
+ * A read is a snapshot of the Host configuration; it does NOT claim to be the
+ * provider the NEXT operation will use — `ctx.web` decides that at call time,
+ * which the qualification proves by executing the real tool.
+ */
+export interface WebProviderSettings {
+  /** `web.searchProvider`: the configured id, or `undefined` when the Host has
+   *  no explicit selection (the official auto-selection then applies). */
+  searchProvider: string | undefined
+  /** `web.fetchProvider`, with the same absent-selection semantics. */
+  fetchProvider: string | undefined
+  /** The `web-deepseek-api` API options (official defaults when unset). */
+  api: {
+    baseURL: string
+    count: number
+    sendOriginalQuestion: boolean
+  }
+  /** Credential-presence facts from the official credential store (never the
+   *  value): `configured` is the store's own answer, `source` its layer when
+   *  it reports one. */
+  credential: {
+    configured: boolean
+    source?: string
+  }
+}
+
+/**
+ * The Web provider configuration sub-domain: the ONLY write path to the
+ * official `web` / `web-deepseek-api` sections. Every write goes through the
+ * official revision-checked settings mutation, and a caller must re-`read()`
+ * after it to establish the committed value (a resolved write is not a
+ * read-back).
+ */
+export interface WebProviderConfig {
+  /** Whether the official Host settings section for the web providers is
+   *  mounted (false = the UI presents the section as unavailable and offers no
+   *  write). */
+  available(): boolean
+  /**
+   * The current Host facts, or `undefined` when the official descriptors cannot
+   * be read. `undefined` is UNAVAILABLE — never the shipped defaults presented
+   * as a successful read (a caller may still show the shipped defaults
+   * separately, as a documented expectation rather than a fact).
+   */
+  read(): Promise<WebProviderSettings | undefined>
+  /** Pin the official search provider (`web.searchProvider`). */
+  setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void>
+  /** Pin the official fetch provider (`web.fetchProvider`). */
+  setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void>
+  /** `web-deepseek-api.count`: an integer from 1 through 50 (the official rule). */
+  setSearchApiCount(count: number): Promise<void>
+  /** `web-deepseek-api.sendOriginalQuestion`: whether the next API search may
+   *  send the triggering human question (the provider bounds it to 128
+   *  characters). */
+  setSendOriginalQuestion(enabled: boolean): Promise<void>
+  /** `web-deepseek-api.baseURL`: an absolute `https:` API base WITHOUT
+   *  credentials, query, fragment or a trailing `/search` / `/fetch` action
+   *  name. A custom endpoint receives the credential, so the human must confirm
+   *  it explicitly in the UI. */
+  setSearchApiBaseURL(url: string): Promise<void>
+}
+
+/**
+ * How current this backend's config reads are (M3-3B, plan §9.1).
+ *
+ * `ready` — the values below are authoritative for the live backend;
+ * `stale` — they are the LAST KNOWN values of a backend that is reconnecting
+ * or whose authority just changed; the UI must mark them non-current and
+ * refuse writes until a read makes them current again;
+ * `unavailable` — there is no authority to read at all (disconnected).
+ *
+ * This is deliberately part of the SEMANTIC contract rather than a
+ * Remote-adapter detail: a consumer must be able to tell "this is the value"
+ * from "this was the value", and a backend that cannot know must say so.
+ */
+export type ConfigReadiness = 'ready' | 'stale' | 'unavailable'
+
+/** Identity of the requesting UI for one DeepSeek Account operation. The Host
+ * derives the Platform request headers from it, so the Client samples it per
+ * request (never caches an old timezone offset across a DST change). */
+export interface AccountClientMetadata {
+  readonly version: string
+  /** Active UI language; the Host reduces it to the Platform wire locale. */
+  readonly locale: string
+  /** Offset from UTC in seconds, positive east of Greenwich. */
+  readonly timezoneOffsetSeconds: number
+}
+
+/** One browser sign-in attempt as the account surface sees it. The attempt id
+ * is the only cancellation identity; it is passed straight back to
+ * {@link AccountConfig.cancelSignIn} and never derived from a URL or label. */
+export interface AccountSignInAttempt {
+  readonly id: string
+  readonly phase:
+    | 'initializing'
+    | 'waiting-browser'
+    | 'exchanging'
+    | 'committing'
+    | 'succeeded'
+    | 'cancelled'
+    | 'expired'
+    | 'failed'
+  readonly authorizeUrl?: string
+  readonly expiresAt?: number
+  readonly errorCode?: 'no-response' | 'network' | 'protocol' | 'expired' | 'storage'
+}
+
+/** Stored-account presence plus the latest attempt. `credential-stored` is a
+ * STORAGE fact, never a claim that the Platform validated the grant. */
+export interface AccountView {
+  readonly status: 'signed-out' | 'credential-stored'
+  readonly links: { readonly usageUrl: string; readonly topUpUrl: string }
+  readonly attempt: AccountSignInAttempt | null
+}
+
+/** The Platform profile projection (contacts already masked by Platform). */
+export interface AccountProfile {
+  readonly id: string | null
+  readonly name: string | null
+  readonly contact: string | null
+  readonly avatarUrl?: string | null
+}
+
+/** One recharge or bonus wallet; the decimal string is retained verbatim. */
+export interface AccountWallet {
+  readonly currency: string
+  readonly balance: string
+}
+
+/** Profile and balance settle INDEPENDENTLY: each may be ready or failed, and
+ * `null` means signed out / the grant changed under the query. */
+export type AccountProfileOutcome =
+  | { readonly status: 'ready'; readonly value: AccountProfile }
+  | { readonly status: 'failed' }
+  | null
+
+export type AccountBalanceOutcome =
+  | {
+      readonly status: 'ready'
+      readonly value: readonly AccountWallet[]
+      readonly bonusWallets: readonly AccountWallet[]
+    }
+  | { readonly status: 'failed' }
+  | null
+
+/**
+ * The DeepSeek Account sub-domain — the ONLY Host authority for browser
+ * account sign-in, profile/balance reads, cancellation and sign-out. It never
+ * exposes a token, grant payload, PKCE value, Platform session or generic
+ * account service object; every DTO is detached, and the callback origin is
+ * the Host webserver's own bound loopback root (never a Client-supplied URL).
+ *
+ * `available()` is the account SERVICE fact. `getCallbackOrigin()` is the
+ * separate browser-callback capability: `undefined` means the Host listener is
+ * missing or not bound, and the UI must state that instead of starting a flow
+ * that cannot complete.
+ */
+export interface AccountConfig {
+  available(): boolean
+  getState(): Promise<AccountView>
+  getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome>
+  getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome>
+  /** Subscribe with a COMPLETE initial state; ending the signal never cancels
+   * an in-flight browser attempt. */
+  watch(signal: AbortSignal): AsyncIterable<AccountView>
+  getCallbackOrigin(): string | undefined
+  /** Start (or join) a browser attempt against the Host's own callback origin
+   * and the fixed `web` login source. */
+  startSignIn(client: AccountClientMetadata): Promise<AccountView>
+  cancelSignIn(id: string): Promise<AccountView>
+  signOut(client: AccountClientMetadata): Promise<AccountView>
+  /** Whether a running Agent's latest bound request used the account provider
+   * (the official sign-out risk fact). Read-only: the Host's signed-out
+   * listener owns the actual cancellation. */
+  hasRunningAccountTasks(): boolean
+}
+
+/** The config assembly — one narrow sub-interface per config domain.
+ * Consumers depend on the sub-interface they use, never on the whole
+ * assembly (no generic settings god API). */
+export interface ConfigPort {
+  /** How current the reads below are (§9.1). Direct is always `ready`: its
+   *  reads hit the in-process Host authority. A Remote backend reports its
+   *  settings mirror's currentness, and a non-`ready` value means the UI
+   *  must mark the values non-current and refuse writes with an explicit
+   *  reason instead of presenting last-known values as authoritative. */
+  configReadiness(): ConfigReadiness
+  /** The TUI settings document (theme/footer/...). */
+  readonly tuiSettings: TuiSettingsConfig | undefined
+  /** The M5 footer-command trust read (USER-layer only). */
+  readonly footerCommandTrust: FooterCommandTrust
+  /** The PR C Custom Text definitions (USER-layer only). */
+  readonly footerCustomItems: FooterCustomItemsConfig
+  /** Provider profiles (the add-provider wizard + /login section reads). */
+  readonly providers: ProviderProfileConfig
+  /** Credentials (API keys + stored records). */
+  readonly credentials: CredentialConfig
+  /** Provider authorization flows. */
+  readonly authorization: AuthorizationConfig
+  /** DeepSeek Account (browser sign-in, profile/balance, sign-out). */
+  readonly account: AccountConfig
+  /** Permission presets (names/default/apply). */
+  readonly permissions: PermissionConfig
+  /** The saved default agent preset. */
+  readonly presetDefault: PresetDefaultConfig
+  /** The official subagent model-selection preference. */
+  readonly subagentModelSelection: SubagentModelSelectionConfig
+  /** The official Web provider selection + Search/Fetch API options. */
+  readonly web: WebProviderConfig
+}

@@ -1,0 +1,113 @@
+/**
+ * The backend vocabulary (M1.1) + assembly (M1.2): the TUI consumes Host
+ * domains through semantic ports, and a backend is the assembly of the
+ * ports serving one transport. `direct` is the current production backend
+ * (in-process, full Host access); `remote` / `wire-local` adapters join in
+ * later milestones (M2/M3) behind the SAME port interfaces — never a second
+ * feature semantics.
+ *
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
+ * @module @xmoon76/dsh-pi-tui/runtime/backend
+ */
+
+import { DIRECT_IMPLEMENTED_CAPABILITIES, type CapabilitySet } from './capability.ts'
+import type { SubagentPort } from './subagent-port.ts'
+import type { SessionReader } from './session-reader-port.ts'
+import type { PendingInputReader } from './pending-input-reader-port.ts'
+import type { SessionWriter } from './session-writer-port.ts'
+import type { SessionLifecycle } from './session-lifecycle-port.ts'
+import type { InteractionPort } from './interaction-port.ts'
+import type { Catalog } from './catalog-port.ts'
+import type { ConfigPort } from './config-port.ts'
+import type { HostFilePort } from './host-file-port.ts'
+import type { SessionArchivePort } from './session-archive-port.ts'
+import type { HostCommandPort } from './host-command-port.ts'
+import type { PluginManagerPort } from './plugin-manager-port.ts'
+import type { JobObservationPort } from './job-observation-port.ts'
+import type { HostUserShellPort } from './host-user-shell-port.ts'
+
+/** The transport backends the TUI can run on. `direct` remains the
+ * production/default; `remote` is the experimental M3-3B assembly that can be
+ * constructed and tested but is NOT selected by normal startup (M3-4 owns the
+ * main-application cutover). */
+export type BackendKind = 'direct' | 'remote'
+
+/** The semantic surface a backend serves: one narrow port per domain. */
+export interface Backend {
+  readonly kind: BackendKind
+  /** The capabilities this backend serves (direct = everything). */
+  readonly capabilities: CapabilitySet
+  /** The subagent domain port (M1.2; more ports join in later cuts). */
+  readonly subagent: SubagentPort
+  /** The session READ domain port (M1.3). */
+  readonly sessionReader: SessionReader
+  /** The semantic pending-input projection (D2.1). */
+  readonly pendingInputReader: PendingInputReader
+  /** The session WRITE domain port (D2.1 contract convergence). */
+  readonly sessionWriter: SessionWriter
+  /** The session LIFECYCLE domain port (D2.1 semantic open). */
+  readonly sessionLifecycle: SessionLifecycle
+  /** The interaction domain port (M1.6). */
+  readonly interaction: InteractionPort
+  /** The catalog domain port (M1.8): models/providers, presets, skills. */
+  readonly catalog: Catalog
+  /** The config domain port (M1.9): settings, provider profiles,
+   * credentials, authorization, permissions, preset default. */
+  readonly config: ConfigPort
+  /** The Host-file domain port (M1.10): `@`-reference discovery and
+   * canonicalization against the Host filesystem. */
+  readonly hostFile: HostFilePort
+  /** The session ARCHIVE domain port (Pre-Stage-D): one complete
+   * Session-tree archive stream per root Session. */
+  readonly sessionArchive: SessionArchivePort
+  /** The Host command execution domain port (D2.1). */
+  readonly hostCommand: HostCommandPort
+  /** The Plugin Manager domain port (P1-A): bundles, plugins, installs. */
+  readonly pluginManager: PluginManagerPort
+  /** The selected-Job observation domain port (P1-B): one non-consuming
+   * observation stream for the Job the user opened. */
+  readonly jobObservation: JobObservationPort
+  /** The Host user-shell execution port (M3-4 PR3 shell amendment): the
+   * backend's execution authority — Direct serves the in-process Host
+   * adapter; Remote serves the truthful-unavailable adapter (CARRIER_GAP). */
+  readonly hostUserShell: HostUserShellPort
+}
+
+/** Assemble the Direct backend: in-process adapters over `ctx.*` services.
+ * The runner depends on the returned `Backend`, never on `ctx.*` directly
+ * for the ported domains. */
+export function createDirectBackend(
+  subagent: SubagentPort,
+  sessionReader: SessionReader,
+  pendingInputReader: PendingInputReader,
+  sessionWriter: SessionWriter,
+  sessionLifecycle: SessionLifecycle,
+  interaction: InteractionPort,
+  catalog: Catalog,
+  config: ConfigPort,
+  hostFile: HostFilePort,
+  sessionArchive: SessionArchivePort,
+  hostCommand: HostCommandPort,
+  pluginManager: PluginManagerPort,
+  jobObservation: JobObservationPort,
+  hostUserShell: HostUserShellPort,
+): Backend {
+  return {
+    kind: 'direct',
+    capabilities: new Set(DIRECT_IMPLEMENTED_CAPABILITIES),
+    subagent,
+    sessionReader,
+    pendingInputReader,
+    sessionWriter,
+    sessionLifecycle,
+    interaction,
+    catalog,
+    config,
+    hostFile,
+    sessionArchive,
+    hostCommand,
+    pluginManager,
+    jobObservation,
+    hostUserShell,
+  }
+}

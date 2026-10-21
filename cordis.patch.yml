@@ -1,0 +1,234 @@
+# The dsh-pi-tui bundle patch: the TUI surface over the dsh-base layer.
+# Applied after dsh-base's insert; rows here override base rows by id, with
+# the profile's own cordis.patch.yml and any --patch overlays still to come.
+#
+# The tui-startup plugin injects `cmdlineArgs` and provides `tuiStartup` as
+# an ordinary Cordis service. The runner row injects that service, so Loader
+# resolves its expressions only after the command line has been parsed.
+# `dsh --profile pi-tui --help` provides nothing, so the TUI never mounts.
+
+- insert:
+    - id: tui-startup
+      name: '@xmoon76/dsh-pi-tui/startup'
+
+    # The extension platform (M3/E): the host provides the piTuiExtensions
+    # service (third-party plugins inject it), the builtins row registers
+    # the first-party chrome contributions through the SAME public API, and
+    # the runner row attaches the surface host over the service's ledger.
+    # All three gate on tuiStartup, so `--help` mounts none of them.
+    - id: pi-tui-extension-host
+      name: '@xmoon76/dsh-pi-tui/extensions'
+      inject: [tuiStartup]
+
+    - id: pi-tui-builtins
+      name: '@xmoon76/dsh-pi-tui/builtins'
+      inject: [tuiStartup, piTuiExtensions]
+
+    # The bundle's OWN Host performance projection (plan PR-1): the single
+    # authority for the R5 / All model-request output rate and the recent TTFB.
+    # It registers the `piTuiPerformance` unit on the official
+    # `sessionProjections` seam — the same seam the official `sessionStats` row
+    # uses — and then publishes the `piTuiPerformanceReady` gate. Gating on
+    # `tuiStartup` keeps `--help` from mounting it; the `sessionProjections`
+    # inject makes the row wait for the Host registry instead of registering
+    # into a missing seam.
+    - id: pi-tui-performance-host
+      name: '@xmoon76/dsh-pi-tui/performance-host'
+      inject: [tuiStartup, sessionProjections]
+
+    # The OFFICIAL Host browser-callback listener for DeepSeek Account sign-in.
+    # The account provider registers `/oauth/callback` on this instance while an
+    # attempt is waiting for the browser; it is mounted here because the dsh-base
+    # layer ships the account provider but not the webserver. `host: 127.0.0.1`
+    # plus `port: 0` keeps the listener on a private loopback interface with an
+    # OS-assigned port (the stable `webserver` id lets a profile patch override
+    # the configuration without introducing a second service). `tuiStartup`
+    # gates the row on the same command-line admission as the TUI runner, so
+    # `dsh --profile pi-tui --help` never opens a socket.
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      inject: [tuiStartup]
+      config:
+        host: 127.0.0.1
+        port: 0
+
+    - id: tui-app
+      name: '@xmoon76/dsh-pi-tui'
+      # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork
+      # must observe the official workspace membership, and Cordis must have
+      # finished the registry's one-time history bootstrap before the surface
+      # can fork. The row below is this bundle's own, so the dependency is
+      # self-contained and a profile that disables it fails loud instead of
+      # silently forking without workspace inheritance.
+      # `pluginManager` is injected for the P1-A Plugin Manager surface: the
+      # dsh-base layer already mounts it (disabled only without a profile),
+      # so this is an explicit lifecycle ordering dependency, never a second
+      # package-manager row.
+      # `piTuiPerformanceReady` is the bundle's own Host projection gate: the
+      # surface must not mount without its performance authority, so a profile
+      # that disables the `pi-tui-performance-host` row fails loudly here
+      # instead of silently falling back to a Client-side estimate.
+      # `deepseekAccount` and `webServer` are the DeepSeek Account authority and
+      # its browser callback listener: the surface must not mount before both
+      # are published, otherwise the Account page could start a sign-in the
+      # Host cannot complete.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady, deepseekAccount, webServer]
+      config:
+        sessionId: ''
+
+    # One background Job's observation stream (P1-B): the official Host
+    # controller wraps `jobs.events` + `jobs.readAt()` into a
+    # NON-CONSUMING follow stream (never `jobs.read()`), so the selected Job
+    # detail can render a live retained-output tail without touching the
+    # model's `job_output` cursor or completion notices. The rc.1 web bundle
+    # mounts this same row; the dsh-base layer does not, so the TUI inserts
+    # it. This is NOT M3: same process, same Host Context, no Client Context,
+    # no Connection, no transport.
+    - id: job-controller
+      name: '@deepseek-ai/dsh-api-job-controller'
+
+    # Host-owned workspace membership (`ctx.workspaceRegistry`): D2.4 Direct
+    # fork mirrors the official Host rule (use the source's directly owning
+    # workspace, else the nearest ancestor workspace of a subagent source) and
+    # attaches the child after publication. That association only exists while
+    # this service is mounted, so the TUI inserts the same official row the web
+    # bundle does (the DSH installation already ships the package). Activating
+    # it also performs the official one-time history bootstrap that groups
+    # stored Session headers by canonical cwd into durable workspace records —
+    # an upstream migration, not a TUI invention, and the reason the row is
+    # documented in docs/architecture/host-client.md.
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+
+    # The OFFICIAL Host `@`-file reference authority (M3-3A): this row is
+    # the same one the official web bundle mounts. It provides
+    # `ctx.fileReferences` (the discovery service the Session Controller's
+    # `fileReferences/list` Remote already forwards to) AND installs the
+    # official per-agent `context:file-reference` system prompt — the model
+    # guidance that relative `@` paths resolve from the workspace root.
+    # Mounting it aligns the TUI's `@`-mention semantics with the official
+    # client contract: the selected mention text goes to the prompt
+    # LITERALLY (`@src/foo.ts`), and the Host/model resolves it; the TUI's
+    # historical send-time absolute-path rewrite is retired with it.
+    - id: file-reference-local
+      name: '@deepseek-ai/dsh-file-reference-local'
+
+    # The 0.1.7 declarative preset registry: preset identity, revisions and
+    # default/selection policy are registry-owned (deployment `default` here;
+    # the user's `selectedDefault` rides the profile form). The four shipped
+    # preset declarations follow as separate patch files under
+    # generated/dsh-presets/, listed after this file in package.json
+    # `dsh.bundle.patch` — a generated, parity-gated byte-exact mirror of
+    # @deepseek-ai/dsh-web-app's exported preset assets (0.1.7
+    # dsh.bundle.patch cannot reference another package's files).
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
+      config:
+        default: standard
+
+    # The official standard preset composes its `subagent` tool with
+    # `modelSelectionSettings: true`, which injects this Host-owned setting
+    # service — the row is required for the standard composition to mount.
+    # Mounting the service ALONE enables nothing: it only owns the
+    # `subagent-model-selection` settings section (default enabled=false,
+    # empty allowlist). Each NEW session samples that section at
+    # composition; the TUI exposes the toggle + allowlist in /settings.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
+    # Host-plane cordis runner: the `cordis` preset's `tool-cordis` row waits
+    # for `dynamicCordisRunner`/`cordisInspect` and fails the preset at mount
+    # without them (same host row the web bundle inserts).
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'
+
+# ── the agent plane moves behind agent presets ─────────────────────────────
+#
+# Every row below composes what ONE agent contributes to the host registries:
+# its tools, its prompt sections, its delegation backends. The base keeps them
+# for single-session surfaces that compose their agent process-wide; the TUI
+# now composes one preset per session, so these rows are disabled here and the
+# official `agent-preset-registry` row above, plus the declarations it resolves,
+# lets each session mount a preset instead.
+#
+# Disabling rather than deleting is deliberate: the base is shared, and a row
+# absent from a surface overlay would silently reappear the day someone
+# reorders the composition. The disabled set is the web bundle's, unchanged.
+#
+# Rows that STAY on the host plane (not listed): `tools` (registry), `shell-env`
+# (publishes the DSH env the model's shell sees), `subagent` + its spawn/fork
+# backends (process singletons), `subagent-model-selection-settings`, the
+# goal/jobs/compaction services and
+# their host infrastructure, `permission`, `approval`, `sandbox*`,
+# `fs-observation-policy`, `spill*`, `timeout-policy`, `repeat-tool-reminder`,
+# `session-*`, `token-meter`. The base's official `ptc-runtime` row also stays:
+# it provides `ptcRuntime`, which the `ptc` preset's `tool-presentation` row
+# waits for, and this overlay owns no second PTC runtime.
+# `command-goal` is disabled below and reintroduced
+# only by presets that own that command in their scoped composition.
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: tool-jobs
+  disabled: true
+
+- id: tool-fs
+  disabled: true
+
+- id: tool-fs-search
+  disabled: true
+
+- id: skill-filesystem
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- id: command-goal
+  disabled: true
+
+- id: tool-goal
+  disabled: true
+
+- id: plan-mode
+  disabled: true
+
+- id: compaction-basic
+  disabled: true
+
+- id: command-compact
+  disabled: true
+
+- id: tool-result-pruner
+  disabled: true
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- id: workflow-ptc
+  disabled: true
+
+- id: tool-workflow
+  disabled: true
+
+- id: agent-instructions
+  disabled: true
+
+- id: tool-todo
+  disabled: true
+
+- id: tool-web
+  disabled: true

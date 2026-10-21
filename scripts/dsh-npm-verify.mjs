@@ -1,0 +1,259 @@
+#!/usr/bin/env node
+/**
+ * Local npm-mode driver. It validates the published/registry dependency lane
+ * in an isolated copy, keeping the tracked lockfile frozen for the declared
+ * target and exercising the same TUI candidate packaging path used by releases.
+ * An explicit --dsh-version override resolves a temporary matching lockfile
+ * before running the same frozen install and checks.
+ *
+ * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.6-alpha.2]
+ * Client-only family lanes add `--exact-family --client-smoke-only`; that lane
+ * runs the Remote Session read smokes AND the D2 closure (Direct ↔ official Host
+ * fork/rewind parity), so the published exact-family distribution is covered by
+ * the same parity gate as source mode.
+ *
+ * `--exact-family` semantics: when the requested target equals this checkout's
+ * declared DSH version (the CI lane), the copied TRACKED lockfile is already an
+ * exact family and is installed frozen, then asserted. A genuinely ALTERNATE
+ * target instead re-resolves under the shared `npmDshFamilyOverrides` glob; that
+ * path is best-effort, because pnpm's glob overrides do not cover every
+ * peer-context transitive instance in this multi-package workspace.
+ *
+ * @module dsh-npm-verify
+ */
+
+import { execFileSync } from 'node:child_process'
+import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parseArgs } from 'node:util'
+
+import { pnpmExecutable, runBounded } from './lib/process.mjs'
+import {
+  PACKAGE_ROOT,
+  assertInstalledDshFamily,
+  assertNoSourceLeak,
+  npmDshDistribution,
+  npmDshVersion,
+  prepareDshInstall,
+  restoreDshInstall,
+  withoutMinimumReleaseAge,
+} from './lib/dsh-distribution.mjs'
+
+const PNPM_COMMAND = pnpmExecutable()
+const NPM_VERIFY_TIMEOUTS = {
+  install: 20 * 60 * 1000,
+  check: 30 * 60 * 1000,
+}
+
+function fail(message) {
+  throw new Error(message)
+}
+
+const PUBLIC_NPM_REGISTRY = 'https://registry.npmjs.org/'
+
+/** Keep npm-mode checks on the public registry with no ambient user config. */
+export function npmVerificationEnvironment(userConfigPath, base = process.env) {
+  return {
+    ...base,
+    npm_config_registry: PUBLIC_NPM_REGISTRY,
+    NPM_CONFIG_REGISTRY: PUBLIC_NPM_REGISTRY,
+    npm_config_userconfig: userConfigPath,
+    NPM_CONFIG_USERCONFIG: userConfigPath,
+    npm_config_minimum_release_age: '0',
+    pnpm_config_minimum_release_age: '0',
+  }
+}
+
+function parseCli() {
+  const args = process.argv.slice(2)
+  if (args[0] === '--') args.shift()
+  const { values } = parseArgs({
+    args,
+    options: {
+      'dsh-version': { type: 'string' },
+      'exact-family': { type: 'boolean' },
+      'client-smoke-only': { type: 'boolean' },
+      keep: { type: 'boolean' },
+    },
+    allowPositionals: false,
+  })
+  return values
+}
+
+async function run(command, args, cwd, label, environment = process.env, timeoutMs = NPM_VERIFY_TIMEOUTS.check, { retainMinimumReleaseAge = true } = {}) {
+  console.log(`DSH npm verify: ${label}`)
+  const withPolicy = { ...environment, npm_config_minimum_release_age: '0', pnpm_config_minimum_release_age: '0' }
+  const result = await runBounded(command, args, {
+    cwd,
+    // An exact-family resolve must not carry a minimum-release-age setting:
+    // with one present, pnpm was observed to ignore the family `overrides` and
+    // re-open the caret family graph to a newer sibling. The frozen install
+    // resolves nothing, so it keeps the policy.
+    env: retainMinimumReleaseAge ? withPolicy : withoutMinimumReleaseAge(withPolicy),
+    timeoutMs,
+    label,
+  })
+  if (result.status !== 0 || result.timedOut) {
+    fail(`${label} failed${result.error ? `: ${result.error.message}` : ` with exit ${result.status ?? 'unknown'}`}`)
+  }
+}
+
+function copyRepository(destination) {
+  const ignored = new Set(['.git', 'node_modules', 'dist', 'coverage', 'temp', '.pnpm-store', '.pnpm-data', '.pnpm-cache'])
+  cpSync(PACKAGE_ROOT, destination, {
+    recursive: true,
+    filter(source) {
+      const relative = source.slice(PACKAGE_ROOT.length + 1)
+      if (relative === '') return true
+      const segments = relative.split(/[\\/]/u)
+      return !segments.some(segment => ignored.has(segment)) && !/^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(basename(source))
+    },
+  })
+}
+
+/**
+ * Pin every declared DSH development package in an ephemeral npm verification
+ * copy to the requested version. The whole-family override that fences the
+ * transitive closure is the shared `npmDshFamilyOverrides` written by
+ * `prepareDshInstall({ npmFamilyPin })`; this function only rewrites the
+ * top-level importers so the temporary lockfile matches the requested target.
+ */
+export function pinNpmDshDependencies(workspace, version) {
+  const packagePath = join(workspace, 'package.json')
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'))
+  const devDependencies = packageJson.devDependencies ?? {}
+  for (const name of Object.keys(devDependencies)) {
+    if (name.startsWith('@deepseek-ai/dsh')) devDependencies[name] = version
+  }
+  writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8')
+}
+
+/** Point the temporary workspace at the real repository's git metadata so
+ * git-dependent tests (the pre-push hook gate) behave identically to the
+ * source verification workspace. Best-effort: a checkout without git
+ * metadata can still run the other gates. */
+function attachGitMetadata(workspace) {
+  try {
+    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
+      cwd: PACKAGE_ROOT,
+      encoding: 'utf8',
+    }).trim()
+    if (gitDir !== '') writeFileSync(join(workspace, '.git'), `gitdir: ${gitDir}\n`, 'utf8')
+  } catch {
+    // A source checkout without Git metadata can still run the other gates.
+  }
+}
+
+export function candidateTarball(workspace) {
+  const candidates = readdirSync(workspace)
+    .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
+    .map(name => join(workspace, name))
+    .filter(path => {
+      const info = lstatSync(path)
+      return info.isFile() && !info.isSymbolicLink() && info.nlink === 1
+    })
+  if (candidates.length !== 1) fail(`expected one TUI candidate tarball, found ${candidates.length}`)
+  return candidates[0]
+}
+
+async function main() {
+  const values = parseCli()
+  const requestedVersion = values['dsh-version']
+  const exactFamily = values['exact-family'] === true
+  const clientSmokeOnly = values['client-smoke-only'] === true
+  if (exactFamily && requestedVersion === undefined) fail('--exact-family requires --dsh-version')
+  const distribution = npmDshDistribution(requestedVersion ?? npmDshVersion())
+  const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-npm-'))
+  const workspace = join(root, 'workspace')
+  const npmConfigPath = join(root, 'npmrc')
+  const npmEnvironment = npmVerificationEnvironment(npmConfigPath, {
+    ...process.env,
+    DSH_NPM_VERIFY_TARGET: distribution.version,
+  })
+  try {
+    writeFileSync(npmConfigPath, `registry=${PUBLIC_NPM_REGISTRY}\n`, 'utf8')
+    copyRepository(workspace)
+    attachGitMetadata(workspace)
+    // The declared target's exact-family lane FREEZES the tracked lockfile: it
+    // already resolves the whole family at the target, and re-resolving under
+    // the glob override both rewrites the lockfile's own config and leaves
+    // peer-context transitive instances behind (pnpm's glob overrides do not
+    // cover them). A genuinely ALTERNATE target still re-resolves.
+    const exactDeclaredTarget = exactFamily && distribution.version === npmDshVersion()
+    if (requestedVersion !== undefined && !exactDeclaredTarget) pinNpmDshDependencies(workspace, distribution.version)
+    const prepared = prepareDshInstall(distribution, workspace, {
+      stripPackageManager: true,
+      npmFamilyPin: exactFamily && !exactDeclaredTarget,
+    })
+    try {
+      if (requestedVersion !== undefined && !exactDeclaredTarget) {
+        await run(
+          PNPM_COMMAND,
+          // No age FLAG here: the phase's policy comes from the environment
+          // alone, so the exact-family lane can drop it in one place.
+          ['install', '--lockfile-only', '--no-frozen-lockfile', '--ignore-scripts', '--reporter=append-only'],
+          workspace,
+          'resolve DSH override lockfile',
+          npmEnvironment,
+          NPM_VERIFY_TIMEOUTS.install,
+          { retainMinimumReleaseAge: !exactFamily },
+        )
+      }
+      await run(PNPM_COMMAND, [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'], workspace, 'frozen npm dependency install', npmEnvironment, NPM_VERIFY_TIMEOUTS.install)
+      if (exactFamily) assertInstalledDshFamily(workspace, distribution.version)
+    } finally {
+      restoreDshInstall(prepared)
+    }
+    if (clientSmokeOnly) {
+      await run(PNPM_COMMAND, ['smoke:remote-session-read'], workspace, 'Remote Session fixture smoke', npmEnvironment)
+      await run(PNPM_COMMAND, ['smoke:remote-session-read-parity'], workspace, 'same-Host Remote Session parity smoke', npmEnvironment)
+      // The restored D2.3 same-Host lane: real Client Context → Gateway → Host
+      // Session Controller for ordinary create, explicit-preset create,
+      // open/retain, model select and preset select + locked.
+      await run(PNPM_COMMAND, ['smoke:remote-session-lifecycle-parity'], workspace, 'same-Host session lifecycle parity smoke', npmEnvironment)
+      // The exact-family install IS the distribution the published package runs
+      // against, so it must clear the same Direct ↔ official Host fork/rewind
+      // parity gate as source mode. Keeping the closure here (rather than in the
+      // ordinary source-check job) lets npm CI prove it too.
+      await run(PNPM_COMMAND, ['smoke:remote-d2-closure'], workspace, 'D2 closure (fork/rewind parity) smoke', npmEnvironment)
+      console.log(`DSH Client family compatibility passed — ${distribution.version}${exactFamily ? ' (exact family)' : ''}`)
+      return
+    }
+    for (const [label, args] of [
+      ['vendored pi-tui typecheck', ['typecheck:fork']],
+      ['vendored pi-tui tests', ['test:fork']],
+      // The bundle tests import the built fork and bundle dist, so build
+      // before the unit suite (the install runs with --ignore-scripts and
+      // dist is not committed).
+      ['TUI build', ['build']],
+      // The PRODUCT suite runs inside `prepack` (the packaging safety gate
+      // must stay self-contained), so running `test:bundle` here would run
+      // the whole product suite TWICE against the same workspace and the same
+      // dependency graph. The TOOLING suite is not part of `prepack`, so it
+      // still needs its own run here.
+      ['TUI tooling tests', ['test:tooling']],
+      ['tmux terminal tooling tests', ['test:tmux']],
+      // `gate:pi-surface-compat` is the re-vendor HARD GATE. It overlaps the
+      // product suite's own glob, but the independent entry is deliberately
+      // kept: a re-vendor contract must not depend on the product suite's
+      // discovery staying unchanged.
+      ['Pi surface compatibility gate', ['gate:pi-surface-compat']],
+      ['TUI candidate build and pack', ['pack:release']],
+    ]) await run(PNPM_COMMAND, args, workspace, label, npmEnvironment)
+    const candidate = candidateTarball(workspace)
+    assertNoSourceLeak(candidate)
+    console.log(`DSH npm compatibility passed — ${basename(candidate)} × DSH ${distribution.version}`)
+  } finally {
+    if (values.keep === true || process.env.DSH_NPM_KEEP === '1') console.error(`preserved npm verification workspace: ${root}`)
+    else rmSync(root, { recursive: true, force: true })
+  }
+}
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(`DSH_NPM_VERIFY_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  })
+}

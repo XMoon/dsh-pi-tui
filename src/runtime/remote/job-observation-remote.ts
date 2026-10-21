@@ -1,0 +1,197 @@
+/**
+ * The experimental Remote selected-Job observation adapter (Pre-M3 PR2): the
+ * semantic {@link JobObservationPort} over the official Client `IJobs`
+ * service (`@deepseek-ai/dsh-api-job-controller/client`).
+ *
+ * The official `ClientJobs` owns every transport-shaped piece — reconnecting
+ * roster/observation streams, the resume cursor, stream sharing by reference
+ * count, gap handling, the bounded render tail and terminal stream lifecycle.
+ * This adapter therefore owns NO follow/cursor/reconnect state machine and
+ * never slices the tail again; it only projects the two official authorities
+ * onto {@link JobObservedSnapshot}:
+ *
+ * - `state.rows[sessionId]`  -> kind / label / status / progress / detail
+ * - `state.observed[jobId]`  -> text / gapBefore / streaming / error
+ *
+ * and maps the one human mutation, `IJobs.kill` -> `job.kill`, onto the
+ * {@link JobStopOutcome} taxonomy without retrying an unproven settlement.
+ *
+ * NOT composed into production: M3 owns Remote backend composition.
+ *
+ * @module @xmoon76/dsh-pi-tui/runtime/remote/job-observation-remote
+ */
+
+import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../job-observation-port.ts'
+import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
+import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
+
+/** One official client-safe Job roster row (`JobView`) subset used here. */
+export interface RemoteObservedJobRow {
+  readonly id: string
+  readonly kind: string
+  readonly label: string
+  readonly status: string
+  readonly progress?: string
+  readonly detail?: string
+}
+
+/** The official `ObservedJob` subset: the bounded tail and its stream facts. */
+export interface RemoteObservedJobState {
+  readonly jobId: string
+  readonly text: string
+  readonly gapBefore: boolean
+  readonly streaming: boolean
+  readonly error?: string
+}
+
+/** The official Client `IJobs` subset this adapter consumes. */
+export interface RemoteJobObservationSource {
+  readonly state: {
+    getSnapshot(): {
+      readonly rows: Readonly<Record<string, readonly RemoteObservedJobRow[]>>
+      readonly observed: Readonly<Record<string, RemoteObservedJobState | undefined>>
+    }
+    subscribe(listener: () => void): () => void
+  }
+  /** Reference-counted roster watch for one session. */
+  watchRows(sessionId: string): () => void
+  /** Reference-counted observation for one job (undefined = unowned job). */
+  observe(sessionId: string | undefined, jobId: string): () => void
+  /** The official human kill RPC (the generated `job.kill` passthrough). */
+  kill(sessionId: string, jobId: string): Promise<RemoteJobKillResult>
+}
+
+/** Structural official `RemoteResult` of one human `job.kill`. */
+export type RemoteJobKillResult =
+  | { readonly ok: true; readonly value: { readonly outcome: 'requested' | 'already-finished' } }
+  | { readonly ok: false; readonly error: unknown }
+
+/**
+ * The Job-Stop operation-specific settlement table.
+ *
+ * It deliberately does NOT reuse the D2.2 write vocabulary's "any other domain
+ * code is a proven refusal" fallback (`../write-outcome.ts` SCOPE): Job Stop is
+ * a different operation family, and rc.2's PROVEN `job.kill` non-commit
+ * vocabulary is only `job/not-found` plus the pinned pre-invocation Gateway
+ * refusals. Any other code — an unknown or foreign domain code, an unproven
+ * `gateway/*`, or a code-less failure — leaves the commit state unproven and
+ * stays `indeterminate`; it is never reported as `rejected` and never replayed.
+ */
+export function classifyJobStopFailure(error: unknown): JobStopOutcome {
+  const code = remoteFailureCode(error)
+  // The Job-Stop-specific proven non-commit: this session's list no longer
+  // carries a killable row under that id.
+  if (code === 'job/not-found') return { kind: 'not-found' }
+  // Proven PRE-DISPATCH refusals: the gateway's own admission rejection and the
+  // pinned infrastructure codes raised before the addressed business method
+  // runs.
+  if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+    return { kind: 'rejected', message: remoteFailureMessage(error) }
+  }
+  // `gateway/cancelled`, `gateway/internal`, `gateway/result-invalid`, any other
+  // `gateway/*`, an unknown/other domain code, and a code-less failure cannot
+  // prove the kill did not commit.
+  return { kind: 'indeterminate', message: remoteFailureMessage(error) }
+}
+
+/** The experimental Remote Job observation port over official `IJobs`. */
+export class RemoteJobObservationPort implements JobObservationPort {
+  private readonly jobs: RemoteJobObservationSource
+
+  constructor(jobs: RemoteJobObservationSource) {
+    this.jobs = jobs
+  }
+
+  open(
+    sessionId: string | undefined,
+    jobId: string,
+    listener: (snapshot: JobObservedSnapshot) => void,
+  ): () => void {
+    const jobs = this.jobs
+    let closed = false
+    /** Every acquired lease, released exactly once by `close`. A synchronous
+     * callback may close the observer while an acquisition is still in flight,
+     * so an already-closed acquisition is released immediately. */
+    const owned: Array<() => void> = []
+    const own = (release: () => void): void => {
+      if (closed) release()
+      else owned.push(release)
+    }
+    /** The last roster row this observer saw: a roster that momentarily drops
+     * the job must not blank the viewer's title/status metadata. */
+    let lastRow: RemoteObservedJobRow | undefined
+
+    const emit = (): void => {
+      if (closed) return
+      const snapshot = jobs.state.getSnapshot()
+      const row = sessionId === undefined
+        ? undefined
+        : snapshot.rows[sessionId]?.find(candidate => candidate.id === jobId)
+      if (row !== undefined) lastRow = row
+      const observed = snapshot.observed[jobId]
+      const progress = row?.progress ?? lastRow?.progress
+      const detail = row?.detail ?? lastRow?.detail
+      // An observation FAILURE is also `streaming: false`: settlement requires
+      // both a terminal stream and no stream error.
+      const settled = observed !== undefined && observed.streaming === false && observed.error === undefined
+      listener(Object.freeze({
+        jobId,
+        kind: row?.kind ?? lastRow?.kind ?? '',
+        label: row?.label ?? lastRow?.label ?? '',
+        status: row?.status ?? lastRow?.status ?? 'running',
+        ...(progress === undefined ? {} : { progress }),
+        ...(detail === undefined ? {} : { detail }),
+        text: observed?.text ?? '',
+        gapBefore: observed?.gapBefore ?? false,
+        settled,
+        ...(observed?.error === undefined ? {} : { error: observed.error }),
+      }))
+    }
+
+    const acquire = (): void => {
+      own(jobs.state.subscribe(emit))
+      if (closed) return
+      if (sessionId !== undefined) own(jobs.watchRows(sessionId))
+      if (closed) return
+      own(jobs.observe(sessionId, jobId))
+    }
+    try {
+      acquire()
+    } catch (error) {
+      // Defensive structural hardening: the source's acquisition calls may
+      // fail synchronously, and this adapter must not depend on them never
+      // throwing. (In the pinned rc.2 the carrier failure of a ClientJobs
+      // stream surfaces asynchronously through the stream consumer, but that
+      // is an implementation detail, not a contract.) A partially acquired
+      // observer must never leak: release everything acquired before
+      // re-throwing.
+      closed = true
+      for (const release of owned.splice(0)) release()
+      throw error
+    }
+    // The official snapshot may already hold a row/tail before this observer
+    // acquired either lease, so the first observation is emitted immediately.
+    emit()
+
+    return () => {
+      if (closed) return
+      closed = true
+      for (const release of owned.splice(0)) release()
+    }
+  }
+
+  /**
+   * Stop one Job through the official `IJobs.kill` passthrough. The generated
+   * method is a `RemoteResult` contract, so no defensive catch: a rejection is
+   * an assembly/programming defect. It shares no state with {@link open} and
+   * never mutates local observation/roster state; the official streams
+   * converge on their own. No automatic retry.
+   */
+  async stop(sessionId: string, jobId: string): Promise<JobStopOutcome> {
+    const result = await this.jobs.kill(sessionId, jobId)
+    if (result.ok) {
+      return result.value.outcome === 'requested' ? { kind: 'requested' } : { kind: 'already-finished' }
+    }
+    return classifyJobStopFailure(result.error)
+  }
+}

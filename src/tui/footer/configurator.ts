@@ -1,0 +1,1439 @@
+/**
+ * The footer configurator UI (the hierarchical editor): a full-width
+ * overlay panel with a FIXED shell — title, contextual help, and a live
+ * preview — and a scrollable body that follows the cursor. The preview is
+ * composed by the REAL FooterComposer against the current StatusSnapshot
+ * (whole-footer on the row pages, the single item's own render on the
+ * item pages). The panel only renders and forwards keys — every mutation
+ * lives in the model (headless-testable).
+ *
+ * Pages (the plan's hierarchy):
+ *   rows  — Row Selector (↑↓ select, Enter edit, S save, Esc close; the
+ *           trailing "Save changes" action + Unsaved/No changes status)
+ *   exit-confirm — dirty-Esc guard (Save & Exit / Discard & Exit / Keep
+ *           Editing) — a panel+model mode, never a second overlay
+ *   row   — Edit Row (Left/Right as VISUAL grouping; ←→ moves sides)
+ *   item  — Item Editor (Style / Text / Default tone / Tone / Advanced…)
+ *   style — Style picker (live per-format examples)
+ *   tone  — Tone picker (semantic tones)
+ *   advanced — Prefix / Suffix / Importance inline editors + Reset
+ *   add   — searchable Add picker (type to filter; Esc clears first)
+ *   row-move — Move Mode (↑↓ reorder within the zone)
+ *
+ * Save transaction (PR E): S, the "Save changes" row and the confirm
+ * page's "Save & Exit" all route through ONE requestSave() — the draft is
+ * captured atomically, onSave is awaited, and the overlay closes only on
+ * RESOLVE. A rejection (already notified by the integration layer) keeps
+ * the configurator open with the draft intact and dirty.
+ *
+ * All key matches go through the project's matchesKey vocabulary (legacy
+ * AND Kitty CSI-u / modifyOtherKeys encodings — no raw sequence compares),
+ * so CSI-u terminals keep every key working. No fork changes.
+ * @module @xmoon76/dsh-pi-tui/tui/footer/configurator
+ */
+
+import {
+  decodePrintableKey,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+  type KeyId,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from '@xmoon76/pi-tui'
+import { color } from '../theme/runtime.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
+import { FooterComposer, renderSpans } from './composer.ts'
+import { sanitizeCommandOutput } from './ansi-sanitize.ts'
+import {
+  CUSTOM_COMMAND_REFRESH_CHOICES_MS,
+  CUSTOM_COMMAND_TIMEOUT_CHOICES_MS,
+  customCommandRefreshChoices,
+  customCommandTimeoutChoices,
+  flatLengthOf,
+  flatPositionOf,
+  FOOTER_TONE_CHOICES,
+  itemMenuFor,
+  toneChoicesFor,
+} from './configurator-model.ts'
+import type { FooterConfiguratorModel } from './configurator-model.ts'
+import { effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs } from '../../domain/footer/custom-items.ts'
+import { MAX_ITEMS_PER_ROW, stripControlChars } from '../../domain/footer/layout.ts'
+import type { FooterItemRegistry } from './item-registry.ts'
+import type { FooterItemRef, FooterLayoutV1, FooterTone } from './presentation-types.ts'
+
+/** The configurator panel's options. */
+export interface FooterConfiguratorOptions {
+  readonly model: FooterConfiguratorModel
+  readonly registry: FooterItemRegistry
+  /** The live snapshot getter (the preview follows streaming state). */
+  readonly snapshot: () => StatusSnapshot
+  readonly composer: FooterComposer
+  /** LIVE getters, not captured values: the preview reflects the current
+   * task-browser availability (the same routing-gate semantic the footer
+   * hint uses) and extension footer text even while the panel is open. */
+  readonly taskBrowserAvailable: () => boolean
+  readonly extensionFooterText: () => string
+  /** The overlay's row budget source: re-read at EVERY render so a
+   * terminal resize never leaves the panel clipped or oversized. */
+  readonly maxVisible: () => number
+  /** Request a render after timer-driven input replay. */
+  readonly requestRender?: () => void
+  /** PR E: the save is AWAITED. Resolve = persisted (and the memory
+   * commit applied) — the host then closes the overlay. Reject = failed:
+   * the integration layer has already notified, and the panel stays open
+   * with the draft intact. A sync `void` return is tolerated (instant
+   * success) for callers without a settings backend. */
+  readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('../../domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
+  readonly onCancel: () => void
+}
+
+/** One physical row of the last painted panel frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns (including
+ * the body scrollport slice), so a click can only act on last-painted
+ * geometry. `select` moves the cursor to the target row through the
+ * model's own move operations; `save`/`exit` route through the panel's
+ * single save path. Text-editing rows (custom-text/command/name,
+ * create-name/text/command, advanced editing) expose no cursor model and
+ * stay keyboard-only. (Mouse parity.) */
+type ConfiguratorMouseHit =
+  | { kind: 'select'; target: number }
+  | { kind: 'save' }
+  | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
+  | { kind: 'inert' }
+
+/** The actionable subset of a hit, used as the press-time gesture
+ * identity (mouse parity): a click may only run the EXACT semantic
+ * action that was pressed — a resize/repaint between press and release
+ * must not transfer the click to whatever action repainted into the
+ * same cell (a transaction-level wrong action, e.g. Keep Editing →
+ * Save & Exit). */
+type ConfiguratorMouseAction =
+  | { kind: 'select'; target: number }
+  | { kind: 'save' }
+  | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
+
+/** The pressed semantic action equals the current hit's action. */
+function sameMouseAction(a: ConfiguratorMouseAction | undefined, b: ConfiguratorMouseHit): boolean {
+  if (a === undefined) return false
+  if (a.kind === 'select') return b.kind === 'select' && b.target === a.target
+  if (a.kind === 'save') return b.kind === 'save'
+  if (a.kind === 'exit') return b.kind === 'exit' && b.choice === a.choice
+  return false
+}
+
+/** The footer configurator overlay panel. */
+export class FooterConfiguratorPanel implements Component {
+  private readonly model: FooterConfiguratorModel
+  private readonly registry: FooterItemRegistry
+  private readonly snapshot: () => StatusSnapshot
+  private readonly composer: FooterComposer
+  private readonly taskBrowserAvailable: () => boolean
+  private readonly extensionFooterText: () => string
+  private readonly maxVisible: () => number
+  private readonly requestRender: () => void
+  private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('../../domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
+  private readonly onCancel: () => void
+  /** The body scrollport's top offset (stable across renders — the cursor
+   * scrolls the body minimally; the fixed shell never moves). */
+  private scrollTop = 0
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: ConfiguratorMouseHit[] = []
+  /** The semantic action the last left press latched (mouse parity): a
+   * click may only run the exact pressed action. */
+  private mousePressedAction: ConfiguratorMouseAction | undefined
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
+  /** Bracketed-paste buffering (the fork's Input-component pattern):
+   * `isInPaste` between the \x1b[200~/\x1b[201~ markers, `pasteBuffer`
+   * accumulating the chunks — the markers (and the content) may split
+   * across terminal chunks. `pasteStartPending` holds an incomplete start
+   * marker, including an ambiguous lone ESC for a bounded replay. */
+  private isInPaste = false
+  private pasteBuffer = ''
+  private pasteStartPending = ''
+  private pasteStartTimer: ReturnType<typeof setTimeout> | undefined
+  /** Recursive scanner replays bypass paste recognition exactly once. */
+  private skipPasteOnce = false
+  /** The fork dispatches input to the focused component's handleInput. */
+  readonly handleInput: (data: string) => void
+
+  constructor(options: FooterConfiguratorOptions) {
+    this.model = options.model
+    this.registry = options.registry
+    this.snapshot = options.snapshot
+    this.composer = options.composer
+    this.taskBrowserAvailable = options.taskBrowserAvailable
+    this.extensionFooterText = options.extensionFooterText
+    this.maxVisible = options.maxVisible
+    this.requestRender = options.requestRender ?? (() => {})
+    this.onSave = options.onSave
+    this.onCancel = options.onCancel
+    this.handleInput = (data: string): void => {
+      // Any keyboard input ends the mouse gesture identity: the
+      // layout/item semantic mutations (Enter/Space/A/M/F/arrows/Esc)
+      // can move a different item onto the pressed cell, so a later
+      // synthesized click must not match the stale ordinal target
+      // (press A → Space removes A → B moves onto the same cell →
+      // release must not activate B).
+      this.mousePressedAction = undefined
+      const state = this.model.state()
+      // A save in flight freezes INPUT (PR E §10): the draft captured for
+      // the pending write must stay the draft on screen, duplicate
+      // Enter/S are refused by construction, and Esc can never race a
+      // second close path. Rendering stays live (resize works).
+      if (state.saving) return
+      // Text-input pages swallow text keys FIRST (space is a query
+      // character there, never the remove action). Text arrives in three
+      // shapes — a plain printable chunk, a Kitty CSI-u / modifyOtherKeys
+      // encoded printable (contains ESC!), and bracketed-paste bursts
+      // (start marker, content, end marker — all ESC-led) — so "contains
+      // ESC" is NOT a printable test: decodePrintableKey + the paste
+      // protocol decide, exactly like the fork's Input component.
+      const textMode = state.mode === 'add'
+        || state.mode === 'create-name'
+        || state.mode === 'create-text'
+        || state.mode === 'create-command'
+        || (state.mode === 'advanced' && state.editing)
+        || ((state.mode === 'custom-text' || state.mode === 'custom-command' || state.mode === 'custom-name') && state.editing)
+      if (textMode && matchesKey(data, 'backspace')) {
+        this.model.backspace()
+        return
+      }
+      if (textMode && !this.skipPasteOnce && this.feedPaste(data)) return
+      if (matchesKey(data, 'escape')) {
+        // The model navigates back page by page; a clean Row Selector's
+        // Esc closes, a dirty one opens the exit-confirm page (PR E §7).
+        if (!this.model.cancel()) this.onCancel()
+        return
+      }
+      if (matchesKey(data, 'enter')) {
+        if (state.mode === 'rows' && this.model.homeSelection().kind === 'save') {
+          // Enter on the "Save changes" action — the discoverable save
+          // path (PR E §4.1).
+          this.requestSave()
+          return
+        }
+        if (state.mode === 'exit-confirm') {
+          this.runExitChoice(this.model.exitConfirmAction())
+          return
+        }
+        this.model.activate()
+        return
+      }
+      if (textMode) {
+        // A plain printable chunk (one character OR a coalesced burst —
+        // fast typists and non-bracketed pastes deliver multi-char runs)
+        // is text: the model strips control characters and enforces the
+        // parser's bounds.
+        const printable = decodePrintableKey(data)
+          ?? (data.length >= 1 && !/[\u0000-\u001f\u007f-\u009f]/.test(data) ? data : undefined)
+        if (printable !== undefined) {
+          this.model.text(printable)
+          return
+        }
+        // A non-printable, unmatched chunk in text mode falls through to
+        // the navigation keys below (arrows move the add list).
+      }
+      if (state.mode === 'rows' && matchesKey(data, 's')) {
+        // The power-user shortcut shares the ONE save path with the
+        // "Save changes" row and "Save & Exit" (PR E §13) — never a
+        // second save implementation.
+        this.requestSave()
+        return
+      }
+      if (state.mode === 'row') {
+        if (matchesKey(data, 'a')) {
+          this.model.startAdd()
+          return
+        }
+        if (matchesKey(data, 'm')) {
+          this.model.startMove()
+          return
+        }
+        if (matchesKey(data, 'f')) {
+          this.model.cycleFormat()
+          return
+        }
+        if (matchesKey(data, 'space')) {
+          this.model.removeActive()
+          return
+        }
+        // Legacy compat shortcuts (no longer advertised in the help —
+        // Move Mode is the primary reorder interaction).
+        if (matchesKey(data, 'shift+up')) {
+          this.model.reorderActive(-1)
+          return
+        }
+        if (matchesKey(data, 'shift+down')) {
+          this.model.reorderActive(1)
+          return
+        }
+      }
+      if (matchesKey(data, 'up')) {
+        this.model.moveUp()
+        return
+      }
+      if (matchesKey(data, 'down')) {
+        this.model.moveDown()
+        return
+      }
+      if (matchesKey(data, 'left')) {
+        this.model.moveZone('left')
+        return
+      }
+      if (matchesKey(data, 'right')) {
+        this.model.moveZone('right')
+        return
+      }
+    }
+  }
+
+  /** The ONE save path (PR E §13): the S shortcut, the Row Selector's
+   * "Save changes" action and the exit-confirm's "Save & Exit" all land
+   * here — saving guard, atomic draft capture, close-on-success only. */
+  private requestSave(): void {
+    if (this.model.state().saving) return
+    // Plan §12: a CLEAN draft has nothing to persist — closing IS the
+    // save outcome. This also keeps an unchanged default/compact footer
+    // from being silently rewritten as footer:'custom' by an idle save.
+    // (The exit-confirm page only exists while dirty, so this branch is
+    // reachable from the selector's S / Save changes row only.)
+    if (!this.model.isDirty()) {
+      this.onCancel()
+      return
+    }
+    this.model.beginSave()
+    this.requestRender()
+    // The draft is captured BEFORE the await: the persistence layer must
+    // observe one atomic snapshot of layout + definitions.
+    const layout = this.model.preview()
+    const customItems = this.model.customItemSettings()
+    void Promise.resolve() // allowlist: the panel is the chain's terminal sink — .then closes on success, .catch keeps the editor open (never rejects unhandled)
+      .then(() => this.onSave(layout, customItems))
+      .then(() => {
+        // Success: the host wrapper has already closed the overlay after
+        // the persistence resolved (PR E §9). Reset the flag for the
+        // disposed-panel edge (a close() that did not dispose us).
+        this.model.endSave()
+      })
+      .catch(() => {
+        // Failure: the integration layer already notified (PR E §11).
+        // The overlay stays open, the draft is untouched, dirty stays
+        // true — the user can keep editing, retry, or Discard & Exit.
+        this.model.endSave()
+        this.requestRender()
+      })
+  }
+
+  /** Dispatch the exit-confirm page's Enter (PR E §7.2). */
+  private runExitChoice(choice: 'save' | 'discard' | 'keep'): void {
+    if (choice === 'save') {
+      this.requestSave()
+      return
+    }
+    if (choice === 'discard') {
+      // Explicit close-without-write: no persistence of layout or
+      // definitions (PR E §7.2 Discard & Exit).
+      this.onCancel()
+    }
+    // 'keep': the model already returned to the Row Selector.
+  }
+
+  invalidate(): void {
+    // The fork re-renders after every handleInput dispatch; a model
+    // mutation from outside (reset helpers) calls this.
+  }
+
+  dispose(): void {
+    this.clearPasteStartPending()
+    this.pasteBuffer = ''
+    this.isInPaste = false
+    this.skipPasteOnce = false
+  }
+
+  render(width: number): string[] {
+    const state = this.model.state()
+    // The budget is re-read EVERY render (resize-safe); the caller's
+    // getter already leaves room for the Frame's border rows.
+    const budget = Math.max(1, this.maxVisible())
+    this.lastRenderWidth = Math.max(1, width)
+    const rule = color.border('─'.repeat(Math.max(0, width - 2)))
+    const head = [
+      color.textStrong(this.title(state)),
+      color.textMuted(this.help(state)),
+    ]
+    const pre = this.preLines(state)
+    const tail = this.tailLines(state)
+    const body = this.bodyLines(state, width)
+    const previewRows = this.previewLines(width)
+    // The EDITABLE body wins over the preview on a short terminal: the
+    // fixed shell is title + help (+ rule + the add page's pinned
+    // lines), the body keeps up to TWO rows (all of them when fewer) and
+    // the PREVIEW compresses to whatever remains — a footer preview can
+    // legally reach 4 physical rows, and letting it eat the shell would
+    // leave a configurator with zero editable rows visible. The preview
+    // block keeps its label only while at least one preview row fits;
+    // a hidden remainder is marked with an ellipsis.
+    const fixedCount = head.length + pre.length + tail.length + 1
+    const left = budget - fixedCount
+    if (left <= 0) {
+      // A tiny terminal: the fixed shell wins, the body drops (the Frame
+      // borders stay visible — the physical minimum).
+      const lines = [...head, ...pre].slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
+      this.hitMap = lines.map((): ConfiguratorMouseHit => ({ kind: 'inert' }))
+      return lines
+    }
+    const bodyMin = state.mode === 'exit-confirm' || state.mode === 'rows'
+      ? body.lines.length // PR E §17.9: the guard's question + three actions, and the whole
+      : Math.min(body.lines.length, 2) // selector (rows + Save changes), never scroll away
+    let bodyBudget: number
+    let previewBlock: string[]
+    if (left <= bodyMin + 1) {
+      // No room for a meaningful preview — the editable rows take it all.
+      bodyBudget = Math.min(body.lines.length, Math.max(1, left))
+      previewBlock = []
+    } else {
+      const previewCount = Math.min(previewRows.length, left - bodyMin - 1)
+      bodyBudget = left - 1 - previewCount
+      previewBlock = previewCount > 0
+        ? [
+            color.textStrong('Preview'),
+            ...previewRows.slice(0, previewCount).map((line, index) =>
+              index === previewCount - 1 && previewRows.length > previewCount ? `${line}…` : line),
+          ]
+        : []
+    }
+    const scrollBudget = Math.max(1, Math.min(bodyBudget, body.lines.length))
+    this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
+    if (body.cursor < this.scrollTop) this.scrollTop = body.cursor
+    if (body.cursor >= this.scrollTop + scrollBudget) this.scrollTop = body.cursor - scrollBudget + 1
+    this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
+    const bodySlice = body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget)
+    const bodyHits = body.hits.slice(this.scrollTop, this.scrollTop + scrollBudget)
+    const lines = [
+      ...head,
+      ...previewBlock,
+      rule,
+      ...pre,
+      ...bodySlice,
+      ...tail,
+    ].map(line => truncateToWidth(line, Math.max(1, width), '…'))
+    this.hitMap = [
+      ...head.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      ...previewBlock.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      { kind: 'inert' },
+      ...pre.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      ...bodyHits,
+      ...tail.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+    ]
+    return lines
+  }
+
+  /**
+   * Mouse parity: the hit map from the LAST render decides what a pointer
+   * event may act on — a selectable row (moves the cursor through the
+   * model's own move operations), the "Save changes" action, the
+   * exit-confirm choices, or inert chrome (title, help, rule, preview,
+   * text-editing rows). A click routes through the SAME operations as
+   * Enter: requestSave / runExitChoice / model.activate(). While a save
+   * is in flight every mouse mutation is ignored, exactly like keyboard
+   * input — no click can create a second save.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture, and every left press starts a fresh
+    // one: release the pressed action up front — BEFORE the width
+    // guard / hit lookup / inert return / saving gate, so a press on
+    // stale-width or inert geometry still replaces the old identity
+    // (the TUI keeps the frame as the press target for a handled
+    // press, so a later release on the same cell synthesizes a click
+    // that must not match a stale action). The local copy still guards
+    // the valid-row comparison below.
+    const pressedAction = this.mousePressedAction
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+      this.mousePressedAction = undefined
+    }
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit || hit.kind === 'inert') return undefined
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    // A save in flight freezes mouse mutations (PR E §10), exactly like
+    // keyboard input.
+    if (this.model.state().saving) return undefined
+    if (event.type === 'press') {
+      if (hit.kind === 'select') {
+        // In row-move mode the keyboard ↑/↓ REORDER the active item; a
+        // mouse click must not implicitly reorder (mouse-plan boundary:
+        // "row-move: click row selects it only"). Item rows are
+        // mouse-inert in that mode.
+        if (this.model.state().mode !== 'row-move') {
+          this.moveCursorTo(hit.target)
+          this.mousePressedAction = { kind: 'select', target: hit.target }
+        }
+      } else if (hit.kind === 'save') {
+        this.mousePressedAction = { kind: 'save' }
+      } else if (hit.kind === 'exit') {
+        this.mousePressedAction = { kind: 'exit', choice: hit.choice }
+      }
+      return { handled: true, focus: true }
+    }
+    // click: the same operations as Enter, but only for the exact
+    // pressed semantic action (a resize/repaint between press and
+    // release must not transfer the click to a different action).
+    if (!sameMouseAction(pressedAction, hit)) return undefined
+    if (hit.kind === 'save') {
+      this.requestSave()
+    } else if (hit.kind === 'exit') {
+      this.runExitChoice(hit.choice)
+    } else if (hit.kind === 'select') {
+      // Same boundary: a click in row-move mode must not both reorder
+      // (via the press above) and exit the mode (via activate) — the
+      // item rows are inert, and Done stays a keyboard action.
+      if (this.model.state().mode !== 'row-move') this.model.activate()
+    }
+    return { handled: true }
+  }
+
+  /** Move the current cursor to `target` through the model's own move
+   * operations (the keyboard's ↑/↓ semantics — never a mouse-specific
+   * cursor path). In row-move mode the model's move operations reorder
+   * the active item, which is the keyboard contract; no drag-reorder is
+   * invented. */
+  private moveCursorTo(target: number): void {
+    const state = this.model.state()
+    const current = state.mode === 'rows' ? state.homeCursor
+      : state.mode === 'row' || state.mode === 'row-move' ? state.cursor
+      : state.mode === 'item' ? state.itemCursor
+      : state.mode === 'advanced'
+        ? Math.max(0, ['prefix', 'suffix', 'importance', 'reset'].indexOf(state.advancedField))
+        : state.pickerIndex
+    const delta = target - current
+    for (let step = 0; step < Math.abs(delta); step += 1) {
+      if (delta > 0) this.model.moveDown()
+      else this.model.moveUp()
+    }
+  }
+
+  /** Feed one chunk through the bracketed-paste protocol. Returns true
+   * when the chunk was consumed as paste traffic (a start marker,
+   * buffered content, or the end marker) — the markers and the content
+   * may split across terminal chunks. A completed paste feeds the WHOLE
+   * content to the model as one text input (the model strips control
+   * characters and enforces the parser's bounds). */
+  private feedPaste(data: string): boolean {
+    const pendingStart = this.pasteStartPending
+    if (pendingStart !== '') {
+      this.clearPasteStartPending()
+      const candidate = pendingStart + data
+      if (continuesPasteStart(candidate)) {
+        data = candidate
+      } else {
+        // A lone ESC is ambiguous: it may be the first byte of a split paste
+        // marker or a real Escape key. Replay it without re-entering this
+        // scanner, then feed the new chunk normally so a fresh marker suffix
+        // cannot be lost. Longer malformed prefixes retain their old
+        // fail-soft behavior: a reconstructed normal key is replayed as one
+        // key, otherwise the incoming chunk is rescanned for fresh paste
+        // markers before ordinary input dispatch.
+        if (pendingStart === '\x1b') {
+          // This is a rejected standalone ESC, not the marker's first byte;
+          // preserve its normal navigation semantics before rescanning the
+          // new chunk for a fresh marker.
+          this.replayWithoutPaste(pendingStart)
+          this.rescanPasteInput(data)
+        } else if (isReplayableInput(candidate)) {
+          this.replayWithoutPaste(candidate)
+        } else {
+          this.rescanPasteInput(data)
+        }
+        return true
+      }
+    }
+
+    // Once a paste has started, every byte belongs to the paste until the
+    // end marker. The end marker is allowed to split because it stays in
+    // pasteBuffer between calls.
+    if (this.isInPaste) {
+      this.pasteBuffer += data
+      this.finishPastes()
+      return true
+    }
+
+    const startIndex = data.indexOf(BRACKETED_PASTE_START)
+    if (startIndex >= 0) {
+      // Preserve ordinary input that arrived before a complete marker, then
+      // consume the marker and continue scanning the same chunk. This path
+      // also handles a complete marker reconstructed from pasteStartPending.
+      const before = data.slice(0, startIndex)
+      if (before !== '') this.handleInput(before)
+      // Dispatching `before` may have buffered a prefix of its own. Preserve
+      // a genuine lone Escape, but discard longer malformed bytes before the
+      // now-complete paste start marker.
+      this.replayPendingEscapeBeforePaste()
+      this.isInPaste = true
+      this.pasteBuffer = data.slice(startIndex + BRACKETED_PASTE_START.length)
+      this.finishPastes()
+      return true
+    }
+
+    // A raw ESC is the one complete key that is also a possible first byte
+    // of the paste marker, so hold it before the normal-key fast path.
+    if (data === '\x1b') {
+      this.holdPasteStart(data)
+      return true
+    }
+
+    // A complete normal key sequence (including arrows and Kitty printables)
+    // must not be mistaken for the shared ESC+[ paste prefix.
+    if (isReplayableInput(data)) return false
+
+    // Keep an incomplete ESC+[200~ suffix. A lone ESC is held briefly as an
+    // ambiguous prefix; if no continuation arrives, the timer replays it as
+    // the configurator's ordinary Escape navigation. Longer prefixes use a
+    // longer bounded hold because they are already unlikely to be standalone
+    // keys and existing split-marker callers need time between chunks.
+    const partialLength = longestPasteStartSuffix(data)
+    if (partialLength > 0) {
+      const ordinary = data.slice(0, -partialLength)
+      if (ordinary !== '') this.handleInput(ordinary)
+      this.holdPasteStart(data.slice(-partialLength))
+      return true
+    }
+
+    return false
+  }
+
+  /** Dispatch replayed bytes without sending them back into paste scanning. */
+  private replayWithoutPaste(data: string): void {
+    const previous = this.skipPasteOnce
+    this.skipPasteOnce = true
+    try {
+      this.handleInput(data)
+    } finally {
+      this.skipPasteOnce = previous
+    }
+  }
+
+  /** Re-enter the scanner for bytes arriving after a rejected prefix. */
+  private rescanPasteInput(data: string): void {
+    if (data === '') return
+    if (this.feedPaste(data)) return
+    this.replayWithoutPaste(data)
+  }
+
+  private holdPasteStart(prefix: string): void {
+    this.pasteStartPending = prefix
+    this.clearPasteStartTimer()
+    const delay = prefix === '\x1b' ? PASTE_ESC_TIMEOUT_MS : PASTE_PREFIX_TIMEOUT_MS
+    this.pasteStartTimer = setTimeout(() => {
+      this.pasteStartTimer = undefined
+      if (this.pasteStartPending !== prefix) return
+      this.pasteStartPending = ''
+      if (prefix === '\x1b') {
+        this.replayWithoutPaste(prefix)
+        this.requestRender()
+      }
+    }, delay)
+  }
+
+  private replayPendingEscapeBeforePaste(): void {
+    const pending = this.pasteStartPending
+    this.clearPasteStartPending()
+    if (pending === '\x1b') this.replayWithoutPaste(pending)
+  }
+
+  private clearPasteStartPending(): void {
+    this.pasteStartPending = ''
+    this.clearPasteStartTimer()
+  }
+
+  private clearPasteStartTimer(): void {
+    if (this.pasteStartTimer === undefined) return
+    clearTimeout(this.pasteStartTimer)
+    this.pasteStartTimer = undefined
+  }
+
+  /** Consume all complete paste end markers in the current buffer. */
+  private finishPastes(): void {
+    let remaining = ''
+    while (this.isInPaste) {
+      const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END)
+      if (endIndex < 0) return
+      const content = this.pasteBuffer.slice(0, endIndex)
+      remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length)
+      this.isInPaste = false
+      this.pasteBuffer = ''
+      this.model.text(content)
+      if (remaining === '') return
+
+      // A single terminal chunk can contain ordinary input or another paste
+      // after the end marker. Re-enter the scanner without sending the same
+      // bytes through the outer handleInput twice.
+      const startIndex = remaining.indexOf(BRACKETED_PASTE_START)
+      if (startIndex >= 0) {
+        const before = remaining.slice(0, startIndex)
+        if (before !== '') this.handleInput(before)
+        // The ordinary bytes before the next marker may have left a prefix
+        // candidate; preserve a lone Escape, but do not leak a longer
+        // malformed prefix into this paste.
+        this.replayPendingEscapeBeforePaste()
+        this.isInPaste = true
+        this.pasteBuffer = remaining.slice(startIndex + BRACKETED_PASTE_START.length)
+        remaining = ''
+        continue
+      }
+      const partialLength = longestPasteStartSuffix(remaining)
+      if (partialLength > 0) {
+        const ordinary = remaining.slice(0, -partialLength)
+        if (ordinary !== '') this.handleInput(ordinary)
+        this.holdPasteStart(remaining.slice(-partialLength))
+        return
+      }
+      this.handleInput(remaining)
+      return
+    }
+  }
+
+  /** The page title (the header). */
+  private title(state: { mode: string; rowIndex: number; cursor: number; addSide: 'left' | 'right'; customKind: 'text' | 'command' }): string {
+    switch (state.mode) {
+      case 'row':
+        return `Edit Row ${state.rowIndex + 1}`
+      case 'row-move':
+        return `Edit Row ${state.rowIndex + 1} [MOVE]`
+      case 'item':
+        return `Edit Item · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'style':
+        return `Style · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'tone':
+        return `Tone · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-tone':
+        return `Default tone · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'advanced':
+        return `Advanced · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-text':
+        return `Text · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-command':
+        return `Command · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-refresh':
+        return `Refresh · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-timeout':
+        return `Timeout · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-name':
+        return `Rename · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'custom-delete':
+        return `Delete · ${this.itemLabel(state.rowIndex, state.cursor)}`
+      case 'create-name':
+      case 'create-text':
+      case 'create-command':
+      case 'create-refresh':
+      case 'create-timeout':
+      case 'create-tone':
+        return state.customKind === 'command' ? 'Create Custom Command' : 'Create Custom Text'
+      case 'add':
+        // The side is decided when the picker opens (the cursor item's
+        // zone): showing it spares the user guessing where the item will
+        // land.
+        return `Add Item → Row ${state.rowIndex + 1} · ${state.addSide === 'left' ? 'Left' : 'Right'}`
+      case 'exit-confirm':
+        return 'Unsaved Changes'
+      default:
+        return 'Configure Footer'
+    }
+  }
+
+  /** The contextual help line (per page — never one long packed line). */
+  private help(state: { mode: string; editing: boolean }): string {
+    switch (state.mode) {
+      case 'rows':
+        return '↑↓ Select · Enter Open · S Save · Esc Close'
+      case 'exit-confirm':
+        return '↑↓ Select · Enter Confirm · Esc Keep Editing'
+      case 'row':
+        return 'A Add · Enter Edit · M Move · ←→ Side · Space Remove · F Style · Esc Back'
+      case 'row-move':
+        return '↑↓ Move · ←→ Side · Enter/Esc Done'
+      case 'item':
+        return '↑↓ Select · Enter Open · ←→ Change · Esc Back'
+      case 'style':
+      case 'tone':
+      case 'custom-tone':
+      case 'custom-refresh':
+      case 'custom-timeout':
+        return '↑↓ Select · Enter Apply · Esc Back'
+      case 'advanced':
+        return state.editing ? 'Type · Enter Confirm · Esc Cancel' : '↑↓ Select · Enter Edit · Esc Back'
+      case 'custom-text':
+      case 'custom-command':
+      case 'custom-name':
+        return 'Type · Enter Confirm · Esc Cancel'
+      case 'custom-delete':
+        return 'Enter Confirm · Esc Cancel'
+      case 'create-name':
+      case 'create-text':
+      case 'create-command':
+        return 'Type · Enter Next · Esc Cancel'
+      case 'create-refresh':
+      case 'create-timeout':
+        return '↑↓ Select · Enter Next · Esc Cancel'
+      case 'create-tone':
+        return '↑↓ Select · Enter Create · Esc Cancel'
+      case 'add':
+        return 'Type to search · ↑↓ Select · Enter Add · Esc Back'
+      default:
+        return ''
+    }
+  }
+
+  /** The preview region: the whole composed footer on the row pages, the
+   * single item's own render (with its ref decoration) on the item
+   * pages. FIXED chrome — never scrolls with the body. */
+  private previewLines(width: number): string[] {
+    const state = this.model.state()
+    if (state.mode === 'item' || state.mode === 'style' || state.mode === 'tone'
+      || state.mode === 'advanced' || state.mode === 'custom-text' || state.mode === 'custom-command'
+      || state.mode === 'custom-refresh' || state.mode === 'custom-timeout'
+      || state.mode === 'custom-tone' || state.mode === 'custom-name' || state.mode === 'custom-delete') {
+      const ref = this.refAt(state.rowIndex, state.cursor)
+      return [ref === undefined ? color.textMuted('(no item)') : this.itemPreview(ref)]
+    }
+    if (state.mode === 'create-name' || state.mode === 'create-text' || state.mode === 'create-tone'
+      || state.mode === 'create-command' || state.mode === 'create-refresh' || state.mode === 'create-timeout') {
+      const tone = state.mode === 'create-tone'
+        ? FOOTER_TONE_CHOICES[state.pickerIndex]?.value ?? state.customTone
+        : state.customTone
+      const text = state.customKind === 'command' ? state.customCommand : state.customText
+      const placeholder = state.customKind === 'command' ? '(enter command)' : '(enter text)'
+      const preview = text === '' ? color.textMuted(placeholder) : renderSpans([{
+        text: stripControlChars(text),
+        ...(tone === 'auto' ? {} : { tone }),
+      }])
+      return [preview]
+    }
+    const preview = this.composer.render({
+      snapshot: this.snapshot(),
+      layout: this.model.preview(),
+      width,
+      context: { taskBrowserAvailable: this.taskBrowserAvailable(), extensionFooterText: this.extensionFooterText() },
+    })
+    // The composed preview flows through the REAL composer (the contract:
+    // the preview must show exactly what the footer will show), but the
+    // draft may carry fields the persisted-layout parser would have
+    // rejected (a hand-built FooterLayoutV1) and definitions render their
+    // own span text — so the composed lines pass the SAME boundary the
+    // command mode applies to user-influenced footer text: SGR + OSC 8
+    // survive (the legitimate styling), every other ESC sequence and C0/
+    // C1 control is stripped.
+    const lines = preview.split('\n').map(line => sanitizeCommandOutput(line))
+      .filter((line, index, all) => !(line === '' && index === all.length - 1))
+    return lines.length > 0 ? lines : [color.textMuted('(empty footer)')]
+  }
+
+  /** Pinned lines ABOVE the scrollport (the add picker's search input —
+   * an input must never scroll away). */
+  private preLines(state: { mode: string; addQuery: string }): string[] {
+    if (state.mode !== 'add') return []
+    return [`${color.textMuted('Search:')} ${state.addQuery === '' ? color.textMuted('(type to filter)') : color.textStrong(state.addQuery)}`]
+  }
+
+  /** Pinned lines BELOW the scrollport (the add picker's description of
+   * the highlighted item — or the full-row notice: the model refuses a
+   * 33rd item, and a silent no-op would look broken). */
+  private tailLines(state: ReturnType<FooterConfiguratorModel['state']>): string[] {
+    if (state.mode !== 'add') return []
+    const row = state.layout.rows[Math.min(state.rowIndex, state.layout.rows.length - 1)]!
+    if (flatLengthOf(row) >= MAX_ITEMS_PER_ROW) {
+      return [color.textMuted('(row is full — remove an item first)')]
+    }
+    if (this.model.isCreateOption()) {
+      const kind = this.model.createActionKind()
+      return [color.textMuted(kind === 'command'
+        ? 'Create a user-defined command item.'
+        : 'Create a user-defined static footer item.')]
+    }
+    const matches = this.model.addMatches()
+    const id = matches[Math.min(state.pickerIndex, Math.max(0, matches.length - 1))]
+    if (id === undefined) return []
+    const description = this.registry.get(id)?.description
+    if (description === undefined || description === '') return []
+    return [color.textMuted(stripControlChars(description))]
+  }
+
+  /** The scrollable body + the line index the cursor sits on. */
+  private bodyLines(state: ReturnType<FooterConfiguratorModel['state']>, width: number): { lines: string[]; cursor: number; hits: ConfiguratorMouseHit[] } {
+    switch (state.mode) {
+      case 'rows': {
+        const lines = [color.textStrong('Select row to edit')]
+        const hits: ConfiguratorMouseHit[] = [{ kind: 'inert' }]
+        state.layout.rows.forEach((row, index) => {
+          // The home cursor — not rowIndex — drives the selector highlight
+          // (PR E §4.2: rowIndex stays the EDITED row).
+          const active = index === state.homeCursor
+          const marker = active ? color.primary('›') : ' '
+          const count = flatLengthOf(row)
+          const noun = count === 1 ? 'item' : 'items'
+          const label = `Row ${index + 1}`
+          const tail = `${count} ${noun}`
+          const pad = Math.max(1, width - visibleWidth(label) - tail.length - 4)
+          const line = `${marker} ${active ? color.textStrong(label) : color.text(label)}${' '.repeat(pad)}${color.textMuted(tail)}`
+          lines.push(line)
+          hits.push({ kind: 'select', target: index })
+        })
+        // The trailing "Save changes" action (PR E §4/§6): the discoverable
+        // save entry with its transactional status.
+        const saveActive = state.homeCursor >= state.layout.rows.length
+        const status = state.saving
+          ? 'Saving…'
+          : this.model.isDirty() ? 'Unsaved' : 'No changes'
+        const statusPainted = state.saving || !this.model.isDirty()
+          ? color.textMuted(status)
+          : color.warning(status)
+        const pad = Math.max(1, width - 'Save changes'.length - status.length - 4)
+        lines.push(`${saveActive ? color.primary('›') : ' '} ${saveActive ? color.textStrong('Save changes') : color.text('Save changes')}${' '.repeat(pad)}${statusPainted}`)
+        hits.push({ kind: 'save' })
+        return { lines, cursor: 1 + Math.min(state.homeCursor, state.layout.rows.length), hits }
+      }
+      case 'exit-confirm': {
+        // PR E §7.2: three explicit exits, no Y/N pair. The save action
+        // reports the in-flight state (PR E §10).
+        const choices = ['Save & Exit', 'Discard & Exit', 'Keep Editing']
+        const activeIndex = Math.min(state.exitConfirmCursor, choices.length - 1)
+        const lines = [color.warning('Save changes before exiting?')]
+        const hits: ConfiguratorMouseHit[] = [{ kind: 'inert' }]
+        choices.forEach((label, index) => {
+          const active = index === activeIndex
+          const marker = active ? color.primary('›') : ' '
+          const name = active ? color.textStrong(label) : color.text(label)
+          let line = `${marker} ${name}`
+          if (active && label === 'Save & Exit' && state.saving) {
+            line += `${' '.repeat(Math.max(1, 16 - label.length))}${color.textMuted('Saving…')}`
+          }
+          lines.push(line)
+          hits.push({ kind: 'exit', choice: index === 0 ? 'save' : index === 1 ? 'discard' : 'keep' })
+        })
+        return { lines, cursor: 1 + activeIndex, hits }
+      }
+      case 'row':
+      case 'row-move': {
+        const row = state.layout.rows[Math.min(state.rowIndex, state.layout.rows.length - 1)]!
+        const lines: string[] = []
+        const hits: ConfiguratorMouseHit[] = []
+        let cursor = 0
+        const emitZone = (zone: 'left' | 'right'): void => {
+          lines.push(color.textStrong(zone === 'left' ? 'Left' : 'Right'))
+          hits.push({ kind: 'inert' })
+          const refs = zone === 'left' ? row.left : row.right
+          if (refs.length === 0) {
+            lines.push(color.textMuted('  (empty)'))
+            hits.push({ kind: 'inert' })
+            return
+          }
+          refs.forEach((ref, index) => {
+            const flat = zone === 'left' ? index : row.left.length + index
+            const active = flat === state.cursor
+            if (active) cursor = lines.length
+            const marker = active
+              ? (state.mode === 'row-move' ? color.accent('◆') : color.primary('›'))
+              : ' '
+            const label = this.refLabel(ref)
+            const style = this.styleText(ref)
+            let line = `${marker} ${active ? color.textStrong(label) : color.text(label)}`
+            if (style !== '') {
+              const pad = Math.max(1, width - 2 - visibleWidth(label) - visibleWidth(style))
+              line += `${' '.repeat(pad)}${color.textMuted(style)}`
+            }
+            lines.push(line)
+            hits.push({ kind: 'select', target: flat })
+          })
+        }
+        emitZone('left')
+        emitZone('right')
+        return { lines, cursor, hits }
+      }
+      case 'item': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const customItem = ref === undefined ? undefined : this.model.customItem(ref.id)
+        const custom = customItem?.kind
+        const menu = itemMenuFor(ref === undefined ? undefined : this.registry.get(ref.id)?.formats, custom)
+        const lines = menu.map((entry, index) => {
+          const active = index === state.itemCursor
+          const marker = active ? color.primary('›') : ' '
+          if (entry.kind === 'style') {
+            const value = this.formatDisplay(ref)
+            return this.menuRow(marker, 'Style', value === '' ? undefined : color.text(value), active)
+          }
+          if (entry.kind === 'tone') {
+            const tone = ref?.tone ?? 'auto'
+            // A legal-but-unlisted persisted token must display as ITSELF
+            // (Strong/Dim/…), never as the 'Auto' fallback.
+            const label = toneChoicesFor(ref?.tone).find(choice => choice.value === tone)?.label ?? 'Auto'
+            return this.menuRow(marker, toneMenuLabel(entry.kind), this.tonePaint(tone, label), active)
+          }
+          if (entry.kind === 'custom-text') {
+            const value = customItem?.kind === 'text' ? customItem.text : undefined
+            return this.menuRow(marker, 'Text', value === undefined ? undefined : color.text(value), active)
+          }
+          if (entry.kind === 'custom-command') {
+            const value = customItem?.kind === 'command' ? customItem.command : undefined
+            return this.menuRow(marker, 'Command', value === undefined ? undefined : color.text(clipText(value, 48)), active)
+          }
+          if (entry.kind === 'custom-refresh') {
+            const value = customItem?.kind === 'command' ? formatRefreshMs(effectiveCustomCommandRefreshMs(customItem)) : undefined
+            return this.menuRow(marker, 'Refresh', value === undefined ? undefined : color.text(value), active)
+          }
+          if (entry.kind === 'custom-timeout') {
+            const value = customItem?.kind === 'command' ? formatTimeoutMs(effectiveCustomCommandTimeoutMs(customItem)) : undefined
+            return this.menuRow(marker, 'Timeout', value === undefined ? undefined : color.text(value), active)
+          }
+          if (entry.kind === 'custom-tone') {
+            const tone = customItem?.tone ?? 'auto'
+            const label = toneChoicesFor(tone).find(choice => choice.value === tone)?.label ?? 'Auto'
+            return this.menuRow(marker, toneMenuLabel(entry.kind), this.tonePaint(tone, label), active)
+          }
+          if (entry.kind === 'custom-name') return this.menuRow(marker, 'Rename definition', undefined, active)
+          if (entry.kind === 'custom-delete') return this.menuRow(marker, 'Delete definition', undefined, active)
+          return this.menuRow(marker, 'Advanced…', undefined, active)
+        })
+        return { lines, cursor: Math.min(state.itemCursor, Math.max(0, menu.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
+      }
+      case 'style': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const def = ref === undefined ? undefined : this.registry.get(ref.id)
+        const formats = def?.formats ?? []
+        const names = formats.map(format => this.humanizeFormat(stripControlChars(format)))
+        // Alignment is computed on VISIBLE widths (a format name may
+        // contain wide characters — string.length would misalign every
+        // row after it).
+        const nameWidth = Math.max(...names.map(name => visibleWidth(name)), 1)
+        const lines = formats.map((format, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const example = ref === undefined ? '' : this.formatExample(ref, format)
+          // The plain name pads FIRST (alignment is computed on visible
+          // text); the color wraps the padded label.
+          const padded = `${names[index]!}${' '.repeat(Math.max(0, nameWidth + 2 - visibleWidth(names[index]!)))}`
+          return `${marker} ${active ? color.textStrong(padded) : color.text(padded)}${example === '' ? '' : ` ${example}`}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, formats.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
+      }
+      case 'tone': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const choices = toneChoicesFor(ref?.tone)
+        const lines = choices.map((choice, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const painted = this.tonePaint(choice.value, choice.label)
+          const suffix = (ref?.tone ?? 'auto') === choice.value ? color.textMuted('  (current)') : ''
+          return `${marker} ${painted}${suffix}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
+      }
+      case 'custom-tone': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const current = this.model.customItem(ref?.id ?? '')?.tone ?? 'auto'
+        const choices = toneChoicesFor(current)
+        const lines = choices.map((choice, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const painted = this.tonePaint(choice.value, choice.label)
+          const suffix = current === choice.value ? color.textMuted('  (current)') : ''
+          return `${marker} ${painted}${suffix}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
+      }
+      case 'custom-refresh': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const item = this.model.customItem(ref?.id ?? '')
+        const current = item?.kind === 'command' ? effectiveCustomCommandRefreshMs(item) : 5000
+        const choices = customCommandRefreshChoices(current)
+        const lines = choices.map((ms, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const label = formatRefreshMs(ms)
+          const suffix = current === ms ? color.textMuted('  (current)') : ''
+          return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
+      }
+      case 'custom-timeout': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const item = this.model.customItem(ref?.id ?? '')
+        const current = item?.kind === 'command' ? effectiveCustomCommandTimeoutMs(item) : 300
+        const choices = customCommandTimeoutChoices(current)
+        const lines = choices.map((ms, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const label = formatTimeoutMs(ms)
+          const suffix = current === ms ? color.textMuted('  (current)') : ''
+          return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+        })
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
+      }
+      case 'custom-text':
+      case 'custom-command':
+      case 'custom-name': {
+        const label = state.mode === 'custom-text' ? 'Text' : state.mode === 'custom-command' ? 'Command' : 'Name'
+        const raw = stripControlChars(state.editBuffer)
+        const value = raw === '' ? color.textMuted('(empty)') : color.textStrong(`${raw}▏`)
+        const lines = [this.menuRow(color.primary('›'), label, value, true)]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        // Text rows expose no cursor model (append/backspace-only): they
+        // stay keyboard-only — no fake cursor is invented for mouse.
+        return { lines, cursor: 0, hits: lines.map(() => ({ kind: 'inert' })) }
+      }
+      case 'custom-delete': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const id = ref?.id ?? ''
+        const count = this.referenceCount(id)
+        const lines = [
+          color.error(`Delete ${this.itemLabel(state.rowIndex, state.cursor)}?`),
+          color.textMuted(count === 0
+            ? 'This definition is not currently placed in the layout.'
+            : `${count} layout reference${count === 1 ? '' : 's'} will be removed.`),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 0, hits: lines.map(() => ({ kind: 'inert' })) }
+      }
+      case 'create-name': {
+        const lines = [
+          this.menuRow(color.primary('›'), 'Name', state.customName === '' ? color.textMuted('(required)') : color.textStrong(`${stripControlChars(state.customName)}▏`), true),
+          color.textMuted('Use a stable name; it is stored as user:<name>.'),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 0, hits: lines.map(() => ({ kind: 'inert' })) }
+      }
+      case 'create-text': {
+        const name = state.customName === '' ? color.textMuted('(unnamed)') : color.text(state.customName)
+        const value = state.customText === '' ? color.textMuted('(required)') : color.textStrong(`${stripControlChars(state.customText)}▏`)
+        const lines = [
+          this.menuRow(' ', 'Name', name, false),
+          this.menuRow(color.primary('›'), 'Text', value, true),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 1, hits: lines.map(() => ({ kind: 'inert' })) }
+      }
+      case 'create-command': {
+        const name = state.customName === '' ? color.textMuted('(unnamed)') : color.text(state.customName)
+        const value = state.customCommand === '' ? color.textMuted('(required)') : color.textStrong(`${stripControlChars(state.customCommand)}▏`)
+        const lines = [
+          this.menuRow(' ', 'Name', name, false),
+          this.menuRow(color.primary('›'), 'Command', value, true),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        return { lines, cursor: 1, hits: lines.map(() => ({ kind: 'inert' })) }
+      }
+      case 'create-refresh': {
+        const lines = [
+          this.menuRow(' ', 'Name', color.text(state.customName), false),
+          this.menuRow(' ', 'Command', color.text(clipText(stripControlChars(state.customCommand), 48)), false),
+          color.textStrong('Refresh'),
+          ...CUSTOM_COMMAND_REFRESH_CHOICES_MS.map((ms, index) => {
+            const active = index === state.pickerIndex
+            const marker = active ? color.primary('›') : ' '
+            const label = formatRefreshMs(ms)
+            const suffix = ms === (CUSTOM_COMMAND_REFRESH_CHOICES_MS[state.pickerIndex] ?? 5000)
+              ? color.textMuted('  (selected)')
+              : ''
+            return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+          }),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        const hits: ConfiguratorMouseHit[] = [
+          { kind: 'inert' },
+          { kind: 'inert' },
+          { kind: 'inert' },
+          ...CUSTOM_COMMAND_REFRESH_CHOICES_MS.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })),
+        ]
+        if (state.customError !== '') hits.push({ kind: 'inert' })
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1), hits }
+      }
+      case 'create-timeout': {
+        const lines = [
+          this.menuRow(' ', 'Name', color.text(state.customName), false),
+          this.menuRow(' ', 'Command', color.text(clipText(stripControlChars(state.customCommand), 48)), false),
+          color.textStrong('Timeout'),
+          ...CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.map((ms, index) => {
+            const active = index === state.pickerIndex
+            const marker = active ? color.primary('›') : ' '
+            const label = formatTimeoutMs(ms)
+            const suffix = ms === (CUSTOM_COMMAND_TIMEOUT_CHOICES_MS[state.pickerIndex] ?? 300)
+              ? color.textMuted('  (selected)')
+              : ''
+            return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
+          }),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        const hits: ConfiguratorMouseHit[] = [
+          { kind: 'inert' },
+          { kind: 'inert' },
+          { kind: 'inert' },
+          ...CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })),
+        ]
+        if (state.customError !== '') hits.push({ kind: 'inert' })
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1), hits }
+      }
+      case 'create-tone': {
+        const contentLabel = state.customKind === 'command' ? 'Command' : 'Text'
+        const content = state.customKind === 'command' ? state.customCommand : state.customText
+        const lines = [
+          this.menuRow(' ', 'Name', color.text(state.customName), false),
+          this.menuRow(' ', contentLabel, color.text(clipText(stripControlChars(content), 48)), false),
+          color.textStrong('Tone'),
+          ...FOOTER_TONE_CHOICES.map((choice, index) => {
+            const active = index === state.pickerIndex
+            const marker = active ? color.primary('›') : ' '
+            const suffix = choice.value === (FOOTER_TONE_CHOICES[state.pickerIndex]?.value ?? 'auto')
+              ? color.textMuted('  (selected)')
+              : ''
+            return `${marker} ${this.tonePaint(choice.value, choice.label)}${suffix}`
+          }),
+        ]
+        if (state.customError !== '') lines.push(color.error(state.customError))
+        const hits: ConfiguratorMouseHit[] = [
+          { kind: 'inert' },
+          { kind: 'inert' },
+          { kind: 'inert' },
+          ...FOOTER_TONE_CHOICES.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })),
+        ]
+        if (state.customError !== '') hits.push({ kind: 'inert' })
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1), hits }
+      }
+      case 'advanced': {
+        const ref = this.refAt(state.rowIndex, state.cursor)
+        const fields: Array<{ field: 'prefix' | 'suffix' | 'importance' | 'reset'; label: string; value: string }> = [
+          // The committed values are display text from an arbitrary
+          // FooterLayoutV1 (the parser rejects control characters in
+          // prefix/suffix, but the model accepts any layout): stripped at
+          // this display boundary exactly like the item preview.
+          { field: 'prefix', label: 'Prefix', value: ref?.prefix === undefined ? '' : stripControlChars(ref.prefix) },
+          { field: 'suffix', label: 'Suffix', value: ref?.suffix === undefined ? '' : stripControlChars(ref.suffix) },
+          { field: 'importance', label: 'Importance', value: ref?.importance === undefined ? '' : String(ref.importance) },
+          { field: 'reset', label: 'Reset to default', value: '' },
+        ]
+        const lines = fields.map((entry, index) => {
+          const active = entry.field === state.advancedField
+          const marker = active ? color.primary('›') : ' '
+          if (entry.field === 'reset') {
+            return `${marker} ${color.textMuted(entry.label)}`
+          }
+          const editing = active && state.editing
+          // The inline buffer is control-char-free by construction (the
+          // model strips on input and seeds from the stripped value), but
+          // the display boundary strips again — never trust a buffer.
+          const raw = stripControlChars(editing ? state.editBuffer : entry.value)
+          const display = raw === ''
+            ? color.textMuted(entry.field === 'importance' ? '(default)' : '(empty)')
+            : color.textStrong(editing ? `${raw}▏` : raw)
+          return this.menuRow(marker, entry.label, display, active)
+        })
+        // Field rows are selectable; an EDITING field row is a text input
+        // (no cursor model — keyboard-only, documented).
+        const hits: ConfiguratorMouseHit[] = fields.map((_, index) => ({
+          kind: state.editing && fields[index]!.field === state.advancedField ? 'inert' : 'select',
+          target: index,
+        }))
+        return { lines, cursor: Math.min(fields.findIndex(entry => entry.field === state.advancedField), fields.length - 1), hits }
+      }
+      case 'add': {
+        const matches = this.model.addMatches()
+        const lines = matches.map((id, index) => {
+          const active = index === state.pickerIndex
+          const marker = active ? color.primary('›') : ' '
+          const def = this.registry.get(id)
+          // An UNKNOWN id renders its raw text: strip control characters
+          // (the parser rejects them in layouts, but an extension source is
+          // never trusted — an ESC/OSC id must not reach the panel).
+          const label = def === undefined ? stripControlChars(id) : stripControlChars(def.label)
+          return `${marker} ${active ? color.textStrong(label) : color.text(label)}`
+        })
+        const createIndex = matches.length
+        if (matches.length === 0) lines.push(color.textMuted('(no matching items)'))
+        const createTextActive = state.pickerIndex === createIndex
+        const createCommandActive = state.pickerIndex === createIndex + 1
+        lines.push(`${createTextActive ? color.primary('›') : ' '} ${createTextActive ? color.textStrong('+ Create Custom Text') : color.text('+ Create Custom Text')}`)
+        lines.push(`${createCommandActive ? color.primary('›') : ' '} ${createCommandActive ? color.textStrong('+ Create Custom Command') : color.text('+ Create Custom Command')}`)
+        const hits: ConfiguratorMouseHit[] = matches.map((_, index) => ({ kind: 'select', target: index }))
+        if (matches.length === 0) hits.push({ kind: 'inert' })
+        hits.push({ kind: 'select', target: createIndex })
+        hits.push({ kind: 'select', target: createIndex + 1 })
+        return { lines, cursor: Math.min(state.pickerIndex, createIndex + 1), hits }
+      }
+    }
+  }
+
+  /** One `› Label    value` menu row with a right-aligned value column. */
+  private menuRow(marker: string, label: string, value: string | undefined, active: boolean): string {
+    const name = active ? color.textStrong(label) : color.text(label)
+    if (value === undefined) return `${marker} ${name}`
+    const pad = Math.max(1, 14 - label.length)
+    return `${marker} ${name}${' '.repeat(pad)}${value}`
+  }
+
+  /** A tone value painted in its own color (Auto = muted). */
+  private tonePaint(tone: FooterTone | 'auto', label: string): string {
+    if (tone === 'auto') return color.textMuted(label)
+    return renderSpans([{ text: label, tone }])
+  }
+
+  /** The item's current format, humanized ('bar' → 'Bar'). A format id
+   * is DISPLAY text too (the parser accepts unknown format strings, an
+   * extension declares its own) — control characters are stripped at the
+   * display boundary. */
+  private formatDisplay(ref: FooterItemRef | undefined): string {
+    if (ref === undefined) return ''
+    const def = this.registry.get(ref.id)
+    if (def === undefined) return ''
+    return this.humanizeFormat(stripControlChars(ref.format ?? def.defaultFormat))
+  }
+
+  private humanizeFormat(format: string): string {
+    return format.charAt(0).toUpperCase() + format.slice(1)
+  }
+
+  /** A style candidate's live example: the definition's own render with
+   * the candidate format applied (plus the ref's tone/prefix/suffix
+   * decoration, exactly like the composer applies them). */
+  private formatExample(ref: FooterItemRef, format: string): string {
+    const def = this.registry.get(ref.id)
+    if (def === undefined) return ''
+    try {
+      const segment = def.render(this.snapshot(), { ...ref, format }, 'preferred', {
+        taskBrowserAvailable: this.taskBrowserAvailable(),
+        extensionFooterText: this.extensionFooterText(),
+      })
+      if (segment === null) return color.textMuted('(unavailable)')
+      return this.decorate(ref, segment.spans)
+    } catch {
+      return color.textMuted('(error)')
+    }
+  }
+
+  /** The item's live preview: its own render with the ref's overrides
+   * applied (tone replaces every span's tone; prefix/suffix wrap). */
+  private itemPreview(ref: FooterItemRef): string {
+    const def = this.registry.get(ref.id)
+    if (def === undefined) return color.textMuted(clipText(stripControlChars(ref.id)))
+    try {
+      const segment = def.render(this.snapshot(), ref, 'preferred', {
+        taskBrowserAvailable: this.taskBrowserAvailable(),
+        extensionFooterText: this.extensionFooterText(),
+      })
+      if (segment === null) return color.textMuted('(unavailable)')
+      const text = this.decorate(ref, segment.spans)
+      return visibleWidth(text) === 0 ? color.textMuted('(unavailable)') : text
+    } catch {
+      return color.textMuted('(error)')
+    }
+  }
+
+  /** Apply the ref decoration the composer applies: prefix + tone
+   * override + suffix. Everything here is DISPLAY text — the parser
+   * rejects control characters in persisted prefix/suffix but ACCEPTS
+   * unknown format strings (and the model accepts any FooterLayoutV1), so
+   * a definition that echoes the ref's format into a span could paint an
+   * ESC/OSC sequence into the preview. Prefix, suffix AND every span's
+   * text are stripped at this last display boundary. */
+  private decorate(ref: FooterItemRef, spans: readonly { text: string; tone?: FooterTone }[]): string {
+    const override = ref.tone === undefined || ref.tone === 'auto' ? undefined : ref.tone
+    const prefix = ref.prefix === undefined ? '' : stripControlChars(ref.prefix)
+    const suffix = ref.suffix === undefined ? '' : stripControlChars(ref.suffix)
+    const rendered = renderSpans(spans.map(span => ({ ...span, text: stripControlChars(span.text) })), override)
+    return `${prefix}${rendered}${suffix}`
+  }
+
+  /** The ref at a row + flat position (undefined when absent). */
+  private refAt(rowIndex: number, flat: number): FooterItemRef | undefined {
+    const row = this.model.preview().rows[Math.min(rowIndex, this.model.preview().rows.length - 1)]
+    if (row === undefined) return undefined
+    const pos = flatPositionOf(flat, row)
+    if (pos === undefined) return undefined
+    return pos.zone === 'left' ? row.left[pos.index] : row.right[pos.index]
+  }
+
+  /** The display label of a ref: the definition's label, or the SANITIZED
+   * raw id for an unknown id (an unloaded plugin — control characters
+   * must never reach the panel). The definition label is display text
+   * from an external source too (a plugin contribution): stripped at the
+   * boundary as well. */
+  private refLabel(ref: FooterItemRef): string {
+    const def = this.registry.get(ref.id)
+    if (def === undefined) return stripControlChars(ref.id)
+    return stripControlChars(def.label)
+  }
+
+  private itemLabel(rowIndex: number, flat: number): string {
+    const ref = this.refAt(rowIndex, flat)
+    if (ref === undefined) return '(no item)'
+    return clipText(this.refLabel(ref))
+  }
+
+  /** Count all layout references to a definition before a delete. */
+  private referenceCount(id: string): number {
+    return this.model.preview().rows.reduce((count, row) => count
+      + row.left.filter(ref => ref.id === id).length
+      + row.right.filter(ref => ref.id === id).length, 0)
+  }
+
+  /** The item's current style name for the Edit Row list (empty for an
+   * unknown definition). */
+  private styleText(ref: FooterItemRef): string {
+    return this.formatDisplay(ref)
+  }
+}
+
+/** A refresh interval in user-facing units ('5s', '30s', '1s'). */
+function formatRefreshMs(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`
+}
+
+/** A timeout in user-facing units ('300ms', '1s'). */
+function formatTimeoutMs(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`
+}
+
+const BRACKETED_PASTE_START = '\x1b[200~'
+const BRACKETED_PASTE_END = '\x1b[201~'
+const PASTE_ESC_TIMEOUT_MS = 10
+const PASTE_PREFIX_TIMEOUT_MS = 250
+const REPLAYABLE_ESC_KEYS: readonly KeyId[] = [
+  'tab', 'enter', 'backspace', 'delete', 'insert', 'home', 'end',
+  'pageUp', 'pageDown', 'up', 'down', 'left', 'right',
+  'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+]
+
+/** Whether a pending-prefix candidate is a complete normal key sequence. */
+function isReplayableInput(data: string): boolean {
+  return matchesKey(data, 'escape')
+    || decodePrintableKey(data) !== undefined
+    || REPLAYABLE_ESC_KEYS.some(key => matchesKey(data, key))
+}
+
+/** Whether the candidate still begins with a valid paste start marker. */
+function continuesPasteStart(data: string): boolean {
+  const length = Math.min(data.length, BRACKETED_PASTE_START.length)
+  return data.slice(0, length) === BRACKETED_PASTE_START.slice(0, length)
+}
+
+/** Return the longest proper start-marker prefix at the end of a chunk.
+ * A one-byte ESC is included because it is ambiguous at a chunk boundary;
+ * the panel holds it briefly and replays it as Escape if no marker follows. */
+function longestPasteStartSuffix(data: string): number {
+  for (let length = Math.min(BRACKETED_PASTE_START.length - 1, data.length); length >= 1; length -= 1) {
+    if (data.endsWith(BRACKETED_PASTE_START.slice(0, length))) return length
+  }
+  return 0
+}
+
+/** The item page keeps definition tone and placement tone visibly distinct. */
+function toneMenuLabel(kind: string): string {
+  return kind === 'custom-tone' ? 'Default tone' : 'Tone'
+}
+
+/** Clip a title-part label (titles truncate ANSI-safely anyway). */
+function clipText(text: string, max = 40): string {
+  return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
+}

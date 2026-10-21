@@ -1,0 +1,245 @@
+#!/usr/bin/env node
+/**
+ * @xmoon76/dsh-pi-tui/scripts/release-notes — extract the bilingual release
+ * notes for a version straight from the changelogs, never from commit
+ * messages or AI summarization. Doubles as the release-metadata gate:
+ *
+ *   - the input must be an explicit release tag `v<version>` or
+ *     `next-v<version>`; the tag prefix selects the publication channel,
+ *     so a bare package version is ambiguous and rejected,
+ *   - package.json `version` must equal the parsed tag version,
+ *   - CHANGELOG.md must contain a `## [<version>]` section,
+ *   - CHANGELOG.en.md must contain the same section,
+ *   - the current section is dated and immediately follows an empty Unreleased,
+ *   - the `[Unreleased]` link names the tag being created,
+ *   - the version link's compare base is a release tag (`v…` or `next-v…`);
+ *     either prefix is accepted because the publication channel does not
+ *     decide which tag came before this release,
+ *   - both reference links and the bilingual section headings are present.
+ *
+ * The notes file is written as `## 中文` / `## English` sections so the
+ * GitHub Release body carries the human-written changelog verbatim.
+ * @module release-notes
+ */
+
+import { readFileSync, writeFileSync } from 'node:fs'
+import { parseReleaseTag } from './release-context.mjs'
+import { requiredGuidance } from './lib/dsh-compat.mjs'
+
+const [, , input, output = 'release-notes.md'] = process.argv
+
+if (input === undefined) {
+  throw new Error('Usage: node scripts/release-notes.mjs <release-tag> [output]')
+}
+
+// Both CI and local invocations must pass an explicit release tag: the tag
+// prefix is the only publication-channel authority, so a bare version cannot
+// be mapped to a channel and is rejected by the parser.
+const release = parseReleaseTag(input)
+const { channel, version } = release
+
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+
+if (pkg.version !== version) {
+  throw new Error(
+    `Release ${input} does not match package.json version ${pkg.version}`,
+  )
+}
+
+function extractSection(file) {
+  const text = readFileSync(file, 'utf8')
+  const lines = text.split(/\r?\n/)
+
+  const prefix = `## [${version}]`
+  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+  const start = lines.findIndex(
+    (line) => line === prefix || line.startsWith(`${prefix} - `),
+  )
+
+  if (start === -1) {
+    throw new Error(`Version ${version} not found in ${file}`)
+  }
+
+  const heading = lines[start]
+  if (!new RegExp(`^## \\[${escapedVersion}\\] - \\d{4}-\\d{2}-\\d{2}$`, 'u').test(heading)) {
+    throw new Error(`Version ${version} in ${file} must have a YYYY-MM-DD release date`)
+  }
+
+  const unreleased = lines.findIndex(line => line === '## [Unreleased]')
+  if (version === pkg.version) {
+    if (unreleased < 0) throw new Error(`${file} must contain an Unreleased section`)
+    const firstSection = lines.findIndex(line => /^## /u.test(line))
+    if (unreleased !== firstSection) throw new Error(`${file} must keep Unreleased as the first changelog section`)
+    const firstRelease = lines.findIndex((line, index) => index > unreleased && /^## \[(?!Unreleased\])/u.test(line))
+    if (start !== firstRelease || lines.slice(unreleased + 1, start).some(line => line.trim() !== '')) {
+      throw new Error(`Version ${version} in ${file} must immediately follow an empty Unreleased section`)
+    }
+  }
+
+  let end = lines.length
+
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^## \[/.test(lines[i])) {
+      end = i
+      break
+    }
+  }
+
+  const content = compactSoftWraps(
+    lines
+      .slice(start + 1, end)
+      .join('\n')
+      .trim(),
+  )
+
+  if (!content) {
+    throw new Error(`Version ${version} is empty in ${file}`)
+  }
+  if (!/^### /mu.test(content)) {
+    throw new Error(`Version ${version} in ${file} must contain changelog categories`)
+  }
+  // The `[Unreleased]` link names the tag being created, so it carries this
+  // release's own prefix. The version link's compare base is the previous
+  // release tag on the real timeline, which may carry EITHER prefix: the npm
+  // dist-tag decides where a release is published, never which tag came before
+  // it (a `next-v…` release is routinely cut after a `v…` one).
+  const comparePrefix = channel === 'next' ? 'next-v' : 'v'
+  const releaseTag = `${comparePrefix}${version}`
+  const releaseTagPattern = `${comparePrefix}${escapedVersion}`
+  const previousTagPattern = '(?:next-)?v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?'
+  const compareBase = 'https://github.com/XMoon/dsh-pi-tui/compare/'
+  const escapedCompareBase = compareBase.replaceAll('.', '\\.')
+  const unreleasedReference = new RegExp(`^\\[Unreleased\\]:\\s+${escapedCompareBase}${releaseTagPattern}\\.\\.\\.HEAD$`, 'mu')
+  const releaseReference = new RegExp(`^\\[${escapedVersion}\\]:\\s+${escapedCompareBase}${previousTagPattern}\\.\\.\\.${releaseTagPattern}$`, 'mu')
+  if (!unreleasedReference.test(text) || !releaseReference.test(text)) {
+    throw new Error(`${file} must contain matching release reference links for ${version} (${releaseTag})`)
+  }
+
+  return {
+    heading,
+    content,
+  }
+}
+
+/**
+ * Fold soft-wrapped continuation lines into single lines.
+ *
+ * The changelogs write every bullet and every prose paragraph as a wrapped
+ * block (a first line followed by continuation lines). GitHub's file viewer
+ * folds those soft breaks, but its Release-body renderer turns them into
+ * hard `<br>` breaks, so an extracted release body shows arbitrary line
+ * breaks mid-sentence. Folding the continuations makes the Release body
+ * render as one paragraph per block, matching the changelog file view.
+ *
+ * Only the changelog's own basic shapes are recognized: blank lines,
+ * headings, fenced code (backtick or tilde, up to three spaces of indent),
+ * blockquotes, lists, reference definitions and thematic breaks. A bullet's
+ * 2-space-indented continuation, a prose paragraph's own continuation and a
+ * blockquote's marked continuation are folded; every other line is emitted as
+ * written. A deliberate hard break (two trailing spaces or a trailing
+ * backslash) survives.
+ */
+function compactSoftWraps(content) {
+  const lines = content.split('\n')
+  const out = []
+  let inCodeFence = false
+
+  for (const line of lines) {
+    if (/^ {0,3}(?:```|~~~)/.test(line)) {
+      inCodeFence = !inCodeFence
+      out.push(line)
+      continue
+    }
+    if (inCodeFence) {
+      out.push(line)
+      continue
+    }
+
+    const previous = out[out.length - 1] ?? ''
+    // A blockquote's marked continuation joins its own marker line; a bullet's
+    // continuation is indented; a prose paragraph continues at column 0.
+    const quoteContinuation = /^ {0,3}>/.test(line) && /^ {0,3}>/.test(previous)
+    const quoteText = quoteContinuation ? line.replace(/^ {0,3}>[ \t]*/, '') : ''
+    const isContinuation = quoteContinuation
+      ? quoteText !== ''
+      : /^ {2}\S/.test(line)
+        ? /^\s*[-*]\s+\S/.test(previous)
+        : !startsBlock(line) && !startsBlock(previous)
+    if (isContinuation && !/(?: {2,}|\\)$/.test(previous)) {
+      const addition = quoteContinuation ? quoteText : line.trimStart()
+      out[out.length - 1] = `${previous.trimEnd()} ${addition}`
+      continue
+    }
+    out.push(line)
+  }
+
+  return out.join('\n')
+}
+
+/** True when a line opens a Markdown block rather than continuing one. */
+function startsBlock(line) {
+  return (
+    line.trim() === '' ||
+    /^ {0,3}(?:#{1,6}(?:\s|$)|```|~~~|>|\[[^\]]+\]:)/.test(line) ||
+    /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/.test(line) ||
+    /^ {0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$/.test(line)
+  )
+}
+
+const zh = extractSection('CHANGELOG.md')
+const en = extractSection('CHANGELOG.en.md')
+
+if (zh.heading !== en.heading) {
+  throw new Error(
+    `Changelog headings do not match:\n` +
+      `  CHANGELOG.md:    ${zh.heading}\n` +
+      `  CHANGELOG.en.md: ${en.heading}`,
+  )
+}
+
+// The 0.4 migration changes the runtime pairing. Keep the copy-paste commands
+// in both the changelog and the generated GitHub Release body; a release page
+// that only says "upgrade" is not actionable enough to prevent a mixed install.
+// A latest-channel release may carry a different install channel and DSH
+// baseline than the previous next-channel train, so do not let any release
+// accidentally retain an older pin's guidance.
+function containsExactGuidance(content, command) {
+  const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)
+}
+
+// The install guidance each release body from the 0.4 line onward must carry
+// is derived from the shared matrix (src/dsh-compat-matrix.json) through
+// scripts/lib/dsh-compat.mjs: the shipped DSH floor, this exact TUI version,
+// and the compatible pair for every fallback row the rule selects. A matrix
+// that does not describe the release is a release bug to fix there, never a
+// reason to inherit an older pin.
+const [major, minor] = version.split('.').map(part => Number.parseInt(part, 10))
+if (major > 0 || minor >= 4) {
+  for (const command of requiredGuidance(version)) {
+    if (!containsExactGuidance(zh.content, command) || !containsExactGuidance(en.content, command)) {
+      throw new Error(`Version ${version} must document ${command} in both changelogs`)
+    }
+  }
+}
+
+const notes = [
+  `## 中文`,
+  ``,
+  zh.content,
+  ``,
+  `---`,
+  ``,
+  `## English`,
+  ``,
+  en.content,
+  ``,
+].join('\n')
+
+writeFileSync(output, notes)
+
+console.log(`Release notes: ${version}`)
+console.log(`  zh: ${zh.heading}`)
+console.log(`  en: ${en.heading}`)
+console.log(`  output: ${output}`)

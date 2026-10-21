@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext"]
+  },
+  "include": ["src", "test"],
+  "exclude": ["test/fixtures"]
+}

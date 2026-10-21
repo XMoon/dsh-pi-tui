@@ -1,0 +1,105 @@
+/**
+ * The Direct backend assembly (Pre-M3 PR1): the ONE place that constructs the
+ * in-process `ctx.*` adapters for a `Backend`. The runner supplies the
+ * Direct-only dependency resolvers (live-Agent lookup, preset composition,
+ * Session accessors) and receives the semantic `Backend`; it no longer
+ * constructs the Direct semantic adapters one by one, so a port can never be
+ * served by a runner-local side channel that bypasses the backend vocabulary.
+ *
+ * This module owns assembly ONLY: no UI, transition, draft, panel or command
+ * routing lives here; every `ctx.*` Host service the adapters need is
+ * resolved lazily INSIDE the assembled adapters themselves (e.g. the Direct
+ * Host user-shell adapter resolves the `shell` capability per call).
+ *
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
+ * @module @xmoon76/dsh-pi-tui/runtime/direct/backend-direct
+ */
+
+import type { Diag } from '../process/diagnostics.ts'
+import type { Backend } from '../backend.ts'
+import { createDirectBackend } from '../backend.ts'
+import type { TuiSettingsConfig } from '../config-port.ts'
+import type { CompositionLike, DirectOwnerPoolLike } from './session-lifecycle-direct.ts'
+import type { DirectSessionLiveResolvers } from './session-direct.ts'
+import type { LiveAgentLike } from './session-writer-direct.ts'
+import type { DirectPendingAgentLike } from './pending-input-reader-direct.ts'
+import type { DurableModelSelectionReader, SessionModelSelectionOwnerLike } from './model-selection-direct.ts'
+import { DirectSubagentPort } from './subagent-direct.ts'
+import { DirectSessionReader } from './session-direct.ts'
+import { DirectPendingInputReader } from './pending-input-reader-direct.ts'
+import { DirectSessionWriter } from './session-writer-direct.ts'
+import { DirectSessionLifecycle } from './session-lifecycle-direct.ts'
+import { DirectInteractionPort } from './interaction-direct.ts'
+import { DirectCatalogPort } from './catalog-direct.ts'
+import { DirectConfigPort } from './config-direct.ts'
+import { DirectHostFilePort } from './host-file-direct.ts'
+import { DirectSessionArchive } from './session-archive-direct.ts'
+import { DirectHostCommandPort } from './host-command-direct.ts'
+import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
+import { DirectJobObservationPort } from './job-observation-direct.ts'
+import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
+
+/** The minimal Host context surface the Direct adapters need (structural;
+ * the services resolve from the running dsh installation). */
+export interface DirectBackendContextLike {
+  get(name: string): unknown
+  on(event: string, listener: unknown): () => void
+}
+
+/** The live-Agent surface the Direct assembly hands to its adapters: the
+ * runner's resolver satisfies every adapter's narrower structural need. */
+export type DirectLiveAgentLike = LiveAgentLike & DirectPendingAgentLike
+
+/** The Direct-only dependency resolvers the runner supplies to the assembly. */
+export interface DirectBackendDeps {
+  readonly ctx: DirectBackendContextLike
+  readonly diag: Diag
+  /** The persisted TUI-settings facade (absent without the Settings service). */
+  readonly tuiSettings: TuiSettingsConfig | undefined
+  /**
+   * The ONE per-Agent model-selection owner (shared with the runner's picker):
+   * it serves the catalog WRITE seam AND the session reader's Direct-only
+   * durable read. The two capabilities are intersected here on purpose — the
+   * reader must never be handed a second owner, and a composition that supplies
+   * only the write half must fail to compile.
+   */
+  readonly modelSelections: SessionModelSelectionOwnerLike & DurableModelSelectionReader
+  /** The Direct Session ownership pool (lifecycle retirement/claim). */
+  readonly ownerPool: DirectOwnerPoolLike
+  /** Resolve one preset composition (the runner's compose). */
+  readonly compose: (presetId?: string) => Promise<CompositionLike>
+  /** The exact live Agent of one Session, or undefined when not mounted. */
+  readonly agentFor: (sessionId: string) => DirectLiveAgentLike | undefined
+  /** The live Agent plus the interactive continuable child currently viewed. */
+  readonly queueAgentFor: (sessionId: string) => DirectLiveAgentLike | undefined
+  /** The Host Session/Agent accessors the Direct session reader projects. */
+  readonly liveResolvers: DirectSessionLiveResolvers
+}
+
+/** Assemble the complete Direct `Backend` from the runner's resolvers. */
+export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
+  return createDirectBackend(
+    new DirectSubagentPort(deps.ctx),
+    new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections),
+    new DirectPendingInputReader(deps.queueAgentFor),
+    new DirectSessionWriter(deps.ctx, deps.agentFor, deps.queueAgentFor),
+    new DirectSessionLifecycle(deps.ctx, deps.compose, deps.ownerPool),
+    new DirectInteractionPort(deps.ctx, deps.agentFor),
+    new DirectCatalogPort(deps.ctx, deps.agentFor, deps.modelSelections, deps.diag),
+    new DirectConfigPort(deps.ctx, deps.tuiSettings, deps.agentFor),
+    new DirectHostFilePort(deps.agentFor, deps.ctx),
+    new DirectSessionArchive(deps.ctx),
+    new DirectHostCommandPort(deps.ctx, deps.agentFor),
+    new DirectPluginManagerPort(deps.ctx),
+    new DirectJobObservationPort(deps.ctx, deps.diag),
+    // The Direct Host user-shell adapter (M3-4 PR3): spawn lives behind
+    // adapter ownership; the sandbox policy runs the dsh shell executor and
+    // fails closed when absent. The `shell` capability resolver stays here as
+    // the one Direct-only seam this assembly hands the adapter (resolved
+    // lazily per call inside adapter ownership).
+    new DirectHostUserShellPort(
+      deps.ctx,
+      () => deps.ctx.get('shell') as unknown as DirectShellCapability | undefined,
+    ),
+  )
+}

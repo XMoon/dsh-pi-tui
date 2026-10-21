@@ -1,0 +1,147 @@
+{
+  "app/bootstrap.ts": [
+    "agentDefaultModel",
+    "agentPresets",
+    "agents",
+    "approval",
+    "attachments",
+    "commands",
+    "import:dsh-agent",
+    "import:dsh-session",
+    "jobs",
+    "llm",
+    "permissionPresets",
+    "planMode",
+    "sandboxPolicy",
+    "sessionProjections",
+    "sessionQuery",
+    "sessions",
+    "settings",
+    "subagents",
+    "tools"
+  ],
+  "app/direct/composition.ts": [
+    "agentPresets",
+    "import:dsh-agent"
+  ],
+  "app/direct/owner-registry.ts": [
+    "import:dsh-agent"
+  ],
+  "app/direct/owner-retirement.ts": [
+    "import:dsh-agent"
+  ],
+  "app/direct/runtime.ts": [
+    "agents",
+    "import:dsh-agent",
+    "sessions",
+    "subagents"
+  ],
+  "client/artifact/transcript-markdown.ts": [
+    "import:dsh-session"
+  ],
+  "commands.ts": [
+    "import:dsh-agent",
+    "import:dsh-session"
+  ],
+  "domain/session/rewind.ts": [
+    "import:dsh-session"
+  ],
+  "domain/status/stats.ts": [
+    "import:dsh-session"
+  ],
+  "domain/transcript/folder.ts": [
+    "import:dsh-session"
+  ],
+  "domain/transcript/types.ts": [
+    "import:dsh-session"
+  ],
+  "index.ts": [
+    "import:dsh-agent"
+  ],
+  "runtime/direct/backend-direct.ts": [
+    "shell"
+  ],
+  "runtime/direct/catalog-direct.ts": [
+    "agentDefaultModel",
+    "agentPresets",
+    "llm",
+    "tools"
+  ],
+  "runtime/direct/config-direct.ts": [
+    "agentPresets",
+    "agents",
+    "approval",
+    "authorization",
+    "commands",
+    "credentials",
+    "llm",
+    "permissionPresets",
+    "settings"
+  ],
+  "runtime/direct/host-command-direct.ts": [
+    "commands"
+  ],
+  "runtime/direct/host-file-direct.ts": [
+    "fileReferences"
+  ],
+  "runtime/direct/interaction-direct.ts": [
+    "approval",
+    "sessionProjections",
+    "userQuestions"
+  ],
+  "runtime/direct/job-observation-direct.ts": [
+    "jobController",
+    "jobs"
+  ],
+  "runtime/direct/model-selection-direct.ts": [
+    "import:dsh-agent"
+  ],
+  "runtime/direct/plugin-manager-direct.ts": [
+    "pluginManager"
+  ],
+  "runtime/direct/session-archive-direct.ts": [
+    "import:dsh-session"
+  ],
+  "runtime/direct/session-direct.ts": [
+    "agentPresets",
+    "import:dsh-session",
+    "sessionProjectionCache",
+    "sessionProjections",
+    "sessionQuery"
+  ],
+  "runtime/direct/session-lifecycle-direct.ts": [
+    "agentDefaultModel",
+    "agents",
+    "import:dsh-agent",
+    "import:dsh-session",
+    "sessionQuery",
+    "workspaceRegistry"
+  ],
+  "runtime/direct/session-preset-direct.ts": [
+    "agentPresets",
+    "import:dsh-session",
+    "sessionProjections",
+    "sessionQuery"
+  ],
+  "runtime/direct/session-projection-direct.ts": [
+    "import:dsh-session",
+    "sessionProjectionCache",
+    "sessionProjections"
+  ],
+  "runtime/direct/session-writer-direct.ts": [
+    "sessionTitle"
+  ],
+  "runtime/direct/skill-catalog.ts": [
+    "agentPresets",
+    "skills"
+  ],
+  "runtime/direct/subagent-direct.ts": [
+    "subagents"
+  ],
+  "runtime/direct/surface-catalog.ts": [
+    "commands"
+  ],
+  "runtime/direct/turn-outline-compat.ts": [
+    "import:dsh-session"
+  ]
+}

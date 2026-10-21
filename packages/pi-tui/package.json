@@ -1,0 +1,60 @@
+{
+	"name": "@xmoon76/pi-tui",
+	"version": "1.1.0",
+	"private": true,
+	"description": "Terminal User Interface library with differential rendering for efficient text-based applications (vendored fork of @earendil-works/pi-tui, see UPSTREAM.json)",
+	"license": "MIT",
+	"author": "Mario Zechner",
+	"homepage": "https://github.com/XMoon/dsh-pi-tui#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/XMoon/dsh-pi-tui.git",
+		"directory": "packages/pi-tui",
+		"note": "vendored snapshot of @earendil-works/pi-tui at v1.1.0 (see UPSTREAM.json); carries the structured local divergence ledger in packages/pi-tui/vendor-divergences.json and its generated DIVERGENCES.md report (re-verify all on every re-vendor)"
+	},
+	"keywords": [
+		"tui",
+		"terminal",
+		"ui",
+		"text-editor",
+		"differential-rendering",
+		"typescript",
+		"cli"
+	],
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"type": "module",
+	"imports": {
+		"#/*": "./src/*.ts"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.mts",
+			"default": "./dist/index.mjs"
+		},
+		"./package.json": "./package.json"
+	},
+	"scripts": {
+		"build": "tsdown",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"test": "tsc --noEmit --target ES2024 --lib ESNext --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --strict --isolatedModules --verbatimModuleSyntax --skipLibCheck --types node test/protected-autocomplete-compile.ts && node --test test/*.test.ts",
+		"clean": "rm -rf dist"
+	},
+	"dependencies": {
+		"get-east-asian-width": "1.6.0",
+		"marked": "18.0.5"
+	},
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"@xterm/headless": "5.5.0",
+		"chalk": "^5.4.1",
+		"typescript": "^5.9.0",
+		"tsdown": "0.22.0"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"//native": "native/ prebuilds (darwin/win32 modifier keys, linux X11 clipboard) are deliberately not vendored. Without them the TUI still runs, but platform input and clipboard degrade: on Windows/Apple Terminal Shift+Tab is indistinguishable from Tab and the native Shift+Enter modifier fallback is unavailable (terminal.ts falls back to sequence heuristics), and the Linux X11 clipboard helper resolves to undefined so getNativeClipboard() reports nothing (host falls back to its own clipboard path). Supported surface: Linux/WSL/SSH into Linux. See AGENTS.md."
+}
