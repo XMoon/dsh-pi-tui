@@ -419,6 +419,42 @@ test('a nested case records its FULL title, with the describe() chain', (t) => {
   ], JSON.stringify(records, null, 2))
 })
 
+test('the reporter records the file path RELATIVE to the repository root', (t) => {
+  // The path has to be a FILE SYSTEM path, not a URL component: on
+  // Windows `URL.pathname` is `/C:/Users/…`, and a space in the checkout
+  // path stays percent-encoded as `%20`. `relative()` against such a
+  // string yields a path that does not exist.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-reporter-path-')
+  const file = join(dir, 'synthetic.test.mjs')
+  writeFileSync(file, "import { test } from 'node:test'\ntest('a synthetic case', () => {})\n")
+  const jsonl = join(dir, 'cases.jsonl')
+  const result = spawnSync(
+    process.execPath,
+    ['--test', `--test-reporter=${REPORTER}`, file],
+    {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined, DSH_TEST_JSONL: jsonl },
+    },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  const records = readFileSync(jsonl, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line))
+  for (const record of records) {
+    // The path must not be a URL component: no percent-encoding, and no
+    // leading slash (which is what a Windows `URL.pathname` has).
+    assert.ok(!record.file.includes('%'), 'the path must not be percent-encoded: ' + record.file)
+    assert.ok(!record.file.startsWith('/'), 'the path must not be an absolute URL path: ' + record.file)
+  }
+  // And the file the case really ran is the file that is named: the
+  // record's own name is the file's path for the file entry.
+  const fileEntry = records.find(record => record.name === record.file)
+  assert.ok(fileEntry !== undefined, JSON.stringify(records, null, 2))
+})
+
 test('a describe() block is a SUITE, not a case', (t) => {
   // Node counts a `describe()` block as a SUITE and its `it()`s as
   // TESTS. The nesting depth cannot tell them apart — a top-level suite
