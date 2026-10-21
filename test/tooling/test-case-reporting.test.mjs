@@ -371,3 +371,83 @@ test('the title transform removes a review finding and an assertion number', () 
     assert.equal(hasLeadingCodePrefix(from), true, `the audit must report: ${from}`)
   }
 })
+
+test('a nested case records its FULL title, with the describe() chain', (t) => {
+  // Node's `name` on a nested test is the node's OWN name; it does not
+  // include the enclosing `describe()`. The title a reader sees in a
+  // report is the chain, so the record has to carry it.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-nested-title-')
+  const file = join(dir, 'synthetic.test.mjs')
+  writeFileSync(file, [
+    "import { describe, test } from 'node:test'",
+    "describe('Session switching', () => {",
+    "  describe('inner', () => {",
+    "    test('rejects a stale read', () => {})",
+    "  })",
+    "  test('keeps the title', () => {})",
+    "})",
+  ].join('\n'))
+  const jsonl = join(dir, 'cases.jsonl')
+  const result = spawnSync(
+    process.execPath,
+    ['--test', `--test-reporter=${REPORTER}`, file],
+    {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined, DSH_TEST_JSONL: jsonl },
+    },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  const records = readFileSync(jsonl, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line))
+  const names = records.filter(record => record.type === 'test' && record.name !== record.file).map(record => record.name)
+  assert.deepEqual(names.sort(), [
+    'Session switching > inner > rejects a stale read',
+    'Session switching > keeps the title',
+  ], JSON.stringify(records, null, 2))
+})
+
+test('a describe() block is a SUITE, not a case', (t) => {
+  // Node counts a `describe()` block as a SUITE and its `it()`s as
+  // TESTS. The nesting depth cannot tell them apart — a top-level suite
+  // has nesting 0, exactly like a plain test — so the reporter keeps
+  // Node's own type, and the inventory counts by it.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-suite-shape-')
+  const file = join(dir, 'synthetic.test.mjs')
+  writeFileSync(file, [
+    "import { describe, it, test } from 'node:test'",
+    "describe('Group', () => {",
+    "  it('first', () => {})",
+    "  it('second', () => {})",
+    "})",
+    "test('top level', () => {})",
+  ].join('\n'))
+  const jsonl = join(dir, 'cases.jsonl')
+  const result = spawnSync(
+    process.execPath,
+    ['--test', `--test-reporter=${REPORTER}`, file],
+    {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined, DSH_TEST_JSONL: jsonl },
+    },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  const records = readFileSync(jsonl, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line))
+  const suites = records.filter(record => record.type === 'suite')
+  const cases = records.filter(record => record.type === 'test' && record.name !== record.file)
+  // Node's own summary for this file: 3 tests / 1 suite.
+  assert.equal(suites.length, 1, JSON.stringify(records, null, 2))
+  assert.equal(suites[0].name, 'Group')
+  assert.equal(cases.length, 3, JSON.stringify(records, null, 2))
+  // Node's own report must agree with the records.
+  assert.match(result.stdout, /^ℹ tests 3$/mu)
+  assert.match(result.stdout, /^ℹ suites 1$/mu)
+})

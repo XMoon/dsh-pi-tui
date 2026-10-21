@@ -99,30 +99,89 @@ export default async function reporter(source, options) {
   // with the completion it belongs to.
   const completions = []
 
+  // The SUITE chain, by test id.
+  //
+  // Node's `name` on a nested test is the node's OWN name — it does not
+  // include the enclosing `describe()`. The full title a reader sees in a
+  // report is the chain, so the chain is rebuilt here from the `test:start`
+  // events, which carry the parent id.
+  //
+  // The ids are unique WITHIN one file, so the map is per file: a file's
+  // own root entry reuses the id of the file's first suite.
+  const suiteNames = new Map()
+
   const write = (record) => {
     if (machine === undefined) return
     machine.write(`${JSON.stringify(record)}\n`)
   }
 
-  const recordOf = (data, outcome) => ({
-    file: data.file === undefined ? undefined : relative(ROOT.pathname, data.file),
-    name: data.name,
-    line: data.line,
-    column: data.column,
-    nesting: data.nesting,
-    duration_ms: data.details?.duration_ms,
-    // The `skip` and `todo` markers carry a REASON, not a boolean: a
-    // skipped case says WHY it was skipped, and that reason is the whole
-    // value of the marker. So the marker is detected by its PRESENCE.
-    result: outcome.skip !== undefined
-      ? 'skip'
-      : outcome.todo !== undefined
-        ? 'todo'
-        : resultOf(data.details),
-  })
+  /**
+   * The full title of a case: its own name plus the chain of suites.
+   *
+   * @param {string} file - the file the case belongs to.
+   * @param {string} name - the case's own name.
+   * @param {number|undefined} parentId - the enclosing suite's id.
+   * @returns {string} the full title.
+   */
+  const fullTitle = (file, name, parentId) => {
+    if (parentId === undefined) return name
+    const chain = suiteNames.get(file)
+    if (chain === undefined) return name
+    const parts = []
+    let current = parentId
+    const seen = new Set()
+    while (current !== undefined && current !== 0 && !seen.has(current)) {
+      seen.add(current)
+      const suiteName = chain.get(current)
+      if (suiteName === undefined) break
+      parts.unshift(suiteName)
+      current = chain.get(`parent:${current}`)
+    }
+    return parts.length === 0 ? name : `${parts.join(' > ')} > ${name}`
+  }
+
+  const recordOf = (data, outcome) => {
+    // The file is recorded in ONE form: relative to the repository root.
+    // Node names a file's own root entry after the file's ABSOLUTE path,
+    // so recording the file relative while the name stays absolute would
+    // make the two impossible to compare — and the file entry is exactly
+    // what tells a file apart from the cases inside it.
+    const file = data.file === undefined ? undefined : relative(ROOT.pathname, data.file)
+    return {
+      file,
+      name: file !== undefined && data.name === data.file
+        ? file
+        : fullTitle(data.file, data.name, data.parentId),
+      line: data.line,
+      column: data.column,
+      nesting: data.nesting,
+      duration_ms: data.details?.duration_ms,
+      // Node's OWN type of the entry: a `describe()` block is a SUITE, a
+      // `test()` is a TEST, and a file's own root entry is a FILE. The
+      // nesting depth is NOT that distinction — a suite at the top level
+      // has nesting 0, exactly like a plain test.
+      type: data.details?.type ?? 'test',
+      // The `skip` and `todo` markers carry a REASON, not a boolean: a
+      // skipped case says WHY it was skipped, and that reason is the whole
+      // value of the marker. So the marker is detected by its PRESENCE.
+      result: outcome.skip !== undefined
+        ? 'skip'
+        : outcome.todo !== undefined
+          ? 'todo'
+          : resultOf(data.details),
+    }
+  }
 
   for await (const event of source) {
     if (machine !== undefined) {
+      if (event.type === 'test:start') {
+        // The suite chain: a start event names a node and points at its
+        // parent, so the chain is built as the nodes arrive.
+        const chain = suiteNames.get(event.data.file) ?? new Map()
+        chain.set(event.data.testId, event.data.name)
+        chain.set(`parent:${event.data.testId}`, event.data.parentId)
+        suiteNames.set(event.data.file, chain)
+      }
       if (event.type === 'test:complete') {
         completions.push(event.data)
       } else if (event.type === 'test:pass' || event.type === 'test:fail' || event.type === 'test:skip') {

@@ -34,21 +34,42 @@ import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
 /**
  * Where the lanes are discovered.
  *
- * It is the repository's own `test/` directory. `DSH_TEST_ROOT` overrides
- * it so that a test can point the runner at a DISPOSABLE tree and exercise
- * the real path — the runner's own discovery, its own reporter wiring, its
- * own temp-root contract — without running the whole suite and without
- * putting a synthetic file where the real lanes would discover it.
+ * It is ALWAYS the repository's own `test/` directory for a QUALIFICATION
+ * run: `pnpm test:product` must scan the repository's 491 product test
+ * files, and nothing an environment variable says may change that set.
+ * A qualification that silently scanned a different tree would report
+ * green without having run the suite it claims to have run.
+ *
+ * `DSH_TEST_ROOT` therefore only applies when the caller ALSO passes
+ * `--test-root`, which is the explicit opt-in a TEST uses to point the
+ * runner at a disposable tree. The two have to agree, so a stray
+ * environment variable cannot redirect a qualification run on its own.
  */
-const TEST_ROOT = process.env.DSH_TEST_ROOT ?? join(ROOT, 'test')
+function resolveTestRoot(explicit) {
+  const canonical = join(ROOT, 'test')
+  if (explicit === undefined) return canonical
+  const override = process.env.DSH_TEST_ROOT
+  if (override === undefined) {
+    throw new Error('--test-root requires DSH_TEST_ROOT to name the same directory')
+  }
+  const resolved = resolve(override)
+  if (resolved !== resolve(explicit)) {
+    throw new Error(`--test-root (${explicit}) and DSH_TEST_ROOT (${override}) disagree`)
+  }
+  return resolved
+}
 
 function main() {
   const laneName = process.argv[2]
+  const args = process.argv.slice(3)
+  const testRootIndex = args.indexOf('--test-root')
+  const explicitTestRoot = testRootIndex === -1 ? undefined : args[testRootIndex + 1]
   if (laneName === undefined) {
-    console.error(`usage: node scripts/run-test-lane.mjs <lane> [--shard=<index>/<total>]\nlanes: ${Object.keys(LANES).join(', ')}`)
+    console.error(`usage: node scripts/run-test-lane.mjs <lane> [--test-root <dir>]\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
   const lane = LANES[laneName]
@@ -56,9 +77,9 @@ function main() {
     console.error(`unknown test lane: ${laneName}\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
-  // The optional shard. It is a runner ARGUMENT, not a mode: the default
+  const testRoot = resolveTestRoot(explicitTestRoot)
   // The lane's patterns are relative to the test root.
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
+  const files = resolveLane(testRoot, lane.patterns, lane.suffixes, lane.exclude ?? [])
   // The file list is passed RELATIVE to the repository root, and the child
   // runs with that root as its working directory.
   //
@@ -73,9 +94,9 @@ function main() {
   // the same shape: the child is given `<root-name>/<file>` relative to
   // the working directory, and the working directory is the root's
   // PARENT.
-  const testRootParent = dirname(TEST_ROOT)
-  const testRootName = basename(TEST_ROOT)
-  const workingDirectory = TEST_ROOT === join(ROOT, 'test') ? ROOT : testRootParent
+  const testRootParent = dirname(testRoot)
+  const testRootName = basename(testRoot)
+  const workingDirectory = testRoot === join(ROOT, 'test') ? ROOT : testRootParent
   const relativeFiles = files.map(rel => join(testRootName, rel))
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
