@@ -33,7 +33,7 @@ function assistantMessage(seq: number, text: string) {
   }
 }
 
-test('§3.3 stats: lifetime totals come from the projections, not the window', async () => {
+test('stats: lifetime totals come from the projections, not the window', async () => {
   // The window carries only ONE old turn; the projections report THREE.
   const window: PresentationReadSnapshot = {
     sessionId: 's',
@@ -77,7 +77,7 @@ test('§3.3 stats: lifetime totals come from the projections, not the window', a
   assert.deepEqual(stats.sessionPerformance, { tokensPerSec: 100 }, 'the All group is the Host projection derivation')
 })
 
-test('§3.3 stats: a superseded transport never commits (undefined)', async () => {
+test('stats: a superseded transport never commits (undefined)', async () => {
   const stale = await composeRemoteSessionStats({
     sessionId: 's',
     // A replaced Connection/binding drops at the fence, never a partial figure.
@@ -107,7 +107,7 @@ test('§3.3 stats: a superseded transport never commits (undefined)', async () =
     'the Host projection alone answers (a measured 0 TTFB stays a visible zero)')
 })
 
-test('§3.6 lastAssistantText: newest message inside the window returns verbatim', async () => {
+test('lastAssistantText: newest message inside the window returns verbatim', async () => {
   const window: PresentationReadSnapshot = {
     sessionId: 's',
     durableEvents: [
@@ -124,7 +124,7 @@ test('§3.6 lastAssistantText: newest message inside the window returns verbatim
   assert.equal(text, 'newest reply')
 })
 
-test('§3.6 lastAssistantText: a message older than the window pages loadOlder exactly to it', async () => {
+test('lastAssistantText: a message older than the window pages loadOlder exactly to it', async () => {
   const olderPage: PresentationReadSnapshot = {
     sessionId: 's',
     durableEvents: [
@@ -150,7 +150,7 @@ test('§3.6 lastAssistantText: a message older than the window pages loadOlder e
   assert.equal(loadOlderCalls, 1)
 })
 
-test('§3.6 lastAssistantText: history start reached with no assistant message is undefined; empty text stays empty-string', async () => {
+test('lastAssistantText: history start reached with no assistant message is undefined; empty text stays empty-string', async () => {
   const noAssistant: PresentationReadSnapshot = {
     sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
     coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',
@@ -173,7 +173,7 @@ test('§3.6 lastAssistantText: history start reached with no assistant message i
   }), '', "'' = the message carries no text")
 })
 
-test('§3.6 lastAssistantText: a superseded paging result is dropped (undefined)', async () => {
+test('lastAssistantText: a superseded paging result is dropped (undefined)', async () => {
   let reads = 0
   const page: PresentationReadSnapshot = {
     sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
@@ -199,7 +199,7 @@ test('§3.6 lastAssistantText: a superseded paging result is dropped (undefined)
 
 /* ── PR5 v2 §1B-2: unknown stays unknown (never `?? 0`) ─────────────────── */
 
-test('§1B-2 absent projections stay absent groups — never fabricated zeros', async () => {
+test('absent projections stay absent groups — never fabricated zeros', async () => {
   const window: PresentationReadSnapshot = {
     sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
     coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',
@@ -219,7 +219,7 @@ test('§1B-2 absent projections stay absent groups — never fabricated zeros', 
   assert.equal(facts.sessionPerformance, undefined, 'an absent Host projection keeps the All group ABSENT')
 })
 
-test('§1B-2 a present Host projection renders its measured zero; a sample-less scope stays ABSENT', async () => {
+test('a present Host projection renders its measured zero; a sample-less scope stays ABSENT', async () => {
   const window: PresentationReadSnapshot = {
     sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
     coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',

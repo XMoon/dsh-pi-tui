@@ -43,6 +43,38 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # The SHARD LIST.
+  #
+  # It is computed in ONE place and handed to the matrix as a JSON array.
+  # A matrix built from inline expressions would either carry empty entries
+  # (a job with no shard) or need a different expression per input value.
+  # The prepare job is also the place that fails loudly on an unsupported
+  # shard count, instead of running a measurement nobody can interpret.
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Resolve the shard list
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+    steps:
+      - name: Build the shard list
+        id: shards
+        env:
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total }}
+        run: |
+          set -euo pipefail
+          case "$DSH_SHARD_TOTAL" in
+            1) shards='[1]' ;;
+            2) shards='[1,2]' ;;
+            3) shards='[1,2,3]' ;;
+            4) shards='[1,2,3,4]' ;;
+            *) echo "unsupported shard total: $DSH_SHARD_TOTAL" >&2; exit 1 ;;
+          esac
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "the measurement will run these shards: $shards"
+
+  # ---------------------------------------------------------------------------
   # The MEASUREMENT itself: one job per shard, each on its own runner.
   #
   # The shards are Node's own `--test-shard`, so they partition the lane's
@@ -52,12 +84,14 @@ jobs:
   # ---------------------------------------------------------------------------
   product-shard:
     name: Product shard ${{ matrix.shard }}/${{ inputs.shard_total }}
+    needs:
+      - prepare
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(format('[{0}]', join('', range(1, inputs.shard_total)))) }}
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
     env:
       DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
 
@@ -143,8 +177,9 @@ jobs:
   aggregate:
     name: Aggregate the product shards
     needs:
+      - prepare
       - product-shard
-    if: ${{ always() }}
+    if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -166,7 +201,10 @@ jobs:
         with:
           pattern: product-diagnostics-shard-*
           path: shards
-          merge-multiple: true
+          # The shards are NOT merged: each one keeps its own directory, so
+          # the aggregate can tell which shard ran what and can notice a
+          # shard that is missing. Merging them would flatten exactly the
+          # distinction the proof depends on.
 
       - name: Prove the shards are the whole lane
         env:

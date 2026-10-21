@@ -186,7 +186,7 @@ test('the host claim is LINE-level: an execute-kind command does not claim its a
     'the argued execute-kind line keeps its image')
 })
 
-test('§D3 line authority: a HOST-RESOLVED name is never TUI-local (argued /export foo keeps attachments + ordinary-prompt semantics)', () => {
+test('line authority: a HOST-RESOLVED name is never TUI-local (argued /export foo keeps attachments + ordinary-prompt semantics)', () => {
   // The frozen rc.2 Host /export (dsh-session-log-export) is execute-kind
   // (no leadingInput): its BARE token is a Host invocation, its ARGUED line
   // is an ordinary submission. The TUI also owns a Client /export built-in —
@@ -209,7 +209,7 @@ test('§D3 line authority: a HOST-RESOLVED name is never TUI-local (argued /expo
 })
 
 
-test('§D3 Direct parity matrix (review round 2 external gate): the TUI-built-in observable behavior is unchanged when no Host name collides', () => {
+test('Direct parity matrix (review round 2 external gate): the TUI-built-in observable behavior is unchanged when no Host name collides', () => {
   // The Direct matrix the external review froze: with the authoritative Host
   // catalog NOT resolving a TUI built-in name, every observable classification
   // keeps its pre-precedence behavior — only a REAL host-resolved name changes

@@ -1,16 +1,18 @@
 /**
- * M3-4 PR4 machine-checkable guards (plan §18.1–§18.4) plus the §7.5
+ * The CLIENT-SURFACE contract guards.
+ *
+ * Machine-checkable locks over the OWNING modules, plus the
  * negative-instrumentation locks that are STRUCTURAL (no runtime spy can
  * observe them): the Remote branch must not reach a Host command executor
  * for Client callbacks, must not consult the Host tool registry for
  * presentation, must not write permissions through the Host preset service,
  * and must not build the rewind picker from a full-log scan.
  *
- * These are source-level locks over the OWNING modules: the behavioural
- * counterparts live in the L6 suites (durable `command/run` counts, the
- * observed OSC 52 payload, the rendered Client-derived cards).
+ * These are source-level locks; the behavioural counterparts live in the
+ * L6 suites (durable `command/run` counts, the observed OSC 52 payload,
+ * the rendered Client-derived cards).
  *
- * @module @xmoon76/dsh-pi-tui/m3-4-pr4-guards.test
+ * @module @xmoon76/dsh-pi-tui/client-surface-contract-guards.test
  */
 
 import assert from 'node:assert/strict'
@@ -27,7 +29,7 @@ const code = (relative: string): string =>
 
 /* ───────────────────── §18.1 Remote command callback gate ─────────────── */
 
-test('§18.1 the Remote TUI-callback route never hands the projected agent to the Host executor', () => {
+test('the Remote TUI-callback route never hands the projected agent to the Host executor', () => {
   const controller = code('app/submission/controller.ts')
   // The REAL-Direct-Agent discriminator gates the Host executor call: the
   // only `commandPlane.execute(` call site sits behind it.
@@ -46,7 +48,7 @@ test('§18.1 the Remote TUI-callback route never hands the projected agent to th
   assert.equal(controller.includes('as unknown as Agent'), false)
 })
 
-test('§18.1 the TUI-owned registration path never requires the Host commands service', () => {
+test('the TUI-owned registration path never requires the Host commands service', () => {
   const commands = code('commands.ts')
   assert.ok(commands.includes("if (clientCommands === undefined) throw new Error('client command registry unavailable')"),
     'the Client registry is the mandatory registration surface')
@@ -58,7 +60,7 @@ test('§18.1 the TUI-owned registration path never requires the Host commands se
     'every TUI definition registers into the Client registry first')
 })
 
-test('§D2 (review round 3 ruling): Direct keeps the Host compatibility MIRROR; Remote callback isolation stays complete', () => {
+test('Direct keeps the Host compatibility MIRROR; Remote callback isolation stays complete', () => {
   // The stage contract (disambiguated by the M3-4
   // owner ruling): ONE TUI definition; Direct may mirror-register it into
   // the in-process Host registry (the compatibility adapter — never a
@@ -88,7 +90,7 @@ test('§D2 (review round 3 ruling): Direct keeps the Host compatibility MIRROR; 
 
 /* ─────────────────── §18.2 Remote tool presenter gate ────────────────── */
 
-test('§18.2 the Remote presentation bridge is Client-derived (no Host registry, no presenter callbacks)', () => {
+test('the Remote presentation bridge is Client-derived (no Host registry, no presenter callbacks)', () => {
   const clientPresenter = code('tui/transcript/client-tool-presenter.ts')
   assert.equal(clientPresenter.includes('ctx.tools'), false)
   assert.equal(clientPresenter.includes('ctx.get'), false)
@@ -120,7 +122,7 @@ test('§18.2 the Remote presentation bridge is Client-derived (no Host registry,
 
 /* ───────────────────── §18.3 Permission write gate ───────────────────── */
 
-test('§18.3 the Remote permission path never writes through the Host preset service', () => {
+test('the Remote permission path never writes through the Host preset service', () => {
   const status = code('app/surface/status-runtime.ts')
   const cycleStart = status.indexOf('const cyclePermission = (): void => {')
   assert.ok(cycleStart !== -1, 'the cycle owner exists')
@@ -143,7 +145,7 @@ test('§18.3 the Remote permission path never writes through the Host preset ser
     'the status projection maps permissions.currentValue')
 })
 
-test('§18.3 the legacy status writer cannot clear a projection-owned permission fact', () => {
+test('the legacy status writer cannot clear a projection-owned permission fact', () => {
   const app = code('tui-app.ts')
   const accessBlock = app.slice(
     app.indexOf('const accessPatch:'),
@@ -157,7 +159,7 @@ test('§18.3 the legacy status writer cannot clear a projection-owned permission
 
 /* ──────────────────────── §18.4 Rewind gate ─────────────────────────── */
 
-test('§18.4 the shared rewind picker owner uses turnOutline + loadThrough only', () => {
+test('the shared rewind picker owner uses turnOutline + loadThrough only', () => {
   const events = code('app/surface/application-events.ts')
   const picker = events.slice(
     events.indexOf('const openRewindPicker = (): void => {'),
@@ -197,7 +199,7 @@ test('§18.4 the shared rewind picker owner uses turnOutline + loadThrough only'
 
 /* ───────────── §7.5 structural negative instrumentation locks ────────── */
 
-test('§7.5 the Remote skill gesture never loads a Client skill body', () => {
+test('the Remote skill gesture never loads a Client skill body', () => {
   const remoteSkill = code('runtime/remote/skill-remote.ts')
   assert.ok(remoteSkill.includes("return { kind: 'unavailable' }"),
     'the Remote resolveSkill is explicitly unavailable (no body read exists)')
@@ -213,7 +215,7 @@ test('§7.5 the Remote skill gesture never loads a Client skill body', () => {
     'the fallback body is never built on the literal-gesture branch')
 })
 
-test('§7.5 unavailable Remote approval/sandbox facts are omitted, never guessed', () => {
+test('unavailable Remote approval/sandbox facts are omitted, never guessed', () => {
   const remoteConfig = code('runtime/remote/config-remote.ts')
   assert.ok(remoteConfig.includes('approvalOverrideAvailable(): boolean'),
     'the capability marker exists (the consumer asks it instead of inferring)')
@@ -263,7 +265,7 @@ test('the transcript-export capability is REQUIRED and refused unless exactly tr
 
 /* ── PR5 v2 §1C: origin-aware command authority guards ─────────────────── */
 
-test('§1C the Direct compatibility mirror is NOT Host origin (registry membership ≠ ownership)', () => {
+test('the Direct compatibility mirror is NOT Host origin (registry membership ≠ ownership)', () => {
   const commands = code('commands.ts')
   // §1C-2: the provenance set exists and marks ONLY successful mirrors.
   assert.ok(commands.includes('mirrorDefinitionIds'), 'the mirror-provenance set holds the EXACT stamped definitionIds (review R6-1)')
@@ -292,7 +294,7 @@ test('§1C the Direct compatibility mirror is NOT Host origin (registry membersh
     'hostCatalogResolves is origin-aware (never raw registry membership)')
 })
 
-test('§1C one classifier drives the submission siblings', () => {
+test('one classifier drives the submission siblings', () => {
   const controller = code('app/submission/controller.ts')
   assert.ok(controller.includes('classifyCommandLine('), 'the controller consumes the classifier')
   // The delivery/attachment/host-dispatch gates consume classification.kind.
@@ -314,7 +316,7 @@ test('§1C one classifier drives the submission siblings', () => {
 
 /* ── PR5 v2 §3C: rewind final-notification currentness guards ──────────── */
 
-test('§3C the rewind final settlement is gated by the operation-owned navigation identity', () => {
+test('the rewind final settlement is gated by the operation-owned navigation identity', () => {
   const runtime = code('app/session/runtime.ts')
   // The adoption commit mints the post-adoption identity.
   assert.ok(runtime.includes('committedNavigation = claimedEpoch === undefined'),
@@ -370,7 +372,7 @@ test('the Ctrl+R Current-session identity comes from the selected ownership auth
 
 /* ── PR5 v4 / R7: the final authority boundaries this round locked ─────── */
 
-test('§1C-4 (R7-1): every routing read of the Host claim consumes the GENUINE Host-origin authority', () => {
+test('(R7-1): every routing read of the Host claim consumes the GENUINE Host-origin authority', () => {
   const controller = code('app/submission/controller.ts')
   // The final command-plane ownership, the submit-time echo gate and the
   // attachment payload all read the origin claim — never the advertised union.
@@ -399,7 +401,7 @@ test('§1C-4 (R7-1): every routing read of the Host claim consumes the GENUINE H
     'the dead advertised-union view is gone')
 })
 
-test('§1C-4 (R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
+test('(R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
   const commands = code('commands.ts')
   const origin = commands.slice(
     commands.indexOf('const hostOriginClaimOf'),
@@ -411,7 +413,7 @@ test('§1C-4 (R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () =
     false, 'a live wrapper NAME must not erase a later genuine Host winner')
 })
 
-test('§1C-4 (R7-2): the attachment gate consumes the shared classification alone', () => {
+test('(R7-2): the attachment gate consumes the shared classification alone', () => {
   const controller = code('app/submission/controller.ts')
   const gate = controller.slice(
     controller.indexOf('const attachmentRefusal = ('),
@@ -427,7 +429,7 @@ test('§1C-4 (R7-2): the attachment gate consumes the shared classification alon
     'a genuine Host command follows its own attachment declaration')
 })
 
-test('§3C-4 (R7-4): the rewind settlement owner is phase-specific', () => {
+test('(R7-4): the rewind settlement owner is phase-specific', () => {
   const events = code('app/surface/application-events.ts')
   // The success settlement is fenced by the operation-owned adopted identity.
   assert.ok(events.includes('!deps.rewind.isNavigationCurrent(owned)) return'),
@@ -496,7 +498,7 @@ test('an absent `model` projection fact is passed THROUGH, never rendered as a b
 
 /* ── PR5 §1C-7 (whole-PR F4): the sessionless route consumes the classifier ── */
 
-test('§1C-7 (whole-PR F4): the sessionless route is the classifier TUI family, never a name set alone', () => {
+test('(whole-PR F4): the sessionless route is the classifier TUI family, never a name set alone', () => {
   const controller = code('app/submission/controller.ts')
   const at = controller.indexOf('const isSessionless = parsed !== undefined')
   assert.ok(at > 0, 'the sessionless predicate exists')
@@ -512,7 +514,7 @@ test('§1C-7 (whole-PR F4): the sessionless route is the classifier TUI family, 
     'the sessionless name set remains an additional filter, never the decider')
 })
 
-test('§1C-6 (whole-PR F4): TUI ownership comes from the LIVE Client registry, never the static name list', () => {
+test('(whole-PR F4): TUI ownership comes from the LIVE Client registry, never the static name list', () => {
   const controller = code('app/submission/controller.ts')
   // The live exact-line claim is the TUI ownership source at every consumer.
   assert.ok(controller.includes('deps.command.clientClaimsLine(parsedAtSubmit)'),
@@ -552,7 +554,7 @@ test('§1C-6 (whole-PR F4): TUI ownership comes from the LIVE Client registry, n
 
 /* ── PR5 §1C-5 (whole-PR F2): the raw skill predicate never outranks the Host reservation ── */
 
-test('§1C-5 (whole-PR F2): every skill-route sibling consumes the Host reservation condition', () => {
+test('(whole-PR F2): every skill-route sibling consumes the Host reservation condition', () => {
   const controller = code('app/submission/controller.ts')
   // The early echo and the steer sibling both consumed the RAW
   // `isSkillInvocation` predicate, so a genuine Host name that does not claim

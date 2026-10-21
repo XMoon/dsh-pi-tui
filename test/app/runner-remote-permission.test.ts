@@ -346,7 +346,7 @@ test('stale permission: apply A → switch B before settle → NO B contaminatio
   assert.notEqual(aPreset, undefined)
 })
 
-test('§1D: /yolo on a Remote live session reaches the semantic permission apply with NO Direct-Agent prerequisite', async (t) => {
+test('/yolo on a Remote live session reaches the semantic permission apply with NO Direct-Agent prerequisite', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr5-yolo'
   const presetId = 'm3-4-pr4-preset'
