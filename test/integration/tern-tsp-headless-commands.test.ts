@@ -66,8 +66,10 @@ function lastNoticeSeq(fixture: DirectTspFixture): number {
 /** Type one full line into the composer and submit it with Enter. */
 async function submitInput(fixture: DirectTspFixture, command: string): Promise<void> {
   fixture.pane.input.type(command)
+  // The composer HOLDING the text is the completion signal: the Enter below
+  // needs the draft, and the draft is the composer's own fact. A fixed
+  // settle after it only guessed how long the hand-off takes.
   await waitFor(`the composer to hold ${command}`, () => composerText(fixture) === command)
-  await directSettle()
   fixture.pane.input.type('\r')
 }
 

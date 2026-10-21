@@ -77,6 +77,19 @@ function durableUserMessages(fixture: Awaited<ReturnType<typeof createDirectTspF
 }
 
 /** The latest controlled editor text on the wire for `dock.composer`. */
+/**
+ * Wait until the composer HAS the text.
+ *
+ * The composer holding the text is the completion signal for a typed line:
+ * the Enter that follows needs the draft, and the draft is the composer's
+ * own fact on the wire. A fixed settle after the typing only guessed how
+ * long the hand-off takes.
+ */
+async function awaitComposer(fixture: DirectTspFixture, text: string): Promise<void> {
+  await waitFor(`the composer to hold ${JSON.stringify(text)}`, () =>
+    latestComposerText(fixture.pane.output.text()) === text, 25_000)
+}
+
 function latestComposerText(wire: string): string | undefined {
   let text: string | undefined
   let seen = false
@@ -124,7 +137,7 @@ test('a real Direct TUI submit writes the Client-sampled zone durably and the mo
     try {
       await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('which day is it')
-      await directSettle()
+      await awaitComposer(fixture, 'which day is it')
       fixture.pane.input.type('\r')
       await waitFor('the scripted model reply', () => fixture.pane.output.text().includes('zone turn ran'), 25_000)
       assert.equal(recorder.calls(), 1, 'the submit commits exactly one Direct write')
@@ -163,7 +176,7 @@ test('an unsamplable process zone refuses the Direct send before dispatch and re
     try {
       await directSettle(4_000)
       fixture.pane.input.type('zone-less send')
-      await directSettle()
+      await awaitComposer(fixture, 'zone-less send')
       assert.equal(latestComposerText(fixture.pane.output.text()), 'zone-less send',
         'the draft is present before submission')
       fixture.pane.input.type('\r')
@@ -217,14 +230,14 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
     try {
       await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('parity question')
-      await directSettle()
+      await awaitComposer(fixture, 'parity question')
       fixture.pane.input.type('\r')
       await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
       await waitFor('the first settled prompt', () => recorder.calls() === 1, 25_000)
 
       // The busy submission while the turn runs: the ordinary queue placement.
       fixture.pane.input.type('parity busy follow-up')
-      await directSettle()
+      await awaitComposer(fixture, 'parity busy follow-up')
       fixture.pane.input.type('\r')
       await waitFor('the busy delivery to settle', () => recorder.calls() === 2, 25_000)
       await directSettle(1_500)
