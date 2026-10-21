@@ -242,10 +242,13 @@ async function mountShutdownRunner(
     runnerReleasedTransport = true
     await originalDisposeTransport()
   }
-  life.defer(() => {
-    if (runnerReleasedTransport) return
-    void aggregate.selected.disposeTransport().catch(() => {})
-  })
+  // The runner fiber is created below, so the cleanup that owns the transport
+  // is registered AFTER it: ONE awaited cleanup, in the production order
+  // (the fiber's teardown effect, then the fallback for a runner that never
+  // mounted). It is AWAITED on purpose: a fire-and-forget teardown would let
+  // the lifecycle remove the temp directories while the transport was still
+  // being disposed, and would let the fallback start the transport teardown
+  // before the runner's own retirement had settled.
   options.beforeMount?.(aggregate)
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = host.workRoot
@@ -264,20 +267,29 @@ async function mountShutdownRunner(
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
   }
-  const runnerFiber = host.ctx.plugin(pluginCtx => {
+  const fiber = host.ctx.plugin(pluginCtx => {
     applyRunnerWithRuntime(
       pluginCtx,
       TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never),
       override,
     )
   })
-  await runnerFiber
-  life.defer(() => { void runnerFiber.dispose() })
+  await fiber
+  life.defer(async (): Promise<void> => {
+    await fiber.dispose()
+    // The fallback for the one case the fiber's teardown effect cannot cover:
+    // the runner never mounted (the mount threw), so no teardown effect exists
+    // and nothing else would release the transport. It runs only when the
+    // runner never reached it, so it can never add a second call to a
+    // transport the runner already disposed.
+    if (runnerReleasedTransport) return
+    await aggregate.selected.disposeTransport().catch(() => {})
+  })
   return {
     host,
     aggregate,
     app: () => apps.at(-1) as never,
-    runnerFiberDispose: async () => { await runnerFiber.dispose() },
+    runnerFiberDispose: async () => { await fiber.dispose() },
   }
 }
 
