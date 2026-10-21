@@ -38,7 +38,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from '../support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
 import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
 
 interface RecordedPrompt {
