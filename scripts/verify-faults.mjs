@@ -19,6 +19,8 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { writeFileSync } from 'node:fs'
 
 /**
@@ -45,23 +47,22 @@ import { writeFileSync } from 'node:fs'
  * unrelated reason cannot be counted as proof.
  */
 const FAULTS = [
-  { fault: 'shard-fail', branch: 'ci/pr-pipeline-prototype-fault-shard-fail', target: 'product shards', expectLog: /the shard test run failed \(INJECTED FAULT 'shard-fail'\)/u },
-  { fault: 'shard-missing', branch: 'ci/pr-pipeline-prototype-fault-shard-missing', target: 'aggregate', expectLog: /expected 4 shard directories/u },
-  { fault: 'digest-mismatch', branch: 'ci/pr-pipeline-prototype-fault-digest-mismatch', target: 'product shards', expectLog: /the build digest is [0-9a-f]+, not the expected [0-9a-f]+/u },
-  { fault: 'build-missing', branch: 'ci/pr-pipeline-prototype-fault-build-missing', target: 'product shards', expectLog: /Artifact not found for name: prototype-build/u },
+  { fault: 'shard-fail', branch: 'ci/pr-pipeline-prototype-fault-shard-fail', token: 'shard-fail', total: 4, target: 'product shards', expectLog: /the shard test run failed \(INJECTED FAULT 'shard-fail'\)/u },
+  { fault: 'shard-missing', branch: 'ci/pr-pipeline-prototype-fault-shard-missing', token: 'shard-missing', total: 4, target: 'aggregate', expectLog: /expected 4 shard directories/u },
+  { fault: 'digest-mismatch', branch: 'ci/pr-pipeline-prototype-fault-digest-mismatch', token: 'digest-mismatch', total: 4, target: 'product shards', expectLog: /the build digest is [0-9a-f]+, not the expected [0-9a-f]+/u },
+  { fault: 'build-missing', branch: 'ci/pr-pipeline-prototype-fault-build-missing', token: 'build-missing', total: 4, target: 'product shards', expectLog: /Artifact not found for name: prototype-build/u },
   // The generic "Smoke 1/8" is not enough: it matches a first smoke that
   // failed for ANY reason, including one where the injection never truncated
   // the candidate. The extra signature is the one a truncated archive
   // produces and nothing else does.
-  { fault: 'smoke-fail', branch: 'ci/pr-pipeline-prototype-fault-smoke-fail', target: 'qualification', expectLog: /Smoke 1\/8[\s\S]*Unexpected EOF in archive/u },
-  { fault: 'downstream-fail', branch: 'ci/pr-pipeline-prototype-fault-downstream-fail', target: 'downstream matrix', expectLog: /the downstream compatibility leg failed \(INJECTED FAULT 'downstream-fail'\)/u },
-  // The SELECTOR BOUNDARY. With one shard, a target of "shard 4" would never
-  // exist and the pipeline could succeed while claiming to inject a fault.
-  // The aggregate must be short the single shard.
-  { fault: 'shard-missing (1-shard run)', branch: 'ci/pr-pipeline-prototype-n1-fault', target: 'aggregate', expectLog: /expected 1 shard directories/u },
+  { fault: 'smoke-fail', branch: 'ci/pr-pipeline-prototype-fault-smoke-fail', token: 'smoke-fail', total: 4, target: 'qualification', expectLog: /Smoke 1\/8[\s\S]*Unexpected EOF in archive/u },
+  { fault: 'downstream-fail', branch: 'ci/pr-pipeline-prototype-fault-downstream-fail', token: 'downstream-fail', total: 4, target: 'downstream matrix', expectLog: /the downstream compatibility leg failed \(INJECTED FAULT 'downstream-fail'\)/u },
+  // The SELECTOR BOUNDARY: with one shard there is no "last but one", so the
+  // injection must target the only shard that exists.
+  { fault: 'shard-missing (1-shard run)', branch: 'ci/pr-pipeline-prototype-n1-fault', token: 'shard-missing', total: 1, target: 'aggregate', expectLog: /expected 1 shard directories/u },
   // The same injection on the other end of the range, after the target moved
   // from shard 3 to shard 1.
-  { fault: 'shard-fail (N=4, target moved to shard 1)', branch: 'ci/pr-pipeline-prototype-n4-fault-shard-fail', target: 'product shards', expectLog: /the shard test run failed \(INJECTED FAULT 'shard-fail'\)/u },
+  { fault: 'shard-fail (N=4, target moved to shard 1)', branch: 'ci/pr-pipeline-prototype-n4-fault-shard-fail', token: 'shard-fail', total: 4, target: 'product shards', expectLog: /the shard test run failed \(INJECTED FAULT 'shard-fail'\)/u },
 ]
 
 function gh(args) {
@@ -136,6 +137,56 @@ function differingFiles(base, sha) {
   }
 }
 
+/**
+ * The injection knobs as they exist in a specific commit.
+ *
+ * The freshness check compares file NAMES. A file name says nothing about
+ * its VALUE: a branch could carry `prototype-shard-total.txt = 1` while its
+ * label claims a four-shard run, the injection would still fire on shard 1,
+ * and every other check would pass. The values are therefore read from the
+ * commit the run executed.
+ *
+ * @param {string} sha - the commit the run executed.
+ * @returns {{fault: string|null, total: number|null}} the knob values.
+ */
+function knobsAt(sha) {
+  const read = (path) => {
+    try {
+      return git(['show', `${sha}:${path}`]).trim()
+    } catch {
+      return null
+    }
+  }
+  const total = read('scripts/prototype-shard-total.txt')
+  const parsed = total === null ? null : Number(total)
+  return {
+    fault: read('scripts/prototype-fault.txt'),
+    total: Number.isInteger(parsed) ? parsed : null,
+  }
+}
+
+/**
+ * The product-shard matrix a run actually created.
+ *
+ * The job names carry `<index>/<total>`, so the shape is observable. A run
+ * labelled four-shard that created `1/1` did not exercise the boundary it
+ * claims.
+ *
+ * @param {Array<{name: string}>} jobs - the run's jobs.
+ * @returns {{indices: number[], totals: number[]}} the observed shape.
+ */
+export function matrixShape(jobs) {
+  const indices = new Set()
+  const totals = new Set()
+  for (const job of jobs) {
+    const match = /^Product shard (\d+)\/(\d+)/u.exec(job.name)
+    if (match === null) continue
+    indices.add(Number(match[1]))
+    totals.add(Number(match[2]))
+  }
+  return { indices: [...indices].sort((a, b) => a - b), totals: [...totals].sort((a, b) => a - b) }
+}
+
 function latestRun(branch) {
   const runs = JSON.parse(gh(['api', `repos/XMoon/dsh-pi-tui/actions/runs?branch=${branch}&per_page=1`]))
   return runs.workflow_runs[0] ?? null
@@ -194,8 +245,9 @@ const REVIEWED_BASE = (() => {
   return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: WORKTREE, encoding: 'utf8' }).trim()
 })()
 
+function main() {
 const results = []
-for (const { fault, branch, target, expectLog } of FAULTS) {
+for (const { fault, branch, token, total, target, expectLog } of FAULTS) {
   const run = latestRun(branch)
   if (run === null) {
     results.push({ fault, ok: false, reason: 'no run found' })
@@ -208,12 +260,36 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
   // FRESHNESS: the run must have executed the reviewed tree, plus only the
   // injection knobs. A stale run is not evidence for the current code.
   const differing = differingFiles(REVIEWED_BASE, run.head_sha)
+  // A four-shard scenario does not need to change the committed total: the
+  // file's own default is four. Allowing the change unconditionally is what
+  // let a "N=4" entry run a one-shard matrix.
+  const allowed = total === 4 ? ['scripts/prototype-fault.txt'] : INJECTION_KNOBS
   const stale = differing === null
     ? ['the run commit is not available locally, so freshness cannot be shown']
-    : differing.filter(file => !INJECTION_KNOBS.includes(file))
+    : differing.filter(file => !allowed.includes(file))
   const headSha = run.head_sha
 
   const jobs = jobsOf(run.id)
+
+  // THE VALUES, not only the names: the commit must carry the token and the
+  // shard total this entry claims, and the matrix must have the matching
+  // shape.
+  const knobs = knobsAt(run.head_sha)
+  const knobFailures = []
+  if (knobs.fault !== token) {
+    knobFailures.push(`the commit carries fault token '${knobs.fault}', not '${token}'`)
+  }
+  if (knobs.total !== total) {
+    knobFailures.push(`the commit carries shard total ${knobs.total}, not ${total}`)
+  }
+  const shape = matrixShape(jobs)
+  const expectedIndices = Array.from({ length: total }, (_, index) => index + 1)
+  if (JSON.stringify(shape.indices) !== JSON.stringify(expectedIndices)) {
+    knobFailures.push(`the matrix ran shards [${shape.indices.join(', ')}], not [${expectedIndices.join(', ')}]`)
+  }
+  if (JSON.stringify(shape.totals) !== JSON.stringify([total])) {
+    knobFailures.push(`the matrix totals are [${shape.totals.join(', ')}], not [${total}]`)
+  }
   const names = jobs.map(job => job.name)
   const jobFor = (phase) => {
     // A matrix phase is several jobs; its verdict is the worst of them.
@@ -235,7 +311,7 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
   const provisional = artifacts.includes('prototype-provisional-candidate')
   const summary = jobFor('Pipeline summary')
 
-  const failures = []
+  const failures = [...knobFailures]
   if (stale.length > 0) {
     failures.push(`the run executed a tree that is not the reviewed base plus the injection knobs: ${stale.join(', ')}`)
   }
@@ -266,6 +342,8 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
     run: run.id,
     headSha,
     fresh: stale.length === 0,
+    knobs,
+    shape,
     runConclusion: run.conclusion,
     target,
     phaseResult,
@@ -281,14 +359,16 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
 }
 
 const report = { checkedAt: new Date().toISOString(), results }
-console.log('| fault | run | head | fresh | run | target phase | phase | log | qualified | summary | verdict |')
-console.log('|---|---|---|---|---|---|---|---|---|---|---|')
+console.log('| fault | run | head | token/total | matrix | fresh | run | target phase | phase | log | qualified | summary | verdict |')
+console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|')
 for (const r of results) {
   if (r.reasons === undefined) {
     console.log(`| ${r.fault} | ${r.run} | ? | — | — | — | — | **${r.reason}** |`)
     continue
   }
-  console.log(`| ${r.fault} | ${r.run} | ${r.headSha.slice(0, 8)} | ${r.fresh ? 'yes' : '**stale**'} | ${r.runConclusion} | ${r.target} | ${r.phaseResult} | ${r.logMatched === true ? 'yes' : r.logMatched === false ? '**no**' : '—'} | ${r.qualifiedArtifact ? '**PRESENT**' : 'absent'} | ${r.summary} | ${r.ok ? 'PASS' : '**FAIL**'} |`)
+  const knobs = `${r.knobs.fault ?? '?'}/${r.knobs.total ?? '?'}`
+  const matrix = `${r.shape.indices.length > 0 ? r.shape.indices.join(',') : '?'}/${r.shape.totals.join(',') || '?'}`
+  console.log(`| ${r.fault} | ${r.run} | ${r.headSha.slice(0, 8)} | ${knobs} | ${matrix} | ${r.fresh ? 'yes' : '**stale**'} | ${r.runConclusion} | ${r.target} | ${r.phaseResult} | ${r.logMatched === true ? 'yes' : r.logMatched === false ? '**no**' : '—'} | ${r.qualifiedArtifact ? '**PRESENT**' : 'absent'} | ${r.summary} | ${r.ok ? 'PASS' : '**FAIL**'} |`)
 }
 for (const r of results) {
   if (!r.ok) for (const reason of r.reasons ?? [r.reason]) console.log(`  - ${r.fault}: ${reason}`)
@@ -296,3 +376,10 @@ for (const r of results) {
 const outIndex = process.argv.indexOf('--out')
 if (outIndex !== -1) writeFileSync(process.argv[outIndex + 1], `${JSON.stringify(report, null, 2)}\n`)
 if (results.some(r => !r.ok)) process.exit(1)
+}
+
+// The script runs only when it is EXECUTED. A test that imports `matrixShape`
+// must not fire GitHub API calls.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+}
