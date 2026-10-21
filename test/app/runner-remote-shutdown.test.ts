@@ -98,15 +98,19 @@ function instrumentTuiApps(life: TestLifecycle): { readonly apps: unknown[] } {
  * Wrap the aggregate's OWN retirement + transport disposal BEFORE the runner
  * adopts it, so the observed order is the production path's, not a timing guess.
  *
- * `transport.disposals` counts the REAL disposals — the ones that did the
- * work. The production disposer is idempotent (`if (transportDisposed)
- * return`) and returns BEFORE it reaches `clientUi.dispose()`, so the Client-UI
- * subtree's dispose runs exactly once per transport no matter how many times
- * the disposer is called. Counting THAT counts the real disposal; counting the
- * disposer calls counts the calls, and a second caller would make the call
- * count 2 while nothing was disposed twice.
+ * `transport.disposals` counts the REAL teardown — the releases of the
+ * transport's DOWNSTREAM owners, whose release IS the teardown of the graph.
+ * The production disposer is idempotent (`if (transportDisposed) return`)
+ * and returns BEFORE it reaches any of them, so a second CALL of the disposer
+ * never reaches them and never changes this count: the count is the teardown,
+ * not the calls. Counting the disposer calls counts the calls, and a second
+ * caller (the fixture's own cleanup) would make the call count 2 while
+ * nothing was torn down twice.
+ *
+ * `transport.calls` counts the CALLS, so a case can state both halves of the
+ * contract: the disposer was reached, and it tore the transport down once.
  */
-function instrumentAggregate(aggregate: RemoteAggregate, observed: string[]): { readonly transport: { disposals: number } } {
+function instrumentAggregate(aggregate: RemoteAggregate, observed: string[]): { readonly transport: { disposals: number; calls: number } } {
   const retirement: SessionOwnerRetirement = aggregate.selected.retirement
   const originalRetire = retirement.retire.bind(retirement)
   retirement.retire = async (owner, mode) => {
@@ -120,20 +124,25 @@ function instrumentAggregate(aggregate: RemoteAggregate, observed: string[]): { 
     observed.push('retirement-settled')
     return report
   }
-  const transport = { disposals: 0 }
-  const originalClientUiDispose = aggregate.clientUi.dispose.bind(aggregate.clientUi)
-  let clientUiDisposed = false
-  aggregate.clientUi.dispose = async (): Promise<void> => {
-    // The production subtree disposer is idempotent: the FIRST call does the
-    // work, a later call is a no-op. Counting only the work keeps the count
-    // equal to the number of REAL teardowns of the transport graph.
-    if (clientUiDisposed) return
-    clientUiDisposed = true
-    transport.disposals += 1
-    await originalClientUiDispose()
+  const transport = { disposals: 0, calls: 0 }
+  const teardownOwners: ReadonlyArray<{ readonly owner: object; readonly key: string }> = [
+    { owner: aggregate.clientUi, key: 'dispose' },
+    { owner: aggregate.presentation.task, key: 'dispose' },
+    { owner: aggregate.backendRuntime, key: 'dispose' },
+    { owner: aggregate.wire.client, key: 'dispose' },
+    { owner: aggregate.wire.host, key: 'dispose' },
+  ]
+  for (const { owner, key } of teardownOwners) {
+    const record = owner as unknown as Record<string, unknown>
+    const original = record[key] as (...args: unknown[]) => Promise<void> | void
+    record[key] = (...args: unknown[]): Promise<void> | void => {
+      transport.disposals += 1
+      return original.apply(owner, args)
+    }
   }
   const originalDispose = aggregate.selected.disposeTransport.bind(aggregate.selected)
   aggregate.selected.disposeTransport = async (): Promise<void> => {
+    transport.calls += 1
     observed.push('transport-dispose')
     await originalDispose()
   }
@@ -156,10 +165,12 @@ interface TeardownCounts {
  * production owner was actually released — not merely that the transport entry
  * was called.
  *
- * The Client-UI subtree's dispose is counted the way the production subtree
- * disposer behaves: the FIRST call does the work, a later call is a no-op and
- * is not counted. So the count is "the owner was really released" — the same
- * quantity `instrumentAggregate` reports for the transport.
+ * The owner counts are the CALLS of each owner's disposer. Every one of these
+ * owners is idempotent in production, so a call that reaches a released owner
+ * is a no-op and the counts stay at one per owner; a count of two would mean
+ * the teardown reached the owner twice. The counts are NOT suppressed by a
+ * local idempotence flag: suppressing a later call would hide exactly the
+ * regression these counts exist to catch.
  */
 function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
   const counts: TeardownCounts = { clientUi: 0, taskWatch: 0, adapters: 0, client: 0, host: 0 }
@@ -171,12 +182,7 @@ function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
       return original.apply(owner, args)
     }
   }
-  let clientUiDisposed = false
-  wrap(aggregate.clientUi, 'dispose', () => {
-    if (clientUiDisposed) return
-    clientUiDisposed = true
-    counts.clientUi += 1
-  })
+  wrap(aggregate.clientUi, 'dispose', () => { counts.clientUi += 1 })
   wrap(aggregate.presentation.task, 'dispose', () => { counts.taskWatch += 1 })
   wrap(aggregate.backendRuntime, 'dispose', () => { counts.adapters += 1 })
   wrap(aggregate.wire.client, 'dispose', () => { counts.client += 1 })
@@ -319,7 +325,7 @@ test('a mounted Remote runner unloads totally and a fresh runner mounts in the s
   const hostA = await mountHost(life, presetId)
   const mainA = 'm3-6-pr3-shutdown-a'
   await hostA.harness.create(SessionId(mainA), { provider: 'smoke', model: 'smoke' }, { cwd: hostA.anchorDir })
-  let transportA: { disposals: number } | undefined
+  let transportA: { disposals: number; calls: number } | undefined
   let teardownA: TeardownCounts | undefined
   const fixtureA = await mountShutdownRunner(life, apps, {
     host: hostA,
@@ -334,7 +340,9 @@ test('a mounted Remote runner unloads totally and a fresh runner mounts in the s
   assert.equal(liveTuiCountForTest(), 1, 'runner A mounted and owns the process TUI slot')
 
   await fixtureA.runnerFiberDispose()
-  assert.equal(transportA?.disposals, 1, 'the selected Remote transport disposes exactly once')
+  assert.equal(transportA?.disposals, 5, 'the selected Remote transport released each of its five owners exactly once')
+  assert.ok((transportA?.calls ?? 0) >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.deepEqual(teardownA, { clientUi: 1, taskWatch: 1, adapters: 1, client: 1, host: 1 },
     'every Remote owner released exactly once: Client UI subtree, task watch, adapters, official Client, Host additive runtime')
   assert.ok(observed.includes('surface-stop'), 'the mounted surface terminal stop was observed')
@@ -350,7 +358,7 @@ test('a mounted Remote runner unloads totally and a fresh runner mounts in the s
   const hostB = await mountHost(life, presetId)
   const mainB = 'm3-6-pr3-shutdown-b'
   await hostB.harness.create(SessionId(mainB), { provider: 'smoke', model: 'smoke' }, { cwd: hostB.anchorDir })
-  let transportB: { disposals: number } | undefined
+  let transportB: { disposals: number; calls: number } | undefined
   const fixtureB = await mountShutdownRunner(life, apps, {
     host: hostB,
     presetId,
@@ -369,7 +377,9 @@ test('a mounted Remote runner unloads totally and a fresh runner mounts in the s
     () => vt.getViewport().join('').includes('remote reply'), 20_000)
 
   await fixtureB.runnerFiberDispose()
-  assert.equal(transportB?.disposals, 1, 'runner B disposes its transport exactly once')
+  assert.equal(transportB?.disposals, 5, 'runner B released each of its five transport owners exactly once')
+  assert.ok((transportB?.calls ?? 0) >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.equal(liveTuiCountForTest(), 0, 'runner B unloads cleanly too')
 })
 
@@ -393,7 +403,7 @@ test('a throwing real generation unsubscribe cannot truncate the root teardown',
 
   const failure = new Error('m3-6-pr3 generation unsubscribe exploded')
   let generationUnsubscribes = 0
-  let transport: { disposals: number } | undefined
+  let transport: { disposals: number; calls: number } | undefined
   // Observe the PRODUCTION coordinator disposal directly (a call-through
   // prototype observer — no product hook). The old held-read signal abort was
   // NOT discriminating: bootstrap aborts the lifecycle BEFORE disposeCatalog,
@@ -432,7 +442,9 @@ test('a throwing real generation unsubscribe cannot truncate the root teardown',
   assert.equal(generationUnsubscribes, 1, 'the real generation unsubscribe executed exactly once')
   assert.equal(coordinatorDisposals.length, 1,
     'the production catalog coordinator disposed exactly once despite the throwing unsubscribe')
-  assert.equal(transport?.disposals, 1, 'the selected transport disposed exactly once')
+  assert.equal(transport?.disposals, 5, 'the selected transport released each of its five owners exactly once')
+  assert.ok((transport?.calls ?? 0) >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.includes('surface-stop'), 'later surface/TuiApp cleanup executed')
   assert.ok(observed.includes('retirement-settled'), 'the Session retirement executed/settled')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('retirement-settled'))
@@ -476,7 +488,7 @@ test('a mounted startup fatal uses the same surface cleanup authority before ret
     return originalStop.call(this)
   })
 
-  let transport: { disposals: number } | undefined
+  let transport: { disposals: number; calls: number } | undefined
   const fixture = await mountShutdownRunner(life, apps, {
     host,
     presetId,
@@ -487,7 +499,9 @@ test('a mounted startup fatal uses the same surface cleanup authority before ret
 
   await waitFor('the fatal path exits once', () => exitCodes.length === 1, 20_000)
   assert.deepEqual(exitCodes, [1], 'the fatal startup path exits exactly once with code 1')
-  assert.equal(transport?.disposals, 1, 'when retirement settles, the Remote transport disposes exactly once')
+  assert.equal(transport?.disposals, 5, 'when retirement settles, the Remote transport released each of its five owners exactly once')
+  assert.ok((transport?.calls ?? 0) >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.includes('surface-stop'), 'the shared cleanup authority disposed the mounted TuiApp')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('retirement-settled'),
     'observed order: surface cleanup precedes the Session retirement')
@@ -531,7 +545,7 @@ test('a throwing mounted TuiApp.dispose() neither strands the later plugin/theme
   const mainId = 'm3-6-pr3-shutdown-d-dispose-failure'
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
 
-  let transport: { disposals: number } | undefined
+  let transport: { disposals: number; calls: number } | undefined
   // Call-through observers on the THREE intermediate/terminal surface-owned
   // releases (plugin-keybinding sync lease, theme-unload hook lease, extension
   // bridge detach), wrapping each REAL returned release before the mount
@@ -601,7 +615,9 @@ test('a throwing mounted TuiApp.dispose() neither strands the later plugin/theme
   assert.ok(observed.includes('retirement-settled'), 'the Session retirement still settled')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('retirement-settled'))
   assert.ok(observed.indexOf('retirement-settled') < observed.indexOf('transport-dispose'))
-  assert.equal(transport?.disposals, 1, 'the selected transport disposed exactly once, after retirement')
+  assert.equal(transport?.disposals, 5, 'the selected transport released each of its five owners exactly once, after retirement')
+  assert.ok((transport?.calls ?? 0) >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   // Fail-closed process slot: the failed final TuiApp dispose keeps it claimed.
   assert.equal(liveTuiCountForTest(), 1,
     'a failed final TuiApp dispose keeps the process TUI slot claimed (fail-closed)')
@@ -611,6 +627,8 @@ test('a throwing mounted TuiApp.dispose() neither strands the later plugin/theme
   await fixture.runnerFiberDispose()
   assert.deepEqual({ keybindingSyncReleases, themeHookReleases, detachCalls },
     { keybindingSyncReleases: 1, themeHookReleases: 1, detachCalls: 1 })
-  assert.equal(transport?.disposals, 1)
+  assert.equal(transport?.disposals, 5)
+  assert.ok((transport?.calls ?? 0) >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.equal(liveTuiCountForTest(), 1)
 })
