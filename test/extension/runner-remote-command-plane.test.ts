@@ -862,7 +862,7 @@ test('/copy reaches the newest assistant message OUTSIDE the initial window by p
     'the copied text is the last assistant message reached by paging')
 })
 
-test('(review F2-external): a REAL Host `/export` claim wins over the same-named TUI built-in', async (t) => {
+test('a REAL Host `/export` claim wins over the same-named TUI built-in', async (t) => {
   // The frozen rc.2 `dsh-session-log-export` Host plugin registers `/export`
   // (a Web-only ZIP download) — the REAL production collision. The TUI also
   // owns a Client `/export` built-in. The §D3 precedence contract: the

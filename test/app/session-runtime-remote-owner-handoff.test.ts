@@ -372,7 +372,7 @@ test('a committed switch survives a post-commit catalog failure and reports it',
     'the post-commit failure is recorded with its truthful catalog phase')
 })
 
-test('(F1 timing): the drop rides the publication commit — BEFORE the new session\'s init/catalog', async () => {
+test('the drop rides the publication commit — BEFORE the new session\'s init/catalog', async () => {
   // The external review's probe-886 shape: the OLD draft must be gone
   // BEFORE the new session becomes editable (its hydration lifts the input
   // fence) — i.e. before ANY post-commit await (init/catalog), never after
@@ -400,7 +400,7 @@ test('(F1 timing): the drop rides the publication commit — BEFORE the new sess
     `the editor-recall scope opens before the new session's hydration (scope@${scopeIndex}, init@${initIndex})`)
 })
 
-test('(F1 atomicity): a THROWING drop seam is a pre-publication failure — OLD owner/draft stand, NEW is released', async () => {
+test('a THROWING drop seam is a pre-publication failure — OLD owner/draft stand, NEW is released', async () => {
   // The external review's publication-atomicity probe: the drop used to
   // carry renderer render IO, so a synchronous throw left the OLD draft
   // already cleared while the publication was rolled back to a
@@ -437,7 +437,7 @@ test('(F1 atomicity): a THROWING drop seam is a pre-publication failure — OLD 
     'the successful retry dropped exactly once')
 })
 
-test('(F1 wiring): the active-draft drop fires ONLY at the committed cross-owner switch', async () => {
+test('the active-draft drop fires ONLY at the committed cross-owner switch', async () => {
   // The production call positions: a successful ordinary switch drops the
   // outgoing draft exactly once (AFTER the publication, with the new owner
   // current); a superseded/pre-publication failed switch NEVER drops; and
@@ -630,7 +630,7 @@ test('a Remote fork adopts the published child through exactly one open and rele
   assert.ok(h.events.includes(`init:${h.core.currentSessionId()!}`), 'the child surface init ran')
 })
 
-test('(F1 atomicity, fork): a THROWING drop seam fails the adoption pre-publication — source/draft stand', async () => {
+test('a THROWING drop seam fails the adoption pre-publication — source/draft stand', async () => {
   // The fork-adoption sibling of the ordinary-switch atomicity probe: the
   // drop rides the adoption's publication seam too, so a synchronous throw
   // there must classify as a PRE-publication failure — the source owner

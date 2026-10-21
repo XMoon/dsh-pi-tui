@@ -508,7 +508,7 @@ test('the TSP renderer declares the switch-dropping stale-restore contract', asy
   }
 })
 
-test('(F1 atomicity): clearActiveDraft is PURE STATE — no render IO, no throw surface', async () => {
+test('clearActiveDraft is PURE STATE — no render IO, no throw surface', async () => {
   // The external review's publication-atomicity finding: the drop runs
   // inside the synchronous publication block, where a throwing render would
   // turn the clear into a pre-publication failure with the draft already

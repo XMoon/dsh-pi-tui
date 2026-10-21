@@ -351,7 +351,7 @@ const settleFrames = async (): Promise<void> => {
 }
 
 
-test('(review F3): a proven settlement does not notify the REPLACEMENT subject\'s surface after a session switch', async () => {
+test('a proven settlement does not notify the REPLACEMENT subject\'s surface after a session switch', async () => {
   // The adapter keeps the dispatched settlement real (no post-dispatch
   // generation re-check); the CONSUMER must therefore own the visibility
   // fence. When the answer was dispatched for session A's continued call and
@@ -412,7 +412,7 @@ test('(review F3): a proven settlement does not notify the REPLACEMENT subject\'
     'the replacement subject\'s surface never sees the old subject\'s settlement notice')
 })
 
-test('(review F3b): a superseded settlement never retires a NEWER entry for the same call', async () => {
+test('a superseded settlement never retires a NEWER entry for the same call', async () => {
   // The reachable sequence the entry-mutation fence exists for: session A's
   // continued answer is dispatched and the Host accepts it (settlement held);
   // the queued reply reaches the projection; the user then DISCARDS that

@@ -641,7 +641,7 @@ test('an EQUAL-time following Conversation closes the Activity (a coarse clock n
   assert.ok(!/Activity \d/u.test(line), `a point Activity hides its duration:\n${line}`)
 })
 
-test('(production): an equal-time Conversation switches the LIVE card to a closed point (viewport + cache state)', async (t) => {
+test('an equal-time Conversation switches the LIVE card to a closed point (viewport + cache state)', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     displayState: { preset: 'compact' },
@@ -743,7 +743,7 @@ test('a trailing retry point can keep counting while the Activity is live', () =
 
 // ── the committed display subject gates a cached card (plan §5.3) ───────────
 
-test('(production pipeline): the settled Tool keeps counting through a real silent wait, then the assistant boundary freezes it without a jump', async (t) => {
+test('the settled Tool keeps counting through a real silent wait, then the assistant boundary freezes it without a jump', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   // Fast injected frames keep the test short; the DURATION reads the real wall
   // clock (a fake clock could hide a jump).
@@ -825,7 +825,7 @@ test('(production pipeline): the settled Tool keeps counting through a real sile
   app.stop()
 })
 
-test('(production pipeline): an injected Context closes the previous Activity; Reasoning closes at the visible assistant text; turn/end closes the rest', async (t) => {
+test('an injected Context closes the previous Activity; Reasoning closes at the visible assistant text; turn/end closes the rest', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     displayState: { preset: 'compact' },
