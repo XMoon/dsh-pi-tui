@@ -742,7 +742,7 @@ test('Host command: executes EXACTLY ONCE through HostCommandPort', async (t) =>
     'exactly ONE command/run row — the Host command is never auto-retried or double-dispatched')
 })
 
-test('B/Remote: the Remote command catalogue routes Host /sessions to its real Host sink', async (t) => {
+test('the Remote command catalogue routes Host /sessions to its real Host sink', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b1-b-remote-sessions-command'
   let calls = 0

@@ -84,7 +84,13 @@ function isAllowedFile(rootDir, file) {
 export function ambiguousAllowlistEntries(rootDir) {
   const counts = new Map()
   for (const file of collectTestFiles(rootDir)) {
-    const basename = file.slice(file.lastIndexOf('/') + 1)
+    // The basename is taken from the POSIX form of the path: `join()`
+    // produces backslashes on Windows, and a basename extracted on `/`
+    // alone would be the WHOLE path there — so two files would never
+    // count as the same name and the uniqueness protection would not
+    // protect anything.
+    const posix = file.split('\\').join('/')
+    const basename = posix.slice(posix.lastIndexOf('/') + 1)
     counts.set(basename, (counts.get(basename) ?? 0) + 1)
   }
   return ALLOWED_DIRECT_USAGE
