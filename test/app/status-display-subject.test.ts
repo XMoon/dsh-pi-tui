@@ -142,7 +142,7 @@ test('every child Session-owned section comes from SessionStatus(childId)', () =
     model: { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
     preset: 'child-preset',
     permission: 'read-only',
-    todo: 'title',
+    todo: 'todo',
     goal: { objective: 'fix the build', phase: 'active' },
     context: { projectedTokens: 100, contextWindow: 2000 },
     usage: { uncachedInputTokens: 5, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 1 },
@@ -170,7 +170,7 @@ test('every child Session-owned section comes from SessionStatus(childId)', () =
   assert.deepEqual(commit.presentation, {
     sessionId: 'child-a',
     workspaceRoot: '/child-a/ws',
-    title: 'title',
+    todo: 'todo',
     todos: [{ content: 'todo', status: 'in_progress' }],
     goal: 'goal ● fix the build',
   })

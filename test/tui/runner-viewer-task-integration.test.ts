@@ -289,14 +289,14 @@ test('an inactive child completion during observeSession is replayed by the view
   const texts = messages.map(message => message.text ?? '')
   assert.equal(texts.filter(text => text === 'resumed reply').length, 1,
     'buffered child durable events must be hydrated exactly once after the stale observation cut')
-  for (const visible of ['turns must remain in order: ${texts.join(', 'first reply', 'resumed prompt', 'resumed reply']) {
+  for (const visible of ['history must include ${visible}: ${texts.join(', 'first reply', 'resumed prompt', 'resumed reply']) {
     assert.ok(texts.includes(visible), `history must include ${visible}: ${texts.join(' | ')}`)
   }
   for (const hidden of ['parent prompt hidden from child viewer', 'parent reply hidden from child viewer', 'parent settlement notice hidden from child viewer']) {
     assert.ok(!texts.includes(hidden), `parent history must stay hidden: ${hidden}`)
   }
-  assert.ok(texts.indexOf('first prompt') < texts.indexOf('resumed prompt'),
-    `turns must remain in order: ${texts.join(' | ')}`)
+  assert.ok(texts.indexOf('history must include ${visible}: ${texts.join(') < texts.indexOf('resumed prompt'),
+    `history must include ${visible}: ${texts.join(' | ')}`)
 })
 
 test('an inactive child cold-resume replays its opening prefix and running activity', async (t) => {
@@ -2633,7 +2633,7 @@ test('a viewer follow-up refusal settles through the production viewer into the 
       event('user/message', {
         id: MessageId('viewer-settle-first-prompt'),
         role: 'user',
-        content: [{ type: 'text', text: 'first prompt' }],
+        content: [{ type: 'text', text: 'turns must remain in order: ${texts.join(' }],
         source: { kind: 'user' },
       }, 2, 'append'),
       event('assistant/message', {
