@@ -568,10 +568,15 @@ test('clearActiveDraft is PURE STATE — no render IO, no throw surface', async 
       'the editor STATE is emptied (the next committed frame draws it)')
     // The next render (B's own commit) carries the empty composer.
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'B' })
-    // The next FRAME is the completion signal: the case asserts that B's own
-    // commit painted a frame, so the wait is for that frame.
-    await awaitFact(() => harness.output.chunks.length > framesBefore, 'the next frame to commit')
+    // The completion signal is the CLEARED COMPOSER ON THE WIRE: the output
+    // chunk count would also move for an unrelated write, and the renderer's
+    // own state says nothing about what was painted. The wire is what the
+    // contract is about.
+    await awaitFact(() => lastComposerText(harness.output.text()) === '',
+      'the cleared composer to reach the wire')
     assert.ok(harness.output.chunks.length > framesBefore, 'the next frame committed')
+    assert.equal(lastComposerText(harness.output.text()), '',
+      'the wire shows the empty composer through B\'s first frame')
     assert.equal(harness.renderer.composer.getDraft(), '', 'the editor stays empty through B\'s first frame')
   } finally {
     await harness.dispose()

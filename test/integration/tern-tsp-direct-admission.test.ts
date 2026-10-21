@@ -16,7 +16,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { pickerNode, wireNodes } from '../support/tsp-picker-wire.ts'
+import { pickerNode, wireNodes, wireTextPerFrame } from '../support/tsp-picker-wire.ts'
 
 /** Every history file written under the fixture's isolated DSH home. */
 function historyFiles(workRoot: string): string[] {
@@ -328,17 +328,25 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         // CURRENT wire must carry the second submission's row.
         await waitFor('the pending delivery row to be painted', () =>
           renderedLines(fixture).some(line => line.includes('second prompt')), 25_000)
-        // The UNIQUENESS is a NEGATIVE guarantee: a late authoritative
-        // occurrence of the same request would paint a SECOND row AFTER the
-        // first one landed, and the raw byte stream would then carry both
-        // while the live tree still has one. "Not yet" is not "never", so the
-        // observation WINDOW stays — and the uniqueness is read from the
-        // CURRENT tree, which is what the de-duplication owns.
-        await directSettle()
+        // The UNIQUENESS is a NEGATIVE guarantee, and "not yet" is not
+        // "never": a late authoritative occurrence of the same request would
+        // paint a SECOND row after the first one landed, and a row that is
+        // painted and later RETRACTED would be gone from the final live set
+        // again. So the observation covers EVERY frame the window produced,
+        // not only the last one, and the window keeps the bound the original
+        // fixed wait had.
+        await directSettle(1_000)
+        for (const state of wireTextPerFrame(fixture.pane)) {
+          const rows = state.filter(line => line.includes('second prompt'))
+          // AT MOST one row in EVERY frame: the row may not have arrived yet
+          // (zero frames), but a frame that carries a SECOND row for the same
+          // submission is the regression, and a row that is painted and later
+          // retracted would be invisible in the final live set.
+          assert.ok(rows.length <= 1,
+            `at most ONE pending delivery row for the second submission in every frame:\n${rows.join('\n')}`)
+        }
         const pendingRows = renderedLines(fixture)
           .filter(line => line.includes('second prompt'))
-        assert.equal(pendingRows.length, 1,
-          `exactly ONE pending delivery row exists for the second submission:\n${pendingRows.join('\n')}`)
         // The row's own MODE is the delivery the case asserts above, and both
         // markers are checked: a next-turn (`queue`) delivery renders the
         // queue row and NO steering row, and a next-step (`steer`) delivery

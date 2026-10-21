@@ -503,6 +503,12 @@ test('the picker default write persists through the official profile plane', asy
     // document, and the registry's effective default follows it.
     await waitFor('the profile document holds the new default', () => presetDefaultRow(patchPath) === 'fixture-b')
     await waitFor('picker dismissed', () => pickerNode(fixture.pane, P) === undefined)
+    // The document is the WRITE surface; the registry's effective default is
+    // the AUTHORITY the case asserts. The picker being dismissed only
+    // establishes that the write settled — it does not prove the effective
+    // default has flipped, so the authority is waited for as well.
+    await waitFor('the effective default to follow the write', () =>
+      (fixture.ctx.get('agentPresets') as { defaultId: string }).defaultId === 'fixture-b')
     assert.equal((fixture.ctx.get('agentPresets') as { defaultId: string }).defaultId, 'fixture-b')
     assert.equal([...fixture.ctx.agents.list()].length, 0, 'a default write creates no Session')
     // The TYPED verb drives the very same writer: the document flips back.
@@ -520,10 +526,11 @@ test('the picker default write persists through the official profile plane', asy
     // A reopened panel reads the new default from the authority.
     fixture.pane.key('/preset\r')
     // The wait is for the BADGE the case asserts, not for the panel's state:
-    // the picker can reach its `ready` phase while the roster it will read —
-    // the one the badge is derived from — is still on its way, and a state
-    // that arrives first would make the assertion read a frame painted
-    // before the authority reached the panel.
+    // the panel's `ready` phase commits together with its roster, but the
+    // badge is derived from the roster's default, and the row the reopened
+    // panel paints is only correct once the authority that backs it has
+    // reached the panel. Waiting for the badge is waiting for the fact the
+    // assertion reads.
     await waitFor('the reopened panel to show the default', () => {
       const badges = (items(fixture.pane).find((entry) => entry.id === 'preset:fixture-a')?.badges ?? []) as Array<{ text: string }>
       return badges.some((badge) => badge.text === 'Default')
