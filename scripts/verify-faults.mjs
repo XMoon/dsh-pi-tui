@@ -49,7 +49,11 @@ const FAULTS = [
   { fault: 'shard-missing', branch: 'ci/pr-pipeline-prototype-fault-shard-missing', target: 'aggregate', expectLog: /expected 4 shard directories/u },
   { fault: 'digest-mismatch', branch: 'ci/pr-pipeline-prototype-fault-digest-mismatch', target: 'product shards', expectLog: /the build digest is [0-9a-f]+, not the expected [0-9a-f]+/u },
   { fault: 'build-missing', branch: 'ci/pr-pipeline-prototype-fault-build-missing', target: 'product shards', expectLog: /Artifact not found for name: prototype-build/u },
-  { fault: 'smoke-fail', branch: 'ci/pr-pipeline-prototype-fault-smoke-fail', target: 'qualification', expectLog: /Smoke 1\/8/u },
+  // The generic "Smoke 1/8" is not enough: it matches a first smoke that
+  // failed for ANY reason, including one where the injection never truncated
+  // the candidate. The extra signature is the one a truncated archive
+  // produces and nothing else does.
+  { fault: 'smoke-fail', branch: 'ci/pr-pipeline-prototype-fault-smoke-fail', target: 'qualification', expectLog: /Smoke 1\/8[\s\S]*Unexpected EOF in archive/u },
   { fault: 'downstream-fail', branch: 'ci/pr-pipeline-prototype-fault-downstream-fail', target: 'downstream matrix', expectLog: /the downstream compatibility leg failed \(INJECTED FAULT 'downstream-fail'\)/u },
   // The SELECTOR BOUNDARY. With one shard, a target of "shard 4" would never
   // exist and the pipeline could succeed while claiming to inject a fault.
@@ -84,6 +88,52 @@ function phasePrefix(phase) {
   const prefix = PHASE_PREFIX[phase]
   if (prefix === undefined) throw new Error(`no job prefix is known for the phase '${phase}'`)
   return prefix
+}
+
+/**
+ * The files an injection branch is allowed to change, relative to the
+ * reviewed base.
+ *
+ * Everything else in the tree must be the reviewed code. Without this check
+ * a verifier happily reports "8/8" while six of the runs executed an OLDER
+ * commit: the evidence would describe a tree that no longer exists.
+ */
+const INJECTION_KNOBS = ['scripts/prototype-fault.txt', 'scripts/prototype-shard-total.txt']
+
+function git(args) {
+  return execFileSync('git', args, { cwd: WORKTREE, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+}
+
+/** Whether this commit is available locally, fetching it if not. */
+function ensureCommit(sha) {
+  try {
+    git(['cat-file', '-e', `${sha}^{commit}`])
+    return true
+  } catch {
+    try {
+      git(['fetch', '--quiet', 'origin', sha])
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+/**
+ * The files in which a run's commit differs from the reviewed base.
+ *
+ * @param {string} base - the reviewed base commit.
+ * @param {string} sha - the commit the run actually executed.
+ * @returns {string[]|null} the differing files, or null when the commit is
+ *   not available (which is NOT proof of freshness).
+ */
+function differingFiles(base, sha) {
+  if (!ensureCommit(sha)) return null
+  try {
+    return git(['diff', '--name-only', base, sha]).split('\n').filter(Boolean)
+  } catch {
+    return null
+  }
 }
 
 function latestRun(branch) {
@@ -129,6 +179,21 @@ function artifactsOf(runId) {
   return JSON.parse(gh(['api', `repos/XMoon/dsh-pi-tui/actions/runs/${runId}/artifacts?per_page=100`])).artifacts
 }
 
+const WORKTREE = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+
+/**
+ * The commit whose tree the injections must have executed.
+ *
+ * The default is the CURRENT HEAD: a run of an older commit proves something
+ * about an older tree, and reporting it as evidence for the present one is
+ * how a verifier says "8/8" about code that no longer exists.
+ */
+const REVIEWED_BASE = (() => {
+  const index = process.argv.indexOf('--base')
+  if (index !== -1) return process.argv[index + 1]
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: WORKTREE, encoding: 'utf8' }).trim()
+})()
+
 const results = []
 for (const { fault, branch, target, expectLog } of FAULTS) {
   const run = latestRun(branch)
@@ -140,6 +205,14 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
     results.push({ fault, run: run.id, ok: false, reason: `run is ${run.status}` })
     continue
   }
+  // FRESHNESS: the run must have executed the reviewed tree, plus only the
+  // injection knobs. A stale run is not evidence for the current code.
+  const differing = differingFiles(REVIEWED_BASE, run.head_sha)
+  const stale = differing === null
+    ? ['the run commit is not available locally, so freshness cannot be shown']
+    : differing.filter(file => !INJECTION_KNOBS.includes(file))
+  const headSha = run.head_sha
+
   const jobs = jobsOf(run.id)
   const names = jobs.map(job => job.name)
   const jobFor = (phase) => {
@@ -163,6 +236,9 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
   const summary = jobFor('Pipeline summary')
 
   const failures = []
+  if (stale.length > 0) {
+    failures.push(`the run executed a tree that is not the reviewed base plus the injection knobs: ${stale.join(', ')}`)
+  }
   if (run.conclusion !== 'failure') failures.push(`the run conclusion is '${run.conclusion}', not 'failure'`)
   if (!phaseFailed) {
     failures.push(`the target phase '${target}' is '${phaseResult}', not 'failure': the injection is not attributable to it`)
@@ -188,6 +264,8 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
   results.push({
     fault,
     run: run.id,
+    headSha,
+    fresh: stale.length === 0,
     runConclusion: run.conclusion,
     target,
     phaseResult,
@@ -203,14 +281,14 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
 }
 
 const report = { checkedAt: new Date().toISOString(), results }
-console.log('| fault | run | run | target phase | phase | log carries the injection | qualified artifact | summary | verdict |')
-console.log('|---|---|---|---|---|---|---|---|---|')
+console.log('| fault | run | head | fresh | run | target phase | phase | log | qualified | summary | verdict |')
+console.log('|---|---|---|---|---|---|---|---|---|---|---|')
 for (const r of results) {
   if (r.reasons === undefined) {
     console.log(`| ${r.fault} | ${r.run} | ? | — | — | — | — | **${r.reason}** |`)
     continue
   }
-  console.log(`| ${r.fault} | ${r.run} | ${r.runConclusion} | ${r.target} | ${r.phaseResult} | ${r.logMatched === true ? 'yes' : r.logMatched === false ? '**no**' : '—'} | ${r.qualifiedArtifact ? '**PRESENT**' : 'absent'} | ${r.summary} | ${r.ok ? 'PASS' : '**FAIL**'} |`)
+  console.log(`| ${r.fault} | ${r.run} | ${r.headSha.slice(0, 8)} | ${r.fresh ? 'yes' : '**stale**'} | ${r.runConclusion} | ${r.target} | ${r.phaseResult} | ${r.logMatched === true ? 'yes' : r.logMatched === false ? '**no**' : '—'} | ${r.qualifiedArtifact ? '**PRESENT**' : 'absent'} | ${r.summary} | ${r.ok ? 'PASS' : '**FAIL**'} |`)
 }
 for (const r of results) {
   if (!r.ok) for (const reason of r.reasons ?? [r.reason]) console.log(`  - ${r.fault}: ${reason}`)
