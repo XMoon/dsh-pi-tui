@@ -124,6 +124,24 @@ same applies to a key: an input that a fence drops (not holds) is lost for
 good, so a wait that ends before the surface is ready loses the command
 rather than delaying it.
 
+**A fixed sleep is a guess, and a guess is both slow and flaky.** A sleep
+that stands in for a delivery the test can OBSERVE costs wall clock on every
+run and still races on a loaded machine. Before writing one, look for the
+fact the step actually needs:
+
+| The step waits for | Wait for |
+| --- | --- |
+| a typed line to reach the composer | the composer holding that text |
+| an Enter to take effect | the effect (the submit callback ran, the draft cleared) |
+| the surface to accept a key | the surface's own readiness signal (for a TSP tty: the input becoming deliverable) |
+| a repaint to land | the painted frame |
+| a NOT to happen | a bounded observation window, with the reason next to it |
+
+A sleep that remains is a statement that the fact is NOT observable, and
+its reason must say which one. Note that a shared render wait is usually
+NOT such a sleep: it covers the renderer's own throttled frame, and
+shortening it breaks the cases that depend on the frame having landed.
+
 ### 6. Discoverability & Execution Cost
 
 A new test must be found by the lane that owns it. The lanes are PATTERNS
