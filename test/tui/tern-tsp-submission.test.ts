@@ -140,7 +140,10 @@ async function mountPane(
  * The FIXED wait, for the observations that are about what did NOT happen.
  *
  * A negative fact ("the held key never reached the composer") needs an
- * observation WINDOW, and the window is the assertion's own bound.
+ * observation WINDOW, and the window is the assertion's own bound. The same
+ * wait covers the moment right after a hydration fence is ARMED: the next
+ * key must land inside the fence, and "the fence is up" is not an
+ * observable frame.
  */
 async function settle(millis = 300): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, millis))
@@ -289,7 +292,6 @@ test('the fence lifts when the new subject commits, and the composer works again
     assert.equal(harness.renderer.composer.getDraft(), '', 'still fenced')
     // The new subject commits a projection: the fence lifts.
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'new' })
-    await settle()
     harness.input.type('after the switch')
     await awaitTyped(harness, 'after the switch')
     assert.equal(harness.renderer.composer.getDraft(), 'after the switch',
@@ -396,7 +398,6 @@ test('a GENUINE session switch clears the old draft — Enter into B never sends
     await settle()
     // B's own projection commits: the fence lifts.
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'B' })
-    await settle()
     assert.equal(harness.renderer.composer.getDraft(), '',
       'the A→B switch cleared A\'s unsubmitted draft (never submittable into B)')
     // A stray Enter right after the lift hands the renderer's EMPTY wire
@@ -438,7 +439,6 @@ test('the FIRST-session creation and a generation bump WITHOUT a committed switc
     harness.renderer.display.beginSessionHydration()
     await settle()
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'first' })
-    await settle()
     assert.equal(harness.renderer.composer.getDraft(), 'typed while the first session creates',
       'the first-session creation preserved the draft (no outgoing session ⇒ no drop)')
     // The pre-publication failure shape: a generation bump happened (the
@@ -450,7 +450,6 @@ test('the FIRST-session creation and a generation bump WITHOUT a committed switc
     harness.renderer.display.beginSessionHydration()
     await settle()
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'still-A' })
-    await settle()
     assert.equal(harness.renderer.composer.getDraft(), 'typed while the first session creates + kept',
       'an invalidated-but-unswitched generation preserved the draft (the drop needs the committed publication)')
   } finally {
@@ -474,7 +473,6 @@ test('a SAME-SESSION rehydrate preserves the unsubmitted draft', async () => {
     // The SAME session's replacement fold commits (a new source token, no
     // generation reset): the fence lifts WITHOUT any draft drop.
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'same-session-new-fold' })
-    await settle()
     assert.equal(harness.renderer.composer.getDraft(), 'kept through rehydrate',
       'the same-session rehydrate preserved the unsubmitted draft')
     harness.input.type(' + more')
@@ -506,7 +504,6 @@ test('a FAILED switch (hydration raised, never cleared, no new subject) preserve
     // The switch FAILED: the same subject's own fold re-commits (the fence
     // lifts on the new source token; no draft was ever dropped).
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'A-recovered' })
-    await settle()
     assert.equal(harness.renderer.composer.getDraft(), 'draft during failed switch',
       'a failed switch preserved the draft (no draft drop without the generation boundary)')
     harness.input.type('\r')
@@ -568,7 +565,9 @@ test('clearActiveDraft is PURE STATE — no render IO, no throw surface', async 
       'the editor STATE is emptied (the next committed frame draws it)')
     // The next render (B's own commit) carries the empty composer.
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'B' })
-    await settle()
+    // The next FRAME is the completion signal: the case asserts that B's own
+    // commit painted a frame, so the wait is for that frame.
+    await awaitFact(() => harness.output.chunks.length > framesBefore, 'the next frame to commit')
     assert.ok(harness.output.chunks.length > framesBefore, 'the next frame committed')
     assert.equal(harness.renderer.composer.getDraft(), '', 'the editor stays empty through B\'s first frame')
   } finally {

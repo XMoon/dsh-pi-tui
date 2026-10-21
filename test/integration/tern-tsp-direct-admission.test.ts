@@ -165,7 +165,10 @@ test('a FAILING Host command rolls the draft back into the composer', async (t) 
   // command line must produce ZERO prompt writes.
   const recorder = fixture.recordPrompts(() => {})
   try {
-    await directSettle(4_000)
+    // The tty becoming DELIVERABLE is the runner's readiness signal: an
+    // input event delivered before the SDK attaches its listener is DROPPED,
+    // so a fixed startup sleep only raced the handshake.
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/failing')
     await awaitComposer(fixture, '/failing')
     assert.equal(latestComposerText(fixture.pane.output.text()), '/failing')
@@ -223,7 +226,10 @@ test('a refused `!` line writes NO input-history row (accepted prompt does)', as
     assert.equal(latestComposerText(fixture.pane.output.text()), '!echo hi',
       'the refused line was restored into the composer')
     for (let index = 0; index < '!echo hi'.length; index += 1) fixture.pane.input.type('\x7f')
-    await directSettle()
+    // The composer being EMPTY is the completion signal for the backspaces:
+    // a fixed settle only guessed how long the editor took to apply them.
+    await waitFor('the composer to clear', () =>
+      latestComposerText(fixture.pane.output.text()) === '', 25_000)
     assert.equal(latestComposerText(fixture.pane.output.text()), '', 'the composer is clear again')
     // POSITIVE CONTROL for the same store: an accepted prompt DOES persist a row,
     // so the empty result above is a real refusal, not a missing store.
@@ -304,12 +310,16 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         assert.equal(second.outcome.kind, 'committed', 'the busy delivery settled committed')
         assert.equal(promptCalls.length, beforeSettled + 1, 'exactly ONE settled write for the second submission (no double-send)')
         // Exactly ONE pending delivery row exists for the second submission.
-        await directSettle(1_000)
+        // The pending delivery row is the completion signal: the assertion is
+        // about how MANY rows the wire carries, so the wait is for that row.
+        await waitFor('the pending delivery row to be painted', () => {
+          const pending = fixture.pane.output.text()
+          return (pending.match(/queued \(/g) ?? []).length + (pending.match(/steering/g) ?? []).length === 1
+        }, 25_000)
         const wire = fixture.pane.output.text()
         assert.equal((wire.match(/queued \(/g) ?? []).length + (wire.match(/steering/g) ?? []).length, 1,
           'exactly ONE pending delivery row exists for the second submission')
         releaseStream()
-        await directSettle(2_000)
         recorder.detach()
       } finally {
         releaseStream()
