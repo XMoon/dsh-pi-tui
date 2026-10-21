@@ -85,20 +85,32 @@ jobs:
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
       shard_total: ${{ steps.shards.outputs.shard_total }}
+      test_concurrency: ${{ steps.shards.outputs.test_concurrency }}
     steps:
+      - name: Checkout the measured commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
+
       - name: Build the shard list
         id: shards
         env:
-          # The shard count comes from the COMMITTED tree when the run
-          # carries no input: a `push` trigger has no inputs, so an
-          # input's default would never apply to the run the branch was
-          # pushed for. The branch carries the count in
-          # `scripts/measurement-shard-total.txt`.
+          # The shard count and the concurrency come from the COMMITTED
+          # tree when the run carries no input: a `push` trigger has no
+          # inputs, so an input's default would never apply to the run
+          # the branch was pushed for. The branch carries them in
+          # `scripts/measurement-shard-total.txt` and
+          # `scripts/measurement-test-concurrency.txt`.
           DSH_SHARD_TOTAL: ${{ inputs.shard_total || '' }}
+          DSH_TEST_CONCURRENCY: ${{ inputs.test_concurrency || '' }}
         run: |
           set -euo pipefail
           if [ -z "$DSH_SHARD_TOTAL" ]; then
             DSH_SHARD_TOTAL="$(cat scripts/measurement-shard-total.txt)"
+          fi
+          if [ -z "$DSH_TEST_CONCURRENCY" ]; then
+            DSH_TEST_CONCURRENCY="$(cat scripts/measurement-test-concurrency.txt 2>/dev/null || echo '')"
           fi
           case "$DSH_SHARD_TOTAL" in
             1) shards='[1]' ;;
@@ -109,7 +121,9 @@ jobs:
           esac
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
           echo "shard_total=$DSH_SHARD_TOTAL" >> "$GITHUB_OUTPUT"
+          echo "test_concurrency=$DSH_TEST_CONCURRENCY" >> "$GITHUB_OUTPUT"
           echo "the measurement will run these shards: $shards"
+          echo "with this test concurrency: ${DSH_TEST_CONCURRENCY:-Node's default}"
 
   # ---------------------------------------------------------------------------
   # The MEASUREMENT itself: one job per shard, each on its own runner.
@@ -180,7 +194,7 @@ jobs:
           set -euo pipefail
           mkdir -p diagnostics
           start=$(date +%s)
-          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ needs.prepare.outputs.shard_total }} ${{ inputs.test_concurrency && format('--test-concurrency={0}', inputs.test_concurrency) || '' }}
+          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ needs.prepare.outputs.shard_total }} ${{ needs.prepare.outputs.test_concurrency && format('--test-concurrency={0}', needs.prepare.outputs.test_concurrency) || '' }}
           end=$(date +%s)
           node scripts/runner-spec.mjs \
             --wall-clock-seconds "$((end - start))" \
