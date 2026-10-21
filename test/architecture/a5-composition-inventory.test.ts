@@ -549,7 +549,7 @@ test('the composition surface keeps the startup order', () => {
   }
 })
 
-test('A5/rc.2: the turn flush is initialized before the routing source is attached', () => {
+test('the turn flush is initialized before the routing source is attached', () => {
   // The routing source registered with `attachEventRouting` can run DURING the
   // startup sequence itself: the Remote event firehose delivers events while
   // the first hydration is still open, and `turn/end` reaches

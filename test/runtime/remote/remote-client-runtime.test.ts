@@ -741,7 +741,7 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
 // L - partial construction failure
 // ---------------------------------------------------------------------------
 
-test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async (t) => {
+test('a Host-side composition failure unwinds the mounted fibers and leaves the ordinary Host intact', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   seedHostSession(host)
@@ -784,7 +784,7 @@ test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leav
   }
 })
 
-test('L2. a Client-side readiness failure unwinds the partial Client cleanly', async (t) => {
+test('a Client-side readiness failure unwinds the partial Client cleanly', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   try {
@@ -881,7 +881,7 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
   }
 })
 
-test('L3. a Client plugin startup rejection unwinds its fiber at its frozen §16 position', async (t) => {
+test('a Client plugin startup rejection unwinds its fiber at its frozen position', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   seedHostSession(host)
@@ -938,7 +938,7 @@ test('L3. a Client plugin startup rejection unwinds its fiber at its frozen §16
   }
 })
 
-test('L4. an aborted lifecycle signal outranks the already-ready readiness fast path', async (t) => {
+test('an aborted lifecycle signal outranks the already-ready readiness fast path', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   seedHostSession(host)

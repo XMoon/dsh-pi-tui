@@ -34,7 +34,7 @@ async function drainUntil(ready: () => boolean, timeoutMs: number): Promise<bool
 
 for (const busyEnter of ['queue', 'steer'] as const) {
   for (const gesture of ['enter', 'accelerated'] as const) {
-    test(`parity/PiTui: a ${gesture === 'enter' ? 'plain Enter' : 'Ctrl+Enter'} into a RUNNING turn takes the ${gesture === 'enter' ? 'configured' : 'OPPOSITE'} busyEnter=${busyEnter}`, async (t) => {
+    test(`PiTui parity: a ${gesture === 'enter' ? 'plain Enter' : 'Ctrl+Enter'} into a RUNNING turn takes the ${gesture === 'enter' ? 'configured' : 'OPPOSITE'} busyEnter=${busyEnter}`, async (t) => {
       const { testLifecycle } = await import('../support/temp-lifecycle.ts')
       const life = testLifecycle(t)
       const home = life.tempDir('b2-parity-pitui-')
