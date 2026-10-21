@@ -290,7 +290,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
   return { vt, app, ctx, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
 }
 
-test('(R6-1): only the winner stamped with THIS surface\'s mirror id is subtracted', () => {
+test('only the winner stamped with THIS surface\'s mirror id is subtracted', () => {
   const t = setup()
   try {
     // The Direct compatibility mirror for /status carries the stamped

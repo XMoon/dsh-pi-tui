@@ -124,7 +124,7 @@ test('no connection reads unavailable without any Host call', async () => {
   assert.deepEqual(calls, [])
 })
 
-test('F5+cancellation: a pre-aborted WORKSPACE request rejects before the unsupported answer', async () => {
+test('a pre-aborted WORKSPACE request rejects before the unsupported answer', async () => {
   const { port, calls } = harness()
   const controller = new AbortController()
   controller.abort()

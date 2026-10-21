@@ -343,3 +343,39 @@ test('the title audit and the title transform agree on what a code is', () => {
     assert.equal(stripCodePrefix(title), title, `the transform must not change: ${title}`)
   }
 })
+
+test('a dot-separated code is removed without cutting the sentence', () => {
+  // The dot is a separator only when a CODE precedes it. In a title like
+  // `F1. a mount throw leaves the fiber unassigned: …` the colon is
+  // inside the SENTENCE, and splitting there would cut it in half.
+  assert.equal(
+    stripCodePrefix('F1. a synchronous mount throw leaves the stage fiber unassigned: the unwind skips it'),
+    'a synchronous mount throw leaves the stage fiber unassigned: the unwind skips it',
+  )
+  assert.equal(
+    stripCodePrefix('§14/J12: a same-Session Job viewer replacement drops the stale settlement'),
+    'a same-Session Job viewer replacement drops the stale settlement',
+  )
+  assert.equal(
+    stripCodePrefix('F5+cancellation: a pre-aborted WORKSPACE request rejects before the answer'),
+    'a pre-aborted WORKSPACE request rejects before the answer',
+  )
+})
+
+test('the title transform removes the remaining code families', () => {
+  const cases = [
+    ['§3.9a: teardown with a pending main-path READ', 'teardown with a pending main-path READ'],
+    ['(10): the replaced modal leaves the seat', 'the replaced modal leaves the seat'],
+    ['(R6-1): only the winner is subtracted', 'only the winner is subtracted'],
+    ['(ctrl-r harness): an Approval A→B FIFO keeps the seat parked', 'an Approval A→B FIFO keeps the seat parked'],
+    ['19.2 hard gate: 100 UI-only refresh cycles', '100 UI-only refresh cycles'],
+    ['02/03 effective ↓ enters from the middle of the last line', 'effective ↓ enters from the middle of the last line'],
+    ['D1. a Host-side wire construction failure unwinds', 'a Host-side wire construction failure unwinds'],
+    ['F5+cancellation: a pre-aborted request rejects', 'a pre-aborted request rejects'],
+    ['§14/J12: a same-Session viewer replacement drops the stale settlement', 'a same-Session viewer replacement drops the stale settlement'],
+  ]
+  for (const [from, to] of cases) {
+    assert.equal(stripCodePrefix(from), to, `must strip: ${from}`)
+    assert.equal(hasLeadingCodePrefix(from), true, `the audit must report: ${from}`)
+  }
+})

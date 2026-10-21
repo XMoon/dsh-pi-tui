@@ -369,7 +369,7 @@ async function openJobRow(fx: JobViewerFixture, label: string): Promise<void> {
   fx.fixture.vt.sendInput('\r')
 }
 
-test('steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
+test('the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -753,7 +753,7 @@ test('11(a): a `kind:subagent` Job with NO stable child id stays in the Job deta
   await waitFor('the subagent Job workspace closed', () => !jobWorkspacePainted(view()), 10_000)
 })
 
-test('step 12: a main-Session switch with a Stop in flight drops the stale settlement and releases the observer without mutating the replacement surface', async (t) => {
+test('a main-Session switch with a Stop in flight drops the stale settlement and releases the observer without mutating the replacement surface', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { host, app, view } = fx
@@ -813,7 +813,7 @@ test('step 12: a main-Session switch with a Stop in flight drops the stale settl
     fx.observeReleases() === fx.observeAcquires(), 10_000)
 })
 
-test('step 12 (teardown variant): disposing the surface with a Stop in flight drops the stale settlement and releases the observer', async (t) => {
+test('disposing the surface with a Stop in flight drops the stale settlement and releases the observer', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -839,7 +839,7 @@ test('step 12 (teardown variant): disposing the surface with a Stop in flight dr
     'surface disposal must release the mounted selected-Job observer')
 })
 
-test('§14/J12: a same-Session Job A -> Job B viewer replacement (with a browser close/reopen) drops A\'s stale Stop SUCCESS settlement and keeps the current viewer\'s Stop working', async (t) => {
+test('a same-Session Job A -> Job B viewer replacement (with a browser close/reopen) drops A\'s stale Stop SUCCESS settlement and keeps the current viewer\'s Stop working', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -898,7 +898,7 @@ test('§14/J12: a same-Session Job A -> Job B viewer replacement (with a browser
   assert.equal(fx.rosterStatus(jobA.id), 'running', 'the retired A Job must be untouched')
 })
 
-test('§14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR settlement, while the current viewer\'s stop ERROR still notifies', async (t) => {
+test('a same-Session A -> B replacement drops A\'s stale Stop ERROR settlement, while the current viewer\'s stop ERROR still notifies', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
