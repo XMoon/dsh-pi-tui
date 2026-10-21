@@ -224,7 +224,7 @@ test('the image scope identity is the presentation LIFETIME, and the renderer st
  * ingress attempt must precede it, and the collected failure must surface
  * after both attempts — a second dispose is inert (the plan's D2 form).
  */
-test('child re-folds are serialized, and a refused commit never overwrites the newer fold', async (t) => {
+test('re-folds are serialized, and a refused commit never overwrites the newer fold', async (t) => {
   // C4/§2.5 owner-level barrier: read A is already in flight when a second
   // requirement is coalesced; the FIFO serializes them, A is refused as
   // superseded (writes NOTHING), and only the newer fold commits. Deterministic

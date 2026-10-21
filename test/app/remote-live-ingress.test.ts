@@ -546,7 +546,7 @@ test('a rollover during an in-flight re-fold re-arms the wakeup (no lost wakeup)
   handle.dispose()
 })
 
-test('R0/RFL-005: a COLD attach after a rollover verifies the first publication', async () => {
+test('a COLD attach after a rollover verifies the first publication', async () => {
   // Upstream keeps a Session resident and the journal stream retains its
   // published window across a restart, so an owner/surface rebuild can cold-read
   // the SAME binding at the OLD revision while the generation is already the new
@@ -577,7 +577,7 @@ test('R0/RFL-005: a COLD attach after a rollover verifies the first publication'
   handle.dispose()
 })
 
-test('R0/RFL-005: a prepend before the opening page still cannot shortcut the reconcile', async () => {
+test('a prepend before the opening page still cannot shortcut the reconcile', async () => {
   // A `prepend` (older history joining the front) can arrive while the retained
   // window is still the previous generation's. Verify-first already holds the
   // handle in recovering, so the prepend reconciles the window instead of being

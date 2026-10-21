@@ -915,7 +915,7 @@ test('re-confirming the same answer fires no real-answer mutation hook', async (
   }
 })
 
-test('B3 F6.3: a retired request detaches its real listener and cannot write into the seat that follows it', async () => {
+test('a retired request detaches its real listener and cannot write into the seat that follows it', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   let renders = 0
   const seat = createTspInteractionSeat({

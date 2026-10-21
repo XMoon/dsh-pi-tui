@@ -258,7 +258,7 @@ test('fullscreen: selected /image rows marquee on the active alt screen', async 
   assert.equal(marqueeDeadline(app), -1, '/image close must reset the file marquee')
 })
 
-test('final app disposal disposes the host file-completion marquee', async (t) => {
+test('app disposal disposes the host file-completion marquee', async (t) => {
   const life = testLifecycle(t)
   const root = marqueeFixture(life)
   const marqueeNow = { value: 0 }

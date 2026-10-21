@@ -389,7 +389,7 @@ test('Focus ON fullscreen expanded root — Thinking compact, Tool compact', asy
   app.stop()
 })
 
-test('E2–E5: per-card clicks layer over the bulk preference; Alt+T resets them', async () => {
+test('per-card clicks layer over the bulk preference; Alt+T resets them', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -679,7 +679,7 @@ function setupSettings() {
   return { vt, app, run, view, settings }
 }
 
-test('I1–I6: the /settings Thinking row is the SAME state as Alt+T (detail semantics)', async () => {
+test('the /settings Thinking row is the SAME state as Alt+T (detail semantics)', async () => {
   const t = setupSettings()
   await t.run()
   let view = await t.view()

@@ -12,11 +12,26 @@
  * keeps the sentence:
  *
  *   'A5b: the composition zone is one facade'  ->  'the composition zone is one facade'
- *   'PR5 negative control: an indeterminate'  ->  'negative control: an indeterminate'
+ *   'PR5 negative control: an indeterminate'  ->  'an indeterminate prompt result'
  *
  * It never rewrites the English, never reorders it, and never invents an
  * outcome. A title whose code is followed by a phrase that already reads as
  * a sentence keeps that phrase exactly.
+ *
+ * ## How the label is found
+ *
+ * The title is split into a HEAD and a SENTENCE at the first separator
+ * that ends a label (a colon, a dash, or a space before a lowercase
+ * word). The HEAD is then examined TOKEN BY TOKEN: a token is part of the
+ * label when it is a code, a section marker, a bracketed code, a
+ * compound-label qualifier, or a listed qualifier word. The label is the
+ * longest run of such tokens from the start.
+ *
+ * The token walk is used instead of one big pattern because the
+ * repository's labels use every order of their parts (`PR5 §1C-3 (R6-1)`,
+ * `PR4 F2b.2 (review round 4)`, `§D2 (review round 3 ruling)`,
+ * `A06/Focus`, `B3 F6.1`, `PR D`) and enumerating the orders in a
+ * pattern is how the pattern starts eating the sentence.
  *
  * The transform is a REPORT: it prints what it would change, and only
  * writes when it is asked to. The reviewer decides which of the changes to
@@ -35,87 +50,180 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
- * A leading SECTION marker (`§18.1`, `§1C-4`, `§D2`).
+ * A code ATOM: a single label token that names an effort.
  *
- * The section number points into the plan that wrote the test, so it is
- * the same kind of local label as a code — the reader of a CI log does not
- * have the plan either.
+ * The families the repository uses: a short uppercase family (`A5b`,
+ * `TS8`, `B4A`, `PR5`, `H3A`, `L6`, `F10` …), optionally with a dotted
+ * sub-number (`D2.1`, `F2b.2`, `P1.1`), a letter suffix (`B4B-10b`),
+ * a slash- or dash-qualified second code (`A5b/TS2`, `S3-R0`), or a
+ * word suffix (`B4B-delete-fallback`).
  *
- * A section marker may carry a letter family (`§1C-4`) or a bracketed
- * index (`§6.4 (3)`), both of which are part of the marker.
+ * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and
+ * a few carry a letter separator (`AC-1`, `PR-A`).
  */
-const SECTION = String.raw`§\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?)(?:\s*\(\d+\))?`
-/**
- * A leading code, and the separator that ends it.
- *
- * The code families are the ones this repository actually uses: a short
- * uppercase family (`A5b`, `TS8`, `B4A`, `PR5`, `H3A`, `L6`, `F10` …),
- * optionally followed by a sub-number (`A5b-6`, `B4A-07`), and optionally
- * followed by a slash-qualified sub-code (`A5b/TS2`).
- *
- * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and a
- * few carry a letter separator (`AC-1`, `PR-A`). They are part of the same
- * family of local labels, so they are matched too.
- *
- * The separator is what tells a CODE from an ordinary word: a code is
- * followed by a colon, a dash, a slash-code or a space and then a
- * lowercase word. `L6` alone as a whole title is NOT a code-led title —
- * there is no sentence to keep.
- */
-const CODE = String.raw`(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:-[A-Z])?(?:-\d+[a-z]?)?(?:\/[A-Z]{1,4}\d+[a-z]?)*|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z](?:\d+)?|RFL-\d+)`
+const CODE_TOKEN = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
 
 /**
- * The word-suffix code form (`B4B-delete-fallback`, `B4B-07-height`).
+ * A SECTION marker: a pointer into the plan that wrote the test.
  *
- * These are rare — five titles in the whole tree — and they are handled
- * explicitly rather than by a loose pattern, so the pattern cannot start
- * eating ordinary hyphenated words.
+ * `§18.1`, `§1C-3`, `§D2`, `§6.4 (3)`. It is the same kind of local
+ * label as a code: the reader of a CI log does not have the plan either.
  */
-const WORD_SUFFIX_CODE = String.raw`[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback)`
-/**
- * ONE leading code label, with the separator that ends it.
- *
- * A label may be followed by a section marker (`§7.4-10/11`), by a
- * bracketed second code (`(F2)`), and by a lowercase qualifier word that
- * belongs to the label (`negative control`, `static`, `lock`).
- */
-const ONE_LABEL = String.raw`(?:${CODE}|${WORD_SUFFIX_CODE}|${SECTION})(?:\s*§\s*[\d.]+(?:-\d+)?(?:\/\d+)?)?(?:\s*\([A-Z]{1,4}\d+[a-z]?\))?(?:\s+\((?:review\s+round\s+\d+\s+)?(?:ruling|review|external)\))?(?:\s+(?:negative\s+control|positive\s+control|static|lock|child|final|retired|addendum)\b)*`
-
-/** Whether a title STARTS with a code (used to keep a bare code intact). */
-const CODE_AT_START = new RegExp(String.raw`^${CODE}\b`, 'u')
+const SECTION_TOKEN = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?)(?:\s*\(\d+\))?$/u
 
 /**
- * The leading-code pattern.
- *
- * It matches a RUN of leading code labels (`L6 PR5: …`), each with its
- * separator, and stops at the first thing that is not a label.
- *
- * The look-ahead is what keeps the transform safe: the text after the
- * labels must NOT itself start with a code, so a title that is only a code
- * (`B3`) is never stripped to nothing.
+ * A bracketed code: `(R6-1)`, `(F2)`, `(3)`.
  */
-const LEADING_CODE = new RegExp(
-  String.raw`^(?:${ONE_LABEL}(?:\s*[:—-]\s*|\s+))+`,
-  'u',
-)
+const BRACKET_CODE_TOKEN = /^\([A-Z]{1,4}\d+[a-z]?(?:\/[A-Z0-9]+)*\)$/u
 
 /**
- * Remove a leading code label run from one title.
+ * A bracketed REVIEW qualifier: `(review round 4)`, `(ruling)`.
+ *
+ * It names the review that produced the case, not the behaviour, so it
+ * goes with the label.
+ */
+const BRACKET_REVIEW_TOKEN = /^\((?:review\s+round\s+\d+\s+)?(?:ruling|review|external)\)$/u
+
+/**
+ * The word-suffix code form: `B4B-delete-fallback`, `B4B-07-height`.
+ *
+ * These are rare — five titles in the whole tree — and they are listed
+ * explicitly rather than matched by a loose rule, so the rule cannot
+ * start eating ordinary hyphenated words.
+ */
+const WORD_SUFFIX_CODE_TOKEN = /^[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback)$/u
+
+/**
+ * A compound-label QUALIFIER: `Direct`, `Focus`, `OWNER-RULED`.
+ *
+ * These name WHICH variant of the behaviour the case covers, so they are
+ * part of the label rather than the sentence.
+ */
+const QUALIFIER_TOKEN = /^(?:Direct|Focus|DEL|BEL|BS|OWNER-RULED)$/u
+
+/**
+ * A lowercase qualifier WORD that belongs to the label.
+ *
+ * `negative control`, `static`, `lock`, `headless` — they say how the
+ * case was proved, not what it proves.
+ */
+const LABEL_WORD = /^(?:negative\s+control|positive\s+control|static|lock|child|final|retired|addendum|absolute|headless)$/u
+
+/**
+ * A single-letter code with a slash-qualified qualifier: `B/Direct`.
+ *
+ * A lone capital letter on its own is a KEY name (`S on a clean draft`),
+ * so it may only lead a label when a qualified code follows it.
+ */
+const SINGLE_LETTER_SLASH_TOKEN = /^[A-Z]\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?|Direct(?:-L\d)?|Focus)$/u
+
+/**
+ * A `PR` code with a single-letter sub-label: `PR D`, `PR E`.
+ *
+ * The single letter is only a sub-label AFTER a `PR` code. On its own it
+ * is a key name — `S on a clean draft closes` is a keyboard key, not a
+ * code — so it may not start a label.
+ */
+const PR_SUB_LABEL = /^PR\d*\s+[A-Z]$/u
+
+/**
+ * Whether one token is part of a label.
+ *
+ * @param {string} token - the token.
+ * @param {boolean} first - whether this is the FIRST token of the title.
+ * @returns {boolean} true when the token belongs to the label.
+ */
+function isLabelToken(token, first) {
+  if (token === '') return false
+  if (PR_SUB_LABEL.test(token)) return true
+  if (first && /^[A-Z]$/u.test(token)) {
+    // A lone capital letter may only lead a label when a slash-qualified
+    // code follows it (`B/Direct`); on its own it is a key name.
+    return false
+  }
+  // A QUALIFIER (`Focus`, `Direct`) names the variant a case covers, so it
+  // is part of the label — but only when a CODE precedes it. On its own,
+  // `Focus Error sanitizes AUTH failure messages` is a sentence ABOUT the
+  // Focus mode, and the word is what the reader needs.
+  if (QUALIFIER_TOKEN.test(token)) {
+    return first ? false : true
+  }
+  return CODE_TOKEN.test(token)
+    || SINGLE_LETTER_SLASH_TOKEN.test(token)
+    || WORD_SUFFIX_CODE_TOKEN.test(token)
+    || SECTION_TOKEN.test(token)
+    || BRACKET_CODE_TOKEN.test(token)
+    || BRACKET_REVIEW_TOKEN.test(token)
+    || LABEL_WORD.test(token)
+}
+
+/**
+ * Split a title into its label HEAD and the rest.
+ *
+ * The head ends at the first separator that ends a label: a colon, a
+ * dash, or a space followed by a lowercase word. A title with no such
+ * separator has no label to remove.
+ *
+ * @param {string} title - the current title.
+ * @returns {{head: string, rest: string}|null} the split, or null.
+ */
+function splitLabel(title) {
+  const colon = title.indexOf(':')
+  if (colon !== -1) return { head: title.slice(0, colon), rest: title.slice(colon + 1) }
+  // A dash separator: `- ` (a dash followed by a space), so an ordinary
+  // hyphenated word is not a separator. The en-dash and em-dash forms are
+  // the same separator.
+  const dash = / [—–-] /u.exec(title)
+  if (dash !== null) return { head: title.slice(0, dash.index), rest: title.slice(dash.index + 3) }
+  // A space before a lowercase word.
+  const space = / (?=[a-z])/u.exec(title)
+  if (space !== null) return { head: title.slice(0, space.index), rest: title.slice(space.index + 1) }
+  return null
+}
+
+/**
+ * Remove a leading code label from one title.
  *
  * @param {string} title - the current title.
  * @returns {string} the title without its leading code.
  */
 export function stripCodePrefix(title) {
-  let rest = title
-  for (;;) {
-    const match = LEADING_CODE.exec(rest)
-    if (match === null) break
-    const candidate = rest.slice(match[0].length)
-    // The sentence must not be another code: `B3` alone stays `B3`.
-    if (candidate.trim() === '' || CODE_AT_START.test(candidate)) break
-    rest = candidate
+  const split = splitLabel(title)
+  if (split === null) return title
+  // The head is examined token by token. A `/`-joined token is one token
+  // (`A06/Focus`), and a `PR D` pair is one token.
+  const rawTokens = split.head.split(/\s+/u).filter(token => token !== '')
+  if (rawTokens.length === 0) return title
+  // A `PR D` pair is ONE label token: the pull-request code and its
+  // single-letter sub-label are one thing.
+  const tokens = []
+  for (const token of rawTokens) {
+    const previous = tokens[tokens.length - 1]
+    if (previous !== undefined && PR_SUB_LABEL.test(`${previous} ${token}`)) {
+      tokens[tokens.length - 1] = `${previous} ${token}`
+      continue
+    }
+    tokens.push(token)
   }
-  if (rest === title) return title
+  let consumed = 0
+  for (const [index, token] of tokens.entries()) {
+    if (!isLabelToken(token, index === 0)) break
+    consumed = index + 1
+  }
+  if (consumed === 0) return title
+  // A label that is only a BARE code is not a label: `B3` alone is the
+  // whole title, and there is no sentence to keep. But a code WITH a
+  // qualifier (`A06/Focus`, `A5b/TS2`) names a variant, and the sentence
+  // after it is the behaviour.
+  if (consumed === tokens.length && tokens.length === 1) {
+    // A label that is ONE token is only a label when there is a SENTENCE
+    // after it. A bare code with nothing after it (`B3`, `L6`) is the
+    // whole title, and there is nothing to keep.
+    if (split.rest.trim() === '') return title
+  }
+  // The label's own words are dropped; the sentence keeps the rest.
+  const rest = split.rest.trimStart()
+  if (rest === '') return title
   return rest
 }
 

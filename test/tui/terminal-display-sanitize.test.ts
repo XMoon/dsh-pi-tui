@@ -121,7 +121,7 @@ test('orphan and unknown ESC forms never emit their ESC', () => {
   assert.equal(sanitizeDisplayText('a\u001b\u00ffb'), 'a\u00ffb')
 })
 
-test('C0/DEL/BEL/BS are dropped except LF', () => {
+test('the NUL, BEL, BS, VT and DEL control characters are dropped, but LF survives', () => {
   assert.equal(sanitizeDisplayText('a\u0000\u0007\u0008\u000bb\u007fc'), 'abc')
   assert.equal(sanitizeDisplayText('a\u0003b'), 'ab')
 })
