@@ -2007,7 +2007,7 @@ test('switching away and BACK restores the continued entry from the official pro
   assert.deepEqual(plane.answers, [], 'the restore dispatches no answer either')
 })
 
-test('finding C/F6 (5): a real publication withdraws A\'s live APPROVAL prompt while its request is still in flight', async (t) => {
+test('a real publication withdraws A\'s live APPROVAL prompt while its request is still in flight', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-approval-')
   const sessionA = fakeSession({

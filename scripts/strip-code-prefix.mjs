@@ -153,7 +153,7 @@ const ASSERTION_LABEL_TOKEN = /^assertion\s+\d+$/u
  * It names the review that produced the case, not the behaviour, so it
  * goes with the label.
  */
-const FINDING_LABEL_TOKEN = /^finding\s+[A-Z]{1,4}\d*$/u
+const FINDING_LABEL_TOKEN = /^findings?\s+[A-Z]{1,4}\d*(?:\/[A-Z]{1,4}\d*)*$/u
 
 /**
  * A `step N` label: `step 8 / §5 Must 17:`, `step 10 + F7:`.
