@@ -140,33 +140,41 @@ function diffsOf(record: Record<string, unknown>): FileDiff[] | undefined {
 }
 
 /**
- * The create-time diff a WRITE-shaped metadata record implies, or undefined.
+ * The diff an EMPTY-diff write metadata record implies, or undefined.
  *
- * Unlike the other branches, this one does not REPORT what the metadata says —
- * it FABRICATES a `newText` from the call arguments. So it must demand the
- * tool's own write contract rather than a mere field collision: the projected
- * `operation` must be one of the two values `dsh-tool-fs` defines — NOT a
- * narrower `create`, because an empty list has TWO origins: a create (no
- * before-image) and an overwrite that wrote the identical content. Its `diffs`
- * must be the empty list, and the call must carry the string `content` the
- * diff is built from. A third-party tool that happens to send `operation` +
- * `path` + `content` matches none of that and gets no view.
+ * An empty `diffs` list has two legitimate origins in the write projection: a
+ * create (no before-image) and an overwrite that wrote the identical content
+ * (the patch has no hunks). Unlike the other branches, this one does not
+ * REPORT what the metadata says — it FABRICATES a `newText` from the call
+ * arguments — so it demands the tool's write contract rather than a mere field
+ * collision: `operation` must be one of the two values that projection
+ * defines, `diffs` must be the empty list, and the call must carry the string
+ * `content` the diff is built from. A third-party tool that happens to send
+ * `operation` + `path` + `content` matches none of that and gets no view.
+ *
+ * The path follows the Host presenter exactly: the metadata's own path when it
+ * has one, otherwise the call's `file_path`. That second arm is reachable only
+ * for OLD or malformed replay metadata — a current write always projects a
+ * canonical path — and the Host rebuilds a diff for it, so declining it here
+ * would make a replayed session diverge from Direct.
  */
-function writeCreateDiffs(
+function emptyWriteDiff(
   record: Record<string, unknown>,
   args: Record<string, unknown> | undefined,
 ): FileDiff[] | undefined {
-  // The write projection defines exactly these two values. An empty list can
-  // come from EITHER: a create has no before-image, and an overwrite that
-  // wrote the identical content produces no hunks. Anything else (another
-  // tool's marker, a `delete`) is refused here rather than interpreted.
   const operation = record['operation']
   if (operation !== 'create' && operation !== 'update') return undefined
   const diffs = record['diffs']
   if (!Array.isArray(diffs) || diffs.length !== 0) return undefined
   const content = args?.['content']
   if (typeof content !== 'string') return undefined
-  return [{ path: record['path'] as string, oldText: null, newText: content }]
+  const metaPath = record['path']
+  const argPath = args?.['file_path']
+  const path = typeof metaPath === 'string' && metaPath !== ''
+    ? metaPath
+    : typeof argPath === 'string' ? argPath : undefined
+  if (path === undefined || path === '') return undefined
+  return [{ path, oldText: null, newText: content }]
 }
 
 /**
@@ -176,11 +184,12 @@ function writeCreateDiffs(
  *
  * - the DIFF shape mirrors the mutation tools. `dsh-tool-fs` records
  *   `{ operation, path, diffs }` for a write and `{ path, diffs }` for an
- *   edit, and deliberately emits `diffs: []` when the write CREATED the file
- *   (`before === null`). Its write presenter then falls back to a diff built
- *   from the call arguments, while its edit presenter declines. The fallback
- *   is keyed on the tool-authored `operation` field — NOT on the tool name,
- *   which a plugin can shadow.
+ *   edit, and emits `diffs: []` in TWO cases: the write CREATED the file
+ *   (`before === null`), or it overwrote it with identical content (no hunks).
+ *   Its write presenter then falls back to a diff built from the call
+ *   arguments, while its edit presenter declines. The fallback is keyed on the
+ *   tool-authored `operation` field — NOT on the tool name, which a plugin can
+ *   shadow.
  * - the READ shape mirrors the read tool: the metadata must survive the same
  *   window validation, and the result content must be exactly one
  *   `<type>file</type>` envelope. The envelope body comes back as `content`,
@@ -200,8 +209,6 @@ function metaPathView(
   if (isError) return undefined
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return undefined
   const record = meta as Record<string, unknown>
-  const path = record['path']
-  if (typeof path !== 'string' || path === '') return undefined
 
   // The result content must be the ONE text block the view describes.
   const only = content.length === 1 ? content[0] : undefined
@@ -215,10 +222,10 @@ function metaPathView(
     if (text.trim() === '') return undefined
     return { card: 'diff', diffs }
   }
-  // A write that CREATED the file records `diffs: []`. The tool's own write
-  // presenter rebuilds the diff from its arguments.
-  const created = writeCreateDiffs(record, args)
-  if (created !== undefined) return { card: 'diff', diffs: created }
+  // An empty diff list (a create, or an overwrite that changed nothing). The
+  // tool's own write presenter rebuilds that diff from its arguments.
+  const rebuilt = emptyWriteDiff(record, args)
+  if (rebuilt !== undefined) return { card: 'diff', diffs: rebuilt }
 
   const readMeta = readMetaOf(record)
   if (readMeta === undefined) return undefined

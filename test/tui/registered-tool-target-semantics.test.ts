@@ -345,9 +345,11 @@ test('an edit whose result carries NO metadata is proven by Direct and refused b
   // is not proof. A plugin may register its own tool under a built-in name,
   // which is why that guess cannot be trusted.
   //
-  // It does NOT measure an edit whose result DOES carry metadata: no case in
-  // this file exercises that shape, here or below. The real-execution cases at
-  // the end of this file are READS, not edits.
+  // What is MISSING, stated exactly: there is no settled-edit Direct/Client
+  // METADATA-PARITY case and no real edit execution here. The earlier edit case
+  // at "the registered edit tool proves the path the head displays" checks
+  // Direct only, and the real executions at the end of this file cover reads
+  // and an unchanged write — not edits.
   const remote = createClientToolPresenter()
   const kindWith = (
     presenter: ToolPresenter,
@@ -541,4 +543,38 @@ test('a REAL overwrite that changes nothing still yields a diff on BOTH branches
   assert.ok(directView !== undefined && directView.card === 'diff', 'the Direct branch rebuilt a diff')
   assert.ok(clientView !== undefined && clientView.card === 'diff', 'the Client branch rebuilt a diff')
   assert.deepEqual(clientView.diffs, directView.diffs, 'both branches agree on the diff')
+
+  // And the rebuilt diff must actually carry the classification: an unchanged
+  // overwrite is still a proven file target on BOTH branches, which is exactly
+  // what the create-only predicate had silently dropped.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'c1', 'write', args),
+    ev('tool/result', {
+      turn: 1,
+      step: 0,
+      message: {
+        id: MessageId('result-c1'),
+        role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [...outcome.content],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+      ...outcome.meta === undefined ? {} : { meta: outcome.meta },
+    }, 2),
+  ])
+  const row = folder.messages().find((m): m is Extract<typeof m, { kind: 'tool' }> => m.kind === 'tool')
+  assert.ok(row !== undefined, 'the folded row exists')
+  const header = toolCardHeader('write', row.args, dir)
+  assert.equal(
+    toolTargetKind(header.summary, toolTargetFactsOf(toolPresenterFrom(registry), row), dir),
+    'path',
+    'Direct proves the path of the unchanged overwrite',
+  )
+  assert.equal(
+    toolTargetKind(header.summary, toolTargetFactsOf(createClientToolPresenter(), row), dir),
+    'path',
+    'the Client proves the same path, which the create-only predicate had dropped',
+  )
 })
