@@ -105,6 +105,21 @@ test('a passing case', () => {})
   assert.equal(byName.get('a passing case')?.result, 'pass')
 })
 
+test('a skipped case that carries a REASON is recorded as SKIPPED', () => {
+  // The repository's own skips carry a reason, not a boolean: the reason
+  // says WHY the case could not run, and that is the whole value of the
+  // marker.
+  const run = runReporter({
+    'a.test.mjs': `
+import { test } from 'node:test'
+test('a blocked case', { skip: 'BLOCKED: the optional bundle is not provisioned' }, () => {})
+`,
+  })
+  assert.equal(run.status, 0, run.stderr)
+  const record = run.records.find(entry => entry.name === 'a blocked case')
+  assert.equal(record?.result, 'skip')
+})
+
 test('a todo case is recorded as TODO', () => {
   const run = runReporter({
     'a.test.mjs': `

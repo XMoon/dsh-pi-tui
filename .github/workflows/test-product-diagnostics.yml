@@ -14,7 +14,7 @@ name: Test product diagnostics
 # It changes NOTHING about the qualification contract: the packaging
 # lifecycle (`prepack` / `postpack`), the lane definitions, the test
 # assertions and the published artifact are all untouched. It runs the SAME
-# `pnpm test:product` lane and adds measurement on top.
+# product lane and adds measurement on top.
 #
 # Every comparison must use the SAME SHA, the same DSH mode, the same
 # lockfile and the same runner image — otherwise the numbers are not
@@ -28,7 +28,7 @@ on:
         required: false
         type: string
       shard_total:
-        description: 'Number of product shards to split the measurement into'
+        description: 'How many shards to split the product lane into'
         required: false
         default: '1'
         type: choice
@@ -42,10 +42,22 @@ permissions:
   contents: read
 
 jobs:
-  product-diagnostics:
-    name: Product lane diagnostics
+  # ---------------------------------------------------------------------------
+  # The MEASUREMENT itself: one job per shard, each on its own runner.
+  #
+  # The shards are Node's own `--test-shard`, so they partition the lane's
+  # file set by construction: the shards are disjoint and their union is
+  # the whole lane. The aggregate job below PROVES that from the recorded
+  # file lists — it does not assume it.
+  # ---------------------------------------------------------------------------
+  product-shard:
+    name: Product shard ${{ matrix.shard }}/${{ inputs.shard_total }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(format('[{0}]', join('', range(1, inputs.shard_total)))) }}
     env:
       DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
 
@@ -96,14 +108,14 @@ jobs:
       # The measurement itself: the ordinary product lane, with the
       # machine-readable case report added on top. The lane's file set, its
       # temp root, its exit code and its signal contract are unchanged.
-      - name: Measure the product lane
+      - name: Measure the product lane shard
         run: |
           set -euo pipefail
           mkdir -p diagnostics
           start=$(date +%s)
-          node scripts/run-test-lane.mjs product --shard=1/${{ inputs.shard_total }}
+          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total }}
           end=$(date +%s)
-          echo "wall_clock_seconds=$((end - start))" | tee -a diagnostics/runner-spec.json
+          echo "wall_clock_seconds=$((end - start))" >> diagnostics/runner-spec.json
 
       - name: Summarize the case distribution
         run: |
@@ -112,11 +124,65 @@ jobs:
             --jsonl diagnostics/cases.jsonl \
             --out diagnostics/case-distribution.json
 
-      - name: Upload the diagnostics
+      - name: Upload the shard diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: product-diagnostics
+          name: product-diagnostics-shard-${{ matrix.shard }}
           path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # The AGGREGATE: the proof that the shards together are the whole lane.
+  #
+  # It fails closed. A missing shard, a failed shard, a skipped shard, an
+  # overlapping file, a lost file or an unexpected skip must NOT be hidden
+  # behind a green summary.
+  # ---------------------------------------------------------------------------
+  aggregate:
+    name: Aggregate the product shards
+    needs:
+      - product-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout the measured commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Download every shard's diagnostics
+        uses: actions/download-artifact@v8
+        with:
+          pattern: product-diagnostics-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Prove the shards are the whole lane
+        env:
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-shards.mjs \
+            --shards shards \
+            --total "$DSH_SHARD_TOTAL" \
+            --out shards/aggregate.json
+
+      - name: Upload the aggregate
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-diagnostics-aggregate
+          path: shards/aggregate.json
           if-no-files-found: warn
           retention-days: 7

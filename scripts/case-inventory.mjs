@@ -56,8 +56,16 @@ async function collect(laneName) {
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
   const relativeFiles = files.map(rel => join('test', rel))
 
+  // The run's disposable temp root, and SEPARATELY the file the reporter
+  // writes its records to.
+  //
+  // They must not be the same directory: the temp root is handed to the
+  // tests as their TMPDIR, and some of them run a NESTED test lane inside
+  // it. A nested run inherits the reporter's destination variable and would
+  // write its own records into this run's file.
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-inventory-'))
-  const jsonl = join(root, 'cases.jsonl')
+  const recordRoot = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-inventory-records-'))
+  const jsonl = join(recordRoot, 'cases.jsonl')
   const child = spawn(
     process.execPath,
     ['--test', `--test-reporter=${REPORTER}`, ...relativeFiles],
@@ -76,6 +84,7 @@ async function collect(laneName) {
     .filter(Boolean)
     .map(line => JSON.parse(line))
   rmSync(root, { recursive: true, force: true })
+  rmSync(recordRoot, { recursive: true, force: true })
   if (code !== 0) {
     throw new Error(`the ${laneName} lane exited ${code}; the inventory is not a measurement`)
   }
