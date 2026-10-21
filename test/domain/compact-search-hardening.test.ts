@@ -59,7 +59,7 @@ function targetFor(message: TranscriptMessage, query: string): {
 
 // --- 7.3 surface transition while search is open ---------------------------
 
-test('7.3 fullscreen cluster reveal -> regular -> dismiss promotes the operable regular owner', async () => {
+test('fullscreen cluster reveal -> regular -> dismiss promotes the operable regular owner', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
   const first = ambient('AGENTS.md', 'instructions', 'instructions body')
@@ -92,7 +92,7 @@ test('7.3 fullscreen cluster reveal -> regular -> dismiss promotes the operable 
   assert.ok(view.includes('CLUSTER_MEMBER_MARKER'), `the member stays visible:\n${view}`)
 })
 
-test('7.3 regular search -> fullscreen -> dismiss keeps a reachable, operable owner', async () => {
+test('regular search -> fullscreen -> dismiss keeps a reachable, operable owner', async () => {
   const { vt, app } = startApp()
   const first = ambient('AGENTS.md', 'instructions', 'instructions body')
   const second = ambient('skill-catalog', 'catalog', 'CLUSTER_MEMBER_MARKER')
@@ -120,7 +120,7 @@ test('7.3 regular search -> fullscreen -> dismiss keeps a reachable, operable ow
 
 // --- 7.1 regular cluster repeat search/dismiss ------------------------------
 
-test('7.1 a regular cluster keeps exactly one stable owner across repeated search cycles', async () => {
+test('a regular cluster keeps exactly one stable owner across repeated search cycles', async () => {
   const { vt, app } = startApp()
   const first = ambient('AGENTS.md', 'instructions', 'instructions body')
   const second = ambient('skill-catalog', 'catalog', 'CLUSTER_MEMBER_MARKER')
@@ -150,7 +150,7 @@ test('7.1 a regular cluster keeps exactly one stable owner across repeated searc
 
 // --- 7.2 fullscreen collapsed cluster vs manual ownership -------------------
 
-test('7.2 a manually opened cluster stays open through search reveal and dismiss', async () => {
+test('a manually opened cluster stays open through search reveal and dismiss', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
   const first = ambient('AGENTS.md', 'instructions', 'instructions body')
@@ -172,7 +172,7 @@ test('7.2 a manually opened cluster stays open through search reveal and dismiss
 })
 
 // --- 7.4 Work search restoration -------------------------------------------
-test('7.4 an already-open Work span stays open through search reveal and dismiss', async () => {
+test('an already-open Work span stays open through search reveal and dismiss', async () => {
   const { vt, app } = startApp()
   const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'open reasoning' }
   const child: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'CHILD_MARKER', status: 'ok' }
@@ -192,7 +192,7 @@ test('7.4 an already-open Work span stays open through search reveal and dismiss
   assert.ok(vt.getViewport().join('\n').includes('Read {}'))
 })
 
-test('7.4 a closed Work span re-collapses after a search reveal is dismissed', async () => {
+test('a closed Work span re-collapses after a search reveal is dismissed', async () => {
   const { vt, app } = startApp()
   const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'closed reasoning' }
   const child: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'CHILD_MARKER', status: 'ok' }
@@ -212,7 +212,7 @@ test('7.4 a closed Work span re-collapses after a search reveal is dismissed', a
 
 // --- 7.5 search during topology mutation ------------------------------------
 
-test('7.5 an Assistant boundary during a Work search re-resolves the owning container', async () => {
+test('an Assistant boundary during a Work search re-resolves the owning container', async () => {
   const { vt, app } = startApp()
   const firstOwner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'first run reasoning' }
   const target: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'TARGET_MARKER', status: 'ok' }
@@ -248,7 +248,7 @@ test('7.5 an Assistant boundary during a Work search re-resolves the owning cont
   assert.ok(view.includes('Read {}'))
 })
 
-test('7.5 a Preparing-to-pending transition during search leaves no stale owner target', async () => {
+test('a Preparing-to-pending transition during search leaves no stale owner target', async () => {
   const { vt, app } = startApp()
   const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'run reasoning' }
   app.setTranscript([owner], new Map(), undefined, [

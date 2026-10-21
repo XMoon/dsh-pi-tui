@@ -281,7 +281,7 @@ test('no tasks: the accessory paints nothing (0 rows, 0 header)', async () => {
 })
 
 /** S2/S3 — the editor boundary drives the entry; the draft survives. */
-test('02/03 effective ↓ enters from the middle of the last visual line and preserves the draft', async () => {
+test('effective ↓ enters from the middle of the last visual line and preserves the draft', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
   })
@@ -403,7 +403,7 @@ test('Quick returns the scrolled editor viewport, cursor and mode unchanged', as
 })
 
 /** S4 — ↑↓/Pg navigation; Up at the global first row exits. */
-test('04/05 Up/Down and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
+test('and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
   const h = await startQuick({
     roster: [
       job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running'),

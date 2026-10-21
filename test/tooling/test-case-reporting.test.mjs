@@ -208,6 +208,19 @@ test('the title transform does not strip a title that IS only a code', () => {
   assert.equal(stripCodePrefix('B3'), 'B3')
 })
 
+test('the title transform does not rewrite a fixture that CONTAINS a case title', () => {
+  // A test that builds a source fixture as an array of strings holds a
+  // sample case title. That fixture is the SUBJECT of the case, so
+  // rewriting it would change what the case proves.
+  const source = [
+    "import { test } from 'node:test'",
+    "const fixture = [",
+    "  \"test('A5b: the composition zone is one facade', () => {})\",",
+    "]",
+  ].join('\n')
+  assert.equal(rewriteSource(source), source, 'a fixture inside a string must not be rewritten')
+})
+
 test('the title transform rewrites only the title literal of a case', () => {
   const source = [
     "import { test } from 'node:test'",

@@ -106,7 +106,7 @@ function collapsedBlockOrder(
 
 // --- F1: busy tool-jobs Notice renders AFTER the Thought ---------------------
 
-test('F1. an UNQUALIFIED busy-turn tool-jobs notice stays visible after the Thought and is never a hidden Action candidate', () => {
+test('an UNQUALIFIED busy-turn tool-jobs notice stays visible after the Thought and is never a hidden Action candidate', () => {
   const noticeRow = notice('Background job', 'job finished', 'tool-jobs')
   const messages = [user('go'), thinking('first'), tool(), noticeRow, thinking('second'), tool(), assistant('final')]
   const collapsedRows = collapsed(messages)
@@ -137,7 +137,7 @@ test('F1. an UNQUALIFIED busy-turn tool-jobs notice stays visible after the Thou
 
 // --- F2: by form + raw position, never hardcoded source kinds ----------------
 
-test('F2. unqualified busy-turn notices render by form, not source kind', () => {
+test('unqualified busy-turn notices render by form, not source kind', () => {
   for (const sourceKind of ['tool-jobs', 'subagent-settled', 'future-producer']) {
     const noticeRow = notice('Agent notice', 'child settled', sourceKind)
     const messages = [user('go'), thinking('first'), tool(), noticeRow, assistant('final')]
@@ -148,7 +148,7 @@ test('F2. unqualified busy-turn notices render by form, not source kind', () => 
 
 // --- F3: opening Notice stays BEFORE the Thought -----------------------------
 
-test('F3. a leading wakeup notice stays visible BEFORE the Thought', () => {
+test('a leading wakeup notice stays visible BEFORE the Thought', () => {
   const noticeRow = notice('Background job', 'woke the agent', 'tool-jobs')
   const messages = [noticeRow, thinking('why I resumed'), tool(), assistant('final')]
   const rows = collapsed(messages)
@@ -161,7 +161,7 @@ test('F3. a leading wakeup notice stays visible BEFORE the Thought', () => {
   )
 })
 
-test('F3b. a notice inside the opening foundation burst stays visible before the Thought', () => {
+test('a notice inside the opening foundation burst stays visible before the Thought', () => {
   const ambientRow = ambient('AGENTS.md')
   const noticeRow = notice('Background job', 'woke the agent', 'tool-jobs')
   const thinkingRow = thinking('process')
@@ -177,7 +177,7 @@ test('F3b. a notice inside the opening foundation burst stays visible before the
 
 // --- F4: mid-turn relay stays visible (unchanged) ----------------------------
 
-test('F4. a mid-turn relay remains visible while collapsed', () => {
+test('a mid-turn relay remains visible while collapsed', () => {
   const relayRow = relay('child-2')
   const messages = [user('go'), thinking('first'), relayRow, thinking('second'), assistant('final')]
   const rows = collapsed(messages)
@@ -186,7 +186,7 @@ test('F4. a mid-turn relay remains visible while collapsed', () => {
 
 // --- F5: notice between two Process regions ----------------------------------
 
-test('F5. an unqualified notice between Process regions renders after the Thought; expanded restores in place', () => {
+test('an unqualified notice between Process regions renders after the Thought; expanded restores in place', () => {
   const noticeRow = notice('Background job', 'between', 'subagent-settled')
   const firstProcess = thinking('before')
   const secondProcess = thinking('after')
@@ -211,7 +211,7 @@ test('F5. an unqualified notice between Process regions renders after the Though
 
 // --- F7: user/steer rows are never moved or swallowed ------------------------
 
-test('F7. the notice disposition never moves or swallows a user/steer row', () => {
+test('the notice disposition never moves or swallows a user/steer row', () => {
   const steerRow = steer('steered mid-turn')
   const noticeRow = notice('Background job', 'mid', 'tool-jobs')
   const messages = [user('opening'), thinking('process'), noticeRow, steerRow, tool()]
@@ -223,7 +223,7 @@ test('F7. the notice disposition never moves or swallows a user/steer row', () =
 
 // --- F7c: mid-turn Notice across the committed-answer fence -------------------
 
-test('F7c. an UNQUALIFIED mid-turn notice before a committed answer keeps Thought -> Notice -> Answer -> Steer (fence preserved)', () => {
+test('an UNQUALIFIED mid-turn notice before a committed answer keeps Thought -> Notice -> Answer -> Steer (fence preserved)', () => {
   // The exact high-risk combination this PR touched: User -> Process ->
   // mid-turn Notice -> Assistant A committed-before-steer -> Steer. The
   // collapsed emit must keep the committed-answer fence: the answer and the
@@ -283,7 +283,7 @@ test('F7c. an UNQUALIFIED mid-turn notice before a committed answer keeps Though
 })
 
 // --- F8: turn-less split keeps the consecutive-run grouping ------------------
-test('F8. a turn split by a turn-less row keeps the consecutive-run grouping (a notice starting its own run is opening foundation)', () => {
+test('a turn split by a turn-less row keeps the consecutive-run grouping (a notice starting its own run is opening foundation)', () => {
   // A turn-less entry SPLITS turn 1 into two runs. The notice starts the second
   // run, so its own lead boundary is the run start and the projection renders
   // it as that run's opening foundation — BEFORE that run's Thought.
@@ -330,7 +330,7 @@ function busyTurnWithNoticeFixture(): { folder: TranscriptFolder; noticeRow: Tra
   return { folder, noticeRow }
 }
 
-test('F6. searching an UNQUALIFIED durable mid-turn notice needs no Focus root reveal and dismiss keeps it visible', async () => {
+test('searching an UNQUALIFIED durable mid-turn notice needs no Focus root reveal and dismiss keeps it visible', async () => {
   const { vt, app } = startApp('focus')
   const { folder, noticeRow } = busyTurnWithNoticeFixture()
   app.setTranscript(folder.messages(), folder.turnActivities())
@@ -355,7 +355,7 @@ test('F6. searching an UNQUALIFIED durable mid-turn notice needs no Focus root r
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no manual disclosure state is created')
 })
 
-test('F9. an UNQUALIFIED Compact notice stays a standalone row (this disposition is Focus-only)', async () => {
+test('an UNQUALIFIED Compact notice stays a standalone row (this disposition is Focus-only)', async () => {
   const { vt, app } = startApp('compact')
   const { folder } = busyTurnWithNoticeFixture()
   app.setTranscript(folder.messages(), folder.turnActivities())
@@ -364,7 +364,7 @@ test('F9. an UNQUALIFIED Compact notice stays a standalone row (this disposition
   assert.ok(view.includes('NOTICE_SUMMARY'), `Compact keeps the notice standalone:\n${view}`)
 })
 
-test('F10. a Full notice keeps the raw chronology (no disposition applies)', async () => {
+test('a Full notice keeps the raw chronology (no disposition applies)', async () => {
   const { vt, app } = startApp('full')
   const { folder, noticeRow } = busyTurnWithNoticeFixture()
   app.setTranscript(folder.messages(), folder.turnActivities())
