@@ -13,7 +13,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { ALLOWED_DIRECT_USAGE, collectTestFiles, scanSource, scanTree } from '../../scripts/temp-hygiene-gate.mjs'
+import { ALLOWED_DIRECT_USAGE, ambiguousAllowlistEntries, collectTestFiles, scanSource, scanTree } from '../../scripts/temp-hygiene-gate.mjs'
 
 /**
  * The WHOLE test tree, not this file's own directory.
@@ -100,6 +100,28 @@ test('collectTestFiles only picks up source files', async (t) => {
   writeFileSync(join(root, 'nested', 'c.test.js'), '')
   const files = collectTestFiles(root).map((file) => file.slice(root.length + 1)).sort()
   assert.deepEqual(files, ['a.test.ts', 'b.test.mjs', join('nested', 'c.test.js')])
+})
+
+test('an allowlisted basename that is NOT unique is reported', async (t) => {
+  // The allowlist names files by their basename, so a file that moves
+  // between ownership directories keeps its verdict. That is only safe
+  // while the basename is UNIQUE: a second file with the same name would
+  // inherit the exemption, and the gate would silently stop policing it.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-gate-ambiguous-')
+  mkdirSync(join(root, 'support'), { recursive: true })
+  mkdirSync(join(root, 'domain'), { recursive: true })
+  writeFileSync(join(root, 'support', 'temp-lifecycle.ts'), 'export const x = 1\n')
+  writeFileSync(join(root, 'domain', 'temp-lifecycle.ts'), 'export const x = 1\n')
+  assert.deepEqual(ambiguousAllowlistEntries(root), ['temp-lifecycle.ts'])
+})
+
+test('the real tree has no ambiguous allowlist entry', () => {
+  assert.deepEqual(
+    ambiguousAllowlistEntries(TEST_ROOT),
+    [],
+    'every allowlisted basename must be unique, or the exemption is a hole',
+  )
 })
 
 test('repository test tree satisfies temp hygiene', () => {

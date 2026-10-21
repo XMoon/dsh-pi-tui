@@ -61,7 +61,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and
  * a few carry a letter separator (`AC-1`, `PR-A`).
  */
-const CODE_TOKEN = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
+const CODE_TOKEN = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
 
 /**
  * A SECTION marker: a pointer into the plan that wrote the test.
@@ -69,7 +69,7 @@ const CODE_TOKEN = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[
  * `§18.1`, `§1C-3`, `§D2`, `§6.4 (3)`. It is the same kind of local
  * label as a code: the reader of a CI log does not have the plan either.
  */
-const SECTION_TOKEN = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?)(?:\s*\(\d+\))?$/u
+const SECTION_TOKEN = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?)(?:\/§?\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?))*?(?:\s*\(\d+\))?$/u
 
 /**
  * A bracketed code: `(R6-1)`, `(F2)`, `(3)`.
@@ -175,6 +175,10 @@ function splitLabel(title) {
   // the same separator.
   const dash = / [—–-] /u.exec(title)
   if (dash !== null) return { head: title.slice(0, dash.index), rest: title.slice(dash.index + 3) }
+  // A DOT separator: `F1. a synchronous mount throw`. The dot follows a
+  // code, so it is the code's own separator and not part of it.
+  const dot = /\. /u.exec(title)
+  if (dot !== null) return { head: title.slice(0, dot.index), rest: title.slice(dot.index + 2) }
   // A space before a lowercase word.
   const space = / (?=[a-z])/u.exec(title)
   if (space !== null) return { head: title.slice(0, space.index), rest: title.slice(space.index + 1) }

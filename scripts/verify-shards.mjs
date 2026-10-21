@@ -72,61 +72,67 @@ function toTestRootPath(path) {
   return normalized.startsWith('test/') ? normalized.slice('test/'.length) : normalized
 }
 
+/**
+ * The identity and the baseline the shards must agree on.
+ *
+ * They come from the environment of the aggregate job, which is the run
+ * that is doing the aggregating. Every value is OPTIONAL at the level of
+ * this reader and REQUIRED at the level of the qualification it serves:
+ * a check that is not given an expectation does not run, and a workflow
+ * that wants the check must therefore pass the expectation.
+ *
+ * @returns {object} the expectations.
+ */
+function readExpectations() {
+  const number = (name) => {
+    const raw = process.env[name]
+    if (raw === undefined || raw === '') return null
+    const value = Number(raw)
+    // A malformed number is a FAILURE, not a missing expectation: a
+    // baseline that cannot be read must not silently disable the check.
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${name} must be a non-negative integer, got: ${raw}`)
+    }
+    return value
+  }
+  return {
+    expectedSha: process.env.DSH_EXPECTED_SHA ?? null,
+    expectedRunId: process.env.DSH_EXPECTED_RUN_ID ?? null,
+    expectedRunAttempt: process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null,
+    expectedCases: number('DSH_EXPECTED_CASES'),
+    expectedSkipped: number('DSH_EXPECTED_SKIPPED'),
+  }
+}
+
 function main() {
   const args = process.argv.slice(2)
   const shardsIndex = args.indexOf('--shards')
   const totalIndex = args.indexOf('--total')
   const outIndex = args.indexOf('--out')
+  // The expected file list. It defaults to the lane's own file list, and
+  // may be overridden with a file that lists them — one per line — so the
+  // CLI can be exercised against a synthetic lane.
+  const filesIndex = args.indexOf('--expected-files')
   if (shardsIndex === -1 || totalIndex === -1) {
-    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>]')
+    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>] [--expected-files <file>]')
+    console.error('the expectations are read from the environment:')
+    console.error('  DSH_EXPECTED_SHA, DSH_EXPECTED_RUN_ID, DSH_EXPECTED_RUN_ATTEMPT,')
+    console.error('  DSH_EXPECTED_CASES, DSH_EXPECTED_SKIPPED')
     process.exit(2)
   }
-  const shardsRoot = resolve(args[shardsIndex + 1])
-  const total = Number(args[totalIndex + 1])
-  // The identity the shards must agree on. It comes from the environment
-  // of the aggregate job, which is the run that is doing the aggregating.
-  const expectedSha = process.env.DSH_EXPECTED_SHA ?? null
-  const expectedRunId = process.env.DSH_EXPECTED_RUN_ID ?? null
-  const expectedRunAttempt = process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null
-  // The baseline the shards' case counts are compared against. Without it
-  // the aggregate only proves that every FILE was covered — not that every
-  // CASE in those files was recorded.
-  const expectedCases = process.env.DSH_EXPECTED_CASES === undefined
-    ? null
-    : Number(process.env.DSH_EXPECTED_CASES)
-  const expectedSkipped = process.env.DSH_EXPECTED_SKIPPED === undefined
-    ? null
-    : Number(process.env.DSH_EXPECTED_SKIPPED)
-
-  const aggregate = verifyShards({
-    shardsRoot,
-    total,
-    expectedSha,
-    expectedRunId,
-    expectedRunAttempt,
-    expectedCases,
-    expectedSkipped,
-  })
-
-  if (outIndex !== -1) {
-    writeFileSync(args[outIndex + 1], `${JSON.stringify(aggregate, null, 2)}\n`)
-  }
-
-  console.log(`lane              ${aggregate.lane}`)
-  console.log(`shards            ${aggregate.shards.length}/${aggregate.shardTotal}`)
-  console.log(`files             ${aggregate.observedFileCount}/${aggregate.expectedFileCount}`)
-  console.log(`cases             ${aggregate.totalCases}`)
-  console.log(`skipped           ${aggregate.totalSkipped}`)
-  for (const shard of aggregate.shards) {
-    console.log(`  ${shard.shard}: files=${shard.fileCount} cases=${shard.caseCount} skipped=${shard.skipped} failed=${shard.failed} wall=${shard.wallClockSeconds}s`)
-  }
-
-  if (aggregate.failures.length > 0) {
-    console.error(`\nthe shard aggregate FAILED (${aggregate.failures.length}):`)
-    for (const failure of aggregate.failures) console.error(`  - ${failure}`)
-    process.exit(1)
-  }
-  console.log('\nthe shard aggregate is the whole lane')
+  const expectedFiles = filesIndex === -1
+    ? undefined
+    : new Set(readFileSync(args[filesIndex + 1], 'utf8').split('\n').filter(Boolean))
+  report(
+    verifyShards({
+      shardsRoot: resolve(args[shardsIndex + 1]),
+      total: Number(args[totalIndex + 1]),
+      expectedFiles,
+      ...readExpectations(),
+    }),
+    outIndex,
+    outIndex === -1 ? '' : args[outIndex + 1],
+  )
 }
 
 /**
@@ -337,22 +343,5 @@ function report(aggregate, outIndex, outPath) {
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2)
-  const shardsIndex = args.indexOf('--shards')
-  const totalIndex = args.indexOf('--total')
-  const outIndex = args.indexOf('--out')
-  if (shardsIndex === -1 || totalIndex === -1) {
-    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>]')
-    process.exit(2)
-  }
-  report(
-    verifyShards({
-      shardsRoot: resolve(args[shardsIndex + 1]),
-      total: Number(args[totalIndex + 1]),
-      expectedSha: process.env.DSH_EXPECTED_SHA ?? null,
-      expectedRunId: process.env.DSH_EXPECTED_RUN_ID ?? null,
-    }),
-    outIndex,
-    outIndex === -1 ? '' : args[outIndex + 1],
-  )
+  main()
 }
