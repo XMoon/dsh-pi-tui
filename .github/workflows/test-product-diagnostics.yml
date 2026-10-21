@@ -38,12 +38,16 @@ on:
           - '3'
           - '4'
       expected_cases:
-        description: 'The case count the unsharded lane reports (the baseline the shards must match)'
-        required: false
+        description: 'The case count the UNSHARDED lane reports at the same SHA, DSH mode and runner (the baseline the shards must match)'
+        required: true
         type: string
       expected_skipped:
-        description: 'The skipped-case count the unsharded lane reports'
-        required: false
+        description: 'The skipped-case count the UNSHARDED lane reports at the same SHA, DSH mode and runner'
+        required: true
+        type: string
+      baseline_source:
+        description: 'Where the baseline came from: the SHA, the DSH mode and the run it was taken from'
+        required: true
         type: string
 
 permissions:
@@ -230,6 +234,7 @@ jobs:
           # a case or reported an extra skip cannot pass.
           DSH_EXPECTED_CASES: ${{ inputs.expected_cases }}
           DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped }}
+          DSH_BASELINE_SOURCE: ${{ inputs.baseline_source }}
         run: |
           set -euo pipefail
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
@@ -238,6 +243,20 @@ jobs:
             --shards shards \
             --total "$DSH_SHARD_TOTAL" \
             --out shards/aggregate.json
+          # The baseline's PROVENANCE is part of the evidence: a count on
+          # its own says nothing about which run produced it.
+          node -e "
+            const fs = require('node:fs')
+            const aggregate = JSON.parse(fs.readFileSync('shards/aggregate.json', 'utf8'))
+            aggregate.baseline = {
+              source: process.env.DSH_BASELINE_SOURCE,
+              sha: process.env.DSH_EXPECTED_SHA,
+              runId: process.env.DSH_EXPECTED_RUN_ID,
+              expectedCases: aggregate.expectedCases,
+              expectedSkipped: aggregate.expectedSkipped,
+            }
+            fs.writeFileSync('shards/aggregate.json', JSON.stringify(aggregate, null, 2) + '\n')
+          "
 
       - name: Upload the aggregate
         if: always()
