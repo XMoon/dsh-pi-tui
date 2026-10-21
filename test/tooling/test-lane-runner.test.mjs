@@ -38,15 +38,15 @@ const WINDOWS_COMMAND_LINE_LIMIT = 32_767
 
 /**
  * The command line the runner builds for a lane, in the WINDOWS spelling:
- * a checkout under `C:\Users\<name>\projects\<repo>\`.
+ * a checkout under `\Users\<name>\projects\<repo>\`.
  */
 function windowsCommandLineLength(lane) {
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
+  const checkout = '\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
   const commandArguments = files.map(rel => `${checkout}test\\\\${rel.replaceAll('/', '\\\\')}`)
   return {
     // The executable and the fixed flags take a little room too.
-    length: 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
+    length: '\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
       + commandArguments.join(' ').length,
     fileCount: files.length,
   }
@@ -55,10 +55,10 @@ function windowsCommandLineLength(lane) {
 test('the product lane command line fits the Windows limit in the RELATIVE form', () => {
   const lane = LANES.product
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
+  const checkout = '\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
   // The RELATIVE form the runner uses: the path under the repository root.
   const relativeArguments = files.map(rel => `test\\\\${rel.replaceAll('/', '\\\\')}`)
-  const length = 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
+  const length = '\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
     + relativeArguments.join(' ').length
   assert.ok(
     length < WINDOWS_COMMAND_LINE_LIMIT,

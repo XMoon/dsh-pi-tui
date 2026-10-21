@@ -171,7 +171,7 @@ async function settle(rounds = 40): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve()
 }
 
-test('Direct: a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /status reaches its handler under running+steer', async (t) => {
+test('a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /status reaches its handler under running+steer', async (t) => {
   const home = testLifecycle(t).tempDir('pr5-direct-origin-')
   const harness = makeHarness(home)
   const ctx = new Context()

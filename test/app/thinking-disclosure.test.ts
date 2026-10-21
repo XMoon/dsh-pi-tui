@@ -123,7 +123,7 @@ function twoThinkingTurn(seqBase: number): SessionEvent[] {
       turn: 1, step: 2,
       message: {
         id: MessageId('a1'), role: 'assistant',
-        content: [{ type: 'text', text: 'final answer' }],
+        content: [{ type: 'text', text: 'answer' }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
     }, T0 + 4, seqBase + 4),

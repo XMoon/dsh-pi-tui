@@ -728,7 +728,7 @@ test('a Question FIFO Q1→Q2 keeps the file-backed History seat parked and rest
   const first = app.askQuestions([{ id: 'q1', question: 'first park?', options: [{ label: 'Yes' }] }])
   const second = app.askQuestions([{ id: 'q2', question: 'second park?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
-  assert.ok(strip(vt.getViewport()).includes('first park?'), 'Q1 owns the seat')
+  assert.ok(strip(vt.getViewport()).includes('first park?'), 'owns the seat')
   assert.ok(!panelVisible(vt.getViewport()), 'the parked History is not painted')
   assert.notEqual(app.focusSeatForTest(), 'editor-panel')
 
@@ -736,7 +736,7 @@ test('a Question FIFO Q1→Q2 keeps the file-backed History seat parked and rest
   vt.sendInput('\r')
   assert.deepEqual(await first, [{ id: 'q1', selected: ['Yes'] }])
   await vt.waitForRender()
-  assert.ok(strip(vt.getViewport()).includes('second park?'), 'Q2 takes the seat directly')
+  assert.ok(strip(vt.getViewport()).includes('second park?'), 'takes the seat directly')
   assert.ok(!panelVisible(vt.getViewport()), 'no History projection between the two flows')
   assert.notEqual(app.focusSeatForTest(), 'editor-panel')
 

@@ -36,7 +36,7 @@ import type { PluginBundleFact, PluginManagerSnapshot, PluginRowFact } from '../
 
 function observation(overrides: Partial<TuiExtensionObservation> = {}): TuiExtensionObservation {
   return {
-    owner: '1:mine',
+    owner: 'mine',
     contributionKinds: ['chrome.footer.item'],
     contributionCount: 1,
     health: 'active',
@@ -114,7 +114,7 @@ test('SELF_BUNDLE always classifies as current-tui and stays the first TUI card'
 test('a proven Loader entryId association classifies a TUI extension in the TUI section', () => {
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'], availability: 'profile', installed: true, source: 'file:/ext' }]),
-    [observation({ owner: '9:my-ext', entryId: 'e-ext' })],
+    [observation({ owner: 'my-ext', entryId: 'e-ext' })],
   )
   const claim = claims.get(bundleValue('my-ext'))!
   assert.equal(claim.role, 'tui-extension')
@@ -126,7 +126,7 @@ test('a proven Loader entryId association classifies a TUI extension in the TUI 
 test('an observation WITHOUT a proven entryId never classifies, even when its owner name equals the package', () => {
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'], availability: 'profile', installed: true, source: 'file:/ext' }]),
-    [observation({ owner: '9:my-ext' })],
+    [observation({ owner: 'my-ext' })],
   )
   const claim = claims.get(bundleValue('my-ext'))!
   assert.equal(claim.role, 'dsh-plugin')
@@ -137,7 +137,7 @@ test('an observation WITHOUT a proven entryId never classifies, even when its ow
 test('a module-name collision is not Loader-entry proof', () => {
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue('collide'), bundleName: 'collide', entryIds: [], availability: 'profile', installed: true, source: 'file:/c' }]),
-    [observation({ owner: '1:collide', entryId: 'e-collide' })],
+    [observation({ owner: 'collide', entryId: 'e-collide' })],
   )
   assert.equal(claims.get(bundleValue('collide'))?.role, 'dsh-plugin')
 })
@@ -146,8 +146,8 @@ test('two proven entryIds of ONE bundle aggregate into one TUI extension card', 
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue('foo'), bundleName: 'foo', entryIds: ['e-a', 'e-b'], availability: 'profile', installed: true, source: 'file:/foo' }]),
     [
-      observation({ owner: '1:foo-a', entryId: 'e-a', contributionKinds: ['chrome.footer.item'], contributionCount: 1 }),
-      observation({ owner: '1:foo-b', entryId: 'e-b', contributionKinds: ['command'], contributionCount: 2, usesAdvancedCapability: true }),
+      observation({ owner: 'foo-a', entryId: 'e-a', contributionKinds: ['chrome.footer.item'], contributionCount: 1 }),
+      observation({ owner: 'foo-b', entryId: 'e-b', contributionKinds: ['command'], contributionCount: 2, usesAdvancedCapability: true }),
     ],
   )
   const classification = claims.get(bundleValue('foo'))!
@@ -519,7 +519,7 @@ test('an unproven self-bundle row protects its live entry by patchId proof, not 
   )
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], availability: 'profile', installed: true, source: 'file:/tui' }]),
-    [observation({ owner: '1:builtins', entryId: 'include:pi-tui-builtins' })],
+    [observation({ owner: 'builtins', entryId: 'include:pi-tui-builtins' })],
   )
   const model = buildPluginManagerModel(snap, claims)
   const card = model.cards.find(candidate => candidate.value === entryValue('include:pi-tui-builtins'))
@@ -844,12 +844,12 @@ test('state their WEB_ONLY boundaries and expose no phantom terminal page action
 test('keeps its WEB_ONLY/not-qualified host limit, B13/B14 state their verified provider boundaries, and B11 states foreground/no-guaranteed-Job', () => {
   const model = experimentalModel()
   const b04 = fact(cardByName(model, B04)!, 'Risk')
-  assert.ok(b04 !== undefined, 'B04 states its WEB_ONLY host limitation')
+  assert.ok(b04 !== undefined, 'states its WEB_ONLY host limitation')
   assert.match(b04!.value, /Host activation is not qualified here/u)
   assert.doesNotMatch(b04!.value, /EXTERNAL_UNVERIFIED/u)
   const b13 = fact(cardByName(model, B13)!, 'Risk')
   const b14 = fact(cardByName(model, B14)!, 'Risk')
-  assert.ok(b13 !== undefined && b14 !== undefined, 'B13/B14 state their external boundaries')
+  assert.ok(b13 !== undefined && b14 !== undefined, 'state their external boundaries')
   assert.match(b13!.value, /DeepSeek Anthropic-compatible endpoint/u)
   assert.match(b13!.value, /no Continue\/Resume/u)
   assert.match(b14!.value, /ChatGPT OAuth/u)

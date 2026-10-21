@@ -275,7 +275,7 @@ test('app disposal disposes the host file-completion marquee', async (t) => {
   assert.notEqual(marqueeDeadline(app), -1, 'dispose: marquee timer must be armed before final teardown')
 
   app.dispose()
-  assert.equal(marqueeDeadline(app), -1, 'final app disposal must clear the host marquee timer')
+  assert.equal(marqueeDeadline(app), -1, 'app disposal must clear the host marquee timer')
 
   let repaintRequests = 0
   const host = app as unknown as { requestRender(force?: boolean): void }

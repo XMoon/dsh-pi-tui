@@ -535,7 +535,7 @@ test('a Question FIFO parks History across Q1→Q2 and restores the SAME tenant 
   const first = h.app.askQuestions([{ id: 'q1', question: 'first flow?', options: [{ label: 'Yes' }] }])
   const second = h.app.askQuestions([{ id: 'q2', question: 'second flow?', options: [{ label: 'Yes' }] }])
   await h.vt.waitForRender()
-  assert.ok(strip(h.vt.getViewport()).includes('first flow?'), 'Q1 owns the seat')
+  assert.ok(strip(h.vt.getViewport()).includes('first flow?'), 'owns the seat')
   assert.notEqual(h.app.focusSeatForTest(), 'editor-panel', 'a parked History is not the keyboard owner')
   assert.equal(panel.focused, false, 'the parked tenant lost focus')
   // An ordinary key while Q1 owns the seat must never reach the parked panel.
@@ -548,7 +548,7 @@ test('a Question FIFO parks History across Q1→Q2 and restores the SAME tenant 
   assert.deepEqual(await first, [{ id: 'q1', selected: ['Yes'] }])
   await h.vt.waitForRender()
   // The FIFO middle: Q2 takes the seat DIRECTLY — History must stay parked.
-  assert.ok(strip(h.vt.getViewport()).includes('second flow?'), 'Q2 owns the seat after Q1 settles')
+  assert.ok(strip(h.vt.getViewport()).includes('second flow?'), 'owns the seat after Q1 settles')
   assert.notEqual(h.app.focusSeatForTest(), 'editor-panel', 'no History restore between the two flows')
   assert.equal(panel.focused, false, 'no tenant focus between the two flows')
 
@@ -943,7 +943,7 @@ test('a post-bump pre-publication failure keeps the owner and still retires thro
   assert.equal(captured.isCurrent(), false, 'the generation-contract expiry is authoritative')
   assert.equal(h.resetRetires.length, 1, 'the ONE reset hook retired the seat at the bump')
   assert.notEqual(h.resetRetires[0]!.ownerId, 'session-b', 'the new owner was NEVER published when History closed')
-  assert.equal(dispose.count(), 1, 'retired exactly once, by the generation contract')
+  assert.equal(dispose.count(), 1, 'exactly once, by the generation contract')
   assert.equal(h.app.getDraft(), draftBefore, 'History cleanup never rewrote the session draft')
   await h.vt.waitForRender()
   assert.ok(!panelVisible(h.vt))

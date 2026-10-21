@@ -1178,7 +1178,7 @@ test('occurrence: a nested PTC hit carries its full ancestor subCallId path', ()
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('child-1'),
       name: 'bash',
-      arguments: { cmd: 'child args marker' },
+      arguments: { cmd: 'args marker' },
     }, 2),
     event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),

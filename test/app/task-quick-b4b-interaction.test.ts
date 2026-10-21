@@ -192,7 +192,7 @@ async function startQuick(options: {
     },
     ...(options.descendants === undefined ? {} : {
       taskRead: {
-        currentKey: () => 'g1:sess-main',
+        currentKey: () => 'sess-main',
         currentSessionId: () => 'sess-main',
         readTask: async () => ({
           parentSessionId: 'sess-main',
@@ -371,7 +371,7 @@ test('effective ↓ enters from the middle of the last visual line and preserves
   assert.ok(view(h.vt).includes('first line of the draft'), 'the editor is visible again')
 })
 
-test('Quick returns the scrolled editor viewport, cursor and mode unchanged', async () => {
+test('Quick: returns the scrolled editor viewport, cursor and mode unchanged', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -465,7 +465,7 @@ test('and PgUp/PgDn move by painted task rows; Up at the global first row exits'
 
 /** S6 — Enter routes the typed selection into a REAL Job workspace (the
  *  literal Enter → accessory → app callback → runtime → Job Inspector sink). */
-test('Enter opens the real Job workspace; a refused value never disturbs it', async () => {
+test('Enter: opens the real Job workspace; a refused value never disturbs it', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
   })
@@ -713,7 +713,7 @@ test('a deleted Quick selection cannot open its fallback before paint', async ()
   assert.ok(view(h.vt).includes('j3'), `the opened workspace is the painted successor:\n${view(h.vt)}`)
 })
 
-test('Enter routes a Quick Subagent through the real typed enterView authority', async () => {
+test('Enter: routes a Quick Subagent through the real typed enterView authority', async () => {
   const h = await startQuick({
     roster: [],
     descendants: [{
@@ -826,7 +826,7 @@ test('a parked Question enters the projection; a refused reopen reports no surfa
   vt.sendInput('\r')
   await vt.waitForRender()
   await sleep(20)
-  assert.ok(reopens.includes('s1:c1'), `the Enter must reopen through the controller entry:\n${reopens.join(' |')}`)
+  assert.ok(reopens.includes('c1'), `the Enter must reopen through the controller entry:\n${reopens.join(' |')}`)
   assert.deepEqual(observedCallbackResults(), [true], 'the successful reopen reports the TRUE outcome')
   assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'the commit leaves Quick after the Question route')
 
@@ -842,7 +842,7 @@ test('a parked Question enters the projection; a refused reopen reports no surfa
   vt.sendInput('\r')
   await vt.waitForRender()
   await sleep(20)
-  assert.equal(reopens.filter(id => id === 's1:c1').length, 2, 'exactly the refusal dispatch happened')
+  assert.equal(reopens.filter(id => id === 'c1').length, 2, 'exactly the refusal dispatch happened')
   assert.deepEqual(observedCallbackResults(), [true, false], 'the refused reopen reports the FALSE outcome through the same callback')
   assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'a refused reopen keeps Quick closed (no fabricated reopen surface)')
 })
@@ -1035,7 +1035,7 @@ test('owner displacement retires Quick before History, Settings, managed overlay
   assert.equal(h.band().identity, -1, 'Quick paints no rows after the plugin editor takes the seat')
 })
 
-test('Job and Settings workspace leases retire active Quick and never restore it', async () => {
+test('Job: and Settings workspace leases retire active Quick and never restore it', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1206,7 +1206,7 @@ test('a session reset with Quick ACTIVE exits and clears the projection', async 
  *  pressed cell's physical y), a repaint, THEN the release on the same
  *  cell: the frame-fence clears the intent — nothing activates. A fresh
  *  same-cell gesture after the resize clicks the CURRENT row normally. */
-test('resize a held press across a width-only resize never activates; a fresh gesture does', async () => {
+test('a held press across a width-only resize never activates; a fresh gesture does', async () => {
   const h = await startQuick({
     roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
   })
@@ -1253,7 +1253,7 @@ test('resize a held press across a width-only resize never activates; a fresh ge
   await h.vt.waitForRender()
 })
 
-test('height a height-only terminal resize invalidates the held SGR row intent', async () => {
+test('a height-only terminal resize invalidates the held SGR row intent', async () => {
   const h = await startQuick({
     roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
   })
@@ -1306,7 +1306,7 @@ test('height a height-only terminal resize invalidates the held SGR row intent',
 
 /** F4: an ACTIVE Quick resized below its grant retires — the editor gets
  *  the keyboard back instead of an invisible band consuming input. */
-test('resize-zero an ACTIVE Quick resized to 0 grant exits and returns the editor', async () => {
+test('an ACTIVE Quick resized to 0 grant exits and returns the editor', async () => {
   const h = await startQuick({ cols: 120, rows: 40, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1325,7 +1325,7 @@ test('resize-zero an ACTIVE Quick resized to 0 grant exits and returns the edito
 
 /** Selection-currentness (B4B-08): deleting the SELECTED row falls back to
  *  its successor (predecessor at the tail) — never to the head. */
-test('delete-fallback deleted selection lands on successor/predecessor', async () => {
+test('deleted selection lands on successor/predecessor', async () => {
   const h = await startQuick({ roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -1351,7 +1351,7 @@ test('delete-fallback deleted selection lands on successor/predecessor', async (
 
 /** Screen-swap retirement (main §5): entering fullscreen while Quick is
  *  ACTIVE must hide the band and return the keyboard to the editor. */
-test('swap a fullscreen hand-off retires the ACTIVE Quick', async () => {
+test('a fullscreen hand-off retires the ACTIVE Quick', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()

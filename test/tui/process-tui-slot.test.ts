@@ -208,7 +208,7 @@ test('a failing final teardown keeps the process slot claimed (fail-closed)', (t
   app.start()
   assert.equal(liveTuiCountForTest(), 1, 'the started app owns the process slot')
 
-  const failure = new Error('final teardown failed')
+  const failure = new Error('teardown failed')
   // A controlled failure in the middle of the final batch: the later cleanup
   // (the generation retirement) must still run, and the disposal must report
   // the failure instead of silently finishing.

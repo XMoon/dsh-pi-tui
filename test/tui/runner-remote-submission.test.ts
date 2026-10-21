@@ -804,7 +804,7 @@ test('image resend: a SECOND submission citing the recalled durable image re-del
   assert.deepEqual(
     Buffer.from(await officialRead(firstIds[0]!)).toString('hex'),
     Buffer.from(pngBytes).toString('hex'),
-    '(1) the FIRST submission durably stored the image; the authorized read returns the original bytes')
+    'the FIRST submission durably stored the image; the authorized read returns the original bytes')
   // The held stream keeps the turn officially RUNNING.
   await waitFor('the session is running (held turn)', () =>
     fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)

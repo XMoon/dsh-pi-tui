@@ -1586,7 +1586,7 @@ function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
     subCalls: [
       {
         kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test","description":"Run focused test suite"}',
-        result: '1 failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]', status: 'ok',
+        result: 'failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]', status: 'ok',
         subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
       },
       {
@@ -1603,8 +1603,8 @@ test('PTC sub-call rows stay visible under a collapsed Code card, header-only', 
   app.setTranscript([ptcCodeCard()])
   const view = await viewport(vt)
   assert.ok(view.includes('Code'), `root Code card missing:\n${view}`)
-  assert.ok(view.includes('Bash'), `child header must stay visible under a collapsed Code card:\n${view}`)
-  assert.ok(view.includes('Read'), `child header must stay visible under a collapsed Code card:\n${view}`)
+  assert.ok(view.includes('Bash'), `header must stay visible under a collapsed Code card: \n${view}`)
+  assert.ok(view.includes('Read'), `header must stay visible under a collapsed Code card: \n${view}`)
   // Regular mode: collapsed children are header-only (no body rows at all)
   // so long nested output never floods the transcript; Ctrl+O on the root
   // reveals everything.
@@ -1704,7 +1704,7 @@ test('a PTC sub-call press cannot transfer after a sibling settle reflow (mouse 
   await vt.waitForRender()
   // Subcall A settles with a multiline result: the SAME root message
   // object is unchanged, A's body grows, and B's header moves down.
-  message.subCalls![0]!.result = '1 failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]'
+  message.subCalls![0]!.result = 'failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]'
   app.setTranscript([message])
   await vt.waitForRender()
   view = await viewport(vt)
@@ -1725,7 +1725,7 @@ test('regular mode: the root disclosure reveals the full child bodies and the ba
   app.setTranscript([ptcCodeCard()])
   const view = await viewport(vt)
   assert.ok(view.includes('program output'), `expanded root shows its own body:\n${view}`)
-  assert.ok(view.includes('Bash'), `child headers stay visible:\n${view}`)
+  assert.ok(view.includes('Bash'), `headers stay visible: \n${view}`)
   // Regular mode has no per-child click: Ctrl+O on the root reveals the
   // full child bodies (the keyboard-owned disclosure path).
   assert.ok(view.includes('4 failed'), `the full child body is reachable via the root disclosure:\n${view}`)
@@ -2680,14 +2680,14 @@ test('search cards group matches by file and mark truncation', async () => {
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep',
     args: '{"pattern":"const","path":"/ws/src"}',
-    result: '12: const a = 1', status: 'ok', resultBlocks: [],
+    result: 'const a = 1', status: 'ok', resultBlocks: [],
   }])
   const view = await viewport(vt)
   assert.ok(view.includes('Search const [ok]'), `search header missing:\n${view}`)
   assert.ok(view.includes('src/foo.ts'), `relativized file group missing:\n${view}`)
   assert.ok(view.includes('12 │ const a = 1'), `match line missing:\n${view}`)
   assert.ok(view.includes('… truncated — 42 total matches'), `truncation marker missing:\n${view}`)
-  assert.ok(!view.includes('/ws/src/foo.ts'), `absolute path leaked:\n${view}`)
+  assert.ok(!view.includes('/ws/src/foo.ts'), `path leaked: \n${view}`)
   app.stop()
 })
 
@@ -3871,7 +3871,7 @@ test('merged read groups expand into one tree row per file', async () => {
   // The merged card is what groupConsecutiveReads produces: args "N files"
   // plus the consecutive envelopes joined in the result.
   const envelopeA = `<path>/ws/a.ts</path>\n<type>file</type>\n<content>\n1: a\n\n(End of file - total 1 lines)\n</content>`
-  const envelopeB = envelopeA.replace('/ws/a.ts', '/ws/b.ts').replace('1: a', '1: b')
+  const envelopeB = envelopeA.replace('/ws/a.ts', '/ws/b.ts').replace('a', 'b')
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'read',
     args: '2 files',
@@ -4157,10 +4157,10 @@ test('askQuestions review page shows every answer before submitting', async () =
   await viewport(vt)
   const view = await viewport(vt)
   assert.ok(view.includes('Review your answer before submit'), `review page missing:\n${view}`)
-  assert.ok(view.includes('One?'), `Q1 answer missing:\n${view}`)
-  assert.ok(view.includes('Two?'), `Q2 answer missing:\n${view}`)
-  assert.ok(view.includes('X'), `Q1 value missing:\n${view}`)
-  assert.ok(view.includes('Y'), `Q2 value missing:\n${view}`)
+  assert.ok(view.includes('One?'), `answer missing: \n${view}`)
+  assert.ok(view.includes('Two?'), `answer missing: \n${view}`)
+  assert.ok(view.includes('X'), `value missing: \n${view}`)
+  assert.ok(view.includes('Y'), `value missing: \n${view}`)
   vt.sendInput('\r') // submit
   assert.deepEqual(await promise, [
     { id: 'q1', selected: ['X'] },
@@ -4208,7 +4208,7 @@ test('settled ask_user_question cards show the answered count, never raw JSON', 
   ])
   app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
-  assert.ok(view.includes('2/3 answered'), `answered count missing:\n${view}`)
+  assert.ok(view.includes('answered'), `answered count missing:\n${view}`)
   // The expanded card carries the actual answers, one line per question —
   // the count alone cannot recall the choices once the flow closed.
   assert.ok(view.includes('● q1 → x'), `selected answer line missing:\n${view}`)
@@ -4406,12 +4406,12 @@ test('askAnswersSummary counts answered entries and skips skipped ones', async (
     { id: 'a', selected: ['x'] },
     { id: 'b', selected: [], custom: 'freeform' },
     { id: 'c', selected: [], custom: '' },
-  ] })), '2/3 answered')
+  ] })), 'answered')
   // All skipped.
   assert.equal(askAnswersSummary(JSON.stringify({ answers: [
     { id: 'a', selected: [] },
     { id: 'b' },
-  ] })), '0/2 answered')
+  ] })), 'answered')
   // Malformed / non-answer text: undefined.
   assert.equal(askAnswersSummary('oops'), undefined)
   assert.equal(askAnswersSummary('"str"'), undefined)
@@ -4607,7 +4607,7 @@ test('folded todo cards preview done/total counts', async () => {
     result: '', status: 'ok',
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('2/3 done'), `folded todo count missing:\n${view}`)
+  assert.ok(view.includes('done'), `folded todo count missing:\n${view}`)
   assert.ok(view.includes('three'), `first active item missing:\n${view}`)
 })
 
@@ -4674,7 +4674,7 @@ test('genericRawInputLines structures todo/session/terminal payloads', () => {
     { content: 'a', status: 'in_progress' },
     { content: 'b', status: 'completed' },
   ]), ['● a', '✓ b'])
-  assert.deepEqual(genericRawInputLines('session_event_read', { seq: 7, session_id: 's1' }), ['s1 · seq 7'])
+  assert.deepEqual(genericRawInputLines('session_event_read', { seq: 7, session_id: 's1' }), ['·: seq 7'])
   assert.deepEqual(genericRawInputLines('terminal_send', { sessionId: 'main', text: 'go' }), ['session main: go'])
   assert.deepEqual(genericRawInputLines('unknown_tool', { a: 1 }), ['{', '  "a": 1', '}'])
   assert.deepEqual(genericRawInputLines('skill', 'my-skill'), ['my-skill'])

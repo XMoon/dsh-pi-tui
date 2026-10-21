@@ -197,7 +197,7 @@ test('regression: the ownership escape preserves the real AgentHandle so the run
   assert.equal((handle.direct!.agent as { session: { id: string } }).session.id, 'session-a')
 })
 
-test('regression: transition commit stores the OWNER HANDLE, and a SECOND transition disposes the FIRST exactly once', async () => {
+test('regression (round 3): transition commit stores the OWNER HANDLE, and a SECOND transition disposes the FIRST exactly once', async () => {
   // The exact chain that broke: transition A→B stores liveHandle from the
   // SessionHandle, then transition B→C disposes the OLD liveHandle. If the
   // commit had stored the SessionHandle (or the agent) instead of the real

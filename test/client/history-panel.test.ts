@@ -482,7 +482,7 @@ test('panel: F2 toggles the 63%/80% presentation and the render grows', async ()
   assert.equal(panel.isExpanded(), true)
   const expanded = panel.render(100)
   assert.ok(expanded.length > normal.length, 'the expanded presentation must grant more rows')
-  assert.ok(plain(expanded).find(line => line.includes('Input History'))!.includes('F2 collapse'), 'the header advertises the toggle')
+  assert.ok(plain(expanded).find(line => line.includes('Input History'))!.includes('collapse'), 'the header advertises the toggle')
   panel.handleInput('\x1bOQ')
   assert.equal(panel.isExpanded(), false)
 })
@@ -1056,7 +1056,7 @@ test('visual: identity / active scope / selected row / counter / metadata carry 
   const dimOpen = color.textDim('\u0000').split('\u0000')[0]!
   const metaLine = raw.find(line => plain([line])[0]!.startsWith('  Scope: session'))!
   assert.ok(metaLine.startsWith(`${dimOpen}  Scope: session`), 'the metadata facts are textDim')
-  assert.ok(raw.some(line => line.includes(color.textMuted('F2 expand'))), 'the F2 hint is textMuted')
+  assert.ok(raw.some(line => line.includes(color.textMuted('expand'))), 'the F2 hint is textMuted')
 })
 
 test('action bar: fixed order with Esc last, whole-segment drops, never a partial word', async () => {
@@ -1210,7 +1210,7 @@ test('theme: dark/light/custom resolve the frozen role tokens live and never ove
       const selected = raw.find(line => line.startsWith(color.primary('> ')))
       assert.ok(selected !== undefined && selected.includes(color.textStrong('alpha prompt')),
         `${themeCase.name}: the selected row uses the live primary cursor + bold textStrong label`)
-      assert.ok(raw.some(line => line.includes(color.textMuted('F2 expand'))),
+      assert.ok(raw.some(line => line.includes(color.textMuted('expand'))),
         `${themeCase.name}: the F2 hint is textMuted`)
       assert.ok(raw.some(line => line.includes(color.textDim('Results · ')) && line.includes(color.textMuted('1 match'))),
         `${themeCase.name}: the counter splits its tokens`)

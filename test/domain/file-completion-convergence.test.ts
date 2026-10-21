@@ -189,7 +189,7 @@ test('@/tmp/ searches the absolute scope', async (t) => {
   const target = life.tempDir('dsh-conv-abs-')
   writeFileSync(join(target, 'deep-abs.txt'), 'x')
   const result = await provider.getSuggestions([`@${target}/abs`], 0, `@${target}/abs`.length, { signal: abort })
-  assert.ok(result !== null, `absolute must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(result !== null, `must suggest: \n${JSON.stringify(result)}`)
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
 })
 
@@ -456,9 +456,9 @@ test('matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
   // The domain resolver is environment-neutral: these pure pins supply the
   // facts explicitly instead of reading the process environment.
   const environment: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
-  const query = resolvePathQuery('C:\\Users\\sh', '/ws', environment)
-  assert.equal(query.searchBase, win32.dirname('C:\\Users\\sh'))
-  assert.equal(query.displayBase, 'C:\\Users\\')
+  const query = resolvePathQuery('\\Users\\sh', '/ws', environment)
+  assert.equal(query.searchBase, win32.dirname('\\Users\\sh'))
+  assert.equal(query.displayBase, '\\Users\\')
   assert.equal(query.winAbsolute, true)
   const unc = resolvePathQuery('\\\\server\\share\\fo', '/ws', environment)
   assert.equal(unc.searchBase, '\\\\server\\share\\')
@@ -475,8 +475,8 @@ test('matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
 })
 
 test('candidates present one full display path independently of host path dialect', () => {
-  assert.equal(scorePathCandidate({ path: 'C:\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
-  assert.equal(scorePathCandidate({ path: 'C:\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
+  assert.equal(scorePathCandidate({ path: '\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
+  assert.equal(scorePathCandidate({ path: '\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   const rootFile = presentPathCandidate({ path: 'package.json', kind: 'file' }, { at: false, quoted: false })
   assert.ok(rootFile !== undefined)
   assert.equal(rootFile.label, 'package.json')
@@ -489,23 +489,23 @@ test('candidates present one full display path independently of host path dialec
   assert.equal(nestedFile.label, 'src/tui/file-completion/presentation.ts')
   assert.equal(nestedFile.description, undefined)
   const directory = presentPathCandidate(
-    { path: 'C:\\Users\\Pictures', kind: 'directory' },
+    { path: '\\Users\\Pictures', kind: 'directory' },
     { at: false, quoted: false, sep: '\\' },
   )
   assert.ok(directory !== undefined)
-  assert.equal(directory.value, 'C:\\Users\\Pictures\\')
-  assert.equal(directory.label, 'C:\\Users\\Pictures/')
+  assert.equal(directory.value, '\\Users\\Pictures\\')
+  assert.equal(directory.label, '\\Users\\Pictures/')
   assert.ok(directory.label.endsWith('/'))
   assert.equal(directory.description, undefined)
   const mixed = presentPathCandidate(
-    { path: 'C:/Users\\Pictures', kind: 'directory' },
+    { path: '/Users\\Pictures', kind: 'directory' },
     { at: true, quoted: false, sep: '\\' },
   )
   assert.ok(mixed !== undefined)
   // The OFFICIAL mention grammar (formatFileMention): the value uses the
   // grammar's own separator and quoting, not the local dialect note.
   assert.equal(mixed.value, '@C:/Users\\Pictures/')
-  assert.equal(mixed.label, 'C:/Users\\Pictures/')
+  assert.equal(mixed.label, '/Users\\Pictures/')
   assert.equal(mixed.description, undefined)
 })
 
@@ -842,9 +842,9 @@ test('review finding (round 6): a scope switch mid-flight fences the old session
 })
 
 test('review finding 2: a Windows-dialect directory keeps the backslash separator', () => {
-  const item = presentPathCandidate({ path: 'C:\\Users\\foo', kind: 'directory' }, { at: false, quoted: false, sep: '\\' })
+  const item = presentPathCandidate({ path: '\\Users\\foo', kind: 'directory' }, { at: false, quoted: false, sep: '\\' })
   assert.ok(item !== undefined)
-  assert.equal(item.value, 'C:\\Users\\foo\\', 'a Windows directory completes with \\ — never a mixed /')
+  assert.equal(item.value, '\\Users\\foo\\', 'a Windows directory completes with \\ — never a mixed /')
   const posix = presentPathCandidate({ path: 'src/foo', kind: 'directory' }, { at: false, quoted: false, sep: '/' })
   assert.ok(posix !== undefined)
   assert.equal(posix.value, 'src/foo/')

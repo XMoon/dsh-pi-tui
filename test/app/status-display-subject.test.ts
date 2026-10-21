@@ -142,11 +142,11 @@ test('every child Session-owned section comes from SessionStatus(childId)', () =
     model: { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
     preset: 'child-preset',
     permission: 'read-only',
-    title: 'child title',
+    title: 'title',
     goal: { objective: 'fix the build', phase: 'active' },
     context: { projectedTokens: 100, contextWindow: 2000 },
     usage: { uncachedInputTokens: 5, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 1 },
-    todos: [{ content: 'child todo', status: 'in_progress' }],
+    todos: [{ content: 'todo', status: 'in_progress' }],
   })
   h.setChild(childRead('child-a', 'research'))
   h.runtime.refresh()
@@ -170,8 +170,8 @@ test('every child Session-owned section comes from SessionStatus(childId)', () =
   assert.deepEqual(commit.presentation, {
     sessionId: 'child-a',
     workspaceRoot: '/child-a/ws',
-    title: 'child title',
-    todos: [{ content: 'child todo', status: 'in_progress' }],
+    title: 'title',
+    todos: [{ content: 'todo', status: 'in_progress' }],
     goal: 'goal ● fix the build',
   })
   // The legacy display fields are the LIVE session's (their own facts — here the
@@ -347,7 +347,7 @@ test('the viewer subject bar projects the SAME atomic snapshot the status runtim
     model: { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
     preset: 'child-preset',
     permission: 'read-only',
-    title: 'child title',
+    title: 'title',
   } as const
   h.setStatus('child-a', childAStatus)
   h.setChild(childRead('child-a', 'research'))
@@ -362,7 +362,7 @@ test('the viewer subject bar projects the SAME atomic snapshot the status runtim
   assert.ok(barA.includes('● running'), `the child activity must render:\n${barA}`)
   assert.ok(barA.includes('deepseek/child-model'), `the child provider/model must render:\n${barA}`)
   assert.ok(barA.includes('@high'), `the child effort must render:\n${barA}`)
-  assert.ok(barA.includes('child title'), `the committed child title must render:\n${barA}`)
+  assert.ok(barA.includes('title'), `the committed child title must render:\n${barA}`)
   assert.ok(!barA.includes('parent-model'), `the parent model must never fill the bar:\n${barA}`)
 
   // A child model/selection update re-derives the same snapshot; the bar follows.

@@ -270,7 +270,7 @@ test('the admitted prompt writer owns the settlement interval — a transition w
   assert.equal(barrier.activeWriters, 0)
 })
 
-test('an indeterminate prompt result never restores the draft', async () => {
+test('negative control: an indeterminate prompt result never restores the draft', async () => {
   const { surface, calls } = recordingSurface({
     prepareMessage: async () => undefined,
     prompt: async () => ({
@@ -288,7 +288,7 @@ test('an indeterminate prompt result never restores the draft', async () => {
   ], 'an unproven post-dispatch result is not restored and not reclassified as a rejection')
 })
 
-test('an unsupported prompt result keeps its generic failure path', async () => {
+test('negative control: an unsupported prompt result keeps its generic failure path', async () => {
   const { surface } = recordingSurface({
     prepareMessage: async () => undefined,
     prompt: async () => ({ kind: 'unsupported' as const, reason: 'prompt is not supported here' }),
@@ -1075,7 +1075,7 @@ test('a command settlement whose subject was REPLACED performs cleanup only, nev
     'a stale settlement performs no visible mutation (no restore/consume/ack/notice/health/artifact-save)')
 })
 
-test('a current-scope settlement performs the normal visible behavior', async () => {
+test('positive control: a current-scope settlement performs the normal visible behavior', async () => {
   const calls: string[] = []
   const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
   const deps = {

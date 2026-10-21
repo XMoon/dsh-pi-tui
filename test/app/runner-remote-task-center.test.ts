@@ -11,8 +11,7 @@
  *   whole-log projection rows the presentation harness mounts
  * - the real `@deepseek-ai/dsh-subagent` Host service, whose plugin
  *   registration is what makes the official `subagentCatalog` /
- *   `subagent` (identity) Session projections readable over the wire
- * - REAL durable parent/child catalog facts: parent Sessions carrying
+ *   `subagent`Session projections readable over the wire * - REAL durable parent/child catalog facts: parent Sessions carrying
  *   `subagent/catalog` SessionEvents, child Sessions carrying their own
  *   `subagent/descriptor` and `subagent/catalog` (the nested grandchild)
  * - the official Client/Gateway path over the real in-process carrier and
@@ -618,7 +617,7 @@ test('one-shot B and nested C are READ-ONLY from the root surface (no interactiv
   await new Promise(resolve => setTimeout(resolve, 200))
 })
 
-test('no Remote Task/child path reads the process-local subagents authority', async (t) => {
+test('negative control §14: no Remote Task/child path reads the process-local subagents authority', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
   // The Direct Task adapter's business authority is
@@ -761,7 +760,7 @@ async function awaitChildInitialTurn(
   }
 }
 
-test('a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
+test('/ §5 Must 17: a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
   const life = testLifecycle(t)
   // The Client-local request zone IS the sending TUI runtime's zone: pin it so
   // the zone the Remote viewer forwards is an asserted value. The official
@@ -1169,7 +1168,7 @@ function seedImageTurn(append: Append, turn: number, text: string, attachment: u
   append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-test('the mounted child viewer routes the durable child image through the CHILD Session readAttachment, and load() captures the asking subject', async (t) => {
+test('+ F7: the mounted child viewer routes the durable child image through the CHILD Session readAttachment, and load() captures the asking subject', async (t) => {
   const life = testLifecycle(t)
   // The REAL inline-image render path fires the loader only when the terminal
   // reports image support (`ImageThumbnail.renderLines`); this is the
@@ -1445,8 +1444,8 @@ test('the OPEN Task Center + child viewer survive a normal reconnect in place �
   const childBindingBefore = sessions.binding(SessionId(CHILD_A_ID))
   assert.ok(mainBindingBefore !== undefined && childBindingBefore !== undefined,
     'both the main and the child binding are retained before the reconnect')
-  app.setDraft('child draft kept across reconnect')
-  assert.equal(app.getDraft(), 'child draft kept across reconnect',
+  app.setDraft('draft kept across reconnect')
+  assert.equal(app.getDraft(), 'draft kept across reconnect',
     'the draft text is present before the reconnect')
 
   // ── The OFFICIAL reconnect (the same carrier the presentation suite
@@ -1478,7 +1477,7 @@ test('the OPEN Task Center + child viewer survive a normal reconnect in place �
   // 4-5. The viewer stays on the same child and the draft is preserved.
   assert.equal(viewport().includes('childa answer 30'), true,
     'the child viewer keeps showing its own subject')
-  assert.equal(app.getDraft(), 'child draft kept across reconnect',
+  assert.equal(app.getDraft(), 'draft kept across reconnect',
     'the user draft is not cleared by the transport reconnect')
 
   // 6. The B generation rehydrates the offline child truth.
@@ -1652,7 +1651,7 @@ test('a main-Session switch fences the in-flight child open — no stale child o
     viewport().includes('childa-late answer 32'), 20_000)
 })
 
-test('the child viewer never falls back to the parent facts for a fact its own Session lacks', async (t) => {
+test('negative control: the child viewer never falls back to the parent facts for a fact its own Session lacks', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
   // The parent carries a durable fact its children do NOT have: one todo entry
@@ -1691,7 +1690,7 @@ test('the child viewer never falls back to the parent facts for a fact its own S
     'the parent todo fact survives the child viewer round trip')
 })
 
-test('leaves no cross-child residue (transcript, workspace, subject, retained generation)', async (t) => {
+test('negative control: child A → child B leaves no cross-child residue (transcript, workspace, subject, retained generation)', async (t) => {
   const life = testLifecycle(t)
   const { fixture, app, viewport } = await mountTaskCenterFixture(life)
   const clientSessions = fixture.aggregate.wire.client.sessions

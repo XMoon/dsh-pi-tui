@@ -90,7 +90,7 @@ test('modifier order is canonicalized (ctrl+shift+p == shift+ctrl+p)', () => {
   assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
 })
 
-test('esc) is lifecycle-reserved', () => {
+test('leader prefix alias (leader: esc) is lifecycle-reserved', () => {
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings({
     leader: 'esc',
@@ -230,7 +230,7 @@ test('canonicalized duplicates dedupe (ctrl+shift+s == shift+ctrl+s)', () => {
 
 // ── 4.3 priority shadow: runtime == UI ────────────────────────────────────
 
-test('the shadowed action is NOT advertised', () => {
+test('priority shadow: the shadowed action is NOT advertised', () => {
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({ 'app.todo.toggle': 'ctrl+s' }))
   assert.equal(manager.resolve('\x13', editorContext)?.action, 'app.todo.toggle')
@@ -247,7 +247,7 @@ test('the shadowed action is NOT advertised', () => {
 
 // ── 4.4 conflict: no fabricated builtin fallback ──────────────────────────
 
-test('no fabricated Ctrl+R / Ctrl+T fallback', () => {
+test('conflict: no fabricated Ctrl+R / Ctrl+T fallback', () => {
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({
     'app.history.search': 'ctrl+x',
@@ -266,7 +266,7 @@ test('no fabricated Ctrl+R / Ctrl+T fallback', () => {
 
 // ── 4.6 leader dead bindings ──────────────────────────────────────────────
 
-test('is rejected by the parser', () => {
+test('<leader>escape: is rejected by the parser', () => {
   const parsed = parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.history.search': '<leader>escape' },
@@ -557,7 +557,7 @@ test('a remapped interrupt keeps its consecutive-press idle semantics', async ()
   app.stop()
 })
 
-test('cannot be bound to submit (the editor newline key)', () => {
+test('Shift+Enter: cannot be bound to submit (the editor newline key)', () => {
   const parsed = parseUserKeybindings({ 'app.input.submit': 'shift+enter' })
   assert.deepEqual(parsed.bindings, {}, 'shift+enter submit must be rejected')
   assert.ok(parsed.diagnostics.some(message => message.includes('newline')),
@@ -654,7 +654,7 @@ test('a conditional high-priority rule does not shadow a lower rule when its pre
 
 // ── remapped interrupt double-window (P2 finding) ─────────────────────────
 
-test('does NOT fire the idle double action', async () => {
+test('Ctrl+X → Esc → Ctrl+X: does NOT fire the idle double action', async () => {
   const vt = new VirtualTerminal(80, 24)
   let rewinds = 0
   const app = new TuiApp(vt, {
@@ -938,7 +938,7 @@ test('a disabled submit never fires on LF/Enter through the host editor', async 
 
 // ── 6.x owner-aware winner selection (round-9 findings) ────────────────────
 
-test('the editor-owned winner submits, steer NEVER fires', async () => {
+test('submit remapped onto a HOST key: the editor-owned winner submits, steer NEVER fires', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
   const steered: string[] = []
@@ -1038,7 +1038,7 @@ test('submit on fork-editor PRE-SUBMIT keys is rejected (they can never fire)', 
   assert.ok(!other.diagnostics.some(message => message.includes('editor consumes')))
 })
 
-test('BOTH triggers stay, Enter is removed', async () => {
+test('mixed direct + leader submit: BOTH triggers stay, Enter is removed', async () => {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text: string) => submitted.push(text), onExit: () => {} })
@@ -1080,7 +1080,7 @@ test('BOTH triggers stay, Enter is removed', async () => {
   app.stop()
 })
 
-test('ctrl+A == ctrl+a; SPACE/Space are printable', () => {
+test('canonical casing: ctrl+A == ctrl+a; SPACE/Space are printable', () => {
   // Single-character bases canonicalize to lowercase — ctrl+A and ctrl+a
   // are the SAME physical key and must conflict (round-9 finding: the
   // canonicalizer skipped single-char bases, the fork runtime lowercases,
@@ -1217,7 +1217,7 @@ test('leader-only REPLACES the builtin steer key (Ctrl+S no longer steers)', asy
   app.stop()
 })
 
-test('the unified model carries NO Enter (resolve/matches/editorSync/snapshot)', () => {
+test('leader-only submit: the unified model carries NO Enter (resolve/matches/editorSync/snapshot)', () => {
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
@@ -1449,7 +1449,7 @@ test('legacy C0 aliases are rejected everywhere (ctrl+i / ctrl+h / ctrl+_ / ctrl
   }
 })
 
-test('raw \\t / \\x08 / \\x1f are the legacy spellings', () => {
+test('the C0 byte premise: raw \\t / \\x08 / \\x1f are the legacy spellings', () => {
   // Why the rejections exist: the fork's matchesKey accepts the raw
   // control bytes for BOTH spellings of one physical key, so on a legacy
   // terminal a `ctrl+i` binding fires on Tab bytes (and vice versa).
@@ -1636,7 +1636,7 @@ test('a rejected editor-owned plugin key never disables a colliding leader', () 
     'no dead plugin rule is advertised')
 })
 
-test('rejected for user configs', () => {
+test('ctrl+backspace is terminal-ambiguous: rejected for user configs', () => {
   // The fork treats raw 0x08 as Ctrl+Backspace on Windows Terminal and
   // plain Backspace on legacy terminals/tmux (matchesRawBackspace
   // branches on WT_SESSION) — a ctrl+backspace binding fires on some
@@ -1667,7 +1667,7 @@ test('the registry rejects ctrl+backspace too', async () => {
   assert.equal(registry.snapshot().bindings.length, 0)
 })
 
-test('raw 0x08 is Backspace on legacy, Ctrl+Backspace on Windows Terminal', () => {
+test('the fork premise: raw 0x08 is Backspace on legacy, Ctrl+Backspace on Windows Terminal', () => {
   // isWindowsTerminalSession() requires WT_SESSION AND no SSH_* vars (the
   // fork excludes remote sessions) — the probe clears both sides.
   const saved: Record<string, string | undefined> = {
@@ -1693,7 +1693,7 @@ test('raw 0x08 is Backspace on legacy, Ctrl+Backspace on Windows Terminal', () =
   }
 })
 
-test('modified F-keys and modified Escape are rejected for USER configs', () => {
+test('runtime-bindable gate: modified F-keys and modified Escape are rejected for USER configs', () => {
   // isValidKeyId only checks the SYNTAX; the fork matcher hard-rejects
   // ANY modifier on F-keys and Escape (keys.ts: `modifier !== 0` →
   // false), so those combos can never fire on any terminal protocol —
@@ -1739,7 +1739,7 @@ test('the registry applies the runtime-bindable gate too', async () => {
   assert.equal(registry.snapshot().bindings.length, 0)
 })
 
-test('modified F-keys/Escape never match; shift+left does', () => {
+test('the runtime premise: modified F-keys/Escape never match; shift+left does', () => {
   // The gate mirrors the fork matcher exactly (probe-verified).
   assert.ok(!matchesKey('\x1b[15;2u', 'shift+f5' as never), 'CSI-u Shift+F5 never matches')
   assert.ok(!matchesKey('\x1b[15;5u', 'ctrl+f5' as never), 'CSI-u Ctrl+F5 never matches')
@@ -1805,7 +1805,7 @@ test('the registry applies the modified-Clear gate too', async () => {
   assert.equal(registry.snapshot().bindings.length, 3)
 })
 
-test('clear supports only unmodified / shift / ctrl', () => {
+test('the runtime premise: clear supports only unmodified / shift / ctrl', () => {
   assert.ok(matchesKey('\x1b[E', 'clear' as never), 'clear matches on legacy')
   assert.ok(matchesKey('\x1b[e', 'shift+clear' as never), 'shift+clear matches on legacy')
   assert.ok(matchesKey('\x1bOe', 'ctrl+clear' as never), 'ctrl+clear matches on legacy')

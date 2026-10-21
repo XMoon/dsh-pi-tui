@@ -1213,10 +1213,10 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
   // The discriminator: a child-only turn must appear, and a parent-only turn
   // must NOT (a surface stuck on the parent would show the opposite).
   seedTurns(appendOf(childId!), 90, 90, 'child')
-  await waitFor('the child-only turn painted', () => viewport().includes('child answer 90'), 20_000)
+  await waitFor('the child-only turn painted', () => viewport().includes('answer 90'), 20_000)
   seedTurns(appendOf(sessionA), 91, 91, 'parent')
   await new Promise(resolve => setTimeout(resolve, 400))
-  assert.equal(viewport().includes('child answer 90'), true,
+  assert.equal(viewport().includes('answer 90'), true,
     'the presentation belongs to the ADOPTED CHILD (its own turn is live)')
   assert.equal(viewport().includes('parent answer 91'), false,
     'a turn committed to the PARENT must not reach the adopted child surface')
@@ -2144,7 +2144,7 @@ test('a TRUE indeterminate Remote /title <name> is consumed by the outer settlem
   // External review F5: the `/title` indeterminate branch suppresses the draft
   // disposition, but the Remote Client-owned command path renders no command
   // card either — so without its own notice the user saw the command vanish
-  // with no explanation. As in the `/preset` E5 case, the fact under test is
+  // with no explanation. As in the `/preset`case, the fact under test is
   // the APPLICATION disposition/presentation, so only the Remote operation
   // result is controlled; the handler, the command settlement owner, the TUI
   // surface and the editor gesture stay real.

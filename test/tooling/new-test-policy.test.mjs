@@ -7,13 +7,10 @@
  * First's judgement half, and Rule 4's narrow-fake rule (whether a fake
  * exposes more capability than its consumer USES depends on what the test is
  * trying to prove, which no static check can decide; `docs/guides/
- * code-review.md` §2 carries that question instead).
- *
- * This suite proves the parts that ARE decidable:
- *
+ * code-review.md`carries that question instead). * * This suite proves the parts that ARE decidable: *
  *   - Rule 6 (Discoverability): a test file is found by the lane that owns
  *     it, the lanes never overlap, the infrastructure directories are never
- *     part of a lane, and a lane that matches nothing FAILS CLOSED;
+ *     part of a lane, and a lane that matches nothing
  *   - Rule 5 (Deterministic Async Testing): a fixed sleep must be either
  *     bounded by a named constant or carry a stated reason.
  *

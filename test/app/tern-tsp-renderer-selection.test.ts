@@ -123,8 +123,7 @@ function decodeFrames(text: string): WireFrame[] {
 class ScriptedTern {
   readonly input = new FakeInput()
   readonly output = new FakeOutput()
-  /** Every `o` (open) body on the wire. */
-  readonly opened: unknown[] = []
+  /** Every `o`body on the wire. */ readonly opened: unknown[] = []
   /** Whether a DA1/hello probe ever ran (the SDK connected). */
   probed = false
 

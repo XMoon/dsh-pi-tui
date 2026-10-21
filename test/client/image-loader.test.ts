@@ -435,7 +435,7 @@ test('object-scope: invalidate(id) reaches an OBJECT scope (ready -> idle + fres
 
 test('object-scope: clear() drops OBJECT-scope state, broadcasts to its subscriber, and listenerCount() counts it', async () => {
   const loader = new ImageLoader(async ref => {
-    if (ref.attachmentId === 'obj-clear-error') throw new Error('child scope failure')
+    if (ref.attachmentId === 'obj-clear-error') throw new Error('scope failure')
     return { ref: {}, data: new Uint8Array([2]) }
   })
   const scope = { key: 'child:1:A' }

@@ -121,7 +121,7 @@ test('a running question is not surfaced as a settled card', () => {
 
 test('a partial/skipped or errored question is still surfaced', () => {
   const partial = question('ok', answersJson(1, 3))
-  assert.equal(askAnswersSummary(partial.result), '1/3 answered')
+  assert.equal(askAnswersSummary(partial.result), 'answered')
   const partialBlocks = projectCompact([tool('read'), partial, tool('bash')], noOptions)
   assert.deepEqual(kindsOf(partialBlocks), ['work', 'message', 'work'], 'a partially answered question still splits the run')
 
@@ -187,7 +187,7 @@ function planReviewTurn(): { folder: TranscriptFolder; planReviewRow: Transcript
   return { folder, planReviewRow: interactionRow }
 }
 
-test('Focus collapsed hoists the settled question outside the Thought', () => {
+test('collapsed hoists the settled question outside the Thought', () => {
   const { folder, questionRow } = questionTurn()
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   const order = blocks.map(block => block.kind === 'message'
@@ -196,7 +196,7 @@ test('Focus collapsed hoists the settled question outside the Thought', () => {
   assert.deepEqual(order, ['user', 'question', 'activity', 'assistant'], 'User | Question | Working | Assistant')
 })
 
-test('Focus expanded restores the question to its exact raw chronology', () => {
+test('expanded restores the question to its exact raw chronology', () => {
   const { folder, questionRow } = questionTurn()
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([TURN]), true)
   // F6 keeps Process runs inside nested Work containers; flatten them for the
@@ -211,7 +211,7 @@ test('Focus expanded restores the question to its exact raw chronology', () => {
     'expanded keeps Process -> Question -> Process raw order')
 })
 
-test('Focus: the settled question is not counted as a turn tool', () => {
+test('the settled question is not counted as a turn tool', () => {
   const { folder } = questionTurn()
   const activity = folder.turnActivity(TURN)
   assert.equal(activity?.toolCalls, 2, 'only the read and bash calls count')
@@ -223,7 +223,7 @@ test('Focus: the settled question is not counted as a turn tool', () => {
 
 test('a multi-question result summarizes N/M and expands to structured answer rows', () => {
   const result = answersJson(2, 3)
-  assert.equal(askAnswersSummary(result), '2/3 answered')
+  assert.equal(askAnswersSummary(result), 'answered')
   const lines = askAnswersLines(result)
   assert.deepEqual(lines?.map(line => line.text), ['● q0 → B', '● q1 → B', '○ q2 — skipped'])
 })
@@ -286,7 +286,7 @@ test('the settled question card renders the N/M summary and structured answers, 
   show(app, folder)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('1/1 answered'), `the collapsed card carries the settled answer summary:\n${view}`)
+  assert.ok(view.includes('answered'), `the collapsed card carries the settled answer summary:\n${view}`)
   assert.ok(view.includes('Question'), `the card names the question:\n${view}`)
 
   app.expandFocusTurn(TURN)
@@ -317,7 +317,7 @@ test('search reaches a hidden answer and dismiss restores the collapsed card', a
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(!view.includes('● q0 → B'), `dismiss restores the collapsed card:\n${view}`)
-  assert.ok(view.includes('1/1 answered'), `the settled summary remains visible:\n${view}`)
+  assert.ok(view.includes('answered'), `the settled summary remains visible:\n${view}`)
 })
 
 test('regular Compact folds the settled question card under the shared owner', async () => {
@@ -613,7 +613,7 @@ test('a timed-out question card renders the authoritative late answer from the p
   enriched.app.setTranscript([card], new Map())
   await enriched.vt.waitForRender()
   const view = enriched.vt.getViewport().join('\n')
-  assert.ok(view.includes('1/1 answered'), `the late answer replaces the timeout preview:\n${view}`)
+  assert.ok(view.includes('answered'), `the late answer replaces the timeout preview:\n${view}`)
   assert.ok(!view.includes('pending'), `the timeout payload is not shown once the answer is known:\n${view}`)
 
   // Without the projection (capability absence) the card never presents the
@@ -622,7 +622,7 @@ test('a timed-out question card renders the authoritative late answer from the p
   enriched.app.setSettledQuestionAnswersLookup(undefined)
   enriched.app.setTranscript([{ ...card }], new Map())
   await enriched.vt.waitForRender()
-  assert.ok(!enriched.vt.getViewport().join('\n').includes('1/1 answered'),
+  assert.ok(!enriched.vt.getViewport().join('\n').includes('answered'),
     'without the projection the timed-out payload is not presented as an answer')
 })
 
@@ -642,13 +642,13 @@ test('an EMPTY settled batch is authoritative and replaces the recorded timeout'
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('pending'), `the recorded timeout is not the outcome any more:\n${view}`)
-  assert.ok(view.includes('0/0 answered'), `the settled entry renders its (empty) authoritative batch:\n${view}`)
+  assert.ok(view.includes('answered'), `the settled entry renders its (empty) authoritative batch:\n${view}`)
 
   // With NO settled entry the card still shows its own recorded result — the
   // enrichment never invents a settled state.
   app.setSettledQuestionAnswersLookup(undefined)
   app.setTranscript([{ ...card }], new Map())
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().join('\n').includes('0/0 answered'),
+  assert.ok(!vt.getViewport().join('\n').includes('answered'),
     'no settled entry means no settled rendering')
 })
