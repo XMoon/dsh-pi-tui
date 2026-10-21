@@ -186,7 +186,7 @@ test('a stale scope after the await notifies NOTHING (no replacement-session con
   assert.deepEqual(h.notices, [], 'a stale owner repaints/notifies nothing for the replacement (§15.6)')
 })
 
-test('§6.3/§16 a same-id transport rollover during the apply notifies NOTHING (the scope alone proves nothing)', async () => {
+test('a same-id transport rollover during the apply notifies NOTHING (the scope alone proves nothing)', async () => {
   // The binding was replaced under the SAME session id with no TUI owner
   // commit: the scope stays current, the transport token does not.
   const h = harness({ current: 'read-only', transportStaleAfterApply: true })

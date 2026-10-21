@@ -372,7 +372,7 @@ test('the Ctrl+R Current-session identity comes from the selected ownership auth
 
 /* ── PR5 v4 / R7: the final authority boundaries this round locked ─────── */
 
-test('(R7-1): every routing read of the Host claim consumes the GENUINE Host-origin authority', () => {
+test('every routing read of the Host claim consumes the GENUINE Host-origin authority', () => {
   const controller = code('app/submission/controller.ts')
   // The final command-plane ownership, the submit-time echo gate and the
   // attachment payload all read the origin claim — never the advertised union.
@@ -498,7 +498,7 @@ test('an absent `model` projection fact is passed THROUGH, never rendered as a b
 
 /* ── PR5 §1C-7 (whole-PR F4): the sessionless route consumes the classifier ── */
 
-test('(whole-PR F4): the sessionless route is the classifier TUI family, never a name set alone', () => {
+test('the sessionless route is the classifier TUI family, never a name set alone', () => {
   const controller = code('app/submission/controller.ts')
   const at = controller.indexOf('const isSessionless = parsed !== undefined')
   assert.ok(at > 0, 'the sessionless predicate exists')
@@ -514,7 +514,7 @@ test('(whole-PR F4): the sessionless route is the classifier TUI family, never a
     'the sessionless name set remains an additional filter, never the decider')
 })
 
-test('(whole-PR F4): TUI ownership comes from the LIVE Client registry, never the static name list', () => {
+test('TUI ownership comes from the LIVE Client registry, never the static name list', () => {
   const controller = code('app/submission/controller.ts')
   // The live exact-line claim is the TUI ownership source at every consumer.
   assert.ok(controller.includes('deps.command.clientClaimsLine(parsedAtSubmit)'),

@@ -557,7 +557,7 @@ test('mutation teeth: the OLD binding-requiring activity fact cannot render the 
     'the mutation targets only the surface projection; the semantic read still reports running')
 })
 
-test('§11/§14.13: one-shot B and nested C are READ-ONLY from the root surface (no interactive editor, no child queue subject)', async (t) => {
+test('one-shot B and nested C are READ-ONLY from the root surface (no interactive editor, no child queue subject)', async (t) => {
   const life = testLifecycle(t)
   const { fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
 
