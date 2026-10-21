@@ -130,7 +130,7 @@ function checkRun(label, usage, output) {
   if (usage.exitCode !== 0) {
     throw new Error(`${label}: the run exited ${usage.exitCode} — its timing is not a measurement`)
   }
-  if (reported.tests === undefined || reported.pass === undefined || reported.fail === undefined) {
+  if (reported.tests === undefined || reported.pass === undefined || reported.fail === undefined || reported.skipped === undefined) {
     throw new Error(`${label}: the run produced no complete report — its timing is not a measurement`)
   }
   if (reported.fail !== 0) {
@@ -172,11 +172,15 @@ async function main() {
       const reported = checkRun(label, usage, output())
       if (reference === undefined) {
         reference = reported
-      } else if (reported.pass !== reference.pass || reported.skipped !== reference.skipped) {
+      } else if (
+        reported.pass !== reference.pass
+        || reported.skipped !== reference.skipped
+        || reported.tests !== reference.tests
+      ) {
         // A level that ran a DIFFERENT number of tests is not a comparable
         // measurement: it would be a different suite, not the same one.
         throw new Error(
-          `${label}: the run reported ${reported.pass} pass / ${reported.skipped} skipped, but the reference is ${reference.pass} / ${reference.skipped} — the levels did not run the same suite`,
+          `${label}: the run reported ${reported.tests} test(s) / ${reported.pass} pass / ${reported.skipped} skipped, but the reference is ${reference.tests} / ${reference.pass} / ${reference.skipped} — the levels did not run the same suite`,
         )
       }
       times.push(elapsed)

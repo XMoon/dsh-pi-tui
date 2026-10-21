@@ -91,11 +91,13 @@ A fake must implement exactly the capability the test exercises. A fake
 with MORE capabilities than the test uses makes the test look like it
 covers more than it does.
 
-The part of this rule that can be checked objectively is that a shared
-fixture has at least one consumer: a helper nobody reads is dead weight,
-and the guard enforces it. Whether a fake exposes more capability than its
-consumer USES depends on what the test is trying to prove, so that half
-stays a review judgement.
+This rule is a REVIEW judgement, and it stays one: whether a fake exposes
+more capability than its consumer USES depends on what the test is trying
+to prove, which no static check can decide. A text scan of the test tree
+cannot decide it either — a mention in a comment is not a consumer, and an
+indirect consumer through another helper is not a text match — so the
+repository does not pretend to check it. `docs/guides/code-review.md` §2
+carries the question the reviewer answers.
 
 ### 5. Deterministic Async Testing
 
@@ -174,16 +176,18 @@ review judgement:
 | 6 — Discoverability | every discovered test file belongs to exactly one lane; the lanes never overlap; the infrastructure directories are never part of a lane | `test/tooling/test-discovery.test.mjs` |
 | 6 — Discoverability (the rule itself) | the discovery rule finds the root level and every nested level, never finds the infrastructure directories, never double-discovers, and fails closed on an empty lane | `test/tooling/test-discovery.test.mjs` |
 | 5 — Deterministic async | a file outside the recorded floor cannot introduce an unreasoned fixed wait, and a floor file's wait count cannot grow | `test/tooling/new-test-policy.test.mjs` |
-| 4 — Minimal infrastructure | a shared fixture has at least one consumer | `test/tooling/new-test-policy.test.mjs` |
 | 6 — Discoverability (placement) | a new Domain, Integration or Tooling test lands in the right lane and reaches the right verification entry point | `test/tooling/new-test-policy.test.mjs` |
 | 6 — Discoverability (execution) | the lane runner passes the file list relative to the repository root, so the command line fits the Windows limit, and the child runs with the repository root as its working directory | `test/tooling/test-lane-runner.test.mjs` |
 | 1 — Ownership First (the read side) | every production file a test reads by path EXISTS: a renamed or moved production module can never leave a source lock silently pointing at a different file | `pnpm gate:production-reads` |
 
-The remaining rules (1, 2, 3, and the "a fake must not exceed its
-consumer's needs" half of 4) are review judgements, and they stay that way
-on purpose: a mechanical gate for "is this test valuable" would either be
-trivially satisfiable or would force tests to be split into shape the gate
-likes.
+The remaining rules (1, 2, 3 and 4) are review judgements, and they
+stay that way on purpose: a mechanical gate for "is this test valuable"
+would either be trivially satisfiable or would force tests to be split
+into shape the gate likes. Rule 4 in particular is NOT checked by a text
+scan of the test tree: a mention in a comment is not a consumer, and an
+indirect consumer through another helper is not a text match — a gate built
+on that would be a false assurance, which is worse than no gate.
+`docs/guides/code-review.md` §2 carries the question instead.
 
 ## 5. What this document does NOT own
 
