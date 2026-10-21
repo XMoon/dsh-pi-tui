@@ -63,9 +63,31 @@ test('unknown/other tools: undefined (the existing Client fallbacks stay authori
   assert.equal(presenter.call('bash', 'not-json'), undefined)
 })
 
-test('result: always undefined — settled rendering stays with the existing Client derivations', () => {
+test('result: a settled view comes only from the TOOL-AUTHORED result metadata', () => {
+  // No metadata: the existing Client derivations stay authoritative.
   assert.equal(presenter.result('edit', '{}', { content: [], isError: false }), undefined)
   assert.equal(presenter.result('bash', '{}', { content: [], isError: true }), undefined)
+  // A foreign or malformed metadata payload: no view, no guess.
+  assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: { unrelated: 1 } }), undefined)
+  assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: 'nope' }), undefined)
+  // A payload that names a path but carries NO window is not the read shape.
+  assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: { path: 'src/a.ts' } }), undefined)
+  // An EMPTY path proves no file.
+  assert.equal(presenter.result('read', '{}', {
+    content: [], isError: false, meta: { path: '', offset: 1, lines: [], totalLines: 1 },
+  }), undefined)
+  // An empty or foreign diff list proves no file either.
+  assert.equal(presenter.result('write', '{}', { content: [], isError: false, meta: { path: 'src/a.ts', diffs: [] } }), undefined)
+  assert.equal(presenter.result('write', '{}', { content: [], isError: false, meta: { path: 'src/a.ts', diffs: [{ foo: 1 }] } }), undefined)
+  // The tool's OWN metadata: the read view the tool declared.
+  const read = presenter.result('read', '{}', {
+    content: [],
+    isError: false,
+    meta: { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1, lang: 'ts' },
+  })
+  assert.ok(read !== undefined && read.card === 'read')
+  assert.equal(read.path, 'src/a.ts')
+  assert.equal(read.lang, 'ts')
 })
 
 test('negative lock: no Host tool registry, no presenter callbacks, no wire surface', () => {

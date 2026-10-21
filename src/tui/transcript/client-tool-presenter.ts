@@ -23,8 +23,11 @@
 
 import type {
   DiffCallView,
+  FileDiff,
+  ReadFileLine,
   TerminalCallView,
   ToolCallView,
+  ToolResultView,
 } from '@deepseek-ai/dsh-tools'
 import type { ToolPresenter } from './tool-presentation.ts'
 
@@ -88,11 +91,71 @@ function terminalView(args: Record<string, unknown>): TerminalCallView | undefin
 }
 
 /**
- * Build the Client-derived presenter (Remote branch). The `result` half is
- * intentionally `undefined`-returning: every settled-result rendering the
- * TUI needs already has a Client-side derivation (read envelopes, result
- * text lines, the compact summaries), so a Host result view is never
- * required — returning undefined keeps those existing paths authoritative.
+ * The read-family result view derived from the TOOL-AUTHORED result metadata.
+ *
+ * The `tool/result` event carries the tool's own `presentationMeta` — a JSON
+ * payload the TOOL wrote about ITS OWN call (`dsh-tool-fs` declares
+ * `{ path, offset, lines, totalLines }`; its write/edit declare
+ * `{ path, diffs }`). Unlike the raw args, that payload is not a guess: it is
+ * the tool's own statement about what it operated on, and it reaches the
+ * Client over the existing session event — no new Host field, no wire
+ * change.
+ *
+ * This is what lets the Remote branch reach the SAME path semantics as the
+ * Direct branch WITHOUT inferring by tool name. Inferring by name is unsafe:
+ * a plugin may register its own tool under a built-in's name, and the
+ * registry lets a scoped registration SHADOW a global one — so a name-keyed
+ * guess would read a plugin's `url` parameter as a path.
+ *
+ * The metadata is narrowed defensively: an absent, malformed or foreign
+ * payload yields no view, and the row keeps the plain generic card.
+ */
+function metaPathView(meta: unknown): ToolResultView | undefined {
+  if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return undefined
+  const record = meta as Record<string, unknown>
+  const path = record['path']
+  if (typeof path !== 'string' || path === '') return undefined
+  const diffs = record['diffs']
+  if (Array.isArray(diffs)) {
+    const paths = diffs
+      .filter((diff): diff is { path: string } =>
+        typeof diff === 'object' && diff !== null
+        && typeof (diff as { path?: unknown }).path === 'string')
+      .map(diff => diff.path)
+    if (paths.length === 0) return undefined
+    return { card: 'diff', diffs: diffs as FileDiff[] }
+  }
+  // The read shape: the tool states the path it read and the window it took.
+  const offset = record['offset']
+  const totalLines = record['totalLines']
+  if (typeof offset !== 'number' || typeof totalLines !== 'number') return undefined
+  const lines = record['lines']
+  const readLines = Array.isArray(lines)
+    ? lines.filter((line): line is ReadFileLine =>
+      typeof line === 'object' && line !== null
+      && typeof (line as { number?: unknown }).number === 'number'
+      && typeof (line as { text?: unknown }).text === 'string')
+    : []
+  const lang = record['lang']
+  return {
+    card: 'read',
+    path,
+    offset,
+    lines: readLines,
+    totalLines,
+    ...(typeof lang === 'string' ? { lang } : {}),
+  }
+}
+
+/**
+ * Build the Client-derived presenter (Remote branch). The `result` half reads
+ * ONLY the tool-authored result metadata, so a Remote read row can reach the
+ * same path semantics as a Direct one without a Host field and without
+ * inferring by tool name. Every other settled-result rendering the TUI needs
+ * already has a Client-side derivation (read envelopes, result text lines,
+ * the compact summaries), so a Host result view is never required — an
+ * absent or foreign metadata yields `undefined` and keeps those paths
+ * authoritative.
  */
 export function createClientToolPresenter(): ToolPresenter {
   return {
@@ -104,8 +167,8 @@ export function createClientToolPresenter(): ToolPresenter {
       if (name === 'bash' || name === 'pwsh') return terminalView(args)
       return undefined
     },
-    result(): undefined {
-      return undefined
+    result(_name: string, _argsRaw: string, result: { readonly meta?: unknown }): ToolResultView | undefined {
+      return metaPathView(result.meta)
     },
   }
 }

@@ -62,6 +62,7 @@ import type { PresetPresentation } from '../../app/command/preset-presentation.t
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
+import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
@@ -161,6 +162,14 @@ export interface TspRendererOptions {
   readonly onFatal?: (error: unknown) => void
   /** SDK connect timeout override (tests); default is the SDK's 1000 ms. */
   readonly connectTimeout?: number
+  /**
+   * PR-B1: the presentation bridge over the REGISTERED tool definitions (the
+   * SAME bridge the PiTui renderer consumes). It is consulted ONLY to decide
+   * whether a tool row's displayed target is PROVEN to be a command, a single
+   * path or a pattern. An absent bridge leaves every row's target plain
+   * `text` — the behaviour before PR-B1.
+   */
+  readonly toolPresenter?: ToolPresenter
   /** The connect seam (tests); default is the shipped SDK `connect`. */
   readonly connect?: typeof sdkConnect
   /** Diagnostics sink for the renderer's own lifecycle facts. */
@@ -484,6 +493,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       scopePrefix,
       ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
+      ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
     })
   }
 

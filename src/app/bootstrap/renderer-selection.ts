@@ -89,6 +89,12 @@ export interface ProductionTspConnectorDeps {
    * being bypassed by a hand-rolled mount.
    */
   readonly connect?: NonNullable<Parameters<(typeof import('../../tui/tsp/session.ts'))['connectTspRenderer']>[0]['connect']>
+  /**
+   * PR-B1: the presentation bridge over the REGISTERED tool definitions. It is
+   * forwarded to the renderer so a tool row's target KIND can be proven from
+   * the tool's own registered view. It changes no displayed string.
+   */
+  readonly toolPresenter?: import('../../tui/transcript/tool-presentation.ts').ToolPresenter
 }
 
 /** The PRODUCTION connector: lazy import + the official SDK connect. */

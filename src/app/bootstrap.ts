@@ -2613,6 +2613,11 @@ export function applyRunnerWithRuntime(
           onFatal: rendererOnFatal,
           log: (message, fields) => diag.info(message, fields),
           logError: (message, fields) => diag.error(message, fields),
+          // PR-B1: the SAME bridge the PiTui renderer consumes. The TSP
+          // renderer reads it ONLY to prove a tool row's target kind; the
+          // Direct/Remote locality is the bridge's own (a Direct lookup of
+          // the scoped registry, a Remote derivation from the raw args).
+          toolPresenter: present,
         }),
         env: process.env,
       })
