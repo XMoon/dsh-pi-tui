@@ -185,8 +185,15 @@ test('the CONCURRENCY level changes how many files Node keeps in flight', () => 
     const files = []
     for (let index = 0; index < 4; index += 1) {
       const file = join(directory, `probe-${index}.test.mjs`)
+      // The fixed hold is the MEASURED quantity, not a blind wait for a
+      // signal: each probe file occupies one worker for a known window, so
+      // the wall clock tells us how many files Node kept in flight.
       writeFileSync(file,
         `import test from 'node:test'\n`
+        // The window IS the experiment: concurrency 1 sums these windows
+        // while higher levels overlap them, so the wall clock is the window
+        // count. The wait is the measured quantity, not a blind sleep.
+        // deadline: none — the probe is bounded by its own 400 ms window.
         + `test('hold ${index}', async () => { await new Promise(r => setTimeout(r, 400)) })\n`)
       files.push(relative(ROOT, file))
     }

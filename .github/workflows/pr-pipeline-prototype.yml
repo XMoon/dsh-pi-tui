@@ -187,8 +187,17 @@ jobs:
         run: node scripts/build-digest.mjs --write build-digest.json
 
       - name: Upload the shared build
-        # INJECTION 'build-missing': the consumers then have nothing to
-        # download and must fail rather than build their own.
+        # INJECTION 'build-missing' suppresses the UPLOAD, so this job still
+        # succeeds and the artifact never exists.
+        #
+        # That is the harder of the two shapes on purpose: the producer looks
+        # healthy while the artifact is missing. What the injection proves is
+        # that every CONSUMER fails closed instead of rebuilding its own
+        # build — not that the producer phase fails, because it does not.
+        #
+        # The targeted phase for this token is therefore the shard consumer,
+        # and the verifier asserts the consumer's own "Artifact not found"
+        # error rather than a producer failure.
         if: ${{ needs.context.outputs.fault != 'build-missing' }}
         uses: actions/upload-artifact@v7
         with:
@@ -335,8 +344,12 @@ jobs:
             --out diagnostics/runner-spec.json
 
       - name: Upload this shard's records
-        # INJECTION 'shard-missing': these records never arrive, so the
-        # aggregate sees three shards where four are required.
+        # INJECTION 'shard-missing': these records never arrive.
+        #
+        # The shard itself RAN and passed, so this job still succeeds; what
+        # must fail is the AGGREGATE, which sees three shards where four are
+        # required. The verifier therefore targets 'aggregate' for this
+        # token, not 'product shards'.
         if: ${{ always() && !(needs.context.outputs.fault == 'shard-missing' && matrix.shard == 4) }}
         uses: actions/upload-artifact@v7
         with:
@@ -801,14 +814,19 @@ jobs:
             echo "the artifact is $ACTUAL, not the qualified $EXPECTED_SHA256" >&2
             exit 1
           fi
-          cp "${TARBALLS[0]}" qualified.tgz
-          echo "qualified $ACTUAL"
+          # The artifact keeps the PACKAGE'S OWN NAME. A downstream
+          # consumer looks for `xmoon76-dsh-pi-tui-*.tgz`; uploading a
+          # renamed copy would make the qualified artifact unusable by the
+          # very jobs it exists for.
+          mkdir -p qualified
+          cp "${TARBALLS[0]}" "qualified/$(basename "${TARBALLS[0]}")"
+          echo "qualified $ACTUAL as $(basename "${TARBALLS[0]}")"
 
       - name: Upload the QUALIFIED artifact
         uses: actions/upload-artifact@v7
         with:
           name: prototype-qualified-candidate
-          path: qualified.tgz
+          path: qualified/*.tgz
           if-no-files-found: error
           retention-days: 3
 
