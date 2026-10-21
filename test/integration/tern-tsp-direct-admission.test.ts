@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from '../support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
 import { pickerNode } from '../support/tsp-picker-wire.ts'
 
 /** Every history file written under the fixture's isolated DSH home. */
