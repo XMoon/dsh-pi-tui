@@ -27,7 +27,7 @@
  * @module @xmoon76/dsh-pi-tui/scripts/pipeline-guard
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -68,6 +68,45 @@ export const FAULT_TOKENS = [
   // a downstream compatibility leg fails after the candidate was built
   'downstream-fail',
 ]
+
+/**
+ * The number of shards this run splits the lane into.
+ *
+ * It is a COMMITTED fact, like every other parameter here, because
+ * `workflow_dispatch` inputs only exist when the workflow is dispatched —
+ * and a workflow that is not on the default branch cannot be dispatched at
+ * all. A push-triggered run therefore has to be able to say which shape it
+ * is, from the tree.
+ *
+ * A dispatch input, when one is present, wins: it is the human's explicit
+ * choice for that run.
+ *
+ * @param {{file: string, input?: string}} options
+ * @returns {{ok: boolean, shardTotal?: number, reason?: string}} the verdict.
+ */
+export function resolveShardTotal({ file, input }) {
+  const supported = [1, 2, 3, 4]
+  const fromInput = (input ?? '').trim()
+  if (fromInput !== '') {
+    const value = Number(fromInput)
+    if (!Number.isInteger(value) || !supported.includes(value)) {
+      return { ok: false, reason: `the dispatched shard total '${fromInput}' is not one of ${supported.join('/')}` }
+    }
+    return { ok: true, shardTotal: value }
+  }
+  if (!existsSync(file)) {
+    return { ok: false, reason: `the committed shard total ${file} is missing: a push run cannot be dispatched, so it must state its shape` }
+  }
+  const raw = readFileSync(file, 'utf8').trim()
+  if (raw === '') {
+    return { ok: false, reason: `the committed shard total ${file} is empty` }
+  }
+  const value = Number(raw)
+  if (!Number.isInteger(value) || !supported.includes(value)) {
+    return { ok: false, reason: `the committed shard total '${raw}' is not one of ${supported.join('/')}` }
+  }
+  return { ok: true, shardTotal: value }
+}
 
 /**
  * Validate the committed fault token.
@@ -175,6 +214,22 @@ export function summarize({ started, phases }) {
 function main() {
   const args = process.argv.slice(2)
   const command = args[0]
+  if (command === 'shard-total') {
+    // `--file` and `--input` are both optional in the CLI: the library
+    // function is what the tests drive.
+    const fileIndex = args.indexOf('--file')
+    const inputIndex = args.indexOf('--input')
+    const verdict = resolveShardTotal({
+      file: fileIndex === -1 ? 'scripts/prototype-shard-total.txt' : args[fileIndex + 1],
+      input: inputIndex === -1 ? '' : args[inputIndex + 1],
+    })
+    if (!verdict.ok) {
+      console.error(verdict.reason)
+      process.exit(1)
+    }
+    console.log(verdict.shardTotal)
+    return
+  }
   if (command === 'fault') {
     const verdict = checkFault(readFileSync(args[1], 'utf8'))
     if (!verdict.ok) {
@@ -218,6 +273,7 @@ function main() {
   }
   console.error('usage: node scripts/pipeline-guard.mjs mode <mode>')
   console.error('       node scripts/pipeline-guard.mjs fault <file>')
+  console.error('       node scripts/pipeline-guard.mjs shard-total [--file <file>] [--input <n>]')
   console.error('       node scripts/pipeline-guard.mjs summary --started <epoch> --phase <name>=<result> ...')
   process.exit(2)
 }

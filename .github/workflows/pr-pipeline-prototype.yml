@@ -124,10 +124,18 @@ jobs:
       - name: Resolve the shard list
         id: shards
         env:
-          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '4' }}
+          DSH_DISPATCHED_SHARD_TOTAL: ${{ inputs.shard_total || '' }}
         run: |
           set -euo pipefail
           echo "started_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+          # The shard total is a COMMITTED fact, with the dispatch input as an
+          # override when one exists.
+          #
+          # It must be readable from the tree because a workflow that is not
+          # on the default branch cannot be dispatched at all: a push run has
+          # no inputs, so an input-only parameter would leave every push
+          # silently pinned to one shape and make the other shapes untestable.
+          DSH_SHARD_TOTAL="$(node scripts/pipeline-guard.mjs shard-total --input "$DSH_DISPATCHED_SHARD_TOTAL")"
           case "$DSH_SHARD_TOTAL" in
             1) shards='[1]' ;;
             2) shards='[1,2]' ;;
@@ -313,8 +321,11 @@ jobs:
       # INJECTION 'digest-mismatch': one byte of a build output changes, so
       # this shard's build is no longer the one the build job identified.
       # The verification below must reject it BEFORE the lane runs.
+      # The target is shard 1, which exists for EVERY shard total. A target
+      # of "shard 2" would silently never fire for a 1-shard run, and the
+      # pipeline would then succeed while claiming to have injected a fault.
       - name: "INJECTED FAULT: corrupt the downloaded build"
-        if: ${{ needs.context.outputs.fault == 'digest-mismatch' && matrix.shard == 2 }}
+        if: ${{ needs.context.outputs.fault == 'digest-mismatch' && matrix.shard == 1 }}
         run: |
           set -euo pipefail
           printf '\n/* injected */\n' >> dist/index.mjs
@@ -326,8 +337,9 @@ jobs:
       # INJECTION 'shard-fail': this shard's run fails. What is under test is
       # the pipeline's HANDLING of a failed shard — the matrix must report
       # failure and the aggregate must refuse the set.
+      # Shard 1 again: it exists for every total.
       - name: "INJECTED FAULT: fail this shard"
-        if: ${{ needs.context.outputs.fault == 'shard-fail' && matrix.shard == 3 }}
+        if: ${{ needs.context.outputs.fault == 'shard-fail' && matrix.shard == 1 }}
         run: |
           echo "the shard test run failed (INJECTED FAULT 'shard-fail')" >&2
           exit 1
@@ -350,7 +362,10 @@ jobs:
         # must fail is the AGGREGATE, which sees three shards where four are
         # required. The verifier therefore targets 'aggregate' for this
         # token, not 'product shards'.
-        if: ${{ always() && !(needs.context.outputs.fault == 'shard-missing' && matrix.shard == 4) }}
+        # Drop the LAST shard of the CURRENT total, so the aggregate is
+        # always short one shard. A fixed index would leave an N=1 run with
+        # nothing dropped.
+        if: ${{ always() && !(needs.context.outputs.fault == 'shard-missing' && matrix.shard == fromJSON(needs.context.outputs.shard_total)) }}
         uses: actions/upload-artifact@v7
         with:
           name: prototype-shard-${{ matrix.shard }}-node24
@@ -814,19 +829,19 @@ jobs:
             echo "the artifact is $ACTUAL, not the qualified $EXPECTED_SHA256" >&2
             exit 1
           fi
-          # The artifact keeps the PACKAGE'S OWN NAME. A downstream
-          # consumer looks for `xmoon76-dsh-pi-tui-*.tgz`; uploading a
-          # renamed copy would make the qualified artifact unusable by the
-          # very jobs it exists for.
-          mkdir -p qualified
-          cp "${TARBALLS[0]}" "qualified/$(basename "${TARBALLS[0]}")"
+          # The artifact keeps the PACKAGE'S OWN NAME, and it is uploaded
+          # from its ORIGINAL path: a copy renamed to `qualified.tgz` would
+          # not match the `xmoon76-dsh-pi-tui-*.tgz` glob a downstream
+          # consumer looks for, so the qualified artifact would be unusable
+          # by the very jobs it exists for.
+          echo "QUALIFIED_TARBALL=${TARBALLS[0]}" >> "$GITHUB_ENV"
           echo "qualified $ACTUAL as $(basename "${TARBALLS[0]}")"
 
       - name: Upload the QUALIFIED artifact
         uses: actions/upload-artifact@v7
         with:
           name: prototype-qualified-candidate
-          path: qualified/*.tgz
+          path: ${{ env.QUALIFIED_TARBALL }}
           if-no-files-found: error
           retention-days: 3
 

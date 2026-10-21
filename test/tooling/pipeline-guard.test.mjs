@@ -20,12 +20,14 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { FAULT_TOKENS, REQUIRED_PHASES, checkFault, checkMode, summarize } from '../../scripts/pipeline-guard.mjs'
+import { FAULT_TOKENS, REQUIRED_PHASES, checkFault, checkMode, resolveShardTotal, summarize } from '../../scripts/pipeline-guard.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'pipeline-guard.mjs')
@@ -33,6 +35,18 @@ const SCRIPT = join(ROOT, 'scripts', 'pipeline-guard.mjs')
 /** Every required phase, at one result. */
 function phasesAt(result) {
   return REQUIRED_PHASES.map(name => ({ name, result }))
+}
+
+/**
+ * A scratch directory that is removed when the case ends.
+ *
+ * @param {import('node:test').TestContext} t - the case context.
+ * @returns {string} the directory.
+ */
+function scratch(t) {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-guard-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  return directory
 }
 
 /** Run the CLI. */
@@ -238,4 +252,75 @@ test('the required phases include the two the qualified-artifact split added', (
   // report green while neither happened.
   assert.ok(REQUIRED_PHASES.includes('downstream matrix'))
   assert.ok(REQUIRED_PHASES.includes('qualified artifact'))
+})
+
+// ---------------------------------------------------------------------------
+// The SHARD TOTAL, and the injection targets that depend on it.
+//
+// A workflow that is not on the default branch cannot be dispatched, so a
+// push run has NO inputs. A shard total that only existed as a dispatch
+// input would therefore pin every push to one shape — and the shapes that
+// were never exercised are exactly where a fault injection can silently stop
+// firing.
+// ---------------------------------------------------------------------------
+
+test('the shard total is read from the committed file when nothing is dispatched', (t) => {
+  const file = join(scratch(t), 'total.txt')
+  writeFileSync(file, '1\n')
+  assert.deepEqual(resolveShardTotal({ file, input: '' }), { ok: true, shardTotal: 1 })
+})
+
+test('a dispatched shard total OVERRIDES the committed one', (t) => {
+  const file = join(scratch(t), 'total.txt')
+  writeFileSync(file, '4\n')
+  assert.deepEqual(resolveShardTotal({ file, input: '2' }), { ok: true, shardTotal: 2 })
+})
+
+test('a MISSING committed total is refused, not defaulted', (t) => {
+  const file = join(scratch(t), 'absent.txt')
+  const verdict = resolveShardTotal({ file, input: '' })
+  assert.equal(verdict.ok, false)
+  assert.match(verdict.reason, /is missing/u)
+})
+
+test('an UNSUPPORTED total is refused in either form', (t) => {
+  const file = join(scratch(t), 'total.txt')
+  writeFileSync(file, '7\n')
+  assert.equal(resolveShardTotal({ file, input: '' }).ok, false)
+  assert.equal(resolveShardTotal({ file, input: '0' }).ok, false)
+  assert.equal(resolveShardTotal({ file, input: 'three' }).ok, false)
+})
+
+test('the committed total is one the matrix supports', () => {
+  const result = cli(['shard-total'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(['1', '2', '3', '4'].includes(result.stdout.trim()))
+})
+
+test('the injections target shards that exist for EVERY total', () => {
+  // The defect this protects: the targets were hardcoded to shards 2, 3 and
+  // 4. With a 1-shard run none of those exist, so the injection never fired
+  // and the pipeline could SUCCEED while claiming to inject a fault. The
+  // selector must target a shard that always exists, or the last shard of
+  // the current total.
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  // A hardcoded index above 1 is the bug: shard 1 exists for every total.
+  assert.doesNotMatch(source, /fault == 'shard-fail' && matrix\.shard == [2-9]/u,
+    'the shard-fail target must exist for every total')
+  assert.doesNotMatch(source, /fault == 'digest-mismatch' && matrix\.shard == [2-9]/u,
+    'the digest-mismatch target must exist for every total')
+  // Dropping a shard must follow the CURRENT total, not a fixed index.
+  assert.match(source, /fault == 'shard-missing' && matrix\.shard == fromJSON\(needs\.context\.outputs\.shard_total\)/u,
+    'the missing-records target must be the last shard of the current total')
+})
+
+test('the qualified artifact is uploaded from its original path', () => {
+  // A renamed copy (`qualified.tgz`) does not match the
+  // `xmoon76-dsh-pi-tui-*.tgz` glob a downstream consumer looks for, so the
+  // qualified artifact would be unusable by the jobs it exists for.
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  assert.doesNotMatch(source, /cp "\$\{TARBALLS\[0\]\}" qualified/u,
+    'the qualified artifact must not be a renamed copy')
+  assert.match(source, /path: \$\{\{ env\.QUALIFIED_TARBALL \}\}/u,
+    'the upload must use the verified tarball\'s own path')
 })
