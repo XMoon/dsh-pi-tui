@@ -93,10 +93,18 @@ test('the runner passes the file list RELATIVE to the repository root', () => {
     'the runner must pass the file list relative to the test root')
   assert.match(source, /cwd: workingDirectory/u,
     "the child must run with the working directory the relative paths are based on")
-  assert.match(source, /const workingDirectory = TEST_ROOT === join\(ROOT, 'test'\) \? ROOT : testRootParent/u,
+  assert.match(source, /const workingDirectory = testRoot === join\(ROOT, 'test'\) \? ROOT : testRootParent/u,
     'the default working directory must be the repository root')
   assert.doesNotMatch(source, /files\.map\(rel => join\(TEST_ROOT, rel\)\)/u,
     'the runner must not pass absolute paths')
+  // A QUALIFICATION run must scan the repository's own test files, and
+  // nothing an environment variable says may change that set.
+  assert.match(source, /function resolveTestRoot\(explicit\)/u,
+    'the test root must be resolved through one guarded function')
+  assert.match(source, /if \(explicit === undefined\) return canonical/u,
+    'without the explicit opt-in the canonical test root is used')
+  assert.match(source, /throw new Error\('--test-root requires DSH_TEST_ROOT/u,
+    'the explicit opt-in and the environment variable must agree')
 })
 
 test('the child runs with the repository root as its working directory', (t) => {

@@ -44,18 +44,18 @@ const REPORTER = join(ROOT, 'scripts', 'test-case-reporter.mjs')
 /**
  * Run one lane and collect its case records.
  *
- * The lane is executed by the SAME runner the repository uses
- * (`scripts/run-test-lane.mjs`), so the collected list is the list the
- * qualification lane really runs — not a re-derived approximation.
+ * The lane is executed by the REPOSITORY'S OWN RUNNER
+ * (`scripts/run-test-lane.mjs`) — the same entry point `pnpm test:product`
+ * uses — so the collected list is the list the qualification lane really
+ * runs, with the runner's own discovery, temp-root contract, exit-code
+ * handling and reporter wiring. The runner's job is to run a lane; the
+ * inventory's job is to read the records that run produced.
  */
 async function collect(laneName) {
   const lane = LANES[laneName]
   if (lane === undefined) {
     throw new Error(`unknown test lane: ${laneName}\nlanes: ${Object.keys(LANES).join(', ')}`)
   }
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const relativeFiles = files.map(rel => join('test', rel))
-
   // The run's disposable temp root, and SEPARATELY the file the reporter
   // writes its records to.
   //
@@ -63,17 +63,16 @@ async function collect(laneName) {
   // tests as their TMPDIR, and some of them run a NESTED test lane inside
   // it. A nested run inherits the reporter's destination variable and would
   // write its own records into this run's file.
-  const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-inventory-'))
   const recordRoot = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-inventory-records-'))
   const jsonl = join(recordRoot, 'cases.jsonl')
   const child = spawn(
     process.execPath,
-    ['--test', `--test-reporter=${REPORTER}`, ...relativeFiles],
+    [join(ROOT, 'scripts', 'run-test-lane.mjs'), laneName],
     {
       cwd: ROOT,
       stdio: ['ignore', 'inherit', 'inherit'],
       shell: false,
-      env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root, DSH_TEST_JSONL: jsonl },
+      env: { ...process.env, DSH_TEST_JSONL: jsonl },
     },
   )
   const code = await new Promise((resolve_) => {
@@ -83,11 +82,11 @@ async function collect(laneName) {
     .split('\n')
     .filter(Boolean)
     .map(line => JSON.parse(line))
-  rmSync(root, { recursive: true, force: true })
   rmSync(recordRoot, { recursive: true, force: true })
   if (code !== 0) {
     throw new Error(`the ${laneName} lane exited ${code}; the inventory is not a measurement`)
   }
+  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
   return { lane: laneName, files, records }
 }
 
@@ -99,12 +98,20 @@ async function main() {
   const print = args.includes('--print')
 
   const { files, records } = await collect(laneName)
-  // A FILE is reported as one case whose name is the file's own path. The
-  // inventory separates it from the cases inside the file, so the case count
-  // matches the reporter's own `tests` count.
+  // The entries are separated by Node's OWN type, not by a guess from the
+  // name or the nesting depth.
+  //
+  // A `describe()` block is a SUITE, and a suite at the top level has
+  // nesting 0 — exactly like a plain test — so the nesting depth cannot
+  // tell them apart. Node reports the type on the completion, so that is
+  // what is used.
+  //
+  // A FILE's own root entry is the one whose NAME is the file's own path;
+  // Node reports it as a `test`, so the type alone cannot identify it
+  // either.
   const fileEntries = records.filter(record => record.name === record.file)
-  const cases = records.filter(record => record.name !== record.file)
-  const suites = cases.filter(record => record.nesting > 0)
+  const suites = records.filter(record => record.type === 'suite' && record.name !== record.file)
+  const cases = records.filter(record => record.type === 'test' && record.name !== record.file)
 
   const inventory = {
     lane: laneName,
@@ -114,6 +121,7 @@ async function main() {
     suiteCount: suites.length,
     files,
     cases,
+    suites,
   }
 
   if (outIndex !== -1) {
