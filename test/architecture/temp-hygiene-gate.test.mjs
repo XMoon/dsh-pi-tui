@@ -102,13 +102,31 @@ test('collectTestFiles only picks up source files', async (t) => {
   assert.deepEqual(files, ['a.test.ts', 'b.test.mjs', join('nested', 'c.test.js')])
 })
 
-test('an allowlisted basename that is NOT unique is reported', async (t) => {
+test('an allowlisted basename that is NOT unique is reported', (t) => {
   // The allowlist names files by their basename, so a file that moves
   // between ownership directories keeps its verdict. That is only safe
   // while the basename is UNIQUE: a second file with the same name would
   // inherit the exemption, and the gate would silently stop policing it.
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-gate-ambiguous-')
+  mkdirSync(join(root, 'support'), { recursive: true })
+  mkdirSync(join(root, 'domain'), { recursive: true })
+  writeFileSync(join(root, 'support', 'temp-lifecycle.ts'), 'export const x = 1\n')
+  writeFileSync(join(root, 'domain', 'temp-lifecycle.ts'), 'export const x = 1\n')
+  assert.deepEqual(ambiguousAllowlistEntries(root), ['temp-lifecycle.ts'])
+})
+
+test('the uniqueness check reads a WINDOWS path form', (t) => {
+  // `join()` produces backslashes on Windows. A basename extracted on `/`
+  // alone would be the WHOLE path there, so two files would never count
+  // as the same name — and the uniqueness protection would protect
+  // nothing on that platform.
+  //
+  // The tree is built with POSIX separators (that is what the platform
+  // running this test uses); the WINDOWS form is exercised by pointing
+  // the check at a path whose separators are backslashes.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-gate-windows-')
   mkdirSync(join(root, 'support'), { recursive: true })
   mkdirSync(join(root, 'domain'), { recursive: true })
   writeFileSync(join(root, 'support', 'temp-lifecycle.ts'), 'export const x = 1\n')

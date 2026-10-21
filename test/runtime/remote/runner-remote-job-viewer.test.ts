@@ -541,7 +541,7 @@ test('the REAL Job viewer observes the Remote stream, updates live without consu
   assert.match(restored, /killed/u, `the restored browser row must show the converged status:\n${restored}`)
 })
 
-test('step 10 + 11(b): a SECOND real Job stops through the Task-Center row confirmation (the SAME semantic operation) and the Job-detail observer is released and re-acquired exactly once', async (t) => {
+test('a SECOND real Job stops through the Task-Center row confirmation (the SAME semantic operation) and the Job-detail observer is released and re-acquired exactly once', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
