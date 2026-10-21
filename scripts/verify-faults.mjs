@@ -45,12 +45,19 @@ import { writeFileSync } from 'node:fs'
  * unrelated reason cannot be counted as proof.
  */
 const FAULTS = [
-  { fault: 'shard-fail', target: 'product shards', expectLog: /the shard test run failed \(INJECTED FAULT 'shard-fail'\)/u },
-  { fault: 'shard-missing', target: 'aggregate', expectLog: /expected 4 shard directories/u },
-  { fault: 'digest-mismatch', target: 'product shards', expectLog: /the build digest is [0-9a-f]+, not the expected [0-9a-f]+/u },
-  { fault: 'build-missing', target: 'product shards', expectLog: /Artifact not found for name: prototype-build/u },
-  { fault: 'smoke-fail', target: 'qualification', expectLog: /Smoke 1\/8/u },
-  { fault: 'downstream-fail', target: 'downstream matrix', expectLog: /the downstream compatibility leg failed \(INJECTED FAULT 'downstream-fail'\)/u },
+  { fault: 'shard-fail', branch: 'ci/pr-pipeline-prototype-fault-shard-fail', target: 'product shards', expectLog: /the shard test run failed \(INJECTED FAULT 'shard-fail'\)/u },
+  { fault: 'shard-missing', branch: 'ci/pr-pipeline-prototype-fault-shard-missing', target: 'aggregate', expectLog: /expected 4 shard directories/u },
+  { fault: 'digest-mismatch', branch: 'ci/pr-pipeline-prototype-fault-digest-mismatch', target: 'product shards', expectLog: /the build digest is [0-9a-f]+, not the expected [0-9a-f]+/u },
+  { fault: 'build-missing', branch: 'ci/pr-pipeline-prototype-fault-build-missing', target: 'product shards', expectLog: /Artifact not found for name: prototype-build/u },
+  { fault: 'smoke-fail', branch: 'ci/pr-pipeline-prototype-fault-smoke-fail', target: 'qualification', expectLog: /Smoke 1\/8/u },
+  { fault: 'downstream-fail', branch: 'ci/pr-pipeline-prototype-fault-downstream-fail', target: 'downstream matrix', expectLog: /the downstream compatibility leg failed \(INJECTED FAULT 'downstream-fail'\)/u },
+  // The SELECTOR BOUNDARY. With one shard, a target of "shard 4" would never
+  // exist and the pipeline could succeed while claiming to inject a fault.
+  // The aggregate must be short the single shard.
+  { fault: 'shard-missing (1-shard run)', branch: 'ci/pr-pipeline-prototype-n1-fault', target: 'aggregate', expectLog: /expected 1 shard directories/u },
+  // The same injection on the other end of the range, after the target moved
+  // from shard 3 to shard 1.
+  { fault: 'shard-fail (N=4, target moved to shard 1)', branch: 'ci/pr-pipeline-prototype-n4-fault-shard-fail', target: 'product shards', expectLog: /the shard test run failed \(INJECTED FAULT 'shard-fail'\)/u },
 ]
 
 function gh(args) {
@@ -105,8 +112,7 @@ function artifactsOf(runId) {
 }
 
 const results = []
-for (const { fault, target, expectLog } of FAULTS) {
-  const branch = `ci/pr-pipeline-prototype-fault-${fault}`
+for (const { fault, branch, target, expectLog } of FAULTS) {
   const run = latestRun(branch)
   if (run === null) {
     results.push({ fault, ok: false, reason: 'no run found' })
