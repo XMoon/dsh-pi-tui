@@ -44,6 +44,11 @@ on:
           - '2'
           - '3'
           - '4'
+      test_concurrency:
+        description: "How many test FILES Node runs at once (the C1 concurrency experiment: ONE lane, no shard, and the concurrency is the only variable)"
+        required: false
+        default: ''
+        type: string
       expected_cases:
         description: 'The case count the UNSHARDED lane reports at the same SHA, DSH mode and runner (the baseline the shards must match)'
         required: false
@@ -165,7 +170,7 @@ jobs:
           set -euo pipefail
           mkdir -p diagnostics
           start=$(date +%s)
-          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total || '1' }}
+          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total || '1' }} ${{ inputs.test_concurrency && format('--test-concurrency={0}', inputs.test_concurrency) || '' }}
           end=$(date +%s)
           node scripts/runner-spec.mjs \
             --wall-clock-seconds "$((end - start))" \
