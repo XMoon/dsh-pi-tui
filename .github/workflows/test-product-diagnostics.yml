@@ -84,13 +84,22 @@ jobs:
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
+      shard_total: ${{ steps.shards.outputs.shard_total }}
     steps:
       - name: Build the shard list
         id: shards
         env:
-          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '1' }}
+          # The shard count comes from the COMMITTED tree when the run
+          # carries no input: a `push` trigger has no inputs, so an
+          # input's default would never apply to the run the branch was
+          # pushed for. The branch carries the count in
+          # `scripts/measurement-shard-total.txt`.
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '' }}
         run: |
           set -euo pipefail
+          if [ -z "$DSH_SHARD_TOTAL" ]; then
+            DSH_SHARD_TOTAL="$(cat scripts/measurement-shard-total.txt)"
+          fi
           case "$DSH_SHARD_TOTAL" in
             1) shards='[1]' ;;
             2) shards='[1,2]' ;;
@@ -99,6 +108,7 @@ jobs:
             *) echo "unsupported shard total: $DSH_SHARD_TOTAL" >&2; exit 1 ;;
           esac
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "shard_total=$DSH_SHARD_TOTAL" >> "$GITHUB_OUTPUT"
           echo "the measurement will run these shards: $shards"
 
   # ---------------------------------------------------------------------------
@@ -110,7 +120,7 @@ jobs:
   # file lists — it does not assume it.
   # ---------------------------------------------------------------------------
   product-shard:
-    name: Product shard ${{ matrix.shard }}/${{ inputs.shard_total || '1' }}
+    name: Product shard ${{ matrix.shard }}/${{ needs.prepare.outputs.shard_total }}
     needs:
       - prepare
     runs-on: ubuntu-latest
@@ -170,7 +180,7 @@ jobs:
           set -euo pipefail
           mkdir -p diagnostics
           start=$(date +%s)
-          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total || '1' }} ${{ inputs.test_concurrency && format('--test-concurrency={0}', inputs.test_concurrency) || '' }}
+          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ needs.prepare.outputs.shard_total }} ${{ inputs.test_concurrency && format('--test-concurrency={0}', inputs.test_concurrency) || '' }}
           end=$(date +%s)
           node scripts/runner-spec.mjs \
             --wall-clock-seconds "$((end - start))" \
@@ -233,7 +243,7 @@ jobs:
 
       - name: Prove the shards are the whole lane
         env:
-          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '1' }}
+          DSH_SHARD_TOTAL: ${{ needs.prepare.outputs.shard_total }}
           # The identity every shard must agree on. A shard from another
           # run must not be counted towards this one: the aggregate would
           # then claim a coverage nobody measured.
