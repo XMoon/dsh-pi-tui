@@ -223,17 +223,11 @@ async function mountShutdownRunner(
   })
   // The transport is disposed by the RUNNER FIBER's teardown effect
   // (`registerRunnerDisposal` → `disposeSelectedTransport`), so the fiber
-  // disposal registered below owns it. A second, unconditional
-  // `selected.disposeTransport()` registration would reach the SAME
-  // idempotent disposer a second time — and the "disposes exactly once"
-  // assertions count the CALLS, so the extra registration could land before
-  // the assertion and make the count 2.
-  //
-  // The fallback below is the SAFETY net for the one case the fiber effect
-  // cannot cover: the runner never mounted (the mount threw), so no teardown
-  // effect exists and nothing else would release the transport. It disposes
-  // ONLY when the fiber never released it, so it can never add a second call
-  // to a transport the runner already disposed.
+  // disposal owns it. The fixture no longer registers a second, unconditional
+  // `selected.disposeTransport()`: it would reach the SAME idempotent
+  // disposer again, and the "disposes exactly once" assertions count the
+  // downstream owner releases, so the extra call could only ever be noise on
+  // a counter that is about the teardown.
   let runnerReleasedTransport = false
   const originalDisposeTransport = aggregate.selected.disposeTransport.bind(aggregate.selected)
   aggregate.selected.disposeTransport = async (): Promise<void> => {
@@ -242,25 +236,17 @@ async function mountShutdownRunner(
     runnerReleasedTransport = true
     await originalDisposeTransport()
   }
-  // ONE awaited cleanup that owns the transport, in the production order: the
-  // runner fiber's teardown effect, then the fallback for a runner that never
-  // mounted. It is AWAITED on purpose: a fire-and-forget teardown would let
-  // the lifecycle remove the temp directories while the transport was still
-  // being disposed, and would let the fallback start the transport teardown
-  // before the runner's own retirement had settled.
+  // The AGGREGATE fallback, registered right after the aggregate exists and
+  // BEFORE any setup step that can reject: it is the safety net for the case
+  // the runner's teardown effect cannot cover — the runner never mounted (the
+  // mount threw), so no teardown effect exists and nothing else would release
+  // the transport. It disposes ONLY when the runner never released it, so it
+  // can never add a second call to a transport the runner already disposed.
   //
-  // It is registered HERE — right after the aggregate exists and BEFORE any
-  // setup step that can reject — so the fallback really covers a mount that
-  // never completed. A cleanup registered after the mount would not exist on
-  // that path at all, and the aggregate would be left undisposed.
-  let runnerFiber: { dispose(): Promise<void> } | undefined
+  // It is AWAITED on purpose: a fire-and-forget teardown would let the
+  // lifecycle remove the temp directories while the transport was still being
+  // disposed.
   life.defer(async (): Promise<void> => {
-    await runnerFiber?.dispose()
-    // The fallback for the one case the fiber's teardown effect cannot cover:
-    // the runner never mounted (the mount threw), so no teardown effect exists
-    // and nothing else would release the transport. It runs only when the
-    // runner never reached it, so it can never add a second call to a
-    // transport the runner already disposed.
     if (runnerReleasedTransport) return
     await aggregate.selected.disposeTransport().catch(() => {})
   })
@@ -289,7 +275,16 @@ async function mountShutdownRunner(
       override,
     )
   })
-  runnerFiber = fiber
+  // The RUNNER cleanup, registered here — after the fiber exists and BEFORE
+  // the mount await that can reject — so a mount that never completed is
+  // still torn down. It is AWAITED, so the runner's own teardown (the surface
+  // stop, the Session retirement and the transport disposal) settles before
+  // the lifecycle moves on to the environment restoration: the cleanup runs
+  // FIRST under the lifecycle's reverse registration order, which is the
+  // acquisition/release order the runner had.
+  life.defer(async (): Promise<void> => {
+    await fiber.dispose()
+  })
   await fiber
   return {
     host,
