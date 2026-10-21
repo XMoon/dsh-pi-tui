@@ -629,6 +629,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # The verdict is a SCRIPT, so this job needs the repository. The old
+      # shell version did not (every value came from the environment), and
+      # omitting the checkout made the step fail with a module-not-found
+      # error instead of a verdict — measured on the first run of this fix.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
       # The verdict is computed by a script, not by shell, for three
       # reasons that shell made easy to get wrong:
       #
