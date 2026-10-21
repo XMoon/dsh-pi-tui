@@ -15,7 +15,7 @@
  * "unqualified" by convention is exactly the hole the provisional/qualified
  * split closes.
  *
- * Usage: node temp/verify-faults.mjs --out <report.json>
+ * Usage: node scripts/verify-faults.mjs --out <report.json>
  */
 
 import { execFileSync } from 'node:child_process'
