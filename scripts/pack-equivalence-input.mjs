@@ -13,7 +13,7 @@
  * it digests exactly the inputs the equality depends on, and a difference
  * means the proof is STALE and must be re-run.
  *
- * What is deliberately NOT here:
+ * What is deliberately NOT here, and what replaced an earlier exclusion:
  *
  *   - the repository's source code. A source change that alters the built
  *     output does not change the RELATION between the two pack paths: both

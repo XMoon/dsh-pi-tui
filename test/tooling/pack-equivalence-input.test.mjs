@@ -220,3 +220,48 @@ test('a workflow command that drifts from the protocol is caught', () => {
     'the ordinary and the lifecycle-free command must not compare equal',
   )
 })
+
+test('the comparator is given the ordinary pack and the lifecycle-free pack, not itself', () => {
+  // The residual gap in the same root: the guard checked that the compare step
+  // MENTIONS the comparator, not which two tarballs it compares. Rewriting
+  // `--b "$ci_only"` to `--b "$ordinary"` turns the proof into a pack compared
+  // with itself — it passes, every digest is unchanged, and the equality is
+  // never actually tested.
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8'))
+  const protocol = JSON.parse(readFileSync(join(ROOT, 'scripts', 'pack-equivalence-protocol.json'), 'utf8'))
+  const compare = workflow.jobs.equivalence.steps.find(step => typeof step.run === 'string' && step.run.includes('compare-tarballs'))
+  assert.ok(compare, 'the equivalence job must run the comparator')
+
+  const { a, b } = protocol.operands
+  assert.notEqual(a, b, 'the two operands must be different packs')
+  // Each operand is a shell variable assigned from the protocol's directory...
+  assert.match(compare.run, new RegExp(`ordinary="\\$\\(ls ${a}/\\*\\.tgz`, 'u'),
+    `--a must come from the ${a} directory`)
+  assert.match(compare.run, new RegExp(`ci_only="\\$\\(ls ${b}/\\*\\.tgz`, 'u'),
+    `--b must come from the ${b} directory`)
+  // ...and the comparator must receive exactly those two.
+  assert.match(compare.run, /--a "\$ordinary"/u, 'the first operand must be the ordinary pack')
+  assert.match(compare.run, /--b "\$ci_only"/u, 'the second operand must be the lifecycle-free pack')
+})
+
+test('each pack is produced into the directory its operand names', () => {
+  // If the destinations swapped, both operands would still be "different
+  // directories" while naming the wrong package.
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8'))
+  const protocol = JSON.parse(readFileSync(join(ROOT, 'scripts', 'pack-equivalence-protocol.json'), 'utf8'))
+  const ordinary = workflow.jobs.equivalence.steps.find(step => typeof step.run === 'string' && step.run.includes('pnpm pack') && !step.run.includes('ignore-scripts'))
+  const ciOnly = workflow.jobs.equivalence.steps.find(step => typeof step.run === 'string' && step.run.includes('ignore-scripts=true'))
+  assert.ok(ordinary && ciOnly, 'both packs must have their own step')
+  // The workflow moves the tarball to `"$GITHUB_WORKSPACE/<dir>/"`, so the
+  // directory is matched as a path segment rather than as a whole quoted word.
+  assert.ok(ordinary.run.includes(`/${protocol.operands.a}/`),
+    `the ordinary pack must land in ${protocol.operands.a}/`)
+  assert.ok(ciOnly.run.includes(`/${protocol.operands.b}/`),
+    `the lifecycle-free pack must land in ${protocol.operands.b}/`)
+  // And NOT in the other one's directory: a swapped destination would make the
+  // operands name the wrong package while still being two distinct paths.
+  assert.equal(ordinary.run.includes(`/${protocol.operands.b}/`), false,
+    'the ordinary pack must not land in the lifecycle-free directory')
+  assert.equal(ciOnly.run.includes(`/${protocol.operands.a}/`), false,
+    'the lifecycle-free pack must not land in the ordinary directory')
+})
