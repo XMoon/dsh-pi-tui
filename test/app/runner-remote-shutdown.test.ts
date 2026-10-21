@@ -242,13 +242,28 @@ async function mountShutdownRunner(
     runnerReleasedTransport = true
     await originalDisposeTransport()
   }
-  // The runner fiber is created below, so the cleanup that owns the transport
-  // is registered AFTER it: ONE awaited cleanup, in the production order
-  // (the fiber's teardown effect, then the fallback for a runner that never
-  // mounted). It is AWAITED on purpose: a fire-and-forget teardown would let
+  // ONE awaited cleanup that owns the transport, in the production order: the
+  // runner fiber's teardown effect, then the fallback for a runner that never
+  // mounted. It is AWAITED on purpose: a fire-and-forget teardown would let
   // the lifecycle remove the temp directories while the transport was still
   // being disposed, and would let the fallback start the transport teardown
   // before the runner's own retirement had settled.
+  //
+  // It is registered HERE — right after the aggregate exists and BEFORE any
+  // setup step that can reject — so the fallback really covers a mount that
+  // never completed. A cleanup registered after the mount would not exist on
+  // that path at all, and the aggregate would be left undisposed.
+  let runnerFiber: { dispose(): Promise<void> } | undefined
+  life.defer(async (): Promise<void> => {
+    await runnerFiber?.dispose()
+    // The fallback for the one case the fiber's teardown effect cannot cover:
+    // the runner never mounted (the mount threw), so no teardown effect exists
+    // and nothing else would release the transport. It runs only when the
+    // runner never reached it, so it can never add a second call to a
+    // transport the runner already disposed.
+    if (runnerReleasedTransport) return
+    await aggregate.selected.disposeTransport().catch(() => {})
+  })
   options.beforeMount?.(aggregate)
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = host.workRoot
@@ -274,17 +289,8 @@ async function mountShutdownRunner(
       override,
     )
   })
+  runnerFiber = fiber
   await fiber
-  life.defer(async (): Promise<void> => {
-    await fiber.dispose()
-    // The fallback for the one case the fiber's teardown effect cannot cover:
-    // the runner never mounted (the mount threw), so no teardown effect exists
-    // and nothing else would release the transport. It runs only when the
-    // runner never reached it, so it can never add a second call to a
-    // transport the runner already disposed.
-    if (runnerReleasedTransport) return
-    await aggregate.selected.disposeTransport().catch(() => {})
-  })
   return {
     host,
     aggregate,
