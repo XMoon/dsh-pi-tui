@@ -102,6 +102,23 @@ const SECTION_TOKEN = /^§\s*\d+(?:\.\d+)*(?:-\d+)*(?:\s*\/\s*§?\s*\d+(?:\.\d+)
 const SECTION_TOKEN_SINGLE = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?)(?:\/§?\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?))*?(?:\s*\(\d+\))?$/u
 
 /**
+ * A SECTION with a single-letter sub-case: `§24 A`, `§11 C`.
+ *
+ * The plan numbers its sub-cases by letter, so the letter belongs to the
+ * section label — `§24 A:` is one label, not a section followed by a
+ * stray word.
+ */
+const SECTION_SUB_CASE = /^§\s*\d+(?:\.\d+)*(?:-\d+)?\s+[A-Z]$/u
+
+/**
+ * A code, a label word and a sub-case letter: `P1.5 headless D`.
+ *
+ * The plan's sub-case letter belongs to the label, so the three parts are
+ * one label.
+ */
+const WORD_SUB_CASE = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+)?|\d+\.\d+)\s+(?:headless|static|lock|child|final|retired|addendum|absolute)\s+[A-Z]$/u
+
+/**
  * A bracketed code: `(R6-1)`, `(F2)`, `(3)`, `(10)`.
  *
  * A bare NUMBER in brackets is a case label too — the plan numbers its
@@ -241,6 +258,8 @@ function isLabelToken(token, first, colonForm = false) {
     || WORD_SUFFIX_CODE_TOKEN.test(token)
     || SECTION_TOKEN.test(token)
     || SECTION_TOKEN_SINGLE.test(token)
+    || SECTION_SUB_CASE.test(token)
+    || WORD_SUB_CASE.test(token)
     || BRACKET_CODE_TOKEN.test(token)
     || BRACKET_REVIEW_TOKEN.test(token)
     || BRACKET_HARNESS_TOKEN.test(token)
@@ -333,7 +352,7 @@ export function splitLeadingLabel(title) {
     const previous = tokens[tokens.length - 1]
     // A `PR D` pair and a `step 8` pair are ONE label token: the code and
     // its sub-label are one thing, not two.
-    if (previous !== undefined && (PR_SUB_LABEL.test(`${previous} ${token}`) || STEP_LABEL_TOKEN.test(`${previous} ${token}`) || FINDING_LABEL_TOKEN.test(`${previous} ${token}`) || ASSERTION_LABEL_TOKEN.test(`${previous} ${token}`))) {
+    if (previous !== undefined && (PR_SUB_LABEL.test(`${previous} ${token}`) || STEP_LABEL_TOKEN.test(`${previous} ${token}`) || FINDING_LABEL_TOKEN.test(`${previous} ${token}`) || ASSERTION_LABEL_TOKEN.test(`${previous} ${token}`) || SECTION_SUB_CASE.test(`${previous} ${token}`) || WORD_SUB_CASE.test(`${previous} ${token} ${tokens[tokens.length + 1] ?? ''}`))) {
       tokens[tokens.length - 1] = `${previous} ${token}`
       continue
     }
@@ -352,6 +371,20 @@ export function splitLeadingLabel(title) {
         consumed = next + 1
         next += 1
       }
+      break
+    }
+    // A SECTION may carry a single-letter sub-case: `§24 A`. The letter
+    // is the plan's sub-case number, so it belongs to the section label.
+    // (The merge above usually joined them already; this covers the case
+    // where the letter was not adjacent.)
+    if (SECTION_SUB_CASE.test(`${token} ${tokens[index + 1] ?? ''}`)) {
+      consumed = index + 2
+      break
+    }
+    // A code, a label word and a sub-case letter: `P1.5 headless D`. The
+    // three parts are ONE label, so the walk consumes all three.
+    if (WORD_SUB_CASE.test(`${token} ${tokens[index + 1] ?? ''} ${tokens[index + 2] ?? ''}`)) {
+      consumed = index + 3
       break
     }
   }
