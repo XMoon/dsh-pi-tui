@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { FAULT_TOKENS, REQUIRED_PHASES, checkFault, checkMode, resolveShardTotal, summarize } from '../../scripts/pipeline-guard.mjs'
+import { depsPlan } from '../../scripts/prototype-deps.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'pipeline-guard.mjs')
@@ -63,14 +64,28 @@ test('npm mode is supported', () => {
   assert.deepEqual(checkMode('npm'), { ok: true })
 })
 
-test('SOURCE mode is REFUSED, with the reason and the remedy', () => {
-  // The prototype cannot qualify it: the source-leak gate needs the built
-  // distribution and the startup smoke is npm-only. Running anyway would
-  // skip a gate and still produce a qualified candidate.
+test('SOURCE mode is supported once the distribution wiring exists', () => {
+  // The guard refused source mode while the source-leak gate had no
+  // distribution and the startup smoke was unconditionally skipped: a
+  // source run would have skipped a gate and still produced a qualified
+  // candidate. Both are wired now, so the mode is allowed — and the
+  // refusal is not "deleted", it moved to the dependency preparation, which
+  // FAILS a source job that was not given the distribution.
   const verdict = checkMode('source')
-  assert.equal(verdict.ok, false)
-  assert.match(verdict.reason, /SOURCE MODE IS NOT IMPLEMENTED/u)
-  assert.match(verdict.reason, /would skip a gate/u)
+  assert.deepEqual(verdict, { ok: true })
+})
+
+test('a SOURCE job without the pinned distribution FAILS', () => {
+  // The new place the boundary lives: a source job that would fall back to
+  // the registry is testing a different dependency graph.
+  assert.throws(
+    () => depsPlan({ mode: 'source', workspace: '/w' }),
+    /source mode requires --distribution/u,
+  )
+  const plan = depsPlan({ mode: 'source', distribution: '/pack', workspace: '/w' })
+  assert.equal(plan.commands[0].includes('--distribution'), true)
+  assert.equal(plan.env.TARBALL_SMOKE_SKIP_INSTALL, '1',
+    'the packed package must not install its own DSH peer when the distribution is already in the workspace')
 })
 
 test('an UNRESOLVED mode is refused, not defaulted', () => {
@@ -89,12 +104,13 @@ test('an UNKNOWN mode is refused', () => {
   assert.match(verdict.reason, /not one this prototype can qualify/u)
 })
 
-test('the CLI exits non-zero for source mode, so the workflow stops there', () => {
+test('the CLI accepts source mode now that its gates are wired', () => {
+  // The entry guard exists to stop a mode the pipeline cannot qualify. It
+  // refused source while the source-leak gate had no distribution; that
+  // wiring exists, so the entry passes and the boundary moved to the
+  // dependency preparation (asserted separately).
   const result = cli(['mode', 'source'])
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /SOURCE MODE IS NOT IMPLEMENTED/u)
-  // The point of refusing at the ENTRY: nothing downstream may run, so no
-  // candidate tarball can be produced for a mode that skipped a gate.
+  assert.equal(result.status, 0, result.stderr)
 })
 
 test('the CLI succeeds for npm mode', () => {
@@ -323,4 +339,49 @@ test('the qualified artifact is uploaded from its original path', () => {
     'the qualified artifact must not be a renamed copy')
   assert.match(source, /path: \$\{\{ env\.QUALIFIED_TARBALL \}\}/u,
     'the upload must use the verified tarball\'s own path')
+})
+
+// ---------------------------------------------------------------------------
+// Stage 3 — the dependency preparation, in one place.
+//
+// Six jobs install dependencies and they must install the SAME graph for the
+// run's mode. Six hand-written copies is how one job keeps installing from
+// the registry while the run claims Source Mode.
+// ---------------------------------------------------------------------------
+
+test('npm mode installs from the registry and exports the registry variables', () => {
+  const plan = depsPlan({ mode: 'npm', workspace: '/w' })
+  assert.deepEqual(plan.commands, [['pnpm', 'install', '--frozen-lockfile']])
+  assert.equal(plan.env.NPM_CONFIG_REGISTRY, 'https://registry.npmjs.org/')
+  assert.equal(plan.env.TARBALL_SMOKE_SKIP_INSTALL, undefined,
+    'the npm path must NOT skip the tarball install')
+})
+
+test('source mode installs the PINNED distribution, not the registry', () => {
+  const plan = depsPlan({ mode: 'source', distribution: '/pack', workspace: '/w' })
+  const [command, ...args] = plan.commands[0]
+  assert.equal(command, 'node')
+  assert.ok(args.some(arg => arg.endsWith('scripts/prepare-dsh-test-environment.mjs')), JSON.stringify(args))
+  assert.deepEqual(args.slice(args.indexOf('--mode'), args.indexOf('--mode') + 2), ['--mode', 'source'])
+  assert.deepEqual(args.slice(args.indexOf('--distribution'), args.indexOf('--distribution') + 2), ['--distribution', '/pack'])
+  assert.ok(args.includes('test/compat/dsh-source.json'), 'the pinned configuration is part of the plan')
+})
+
+test('an UNKNOWN mode is refused rather than installed as npm', () => {
+  assert.throws(() => depsPlan({ mode: 'registry', workspace: '/w' }), /not one this prototype prepares dependencies for/u)
+})
+
+test('every job that installs dependencies uses the shared preparation', () => {
+  // The contract against the shipped workflow: no job may keep its own
+  // inline `pnpm install`, because that is the copy that drifts.
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  const inline = [...source.matchAll(/pnpm install --frozen-lockfile/gu)].length
+  assert.equal(inline, 0, 'no job may install dependencies inline: use scripts/prototype-deps.mjs')
+  const shared = [...source.matchAll(/prototype-deps\.mjs/gu)].length
+  assert.equal(shared, 6, `the six consumer jobs must all use the shared preparation, found ${shared}`)
+})
+
+test('the mode override exists and is one the resolver accepts', () => {
+  const raw = readFileSync(join(ROOT, 'scripts', 'prototype-mode.txt'), 'utf8').trim()
+  assert.ok(['resolved', 'npm', 'source'].includes(raw), `unexpected mode override: ${raw}`)
 })

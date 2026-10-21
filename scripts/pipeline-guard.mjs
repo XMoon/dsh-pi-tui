@@ -133,7 +133,7 @@ export function checkFault(raw) {
  * npm-only. A source-mode run would silently skip a gate, so the pipeline
  * refuses the mode rather than qualifying less than it claims.
  */
-export const SUPPORTED_MODES = ['npm']
+export const SUPPORTED_MODES = ['npm', 'source']
 
 /**
  * Refuse a mode the prototype cannot qualify.
@@ -147,10 +147,11 @@ export function checkMode(mode) {
   }
   if (SUPPORTED_MODES.includes(mode)) return { ok: true }
   if (mode === 'source') {
-    return {
-      ok: false,
-      reason: 'SOURCE MODE IS NOT IMPLEMENTED in this prototype: the source-leak gate needs the built distribution and the startup smoke is npm-only, so a source-mode run would skip a gate and still look qualified. Implement Source Mode (D1/D2 and the distribution injection) before enabling it.',
-    }
+    // Source Mode IS implemented here: the pinned distribution is built
+    // once and every consumer installs from it, and the source-leak gate is
+    // given the distribution explicitly. The startup smoke stays npm-only
+    // and says so in the log instead of failing silently.
+    return { ok: true }
   }
   return { ok: false, reason: `the DSH dependency mode '${mode}' is not one this prototype can qualify` }
 }

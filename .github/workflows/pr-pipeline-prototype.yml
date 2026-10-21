@@ -71,6 +71,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       mode: ${{ steps.context.outputs.mode }}
+      source_ref: ${{ steps.context.outputs.source_ref }}
+      source_expected_version: ${{ steps.context.outputs.source_expected_version }}
       fault: ${{ steps.fault.outputs.fault }}
       shard_total: ${{ steps.shards.outputs.shard_total }}
       shards: ${{ steps.shards.outputs.shards }}
@@ -93,7 +95,23 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: node scripts/dsh-ci-context.mjs
+        run: |
+          set -euo pipefail
+          # The mode follows the real resolver, EXCEPT that the prototype
+          # may be told to exercise one explicitly.
+          #
+          # Source Mode only resolves on `next` (by the tracked mode policy),
+          # and the prototype lives on throwaway branches — so without an
+          # override the Source path could never be exercised at all. The
+          # override is a committed fact, so a run cannot differ from what
+          # its commit says.
+          FORCED="$(cat scripts/prototype-mode.txt)"
+          FORCED="$(printf '%s' "$FORCED" | tr -d '[:space:]')"
+          case "$FORCED" in
+            resolved) node scripts/dsh-ci-context.mjs ;;
+            npm|source) node scripts/dsh-ci-context.mjs --force-mode "$FORCED" ;;
+            *) echo "scripts/prototype-mode.txt must be resolved, npm or source, got: $FORCED" >&2; exit 1 ;;
+          esac
 
       # Source Mode is REFUSED here, at the entry, before a build or a
       # candidate can exist.
@@ -158,7 +176,12 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build the shared artifact
-    needs: context
+    needs:
+      - context
+      # In Source Mode the build consumes the pinned distribution, so it
+      # cannot start before that pack exists. A skipped dependency does not
+      # block a run, so the npm path is unaffected.
+      - source-pack
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -174,17 +197,25 @@ jobs:
           cache: true
           install: false
 
-      - name: Install the dependencies
+      # One dependency preparation for every job, because the two modes need
+      # DIFFERENT graphs: a job that installed from the registry while the run
+      # claimed Source Mode would be testing something else.
+      - name: Download the pinned DSH source pack
+        if: ${{ needs.context.outputs.mode == 'source' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare the dependencies for this mode
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
         run: |
           set -euo pipefail
-          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
-          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
-            npm_config_registry=https://registry.npmjs.org/ \
-            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
-            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
-            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-            pnpm install --frozen-lockfile
+          node scripts/prototype-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
 
       # `clean` FIRST, exactly like `prepack` does: a build that reuses a
       # stale `dist` is not the build this commit produces.
@@ -221,6 +252,63 @@ jobs:
           retention-days: 3
 
   # ---------------------------------------------------------------------------
+  # THE PINNED DSH DISTRIBUTION, in Source Mode only.
+  #
+  # Source Mode does not install the registry's DSH: it installs the official
+  # family built from the pinned commit, so every job that installs
+  # dependencies needs the SAME pack. Building it once and shipping it as an
+  # artifact is what makes "the same dependency graph everywhere" true rather
+  # than intended.
+  # ---------------------------------------------------------------------------
+  source-pack:
+    name: Build the pinned DSH source pack
+    needs: context
+    if: ${{ needs.context.outputs.mode == 'source' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout the pinned DeepSeek Harness
+        uses: actions/checkout@v7
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ needs.context.outputs.source_ref }}
+          path: deepseek-harness
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Build and pack the official DSH family
+        env:
+          DSH_SOURCE_REF: ${{ needs.context.outputs.source_ref }}
+          DSH_EXPECTED_VERSION: ${{ needs.context.outputs.source_expected_version }}
+        run: |
+          set -euo pipefail
+          node scripts/dsh-source-pack.mjs \
+            --dsh-dir "$GITHUB_WORKSPACE/deepseek-harness" \
+            --ref "$DSH_SOURCE_REF" \
+            --expected-version "$DSH_EXPECTED_VERSION" \
+            --out "$RUNNER_TEMP/dsh-source-pack"
+          test -f "$RUNNER_TEMP/dsh-source-pack/dsh-source-distribution.json"
+
+      - name: Upload the pinned DSH source pack
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
   # TYPECHECK, ONCE.
   #
   # It DEPENDS on the build: `tsconfig.json` includes `src` and `test`, and
@@ -236,6 +324,7 @@ jobs:
   typecheck:
     name: Bundle typecheck
     needs:
+      - source-pack
       - context
       - build
     runs-on: ubuntu-latest
@@ -253,12 +342,25 @@ jobs:
           cache: true
           install: false
 
-      - name: Install the dependencies
+      # One dependency preparation for every job, because the two modes need
+      # DIFFERENT graphs: a job that installed from the registry while the run
+      # claimed Source Mode would be testing something else.
+      - name: Download the pinned DSH source pack
+        if: ${{ needs.context.outputs.mode == 'source' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare the dependencies for this mode
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
         run: |
           set -euo pipefail
-          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-            pnpm install --frozen-lockfile
+          node scripts/prototype-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
 
       - name: Download the shared build
         uses: actions/download-artifact@v8
@@ -279,6 +381,7 @@ jobs:
   product-shard:
     name: Product shard ${{ matrix.shard }}/${{ needs.context.outputs.shard_total }}
     needs:
+      - source-pack
       - context
       - build
     runs-on: ubuntu-latest
@@ -303,12 +406,25 @@ jobs:
           cache: true
           install: false
 
-      - name: Install the dependencies
+      # One dependency preparation for every job, because the two modes need
+      # DIFFERENT graphs: a job that installed from the registry while the run
+      # claimed Source Mode would be testing something else.
+      - name: Download the pinned DSH source pack
+        if: ${{ needs.context.outputs.mode == 'source' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare the dependencies for this mode
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
         run: |
           set -euo pipefail
-          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-            pnpm install --frozen-lockfile
+          node scripts/prototype-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
 
       # The build is DOWNLOADED, not rebuilt. The digest comes with it, and
       # the next step proves the downloaded tree is that build.
@@ -498,6 +614,7 @@ jobs:
   candidate:
     name: Build the candidate tarball
     needs:
+      - source-pack
       - context
       - build
     runs-on: ubuntu-latest
@@ -518,12 +635,25 @@ jobs:
           cache: true
           install: false
 
-      - name: Install the dependencies
+      # One dependency preparation for every job, because the two modes need
+      # DIFFERENT graphs: a job that installed from the registry while the run
+      # claimed Source Mode would be testing something else.
+      - name: Download the pinned DSH source pack
+        if: ${{ needs.context.outputs.mode == 'source' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare the dependencies for this mode
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
         run: |
           set -euo pipefail
-          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-            pnpm install --frozen-lockfile
+          node scripts/prototype-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
 
       - name: Download the shared build
         uses: actions/download-artifact@v8
@@ -572,6 +702,7 @@ jobs:
   qualify:
     name: Qualify the candidate
     needs:
+      - source-pack
       - context
       - build
       - typecheck
@@ -594,12 +725,25 @@ jobs:
           cache: true
           install: false
 
-      - name: Install the dependencies
+      # One dependency preparation for every job, because the two modes need
+      # DIFFERENT graphs: a job that installed from the registry while the run
+      # claimed Source Mode would be testing something else.
+      - name: Download the pinned DSH source pack
+        if: ${{ needs.context.outputs.mode == 'source' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare the dependencies for this mode
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
         run: |
           set -euo pipefail
-          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-            pnpm install --frozen-lockfile
+          node scripts/prototype-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
 
       - name: Download the candidate
         uses: actions/download-artifact@v8
@@ -664,11 +808,30 @@ jobs:
         run: node scripts/compose-agent-compat-smoke.mjs "$CANDIDATE"
 
       - name: Source leak gate
-        run: node scripts/dsh-source-leak-gate.mjs "$CANDIDATE"
+        env:
+          DSH_SOURCE_ARTIFACT: ${{ runner.temp }}/dsh-source-pack
+        run: |
+          set -euo pipefail
+          # In Source Mode the gate must know which distribution the build
+          # consumed, or it cannot tell a legitimate source resolution from
+          # a leak. Passing nothing would run a weaker check on the same
+          # tarball and report the same green.
+          if [ "$DSH_MODE" = "source" ]; then
+            node scripts/dsh-source-leak-gate.mjs "$CANDIDATE" --distribution "$DSH_SOURCE_ARTIFACT"
+          else
+            node scripts/dsh-source-leak-gate.mjs "$CANDIDATE"
+          fi
 
       - name: TUI startup strictness handshake
         if: env.DSH_MODE == 'npm'
         run: pnpm smoke:startup-strictness -- "$CANDIDATE"
+
+      # A step that does not apply must SAY so. A silent skip in a
+      # qualification is indistinguishable from a gate that ran and passed.
+      - name: Record the npm-only smoke on a source run
+        if: env.DSH_MODE == 'source'
+        run: |
+          echo 'NOT_APPLICABLE: the startup strictness smoke is npm-only; Source Mode is qualified by its own lanes'
 
       # The digest is checked AGAIN, after the smokes, against the value the
       # pack job recorded: a candidate replaced between the smokes and the
@@ -714,6 +877,7 @@ jobs:
   downstream:
     name: Downstream compat / Node ${{ matrix.node }}
     needs:
+      - source-pack
       - context
       - qualify
     runs-on: ubuntu-latest
@@ -740,12 +904,25 @@ jobs:
           cache: true
           install: false
 
-      - name: Install the workspace dependencies
+      # One dependency preparation for every job, because the two modes need
+      # DIFFERENT graphs: a job that installed from the registry while the run
+      # claimed Source Mode would be testing something else.
+      - name: Download the pinned DSH source pack
+        if: ${{ needs.context.outputs.mode == 'source' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare the dependencies for this mode
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
         run: |
           set -euo pipefail
-          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-            pnpm install --frozen-lockfile
+          node scripts/prototype-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
 
       - name: Download the provisional candidate
         uses: actions/download-artifact@v8
