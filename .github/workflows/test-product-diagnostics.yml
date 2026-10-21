@@ -209,6 +209,11 @@ jobs:
       - name: Prove the shards are the whole lane
         env:
           DSH_SHARD_TOTAL: ${{ inputs.shard_total }}
+          # The identity every shard must agree on. A shard from another
+          # run must not be counted towards this one: the aggregate would
+          # then claim a coverage nobody measured.
+          DSH_EXPECTED_SHA: ${{ inputs.sha || github.sha }}
+          DSH_EXPECTED_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           node scripts/verify-shards.mjs \
