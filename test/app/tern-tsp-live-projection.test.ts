@@ -751,7 +751,7 @@ test('an owner handover under the SAME fold/window drops the interrupted frame',
 
 // ── P2-06 / P2-07: a replaced fold under the SAME session id ────────────────
 
-test('07: a replaced fold under the SAME session id is a new projection scope', () => {
+test('a replaced fold under the SAME session id is a new projection scope', () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -850,7 +850,7 @@ test('dispose releases the read-only observer, so no later projection reaches th
 
 // ── P2-12 / P2-14: tty isolation and the product boundary ───────────────────
 
-test('14: the TSP sink owns its own tty and no product source imports the SDK', async () => {
+test('the TSP sink owns its own tty and no product source imports the SDK', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)
