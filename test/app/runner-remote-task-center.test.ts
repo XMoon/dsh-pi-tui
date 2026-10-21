@@ -302,7 +302,7 @@ function flat(view: string): string {
   return view.replace(/\s+/gu, ' ')
 }
 
-test('§11/§14.4-5-6: `/tasks` renders the REAL Remote descendant tree and the child row opens the REAL child viewer', async (t) => {
+test('`/tasks` renders the REAL Remote descendant tree and the child row opens the REAL child viewer', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
   // A parent-session pending echo: while the MAIN surface owns the queue it is

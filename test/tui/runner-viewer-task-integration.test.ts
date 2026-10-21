@@ -2976,7 +2976,7 @@ test('Direct viewer shows the child’s used model and follows later request hea
   assert.ok(!restored.includes('child-b-used-model'), `the child model must not linger on the main subject:\n${restored}`)
 })
 
-test('(owner item 1): a child that USED the same route as the process default reads it through the absence branch, never as a default fill', async (t) => {
+test('a child that USED the same route as the process default reads it through the absence branch, never as a default fill', async (t) => {
   // The inherited-route case: the child's own `request/header` carries exactly
   // the process default's provider/model, so a default-fill bug would render the
   // SAME string and a broken compat read would render `model ?`. The test

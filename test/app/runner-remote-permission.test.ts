@@ -569,7 +569,7 @@ test('a real pending Remote Question survives reconnect — the same flow answer
     'the question surface fully retired after the single answer')
 })
 
-test('(review follow-up): a dispatched continued-answer settlement stays real across reconnect — classified from the Host result, never replayed', async (t) => {
+test('a dispatched continued-answer settlement stays real across reconnect — classified from the Host result, never replayed', async (t) => {
   // The §16.3 write-settlement window the live-waterfall case cannot reach:
   // the answer is dispatched through `answerContinued()` on generation A,
   // the Connection reconnects while the settlement is in flight, and the
@@ -814,7 +814,7 @@ test('(review follow-up): a dispatched continued-answer settlement stays real ac
     `the controller observed exactly one truthful adapter settlement (no reclassification): ${JSON.stringify(settledOutcomes)}`)
 })
 
-test('(review O1): a dispatched credential write stays real across reconnect — no reclassification, exactly one dispatch, no replay', async (t) => {
+test('a dispatched credential write stays real across reconnect — no reclassification, exactly one dispatch, no replay', async (t) => {
   // The /login handler writes through exactly this port
   // (`runner.config.credentials.setReference`). The shared fixture now mounts
   // the SAME writable provider the production base composition mounts

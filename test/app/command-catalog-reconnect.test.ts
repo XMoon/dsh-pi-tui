@@ -672,7 +672,7 @@ test('disposeCatalog unsubscribes the generation listener exactly once and no po
 
 /* ── CCR-8 ────────────────────────────────────────────────────────────── */
 
-test('(Direct negative control): no generation subscription exists on the Direct branch', () => {
+test('no generation subscription exists on the Direct branch', () => {
   const harness = fakeRunnerDeps({
     remoteSource: undefined,
     currentSessionId: () => 'session-a',
