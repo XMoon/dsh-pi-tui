@@ -26,11 +26,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { resolveTestRoot } from '../../scripts/run-test-lane.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 
@@ -150,36 +152,39 @@ test('the lane runner WRITES the case records when the opt-in variable is set', 
   assert.equal(fileEntries.length, 2, JSON.stringify(records.map(r => r.name), null, 2))
 })
 
-test('the environment variable ALONE cannot redirect a qualification run', (t) => {
+test('the environment variable ALONE cannot redirect a qualification run', () => {
   // `pnpm test:product` must scan the repository's own test files, and
-  // nothing an environment variable says may change that set. A stray
+  // nothing an environment variable says may change that set: a stray
   // `DSH_TEST_ROOT` in a developer's shell must not make the product
   // lane report green without having run the product suite.
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-lane-redirect-')
-  const testRoot = join(root, 'test')
-  mkdirSync(testRoot, { recursive: true })
-  writeFileSync(join(testRoot, 'synthetic.test.ts'), "import test from 'node:test'\ntest('a synthetic case', () => {})\n")
-  const result = spawnSync(process.execPath, [RUNNER, 'product'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    timeout: 60_000,
-    env: {
-      ...process.env,
-      NODE_TEST_CONTEXT: undefined,
-      DSH_TEST_ROOT: testRoot,
-    },
-  })
-  // The variable is IGNORED without the explicit flag, so the runner
-  // scans the repository's OWN tree — and runs the real product suite.
-  // The synthetic file is never executed, which is what proves the run
-  // was not redirected.
-  assert.doesNotMatch(result.stdout, /a synthetic case/u,
-    'the synthetic file must not have been run')
-  // The repository's own product suite ran: the report carries a case
-  // from a file the synthetic tree does not have.
-  assert.match(result.stdout, /REAL PlatformAccount \+ official WebServer callback/u,
-    'the repository\'s own product suite must have run')
+  //
+  // The DECISION is what is under test, and it is a decision about one
+  // directory — so it is verified directly, without running the product
+  // suite to observe which files it found.
+  const canonical = join(ROOT, 'test')
+  const synthetic = join(tmpdir(), 'dsh-synthetic-test-root')
+  // The variable alone: IGNORED, and the canonical root is used.
+  assert.equal(
+    resolveTestRoot(undefined, { DSH_TEST_ROOT: synthetic }),
+    canonical,
+    'the environment variable alone must not redirect the lane',
+  )
+  // The explicit opt-in: the two have to AGREE, or the runner refuses.
+  assert.equal(
+    resolveTestRoot(synthetic, { DSH_TEST_ROOT: synthetic }),
+    resolve(synthetic),
+    'the explicit opt-in must select the named root',
+  )
+  assert.throws(
+    () => resolveTestRoot(synthetic, {}),
+    /requires DSH_TEST_ROOT/u,
+    'the explicit opt-in without the variable must be refused',
+  )
+  assert.throws(
+    () => resolveTestRoot(synthetic, { DSH_TEST_ROOT: canonical }),
+    /disagree/u,
+    'the explicit opt-in and the variable must agree',
+  )
 })
 
 test('the lane runner writes NO records when the opt-in variable is absent', (t) => {

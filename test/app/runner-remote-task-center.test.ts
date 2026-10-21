@@ -761,7 +761,7 @@ async function awaitChildInitialTurn(
   }
 }
 
-test('/ §5 Must 17: a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
+test('a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
   const life = testLifecycle(t)
   // The Client-local request zone IS the sending TUI runtime's zone: pin it so
   // the zone the Remote viewer forwards is an asserted value. The official
@@ -1169,7 +1169,7 @@ function seedImageTurn(append: Append, turn: number, text: string, attachment: u
   append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-test('+ F7: the mounted child viewer routes the durable child image through the CHILD Session readAttachment, and load() captures the asking subject', async (t) => {
+test('the mounted child viewer routes the durable child image through the CHILD Session readAttachment, and load() captures the asking subject', async (t) => {
   const life = testLifecycle(t)
   // The REAL inline-image render path fires the loader only when the terminal
   // reports image support (`ImageThumbnail.renderLines`); this is the

@@ -207,6 +207,12 @@ test('the title transform removes every code family the tree uses', () => {
     ['A5b-6: the composition root introduces no new type', 'the composition root introduces no new type'],
     ['B4A-07 a resize re-budgets the window', 'a resize re-budgets the window'],
     ['PR5 §1C-3 (R6-1): only the winner is subtracted', 'only the winner is subtracted'],
+    // A `step N` label carries its JOINED parts: 'step 10 + 11(b)',
+    // 'steps 1-8 + negatives (c)/no-retry', 'step 8 / §5 Must 17'. The
+    // whole scope is one label, and it goes with the code.
+    ['L6 §15 step 10 + 11(b): a SECOND real Job stops', 'a SECOND real Job stops'],
+    ['L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job viewer observes', 'the REAL Job viewer observes'],
+    ['L6 §15 step 8 / §5 Must 17: the case', 'the case'],
     // A bracketed qualifier that DIRECTLY follows the code is part of
     // the LABEL: it names the review or the variant, and it goes with
     // the code.
