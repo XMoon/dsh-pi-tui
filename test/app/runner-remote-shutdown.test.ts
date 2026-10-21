@@ -217,12 +217,29 @@ async function mountShutdownRunner(
   })
   // The transport is disposed by the RUNNER FIBER's teardown effect
   // (`registerRunnerDisposal` → `disposeSelectedTransport`), so the fiber
-  // disposal registered below owns it. A second, direct
+  // disposal registered below owns it. A second, unconditional
   // `selected.disposeTransport()` registration would reach the SAME
   // idempotent disposer a second time — and the "disposes exactly once"
-  // assertions count the CALLS, so the extra registration could land
-  // before the assertion and make the count 2. The fiber disposal is the ONE
-  // owner; nothing else disposes the transport.
+  // assertions count the CALLS, so the extra registration could land before
+  // the assertion and make the count 2.
+  //
+  // The fallback below is the SAFETY net for the one case the fiber effect
+  // cannot cover: the runner never mounted (the mount threw), so no teardown
+  // effect exists and nothing else would release the transport. It disposes
+  // ONLY when the fiber never released it, so it can never add a second call
+  // to a transport the runner already disposed.
+  let runnerReleasedTransport = false
+  const originalDisposeTransport = aggregate.selected.disposeTransport.bind(aggregate.selected)
+  aggregate.selected.disposeTransport = async (): Promise<void> => {
+    // The fiber's teardown effect reached the transport: the fallback below
+    // must NOT add a second call.
+    runnerReleasedTransport = true
+    await originalDisposeTransport()
+  }
+  life.defer(() => {
+    if (runnerReleasedTransport) return
+    void aggregate.selected.disposeTransport().catch(() => {})
+  })
   options.beforeMount?.(aggregate)
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = host.workRoot
