@@ -107,6 +107,24 @@ function failedLog(runId) {
   }
 }
 
+/**
+ * The lines of one job from `gh run view --log-failed`.
+ *
+ * Every line is prefixed with the job name and a tab, so the target job's
+ * evidence can be isolated. Without this, a message produced by ANY job
+ * would satisfy the assertion.
+ *
+ * @param {string} log - the whole failed log.
+ * @param {string} jobPrefix - the job-name prefix of the target phase.
+ * @returns {string} the target job's lines.
+ */
+function logForJob(log, jobPrefix) {
+  return log
+    .split('\n')
+    .filter(line => line.startsWith(`${jobPrefix}`) || line.includes(`\t${jobPrefix}`))
+    .join('\n')
+}
+
 function artifactsOf(runId) {
   return JSON.parse(gh(['api', `repos/XMoon/dsh-pi-tui/actions/runs/${runId}/artifacts?per_page=100`])).artifacts
 }
@@ -135,6 +153,10 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
     return 'success'
   }
   const phaseResult = jobFor(target)
+  // The target must have FAILED. Treating `skipped`, `cancelled` or an
+  // unfinished job as "the target failed" would let a run where the target
+  // never executed count as proof of the injection.
+  const phaseFailed = phaseResult === 'failure'
   const artifacts = artifactsOf(run.id).map(a => a.name)
   const qualified = artifacts.includes('prototype-qualified-candidate')
   const provisional = artifacts.includes('prototype-provisional-candidate')
@@ -142,14 +164,22 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
 
   const failures = []
   if (run.conclusion !== 'failure') failures.push(`the run conclusion is '${run.conclusion}', not 'failure'`)
-  if (phaseResult === 'success' || phaseResult === 'absent') failures.push(`the target phase '${target}' is '${phaseResult}': the failure is not attributable to it`)
-  // The attribution evidence: the log must carry the injection's own
-  // message. A red run for an unrelated reason is not proof of this class.
+  if (!phaseFailed) {
+    failures.push(`the target phase '${target}' is '${phaseResult}', not 'failure': the injection is not attributable to it`)
+  }
+  // The attribution evidence: the TARGET JOB's own log must carry the
+  // injection's message.
+  //
+  // Reading the whole run's failed log is not the same thing: every other
+  // job's failure would be searched too, so a target that never ran could be
+  // "attributed" by a message produced somewhere else.
   let logMatched = null
-  if (phaseResult !== 'success' && phaseResult !== 'absent') {
+  if (phaseFailed) {
     const log = failedLog(run.id)
-    logMatched = expectLog.test(log)
-    if (!logMatched) failures.push(`the failing log does not carry the injection's own message (${expectLog})`)
+    logMatched = expectLog.test(logForJob(log, phasePrefix(target)))
+    if (!logMatched) {
+      failures.push(`the target job's log does not carry the injection's own message (${expectLog})`)
+    }
   }
   // THE substance: the qualified artifact must not exist.
   if (qualified) failures.push('a prototype-qualified-candidate artifact EXISTS: the qualification was not refused')
@@ -161,6 +191,7 @@ for (const { fault, branch, target, expectLog } of FAULTS) {
     runConclusion: run.conclusion,
     target,
     phaseResult,
+    phaseFailed,
     logMatched,
     qualifiedArtifact: qualified,
     provisionalArtifact: provisional,

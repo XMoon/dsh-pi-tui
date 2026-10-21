@@ -20,7 +20,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { dirname } from 'node:path'
@@ -64,15 +64,17 @@ test('npm mode is supported', () => {
   assert.deepEqual(checkMode('npm'), { ok: true })
 })
 
-test('SOURCE mode is supported once the distribution wiring exists', () => {
-  // The guard refused source mode while the source-leak gate had no
-  // distribution and the startup smoke was unconditionally skipped: a
-  // source run would have skipped a gate and still produced a qualified
-  // candidate. Both are wired now, so the mode is allowed — and the
-  // refusal is not "deleted", it moved to the dependency preparation, which
-  // FAILS a source job that was not given the distribution.
+test('SOURCE mode is refused because it cannot be RESOLVED here', () => {
+  // The wiring exists (pinned pack, one dependency preparation, the leak
+  // gate taking the distribution), but no Source Mode run can be produced in
+  // this workflow: the repository resolver derives `source` only on the
+  // `next` line when the tracked policy selects it, and it refuses a forced
+  // mode that disagrees. A mode the pipeline cannot demonstrate is not
+  // qualified.
   const verdict = checkMode('source')
-  assert.deepEqual(verdict, { ok: true })
+  assert.equal(verdict.ok, false)
+  assert.match(verdict.reason, /cannot be RESOLVED/u)
+  assert.match(verdict.reason, /NOT_VERIFIED/u)
 })
 
 test('a SOURCE job without the pinned distribution FAILS', () => {
@@ -104,13 +106,10 @@ test('an UNKNOWN mode is refused', () => {
   assert.match(verdict.reason, /not one this prototype can qualify/u)
 })
 
-test('the CLI accepts source mode now that its gates are wired', () => {
-  // The entry guard exists to stop a mode the pipeline cannot qualify. It
-  // refused source while the source-leak gate had no distribution; that
-  // wiring exists, so the entry passes and the boundary moved to the
-  // dependency preparation (asserted separately).
+test('the CLI refuses source mode at the entry', () => {
   const result = cli(['mode', 'source'])
-  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /cannot be RESOLVED/u)
 })
 
 test('the CLI succeeds for npm mode', () => {
@@ -381,9 +380,15 @@ test('every job that installs dependencies uses the shared preparation', () => {
   assert.equal(shared, 6, `the six consumer jobs must all use the shared preparation, found ${shared}`)
 })
 
-test('the mode override exists and is one the resolver accepts', () => {
-  const raw = readFileSync(join(ROOT, 'scripts', 'prototype-mode.txt'), 'utf8').trim()
-  assert.ok(['resolved', 'npm', 'source'].includes(raw), `unexpected mode override: ${raw}`)
+test('no committed mode override exists, because it could never work', () => {
+  // An override that passes `--force-mode source` fails at the entry: the
+  // resolver accepts a forced mode only when it agrees with the derived one.
+  // Keeping the file would be a switch that reports "source" in the tree and
+  // fails in the run.
+  assert.equal(existsSync(join(ROOT, 'scripts', 'prototype-mode.txt')), false,
+    'the prototype must not carry a mode override the resolver refuses')
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  assert.doesNotMatch(source, /--force-mode/u, 'the workflow must not try to force a mode')
 })
 
 test('a job that needs the SKIPPED source pack still runs in npm mode', () => {
@@ -414,4 +419,29 @@ test('the source pack is only built in source mode', () => {
   const header = source.slice(start, source.indexOf('    steps:', start))
   assert.match(header, /if: \$\{\{ needs\.context\.outputs\.mode == 'source' \}\}/u,
     'the pinned distribution must not be built for an npm run')
+})
+
+test('every job downstream of the source pack states its own condition', () => {
+  // A skipped job skips its dependents THROUGH the dependency graph, not only
+  // through direct `needs`. `source-pack` is skipped in npm mode, so every
+  // job that can reach it — directly or transitively — must override the
+  // default, or the npm path silently publishes nothing while each direct
+  // dependency reports success.
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  const workflow = source
+  // The jobs that may legitimately run without an override.
+  const exempt = new Set(['context', 'source-pack', 'aggregate', 'summary'])
+  const jobNames = [...workflow.matchAll(/\n  ([a-z][a-z-]*):\n/g)].map(match => match[1])
+  const overridden = []
+  for (const name of jobNames) {
+    if (exempt.has(name)) continue
+    const start = workflow.indexOf(`\n  ${name}:\n`)
+    const header = workflow.slice(start, workflow.indexOf('    steps:', start))
+    if (!header.includes('source-pack')) continue
+    const direct = /if: \$\{\{ !cancelled\(\) && needs\.source-pack\.result != 'failure' \}\}/u.test(header)
+    const viaBuild = /if: \$\{\{ !cancelled\(\) && needs\.build\.result == 'success' \}\}/u.test(header)
+    assert.ok(direct || viaBuild, `${name} depends on the source pack but has no condition`)
+    overridden.push(name)
+  }
+  assert.ok(overridden.length >= 6, `the consumers must be covered, only found ${overridden.join(', ')}`)
 })

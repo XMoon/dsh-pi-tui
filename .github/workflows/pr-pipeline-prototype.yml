@@ -95,23 +95,17 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          # The mode follows the real resolver, EXCEPT that the prototype
-          # may be told to exercise one explicitly.
-          #
-          # Source Mode only resolves on `next` (by the tracked mode policy),
-          # and the prototype lives on throwaway branches — so without an
-          # override the Source path could never be exercised at all. The
-          # override is a committed fact, so a run cannot differ from what
-          # its commit says.
-          FORCED="$(cat scripts/prototype-mode.txt)"
-          FORCED="$(printf '%s' "$FORCED" | tr -d '[:space:]')"
-          case "$FORCED" in
-            resolved) node scripts/dsh-ci-context.mjs ;;
-            npm|source) node scripts/dsh-ci-context.mjs --force-mode "$FORCED" ;;
-            *) echo "scripts/prototype-mode.txt must be resolved, npm or source, got: $FORCED" >&2; exit 1 ;;
-          esac
+        # The mode comes from the repository's OWN resolver, with no
+        # override.
+        #
+        # An earlier version tried to force Source Mode from a committed
+        # file. It cannot work: the resolver accepts a forced mode only when
+        # it AGREES with the one derived from the event, and that derivation
+        # yields `source` only for a push to `next` (or a PR targeting it)
+        # while the tracked policy selects source. A forced `source` on these
+        # branches therefore fails at the entry — which is the honest
+        # outcome, because Source Mode is not exercisable here at all.
+        run: node scripts/dsh-ci-context.mjs
 
       # Source Mode is REFUSED here, at the entry, before a build or a
       # candidate can exist.
@@ -1000,6 +994,13 @@ jobs:
       - candidate
       - qualify
       - downstream
+    # This job depends on `source-pack` TRANSITIVELY, through `build`, and a
+    # skipped job in the dependency graph skips its dependents unless they
+    # say otherwise. Without this condition an npm run published nothing
+    # while every one of its direct dependencies had succeeded — and the
+    # summary then failed on `qualified artifact is 'skipped'`, which points
+    # at the wrong job.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

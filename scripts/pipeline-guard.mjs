@@ -133,7 +133,14 @@ export function checkFault(raw) {
  * npm-only. A source-mode run would silently skip a gate, so the pipeline
  * refuses the mode rather than qualifying less than it claims.
  */
-export const SUPPORTED_MODES = ['npm', 'source']
+/**
+ * The modes this workflow can QUALIFY, which is not the same as the modes it
+ * has wiring for.
+ *
+ * `source` is deliberately absent: the repository resolver cannot derive it
+ * on these branches, so no Source Mode run can be produced here to qualify.
+ */
+export const SUPPORTED_MODES = ['npm']
 
 /**
  * Refuse a mode the prototype cannot qualify.
@@ -147,11 +154,18 @@ export function checkMode(mode) {
   }
   if (SUPPORTED_MODES.includes(mode)) return { ok: true }
   if (mode === 'source') {
-    // Source Mode IS implemented here: the pinned distribution is built
-    // once and every consumer installs from it, and the source-leak gate is
-    // given the distribution explicitly. The startup smoke stays npm-only
-    // and says so in the log instead of failing silently.
-    return { ok: true }
+    // The WIRING exists (pinned distribution, one dependency preparation,
+    // the leak gate taking the distribution), but Source Mode cannot be
+    // RESOLVED into this workflow: `dsh-ci-context.mjs` derives `source`
+    // only for a push to `next`, or a PR targeting `next`, when the tracked
+    // policy selects it — and it refuses a forced mode that disagrees.
+    //
+    // So this pipeline cannot show a Source Mode run at all, and a mode it
+    // cannot demonstrate must not be accepted as qualified.
+    return {
+      ok: false,
+      reason: 'Source Mode cannot be RESOLVED in this workflow: the repository resolver derives it only for `next` when the tracked policy selects source, and it refuses a forced mode that disagrees. The wiring exists but is NOT_VERIFIED here; qualify Source Mode on the `next` line (or with an Owner-approved override there).',
+    }
   }
   return { ok: false, reason: `the DSH dependency mode '${mode}' is not one this prototype can qualify` }
 }
