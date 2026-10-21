@@ -3465,7 +3465,7 @@ test('a deferred session where the host name DISAPPEARS keeps the argued line an
     'a known non-invocation is never consumed as an advertised command miss, even when the name disappears')
 })
 
-test('AC-2/R7-3: a genuine Host command installed AFTER a live skill wrapper owns its name (a wrapper name must not erase it)', async (t) => {
+test('a genuine Host command installed AFTER a live skill wrapper owns its name (a wrapper name must not erase it)', async (t) => {
   // R7-3: the live skill wrapper `/grilling` exists FIRST; a plugin then
   // installs a GENUINE Host `/grilling`. The wrapper disposer stays live, so the
   // name-based wrapper shortcut in `hostOriginClaimOf` (`skillDisposers.has`)

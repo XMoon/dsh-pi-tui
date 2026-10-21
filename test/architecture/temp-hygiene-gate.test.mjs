@@ -102,7 +102,7 @@ test('collectTestFiles only picks up source files', async (t) => {
   assert.deepEqual(files, ['a.test.ts', 'b.test.mjs', join('nested', 'c.test.js')])
 })
 
-test('an allowlisted basename that is NOT unique is reported', (t) => {
+test('repository test tree satisfies temp hygiene', (t) => {
   // The allowlist names files by their basename, so a file that moves
   // between ownership directories keeps its verdict. That is only safe
   // while the basename is UNIQUE: a second file with the same name would

@@ -11,7 +11,7 @@ import {
   type DirectSurfaceAuthorityContext,
 } from '../../../src/runtime/direct/surface-authority-direct.ts'
 
-test('the live eligibility check never reads a catalog service', () => {
+test('checks live eligibility without reading catalog services', () => {
   const ctx = { get: () => { assert.fail('eligibility must not discover catalogs') } }
   let agent: DirectSurfaceAuthorityAgent | undefined
   const reader = new DirectSurfaceAuthorityReader(ctx, sessionId => {

@@ -3238,7 +3238,7 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
 // notice line — with a HOSTILE official label, and asserts on the RAW stream
 // the TUI writes to the terminal (never a `stripTerminalSequences()` shot).
 
-test('the real /tasks Subagent interrupt admits through the session writer and a hostile label never reaches the terminal stream', async (t) => {
+test('S-03 L6: the real /tasks Subagent interrupt admits through the session writer and a hostile label never reaches the terminal stream', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-task-interrupt-text-safety-')
   const previousHome = process.env.DSH_HOME

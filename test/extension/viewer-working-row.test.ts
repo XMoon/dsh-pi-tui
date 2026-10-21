@@ -153,7 +153,7 @@ test('the committed display subject owns the row, not the viewer entry-time acti
     'the reverse flip must clear the row again')
 })
 
-test('follows the newly displayed child immediately', async () => {
+test('A ->: child B follows the newly displayed child immediately', async () => {
   const { vt, app } = startApp()
   enterChildDisplaySubject(app, { ...CHILD_A, activity: 'running' })
   assert.ok((await view(vt)).includes('Working...'), 'precondition: child A is running')
