@@ -19,17 +19,17 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { checkProductionReads, formatReport, passes } from '../../scripts/check-production-reads.mjs'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..')
 
 /** A disposable test root with one test file in it. */
-function fixtureRoot(name, source) {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-reads-gate-'))
+function fixtureRoot(t, name, source) {
+  const root = testLifecycle(t).tempDir('dsh-reads-gate-')
   mkdirSync(join(root, 'tooling'), { recursive: true })
   writeFileSync(join(root, 'tooling', `${name}.test.mjs`), source)
   return root
@@ -43,7 +43,7 @@ test('the gate is green on the real tree', () => {
 })
 
 test('the gate FAILS when a test reads a production file that does not exist', (t) => {
-  const root = fixtureRoot('synthetic-missing-read', [
+  const root = fixtureRoot(t, 'synthetic-missing-read', [
     "import test from 'node:test'",
     "import { readFileSync } from 'node:fs'",
     "import { join } from 'node:path'",
@@ -54,7 +54,6 @@ test('the gate FAILS when a test reads a production file that does not exist', (
     '})',
     '',
   ].join('\n'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
   const result = checkProductionReads(root, REPO_ROOT)
   assert.equal(passes(result), false, 'a read of a non-existent production file must fail the gate')
   assert.match(formatReport(result), /does NOT exist: 1/u)
@@ -64,7 +63,7 @@ test('the gate FAILS when a production read cannot be resolved statically', (t) 
   // The fail-closed case: a NEW read form the resolver does not understand
   // must not be counted as covered. A green gate must mean "every
   // production read was checked".
-  const root = fixtureRoot('synthetic-unresolved-read', [
+  const root = fixtureRoot(t, 'synthetic-unresolved-read', [
     "import test from 'node:test'",
     "import { readFileSync } from 'node:fs'",
     "import { join } from 'node:path'",
@@ -77,7 +76,6 @@ test('the gate FAILS when a production read cannot be resolved statically', (t) 
     '})',
     '',
   ].join('\n'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
   const result = checkProductionReads(root, REPO_ROOT)
   assert.equal(passes(result), false, 'an unresolvable production read must fail the gate')
   assert.match(formatReport(result), /could NOT be resolved statically: 1/u)

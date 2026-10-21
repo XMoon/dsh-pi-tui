@@ -18,11 +18,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 import { parseShard } from '../../scripts/run-test-lane.mjs'
 import { stripCodePrefix, rewriteSource } from '../../scripts/strip-code-prefix.mjs'
@@ -32,9 +33,9 @@ const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 const REPORTER = join(ROOT, 'scripts', 'test-case-reporter.mjs')
 
 /** Run a synthetic test file through the reporter and return its records. */
-function runReporter(files, { jsonl = true } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-case-reporter-'))
-  try {
+function runReporter(t, files, { jsonl = true } = {}) {
+  const dir = testLifecycle(t).tempDir('dsh-case-reporter-')
+  {
     const jsonlPath = join(dir, 'cases.jsonl')
     for (const [name, source] of Object.entries(files)) {
       writeFileSync(join(dir, name), source)
@@ -56,8 +57,6 @@ function runReporter(files, { jsonl = true } = {}) {
       ? readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
       : []
     return { status: result.status, stdout: result.stdout, stderr: result.stderr, records }
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 }
 
@@ -67,8 +66,8 @@ test('the first case passes', () => {})
 test('the second case passes', () => {})
 `
 
-test('the reporter records every case of every file it is given', () => {
-  const run = runReporter({
+test('the reporter records every case of every file it is given', (t) => {
+  const run = runReporter(t, {
     'a.test.mjs': TWO_CASES,
     'b.test.mjs': TWO_CASES,
   })
@@ -79,8 +78,8 @@ test('the reporter records every case of every file it is given', () => {
   assert.equal(files.size, 2, 'both files must be represented')
 })
 
-test('a case that is only a code keeps its name', () => {
-  const run = runReporter({
+test('a case that is only a code keeps its name', (t) => {
+  const run = runReporter(t, {
     'a.test.mjs': `
 import { test } from 'node:test'
 test('B3', () => {})
@@ -91,8 +90,8 @@ test('B3', () => {})
   assert.ok(names.includes('B3'), JSON.stringify(names))
 })
 
-test('a skipped case is recorded as SKIPPED, not as a fast pass', () => {
-  const run = runReporter({
+test('a skipped case is recorded as SKIPPED, not as a fast pass', (t) => {
+  const run = runReporter(t, {
     'a.test.mjs': `
 import { test } from 'node:test'
 test('a skipped case', { skip: true }, () => {})
@@ -105,11 +104,11 @@ test('a passing case', () => {})
   assert.equal(byName.get('a passing case')?.result, 'pass')
 })
 
-test('a skipped case that carries a REASON is recorded as SKIPPED', () => {
+test('a skipped case that carries a REASON is recorded as SKIPPED', (t) => {
   // The repository's own skips carry a reason, not a boolean: the reason
   // says WHY the case could not run, and that is the whole value of the
   // marker.
-  const run = runReporter({
+  const run = runReporter(t, {
     'a.test.mjs': `
 import { test } from 'node:test'
 test('a blocked case', { skip: 'BLOCKED: the optional bundle is not provisioned' }, () => {})
@@ -120,8 +119,8 @@ test('a blocked case', { skip: 'BLOCKED: the optional bundle is not provisioned'
   assert.equal(record?.result, 'skip')
 })
 
-test('a todo case is recorded as TODO', () => {
-  const run = runReporter({
+test('a todo case is recorded as TODO', (t) => {
+  const run = runReporter(t, {
     'a.test.mjs': `
 import { test } from 'node:test'
 test('a todo case', { todo: 'later' }, () => {})
@@ -132,13 +131,14 @@ test('a todo case', { todo: 'later' }, () => {})
   assert.equal(record?.result, 'todo')
 })
 
-test('the human report is the spec report: the case lines are the same', () => {
+test('the human report is the spec report: the whole report is the same', (t) => {
   const source = `
 import { test } from 'node:test'
 test('a case that passes', () => {})
+test('a skipped case', { skip: true }, () => {})
 `
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-case-spec-'))
-  try {
+  const dir = testLifecycle(t).tempDir('dsh-case-spec-')
+  {
     const file = join(dir, 'a.test.mjs')
     writeFileSync(file, source)
     const plain = spawnSync(process.execPath, ['--test', '--test-reporter=spec', file], {
@@ -151,20 +151,22 @@ test('a case that passes', () => {})
       encoding: 'utf8',
       env: { ...process.env, NODE_TEST_CONTEXT: undefined, DSH_TEST_JSONL: join(dir, 'cases.jsonl') },
     })
-    // The case lines are the report a CI log shows; the timing suffix is
-    // the only part that legitimately differs between two runs.
-    const caseLines = output => output
+    // The WHOLE report is compared, not only the case lines: a reporter
+    // that dropped a summary line would still pass a case-line
+    // comparison.
+    //
+    // The TIMINGS are the only part that legitimately differs between two
+    // runs — the per-case duration and the total. They are normalised
+    // away; everything else must be identical, line for line.
+    const normalized = output => output
       .split('\n')
-      .filter(line => line.startsWith('✔') || line.startsWith('✖'))
-      .map(line => line.replace(/\([\d.]+ms\)/u, ''))
-    assert.deepEqual(caseLines(teed.stdout), caseLines(plain.stdout))
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
+      .map(line => line.replace(/\([\d.]+ms\)/u, '(TIME)').replace(/duration_ms [\d.]+/u, 'duration_ms TIME'))
+    assert.deepEqual(normalized(teed.stdout), normalized(plain.stdout))
   }
 })
 
-test('without the JSONL destination the reporter still prints the human report', () => {
-  const run = runReporter({ 'a.test.mjs': TWO_CASES }, { jsonl: false })
+test('without the JSONL destination the reporter still prints the human report', (t) => {
+  const run = runReporter(t, { 'a.test.mjs': TWO_CASES }, { jsonl: false })
   assert.equal(run.status, 0, run.stderr)
   assert.match(run.stdout, /the first case passes/u)
 })
@@ -236,13 +238,13 @@ test('the runner specification reports the real machine, and marks what it canno
   }
 })
 
-test('the runner specification with a wall clock is still valid JSON', () => {
+test('the runner specification with a wall clock is still valid JSON', (t) => {
   // The measured wall clock used to be APPENDED to the specification file
   // as `wall_clock_seconds=42`, which made the JSON invalid — so the
   // aggregate could not read the very file that held the measurement. The
   // wall clock is now a FIELD of the document.
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-runner-spec-'))
-  try {
+  const dir = testLifecycle(t).tempDir('dsh-runner-spec-')
+  {
     const path = join(dir, 'runner-spec.json')
     const result = spawnSync(
       process.execPath,
@@ -252,8 +254,6 @@ test('the runner specification with a wall clock is still valid JSON', () => {
     assert.equal(result.status, 0, result.stderr)
     const spec = JSON.parse(readFileSync(path, 'utf8'))
     assert.equal(spec.wallClockSeconds, 42)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
   }
 })
 
