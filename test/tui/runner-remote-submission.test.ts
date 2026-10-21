@@ -326,7 +326,7 @@ test('prompt: a sessionless first prompt creates the Session, then reaches the H
   }
 })
 
-test('L6 §37 shell (Remote, CARRIER_GAP): `!` and `!!` BOTH fail closed — zero Client spawn, zero Session write, visible unavailable', async (t) => {
+test('shell (Remote, CARRIER_GAP): `!` and `!!` BOTH fail closed — zero Client spawn, zero Session write, visible unavailable', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-shellgap'
   const presetId = 'm3-4-pr3-preset'

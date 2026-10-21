@@ -369,7 +369,7 @@ async function openJobRow(fx: JobViewerFixture, label: string): Promise<void> {
   fx.fixture.vt.sendInput('\r')
 }
 
-test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
+test('steps 1-8 + negatives (c) /no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -708,7 +708,7 @@ test('the OPEN Job viewer recovers after reconnect — same detail, B output con
     'exactly one Host kill admission served the post-B Stop')
 })
 
-test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
+test('negative control 11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx

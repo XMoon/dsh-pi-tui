@@ -721,7 +721,7 @@ test('the first and the re-entrant caller observe the SAME complete teardown out
     'the SAME failure is surfaced to both callers')
 })
 
-test('R4-3: a sibling that throws `undefined` is a FAILURE, never a silent success', async () => {
+test('a sibling that throws `undefined` is a FAILURE, never a silent success', async () => {
   // `throw undefined` is legal JavaScript: the batch cannot use the thrown
   // VALUE as the presence test, or a broken disposer would report a clean
   // teardown to every caller.
@@ -740,7 +740,7 @@ test('R4-3: a sibling that throws `undefined` is a FAILURE, never a silent succe
   assert.equal(outcomes[1]!.reason, undefined)
 })
 
-test('R4-3b: a sibling `throw undefined` and a failing release aggregate BOTH', async () => {
+test('a sibling `throw undefined` and a failing release aggregate BOTH', async () => {
   const releaseFailure = new Error('tty release exploded')
   const { lifecycle, release } = mountLifecycle({
     throwInViewer: true,
@@ -825,7 +825,7 @@ test('a FAILED acquisition release rejects the shared teardown outcome', async (
   assert.equal(outcome[0]!.reason, releaseError, 'the exact acquired-release failure is surfaced')
 })
 
-test('R5-2b: an acquisition release that rejects `undefined` is still a failure', async () => {
+test('an acquisition release that rejects `undefined` is still a failure', async () => {
   const { lifecycle, release, failAcquire } = mountLifecycle({ holdAcquisition: true })
   const released = lifecycle.disposeSurface()
   assert.ok(released instanceof Promise)
