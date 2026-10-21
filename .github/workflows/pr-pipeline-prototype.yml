@@ -94,6 +94,19 @@ jobs:
           GITHUB_BASE_REF: ${{ github.base_ref }}
         run: node scripts/dsh-ci-context.mjs
 
+      # Source Mode is REFUSED here, at the entry, before a build or a
+      # candidate can exist.
+      #
+      # It is not implemented in this prototype: the source-leak gate needs
+      # the built distribution passed explicitly and the startup smoke is
+      # npm-only, so a source-mode run would skip a gate and still produce a
+      # qualified candidate. Qualifying less than the pipeline claims is
+      # worse than refusing the mode.
+      - name: Refuse a dependency mode this prototype cannot qualify
+        env:
+          DSH_MODE: ${{ steps.context.outputs.mode }}
+        run: node scripts/pipeline-guard.mjs mode "$DSH_MODE"
+
       - name: Resolve the shard list
         id: shards
         env:
@@ -289,7 +302,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: prototype-shard-${{ matrix.shard }}
+          name: prototype-shard-${{ matrix.shard }}-node24
           path: diagnostics
           if-no-files-found: warn
           retention-days: 3
@@ -350,13 +363,30 @@ jobs:
           # "default" catches a pipeline that silently starts applying a
           # level nobody chose.
           DSH_EXPECTED_CONCURRENCY: default
-          DSH_EXPECTED_CASES: ''
-          DSH_EXPECTED_SKIPPED: ''
+          # The case and skip baselines are committed facts, read from files
+          # so that a qualification CANNOT disable the comparison by passing
+          # an empty value. A missing, empty or malformed file FAILS.
+          #
+          # They are two SEPARATE checks: the count catches a case that
+          # stopped running, and the reasons below catch a case that
+          # stopped running for a reason nobody agreed to.
+          DSH_EXPECTED_CASES_FILE: scripts/measurement-expected-cases.txt
+          DSH_EXPECTED_SKIPPED_FILE: scripts/measurement-expected-skipped.txt
           # A skip is accepted only when its REASON belongs to a pre-agreed
           # class of missing capability or unprovisioned dependency. A count
           # cannot carry that meaning: a case can start skipping itself for a
           # new reason and leave the count identical.
           DSH_ACCEPTED_SKIPS_FILE: scripts/measurement-accepted-skips.txt
+          # WHERE the baseline numbers came from. A count on its own cannot
+          # say which run produced it, and this pipeline is not allowed to
+          # certify itself against itself.
+          DSH_BASELINE_SOURCE: >-
+            scripts/measurement-expected-cases.txt + measurement-expected-skipped.txt,
+            measured by the UNSHARDED product lane on the npm / Linux / Node 24
+            runner (2026-10-21): 9122 cases, 37 skipped = 36 optional-bundle + 1
+            no fd/fdfind. A legitimate change to the number of tests must update
+            these files IN THE SAME COMMIT as the test change, citing the full
+            unsharded run that produced the new numbers.
         run: |
           set -euo pipefail
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
@@ -369,6 +399,7 @@ jobs:
           node scripts/verify-shards.mjs \
             --shards shards \
             --total "${{ needs.context.outputs.shard_total }}" \
+            --baseline-source "$DSH_BASELINE_SOURCE" \
             --out aggregate.json
 
       - name: Upload the aggregate report
@@ -598,9 +629,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # The verdict is computed by a script, not by shell, for three
+      # reasons that shell made easy to get wrong:
+      #
+      #   - `skipped` used to be accepted as success, so a pipeline where a
+      #     required phase never ran could report a green summary;
+      #   - `context` was missing from the phase list entirely, so a run
+      #     with no resolved dependency mode could still summarise as green;
+      #   - the elapsed time was computed from the context job's start
+      #     instant, and the shell treats an EMPTY operand as zero — a
+      #     failed context produced a plausible-looking number instead of a
+      #     diagnosis.
+      #
+      # Every required phase must now be `success`. A phase that did not run
+      # did not prove anything.
       - name: Report the outcome of every phase
         env:
           STARTED: ${{ needs.context.outputs.started_epoch }}
+          CONTEXT: ${{ needs.context.result }}
           BUILD: ${{ needs.build.result }}
           TYPECHECK: ${{ needs.typecheck.result }}
           SHARDS: ${{ needs.product-shard.result }}
@@ -609,27 +655,16 @@ jobs:
           QUALIFY: ${{ needs.qualify.result }}
         run: |
           set -euo pipefail
-          elapsed=$(( $(date +%s) - STARTED ))
-          {
-            echo "phase            result"
-            echo "build            $BUILD"
-            echo "typecheck        $TYPECHECK"
-            echo "product shards   $SHARDS"
-            echo "aggregate        $AGGREGATE"
-            echo "candidate pack   $CANDIDATE"
-            echo "qualification    $QUALIFY"
-            echo
-            echo "whole pipeline   ${elapsed}s"
-          } | tee pipeline-summary.txt
-          # A summary that is green while a phase failed would be exactly the
-          # "green aggregate hides a missing shard" failure this prototype is
-          # built to prevent.
-          for phase in "$BUILD" "$TYPECHECK" "$SHARDS" "$AGGREGATE" "$CANDIDATE" "$QUALIFY"; do
-            case "$phase" in
-              success|skipped) ;;
-              *) echo "a phase did not succeed: $phase" >&2; exit 1 ;;
-            esac
-          done
+          node scripts/pipeline-guard.mjs summary \
+            --started "$STARTED" \
+            --phase "context=$CONTEXT" \
+            --phase "build=$BUILD" \
+            --phase "typecheck=$TYPECHECK" \
+            --phase "product shards=$SHARDS" \
+            --phase "aggregate=$AGGREGATE" \
+            --phase "candidate pack=$CANDIDATE" \
+            --phase "qualification=$QUALIFY" \
+            | tee pipeline-summary.txt
 
       - name: Upload the pipeline summary
         if: always()

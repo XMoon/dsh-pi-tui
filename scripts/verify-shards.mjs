@@ -45,16 +45,41 @@ const LANE = 'product'
  * @returns {number|Record<string, number>|null} the baseline.
  */
 function expectedSkippedBaseline() {
-  const raw = process.env.DSH_EXPECTED_SKIPPED
-  if (raw === undefined || raw === '') return null
-  if (raw.trimStart().startsWith('{')) {
-    try {
-      return JSON.parse(raw)
-    } catch {
-      throw new Error(`DSH_EXPECTED_SKIPPED is not a valid per-version map: ${raw}`)
+  const parse = (name, raw) => {
+    if (raw.trimStart().startsWith('{')) {
+      try {
+        return JSON.parse(raw)
+      } catch {
+        throw new Error(`${name} is not a valid per-version map: ${raw}`)
+      }
     }
+    const value = Number(raw)
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${name} must be a non-negative integer or a per-version map, got: ${raw}`)
+    }
+    return value
   }
-  return Number(raw)
+  // The skip COUNT is checked from a committed file exactly like the case
+  // count, and it is checked SEPARATELY from the skip REASONS.
+  //
+  // The two answer different questions and neither replaces the other: the
+  // count catches a case that stopped running, the reasons catch a case
+  // that stopped running for a reason nobody agreed to. A run can have the
+  // right count with wrong reasons, and the right reasons with a lost case.
+  const fileVar = 'DSH_EXPECTED_SKIPPED_FILE'
+  const path = process.env[fileVar]
+  if (path === undefined || path === '') {
+    const raw = process.env.DSH_EXPECTED_SKIPPED
+    return raw === undefined || raw === '' ? null : parse('DSH_EXPECTED_SKIPPED', raw)
+  }
+  if (!existsSync(path)) {
+    throw new Error(`the committed baseline ${path} (from ${fileVar}) is missing: a qualification cannot run without it`)
+  }
+  const raw = readFileSync(path, 'utf8').trim()
+  if (raw === '') {
+    throw new Error(`the committed baseline ${path} is empty: a qualification cannot run without a number`)
+  }
+  return parse(path, raw)
 }
 
 /**
@@ -206,6 +231,41 @@ function toTestRootPath(path) {
 }
 
 /**
+ * A baseline value that a qualification reads from a committed FILE.
+ *
+ * Three ways this must fail, because each of them would otherwise silently
+ * disable the comparison:
+ *
+ *   - the file is MISSING — the caller named a baseline that is not there;
+ *   - the file is EMPTY or unreadable — there is no number in it;
+ *   - the file does not hold an integer — it is not a baseline.
+ *
+ * `valueName` is the direct-value alternative. It is only consulted when no
+ * file is named, and an empty value there still means "no expectation".
+ * A QUALIFICATION must therefore name the file, not the value.
+ *
+ * @param {string} fileVar - the environment variable holding the path.
+ * @param {string} valueVar - the environment variable holding the value.
+ * @param {function(string, string): number} integer - the parser.
+ * @returns {number|null} the baseline, or null when none was named.
+ */
+function expectationFromFile(fileVar, valueVar, integer) {
+  const path = process.env[fileVar]
+  if (path === undefined || path === '') {
+    const raw = process.env[valueVar]
+    return raw === undefined || raw === '' ? null : integer(valueVar, raw)
+  }
+  if (!existsSync(path)) {
+    throw new Error(`the committed baseline ${path} (from ${fileVar}) is missing: a qualification cannot run without it`)
+  }
+  const raw = readFileSync(path, 'utf8').trim()
+  if (raw === '') {
+    throw new Error(`the committed baseline ${path} is empty: a qualification cannot run without a number`)
+  }
+  return integer(path, raw)
+}
+
+/**
  * The identity and the baseline the shards must agree on.
  *
  * They come from the environment of the aggregate job, which is the run
@@ -217,9 +277,7 @@ function toTestRootPath(path) {
  * @returns {object} the expectations.
  */
 function readExpectations() {
-  const number = (name) => {
-    const raw = process.env[name]
-    if (raw === undefined || raw === '') return null
+  const integer = (name, raw) => {
     const value = Number(raw)
     // A malformed number is a FAILURE, not a missing expectation: a
     // baseline that cannot be read must not silently disable the check.
@@ -228,11 +286,23 @@ function readExpectations() {
     }
     return value
   }
+  const number = (name) => {
+    const raw = process.env[name]
+    if (raw === undefined || raw === '') return null
+    return integer(name, raw)
+  }
   return {
     expectedSha: process.env.DSH_EXPECTED_SHA ?? null,
     expectedRunId: process.env.DSH_EXPECTED_RUN_ID ?? null,
     expectedRunAttempt: process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null,
-    expectedCases: number('DSH_EXPECTED_CASES'),
+    // A QUALIFICATION passes the baseline as a committed FILE, and a
+    // missing, unreadable, empty or malformed file is a FAILURE.
+    //
+    // The value form stays for callers that already have the number in
+    // hand, but a qualification must not be able to disable the check by
+    // passing an empty string: that is exactly how the case total came to
+    // be compared against nothing while every other gate passed.
+    expectedCases: expectationFromFile('DSH_EXPECTED_CASES_FILE', 'DSH_EXPECTED_CASES', integer),
     expectedSkipped: expectedSkippedBaseline(),
     // The concurrency the measurement claims to be about. `0` is not a
     // level, so it cannot be written by accident; the workflow passes the
@@ -275,11 +345,17 @@ function main() {
   // may be overridden with a file that lists them — one per line — so the
   // CLI can be exercised against a synthetic lane.
   const filesIndex = args.indexOf('--expected-files')
+  // WHERE the baseline came from. A count on its own says nothing about
+  // which run produced it, and a qualification has to be able to answer
+  // that question from its own report.
+  const sourceIndex = args.indexOf('--baseline-source')
   if (shardsIndex === -1 || totalIndex === -1) {
-    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>] [--expected-files <file>]')
+    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>] [--expected-files <file>] [--baseline-source <text>]')
     console.error('the expectations are read from the environment:')
     console.error('  DSH_EXPECTED_SHA, DSH_EXPECTED_RUN_ID, DSH_EXPECTED_RUN_ATTEMPT,')
-    console.error('  DSH_EXPECTED_CASES, DSH_EXPECTED_SKIPPED')
+    console.error('  DSH_EXPECTED_CASES_FILE / DSH_EXPECTED_CASES,')
+    console.error('  DSH_EXPECTED_SKIPPED_FILE / DSH_EXPECTED_SKIPPED,')
+    console.error('  DSH_EXPECTED_CONCURRENCY, DSH_ACCEPTED_SKIPS_FILE')
     process.exit(2)
   }
   const expectedFiles = filesIndex === -1
@@ -290,6 +366,7 @@ function main() {
       shardsRoot: resolve(args[shardsIndex + 1]),
       total: Number(args[totalIndex + 1]),
       expectedFiles,
+      baselineSource: sourceIndex === -1 ? null : args[sourceIndex + 1],
       ...readExpectations(),
     }),
     outIndex,
@@ -317,6 +394,7 @@ export function verifyShards({
   expectedSkipped = null,
   expectedConcurrency = undefined,
   acceptedSkips = undefined,
+  baselineSource = null,
   expectedFiles: expectedFilesOverride,
 }) {
   const failures = []
@@ -612,6 +690,9 @@ export function verifyShards({
     totalSkipped,
     expectedCases,
     expectedSkipped,
+    // Provenance, so a reader of the report knows which run the baseline
+    // came from without correlating it with a job log.
+    baselineSource,
     // What the measurement CLAIMED, in the same shape the shards recorded
     // what they APPLIED, so a reader can compare the two sides directly.
     expectedConcurrency: expectedConcurrency === undefined ? null : expectedConcurrency,
