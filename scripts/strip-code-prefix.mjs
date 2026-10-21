@@ -449,6 +449,49 @@ export function rewriteSource(source) {
 }
 
 /**
+ * Whether the `/` at `position` is a DIVISION rather than a regex literal.
+ *
+ * A division follows a value — an identifier, a number or a closing
+ * bracket — while a regex literal follows an operator, a keyword or the
+ * start of an expression.
+ */
+function isDivision(source, position) {
+  let index = position - 1
+  while (index >= 0 && /\s/u.test(source[index])) index -= 1
+  if (index < 0) return false
+  return /[\w$)\]]/u.test(source[index])
+}
+
+/**
+ * The index just past the regex literal that starts at `position`.
+ *
+ * @returns {number} the index, or -1 when this is not a regex literal.
+ */
+function findRegexEnd(source, position) {
+  let index = position + 1
+  let inClass = false
+  while (index < source.length) {
+    const char = source[index]
+    if (char === '\\') {
+      index += 2
+      continue
+    }
+    if (char === '[') inClass = true
+    else if (char === ']') inClass = false
+    else if (char === '/' && !inClass) {
+      // The flags follow the closing slash.
+      let end = index + 1
+      while (end < source.length && /[a-z]/u.test(source[end])) end += 1
+      return end
+    } else if (char === '\n') {
+      return -1
+    }
+    index += 1
+  }
+  return -1
+}
+
+/**
  * Whether an index falls inside a string literal.
  *
  * A `test(` inside a string is TEXT, not a call: a fixture that contains
@@ -479,6 +522,16 @@ function isInsideAString(source, index) {
       const close = source.indexOf('*/', position)
       position = close === -1 ? source.length : close + 1
       continue
+    }
+    // A REGEX literal is not a string: `/DSH session ([^\s\"]+)/gu` carries
+    // a double quote, and counting it would open a string that never
+    // closes — so every `test(` after it would look like text.
+    if (quote === null && char === '/' && !isDivision(source, position)) {
+      const close = findRegexEnd(source, position)
+      if (close !== -1) {
+        position = close
+        continue
+      }
     }
     if (quote === null) {
       if (char === "'" || char === '"' || char === '`') quote = char
