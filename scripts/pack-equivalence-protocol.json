@@ -1,0 +1,6 @@
+{
+  "ordinaryPack": "pnpm pack --pack-destination <workspace>",
+  "ciOnlyPack": "pnpm pack --config.ignore-scripts=true --pack-destination <workspace>",
+  "comparator": "scripts/compare-tarballs.mjs",
+  "note": "The two commands whose CONTENT equality is asserted. A change here is a change of protocol, not of inputs: the recorded proof no longer describes the comparison the pipeline performs."
+}

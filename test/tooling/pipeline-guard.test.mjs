@@ -21,6 +21,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { parse as parseYaml } from 'yaml'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { dirname } from 'node:path'
@@ -455,47 +456,54 @@ test('every conditional job checks EVERY one of its needs', () => {
   // therefore runs when the typecheck, the aggregate, the qualification or a
   // downstream leg FAILED — as long as the build succeeded.
   //
-  // The qualified-artifact job had exactly that condition, and its only
-  // steps are a digest re-check and an upload: a failed downstream leg would
-  // still have produced a "qualified" artifact. That is the one invariant the
-  // provisional/qualified split exists to guarantee.
-  const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
-  const jobNames = [...workflow.matchAll(/\n  ([a-z][a-z-]*):\n/gu)].map(match => match[1])
+  // The qualified-artifact job had exactly that condition, and its only steps
+  // are a digest re-check and an upload: a failed downstream leg would still
+  // have produced a "qualified" artifact.
+  //
+  // The needs are read from the PARSED workflow, not with a line regex: an
+  // earlier version matched only contiguous `- item` lines, so a COMMENT
+  // between two needs silently truncated the list and the need below the
+  // comment was never checked.
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8'))
   let inspected = 0
-  for (const name of jobNames) {
-    const start = workflow.indexOf(`\n  ${name}:\n`)
-    const header = workflow.slice(start, workflow.indexOf('    steps:', start))
-    const condition = /    if: \$\{\{([^\n]*)\}\}/u.exec(header)
-    if (condition === null) continue
-    if (!condition[1].includes('!cancelled()')) continue
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    const condition = job.if
+    if (typeof condition !== 'string' || !condition.includes('!cancelled()')) continue
     inspected += 1
-    const needsBlock = /    needs:\n((?:      - [\w-]+\n)+)/u.exec(header)
-    assert.notEqual(needsBlock, null, `${name} has a condition but no readable needs list`)
-    const needs = [...needsBlock[1].matchAll(/- ([\w-]+)/gu)].map(match => match[1])
+    const needs = Array.isArray(job.needs) ? job.needs : [job.needs].filter(Boolean)
+    assert.ok(needs.length > 0, `${name} has a condition but no needs`)
     for (const need of needs) {
-      const escaped = need.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-      if (need === 'source-pack') {
-        // Skipped in npm mode, so it may not require success — but its
-        // FAILURE must still stop the job.
-        assert.match(condition[1], new RegExp(`needs\\['source-pack'\\]\\.result != 'failure'`, 'u'),
-          `${name} must stop when the pinned distribution could not be built`)
-      } else {
-        assert.match(condition[1], new RegExp(`needs\\['${escaped}'\\]\\.result == 'success'`, 'u'),
-          `${name} must require '${need}' to be success: !cancelled() suppresses the implicit success() check`)
-      }
+      // `source-pack` is skipped in npm mode, so it may not require success —
+      // but its FAILURE must still stop the job. Every other need must be an
+      // explicit success, including the equivalence proof: its JOB always
+      // runs, so a skipped proof is not a state the gate has to tolerate.
+      const expected = need === 'source-pack'
+        ? new RegExp(`needs\\['${need}'\\]\\.result != 'failure'`, 'u')
+        : new RegExp(`needs\\['${need}'\\]\\.result == 'success'`, 'u')
+      assert.match(condition, expected,
+        `${name} must state the verdict of '${need}': !cancelled() suppresses the implicit success() check`)
     }
   }
   assert.ok(inspected >= 7, `the conditional jobs must all be covered, found ${inspected}`)
 })
 
 test('the qualified artifact job cannot run on a failed downstream leg', () => {
-  // The concrete case: `downstream-fail` makes one matrix leg fail. The
-  // qualified job must then be SKIPPED, not run and upload.
-  const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
-  const start = workflow.indexOf('\n  qualified:\n')
-  const header = workflow.slice(start, workflow.indexOf('    steps:', start))
-  assert.match(header, /needs\['downstream'\]\.result == 'success'/u)
-  assert.match(header, /needs\['qualify'\]\.result == 'success'/u)
-  assert.match(header, /needs\['aggregate'\]\.result == 'success'/u)
-  assert.match(header, /needs\['typecheck'\]\.result == 'success'/u)
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8'))
+  const condition = workflow.jobs.qualified.if
+  for (const need of ['downstream', 'qualify', 'aggregate', 'typecheck', 'candidate', 'build', 'context']) {
+    assert.match(condition, new RegExp(`needs\\['${need}'\\]\\.result == 'success'`, 'u'),
+      `the qualified artifact must require '${need}'`)
+  }
+})
+
+test('a FAILED equivalence proof blocks the qualified artifact', () => {
+  // The proof runs only when the packaging inputs changed, but when it DOES
+  // run and fails, the artifact must not be published. This is stated here
+  // explicitly because the mechanical loop above previously missed the
+  // `equivalence` need (a comment truncated its needs list).
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8'))
+  const qualified = workflow.jobs.qualified
+  assert.ok(qualified.needs.includes('equivalence'), 'the qualified artifact must depend on the proof')
+  assert.match(qualified.if, /needs\['equivalence'\]\.result == 'success'/u,
+    'the proof job always runs, so its verdict must be success — not merely "not failed"')
 })

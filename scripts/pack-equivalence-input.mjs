@@ -51,6 +51,19 @@ const INPUTS = [
   { path: 'scripts/generate-dsh-presets.mjs', why: 'the generated presets are part of the payload' },
   // An ignore file changes which files the packer includes, if present.
   { path: '.npmignore', why: 'an ignore file changes which files are packed', optional: true },
+  // The lockfile pins not only a consumer's dependency versions but the
+  // build TOOLCHAIN that produces the payload. Excluding it would let a
+  // toolchain bump change what is built while the proof still claimed to
+  // cover it.
+  { path: 'pnpm-lock.yaml', why: 'the lockfile pins the build toolchain that produces the payload' },
+  // Workspace layout decides how pnpm resolves and packs.
+  { path: 'pnpm-workspace.yaml', why: 'the workspace layout decides how pnpm resolves and packs', optional: true },
+  // The COMPARATOR decides what "equivalent" means. A changed comparator
+  // could stop noticing a difference the old one caught.
+  { path: 'scripts/compare-tarballs.mjs', why: 'the comparator defines what equivalent means' },
+  // The PROTOCOL is the two commands being compared. A changed command is a
+  // different comparison, so the recorded proof no longer describes it.
+  { path: 'scripts/pack-equivalence-protocol.json', why: 'the protocol is the pair of commands being compared' },
 ]
 
 /**
@@ -98,6 +111,18 @@ function describe() {
   }
 }
 
+/**
+ * The value of a `--flag <value>` pair.
+ *
+ * @param {string[]} args - the command line arguments.
+ * @param {string} name - the flag.
+ * @returns {string|undefined} the value.
+ */
+function valueOf(args, name) {
+  const index = args.indexOf(name)
+  return index === -1 ? undefined : args[index + 1]
+}
+
 function main() {
   const args = process.argv.slice(2)
   const writeIndex = args.indexOf('--write')
@@ -120,6 +145,27 @@ function main() {
     process.exit(1)
   }
   const recorded = JSON.parse(readFileSync(path, 'utf8'))
+  // A DIGEST is not a PROOF. Matching bytes say the inputs are the ones the
+  // file was taken at; they say nothing about whether the comparison was ever
+  // run, or whether it PASSED. A record whose proof was deleted, or whose
+  // proof says `equivalent: false`, must reopen the question.
+  const proof = recorded.proof
+  if (proof === undefined || proof === null || proof.equivalent !== true) {
+    console.log('changed: the record carries no PASSING equivalence proof')
+    process.exit(1)
+  }
+  // The proof's SCOPE is part of the gate. An npm proof says nothing about a
+  // source run, and a Node 24 proof says nothing about another runtime.
+  const mode = valueOf(args, '--mode') ?? 'npm'
+  const node = valueOf(args, '--node') ?? String(process.versions.node.split('.')[0])
+  if (proof.mode !== mode) {
+    console.log(`changed: the recorded proof is for mode '${proof.mode}', not '${mode}'`)
+    process.exit(1)
+  }
+  if (proof.node !== node) {
+    console.log(`changed: the recorded proof is for Node ${proof.node}, not ${node}`)
+    process.exit(1)
+  }
   if (recorded.digest !== current.digest) {
     const changed = (recorded.inputs ?? [])
       .filter(input => {

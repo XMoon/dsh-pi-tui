@@ -53,12 +53,73 @@ test('the digest is stable across two reads', () => {
   assert.equal(packagingInputDigest().digest, packagingInputDigest().digest)
 })
 
-test('a recorded proof covers the current inputs', (t) => {
+test('a DIGEST alone is not a proof', (t) => {
+  // The defect this replaces: the check compared only `digest`, so a record
+  // with no proof at all — or a proof that said `equivalent: false` — was
+  // reported as "unchanged" and the pipeline skipped the comparison while
+  // still publishing. Bytes say WHICH inputs; they say nothing about whether
+  // the comparison ever ran or passed.
   const file = join(scratch(t), 'baseline.json')
   assert.equal(cli(['--write', file]).status, 0)
   const check = cli(['--check', file])
+  assert.equal(check.status, 1, 'a record without a passing proof must trigger the proof')
+  assert.match(check.stdout, /no PASSING equivalence proof/u)
+})
+
+test('a proof that says equivalent: false triggers the proof', (t) => {
+  const file = join(scratch(t), 'baseline.json')
+  cli(['--write', file])
+  const recorded = JSON.parse(readFileSync(file, 'utf8'))
+  recorded.proof = { equivalent: false, mode: 'npm', node: '24' }
+  writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
+  const check = cli(['--check', file])
+  assert.equal(check.status, 1)
+  assert.match(check.stdout, /no PASSING equivalence proof/u)
+})
+
+test('a recorded proof covers the inputs it was taken at, in ITS scope', (t) => {
+  const file = join(scratch(t), 'baseline.json')
+  cli(['--write', file])
+  const recorded = JSON.parse(readFileSync(file, 'utf8'))
+  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0] }
+  writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
+  const check = cli(['--check', file])
   assert.equal(check.status, 0, check.stdout + check.stderr)
   assert.match(check.stdout, /unchanged/u)
+})
+
+test('a proof from ANOTHER mode does not cover this run', (t) => {
+  // An npm proof says nothing about a source run: the dependency graph and
+  // the packed payload are different.
+  const file = join(scratch(t), 'baseline.json')
+  cli(['--write', file])
+  const recorded = JSON.parse(readFileSync(file, 'utf8'))
+  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0] }
+  writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
+  const check = cli(['--check', file, '--mode', 'source'])
+  assert.equal(check.status, 1)
+  assert.match(check.stdout, /mode 'npm', not 'source'/u)
+})
+
+test('a proof from ANOTHER Node major does not cover this run', (t) => {
+  const file = join(scratch(t), 'baseline.json')
+  cli(['--write', file])
+  const recorded = JSON.parse(readFileSync(file, 'utf8'))
+  recorded.proof = { equivalent: true, mode: 'npm', node: '24' }
+  writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
+  const check = cli(['--check', file, '--node', '26'])
+  assert.equal(check.status, 1)
+  assert.match(check.stdout, /Node 24, not 26/u)
+})
+
+test('the comparator and the protocol are part of the digested inputs', () => {
+  // "equivalent" is whatever the comparator measures, and the comparison is
+  // between two specific commands. A change to either makes the recorded
+  // proof describe a comparison the pipeline no longer performs.
+  const paths = packagingInputDigest().inputs.map(input => input.path)
+  assert.ok(paths.includes('scripts/compare-tarballs.mjs'), 'the comparator defines "equivalent"')
+  assert.ok(paths.includes('scripts/pack-equivalence-protocol.json'), 'the protocol is the pair of commands compared')
+  assert.ok(paths.includes('pnpm-lock.yaml'), 'the lockfile pins the build toolchain that produces the payload')
 })
 
 test('a MISSING record TRIGGERS the proof instead of counting as unchanged', (t) => {
@@ -72,6 +133,9 @@ test('a MISSING record TRIGGERS the proof instead of counting as unchanged', (t)
 test('a record for OTHER inputs TRIGGERS the proof and names what differs', (t) => {
   const file = join(scratch(t), 'baseline.json')
   const recorded = JSON.parse(readFileSync((cli(['--write', file]), file), 'utf8'))
+  // A valid proof, so the check proceeds to the digest comparison this case
+  // is about.
+  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0] }
   // Pretend the manifest changed since the proof was taken.
   recorded.digest = '0'.repeat(64)
   recorded.inputs = recorded.inputs.map(input =>

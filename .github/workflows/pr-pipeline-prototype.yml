@@ -1009,7 +1009,8 @@ jobs:
         id: trigger
         run: |
           set -euo pipefail
-          if node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json; then
+          if node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json \
+               --mode "${{ needs.context.outputs.mode }}" --node 24; then
             echo 'needed=false' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=true' >> "$GITHUB_OUTPUT"
@@ -1088,9 +1089,10 @@ jobs:
       - candidate
       - qualify
       - downstream
-      # A triggered equivalence proof that FAILED must stop the qualified
-      # artifact. The job is skipped when the proof is still valid, so the
-      # condition below tolerates `skipped` for this need only.
+      # The equivalence JOB always runs (only its expensive steps are
+      # conditional), so its verdict is either success or failure — and a
+      # failure must stop the qualified artifact. There is therefore no
+      # skipped case to tolerate.
       - equivalence
     # This job depends on `source-pack` TRANSITIVELY, through `build`, and a
     # skipped job in the dependency graph skips its dependents unless they
@@ -1098,7 +1100,7 @@ jobs:
     # while every one of its direct dependencies had succeeded — and the
     # summary then failed on `qualified artifact is 'skipped'`, which points
     # at the wrong job.
-    if: ${{ !cancelled() && needs['context'].result == 'success' && needs['build'].result == 'success' && needs['typecheck'].result == 'success' && needs['aggregate'].result == 'success' && needs['candidate'].result == 'success' && needs['qualify'].result == 'success' && needs['downstream'].result == 'success' && needs['equivalence'].result != 'failure' }}
+    if: ${{ !cancelled() && needs['context'].result == 'success' && needs['build'].result == 'success' && needs['typecheck'].result == 'success' && needs['aggregate'].result == 'success' && needs['candidate'].result == 'success' && needs['qualify'].result == 'success' && needs['downstream'].result == 'success' && needs['equivalence'].result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
