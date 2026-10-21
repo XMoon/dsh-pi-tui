@@ -61,7 +61,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and
  * a few carry a letter separator (`AC-1`, `PR-A`).
  */
-const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|\d{1,3}\([a-z]\)?|\b[a-z]\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
+const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Remote|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|\d{1,3}\([a-z]\)?|\b[a-z]\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
 
 /**
  * A SECTION marker: a pointer into the plan that wrote the test.
@@ -121,7 +121,7 @@ const WORD_SUFFIX_CODE_TOKEN = /^[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-
  * These name WHICH variant of the behaviour the case covers, so they are
  * part of the label rather than the sentence.
  */
-const QUALIFIER_TOKEN = /^(?:Direct|Focus|DEL|BEL|BS|OWNER-RULED)$/u
+const QUALIFIER_TOKEN = /^(?:Direct|Remote|Focus|DEL|BEL|BS|OWNER-RULED)$/u
 
 /**
  * A lowercase qualifier WORD that belongs to the label.
@@ -137,7 +137,15 @@ const LABEL_WORD = /^(?:negative\s+control|positive\s+control|static|lock|child|
  * A lone capital letter on its own is a KEY name (`S on a clean draft`),
  * so it may only lead a label when a qualified code follows it.
  */
-const SINGLE_LETTER_SLASH_TOKEN = /^[A-Z]\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?|Direct(?:-L\d)?|Focus)$/u
+const SINGLE_LETTER_SLASH_TOKEN = /^[A-Z]\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?|Direct(?:-L\d)?|Remote|Focus)$/u
+
+/**
+ * A `step N` label: `step 8 / §5 Must 17:`, `step 10 + F7:`.
+ *
+ * The plan numbers its steps, and the step number is a local label of the
+ * same kind as a case code.
+ */
+const STEP_LABEL_TOKEN = /^step\s+\d+(?:\s*[+/]\s*(?:step\s+\d+|[A-Z]{1,4}\d+[a-z]?|§\s*[\d.A-Z]+(?:\s+Must\s+\d+)?))*$/u
 
 /**
  * A `PR` code with a single-letter sub-label: `PR D`, `PR E`.
@@ -176,6 +184,7 @@ function isLabelToken(token, first, colonForm = false) {
   }
   return CODE_TOKEN.test(token)
     || SINGLE_LETTER_SLASH_TOKEN.test(token)
+    || STEP_LABEL_TOKEN.test(token)
     || WORD_SUFFIX_CODE_TOKEN.test(token)
     || SECTION_TOKEN.test(token)
     || SECTION_TOKEN_SINGLE.test(token)
@@ -265,7 +274,9 @@ export function splitLeadingLabel(title) {
   const tokens = []
   for (const token of rawTokens) {
     const previous = tokens[tokens.length - 1]
-    if (previous !== undefined && PR_SUB_LABEL.test(`${previous} ${token}`)) {
+    // A `PR D` pair and a `step 8` pair are ONE label token: the code and
+    // its sub-label are one thing, not two.
+    if (previous !== undefined && (PR_SUB_LABEL.test(`${previous} ${token}`) || STEP_LABEL_TOKEN.test(`${previous} ${token}`))) {
       tokens[tokens.length - 1] = `${previous} ${token}`
       continue
     }
@@ -275,6 +286,17 @@ export function splitLeadingLabel(title) {
   for (const [index, token] of tokens.entries()) {
     if (!isLabelToken(token, index === 0, colonForm && index === 0)) break
     consumed = index + 1
+    // A `step N` label carries its trailing parts: `step 8 / §5 Must 17`.
+    // They are ONE label, so the loop keeps consuming while the next
+    // token is a label part too.
+    if (STEP_LABEL_TOKEN.test(token)) {
+      let next = index + 1
+      while (next < tokens.length && isLabelToken(tokens[next], false)) {
+        consumed = next + 1
+        next += 1
+      }
+      break
+    }
   }
   if (consumed === 0) return null
   const label = tokens.slice(0, consumed).join(' ')
