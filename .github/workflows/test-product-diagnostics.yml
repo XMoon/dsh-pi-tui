@@ -104,6 +104,7 @@ jobs:
           # `scripts/measurement-test-concurrency.txt`.
           DSH_SHARD_TOTAL: ${{ inputs.shard_total || '' }}
           DSH_TEST_CONCURRENCY: ${{ inputs.test_concurrency || '' }}
+          DSH_NODE_VERSIONS: ${{ inputs.node_versions || '' }}
         run: |
           set -euo pipefail
           if [ -z "$DSH_SHARD_TOTAL" ]; then
@@ -111,6 +112,9 @@ jobs:
           fi
           if [ -z "$DSH_TEST_CONCURRENCY" ]; then
             DSH_TEST_CONCURRENCY="$(cat scripts/measurement-test-concurrency.txt 2>/dev/null || echo '')"
+          fi
+          if [ -z "$DSH_NODE_VERSIONS" ]; then
+            DSH_NODE_VERSIONS="$(cat scripts/measurement-node-versions.txt 2>/dev/null || echo '["24"]')"
           fi
           case "$DSH_SHARD_TOTAL" in
             1) shards='[1]' ;;
