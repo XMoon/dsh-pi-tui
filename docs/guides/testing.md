@@ -132,6 +132,88 @@ Before adding an expensive test, check:
 
 A test must not introduce an unreasoned multi-second fixed wait.
 
+### 7. Case Titles
+
+The unit of readability is the CASE TITLE — the full name a CI reporter
+shows for one `test()` / `it()`, not the file it lives in. A reader who
+sees a failure in a CI log must learn, from the title alone, what condition
+was set up and what result was expected.
+
+Write the title as **condition → observable result**, in English, in the
+business/lifecycle vocabulary of the system:
+
+```ts
+test('a late detach of surface A does not unbind the newer surface B', …)
+```
+
+Put the shared context in the enclosing `describe()` and let the case carry
+only what is specific to it:
+
+```ts
+describe('Session switching during pending reads', () => {
+  test('rejects the older session result', …)
+  test('keeps the current session title visible', …)
+})
+```
+
+Three rules decide whether a title needs work:
+
+1. **No plan, milestone or review codes as the subject.** A code like `A5b`,
+   `B4A-07`, `PR5`, `M3-4` or `RFL-002` is a local label from the effort
+   that wrote the test. A reader of a CI log does not have that effort, so a
+   title led by a code hides the behaviour. When a code has real failure
+   provenance value, keep it as a short `Regression: PR #…` comment next to
+   the case, not as its name.
+2. **The title states the RESULT, not the topic.** "tests the writer
+   admission" names a subject; "a stale scope refused at admission takes
+   the distinct stale path and runs no write" names an outcome. A title
+   that does not say what must be observed cannot fail loudly — the reader
+   cannot tell a missing assertion from an intended one.
+3. **The title does not overclaim the evidence.** A title must not say
+   `real Host`, `end-to-end` or `wire` for a structural fake, and must not
+   say `rejects` for a behaviour that actually ignores the input.
+
+Titles that already satisfy the three rules are left ALONE. Renaming a
+clear title creates churn and loses the history the name carries; the goal
+is readability, not uniformity.
+
+**Evidence levels are not title prefixes.** `L1`–`L6` are the
+Host/Client qualification tiers defined in
+[host-client.md](../architecture/host-client.md#qualification-tiers); most
+tests in this repository are not Host/Client evidence at all, and a
+`[L1]`-style prefix on an ordinary TUI, tooling or static test is a false
+label. A test that could be mistaken for a higher tier states its real
+evidence once, in the enclosing `describe()` or at the top of the file, in
+one sentence. Do not add a `Contract:` / `Evidence:` template to every
+case, and do not add a comment to a case whose title already says it.
+
+**Files are named by owner, not by the case.** A test file's name states
+the production owner it covers. A file whose name is only a code or a
+milestone (`a5b-bootstrap-closure.test.ts`) hides that owner and should be
+renamed to the owner it actually covers. The file's cases then read as
+ordinary English without any prefix.
+
+#### Worked examples
+
+| Instead of | Write |
+|---|---|
+| `PR5 §1C-3 (R6-1): only the winner stamped with THIS surface's mirror id is subtracted` | `subtracts only the winning command belonging to the active surface mirror` |
+| `P1-3: attach A → attach B → late detach A leaves B bound` | `a late detach of surface A does not unbind the newer surface B` |
+| `M5: a STALE command handle never untracks a later registration` | `a stale command handle cannot remove a newer registration` |
+| `A5b: the composition zone is one facade plus its bootstrap helpers, and nothing else` | `the composition zone is one facade plus its bootstrap helpers, and nothing else` |
+
+The last row is the common shape of this cleanup: the CODE is redundant,
+because the enclosing `describe()` or the file's owner already supplies
+the context. Dropping the code is a rename with no loss.
+
+#### Checking the result
+
+`pnpm report:case-inventory` collects the real case list of a lane by
+running that lane through the same reporter the CI uses, and prints the
+titles that still lead with a code or that carry no result. It is a
+REPORT, not a gate: the judgement "is this title clear" stays with the
+reviewer, exactly like rule 4 above.
+
 ## 2. Running the tests
 
 | Command | What it runs |
