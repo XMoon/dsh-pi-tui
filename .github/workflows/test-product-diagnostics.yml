@@ -305,3 +305,86 @@ jobs:
           path: shards/aggregate.json
           if-no-files-found: warn
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # The PACK EQUIVALENCE PROOF.
+  #
+  # A CI-only fast pack — one that skips the `prepack` lifecycle because
+  # the tests already ran in separate shard jobs — is only acceptable if the
+  # package it produces carries the SAME CONTENT as the ordinary `pnpm pack`
+  # package. This job builds both and compares them by CONTENT: the tar
+  # entries, the digest of every unpacked file, and the manifest fields.
+  #
+  # It is a MEASUREMENT, not a gate on the release path: the release tag
+  # keeps using the ordinary `pnpm pack` lifecycle until an explicit Owner
+  # decision says otherwise.
+  # ---------------------------------------------------------------------------
+  pack-equivalence:
+    name: Pack equivalence (ordinary vs CI-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout the measured commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          package-manager-cache: false
+
+      - name: Install the dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the ordinary package
+        run: |
+          set -euo pipefail
+          mkdir -p packs
+          # The ordinary pack runs the whole lifecycle: `prepack` cleans,
+          # builds and runs the product suite, and `postpack` runs the
+          # eight public-package smokes.
+          #
+          # The tarball goes into the WORKSPACE, not into `packs/`: the
+          # postpack smokes look for it in the current directory or its
+          # parent, and a tarball in a subdirectory would fail them for a
+          # reason that has nothing to do with the package.
+          pnpm pack --pack-destination "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE"/xmoon76-dsh-pi-tui-*.tgz "$GITHUB_WORKSPACE/packs/"
+
+      - name: Build the CI-only package
+        run: |
+          set -euo pipefail
+          mkdir -p packs-ci-only
+          # `--config.ignore-scripts=true` skips the lifecycle scripts, so
+          # the package is built WITHOUT the prepack test run and WITHOUT
+          # the postpack smokes. The comparison proves whether the CONTENT
+          # is the same.
+          pnpm pack --pack-destination "$GITHUB_WORKSPACE" \
+            --config.ignore-scripts=true
+          mv "$GITHUB_WORKSPACE"/xmoon76-dsh-pi-tui-*.tgz "$GITHUB_WORKSPACE/packs-ci-only/"
+
+      - name: Compare the two packages by CONTENT
+        run: |
+          set -euo pipefail
+          ordinary="$(ls packs/*.tgz | head -1)"
+          ci_only="$(ls packs-ci-only/*.tgz | head -1)"
+          node scripts/compare-tarballs.mjs \
+            --a "$ordinary" \
+            --b "$ci_only" \
+            --out packs/pack-equivalence.json
+
+      - name: Upload the pack equivalence report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-diagnostics-pack-equivalence
+          path: |
+            packs/pack-equivalence.json
+            packs/*.tgz
+            packs-ci-only/*.tgz
+          if-no-files-found: warn
+          retention-days: 7
