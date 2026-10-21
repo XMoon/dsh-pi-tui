@@ -12,8 +12,9 @@
  * The FALLBACK is the safety net for the one case the fiber effect cannot
  * cover: the runner never mounted (the mount threw), so no teardown effect
  * exists and nothing else would release the transport. It disposes ONLY when
- * the runner never released it, so it can never add a second call to a
- * transport the runner already disposed.
+ * the transport disposer was never REACHED, so it can never add a second
+ * call to a transport the runner already disposed — the production disposer
+ * is idempotent, so a call after the first one tears nothing down again.
  *
  * A failed fallback is NOT swallowed: the test lifecycle
  * (`test/support/temp-lifecycle.ts`) collects the cleanup failures and
@@ -32,8 +33,17 @@ export interface DisposableTransport {
 export interface TransportTeardownOwnership {
   /** The fallback, as the lifecycle cleanup runs it. */
   readonly runFallback: () => Promise<void>
-  /** Whether the runner's own teardown already released the transport. */
-  readonly releasedByRunner: () => boolean
+  /**
+   * Whether the transport disposer was REACHED.
+   *
+   * It is NOT "the transport was released": the flag is set when the disposer
+   * is entered, so a disposer that then FAILS still leaves it set. That is
+   * the right gate for the fallback, because the production disposer is
+   * idempotent — once it was reached, a second call tears nothing down
+   * again — but the name says exactly that, so it is not confused with the
+   * completed releases the teardown observer counts.
+   */
+  readonly disposeTransportReached: () => boolean
 }
 
 /**
@@ -46,17 +56,18 @@ export interface TransportTeardownOwnership {
 export function ownTransportTeardown(
   transport: DisposableTransport,
 ): TransportTeardownOwnership {
-  let releasedByRunner = false
+  let disposeTransportReached = false
   const originalDisposeTransport = transport.disposeTransport.bind(transport)
   transport.disposeTransport = async (): Promise<void> => {
-    // The runner's teardown effect reached the transport: the fallback must
-    // NOT add a second call.
-    releasedByRunner = true
+    // The disposer was reached: the production one is idempotent, so a
+    // second call would tear nothing down again and the fallback must NOT
+    // add one.
+    disposeTransportReached = true
     await originalDisposeTransport()
   }
   const runFallback = async (): Promise<void> => {
-    if (releasedByRunner) return
+    if (disposeTransportReached) return
     await transport.disposeTransport()
   }
-  return { runFallback, releasedByRunner: () => releasedByRunner }
+  return { runFallback, disposeTransportReached: () => disposeTransportReached }
 }
