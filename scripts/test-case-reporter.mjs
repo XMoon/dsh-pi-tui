@@ -164,9 +164,13 @@ export default async function reporter(source, options) {
       // The `skip` and `todo` markers carry a REASON, not a boolean: a
       // skipped case says WHY it was skipped, and that reason is the whole
       // value of the marker. So the marker is detected by its PRESENCE.
-      result: outcome.skip !== undefined
+      //
+      // The marker is read from the OUTCOME and from the COMPLETION: a
+      // completion that never got an outcome still carries its own skip,
+      // and reading only the outcome would report such a case as `pass`.
+      result: outcome.skip !== undefined || data.skip !== undefined
         ? 'skip'
-        : outcome.todo !== undefined
+        : outcome.todo !== undefined || data.todo !== undefined
           ? 'todo'
           : resultOf(data.details),
     }
