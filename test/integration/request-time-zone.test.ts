@@ -254,6 +254,14 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
         (message as { source: { clientTimeZone?: string } }).source.clientTimeZone),
       ['Asia/Shanghai', 'Asia/Shanghai'],
       'the ordinary AND the busy (queue) submission carry the same per-submit source zone')
+      // The queue row is the POSITIVE completion signal, and the steering row
+      // is a NEGATIVE guarantee: a queued submission must NEVER render as a
+      // steering row. The two are not the same fact — the steering row can
+      // only be ruled out by an observation WINDOW, because a late
+      // authoritative occurrence would paint it AFTER the queue row landed.
+      // So the window stays: the negative fact needs one, and it is the
+      // window the original fixed wait provided.
+      await directSettle()
       const renderedDuringBusy = renderedLines(fixture)
       assert.ok(renderedDuringBusy.some(line => line.includes('queued (followup): parity busy follow-up')),
         `the busy submission must render as the ordinary queue row:\n${renderedDuringBusy.join('\n')}`)

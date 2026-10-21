@@ -16,7 +16,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { pickerNode } from '../support/tsp-picker-wire.ts'
+import { pickerNode, wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
 
 /** Every history file written under the fixture's isolated DSH home. */
 function historyFiles(workRoot: string): string[] {
@@ -39,6 +39,17 @@ async function awaitComposer(fixture: DirectTspFixture, text: string): Promise<v
 }
 
 /** The latest controlled editor text on the wire for `dock.composer`. */
+/** Every text line the CURRENT wire tree carries. */
+function renderedLines(fixture: DirectTspFixture): string[] {
+  const lines: string[] = []
+  const collect = (node: WireNode): void => {
+    if (typeof node.p.text === 'string' && node.p.text !== '') lines.push(node.p.text)
+    for (const child of node.c ?? []) collect(child)
+  }
+  for (const node of wireNodes(fixture.pane)) collect(node)
+  return lines
+}
+
 function latestComposerText(wire: string): string | undefined {
   let text: string | undefined
   let seen = false
@@ -309,16 +320,27 @@ for (const busyEnter of ['queue', 'steer'] as const) {
           `${gesture} into a running turn delivered as ${expected} (busyEnter=${busyEnter})`)
         assert.equal(second.outcome.kind, 'committed', 'the busy delivery settled committed')
         assert.equal(promptCalls.length, beforeSettled + 1, 'exactly ONE settled write for the second submission (no double-send)')
-        // Exactly ONE pending delivery row exists for the second submission.
-        // The pending delivery row is the completion signal: the assertion is
-        // about how MANY rows the wire carries, so the wait is for that row.
-        await waitFor('the pending delivery row to be painted', () => {
-          const pending = fixture.pane.output.text()
-          return (pending.match(/queued \(/g) ?? []).length + (pending.match(/steering/g) ?? []).length === 1
-        }, 25_000)
-        const wire = fixture.pane.output.text()
-        assert.equal((wire.match(/queued \(/g) ?? []).length + (wire.match(/steering/g) ?? []).length, 1,
-          'exactly ONE pending delivery row exists for the second submission')
+        // The pending delivery row is the POSITIVE completion signal: the
+        // CURRENT wire must carry the second submission's row.
+        await waitFor('the pending delivery row to be painted', () =>
+          renderedLines(fixture).some(line => line.includes('second prompt')), 25_000)
+        // The UNIQUENESS is a NEGATIVE guarantee: a late authoritative
+        // occurrence of the same request would paint a SECOND row AFTER the
+        // first one landed, and the raw byte stream would then carry both
+        // while the live tree still has one. "Not yet" is not "never", so the
+        // observation WINDOW stays — and the uniqueness is read from the
+        // CURRENT tree, which is what the de-duplication owns.
+        await directSettle()
+        const pendingRows = renderedLines(fixture)
+          .filter(line => line.includes('second prompt'))
+        assert.equal(pendingRows.length, 1,
+          `exactly ONE pending delivery row exists for the second submission:\n${pendingRows.join('\n')}`)
+        // The row's own mode is the delivery the case asserts above: this
+        // gesture delivered as `steer` renders a steering row, and as
+        // `queue` renders the queue row — the row must not carry BOTH.
+        assert.equal(pendingRows.filter(line => line.includes('steering')).length,
+          expected === 'steer' ? 1 : 0,
+          `the second submission renders exactly one row, carrying its own mode:\n${pendingRows.join('\n')}`)
         releaseStream()
         recorder.detach()
       } finally {
