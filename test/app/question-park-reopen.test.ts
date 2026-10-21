@@ -572,7 +572,7 @@ test('the REAL TSP seat parks a continued form on Esc and reopens it with the pr
   }
 })
 
-test('finding F7: a held timed claim retired by a publication never mounts its form (and is not revived)', async () => {
+test('a held timed claim retired by a publication never mounts its form (and is not revived)', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const seat = createTspInteractionSeat({
     render: () => {},

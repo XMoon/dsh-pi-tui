@@ -140,6 +140,22 @@ const LABEL_WORD = /^(?:negative\s+control|positive\s+control|static|lock|child|
 const SINGLE_LETTER_SLASH_TOKEN = /^[A-Z]\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?|Direct(?:-L\d)?|Remote|Focus)$/u
 
 /**
+ * An `assertion N` label: a numbered assertion of a plan's checklist.
+ *
+ * It names the checklist item the case covers, not the behaviour, so it
+ * goes with the label.
+ */
+const ASSERTION_LABEL_TOKEN = /^assertion\s+\d+$/u
+
+/**
+ * A `finding C` / `finding F7` label: a review finding's own number.
+ *
+ * It names the review that produced the case, not the behaviour, so it
+ * goes with the label.
+ */
+const FINDING_LABEL_TOKEN = /^finding\s+[A-Z]{1,4}\d*$/u
+
+/**
  * A `step N` label: `step 8 / §5 Must 17:`, `step 10 + F7:`.
  *
  * The plan numbers its steps, and the step number is a local label of the
@@ -169,6 +185,12 @@ function isLabelToken(token, first, colonForm = false) {
   // case`). In the space form it is a measurement — `80 columns keep the
   // full provider/model` — and the measurement is the point of the title.
   if (/^\d{1,3}$/u.test(token)) return colonForm
+  // A single capital letter before a COLON is a case label: `A:`, `B:`,
+  // `C:`, `E:`. The plan numbers its sub-cases with a letter, and the
+  // letter alone is the whole label. Without the colon it is a KEY name
+  // — `S on a clean draft closes` — and the letter is what the reader
+  // needs.
+  if (/^[A-Z]$/u.test(token)) return colonForm
   if (PR_SUB_LABEL.test(token)) return true
   if (first && /^[A-Z]$/u.test(token)) {
     // A lone capital letter may only lead a label when a slash-qualified
@@ -185,6 +207,8 @@ function isLabelToken(token, first, colonForm = false) {
   return CODE_TOKEN.test(token)
     || SINGLE_LETTER_SLASH_TOKEN.test(token)
     || STEP_LABEL_TOKEN.test(token)
+    || FINDING_LABEL_TOKEN.test(token)
+    || ASSERTION_LABEL_TOKEN.test(token)
     || WORD_SUFFIX_CODE_TOKEN.test(token)
     || SECTION_TOKEN.test(token)
     || SECTION_TOKEN_SINGLE.test(token)
@@ -276,7 +300,7 @@ export function splitLeadingLabel(title) {
     const previous = tokens[tokens.length - 1]
     // A `PR D` pair and a `step 8` pair are ONE label token: the code and
     // its sub-label are one thing, not two.
-    if (previous !== undefined && (PR_SUB_LABEL.test(`${previous} ${token}`) || STEP_LABEL_TOKEN.test(`${previous} ${token}`))) {
+    if (previous !== undefined && (PR_SUB_LABEL.test(`${previous} ${token}`) || STEP_LABEL_TOKEN.test(`${previous} ${token}`) || FINDING_LABEL_TOKEN.test(`${previous} ${token}`) || ASSERTION_LABEL_TOKEN.test(`${previous} ${token}`))) {
       tokens[tokens.length - 1] = `${previous} ${token}`
       continue
     }
@@ -300,7 +324,15 @@ export function splitLeadingLabel(title) {
   }
   if (consumed === 0) return null
   const label = tokens.slice(0, consumed).join(' ')
-  const sentence = split.rest.trimStart()
+  // The tokens the label did NOT consume are part of the SENTENCE.
+  //
+  // `B3 F4 control: with no settled entry …` — the code is `B3 F4`, and
+  // `control` is the CATEGORY the case belongs to. The category is part of
+  // what the title says, and dropping it would make the title say less
+  // than it did.
+  const kept = tokens.slice(consumed).join(' ')
+  const rest = split.rest.trimStart()
+  const sentence = kept === '' ? rest : `${kept}: ${rest}`
   // A label that is ONE bare token with no sentence after it is the whole
   // title (`B3`, `L6`), not a label.
   if (consumed === tokens.length && tokens.length === 1 && sentence === '') return null
