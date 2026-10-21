@@ -209,7 +209,7 @@ function instrumentContext(
   }) as typeof context.plugin
 }
 
-test('F1. a synchronous mount throw leaves the stage fiber unassigned: the unwind skips it and keeps the ORIGINAL error primary with no phantom causes', async (t) => {
+test('a synchronous mount throw leaves the stage fiber unassigned: the unwind skips it and keeps the ORIGINAL error primary with no phantom causes', async (t) => {
   const life = testLifecycle(t)
   const context = new Context()
   life.defer(() => context.fiber.dispose())
@@ -234,7 +234,7 @@ test('F1. a synchronous mount throw leaves the stage fiber unassigned: the unwin
     'the startup facts are gone after the failed construction')
 })
 
-test('F2. a rejected plugin STARTUP still owns its fiber: the unwind disposes it at its own position, original error primary', async (t) => {
+test('a rejected plugin STARTUP still owns its fiber: the unwind disposes it at its own position, original error primary', async (t) => {
   const life = testLifecycle(t)
   const context = new Context()
   life.defer(() => context.fiber.dispose())
@@ -251,7 +251,7 @@ test('F2. a rejected plugin STARTUP still owns its fiber: the unwind disposes it
     'the assigned rejected fiber unwinds first: builtins(fiber-3) -> extension host(fiber-2) -> startup facts(fiber-1)')
 })
 
-test('F3. a REAL cleanup failure rides the cause chain beside the original error (never replaces it, cleanup continues)', async (t) => {
+test('a REAL cleanup failure rides the cause chain beside the original error (never replaces it, cleanup continues)', async (t) => {
   const life = testLifecycle(t)
   const context = new Context()
   life.defer(() => context.fiber.dispose())
