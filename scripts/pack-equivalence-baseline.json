@@ -54,11 +54,12 @@
     "equivalent": true,
     "mode": "npm",
     "node": "24",
+    "platform": "Linux",
     "entryCount": 37,
     "differingFiles": [],
     "manifestDifferences": [],
-    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39658295346",
-    "commit": "0f4369b0a3e337b01c46f607c03d5509d6b60524",
-    "note": "A change to any digested input, to this proof's MODE or NODE, or a missing/false proof reopens the question."
+    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39660914932",
+    "commit": "e9f4f25d75fea1b210723f323e51bcf3bfc9bd3f",
+    "note": "Reopened by any change to a digested input, to the proof MODE/NODE/PLATFORM, to the protocol, or by a missing/false proof."
   }
 }
