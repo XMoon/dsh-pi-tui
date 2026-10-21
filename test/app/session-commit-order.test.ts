@@ -25,7 +25,7 @@ function publication(log: string[]) {
   }
 }
 
-test('A ordinary transition: ack → latency → bump(reset) → publish → recall commit → completion', () => {
+test('ordinary transition: ack → latency → bump(reset) → publish → recall commit → completion', () => {
   const log: string[] = []
   const seams: OrdinaryCommitSeams = {
     isSurfaceDisposed: () => false,
@@ -42,7 +42,7 @@ test('A ordinary transition: ack → latency → bump(reset) → publish → rec
     'the queued recalls settle as committed only AFTER the owner publication (the commit point)')
 })
 
-test('A ordinary transition on a disposed surface: publish the late child, then the recall commit', () => {
+test('ordinary transition on a disposed surface: publish the late child, then the recall commit', () => {
   const log: string[] = []
   const seams: OrdinaryCommitSeams = {
     isSurfaceDisposed: () => true,
@@ -56,7 +56,7 @@ test('A ordinary transition on a disposed surface: publish the late child, then 
     'a disposed surface must skip ack/latency/bump and the completion reset, but still publish the late child for retirement and settle its recalls as committed')
 })
 
-test('B fork adoption: ack(session forked) → latency → bump(reset) → publish → recall commit → completion', () => {
+test('fork adoption: ack(session forked) → latency → bump(reset) → publish → recall commit → completion', () => {
   const log: string[] = []
   runForkCommit({
     settlePendingQueueRecalls: (committed) => { log.push(`recalls:${committed}`) },
@@ -71,7 +71,7 @@ test('B fork adoption: ack(session forked) → latency → bump(reset) → publi
     'the queued recalls settle as committed only AFTER the child publication (the commit point)')
 })
 
-test('C first session: publish → completion → await child idle → bump(reset) → init', async () => {
+test('first session: publish → completion → await child idle → bump(reset) → init', async () => {
   const log: string[] = []
   const committed = await runFirstSessionCommit({
     ...publication(log),
@@ -84,7 +84,7 @@ test('C first session: publish → completion → await child idle → bump(rese
     'the first-session create bumps AFTER publishing its committed child (unlike A/B)')
 })
 
-test('C first session aborted during the child idle: no bump and no init', async () => {
+test('first session aborted during the child idle: no bump and no init', async () => {
   const log: string[] = []
   const committed = await runFirstSessionCommit({
     ...publication(log),
@@ -95,7 +95,7 @@ test('C first session aborted during the child idle: no bump and no init', async
   assert.deepEqual(log, ['publish', 'completion:agent-1', 'quiesce'])
 })
 
-test('D startup resume with no agent: publication stays SYNCHRONOUS (no promise, no microtask yield)', () => {
+test('startup resume with no agent: publication stays SYNCHRONOUS (no promise, no microtask yield)', () => {
   const log: string[] = []
   const wait = runResumeCommit({
     ...publication(log),
@@ -109,7 +109,7 @@ test('D startup resume with no agent: publication stays SYNCHRONOUS (no promise,
     'publication and the quiesce decision must both happen synchronously')
 })
 
-test('D startup resume with an owner: publish → completion → pre-mount quiesce (no bump)', async () => {
+test('startup resume with an owner: publish → completion → pre-mount quiesce (no bump)', async () => {
   const log: string[] = []
   const wait = runResumeCommit({
     ...publication(log),

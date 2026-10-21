@@ -882,7 +882,7 @@ test('a sessionless @dir/ lists children (direct children listing)', async (t) =
 
 // ── §24 headless integration: TuiApp + TuiEditor + MentionProvider ─────────
 
-test('A: @src → dropdown → Tab → @src/ → children dropdown', async (t) => {
+test('@src → dropdown → Tab → @src/ → children dropdown', async (t) => {
   const life = testLifecycle(t)
   const { startApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
@@ -899,7 +899,7 @@ test('A: @src → dropdown → Tab → @src/ → children dropdown', async (t) =
   await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
 })
 
-test('B: /image src → dropdown → Tab → /image src/ → children dropdown', async (t) => {
+test('/image src → dropdown → Tab → /image src/ → children dropdown', async (t) => {
   const life = testLifecycle(t)
   const { startImageApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
@@ -916,7 +916,7 @@ test('B: /image src → dropdown → Tab → /image src/ → children dropdown',
   await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
 })
 
-test('C: hello ./src<Tab> opens no dropdown', async (t) => {
+test('hello ./src<Tab> opens no dropdown', async (t) => {
   const life = testLifecycle(t)
   const { startApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
@@ -941,7 +941,7 @@ test('C: hello ./src<Tab> opens no dropdown', async (t) => {
   assert.equal(app.seatTextForTest(), 'hello ./src', 'the draft is untouched')
 })
 
-test('E: sessionless @dir/ lists children through the app chain', async (t) => {
+test('sessionless @dir/ lists children through the app chain', async (t) => {
   const life = testLifecycle(t)
   const { startApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
