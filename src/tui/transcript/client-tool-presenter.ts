@@ -149,8 +149,18 @@ function diffsOf(record: Record<string, unknown>): FileDiff[] | undefined {
  * arguments — so it demands the tool's write contract rather than a mere field
  * collision: `operation` must be one of the two values that projection
  * defines, `diffs` must be the empty list, and the call must carry the string
- * `content` the diff is built from. A third-party tool that happens to send
- * `operation` + `path` + `content` matches none of that and gets no view.
+ * `content` the diff is built from.
+ *
+ * BOUNDARY, deliberately recorded here: that shape is specific enough to be
+ * worth honouring, but it is NOT a globally unique tool identity. `meta` is
+ * arbitrary tool-private JSON with no namespace, so a third-party tool can
+ * legitimately emit the very same fields and be rendered as a file diff. The
+ * Owner has accepted that bound for this PR and for the not-yet-public Remote
+ * branch, because the worst outcome is a read-only presentation, and because a
+ * real discriminator would need a Host/Wire-level type this change must not
+ * add. Re-open that decision when the Remote branch opens publicly or a real
+ * third-party collision appears — and then review the whole Remote result-
+ * presenter provenance mechanism, not just this one field.
  *
  * The path follows the Host presenter exactly: the metadata's own path when it
  * has one, otherwise the call's `file_path`. That second arm is reachable only
