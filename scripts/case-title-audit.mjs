@@ -69,47 +69,68 @@ function classify(name) {
   return 'OK'
 }
 
+/**
+ * Collect one lane's inventory.
+ *
+ * @param {string} lane - the lane name.
+ * @returns {object} the inventory.
+ */
+function collectInventory(lane) {
+  const path = join(ROOT, 'temp', `case-inventory-${lane}.json`)
+  const result = spawnSync(
+    process.execPath,
+    [join(ROOT, 'scripts', 'case-inventory.mjs'), '--lane', lane, '--out', path],
+    { cwd: ROOT, stdio: ['ignore', 'ignore', 'inherit'] },
+  )
+  if (result.status !== 0) {
+    console.error(`the ${lane} case inventory could not be collected; the audit is not a measurement`)
+    process.exit(1)
+  }
+  return JSON.parse(readFileSync(path, 'utf8'))
+}
+
 function main() {
   const args = process.argv.slice(2)
   const inventoryIndex = args.indexOf('--inventory')
   const laneIndex = args.indexOf('--lane')
 
-  let inventory
   if (inventoryIndex !== -1) {
-    inventory = JSON.parse(readFileSync(args[inventoryIndex + 1], 'utf8'))
-  } else {
-    const lane = laneIndex === -1 ? 'product' : args[laneIndex + 1]
-    const result = spawnSync(
-      process.execPath,
-      [join(ROOT, 'scripts', 'case-inventory.mjs'), '--lane', lane, '--out', join(ROOT, 'temp', 'case-inventory.json')],
-      { cwd: ROOT, stdio: ['ignore', 'ignore', 'inherit'] },
-    )
-    if (result.status !== 0) {
-      console.error('the case inventory could not be collected; the audit is not a measurement')
-      process.exit(1)
-    }
-    inventory = JSON.parse(readFileSync(join(ROOT, 'temp', 'case-inventory.json'), 'utf8'))
+    report([JSON.parse(readFileSync(args[inventoryIndex + 1], 'utf8'))])
+    return
   }
+  // Without an explicit inventory, EVERY lane is audited: a report that
+  // covered only the product lane would say nothing about the tooling
+  // lane's titles, and a "no code-led titles" claim has to be true of the
+  // whole tree.
+  const lanes = laneIndex === -1 ? ['product', 'tooling'] : [args[laneIndex + 1]]
+  report(lanes.map(collectInventory))
+}
+
+function report(inventories) {
 
   const findings = []
-  for (const record of inventory.cases) {
-    const verdict = classify(record.name)
-    if (verdict !== 'OK') {
-      findings.push({ verdict, file: record.file, line: record.line, name: record.name })
+  for (const inventory of inventories) {
+    for (const record of inventory.cases) {
+      const verdict = classify(record.name)
+      if (verdict !== 'OK') {
+        findings.push({ lane: inventory.lane, verdict, file: record.file, line: record.line, name: record.name })
+      }
     }
   }
 
   const byVerdict = {}
   for (const finding of findings) byVerdict[finding.verdict] = (byVerdict[finding.verdict] ?? 0) + 1
 
-  console.log(`lane            ${inventory.lane}`)
-  console.log(`files           ${inventory.fileCount}`)
-  console.log(`cases           ${inventory.caseCount}`)
+  for (const inventory of inventories) {
+    console.log(`lane            ${inventory.lane}`)
+    console.log(`files           ${inventory.fileCount}`)
+    console.log(`cases           ${inventory.caseCount}`)
+  }
   console.log(`candidates      ${findings.length}`)
   console.log(`by verdict      ${JSON.stringify(byVerdict)}`)
   console.log('')
   for (const finding of findings) {
-    console.log(`${finding.verdict}\t${finding.file}:${finding.line}\t${finding.name}`)
+    console.log(`${finding.verdict}\t${finding.lane}\t${finding.file}:${finding.line}\t${finding.name}`)
   }
 }
 

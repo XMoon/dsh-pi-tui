@@ -222,12 +222,16 @@ Two reports, in this order:
 
 | Command | What it reports |
 |---|---|
-| `pnpm report:case-inventory` | the real case list of the product lane, collected by running that lane through the same reporter the CI uses |
-| `pnpm report:case-titles` | the titles of that list that still lead with a code, or that name a subject without naming a result |
+| `pnpm report:case-inventory` | the real case list of every lane, collected by running each lane through the same reporter the CI uses |
+| `pnpm report:case-titles` | the titles of those lists that still lead with a code, or that name a subject without naming a result |
 
 The inventory is collected from a RUN, not from a text scan: a table-driven
 case builds its title at run time, and a `describe()` chain contributes to
 the title the reader sees, so a regex cannot produce the list.
+
+The audit and the rewrite tool share ONE definition of what a code is, so
+they can never disagree: a title the audit does not report is a title the
+rewrite tool would not change.
 
 Both are REPORTS, not gates: the judgement "is this title clear" stays with
 the reviewer, exactly like rule 4 above. The audit's two verdicts are
