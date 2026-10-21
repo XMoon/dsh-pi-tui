@@ -87,6 +87,7 @@ jobs:
       shard_total: ${{ steps.shards.outputs.shard_total }}
       test_concurrency: ${{ steps.shards.outputs.test_concurrency }}
       nodes: ${{ steps.shards.outputs.nodes }}
+      expected_skipped: ${{ steps.shards.outputs.expected_skipped }}
     steps:
       - name: Checkout the measured commit
         uses: actions/checkout@v7
@@ -106,6 +107,7 @@ jobs:
           DSH_SHARD_TOTAL: ${{ inputs.shard_total || '' }}
           DSH_TEST_CONCURRENCY: ${{ inputs.test_concurrency || '' }}
           DSH_NODE_VERSIONS: ${{ inputs.node_versions || '' }}
+          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped || '' }}
         run: |
           set -euo pipefail
           if [ -z "$DSH_SHARD_TOTAL" ]; then
@@ -131,6 +133,7 @@ jobs:
           echo "shard_total=$DSH_SHARD_TOTAL" >> "$GITHUB_OUTPUT"
           echo "test_concurrency=$DSH_TEST_CONCURRENCY" >> "$GITHUB_OUTPUT"
           echo "nodes=$DSH_NODE_VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "expected_skipped=$DSH_EXPECTED_SKIPPED" >> "$GITHUB_OUTPUT"
           echo "the measurement will run these shards: $shards"
           echo "with this test concurrency: ${DSH_TEST_CONCURRENCY:-the Node default}"
 
@@ -288,7 +291,7 @@ jobs:
           # The expected skip count, per Node version when the versions
           # differ: a version can legitimately skip a different number of
           # cases than another. A single number applies to every version.
-          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped || '' }}
+          DSH_EXPECTED_SKIPPED: ${{ needs.prepare.outputs.expected_skipped }}
           DSH_BASELINE_SOURCE: ${{ inputs.baseline_source || 'the unsharded lane of the same commit' }}
         run: |
           set -euo pipefail
