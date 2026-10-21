@@ -170,24 +170,39 @@ test('result: the read metadata must survive the same window validation the tool
   assert.equal(read({ ...base, lang: 7 }), undefined, 'non-string lang')
 })
 
-test('result: a write that CREATED the file rebuilds its diff from the arguments', () => {
+test('result: a write that CREATED the file rebuilds its diff, and nothing else does', () => {
   // `dsh-tool-fs` records `diffs: []` when a write creates a file (there is no
   // before-image), and its own write presenter then rebuilds the diff from the
-  // call arguments. The Client keys that fallback on the tool-authored
-  // `operation` field, never on the tool name.
-  const created = presenter.result('write', JSON.stringify({ file_path: 'src/new.ts', content: 'fresh\n' }), {
+  // call arguments. This branch FABRICATES data, so it demands the tool's own
+  // write contract — the projected `operation` value, the empty list that
+  // create emits, and a string `content` argument — never a name.
+  const args = JSON.stringify({ file_path: 'src/new.ts', content: 'fresh\n' })
+  const created = presenter.result('write', args, {
     content: [{ type: 'text', text: 'written' }],
     isError: false,
     meta: { operation: 'create', path: 'src/new.ts', diffs: [] },
   })
   assert.ok(created !== undefined && created.card === 'diff')
   assert.deepEqual(created.diffs, [{ path: 'src/new.ts', oldText: null, newText: 'fresh\n' }])
-  // Without the write marker, an empty diff list proves no file: the edit
-  // presenter declines exactly the same shape.
+
+  const read = (meta: Record<string, unknown>, callArgs = args): unknown => presenter.result('write', callArgs, {
+    content: [{ type: 'text', text: 'written' }], isError: false, meta: meta as never,
+  })
+  // A third-party tool that happens to send `operation` + `path` + `content`
+  // must not be read as a create: the operation value is not one the write
+  // contract defines.
+  assert.equal(read({ operation: 'delete', path: 'src/a.ts', diffs: [] }), undefined, 'unknown operation value')
+  // `[]` is the create signature; an absent list is not this shape.
+  assert.equal(read({ operation: 'create', path: 'src/a.ts' }), undefined, 'no diffs field')
+  // `[]` contradicts `update`, which would have carried hunks.
+  assert.equal(read({ operation: 'update', path: 'src/a.ts', diffs: [] }), undefined, 'update with an empty list')
+  // The diff is built from the argument, so the argument must be there.
+  assert.equal(read({ operation: 'create', path: 'src/a.ts', diffs: [] }, JSON.stringify({ file_path: 'src/a.ts' })), undefined, 'no content argument')
+  // An edit with an empty list declines, exactly like the Host edit presenter.
   assert.equal(presenter.result('edit', JSON.stringify({ file_path: 'src/a.ts', old_string: 'a', new_string: 'b' }), {
     content: [{ type: 'text', text: 'edited' }],
     isError: false,
-    meta: { path: 'src/a.ts', diffs: [] },
+    meta: { operation: 'create', path: 'src/a.ts', diffs: [] },
   }), undefined)
 })
 
