@@ -62,11 +62,34 @@ export function collectTestFiles(rootDir, files = []) {
  *
  * The allowlist names files by their BASENAME, so a file that moves
  * between ownership directories keeps its verdict.
+ *
+ * A basename is only safe while it is UNIQUE in the tree. If two files
+ * share an allowed basename, the second one inherits the exemption — so
+ * the gate checks the uniqueness of every allowlisted basename and fails
+ * closed when one of them is ambiguous. A carve-out that a new file can
+ * silently take over is not a carve-out; it is a hole.
  */
 function isAllowedFile(rootDir, file) {
   const rel = relative(rootDir, file).split('\\').join('/')
   const basename = rel.slice(rel.lastIndexOf('/') + 1)
   return ALLOWED_DIRECT_USAGE.some((allowed) => allowed.file === basename)
+}
+
+/**
+ * The allowlisted basenames that are NOT unique in the tree.
+ *
+ * @param {string} rootDir - the test root.
+ * @returns {string[]} the ambiguous basenames.
+ */
+export function ambiguousAllowlistEntries(rootDir) {
+  const counts = new Map()
+  for (const file of collectTestFiles(rootDir)) {
+    const basename = file.slice(file.lastIndexOf('/') + 1)
+    counts.set(basename, (counts.get(basename) ?? 0) + 1)
+  }
+  return ALLOWED_DIRECT_USAGE
+    .map((allowed) => allowed.file)
+    .filter(basename => (counts.get(basename) ?? 0) > 1)
 }
 
 /** Scan one source file's text; returns violations (file:line + matched token). */
@@ -104,6 +127,13 @@ function printViolations(violations) {
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
   const rootDir = process.argv[2] ?? join(process.cwd(), 'test')
+  const ambiguous = ambiguousAllowlistEntries(rootDir)
+  if (ambiguous.length > 0) {
+    console.error(`temp-hygiene-gate: the allowlist is ambiguous: ${ambiguous.join(', ')}`)
+    console.error('  two files share an allowed basename, so the second one inherits the')
+    console.error('  exemption. Narrow the entry to a path, or rename one of the files.')
+    process.exit(1)
+  }
   const violations = scanTree(rootDir)
   if (violations.length > 0) {
     printViolations(violations)
