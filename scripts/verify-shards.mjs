@@ -217,7 +217,7 @@ export function verifyShards({
       cancelled: cancelled.length,
       sha: spec?.sha ?? null,
       runId: spec?.runId ?? null,
-      wallClockSeconds: spec?.wall_clock_seconds ?? null,
+      wallClockSeconds: spec?.wallClockSeconds ?? null,
       availableParallelism: spec?.cpu?.availableParallelism ?? null,
     })
   }
