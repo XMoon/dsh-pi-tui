@@ -48,7 +48,7 @@ const FILES = ['app/one.test.ts', 'app/two.test.ts', 'tui/three.test.ts']
  * @param {string} name - the shard's directory name.
  * @param {{files: string[], results?: Record<string, string>, spec?: object|null}} options
  */
-function writeShard(root, name, { files, results = {}, spec = { sha: 'sha-1', runId: 'run-1' } }) {
+function writeShard(root, name, { files, results = {}, spec = { sha: 'sha-1', runId: 'run-1' }, applied = undefined }) {
   const directory = join(root, name)
   mkdirSync(directory, { recursive: true })
   const records = []
@@ -64,6 +64,18 @@ function writeShard(root, name, { files, results = {}, spec = { sha: 'sha-1', ru
   writeFileSync(join(directory, 'cases.jsonl'), records.map(record => JSON.stringify(record)).join('\n') + '\n')
   if (spec !== null) {
     writeFileSync(join(directory, 'runner-spec.json'), JSON.stringify(spec))
+  }
+  // The parameters the runner APPLIED. A shard that recorded none is a
+  // shard whose configuration is unknown, and the aggregate rejects it —
+  // so every VALID fixture carries them, exactly like a real shard does.
+  // `applied: null` is how a case deliberately omits them.
+  if (applied !== null) {
+    const index = /shard-(\d+)/u.exec(name)?.[1] ?? '1'
+    writeFileSync(join(directory, 'effective-params.json'), JSON.stringify(applied ?? {
+      shard: `${index}/2`,
+      testConcurrency: null,
+      laneFileCount: files.length,
+    }))
   }
   return directory
 }
@@ -561,4 +573,120 @@ test('a TODO case fails the aggregate', (t) => {
   })
   assert.ok(aggregate.failures.length > 0, 'a todo case must fail the aggregate')
   assert.match(aggregate.failures.join('\n'), /1 todo/u)
+})
+
+// ---------------------------------------------------------------------------
+// The EFFECTIVE parameters.
+//
+// The regression these protect: five CI runs were reported as a concurrency
+// comparison while every one of them ran at Node's default, because the
+// runner accepted `--test-concurrency` and then never put it on the child's
+// command line. Nothing failed — the lane was green and the report was
+// complete. Only the CONFIGURATION was a lie.
+//
+// So the runner records what it applied, and the aggregate compares that
+// record against the level the run claims to measure.
+// ---------------------------------------------------------------------------
+
+test('a shard that ran at a DIFFERENT concurrency than the run claims fails', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-applied-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    applied: { shard: '1/2', testConcurrency: 8, laneFileCount: 2 },
+  })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    applied: { shard: '2/2', testConcurrency: 8, laneFileCount: 1 },
+  })
+  // The run CLAIMS Node's default, and the shards applied 8. That is not a
+  // measurement of the default, so it must not pass as one.
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedConcurrency: 'default',
+  })
+  assert.ok(aggregate.failures.length > 0, 'an applied level that differs from the claim must fail')
+  assert.match(aggregate.failures.join('\n'), /claims Node's default concurrency but ran at 8/u)
+})
+
+test('a shard that applied the claimed concurrency is accepted', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-applied-ok-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    applied: { shard: '1/2', testConcurrency: 6, laneFileCount: 2 },
+  })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    applied: { shard: '2/2', testConcurrency: 6, laneFileCount: 1 },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedConcurrency: 6,
+  })
+  assert.deepEqual(aggregate.failures, [])
+})
+
+test('a shard that recorded NO applied parameters fails when a level is claimed', (t) => {
+  // A shard whose applied configuration is unknown cannot prove it measured
+  // the claimed level. Failing open here would recreate the original defect.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-applied-missing-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'], applied: null })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], applied: null })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedConcurrency: 'default',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a shard with no applied parameters must fail')
+  assert.match(aggregate.failures.join('\n'), /recorded no effective parameters/u)
+})
+
+test('a shard artifact filed under a DIFFERENT shard than it ran fails', (t) => {
+  // The directory names the shard the artifact belongs to; the runner
+  // recorded the shard it was given. If they disagree, the artifact is
+  // filed under a shard whose coverage it does not hold.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-index-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    applied: { shard: '2/2', testConcurrency: null, laneFileCount: 2 },
+  })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    applied: { shard: '2/2', testConcurrency: null, laneFileCount: 1 },
+  })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.ok(aggregate.failures.length > 0, 'a mis-filed shard must fail')
+  assert.match(aggregate.failures.join('\n'), /ran the shard 2\/2, not 1\/2/u)
+})
+
+test('the aggregate records both the CLAIMED and the APPLIED level', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-record-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    applied: { shard: '1/2', testConcurrency: 4, laneFileCount: 2 },
+  })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    applied: { shard: '2/2', testConcurrency: 4, laneFileCount: 1 },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedConcurrency: 4,
+  })
+  assert.equal(aggregate.expectedConcurrency, 4, 'the claim is part of the record')
+  for (const shard of aggregate.shards) {
+    assert.equal(shard.applied.testConcurrency, 4, 'what each shard applied is part of the record')
+    assert.equal(shard.applied.laneFileCount, shard.fileCount)
+  }
 })

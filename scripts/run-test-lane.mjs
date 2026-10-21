@@ -25,7 +25,8 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,6 +36,15 @@ import { LANES } from './test-lanes.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const TEST_ROOT = join(ROOT, 'test')
+
+/** A command's trimmed output, or null when it cannot be read. */
+function commandOutput(file, args) {
+  try {
+    return execFileSync(file, args, { encoding: 'utf8', cwd: ROOT }).trim()
+  } catch {
+    return null
+  }
+}
 
 /**
  * Parse the optional `--shard=<index>/<total>` argument.
@@ -149,13 +159,42 @@ function main() {
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
-  const child = spawn(process.execPath, [
+  const spawnArgs = [
     '--test',
     ...reporterArgs,
     ...(shard === undefined ? [] : [`--test-shard=${shard}`]),
     ...(concurrency === undefined ? [] : [concurrency]),
     ...relativeFiles,
-  ], {
+  ]
+
+  // The EFFECTIVE parameters.
+  //
+  // The workflow knows what it INTENDED to run; only this process knows what
+  // it actually put on the child's command line. The difference between the
+  // two is not hypothetical: the concurrency used to be accepted here and
+  // then dropped, so five CI runs were reported as a concurrency comparison
+  // while every one of them ran at Node's default.
+  //
+  // So the applied values are recorded here, next to the case records, and
+  // the aggregate checks them against what the run claims to be.
+  const effective = process.env.DSH_TEST_EFFECTIVE_JSON
+  if (effective !== undefined) {
+    writeFileSync(effective, `${JSON.stringify({
+      shard: shard ?? null,
+      testConcurrency: concurrency === undefined ? null : Number(concurrency.slice('--test-concurrency='.length)),
+      // The files this shard handed to Node, before Node's own sharding.
+      laneFileCount: relativeFiles.length,
+      // The fixed flags, so a reader can see the whole prefix.
+      argvPrefix: spawnArgs.slice(0, spawnArgs.length - relativeFiles.length),
+      nodeExecPath: process.execPath,
+      nodeVersion: process.version,
+      sha: commandOutput('git', ['rev-parse', 'HEAD']),
+      runId: process.env.GITHUB_RUN_ID ?? null,
+      runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+    }, null, 2)}\n`)
+  }
+
+  const child = spawn(process.execPath, spawnArgs, {
     cwd: ROOT,
     stdio: 'inherit',
     shell: false,

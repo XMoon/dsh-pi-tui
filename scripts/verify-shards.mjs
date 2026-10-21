@@ -133,6 +133,39 @@ function readShardSpec(shardDirectory) {
 }
 
 /**
+ * The parameters the RUNNER actually applied, as it recorded them.
+ *
+ * This is not what the workflow asked for: it is what the runner put on the
+ * child's command line. `null` when the shard recorded nothing, which is a
+ * failure when the aggregate expects a specific configuration.
+ */
+function readEffectiveParams(shardDirectory) {
+  const path = join(shardDirectory, 'effective-params.json')
+  if (!existsSync(path)) return null
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The shard argument a shard directory names.
+ *
+ * `product-diagnostics-shard-2-node24` is the artifact of `--shard=2/<total>`.
+ * A directory that does not name a shard has no expected index, so the
+ * comparison is skipped rather than invented.
+ */
+function shardIndexOf(directory, total) {
+  // `shard-2`, `product-diagnostics-shard-2-node24` — the index is the
+  // digits after `shard-`, and any `-node<version>` suffix is not part of
+  // the shard argument.
+  const match = /shard-(\d+)(?:-node[\d.]+)?$/u.exec(directory)
+  if (match === null) return null
+  return `${match[1]}/${total}`
+}
+
+/**
  * A recorded file path in the TEST-root form the discovery rule uses.
  *
  * The reporter records the path relative to the repository root, because
@@ -174,7 +207,35 @@ function readExpectations() {
     expectedRunAttempt: process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null,
     expectedCases: number('DSH_EXPECTED_CASES'),
     expectedSkipped: expectedSkippedBaseline(),
+    // The concurrency the measurement claims to be about. `0` is not a
+    // level, so it cannot be written by accident; the workflow passes the
+    // resolved level (or omits it when the level is Node's default, which
+    // the runner records as `null`).
+    expectedConcurrency: expectedConcurrencyBaseline(),
   }
+}
+
+/**
+ * The concurrency level the measurement claims to have applied.
+ *
+ * THREE states, because "the level is Node's default" and "there is no
+ * expectation" must not collapse into the same value:
+ *
+ *   - `undefined` — no level is asserted, so no concurrency check runs;
+ *   - `'default'` — the run claims Node's own default, so the runner must
+ *     have recorded `null` (no flag). This is the state that catches a run
+ *     that CLAIMS default and silently applied a number;
+ *   - a number — the run claims that explicit level.
+ */
+function expectedConcurrencyBaseline() {
+  const raw = process.env.DSH_EXPECTED_CONCURRENCY
+  if (raw === undefined || raw === '') return undefined
+  if (raw === 'default') return 'default'
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`DSH_EXPECTED_CONCURRENCY must be a positive integer or "default", got: ${raw}`)
+  }
+  return value
 }
 
 function main() {
@@ -226,6 +287,7 @@ export function verifyShards({
   expectedRunAttempt = null,
   expectedCases = null,
   expectedSkipped = null,
+  expectedConcurrency = undefined,
   expectedFiles: expectedFilesOverride,
 }) {
   const failures = []
@@ -382,6 +444,42 @@ export function verifyShards({
     totalSkipped += skipped
     group.cases += shardCases.length
     group.skipped += skipped
+    // The EFFECTIVE parameters the runner applied.
+    //
+    // The workflow knows what it intended; the runner recorded what it put
+    // on the child's command line. Those two differ when an argument is
+    // accepted and then dropped — which is exactly how five CI runs were
+    // once reported as a concurrency comparison while every one of them ran
+    // at Node's default.
+    //
+    // A measurement whose applied parameters are not the ones it claims is
+    // not a measurement of that configuration, so a mismatch FAILS.
+    // The shard INDEX is part of the identity: the directory names the
+    // shard the artifact belongs to, and the runner recorded the shard it
+    // was given. If they disagree, the artifact is filed under a shard
+    // whose coverage it does not hold.
+    //
+    // The concurrency is checked only when the run ASSERTS a level. The
+    // check exists because an argument accepted and then dropped is not
+    // hypothetical: five CI runs were once reported as a concurrency
+    // comparison while every one of them ran at Node's default.
+    const applied = readEffectiveParams(shardDirectory)
+    if (applied === null) {
+      failures.push(`the shard ${directory} recorded no effective parameters: what it actually ran is unknown`)
+    } else {
+      const expectedShard = shardIndexOf(directory, total)
+      if (expectedShard !== null && applied.shard !== expectedShard) {
+        failures.push(`the shard ${directory} ran the shard ${applied.shard}, not ${expectedShard}`)
+      }
+      if (expectedConcurrency === 'default') {
+        if (applied.testConcurrency !== null) {
+          failures.push(`the shard ${directory} claims Node's default concurrency but ran at ${applied.testConcurrency}`)
+        }
+      } else if (expectedConcurrency !== undefined && applied.testConcurrency !== expectedConcurrency) {
+        const actual = applied.testConcurrency === null ? "Node's default" : String(applied.testConcurrency)
+        failures.push(`the shard ${directory} ran at ${actual}, not the measured ${expectedConcurrency}`)
+      }
+    }
     shards.push({
       shard: directory,
       fileCount: shardFiles.length,
@@ -391,6 +489,11 @@ export function verifyShards({
       cancelled: cancelled.length,
       sha: spec?.sha ?? null,
       runId: spec?.runId ?? null,
+      applied: applied === null ? null : {
+        shard: applied.shard,
+        testConcurrency: applied.testConcurrency,
+        laneFileCount: applied.laneFileCount,
+      },
       wallClockSeconds: spec?.wallClockSeconds ?? null,
       availableParallelism: spec?.cpu?.availableParallelism ?? null,
     })
@@ -455,6 +558,9 @@ export function verifyShards({
     totalSkipped,
     expectedCases,
     expectedSkipped,
+    // What the measurement CLAIMED, in the same shape the shards recorded
+    // what they APPLIED, so a reader can compare the two sides directly.
+    expectedConcurrency: expectedConcurrency === undefined ? null : expectedConcurrency,
     shards,
     versions,
     failures,

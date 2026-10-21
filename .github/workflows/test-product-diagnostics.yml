@@ -45,24 +45,24 @@ on:
           - '3'
           - '4'
       test_concurrency:
-        description: "How many test FILES Node runs at once (the C1 concurrency experiment: ONE lane, no shard, and the concurrency is the only variable)"
+        description: "How many test FILES Node runs at once. 'default' means Node's own (os.availableParallelism), expressed by NOT passing the flag. The C1 experiment varies ONLY this."
         required: false
-        default: '1'
+        default: 'default'
         type: string
       expected_cases:
-        description: 'The case count the UNSHARDED lane reports at the same SHA, DSH mode and runner (the baseline the shards must match)'
+        description: 'The case count the UNSHARDED lane reports at the same SHA, DSH mode and runner. Empty reads the committed baseline.'
         required: false
-        default: '9110'
+        default: ''
         type: string
       expected_skipped:
-        description: 'The skipped-case count the UNSHARDED lane reports at the same SHA, DSH mode and runner'
+        description: 'The skipped-case count the UNSHARDED lane reports at the same SHA, DSH mode and runner. Empty reads the committed baseline.'
         required: false
-        default: '37'
+        default: ''
         type: string
       baseline_source:
         description: 'Where the baseline came from: the SHA, the DSH mode and the run it was taken from'
         required: false
-        default: 'the ubuntu runner at this commit, npm mode (9110 cases, 37 skips: 36 optional-bundle + 1 no fd/fdfind on PATH)'
+        default: 'the ubuntu runner at this commit, npm mode'
         type: string
 
 permissions:
@@ -89,6 +89,15 @@ jobs:
       nodes: ${{ steps.shards.outputs.nodes }}
       expected_skipped: ${{ steps.shards.outputs.expected_skipped }}
       expected_cases: ${{ steps.shards.outputs.expected_cases }}
+      # The instant this workflow's DAG started. The aggregate uses it to
+      # report the WHOLE path — prepare + shards + uploads + download —
+      # rather than only the test lane, because the lane is not what the
+      # critical path costs.
+      started_epoch: ${{ steps.shards.outputs.started_epoch }}
+      # Which OPTIONAL phases this round runs. A shard measurement leaves
+      # the pack-equivalence proof out, because that job is slower than the
+      # sharded path and would become the workflow's wall clock.
+      pack_equivalence: ${{ steps.shards.outputs.pack_equivalence }}
     steps:
       - name: Checkout the measured commit
         uses: actions/checkout@v7
@@ -112,21 +121,51 @@ jobs:
           DSH_EXPECTED_CASES: ${{ inputs.expected_cases || '' }}
         run: |
           set -euo pipefail
+          # The DAG's start. Recorded so the aggregate can report the WHOLE
+          # path — prepare + shards + uploads + download — instead of only
+          # the test lane, which is not what the critical path costs.
+          echo "started_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
           if [ -z "$DSH_SHARD_TOTAL" ]; then
             DSH_SHARD_TOTAL="$(cat scripts/measurement-shard-total.txt)"
           fi
+          # The baselines and the level are COMMITTED facts. A missing one is
+          # a broken measurement, not a measurement with a default: a guessed
+          # baseline would make the aggregate compare the shards against a
+          # number nobody measured, and a guessed level would label a run
+          # with a configuration it did not apply.
           if [ -z "$DSH_EXPECTED_CASES" ]; then
-            DSH_EXPECTED_CASES="$(cat scripts/measurement-expected-cases.txt 2>/dev/null || echo '9110')"
+            if [ ! -f scripts/measurement-expected-cases.txt ]; then
+              echo 'the committed baseline scripts/measurement-expected-cases.txt is missing' >&2
+              exit 1
+            fi
+            DSH_EXPECTED_CASES="$(cat scripts/measurement-expected-cases.txt)"
           fi
           if [ -z "$DSH_EXPECTED_SKIPPED" ]; then
-            DSH_EXPECTED_SKIPPED="$(cat scripts/measurement-expected-skipped.txt 2>/dev/null || echo '37')"
+            if [ ! -f scripts/measurement-expected-skipped.txt ]; then
+              echo 'the committed baseline scripts/measurement-expected-skipped.txt is missing' >&2
+              exit 1
+            fi
+            DSH_EXPECTED_SKIPPED="$(cat scripts/measurement-expected-skipped.txt)"
           fi
           if [ -z "$DSH_TEST_CONCURRENCY" ]; then
-            DSH_TEST_CONCURRENCY="$(cat scripts/measurement-test-concurrency.txt 2>/dev/null || echo '')"
+            if [ ! -f scripts/measurement-test-concurrency.txt ]; then
+              echo 'the committed level scripts/measurement-test-concurrency.txt is missing' >&2
+              exit 1
+            fi
+            DSH_TEST_CONCURRENCY="$(cat scripts/measurement-test-concurrency.txt | tr -d '[:space:]')"
           fi
           if [ -z "$DSH_NODE_VERSIONS" ]; then
             DSH_NODE_VERSIONS="$(cat scripts/measurement-node-versions.txt 2>/dev/null || echo '["24"]')"
           fi
+          PACK_EQUIVALENCE="$(cat scripts/measurement-run-pack-equivalence.txt 2>/dev/null | tr -d '[:space:]')"
+          if [ -z "$PACK_EQUIVALENCE" ]; then
+            echo 'the committed phase list scripts/measurement-run-pack-equivalence.txt is missing' >&2
+            exit 1
+          fi
+          case "$PACK_EQUIVALENCE" in
+            true|false) ;;
+            *) echo "measurement-run-pack-equivalence.txt must be true or false, got: $PACK_EQUIVALENCE" >&2; exit 1 ;;
+          esac
           case "$DSH_SHARD_TOTAL" in
             1) shards='[1]' ;;
             2) shards='[1,2]' ;;
@@ -140,6 +179,7 @@ jobs:
           echo "nodes=$DSH_NODE_VERSIONS" >> "$GITHUB_OUTPUT"
           echo "expected_skipped=$DSH_EXPECTED_SKIPPED" >> "$GITHUB_OUTPUT"
           echo "expected_cases=$DSH_EXPECTED_CASES" >> "$GITHUB_OUTPUT"
+          echo "pack_equivalence=$PACK_EQUIVALENCE" >> "$GITHUB_OUTPUT"
           echo "the measurement will run these shards: $shards"
           echo "with this test concurrency: ${DSH_TEST_CONCURRENCY:-the Node default}"
 
@@ -167,6 +207,11 @@ jobs:
         node: ${{ fromJSON(needs.prepare.outputs.nodes) }}
     env:
       DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
+      # What the runner ACTUALLY applied, as the runner itself recorded it.
+      # The aggregate compares this against the level the run claims to
+      # measure, so an argument that is accepted and then dropped cannot
+      # pass as a measurement of that level.
+      DSH_TEST_EFFECTIVE_JSON: ${{ github.workspace }}/diagnostics/effective-params.json
 
     steps:
       - name: Checkout the measured commit
@@ -298,6 +343,12 @@ jobs:
           # differ: a version can legitimately skip a different number of
           # cases than another. A single number applies to every version.
           DSH_EXPECTED_SKIPPED: ${{ needs.prepare.outputs.expected_skipped }}
+          # The level this run CLAIMS to measure. The shards record what they
+          # ACTUALLY applied, and a shard whose applied level does not match
+          # this claim FAILS — a run that silently applied a different
+          # concurrency is not a measurement of this one.
+          DSH_EXPECTED_CONCURRENCY: ${{ needs.prepare.outputs.test_concurrency }}
+          DSH_DAG_STARTED_EPOCH: ${{ needs.prepare.outputs.started_epoch }}
           DSH_BASELINE_SOURCE: ${{ inputs.baseline_source || 'the unsharded lane of the same commit' }}
         run: |
           set -euo pipefail
@@ -308,16 +359,35 @@ jobs:
             --total "$DSH_SHARD_TOTAL" \
             --out shards/aggregate.json
           # The baseline's PROVENANCE is part of the evidence: a count on
-          # its own says nothing about which run produced it.
+          # its own says nothing about which run produced it. The DAG's own
+          # wall clock is recorded next to it, because the product lane is
+          # not the whole critical path: prepare, upload and download are
+          # part of what a sharded pipeline actually costs.
           node -e "
             const fs = require('node:fs')
             const aggregate = JSON.parse(fs.readFileSync('shards/aggregate.json', 'utf8'))
+            const started = Number(process.env.DSH_DAG_STARTED_EPOCH)
+            const now = Math.floor(Date.now() / 1000)
             aggregate.baseline = {
               source: process.env.DSH_BASELINE_SOURCE,
               sha: process.env.DSH_EXPECTED_SHA,
               runId: process.env.DSH_EXPECTED_RUN_ID,
               expectedCases: aggregate.expectedCases,
               expectedSkipped: aggregate.expectedSkipped,
+            }
+            aggregate.dag = {
+              startedEpochSeconds: Number.isFinite(started) ? started : null,
+              aggregateStartedEpochSeconds: now,
+              // Prepare + every shard + the artifact transfers + this job,
+              // as one number. It is the path a PR actually waits on.
+              seconds: Number.isFinite(started) ? now - started : null,
+              shardWallSecondsMax: Math.max(...aggregate.shards.map(s => s.wallClockSeconds ?? 0)),
+              shardWallSecondsSum: aggregate.shards.reduce((sum, s) => sum + (s.wallClockSeconds ?? 0), 0),
+              // The gap between the slowest shard and the whole DAG is what
+              // the transfers, the queueing and the aggregate itself cost.
+              overheadSeconds: Number.isFinite(started)
+                ? now - started - Math.max(...aggregate.shards.map(s => s.wallClockSeconds ?? 0))
+                : null,
             }
             fs.writeFileSync('shards/aggregate.json', JSON.stringify(aggregate, null, 2) + '\n')
           "
@@ -346,6 +416,20 @@ jobs:
   # ---------------------------------------------------------------------------
   pack-equivalence:
     name: Pack equivalence (ordinary vs CI-only)
+    needs:
+      - prepare
+    # OPTIONAL, and OFF by default for a SHARD measurement.
+    #
+    # This job runs a full ordinary `pnpm pack` (which runs the WHOLE product
+    # lane) and takes ~400s — longer than the sharded path it runs beside.
+    # Leaving it in would make the whole workflow's wall clock report this
+    # job rather than the shards, and the DAG latency being measured would
+    # be the equivalence proof's, not the sharding's.
+    #
+    # The flag is a COMMITTED fact like every other measurement parameter,
+    # so which phases a round ran is a property of the branch and not of a
+    # memory of what was intended.
+    if: ${{ needs.prepare.outputs.pack_equivalence == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
