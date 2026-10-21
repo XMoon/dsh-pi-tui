@@ -1,0 +1,620 @@
+name: PR pipeline prototype
+
+# A PROTOTYPE of the PR-only validated packing path. It is NOT a required
+# check and it changes NOTHING about the release contract.
+#
+# The problem it addresses is measured: `pnpm pack` runs the package's
+# `prepack`, which runs the WHOLE product lane on ONE runner inside ONE job.
+# On a 4 vCPU runner that lane is ~320 s of a ~400 s job, and the job is
+# ~400 s of a ~508 s workflow. The lane is the critical path, and a single
+# runner cannot shorten it by being given a better concurrency (measured:
+# the default IS the best level on 4 vCPUs).
+#
+# The shape below takes the lane OFF the critical path instead:
+#
+#   build once (fork + bundle) ──┬─ typecheck:bundle            (sibling, ONCE)
+#        │                       ├─ product shard 1/N ─┐
+#        │                       ├─ ...                ├─ aggregate (proof)
+#        │                       └─ product shard N/N ─┘
+#        └─ pack WITHOUT lifecycle ─────────────────────────────┐
+#                                                               ↓
+#                              qualify: 8 smokes + source leak + startup
+#                                                               ↓
+#                                        qualified candidate upload
+#
+# What it does NOT do:
+#
+#   - it does not touch `.github/workflows/ci.yml`, so the ordinary PR
+#     checks and the release pipeline are unchanged;
+#   - it does not bypass the release lifecycle: a tag still runs the
+#     ordinary `pnpm pack`, which still runs `prepack` and `postpack`;
+#   - it does not trust a PR artifact as a release candidate. The upload is
+#     named `prototype-qualified-candidate` and no publishing event reads it.
+#
+# Everything is bound to ONE commit, one dependency mode and ONE build
+# identity: the shards and the pack both prove they consume the build the
+# build job produced, and the qualification proves it ran against the exact
+# tarball the pack job produced.
+
+on:
+  # The prototype branch ONLY. It must not be triggerable by the measurement
+  # branches: those exist to measure the lane, and running this pipeline
+  # beside them would add runner load to the very measurement it would
+  # distort.
+  push:
+    branches:
+      - 'ci/pr-pipeline-prototype-*'
+  workflow_dispatch:
+    inputs:
+      shard_total:
+        description: 'How many shards to split the product lane into'
+        required: false
+        default: '4'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve the dependency mode the same way the real CI does, so the
+  # prototype exercises the real resolver rather than a copy of its rules.
+  # ---------------------------------------------------------------------------
+  context:
+    name: Resolve the pipeline context
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.context.outputs.mode }}
+      shard_total: ${{ steps.shards.outputs.shard_total }}
+      shards: ${{ steps.shards.outputs.shards }}
+      started_epoch: ${{ steps.shards.outputs.started_epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Resolve the DSH mode
+        id: context
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: node scripts/dsh-ci-context.mjs
+
+      - name: Resolve the shard list
+        id: shards
+        env:
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '4' }}
+        run: |
+          set -euo pipefail
+          echo "started_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+          case "$DSH_SHARD_TOTAL" in
+            1) shards='[1]' ;;
+            2) shards='[1,2]' ;;
+            3) shards='[1,2,3]' ;;
+            4) shards='[1,2,3,4]' ;;
+            *) echo "unsupported shard total: $DSH_SHARD_TOTAL" >&2; exit 1 ;;
+          esac
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "shard_total=$DSH_SHARD_TOTAL" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # THE ONE BUILD. It runs `clean` and `build` (fork first, then the bundle)
+  # and then takes a DIGEST of the outputs. Every consumer proves it holds
+  # that build:
+  #
+  #   - the shards verify the digest before running, so a partially restored
+  #     tree fails instead of testing an unverified build;
+  #   - the pack job verifies it before packing, so the tarball is packed
+  #     from the build the tests ran against.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build the shared artifact
+    needs: context
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install the dependencies
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      # `clean` FIRST, exactly like `prepack` does: a build that reuses a
+      # stale `dist` is not the build this commit produces.
+      - name: Clean and build
+        run: pnpm clean && pnpm clean:fork && pnpm build
+
+      - name: Record the build identity
+        run: node scripts/build-digest.mjs --write build-digest.json
+
+      - name: Upload the shared build
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-build
+          # The build OUTPUTS only. `node_modules` is reinstalled in every
+          # consumer (it is not portable), and `src` comes from the checkout.
+          path: |
+            dist
+            packages/pi-tui/dist
+            generated
+            build-digest.json
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # TYPECHECK, ONCE, as a SIBLING of the shards.
+  #
+  # It reads `src` and `test` only (`tsconfig.json` includes those), so it
+  # does not need the build and does not need to run on four runners. Running
+  # the same full typecheck four times would add runner-minutes and prove
+  # nothing new.
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Bundle typecheck
+    needs: context
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install the dependencies
+        run: |
+          set -euo pipefail
+          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      - name: Typecheck the bundle
+        run: pnpm typecheck:bundle
+
+  # ---------------------------------------------------------------------------
+  # THE PRODUCT SHARDS: Node's own `--test-shard`, so the partition is
+  # disjoint by construction and the aggregate only has to PROVE it.
+  # ---------------------------------------------------------------------------
+  product-shard:
+    name: Product shard ${{ matrix.shard }}/${{ needs.context.outputs.shard_total }}
+    needs:
+      - context
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.context.outputs.shards) }}
+    env:
+      DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
+      DSH_TEST_EFFECTIVE_JSON: ${{ github.workspace }}/diagnostics/effective-params.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install the dependencies
+        run: |
+          set -euo pipefail
+          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      # The build is DOWNLOADED, not rebuilt. The digest comes with it, and
+      # the next step proves the downloaded tree is that build.
+      - name: Download the shared build
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-build
+          path: ${{ github.workspace }}
+
+      - name: Verify this shard holds the build the build job produced
+        run: node scripts/build-digest.mjs --verify build-digest.json
+
+      - name: Run this shard
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          start=$(date +%s)
+          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ needs.context.outputs.shard_total }}
+          end=$(date +%s)
+          node scripts/runner-spec.mjs \
+            --wall-clock-seconds "$((end - start))" \
+            --out diagnostics/runner-spec.json
+
+      - name: Upload this shard's records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-shard-${{ matrix.shard }}
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE AGGREGATE: the proof that the shards are the whole lane, and that
+  # each one ran the shard it claims.
+  #
+  # `if: always()` so a FAILED or CANCELLED shard still produces a report —
+  # the report then says why the set is invalid, instead of the aggregate
+  # being skipped and the downstream jobs silently having no proof.
+  # ---------------------------------------------------------------------------
+  aggregate:
+    name: Aggregate the shards
+    needs:
+      - context
+      - product-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Download every shard's records
+        uses: actions/download-artifact@v8
+        with:
+          pattern: prototype-shard-*
+          path: shards
+
+      - name: Require every shard job to have SUCCEEDED
+        env:
+          SHARD_RESULT: ${{ needs.product-shard.result }}
+        run: |
+          set -euo pipefail
+          # A green aggregate must never hide a failed shard. The matrix
+          # result is the authority for "the job ran and passed"; the record
+          # checks below are the authority for "it covered its files".
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "the product shard matrix result is '$SHARD_RESULT', not 'success'" >&2
+            exit 1
+          fi
+
+      - name: Prove the shards are the whole lane
+        env:
+          DSH_EXPECTED_RUN_ID: ${{ github.run_id }}
+          DSH_EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          # No concurrency is asserted here: this pipeline does not pass the
+          # flag, so the runner must record Node's default (null). Asserting
+          # "default" catches a pipeline that silently starts applying a
+          # level nobody chose.
+          DSH_EXPECTED_CONCURRENCY: default
+          DSH_EXPECTED_CASES: ''
+          DSH_EXPECTED_SKIPPED: ''
+        run: |
+          set -euo pipefail
+          DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
+          export DSH_EXPECTED_SHA
+          # There is no committed baseline in this prototype: the case and
+          # skip counts are compared against the UNSHARDED lane only when a
+          # caller supplies them. What is PROVED here, unconditionally, is
+          # the partition: every file exactly once, every shard's identity
+          # and applied parameters, and zero failed or cancelled cases.
+          node scripts/verify-shards.mjs \
+            --shards shards \
+            --total "${{ needs.context.outputs.shard_total }}" \
+            --out aggregate.json
+
+      - name: Upload the aggregate report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-aggregate
+          path: aggregate.json
+          if-no-files-found: warn
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE CANDIDATE: the package built from the SAME verified build, WITHOUT
+  # the package lifecycle.
+  #
+  # `--config.ignore-scripts=true` skips BOTH hooks: `prepack` (which would
+  # run the whole product lane again) AND `postpack` (which would run the
+  # eight smokes). That is measured, not assumed. So this job earns the
+  # tarball and records its digest; the QUALIFY job earns the qualification.
+  # ---------------------------------------------------------------------------
+  candidate:
+    name: Build the candidate tarball
+    needs:
+      - context
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install the dependencies
+        run: |
+          set -euo pipefail
+          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      - name: Download the shared build
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-build
+          path: ${{ github.workspace }}
+
+      - name: Verify the pack consumes the build the tests ran against
+        run: node scripts/build-digest.mjs --verify build-digest.json
+
+      - name: Pack WITHOUT the lifecycle
+        id: pack
+        run: |
+          set -euo pipefail
+          rm -f xmoon76-dsh-pi-tui-*.tgz
+          pnpm pack --config.ignore-scripts=true --pack-destination "$GITHUB_WORKSPACE"
+
+          mapfile -t TARBALLS < <(find . -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -printf '%f\n' | sort)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+          TARBALL="${TARBALLS[0]}"
+          SHA256="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "candidate $TARBALL $SHA256"
+
+      - name: Upload the candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-candidate
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE QUALIFICATION: every gate that makes the tarball a candidate, run
+  # against the SAME tarball, after the tests and the typecheck have passed.
+  #
+  # The digest is re-computed HERE, from the downloaded bytes. The action's
+  # own digest check reports a mismatch as a WARNING, which is not a gate,
+  # so the comparison is an explicit step.
+  # ---------------------------------------------------------------------------
+  qualify:
+    name: Qualify the candidate
+    needs:
+      - context
+      - build
+      - typecheck
+      - aggregate
+      - candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DSH_MODE: ${{ needs.context.outputs.mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install the dependencies
+        run: |
+          set -euo pipefail
+          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      - name: Download the candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-candidate
+          path: candidate
+
+      - name: Prove the candidate is the tarball the pack job produced
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+          EXPECTED_TARBALL: ${{ needs.candidate.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(find candidate -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one downloaded tarball, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "${TARBALLS[0]}" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the downloaded tarball is $ACTUAL, not the produced $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+          if [ "$(basename "${TARBALLS[0]}")" != "$EXPECTED_TARBALL" ]; then
+            echo "the downloaded tarball is $(basename "${TARBALLS[0]}"), not $EXPECTED_TARBALL" >&2
+            exit 1
+          fi
+          echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
+          echo "the candidate is the produced tarball ($ACTUAL)"
+
+      # The eight postpack smokes, one step each, in the SAME order the
+      # package lifecycle runs them, each given the explicit path of the one
+      # candidate. A failing smoke stops the job, exactly like `&&` in the
+      # lifecycle. Any of them missing is a MISSING qualification.
+      - name: "Smoke 1/8: tarball"
+        run: node scripts/tarball-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 2/8: extension fixture"
+        run: node scripts/extension-fixture-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 3/8: advanced plugin"
+        run: node scripts/advanced-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 4/8: phase4 plugin"
+        run: node scripts/phase4-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 5/8: unstable plugin"
+        run: node scripts/unstable-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 6/8: vim plugin"
+        run: node scripts/vim-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 7/8: examples plugin"
+        run: node scripts/examples-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 8/8: compose agent"
+        run: node scripts/compose-agent-compat-smoke.mjs "$CANDIDATE"
+
+      - name: Source leak gate
+        run: node scripts/dsh-source-leak-gate.mjs "$CANDIDATE"
+
+      - name: TUI startup strictness handshake
+        if: env.DSH_MODE == 'npm'
+        run: pnpm smoke:startup-strictness -- "$CANDIDATE"
+
+      # The digest is checked AGAIN, after the smokes, against the value the
+      # pack job recorded: a candidate replaced between the smokes and the
+      # upload must not be uploaded as the one that was qualified.
+      - name: Re-prove the candidate was not replaced during qualification
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          ACTUAL="$(sha256sum "$CANDIDATE" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the candidate changed during qualification: $ACTUAL, not $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+
+      # The upload is the LAST step, downstream of every gate. It is named so
+      # that no publishing event can mistake it for a release candidate.
+      - name: Upload the QUALIFIED candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-qualified-candidate
+          path: ${{ env.CANDIDATE }}
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # The pipeline's own cost, as one number.
+  #
+  # The product lane is not the critical path on its own: prepare, the build,
+  # the transfers and the qualification all contribute. This job reports the
+  # whole path and the slowest shard, so the trade-off (wall clock against
+  # runner-minutes) can be read from the run instead of estimated.
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Pipeline summary
+    needs:
+      - context
+      - build
+      - typecheck
+      - product-shard
+      - aggregate
+      - candidate
+      - qualify
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the outcome of every phase
+        env:
+          STARTED: ${{ needs.context.outputs.started_epoch }}
+          BUILD: ${{ needs.build.result }}
+          TYPECHECK: ${{ needs.typecheck.result }}
+          SHARDS: ${{ needs.product-shard.result }}
+          AGGREGATE: ${{ needs.aggregate.result }}
+          CANDIDATE: ${{ needs.candidate.result }}
+          QUALIFY: ${{ needs.qualify.result }}
+        run: |
+          set -euo pipefail
+          elapsed=$(( $(date +%s) - STARTED ))
+          {
+            echo "phase            result"
+            echo "build            $BUILD"
+            echo "typecheck        $TYPECHECK"
+            echo "product shards   $SHARDS"
+            echo "aggregate        $AGGREGATE"
+            echo "candidate pack   $CANDIDATE"
+            echo "qualification    $QUALIFY"
+            echo
+            echo "whole pipeline   ${elapsed}s"
+          } | tee pipeline-summary.txt
+          # A summary that is green while a phase failed would be exactly the
+          # "green aggregate hides a missing shard" failure this prototype is
+          # built to prevent.
+          for phase in "$BUILD" "$TYPECHECK" "$SHARDS" "$AGGREGATE" "$CANDIDATE" "$QUALIFY"; do
+            case "$phase" in
+              success|skipped) ;;
+              *) echo "a phase did not succeed: $phase" >&2; exit 1 ;;
+            esac
+          done
+
+      - name: Upload the pipeline summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-summary
+          path: pipeline-summary.txt
+          if-no-files-found: warn
+          retention-days: 3
