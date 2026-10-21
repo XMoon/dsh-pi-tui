@@ -22,12 +22,12 @@
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { dirname, join as joinPath } from 'node:path'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = joinPath(here, '../..')
@@ -96,8 +96,7 @@ exec ${process.execPath} "$(dirname "$0")/fake-tern.mjs" "$@"
 }
 
 /** Run the driver against the fake CLI with a flow that does nothing. */
-function runDriver(fake, extraEnv = {}) {
-  const dir = mkdtempSync(joinPath(tmpdir(), 'tern-gui-drive-test-'))
+function runDriver(fake, extraEnv = {}, dir) {
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, 'export default async function (h) { h.check("the flow ran", true) }\n')
   const out = joinPath(dir, 'out')
@@ -116,10 +115,11 @@ function runDriver(fake, extraEnv = {}) {
   return { dir, out, result }
 }
 
-test('the GUI driver isolates the window from the user\'s real Tern profile', () => {
-  const dir = mkdtempSync(joinPath(tmpdir(), 'tern-gui-iso-'))
+test('the GUI driver isolates the window from the user\'s real Tern profile', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-iso-')
   const fake = writeFakeTern(dir)
-  const { out, result } = runDriver(fake)
+  const { out, result } = runDriver(fake, {}, dir)
   assert.equal(result.status, 0, result.stdout + result.stderr)
 
   // The window's OWN environment must point at the run directory, never at the
@@ -129,8 +129,9 @@ test('the GUI driver isolates the window from the user\'s real Tern profile', ()
   assert.doesNotMatch(log, new RegExp(`ISOLATED CONFIG ${process.env.HOME ?? '/root'}/\\.config`))
 })
 
-test('the GUI driver never repeats an input and aborts on an unacknowledged one', () => {
-  const dir = mkdtempSync(joinPath(tmpdir(), 'tern-gui-once-'))
+test('the GUI driver never repeats an input and aborts on an unacknowledged one', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-once-')
   const fake = writeFakeTern(dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
@@ -156,8 +157,9 @@ test('the GUI driver never repeats an input and aborts on an unacknowledged one'
   assert.ok(clicks.length <= 1)
 })
 
-test('the GUI driver reports the window\'s minimum size instead of failing on it', () => {
-  const dir = mkdtempSync(joinPath(tmpdir(), 'tern-gui-min-'))
+test('the GUI driver reports the window\'s minimum size instead of failing on it', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-min-')
   const fake = writeFakeTern(dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
@@ -175,8 +177,9 @@ test('the GUI driver reports the window\'s minimum size instead of failing on it
   assert.equal(ledger.failed, 0)
 })
 
-test('the GUI driver copies the client\'s PNG into the run directory', () => {
-  const dir = mkdtempSync(joinPath(tmpdir(), 'tern-gui-shot-'))
+test('the GUI driver copies the client\'s PNG into the run directory', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-shot-')
   const fake = writeFakeTern(dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
