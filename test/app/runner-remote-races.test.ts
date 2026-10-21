@@ -27,6 +27,8 @@ import type { RemotePromptSerializer } from '../../src/runtime/remote/session-wr
 import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
 import { RemotePromptSerializerProduction } from '../../src/runtime/remote/prompt-serializer-remote.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
+import { assertTransportTeardownOnce, observeTransportDisposal } from '../support/transport-disposal-observer.ts'
+import { ownTransportTeardown } from '../support/transport-teardown-ownership.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -139,10 +141,10 @@ interface RaceFixture {
 /**
  * The transport-disposal observer.
  *
- * The contract the teardown cases assert is a PAIR of facts, and the two
+ * The contract the teardown cases assert is a PAIR of facts, and the
  * counters measure them separately:
  *
- *  - `ownerReleases` — the transport's DOWNSTREAM owners were released, each
+ *  - `ownerReleases` — the transport's DOWNSTREAM owners were RELEASED, each
  *    exactly once. Those owners (the Client-UI subtree, the task watch, the
  *    backend runtime, the official Client runtime and the Host additive
  *    runtime) ARE the teardown of the graph, so their release counts are the
@@ -162,44 +164,6 @@ interface RaceFixture {
  *    both reach the same idempotent disposer, and a second CALL must not be
  *    read as a second teardown.
  */
-interface TransportDisposalObserver {
-  /** Each downstream owner's release count, by owner name. */
-  readonly ownerReleases: Readonly<Record<string, number>>
-  /** The disposer CALLS, real or idempotent no-op. */
-  readonly calls: () => number
-}
-
-function observeTransportDisposal(
-  aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>,
-  observed: string[],
-): TransportDisposalObserver {
-  const owners: ReadonlyArray<{ readonly name: string; readonly owner: object; readonly key: string }> = [
-    { name: 'clientUi', owner: aggregate.clientUi, key: 'dispose' },
-    { name: 'task', owner: aggregate.presentation.task, key: 'dispose' },
-    { name: 'backendRuntime', owner: aggregate.backendRuntime, key: 'dispose' },
-    { name: 'client', owner: aggregate.wire.client, key: 'dispose' },
-    { name: 'host', owner: aggregate.wire.host, key: 'dispose' },
-  ]
-  const releases: Record<string, number> = {}
-  for (const { name, owner, key } of owners) {
-    releases[name] = 0
-    const record = owner as unknown as Record<string, unknown>
-    const original = record[key] as (...args: unknown[]) => Promise<void> | void
-    record[key] = (...args: unknown[]): Promise<void> | void => {
-      releases[name] = (releases[name] ?? 0) + 1
-      return original.apply(owner, args)
-    }
-  }
-  const selected = aggregate.selected as { disposeTransport(): Promise<void> }
-  const originalDispose = selected.disposeTransport.bind(selected)
-  let calls = 0
-  selected.disposeTransport = async (): Promise<void> => {
-    calls += 1
-    observed.push('transport-dispose')
-    await originalDispose()
-  }
-  return { ownerReleases: releases, calls: () => calls }
-}
 
 async function mountRaceRunner(
   life: TestLifecycle,
@@ -221,35 +185,18 @@ async function mountRaceRunner(
       ...(options.resumeSessionId === undefined ? {} : { sessionId: options.resumeSessionId }),
     },
   })
-  // The transport is disposed by the RUNNER FIBER's teardown effect
-  // (`registerRunnerDisposal` → `disposeSelectedTransport`), so the fiber
-  // disposal owns it. The fixture no longer registers a second, direct
-  // `selected.disposeTransport()`: it would reach the SAME idempotent
-  // disposer again, and the "the transport disposes exactly once"
-  // assertions count the downstream owner releases, so the extra call could
-  // only ever be noise on a counter that is about the teardown.
-  let runnerReleasedTransport = false
-  const originalDisposeTransport = aggregate.selected.disposeTransport.bind(aggregate.selected)
-  aggregate.selected.disposeTransport = async (): Promise<void> => {
-    // The fiber's teardown effect reached the transport: the fallback below
-    // must NOT add a second call.
-    runnerReleasedTransport = true
-    await originalDisposeTransport()
-  }
-  // The AGGREGATE fallback, registered right after the aggregate exists and
-  // BEFORE any setup step that can reject: it is the safety net for the case
-  // the runner's teardown effect cannot cover — the runner never mounted (the
-  // mount threw), so no teardown effect exists and nothing else would release
-  // the transport. It disposes ONLY when the runner never released it, so it
-  // can never add a second call to a transport the runner already disposed.
+  // The transport ownership: the RUNNER FIBER's teardown effect disposes the
+  // transport, and the aggregate fallback covers the case where the runner
+  // never mounted. See `test/support/transport-teardown-ownership.ts`.
   //
-  // It is AWAITED on purpose: a fire-and-forget teardown would let the
+  // The fallback is registered right after the aggregate exists and BEFORE any
+  // setup step that can reject, so a mount that never completed is still
+  // covered. It is AWAITED: a fire-and-forget teardown would let the
   // lifecycle remove the temp directories while the transport was still being
-  // disposed.
-  life.defer(async (): Promise<void> => {
-    if (runnerReleasedTransport) return
-    await aggregate.selected.disposeTransport().catch(() => {})
-  })
+  // disposed, and a FAILED fallback is NOT swallowed — the lifecycle collects
+  // the failure and reports it.
+  const ownership = ownTransportTeardown(aggregate.selected)
+  life.defer(ownership.runFallback)
   const vt = new VirtualTerminal(110, 32)
   const restoreTerminal = await import('../support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
   life.defer(restoreTerminal)
@@ -455,9 +402,9 @@ test('teardown with a pending main-path READ — release after the OBSERVED surf
   // has NOT disposed yet (the drain runs first) and the read is still
   // pending.
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
-  assert.deepEqual(transport.ownerReleases, {
+  assert.deepEqual(transport.ownerCalls, {
     clientUi: 0, task: 0, backendRuntime: 0, client: 0, host: 0,
-  }, 'no transport owner was released while the surface is stopped and the drain is pending')
+  }, 'no transport owner was reached while the surface is stopped and the drain is pending')
   assert.equal(readParked && releaseRead !== undefined, true, 'the pending read is still unsettled inside the drain window')
   // Release the pending read INSIDE the drain window (surface fenced, drain
   // in flight, transport not yet disposed).
@@ -466,9 +413,8 @@ test('teardown with a pending main-path READ — release after the OBSERVED surf
   await teardownPromise
   // Observed order: surface-stop BEFORE transport-dispose (the drain
   // settles the released read between them), transport EXACTLY once.
-  assert.deepEqual(transport.ownerReleases, {
-    clientUi: 1, task: 1, backendRuntime: 1, client: 1, host: 1,
-  }, 'every transport owner was released exactly once through the runner teardown')
+  assertTransportTeardownOnce(transport,
+    'every transport owner was reached once and RELEASED once through the runner teardown')
   assert.ok(transport.calls() >= 1,
     'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
@@ -527,14 +473,13 @@ test('teardown with a pending WRITE — observed surface-stop boundary, drain-se
   // START the teardown; observe the surface stop BEFORE releasing the write.
   const teardownPromise = fixture.runnerFiberDispose()
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
-  assert.deepEqual(transport.ownerReleases, {
+  assert.deepEqual(transport.ownerCalls, {
     clientUi: 0, task: 0, backendRuntime: 0, client: 0, host: 0,
-  }, 'no transport owner was released while the drain is pending the parked write')
+  }, 'no transport owner was reached while the drain is pending the parked write')
   parked.release()
   await teardownPromise
-  assert.deepEqual(transport.ownerReleases, {
-    clientUi: 1, task: 1, backendRuntime: 1, client: 1, host: 1,
-  }, 'every transport owner was released exactly once through the runner teardown')
+  assertTransportTeardownOnce(transport,
+    'every transport owner was reached once and RELEASED once through the runner teardown')
   assert.ok(transport.calls() >= 1,
     'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
@@ -604,9 +549,8 @@ test('a prompt ACCEPTED before teardown keeps its receipt, becomes durable and i
   const transport = observeTransportDisposal(fixture.aggregate, observed)
 
   await fixture.runnerFiberDispose()
-  assert.deepEqual(transport.ownerReleases, {
-    clientUi: 1, task: 1, backendRuntime: 1, client: 1, host: 1,
-  }, 'every transport owner was released exactly once')
+  assertTransportTeardownOnce(transport,
+    'every transport owner was reached once and RELEASED once')
   assert.ok(transport.calls() >= 1,
     'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
