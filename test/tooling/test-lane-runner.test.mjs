@@ -78,6 +78,25 @@ test('the ABSOLUTE form would NOT fit the Windows limit, so the relative form is
   )
 })
 
+test('the SHARDED command line still fits the Windows limit', () => {
+  // The shard argument and the reporter flag ADD to the command line, and
+  // the shard path is exactly what the CI measurement uses. If the
+  // measurement's own command line did not fit, the sharded lane would
+  // fail to START on a Windows runner — and the failure would look like a
+  // test failure rather than a command-line failure.
+  const lane = LANES.product
+  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
+  const relativeArguments = files.map(rel => `test\\${rel.replaceAll('/', '\\')}`)
+  // The fixed part: the executable, `--test`, the shard argument and the
+  // reporter flag the measurement adds.
+  const fixed = 'C:\\Program Files\\nodejs\\node.exe --test --test-shard=1/4 --test-reporter=C:\\Users\\owner\\projects\\dsh-pi-tui\\scripts\\test-case-reporter.mjs '.length
+  const length = fixed + relativeArguments.join(' ').length
+  assert.ok(
+    length < WINDOWS_COMMAND_LINE_LIMIT,
+    `the sharded command line must fit the Windows limit: ${length} >= ${WINDOWS_COMMAND_LINE_LIMIT}`,
+  )
+})
+
 test('the runner passes the file list RELATIVE to the repository root', () => {
   // The runner's own source is the contract: it must build the argument
   // list from the test-root-relative paths and set the child's working
