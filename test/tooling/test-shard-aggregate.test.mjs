@@ -973,11 +973,11 @@ test('the SHIPPED skip policy rejects a POSIX-only skip on the Linux runner', (t
   assert.match(result.stderr, /mkfifo is POSIX-only/u)
 })
 
-test('the SHIPPED skip policy still accepts the two evidenced classes', (t) => {
-  // Tightening the policy must not break the real population: 36
-  // optional-bundle + 1 no-fd skip is the whole of the observed set.
+test('a MISSING skip policy file FAILS rather than disabling the check', (t) => {
+  // An absent policy must not mean "accept everything": that would turn a
+  // forgotten file into a silently weaker qualification.
   const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-skip-evidenced-')
+  const directory = life.tempDir('dsh-skip-nopolicy-file-')
   const root = join(directory, 'shards')
   writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
   writeShard(root, 'shard-2', {
@@ -996,6 +996,53 @@ test('the SHIPPED skip policy still accepts the two evidenced classes', (t) => {
     ROOT,
   )
   assert.notEqual(result.status, 0, 'a missing policy file must fail rather than disable the check')
+  assert.match(result.stderr, /policy .* is missing/u)
+})
+
+test('the SHIPPED skip policy ACCEPTS each evidenced class, against the real file', (t) => {
+  // The positive direction, driven by the REAL policy file rather than a
+  // copy of its patterns inside this test.
+  //
+  // The defect this replaces: the previous case pointed the policy at a
+  // file that does not exist and asserted a FAILURE, so it proved the
+  // missing-file path and nothing about whether the shipped policy still
+  // accepts the two classes the runner actually produces. A policy that
+  // accepted NOTHING would have passed it.
+  const reasons = [
+    'BLOCKED: no provisioned official DSH 0.2.1-rc.2 Optional-bundle installation was found',
+    'no fd/fdfind on PATH: the real-fd case test cannot run',
+  ]
+  for (const reason of reasons) {
+    const life = testLifecycle(t)
+    const directory = life.tempDir('dsh-skip-accepted-')
+    const root = join(directory, 'shards')
+    writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+    writeShard(root, 'shard-2', {
+      files: ['tui/three.test.ts'],
+      results: { 'tui/three.test.ts': 'skip' },
+      skipReasons: { 'tui/three.test.ts': reason },
+    })
+    const casesFile = join(directory, 'cases.txt')
+    const skippedFile = join(directory, 'skipped.txt')
+    writeFileSync(casesFile, '3\n')
+    writeFileSync(skippedFile, '1\n')
+    const out = join(directory, 'aggregate.json')
+    const result = cliAt(
+      ['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory), '--out', out],
+      {
+        DSH_EXPECTED_CASES_FILE: casesFile,
+        DSH_EXPECTED_SKIPPED_FILE: skippedFile,
+        DSH_ACCEPTED_SKIPS_FILE: join(ROOT, 'scripts', 'measurement-accepted-skips.txt'),
+      },
+      ROOT,
+    )
+    assert.equal(result.status, 0, `the shipped policy must ACCEPT "${reason}": ${result.stderr}`)
+    const report = JSON.parse(readFileSync(out, 'utf8'))
+    assert.deepEqual(report.failures, [])
+    assert.equal(report.totalSkipped, 1)
+    assert.deepEqual(report.skipPolicy, { acceptedClasses: 2, enforced: true },
+      'the accepted classes are the two with evidence on this runner')
+  }
 })
 
 test('the F1 artifact naming is parsed as a shard identity', (t) => {

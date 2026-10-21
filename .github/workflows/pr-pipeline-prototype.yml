@@ -377,16 +377,25 @@ jobs:
           # cannot carry that meaning: a case can start skipping itself for a
           # new reason and leave the count identical.
           DSH_ACCEPTED_SKIPS_FILE: scripts/measurement-accepted-skips.txt
-          # WHERE the baseline numbers came from. A count on its own cannot
-          # say which run produced it, and this pipeline is not allowed to
-          # certify itself against itself.
+          # WHERE the baseline numbers came from, as a run a reader can open.
+          #
+          # A count on its own cannot say which run produced it, and this
+          # pipeline is not allowed to certify itself against itself: the
+          # baseline is the UNSHARDED lane's own result, measured on a
+          # different run from this one.
+          #
+          # A legitimate change to the number of tests must update these
+          # files IN THE SAME COMMIT as the test change, citing the full
+          # UNSHARDED run that produced the new numbers.
           DSH_BASELINE_SOURCE: >-
-            scripts/measurement-expected-cases.txt + measurement-expected-skipped.txt,
-            measured by the UNSHARDED product lane on the npm / Linux / Node 24
-            runner (2026-10-21): 9122 cases, 37 skipped = 36 optional-bundle + 1
-            no fd/fdfind. A legitimate change to the number of tests must update
-            these files IN THE SAME COMMIT as the test change, citing the full
-            unsharded run that produced the new numbers.
+            run https://github.com/XMoon/dsh-pi-tui/actions/runs/39626830482
+            (branch ci/test-clarity-diagnostics-20261021 at e4ee68170b69c1d5e7cd5f1940c89a92a5b4f77a,
+            3 attempts, all green), UNSHARDED product lane (shard total 1,
+            Node default concurrency), npm mode, Linux, Node 24: 9122 cases,
+            37 skipped = 36 optional-bundle + 1 no fd/fdfind. The product code
+            and the product test tree at that SHA are byte-identical to main
+            d978f93a; the branch adds only the measurement tooling and its
+            committed configuration.
         run: |
           set -euo pipefail
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
