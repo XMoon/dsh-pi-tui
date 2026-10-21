@@ -79,7 +79,7 @@ function largeWorkspaceFixture(life: TestLifecycle): { root: string } {
   return { root }
 }
 
-test('P1.1: ordinary prompt positions never open the HOST file dropdown', async (t) => {
+test('ordinary prompt positions never open the HOST file dropdown', async (t) => {
   const life = testLifecycle(t)
   const { root } = largeWorkspaceFixture(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -98,7 +98,7 @@ test('P1.1: ordinary prompt positions never open the HOST file dropdown', async 
   }
 })
 
-test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays false)', async (t) => {
+test('foo<Tab> opens no dropdown (isShowingAutocomplete stays false)', async (t) => {
   const life = testLifecycle(t)
   const { root } = largeWorkspaceFixture(life)
   const { startApp } = await import('../support/app-harness.ts')
@@ -124,7 +124,7 @@ test('P1.1 headless: foo<Tab> opens no dropdown (isShowingAutocomplete stays fal
   assert.equal(app.seatTextForTest(), 'foo', 'the draft is untouched')
 })
 
-test('P1.2: scoped @ paths search their OWN directory (outside the cwd)', async (t) => {
+test('scoped @ paths search their OWN directory (outside the cwd)', async (t) => {
   const life = testLifecycle(t)
   const { root, workspace, sibling } = outsideCwdFixture(life)
   const provider = new MentionProvider([], workspace, new DirectHostFilePort(() => undefined, null))
@@ -137,7 +137,7 @@ test('P1.2: scoped @ paths search their OWN directory (outside the cwd)', async 
   void root
 })
 
-test('P1.2: @../../scope resolves outside the cwd by the typed amount', async (t) => {
+test('@../../scope resolves outside the cwd by the typed amount', async (t) => {
   const life = testLifecycle(t)
   // A REAL ../../ fixture: workspace = /root/alpha/beta/workspace; `../..`
   // resolves to /root/alpha, so `../../alpha` targets /root/alpha/alpha.
@@ -164,7 +164,7 @@ test('P1.2: @../../scope resolves outside the cwd by the typed amount', async (t
     `nested ../../ value missing:\n${JSON.stringify(nested)}`)
 })
 
-test('P1.2: @~/ resolves through the homedir', async (t) => {
+test('@~/ resolves through the homedir', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-conv-home-')
   mkdirSync(join(home, 'pics'))
@@ -182,7 +182,7 @@ test('P1.2: @~/ resolves through the homedir', async (t) => {
   }
 })
 
-test('P1.2 absolute: @/tmp/ searches the absolute scope', async (t) => {
+test('@/tmp/ searches the absolute scope', async (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).root
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -258,7 +258,7 @@ test('Host @ and Client /image completion keep separate cwd ownership', async (t
   assert.ok(!image.items.some(item => item.value.includes('host-only')), 'image completion must not read Host cwd')
 })
 
-test('P1.3: a >2000-entry workspace keeps directory continuation working', async (t) => {
+test('a >2000-entry workspace keeps directory continuation working', async (t) => {
   const life = testLifecycle(t)
   const { root } = largeWorkspaceFixture(life)
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -273,7 +273,7 @@ test('P1.3: a >2000-entry workspace keeps directory continuation working', async
   assert.ok(children.items.some(item => item.value === '@src/wanted.ts'), 'the wanted child must appear')
 })
 
-test('P1.4: substring ranking is shared between @ and /image', async (t) => {
+test('substring ranking is shared between @ and /image', async (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).workspace
   mkdirSync(join(root, 'src'))
@@ -298,7 +298,7 @@ test('P1.4: substring ranking is shared between @ and /image', async (t) => {
     `/image nested must share subtree fuzzy discovery:\n${JSON.stringify(image)}`)
 })
 
-test('P1.5: a stale prefix accept never deletes @-preceding text', (t) => {
+test('a stale prefix accept never deletes @-preceding text', (t) => {
   const life = testLifecycle(t)
   const root = outsideCwdFixture(life).workspace
   const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
@@ -317,7 +317,7 @@ test('P1.5: a stale prefix accept never deletes @-preceding text', (t) => {
   assert.deepEqual(appliedArg.lines, ['/image sub'], 'a stale argument accept must not rewrite the draft')
 })
 
-test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact', async (t) => {
+test('a quick Backspace over a mention leaves the draft intact', async (t) => {
   const life = testLifecycle(t)
   const { startApp } = await import('../support/app-harness.ts')
   const root = outsideCwdFixture(life).workspace

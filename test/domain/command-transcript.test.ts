@@ -572,7 +572,7 @@ test('a failed manual command keeps its error in the combined owner', () => {
     'the command error stays part of the combined presentation facts')
 })
 
-test('A06/Focus: an idle manual compaction keeps the real chronology outside the Thought', () => {
+test('an idle manual compaction keeps the real chronology outside the Thought', () => {
   // The fused manual compaction is a turn-less standalone boundary: the
   // collapsed Focus must keep `assistant final` → `Context compacted` in
   // their real order instead of lifting the card into the finished turn's

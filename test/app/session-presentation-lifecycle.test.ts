@@ -220,7 +220,7 @@ test('a transport rollover during the cold read makes the hydrate uncommitted (u
     'the stale transport token makes the hydrate return undefined (what the retry keys on)')
 })
 
-test('S3-R0/RFL-001: a window reconcile re-derives the compaction routing state from the committed window', async (t) => {
+test('a window reconcile re-derives the compaction routing state from the committed window', async (t) => {
   // External review RFL-001: the replace path used to run the full cold hydrate,
   // which also reset `compactingId` and the phase/busy/working presentation from
   // the log (`applyResumedCompaction`). The in-place reconcile must restore that

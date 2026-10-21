@@ -457,7 +457,7 @@ test('whitespace-only no-payload steering restores when the child authority is u
   assert.deepEqual(restored, ['   '], 'a missing child cannot swallow the cleared whitespace draft')
 })
 
-test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier turn', async () => {
+test('Ctrl+S steers queued occurrences FIFO inside one operation-barrier turn', async () => {
   const agent = fakeAgent(['a', 'b'])
   const barrier = new SessionOperationBarrier()
   const events: string[] = []

@@ -41,7 +41,7 @@ function latestComposerText(wire: string): string | undefined {
   return seen ? text : undefined
 }
 
-test('B2/Direct-L6: a TSP Enter drives a REAL Agent turn and the streamed reply reaches the pane', async (t) => {
+test('a TSP Enter drives a REAL Agent turn and the streamed reply reaches the pane', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['DIRECT', '-L6', '-OK'] })

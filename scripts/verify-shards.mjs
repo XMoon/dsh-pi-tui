@@ -197,14 +197,29 @@ export function verifyShards({
     // The shard must record the run it belongs to. Without that identity
     // a shard from a DIFFERENT run could be counted towards this one, and
     // the aggregate would claim a coverage it never measured.
+    //
+    // The identity is checked as a WHOLE: when the aggregate knows the
+    // expected SHA or run id, a shard that does not carry it — because the
+    // field is missing, null or empty — is rejected too. A check that only
+    // compares the field when it happens to be present fails OPEN on a
+    // specification that records nothing.
     if (spec === null) {
       failures.push(`the shard ${directory} recorded no runner specification: its identity is unknown`)
-    } else if (spec.sha !== undefined && spec.sha !== null && expectedSha !== null && spec.sha !== expectedSha) {
-      failures.push(`the shard ${directory} ran against ${spec.sha}, not ${expectedSha}`)
-    }
-    if (spec !== null && spec.runId !== undefined && spec.runId !== null
-      && expectedRunId !== null && spec.runId !== expectedRunId) {
-      failures.push(`the shard ${directory} belongs to run ${spec.runId}, not ${expectedRunId}`)
+    } else {
+      if (expectedSha !== null) {
+        if (spec.sha === undefined || spec.sha === null || spec.sha === '') {
+          failures.push(`the shard ${directory} recorded no commit SHA: its identity is unknown`)
+        } else if (spec.sha !== expectedSha) {
+          failures.push(`the shard ${directory} ran against ${spec.sha}, not ${expectedSha}`)
+        }
+      }
+      if (expectedRunId !== null) {
+        if (spec.runId === undefined || spec.runId === null || spec.runId === '') {
+          failures.push(`the shard ${directory} recorded no run id: its identity is unknown`)
+        } else if (spec.runId !== expectedRunId) {
+          failures.push(`the shard ${directory} belongs to run ${spec.runId}, not ${expectedRunId}`)
+        }
+      }
     }
     totalCases += shardCases.length
     totalSkipped += skipped

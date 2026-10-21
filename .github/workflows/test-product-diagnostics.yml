@@ -210,10 +210,16 @@ jobs:
           # The identity every shard must agree on. A shard from another
           # run must not be counted towards this one: the aggregate would
           # then claim a coverage nobody measured.
-          DSH_EXPECTED_SHA: ${{ inputs.sha || github.sha }}
+          #
+          # The expected SHA is the commit THIS job checked out, read from
+          # the repository itself. The workflow's `inputs.sha` names the
+          # commit that was REQUESTED, which is not necessarily the one
+          # that was measured.
           DSH_EXPECTED_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
+          export DSH_EXPECTED_SHA
           node scripts/verify-shards.mjs \
             --shards shards \
             --total "$DSH_SHARD_TOTAL" \
