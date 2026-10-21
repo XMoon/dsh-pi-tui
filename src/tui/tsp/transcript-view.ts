@@ -30,6 +30,8 @@ import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { systemContextBody, toolCardHeader } from '../transcript/tool-presentation.ts'
+import type { ToolPresenter } from '../transcript/tool-presentation.ts'
+import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 
@@ -78,6 +80,16 @@ export interface TranscriptViewOptions {
    * transcript message is never rewritten.
    */
   readonly settledQuestionAnswersLookup?: SettledQuestionAnswersLookup
+  /**
+   * PR-B1: the presentation bridge over the REGISTERED tool definitions
+   * (the SAME bridge the PiTui renderer consumes). It is consulted ONLY to
+   * decide whether a tool row's displayed target is PROVEN to be a command, a
+   * single path or a pattern, so the native client can draw it with the
+   * matching syntax. It never changes the displayed string, the body, the
+   * card's identity or its status — an absent bridge leaves every row's
+   * target plain `text`, exactly as before.
+   */
+  readonly toolPresenter?: ToolPresenter
 }
 
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
@@ -139,7 +151,18 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
       name: sanitizedPhysicalLine(message.name),
       title: sanitizedPhysicalLine(header.title),
       status: toolStatus(message.status),
-      ...(header.summary === '' ? {} : { target: sanitizedPhysicalLine(header.summary), targetKind: 'text' }),
+      // PR-B1: the target KIND is the ONLY thing that changes. The displayed
+      // string, the body, the key and the status are byte-identical to the
+      // plain row; a row whose target is not PROVEN by the registered tool's
+      // own presentation view keeps the plain `text` kind.
+      ...(header.summary === '' ? {} : {
+        target: sanitizedPhysicalLine(header.summary),
+        targetKind: toolTargetKind(
+          header.summary,
+          toolTargetFactsOf(options.toolPresenter, message),
+          options.cwd,
+        ),
+      }),
     },
     ...body,
   )
