@@ -185,9 +185,10 @@ test('the title transform removes a leading code and keeps the sentence', () => 
     stripCodePrefix('A5b: the composition zone is one facade plus its bootstrap helpers'),
     'the composition zone is one facade plus its bootstrap helpers',
   )
+  // `negative control` names the KIND of case, not the code — it stays.
   assert.equal(
     stripCodePrefix('PR5 negative control: an indeterminate prompt result never restores the draft'),
-    'an indeterminate prompt result never restores the draft',
+    'negative control: an indeterminate prompt result never restores the draft',
   )
   assert.equal(
     stripCodePrefix('A5b/TS2: a forbidden handler reintroduced in a NESTED helper fails the zone lock'),
@@ -279,8 +280,11 @@ test('the title transform removes every code family the tree uses', () => {
     ['A5b-6: the composition root introduces no new type', 'the composition root introduces no new type'],
     ['B4A-07 a resize re-budgets the window', 'a resize re-budgets the window'],
     ['PR5 §1C-3 (R6-1): only the winner is subtracted', 'only the winner is subtracted'],
-    ['PR4 F2b.2 (review round 4): a fulfilled observation is an issue', 'a fulfilled observation is an issue'],
-    ['§D2 (review round 3 ruling): Direct keeps the mirror', 'Direct keeps the mirror'],
+    // `(review round 4)` is a REVIEW qualifier, not part of the code —
+    // it stays, because it says which review produced the case.
+    ['PR4 F2b.2 (review round 4): a fulfilled observation is an issue', '(review round 4): a fulfilled observation is an issue'],
+    // The bracketed REVIEW qualifier is not the code — it stays.
+    ['§D2 (review round 3 ruling): Direct keeps the mirror', '(review round 3 ruling): Direct keeps the mirror'],
     ['§18.1 the Remote route never hands over', 'the Remote route never hands over'],
     ['A06/Focus: an idle compaction keeps the chronology', 'an idle compaction keeps the chronology'],
     ['B3 F6.1: a real answer freezes the countdown', 'a real answer freezes the countdown'],
@@ -381,13 +385,59 @@ test('the title transform removes the remaining code families', () => {
     ['(10): the replaced modal leaves the seat', 'the replaced modal leaves the seat'],
     ['(R6-1): only the winner is subtracted', 'only the winner is subtracted'],
     ['(ctrl-r harness): an Approval A→B FIFO keeps the seat parked', 'an Approval A→B FIFO keeps the seat parked'],
-    ['19.2 hard gate: 100 UI-only refresh cycles', '100 UI-only refresh cycles'],
+    // `hard gate` is the CATEGORY the case belongs to, not part of the
+    // code — so it stays.
+    ['19.2 hard gate: 100 UI-only refresh cycles', 'hard gate: 100 UI-only refresh cycles'],
     ['02/03 effective ↓ enters from the middle of the last line', 'effective ↓ enters from the middle of the last line'],
     ['D1. a Host-side wire construction failure unwinds', 'a Host-side wire construction failure unwinds'],
     ['F5+cancellation: a pre-aborted request rejects', 'a pre-aborted request rejects'],
     ['§14/J12: a same-Session viewer replacement drops the stale settlement', 'a same-Session viewer replacement drops the stale settlement'],
   ]
   for (const [from, to] of cases) {
+    assert.equal(stripCodePrefix(from), to, `must strip: ${from}`)
+    assert.equal(hasLeadingCodePrefix(from), true, `the audit must report: ${from}`)
+  }
+})
+
+test('the title transform keeps the MEANINGFUL words that follow the code', () => {
+  // `B3 F4 control: …` — the code is `B3 F4`, and `control` is the
+  // CATEGORY the case belongs to. Dropping it would make the title say
+  // LESS than it did, which is the opposite of the transform's contract.
+  assert.equal(
+    stripCodePrefix('B3 F4 control: with no settled entry an empty recorded result still renders no result body'),
+    'control: with no settled entry an empty recorded result still renders no result body',
+  )
+  assert.equal(
+    stripCodePrefix('A0 fullscreen seat preflight: the alt screen delivers press/click to a History result row'),
+    'fullscreen seat preflight: the alt screen delivers press/click to a History result row',
+  )
+  assert.equal(
+    stripCodePrefix('L6 §37 shell (Remote, CARRIER_GAP): the shell routes the turn'),
+    'shell (Remote, CARRIER_GAP): the shell routes the turn',
+  )
+})
+
+test('the title transform removes the case labels the plan numbers by letter', () => {
+  // The plan numbers its sub-cases with a letter, and the letter alone is
+  // the whole label: `A:`, `B:`, `C:`, `E:`.
+  for (const [from, to] of [
+    ['A: @src → dropdown → Tab → @src/ → children dropdown', '@src → dropdown → Tab → @src/ → children dropdown'],
+    ['B: /image src → dropdown → Tab', '/image src → dropdown → Tab'],
+    ['C: hello ./src<Tab> opens no dropdown', 'hello ./src<Tab> opens no dropdown'],
+    ['E: sessionless @dir/ lists children through the app chain', 'sessionless @dir/ lists children through the app chain'],
+  ]) {
+    assert.equal(stripCodePrefix(from), to, `must strip: ${from}`)
+    assert.equal(hasLeadingCodePrefix(from), true, `the audit must report: ${from}`)
+  }
+})
+
+test('the title transform removes a review finding and an assertion number', () => {
+  for (const [from, to] of [
+    ['finding C (1): the real /new quiesce parks on a LIVE Question', 'the real /new quiesce parks on a LIVE Question'],
+    ['finding F7: a held timed claim retired by a publication never mounts its form', 'a held timed claim retired by a publication never mounts its form'],
+    ['assertion 7: a Remote adapter cannot import the Direct implementation', 'a Remote adapter cannot import the Direct implementation'],
+    ['assertion 14: the startup island must not reach a repository implementation module', 'the startup island must not reach a repository implementation module'],
+  ]) {
     assert.equal(stripCodePrefix(from), to, `must strip: ${from}`)
     assert.equal(hasLeadingCodePrefix(from), true, `the audit must report: ${from}`)
   }
