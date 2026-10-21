@@ -137,28 +137,34 @@ interface RaceFixture {
 }
 
 /**
- * The REAL transport-disposal observer.
+ * The transport-disposal observer.
  *
- * The production disposer is idempotent (`if (transportDisposed) return`
- * BEFORE it reaches `clientUi.dispose()`), so the Client-UI subtree's dispose
- * does the work EXACTLY ONCE per transport — no matter how many times the
- * disposer is called. Counting THAT is counting the REAL disposal; counting
- * the disposer calls counts the calls, and a second caller (the fixture's own
- * cleanup, a retry) would make the call count 2 while nothing was disposed
- * twice.
+ * The contract the teardown cases assert is a PAIR of facts, and the two
+ * counters measure them separately:
  *
- * The observer therefore wraps `clientUi.dispose` — the first thing the real
- * disposal does — and counts the disposals that DID the work. The wrapper
- * keeps the production idempotence itself: a later call is a no-op, exactly
- * like the production subtree disposer, and it is NOT counted. So the count
- * means "the transport graph was really torn down", and a genuine second
- * teardown of the graph would count 2 and fail the assertion.
+ *  - `ownerReleases` — the transport's DOWNSTREAM owners were released, each
+ *    exactly once. Those owners (the Client-UI subtree, the task watch, the
+ *    backend runtime, the official Client runtime and the Host additive
+ *    runtime) ARE the teardown of the graph, so their release counts are the
+ *    teardown counts. The production disposer is idempotent (`if
+ *    (transportDisposed) return` BEFORE it reaches any of them), so a second
+ *    CALL of the disposer never reaches them and never changes these counts:
+ *    the counts are the teardown, not the calls. They are also the counts
+ *    that react to a REGRESSION of that production idempotence — then a
+ *    second call would reach the owners again, their counts would become 2,
+ *    and the assertions would fail. Counting the disposer calls could not
+ *    do that, and it is also what used to make this case flake under CI load
+ *    (a second CALL from the fixture's own cleanup, with nothing torn down
+ *    twice).
  *
- * The disposer CALL is still observed for the ORDER assertions.
+ *  - `calls` — the disposer was CALLED, how many times. A call is not a
+ *    teardown: the fixture's own cleanup and the runner's teardown effect
+ *    both reach the same idempotent disposer, and a second CALL must not be
+ *    read as a second teardown.
  */
 interface TransportDisposalObserver {
-  /** The REAL disposals: the ones that did the work. */
-  readonly realDisposals: () => number
+  /** Each downstream owner's release count, by owner name. */
+  readonly ownerReleases: Readonly<Record<string, number>>
   /** The disposer CALLS, real or idempotent no-op. */
   readonly calls: () => number
 }
@@ -167,18 +173,22 @@ function observeTransportDisposal(
   aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>,
   observed: string[],
 ): TransportDisposalObserver {
-  const clientUi = aggregate.clientUi
-  const originalClientUiDispose = clientUi.dispose.bind(clientUi)
-  let realDisposals = 0
-  let clientUiDisposed = false
-  // The wrapper carries the production subtree disposer's idempotence, so it
-  // knows whether a call did the work or was a no-op: only the FIRST call
-  // forwards to the production disposer and counts.
-  clientUi.dispose = async (): Promise<void> => {
-    if (clientUiDisposed) return
-    clientUiDisposed = true
-    realDisposals += 1
-    await originalClientUiDispose()
+  const owners: ReadonlyArray<{ readonly name: string; readonly owner: object; readonly key: string }> = [
+    { name: 'clientUi', owner: aggregate.clientUi, key: 'dispose' },
+    { name: 'task', owner: aggregate.presentation.task, key: 'dispose' },
+    { name: 'backendRuntime', owner: aggregate.backendRuntime, key: 'dispose' },
+    { name: 'client', owner: aggregate.wire.client, key: 'dispose' },
+    { name: 'host', owner: aggregate.wire.host, key: 'dispose' },
+  ]
+  const releases: Record<string, number> = {}
+  for (const { name, owner, key } of owners) {
+    releases[name] = 0
+    const record = owner as unknown as Record<string, unknown>
+    const original = record[key] as (...args: unknown[]) => Promise<void> | void
+    record[key] = (...args: unknown[]): Promise<void> | void => {
+      releases[name] = (releases[name] ?? 0) + 1
+      return original.apply(owner, args)
+    }
   }
   const selected = aggregate.selected as { disposeTransport(): Promise<void> }
   const originalDispose = selected.disposeTransport.bind(selected)
@@ -188,7 +198,7 @@ function observeTransportDisposal(
     observed.push('transport-dispose')
     await originalDispose()
   }
-  return { realDisposals: () => realDisposals, calls: () => calls }
+  return { ownerReleases: releases, calls: () => calls }
 }
 
 async function mountRaceRunner(
@@ -433,8 +443,9 @@ test('teardown with a pending main-path READ — release after the OBSERVED surf
   // has NOT disposed yet (the drain runs first) and the read is still
   // pending.
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
-  assert.equal(transport.realDisposals(), 0,
-    'the transport has NOT disposed while the surface is stopped and the drain is pending')
+  assert.deepEqual(transport.ownerReleases, {
+    clientUi: 0, task: 0, backendRuntime: 0, client: 0, host: 0,
+  }, 'no transport owner was released while the surface is stopped and the drain is pending')
   assert.equal(readParked && releaseRead !== undefined, true, 'the pending read is still unsettled inside the drain window')
   // Release the pending read INSIDE the drain window (surface fenced, drain
   // in flight, transport not yet disposed).
@@ -443,8 +454,11 @@ test('teardown with a pending main-path READ — release after the OBSERVED surf
   await teardownPromise
   // Observed order: surface-stop BEFORE transport-dispose (the drain
   // settles the released read between them), transport EXACTLY once.
-  assert.equal(transport.realDisposals(), 1,
-    'the selected transport disposes exactly once through the runner teardown')
+  assert.deepEqual(transport.ownerReleases, {
+    clientUi: 1, task: 1, backendRuntime: 1, client: 1, host: 1,
+  }, 'every transport owner was released exactly once through the runner teardown')
+  assert.ok(transport.calls() >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'observed order: surface stop precedes the transport disposal (the drain ran between)')
   assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
@@ -501,12 +515,16 @@ test('teardown with a pending WRITE — observed surface-stop boundary, drain-se
   // START the teardown; observe the surface stop BEFORE releasing the write.
   const teardownPromise = fixture.runnerFiberDispose()
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
-  assert.equal(transport.realDisposals(), 0,
-    'the transport has NOT disposed while the drain is pending the parked write')
+  assert.deepEqual(transport.ownerReleases, {
+    clientUi: 0, task: 0, backendRuntime: 0, client: 0, host: 0,
+  }, 'no transport owner was released while the drain is pending the parked write')
   parked.release()
   await teardownPromise
-  assert.equal(transport.realDisposals(), 1,
-    'the selected transport disposes exactly once through the runner teardown')
+  assert.deepEqual(transport.ownerReleases, {
+    clientUi: 1, task: 1, backendRuntime: 1, client: 1, host: 1,
+  }, 'every transport owner was released exactly once through the runner teardown')
+  assert.ok(transport.calls() >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'observed order: surface stop precedes the transport disposal (the drain settled the write between)')
   // A short observation window only widens the chance to SEE a late frame; it
@@ -574,7 +592,11 @@ test('a prompt ACCEPTED before teardown keeps its receipt, becomes durable and i
   const transport = observeTransportDisposal(fixture.aggregate, observed)
 
   await fixture.runnerFiberDispose()
-  assert.equal(transport.realDisposals(), 1, 'the selected transport disposes exactly once')
+  assert.deepEqual(transport.ownerReleases, {
+    clientUi: 1, task: 1, backendRuntime: 1, client: 1, host: 1,
+  }, 'every transport owner was released exactly once')
+  assert.ok(transport.calls() >= 1,
+    'the teardown really reached the transport disposer (the release was not inferred)')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'the observed order stays surface stop -> drain -> transport disposal')
   await new Promise(resolve => setTimeout(resolve, 200))
