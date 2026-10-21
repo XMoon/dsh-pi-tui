@@ -1793,7 +1793,7 @@ test('only visible panes publish hits: the hidden Detail band neither copies nor
   h.dispose()
 })
 
-test('C copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
+test('C: copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
   await key(h, 'c')

@@ -1801,7 +1801,7 @@ test('state: a re-opened legacy root or a changed stable set is rejected', () =>
     'an extra stable entry must fail')
 })
 
-test('roots are a closed forbidden set (48 physical roots, builtins excluded)', () => {
+test('retired roots are a closed forbidden set (48 physical roots, builtins excluded)', () => {
   assert.equal(RETIRED_SOURCE_ROOTS.length, 48, 'all 48 physical roots removed by F1-F6 are forbidden')
   assert.equal(new Set(RETIRED_SOURCE_ROOTS).size, 48, 'the retired set has no duplicates')
   assert.equal(RETIRED_SOURCE_ROOTS.includes('builtins.ts'), false,
