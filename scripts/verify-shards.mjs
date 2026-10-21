@@ -40,6 +40,46 @@ const LANE = 'product'
 
 /** The case records of one shard directory. */
 /**
+ * The expected skip count baseline: one number, or a per-version map.
+ *
+ * @returns {number|Record<string, number>|null} the baseline.
+ */
+function expectedSkippedBaseline() {
+  const raw = process.env.DSH_EXPECTED_SKIPPED
+  if (raw === undefined || raw === '') return null
+  if (raw.trimStart().startsWith('{')) {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      throw new Error(`DSH_EXPECTED_SKIPPED is not a valid per-version map: ${raw}`)
+    }
+  }
+  return Number(raw)
+}
+
+/**
+ * The expected skip count for a Node version.
+ *
+ * The baseline is one number for the whole run, unless it is a
+ * PER-VERSION map: `{"22.19.0": 31, "24": 37}`. A Node version can
+ * legitimately skip a different number of cases than another — the
+ * optional-bundle skip depends on what that version's environment
+ * provides.
+ *
+ * @param {string} version - the Node version.
+ * @returns {number|null} the expected skip count, or null when it is unknown.
+ */
+function expectedSkippedFor(version, baseline) {
+  if (baseline === null || baseline === undefined) return null
+  if (typeof baseline === 'object') {
+    const value = baseline[version]
+    return value === undefined ? null : value
+  }
+  if (Number.isNaN(baseline)) return null
+  return baseline
+}
+
+/**
  * The Node version a shard directory ran on.
  *
  * The directories are `<shard>-node<version>`; a directory that does not
@@ -133,7 +173,7 @@ function readExpectations() {
     expectedRunId: process.env.DSH_EXPECTED_RUN_ID ?? null,
     expectedRunAttempt: process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null,
     expectedCases: number('DSH_EXPECTED_CASES'),
-    expectedSkipped: number('DSH_EXPECTED_SKIPPED'),
+    expectedSkipped: expectedSkippedBaseline(),
   }
 }
 
@@ -394,9 +434,14 @@ export function verifyShards({
         failures.push(`the shards on Node ${group.version} recorded ${cases} case(s), but the baseline is ${expectedCases}`)
       }
     }
-    if (expectedSkipped !== null && !Number.isNaN(expectedSkipped)) {
-      if (skipped !== expectedSkipped) {
-        failures.push(`the shards on Node ${group.version} recorded ${skipped} skipped case(s), but the baseline is ${expectedSkipped}`)
+    // The expected skip count may be a PER-VERSION map: a Node version can
+    // legitimately skip a different number of cases than another — the
+    // optional-bundle skip depends on what that version's environment
+    // provides.
+    const expected = expectedSkippedFor(group.version, expectedSkipped)
+    if (expected !== null && !Number.isNaN(expected)) {
+      if (skipped !== expected) {
+        failures.push(`the shards on Node ${group.version} recorded ${skipped} skipped case(s), but the baseline for that version is ${expected}`)
       }
     }
   }

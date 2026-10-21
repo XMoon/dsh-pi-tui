@@ -356,7 +356,7 @@ test('an EXTRA skipped case fails the aggregate when a baseline is known', (t) =
     expectedSkipped: 0,
   })
   assert.ok(aggregate.failures.length > 0, 'an extra skip must fail the aggregate')
-  assert.match(aggregate.failures.join('\n'), /recorded 1 skipped case\(s\), but the baseline is 0/u)
+  assert.match(aggregate.failures.join('\n'), /recorded 1 skipped case\(s\), but the baseline for that version is 0/u)
 })
 
 test('the aggregate accepts a split that matches the baseline exactly', (t) => {

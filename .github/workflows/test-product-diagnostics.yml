@@ -111,6 +111,9 @@ jobs:
           if [ -z "$DSH_SHARD_TOTAL" ]; then
             DSH_SHARD_TOTAL="$(cat scripts/measurement-shard-total.txt)"
           fi
+          if [ -z "$DSH_EXPECTED_SKIPPED" ]; then
+            DSH_EXPECTED_SKIPPED="$(cat scripts/measurement-expected-skipped.txt 2>/dev/null || echo '37')"
+          fi
           if [ -z "$DSH_TEST_CONCURRENCY" ]; then
             DSH_TEST_CONCURRENCY="$(cat scripts/measurement-test-concurrency.txt 2>/dev/null || echo '')"
           fi
@@ -282,7 +285,10 @@ jobs:
           # is the UNSHARDED lane's own totals, so a recorder that dropped
           # a case or reported an extra skip cannot pass.
           DSH_EXPECTED_CASES: ${{ inputs.expected_cases || '9110' }}
-          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped || '37' }}
+          # The expected skip count, per Node version when the versions
+          # differ: a version can legitimately skip a different number of
+          # cases than another. A single number applies to every version.
+          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped || '' }}
           DSH_BASELINE_SOURCE: ${{ inputs.baseline_source || 'the unsharded lane of the same commit' }}
         run: |
           set -euo pipefail
