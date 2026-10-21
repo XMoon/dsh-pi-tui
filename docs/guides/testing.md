@@ -189,7 +189,25 @@ indirect consumer through another helper is not a text match — a gate built
 on that would be a false assurance, which is worse than no gate.
 `docs/guides/code-review.md` §2 carries the question instead.
 
-## 5. What this document does NOT own
+## 5. The operator tools
+
+Four recurring reports over the living test tree. They are read-only (the
+baseline generator excepted, and it only rewrites the recorded floor), and
+each has a package-script entry point:
+
+| Command | What it reports |
+|---|---|
+| `pnpm report:execution-topology` | the script → leaf → CI job mapping, and the leaves driven by more than one script |
+| `pnpm report:zero-consumer-exports` | the shared-helper exports that no consumer reads |
+| `pnpm bench:parallel` | the product lane at several concurrency levels, with every run verified |
+| `pnpm baseline:fixed-waits` | regenerates the fixed-wait floor the policy guard compares against |
+
+The benchmark is the qualification tool for the parallel policy: it
+verifies every run (exit code, signal, a complete report, `fail === 0`)
+and requires the levels to report the SAME case counts, so a broken or
+partial run can never produce a conclusion.
+
+## 6. What this document does NOT own
 
 - The architecture contracts: `docs/architecture/overview.md`.
 - The release and packaging procedure: `docs/guides/releasing.md`.
