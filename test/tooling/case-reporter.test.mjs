@@ -71,37 +71,29 @@ test('a case whose outcome never arrives is still recorded with ITS OWN skip', (
   assert.equal(skipped.result, 'skip', 'the completion carries the skip marker itself')
 })
 
-test('a case whose outcome never arrives keeps ITS OWN skip', async () => {
-  // The reporter pairs each outcome with the oldest completion of the same
-  // file. A completion that never gets an outcome is recorded by the
-  // trailing loop — and that loop used to record it as `pass`, because
-  // it read the skip from the (absent) outcome instead of from the
-  // completion, which carries the marker itself.
+test('a case is recorded with the marker ITS OWN completion carries', () => {
+  // The reporter pairs each outcome with the oldest completion of the
+  // same file, so under load a completion can be left WITHOUT an outcome
+  // — it is then recorded by the trailing loop.
   //
-  // The consequence was a RECORD that said `pass` for a case the CI log
-  // showed as skipped, so the aggregate's skip baseline was off by one
-  // and compared against the wrong number.
-  const { default: reporter } = await import('../../scripts/test-case-reporter.mjs')
-  const events = [
-    { type: 'test:start', data: { testId: 1, parentId: 0, name: 'a suite', file: '/repo/test/x.test.mjs', line: 1, column: 1, nesting: 0 } },
-    { type: 'test:complete', data: { testId: 2, parentId: 1, name: 'a skipped case', file: '/repo/test/x.test.mjs', line: 2, column: 3, nesting: 1, details: { type: 'test', duration_ms: 1 }, skip: 'why' } },
-  ]
-  const destination = join(ROOT, 'temp', `dsh-reporter-unmatched-${process.pid}.jsonl`)
-  mkdirSync(join(ROOT, 'temp'), { recursive: true })
-  rmSync(destination, { force: true })
-  const previous = process.env.DSH_TEST_JSONL
-  process.env.DSH_TEST_JSONL = destination
-  try {
-    await reporter((async function* () { for (const event of events) yield event })())
-  } finally {
-    if (previous === undefined) delete process.env.DSH_TEST_JSONL
-    else process.env.DSH_TEST_JSONL = previous
-  }
-  const records = readFileSync(destination, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
-  rmSync(destination, { force: true })
-  const skipped = records.find(entry => entry.name === 'a skipped case')
-  assert.ok(skipped !== undefined, JSON.stringify(records, null, 2))
-  assert.equal(skipped.result, 'skip', 'the completion carries the skip marker itself')
+  // That loop used to read the skip from the (absent) outcome, so a case
+  // the CI log showed as SKIPPED was recorded as `pass`. The aggregate's
+  // skip baseline is compared against these records, so the baseline was
+  // off by one and the comparison was against the wrong number.
+  //
+  // The rule the records must satisfy: the result comes from the
+  // completion's own marker, whether or not an outcome arrived.
+  const source = readFileSync(REPORTER, 'utf8')
+  assert.match(
+    source,
+    /outcome\.skip !== undefined \|\| data\.skip !== undefined/u,
+    'the completion\'s own skip marker must be read as well as the outcome\'s',
+  )
+  assert.match(
+    source,
+    /outcome\.todo !== undefined \|\| data\.todo !== undefined/u,
+    'the completion\'s own todo marker must be read as well as the outcome\'s',
+  )
 })
 
 test('a suite is recorded as a suite, and its children keep their own results', () => {
