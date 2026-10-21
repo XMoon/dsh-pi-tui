@@ -199,12 +199,25 @@ test('result: an EMPTY diff list is rebuilt from the arguments for a create OR a
   const read = (meta: Record<string, unknown>, callArgs = args): unknown => presenter.result('write', callArgs, {
     content: [{ type: 'text', text: 'written' }], isError: false, meta: meta as never,
   })
-  // A third-party tool that happens to send `operation` + `path` + `content`
-  // must not be read as a write: the marker is not a value the contract defines.
+  // A marker OUTSIDE the write projection's two values is refused. The
+  // ACCEPTED case is the opposite one: an exact `create`/`update` + empty
+  // `diffs` + string `content` from a third party IS rendered as a write diff
+  // — the owner-accepted structural bound — so this negative must not be read
+  // as a claim that foreign tools can never collide.
   assert.equal(read({ operation: 'delete', path: 'src/a.ts', diffs: [] }), undefined, 'unknown operation value')
   assert.equal(read({ operation: 'fetch', path: 'https://example.test/x', diffs: [] }), undefined, 'a foreign marker')
   // The empty list is the signature; an absent list is not this shape.
   assert.equal(read({ operation: 'create', path: 'src/a.ts' }), undefined, 'no diffs field')
+  // PRECEDENCE, pinned: when the metadata carries its own path AND the call
+  // carries a different one, the metadata's canonical path wins — the same
+  // order as the Host's `pathFromMeta(meta) ?? args.file_path`.
+  const canonical = presenter.result('write', JSON.stringify({ file_path: 'src/relative.ts', content: 'x' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { operation: 'create', path: '/abs/canonical.ts', diffs: [] },
+  })
+  assert.deepEqual(canonical?.card === 'diff' ? canonical.diffs : undefined,
+    [{ path: '/abs/canonical.ts', oldText: null, newText: 'x' }], 'the metadata path wins')
   // The diff is built from the argument, so the argument must be there.
   assert.equal(read({ operation: 'create', path: 'src/a.ts', diffs: [] }, JSON.stringify({ file_path: 'src/a.ts' })), undefined, 'no content argument')
   // An edit with an empty list declines, exactly like the Host edit presenter.
