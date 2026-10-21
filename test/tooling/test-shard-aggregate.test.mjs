@@ -56,7 +56,10 @@ function writeShard(root, name, { files, results = {}, spec = { sha: 'sha-1', ru
     const repositoryPath = `test/${file}`
     // A FILE is reported as one case whose name is the file's own path.
     records.push({ file: repositoryPath, name: repositoryPath, line: 1, column: 1, nesting: 0, duration_ms: 1, result: 'pass' })
-    records.push({ file: repositoryPath, name: `the case in ${file}`, line: 2, column: 1, nesting: 0, duration_ms: 1, result: results[file] ?? 'pass' })
+    // The result is taken AS GIVEN: a case with no result must stay
+    // without one, so the aggregate's allow list can be exercised.
+    const result = Object.hasOwn(results, file) ? results[file] : 'pass'
+    records.push({ file: repositoryPath, name: `the case in ${file}`, line: 2, column: 1, nesting: 0, duration_ms: 1, result })
   }
   writeFileSync(join(directory, 'cases.jsonl'), records.map(record => JSON.stringify(record)).join('\n') + '\n')
   if (spec !== null) {
@@ -145,7 +148,8 @@ test('a case with NO outcome fails the aggregate', (t) => {
   writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], results: { 'tui/three.test.ts': 'unknown' } })
   const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
   assert.ok(aggregate.failures.length > 0, 'a case with no outcome must fail the aggregate')
-  assert.match(aggregate.failures.join('\n'), /no outcome/u)
+  // The outcome is not accepted: it is neither a pass nor an accepted skip.
+  assert.match(aggregate.failures.join('\n'), /outcome is not accepted/u)
 })
 
 test('a shard from a DIFFERENT run fails the aggregate', (t) => {
@@ -462,4 +466,39 @@ test('the CLI refuses a malformed baseline instead of disabling the check', (t) 
   })
   assert.notEqual(run.status, 0, 'a malformed baseline must fail')
   assert.match(run.stderr, /must be a non-negative integer/u)
+})
+
+test('a case whose result is MISSING fails the aggregate', (t) => {
+  // A deny list would pass this record: `undefined` is not `fail`, not
+  // `cancelled` and not `unknown`, and it changes neither the case count
+  // nor the skip count — so the aggregate would accept a shard set whose
+  // evidence is incomplete.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-cli-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], results: { 'tui/three.test.ts': undefined } })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+  })
+  assert.ok(aggregate.failures.length > 0, 'a case with no result must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /outcome is not accepted/u)
+})
+
+test('a TODO case fails the aggregate', (t) => {
+  // A todo is a case Node recognised but did not prove. It is not a
+  // failure, and it is not a pass either — accepting it by omission
+  // would let a case that proves nothing count as qualified.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-cli-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], results: { 'tui/three.test.ts': 'todo' } })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+  })
+  assert.ok(aggregate.failures.length > 0, 'a todo case must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /1 todo/u)
 })

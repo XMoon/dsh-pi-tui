@@ -18,7 +18,7 @@
  * @module @xmoon76/dsh-pi-tui/scripts/case-title-audit
  */
 
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -77,6 +77,8 @@ function classify(name) {
  */
 function collectInventory(lane) {
   const path = join(ROOT, 'temp', `case-inventory-${lane}.json`)
+  // `temp/` is not tracked, so a clean checkout has no such directory.
+  mkdirSync(dirname(path), { recursive: true })
   const result = spawnSync(
     process.execPath,
     [join(ROOT, 'scripts', 'case-inventory.mjs'), '--lane', lane, '--out', path],

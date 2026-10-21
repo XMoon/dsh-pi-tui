@@ -82,11 +82,19 @@ test('the runner passes the file list RELATIVE to the repository root', () => {
   // The runner's own source is the contract: it must build the argument
   // list from the test-root-relative paths and set the child's working
   // directory to the repository root.
+  //
+  // The assertion is about the CONTRACT — a relative path, and the
+  // repository root as the working directory — not about one literal
+  // spelling of it. The test root's own NAME is used as the prefix, so an
+  // overridden root keeps the same shape; pinning the literal would make
+  // a legitimate change look like a regression.
   const source = readFileSync(join(ROOT, 'scripts', 'run-test-lane.mjs'), 'utf8')
-  assert.match(source, /const relativeFiles = files\.map\(rel => join\('test', rel\)\)/u,
-    'the runner must pass the file list relative to the repository root')
-  assert.match(source, /cwd: ROOT/u,
-    "the child must run with the repository root as its working directory")
+  assert.match(source, /const relativeFiles = files\.map\(rel => join\(testRootName, rel\)\)/u,
+    'the runner must pass the file list relative to the test root')
+  assert.match(source, /cwd: workingDirectory/u,
+    "the child must run with the working directory the relative paths are based on")
+  assert.match(source, /const workingDirectory = TEST_ROOT === join\(ROOT, 'test'\) \? ROOT : testRootParent/u,
+    'the default working directory must be the repository root')
   assert.doesNotMatch(source, /files\.map\(rel => join\(TEST_ROOT, rel\)\)/u,
     'the runner must not pass absolute paths')
 })

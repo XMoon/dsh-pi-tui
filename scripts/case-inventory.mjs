@@ -29,7 +29,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -117,7 +117,13 @@ async function main() {
   }
 
   if (outIndex !== -1) {
-    writeFileSync(args[outIndex + 1], `${JSON.stringify(inventory, null, 2)}\n`)
+    // The destination's PARENT may not exist: the report goes to `temp/`,
+    // and `temp/` is not tracked, so a clean checkout has no such
+    // directory. Creating it here means the command works on its own,
+    // instead of failing AFTER the whole lane has run.
+    const destination = resolve(args[outIndex + 1])
+    mkdirSync(dirname(destination), { recursive: true })
+    writeFileSync(destination, `${JSON.stringify(inventory, null, 2)}\n`)
   }
   if (print || outIndex === -1) {
     console.log(JSON.stringify(inventory, null, 2))
