@@ -1226,7 +1226,7 @@ test('a refused approval admission is drained by the surface teardown (and its b
   }
 })
 
-test('A: a signal-less refused admission settles fail-closed at admission (never waits for TUI exit)', async () => {
+test('a signal-less refused admission settles fail-closed at admission (never waits for TUI exit)', async () => {
   const harness = await mountRunnerHarness()
   let release: (() => void) | undefined
   try {

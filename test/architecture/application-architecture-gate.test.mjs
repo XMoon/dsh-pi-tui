@@ -1856,7 +1856,7 @@ test('roots: a recreated file or a dangling old-path import is rejected', () => 
   ]), [])
 })
 
-test('assertion 7: a Remote adapter cannot import the Direct implementation (two HF1 edges excepted)', () => {
+test('a Remote adapter cannot import the Direct implementation (two HF1 edges excepted)', () => {
   // `direct-import-outside-composition` treats the whole runtime/** layer as
   // Direct composition, so runtime/remote was silently exempt; this check is
   // the actual assertion, and its exception is scoped to the reviewed
@@ -1895,7 +1895,7 @@ test('assertion 7: a Remote adapter cannot import the Direct implementation (two
   ]), [])
 })
 
-test('assertion 11: a concrete extension registry must live under extension/internal/**', () => {
+test('a concrete extension registry must live under extension/internal/**', () => {
   const real = collectSourceEntries()
   assert.deepEqual(findConcreteRegistryPlacementViolations(real), [],
     'the real tree keeps every concrete extension registry under extension/internal/**')
@@ -1941,7 +1941,7 @@ test('assertion 11: a concrete extension registry must live under extension/inte
   ]), [])
 })
 
-test('assertion 14: the startup island must not reach a repository implementation module', () => {
+test('the startup island must not reach a repository implementation module', () => {
   const real = collectSourceEntries()
   assert.equal(real.some(entryItem => entryItem.rel === 'startup.ts'), true, 'the real startup entry exists')
   assert.deepEqual(findStartupIslandViolations(real), [],

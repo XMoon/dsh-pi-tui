@@ -716,7 +716,7 @@ async function settledOrPending(pending: Promise<unknown>): Promise<string> {
 
 // ── Findings C/F6/F7/F8: a replaced Session's form leaves the seat ───────────
 
-test('finding C: withdrawPresentation drops the form and releases the input (the promise stays with its own lifetime)', async () => {
+test('withdrawPresentation drops the form and releases the input (the promise stays with its own lifetime)', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const seat = createTspInteractionSeat({
     render: () => {},
@@ -795,7 +795,7 @@ test('findings F6/F7: a lifetime retired BEFORE its slot exists never mounts, an
   seat.dispose()
 })
 
-test('finding F8: a withdrawal whose frame commit fails reaches the renderer fatal sink and settles nothing itself', async () => {
+test('a withdrawal whose frame commit fails reaches the renderer fatal sink and settles nothing itself', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const fatals: unknown[] = []
   let failFrame = false
