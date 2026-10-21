@@ -61,7 +61,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and
  * a few carry a letter separator (`AC-1`, `PR-A`).
  */
-const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
+const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|\d{1,3}\([a-z]\)?|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
 
 /**
  * A SECTION marker: a pointer into the plan that wrote the test.
@@ -144,8 +144,12 @@ const PR_SUB_LABEL = /^PR\d*\s+[A-Z]$/u
  * @param {boolean} first - whether this is the FIRST token of the title.
  * @returns {boolean} true when the token belongs to the label.
  */
-function isLabelToken(token, first) {
+function isLabelToken(token, first, colonForm = false) {
   if (token === '') return false
+  // A bare number is a case label only in the COLON form (`02: the
+  // case`). In the space form it is a measurement — `80 columns keep the
+  // full provider/model` — and the measurement is the point of the title.
+  if (/^\d{1,3}$/u.test(token)) return colonForm
   if (PR_SUB_LABEL.test(token)) return true
   if (first && /^[A-Z]$/u.test(token)) {
     // A lone capital letter may only lead a label when a slash-qualified
@@ -204,7 +208,14 @@ function splitLabel(title) {
     }
   }
   const colon = title.indexOf(':')
-  if (colon !== -1) return { head: title.slice(0, colon), rest: title.slice(colon + 1) }
+  if (colon !== -1) {
+    const head = title.slice(0, colon)
+    // A bare NUMBER before the colon is a case label: `02: the case`. A
+    // number that starts a SENTENCE is a measurement — `80 columns keep
+    // the full provider/model` — and the measurement is the point of the
+    // title, so it stays.
+    return { head, rest: title.slice(colon + 1), colonForm: true }
+  }
   // A dash separator: `- ` (a dash followed by a space), so an ordinary
   // hyphenated word is not a separator. The en-dash and em-dash forms are
   // the same separator.
@@ -230,6 +241,7 @@ function splitLabel(title) {
 export function splitLeadingLabel(title) {
   const split = splitLabel(title)
   if (split === null) return null
+  const colonForm = split.colonForm === true
   // A BRACKETED head is ONE token: `(ctrl-r harness)` is a single label,
   // and splitting it on the space inside the bracket would make the
   // bracket a token of its own.
@@ -248,7 +260,7 @@ export function splitLeadingLabel(title) {
   }
   let consumed = 0
   for (const [index, token] of tokens.entries()) {
-    if (!isLabelToken(token, index === 0)) break
+    if (!isLabelToken(token, index === 0, colonForm && index === 0)) break
     consumed = index + 1
   }
   if (consumed === 0) return null
