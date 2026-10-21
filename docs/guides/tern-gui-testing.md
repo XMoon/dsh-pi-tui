@@ -166,7 +166,7 @@ These are the ones that make the lane worth its extra setup.
 | `system` | the window's own info: the title, the displays, the dialogs, the file associations, the input-monitor state. |
 | `pick X Y` | what is really at a point. |
 | `layers` | the last frame's compositing layers in paint order. |
-| `perf on\|off\|reset\|mark\|since` | the client's own frame timing. |
+| `perf` | the client's own frame timing: a BARE `perf` is the summary (frames, `idleFrames`, `drawnShare`, and the `cpu`/`thread`/`app`/`update` percentiles). `perf on\|off` toggles the collection, `perf mark` marks a point and `perf since` reports the frames after it (it needs a mark first). |
 | `state` | the window's own state JSON (tabs, panes, focus, the theme). |
 
 ## Rules that keep the evidence honest
@@ -180,6 +180,19 @@ These are the ones that make the lane worth its extra setup.
   action is a grey pill whose **label is invisible**; the reason survives only
   in the `title` attribute. A GUI capture that shows "the button is there" is
   not evidence that the user can read it.
+- **VECTOR TEXT IS NOT A TEXT NODE.** A drawn graph (a Mermaid diagram, an SVG)
+  paints its labels as vector content: the client's tree exposes the graphic's
+  CHROME (`mermaid - graph`, `Source`, `Copy`, `Open`) and the graphic's
+  element, but **not** the text inside it. The PNG is the evidence for the
+  drawn content; the tree is the evidence for the chrome and the box.
+- **A CLICK ONLY LANDS ON WHAT IS IN VIEW.** A surface that scrolls (a
+  transcript, a long list) lays out its off-screen controls with real boxes,
+  and a click on one lands on whatever covers it. The flow must address a
+  control whose box is inside the viewport.
+- **THE CLIENT VIRTUALIZES A LONG SURFACE.** At 500 rows the client's node
+  count is IDENTICAL to 100 rows, and the visible window is the TAIL. A flat
+  node counter is the client's virtualization, not lost content: prove the
+  content by looking at WHICH rows are rendered.
 - **A REAL click is still ONE click.** Deliver it with `send` (never retried)
   and prove it with the subject's own record, not with a redraw.
 - **The window is a MULTIPLEXER.** A TSP surface is what a program **inside a
@@ -221,6 +234,11 @@ These are the ones that make the lane worth its extra setup.
     (measured: 720px wide on this build), so the GUI lane cannot reach the
     400px pane the headless lane uses. **A narrow-width question is a
     headless question.**
+12. **`perf since` NEEDS A `perf mark` FIRST.** A bare `perf` is the summary;
+    `perf since` without a mark is refused.
+13. **AN SVG IS NOT THEMED BY THE CLIENT.** A drawn SVG keeps its OWN colours:
+    its hardcoded background stays in the client's dark theme. Only the
+    client's own widgets (`chart`, `picker`, `tool`) follow the theme.
 
 ## Scripts
 
