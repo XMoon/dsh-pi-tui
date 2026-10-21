@@ -693,7 +693,7 @@ test('history paging (loadOlder) extends the loaded window without replacing the
   }
 })
 
-test('(SURFACE_REACHABLE): the real boundary gesture extends the loaded official history through the mounted surface', async (t) => {
+test('the real boundary gesture extends the loaded official history through the mounted surface', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-gesture'
   const hostPreset = 'm3-4-pr2-preset'

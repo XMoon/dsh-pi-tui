@@ -497,7 +497,7 @@ async function flush(): Promise<void> {
 
 // ── P2-01 / P2-02: the real application event chain reaches the real sink ──
 
-test('02: a routed durable tool call reaches the real SDK sink through the live projection', async () => {
+test('a routed durable tool call reaches the real SDK sink through the live projection', async () => {
   const tern = new ScriptedTern()
   const { session, surface: sdk } = await openTern(tern)
   const bridge = createBridge(sdk)

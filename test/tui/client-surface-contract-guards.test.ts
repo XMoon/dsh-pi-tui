@@ -554,7 +554,7 @@ test('TUI ownership comes from the LIVE Client registry, never the static name l
 
 /* ── PR5 §1C-5 (whole-PR F2): the raw skill predicate never outranks the Host reservation ── */
 
-test('(whole-PR F2): every skill-route sibling consumes the Host reservation condition', () => {
+test('every skill-route sibling consumes the Host reservation condition', () => {
   const controller = code('app/submission/controller.ts')
   // The early echo and the steer sibling both consumed the RAW
   // `isSkillInvocation` predicate, so a genuine Host name that does not claim

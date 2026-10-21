@@ -708,7 +708,7 @@ test('the OPEN Job viewer recovers after reconnect — same detail, B output con
     'exactly one Host kill admission served the post-B Stop')
 })
 
-test('11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
+test('a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx

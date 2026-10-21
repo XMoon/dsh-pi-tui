@@ -818,7 +818,7 @@ test('the real Host cancel terminates the real pnpm install, restores the profil
   assert.equal(controller.installView()?.phase, 'done')
 })
 
-test('(too-late): the controller renders the real Host too-late response and the one install settles', async (t) => {
+test('the controller renders the real Host too-late response and the one install settles', async (t) => {
   // Deterministic race window: the Host advances to `applying` and emits the
   // official phase event, but this test-local PORT WRAPPER withholds that ONE
   // presentation event until the user's Stop has already been dispatched. The

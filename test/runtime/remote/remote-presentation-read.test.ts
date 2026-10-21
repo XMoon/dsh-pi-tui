@@ -432,7 +432,7 @@ test('a same-id new binding generation cannot accept the old settle', async () =
   assert.equal(await pending, undefined)
 })
 
-test('(Direct): the Direct mapping is a cancellation check plus the FULL snapshot', async () => {
+test('the Direct mapping is a cancellation check plus the FULL snapshot', async () => {
   const { DirectPresentationReader } = await import('../../../src/runtime/direct/presentation-read-direct.ts')
   let agents = 0
   const reader = new DirectPresentationReader({
