@@ -1,0 +1,40 @@
+{
+  "digest": "d33e19a36ecd3c65a7f94dc50f8bbc863519f021cbda6a1553cdbfdb24179c30",
+  "inputs": [
+    {
+      "path": "package.json",
+      "present": true,
+      "sha256": "b9cbae7468dfd44f43df562b70008e590849a11c50fd8162359bfea8bea51870",
+      "why": "the manifest decides what is packed and how it is rewritten"
+    },
+    {
+      "path": "tsdown.config.ts",
+      "present": true,
+      "sha256": "da73e93945855305ce865c916343b3e5d3aef0ce848895195c7b1589137edb18",
+      "why": "the bundle build decides the payload files"
+    },
+    {
+      "path": "scripts/generate-dsh-presets.mjs",
+      "present": true,
+      "sha256": "01494eca7acdc0a6c3ec83ec54381f8debbc9a094c581b049512d8a4db745f9f",
+      "why": "the generated presets are part of the payload"
+    },
+    {
+      "path": ".npmignore",
+      "present": false,
+      "sha256": null,
+      "why": "an ignore file changes which files are packed"
+    }
+  ],
+  "proof": {
+    "equivalent": true,
+    "entryCount": 37,
+    "differingFiles": [],
+    "manifestDifferences": [],
+    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39651970677",
+    "commit": "6f6f9901a0ebc40f9344517db6d2e9212d0ef9c9",
+    "mode": "npm",
+    "platform": "ubuntu-latest / Node 24",
+    "note": "A change to any listed input DIGEST reopens this proof: the equality is a gated property, not a permanent one."
+  }
+}
