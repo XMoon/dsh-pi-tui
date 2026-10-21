@@ -40,8 +40,15 @@
 import { createWriteStream } from 'node:fs'
 import { relative } from 'node:path'
 import { spec } from 'node:test/reporters'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = new URL('..', import.meta.url)
+// The repository root, as a FILE SYSTEM path.
+//
+// `URL.pathname` is a URL component, not a path: on Windows it is
+// `/C:/Users/…`, and a space in the checkout path stays percent-encoded
+// as `%20`. `relative()` against such a string produces a path that does
+// not exist, so the recorded file paths would be wrong.
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 /**
  * The JSONL destination; absent means "behave exactly like the spec
@@ -146,7 +153,7 @@ export default async function reporter(source, options) {
     // so recording the file relative while the name stays absolute would
     // make the two impossible to compare — and the file entry is exactly
     // what tells a file apart from the cases inside it.
-    const file = data.file === undefined ? undefined : relative(ROOT.pathname, data.file)
+    const file = data.file === undefined ? undefined : relative(ROOT, data.file)
     return {
       file,
       name: file !== undefined && data.name === data.file

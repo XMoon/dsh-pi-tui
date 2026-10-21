@@ -10,12 +10,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { ALLOWED_DIRECT_USAGE, collectTestFiles, scanSource, scanTree } from '../../scripts/temp-hygiene-gate.mjs'
 
-const TEST_ROOT = dirname(fileURLToPath(import.meta.url))
+// The WHOLE test tree, not this file's own directory: a violation in
+// `test/app/`, `test/tui/` or `test/tooling/` is a violation too, and
+// this test is the repository-level guard for them.
+const TEST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('a plain test file calling mkdtempSync directly is a violation', () => {
   const violations = scanSource(
@@ -94,6 +97,19 @@ test('collectTestFiles only picks up source files', async (t) => {
   writeFileSync(join(root, 'nested', 'c.test.js'), '')
   const files = collectTestFiles(root).map((file) => file.slice(root.length + 1)).sort()
   assert.deepEqual(files, ['a.test.ts', 'b.test.mjs', join('nested', 'c.test.js')])
+})
+
+test('a violation in ANOTHER owner directory is reported', (t) => {
+  // The repository-level guard has to reach every owner directory, not
+  // only the one this file lives in.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-gate-owner-')
+  mkdirSync(join(root, 'app'), { recursive: true })
+  mkdirSync(join(root, 'tui'), { recursive: true })
+  writeFileSync(join(root, 'app', 'stray.test.ts'), `import { mkdtempSync } from 'node:fs'\nconst root = mkdtempSync(join(tmpdir(), 'dsh-x-'))\n`)
+  const violations = scanTree(root)
+  assert.equal(violations.length, 2, JSON.stringify(violations))
+  assert.ok(violations[0].file.includes('app'), 'the violation in the other directory must be reported')
 })
 
 test('repository test tree satisfies temp hygiene', () => {

@@ -38,6 +38,8 @@ const FORBIDDEN_TOKEN = /\bmkdtemp(?:Sync)?\b/gu
 export const ALLOWED_DIRECT_USAGE = [
   { file: 'temp-lifecycle.ts', reason: 'the helper itself: the one place allowed to create test temp dirs' },
   { file: 'temp-hygiene-gate.test.mjs', reason: 'the gate\'s own test fixtures must contain the forbidden tokens' },
+  { file: 'new-test-policy.test.mjs', reason: 'the policy gate\'s own fixture tree must be a disposable root, and its probe sources must contain the forbidden tokens' },
+  { file: 'production-reads-gate.test.mjs', reason: 'the reads gate\'s own fixture root must be a disposable tree' },
   { file: 'dev-bootstrap-ephemeral.test.mjs', reason: 'embedded fake-pnpm child script must create real temp dirs to drive the real source-pack script (contained by the runner)' },
   { file: 'dsh-source-identity.test.mjs', reason: 'embedded fake-pnpm child script must create real temp dirs to drive the real source-pack script (contained by the runner)' },
 ]
