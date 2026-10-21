@@ -205,21 +205,39 @@ export function verifyShards({
     }
     const shardCases = cases.filter(record => record.name !== record.file)
     const skipped = shardCases.filter(record => record.result === 'skip').length
-    // A shard that produced records is NOT proof that its cases RAN. A
-    // failed or cancelled case is a real failure, and a shard that died
-    // half way leaves only the records it managed to write. So the
-    // outcomes themselves are checked, not just their presence.
+    // A shard that produced records is NOT proof that its cases RAN.
+    //
+    // The check is an ALLOW LIST, not a deny list: a case counts as
+    // qualified only when its outcome is one this qualification accepts.
+    // A deny list would pass a record whose `result` is missing (a
+    // truncated or malformed JSONL line) and a `todo` (a case Node
+    // recognised but did not prove), because neither is `fail`,
+    // `cancelled` or `unknown` — and neither changes the case count or
+    // the skip count, so the aggregate would accept a shard set that
+    // never proved what it claims.
+    //
+    // `pass` and `skip` are the accepted outcomes: a case that ran and
+    // passed, or a case that was skipped for a reason this qualification
+    // accepts. A `todo` is a DECISION, not a pass — if a todo is ever
+    // acceptable it has to be an explicit one.
+    const ACCEPTED_RESULTS = new Set(['pass', 'skip'])
+    const unacceptable = shardCases.filter(record => !ACCEPTED_RESULTS.has(record.result))
+    if (unacceptable.length > 0) {
+      const byResult = new Map()
+      for (const record of unacceptable) {
+        const key = record.result === undefined ? '(no result)' : String(record.result)
+        byResult.set(key, (byResult.get(key) ?? 0) + 1)
+      }
+      const summary = [...byResult.entries()].map(([result, count]) => `${count} ${result}`).join(', ')
+      failures.push(`the shard ${directory} reported ${unacceptable.length} case(s) whose outcome is not accepted: ${summary}`)
+    }
     const failed = shardCases.filter(record => record.result === 'fail')
     const cancelled = shardCases.filter(record => record.result === 'cancelled')
-    const unknown = shardCases.filter(record => record.result === 'unknown')
     if (failed.length > 0) {
       failures.push(`the shard ${directory} reported ${failed.length} failing case(s): ${failed.slice(0, 3).map(record => record.name).join('; ')}`)
     }
     if (cancelled.length > 0) {
       failures.push(`the shard ${directory} reported ${cancelled.length} cancelled case(s)`)
-    }
-    if (unknown.length > 0) {
-      failures.push(`the shard ${directory} reported ${unknown.length} case(s) with no outcome: the shard did not finish`)
     }
     // The shard must record the run it belongs to. Without that identity
     // a shard from a DIFFERENT run could be counted towards this one, and

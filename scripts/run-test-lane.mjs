@@ -27,14 +27,23 @@
 import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const TEST_ROOT = join(ROOT, 'test')
+/**
+ * Where the lanes are discovered.
+ *
+ * It is the repository's own `test/` directory. `DSH_TEST_ROOT` overrides
+ * it so that a test can point the runner at a DISPOSABLE tree and exercise
+ * the real path — the runner's own discovery, its own reporter wiring, its
+ * own temp-root contract — without running the whole suite and without
+ * putting a synthetic file where the real lanes would discover it.
+ */
+const TEST_ROOT = process.env.DSH_TEST_ROOT ?? join(ROOT, 'test')
 
 /**
  * Parse the optional `--shard=<index>/<total>` argument.
@@ -93,16 +102,40 @@ function main() {
   // The relative form is ~9,000 characters on every platform, and the
   // child's `cwd` keeps the repository root as the working directory —
   // which the tests rely on (22 of them read `process.cwd()`).
-  const relativeFiles = files.map(rel => join('test', rel))
+  //
+  // The prefix is the test root's own name, so an overridden root keeps
+  // the same shape: the child is given `<root-name>/<file>` relative to
+  // the working directory, and the working directory is the root's
+  // PARENT.
+  const testRootParent = dirname(TEST_ROOT)
+  const testRootName = basename(TEST_ROOT)
+  const workingDirectory = TEST_ROOT === join(ROOT, 'test') ? ROOT : testRootParent
+  const relativeFiles = files.map(rel => join(testRootName, rel))
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
+  // The MACHINE-READABLE reporter.
+  //
+  // It is opt-in: the destination variable is what turns it on. Without
+  // the variable the lane runs exactly as it always did, with Node's own
+  // reporter and no extra file. With it, the reporter is loaded and it
+  // writes the case records NEXT TO the human report.
+  //
+  // The reporter has to be named on the COMMAND LINE — the destination
+  // variable alone does not make Node load it, so a run that set the
+  // variable but not the flag would produce no records at all, and every
+  // consumer of them would fail later with a confusing "file not found".
+  const jsonl = process.env.DSH_TEST_JSONL
+  const reporterArgs = jsonl === undefined
+    ? []
+    : [`--test-reporter=${join(ROOT, 'scripts', 'test-case-reporter.mjs')}`]
   const child = spawn(process.execPath, [
     '--test',
+    ...reporterArgs,
     ...(shard === undefined ? [] : [`--test-shard=${shard}`]),
     ...relativeFiles,
   ], {
-    cwd: ROOT,
+    cwd: workingDirectory,
     stdio: 'inherit',
     shell: false,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
