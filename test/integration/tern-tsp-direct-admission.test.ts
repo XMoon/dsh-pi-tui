@@ -344,6 +344,18 @@ for (const busyEnter of ['queue', 'steer'] as const) {
           // retracted would be invisible in the final live set.
           assert.ok(rows.length <= 1,
             `at most ONE pending delivery row for the second submission in every frame:\n${rows.join('\n')}`)
+          // The row's MODE is checked in EVERY frame too, not only in the
+          // last one. The local echo and the authoritative occurrence are two
+          // producers of the same request: a local echo painted with the
+          // WRONG placement and then REPLACED by the authoritative row would
+          // pass a uniqueness check and a last-frame mode check, and the
+          // wrong mode would have been on the screen.
+          const frameQueue = rows.filter(line => line.includes('queued (followup)')).length
+          const frameSteering = rows.filter(line => line.includes('steering')).length
+          assert.ok(frameQueue <= (expected === 'queue' ? 1 : 0),
+            `at most ${expected === 'queue' ? 'one queue' : 'no queue'} row for the second submission in every frame:\n${rows.join('\n')}`)
+          assert.ok(frameSteering <= (expected === 'steer' ? 1 : 0),
+            `at most ${expected === 'steer' ? 'one steering' : 'no steering'} row for the second submission in every frame:\n${rows.join('\n')}`)
         }
         const pendingRows = renderedLines(fixture)
           .filter(line => line.includes('second prompt'))
