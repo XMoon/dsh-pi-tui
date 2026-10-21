@@ -597,7 +597,7 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
   })
 }
 
-test('a timed-out question card renders the authoritative late answer from the projection', async () => {
+test('M3-3B a timed-out question card renders the authoritative late answer from the projection', async () => {
   // The call's own result recorded the timeout; the answer arrived later and
   // lives in the `userQuestions.settled` projection. The card must show what
   // the user finally answered — the durable transcript event is unchanged.
@@ -626,7 +626,7 @@ test('a timed-out question card renders the authoritative late answer from the p
     'without the projection the timed-out payload is not presented as an answer')
 })
 
-test('an EMPTY settled batch is authoritative and replaces the recorded timeout', async () => {
+test('M3-3B an EMPTY settled batch is authoritative and replaces the recorded timeout', async () => {
   // rc.2 allows a settled entry whose answers batch is empty (a late reply
   // settled the question without a readable batch). The settled entry is the
   // authority: falling back to the call's own result would keep presenting the

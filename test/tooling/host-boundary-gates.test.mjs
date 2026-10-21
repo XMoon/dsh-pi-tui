@@ -25,7 +25,7 @@ function packageScripts() {
   return readFileSync(PACKAGE_JSON, 'utf8')
 }
 
-test('the D1 closure smoke is the ONE Source Mode entry for the four parity proofs', () => {
+test('the D1 closure gate is the ONE Source Mode entry for the four parity proofs', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
   // The D1 closure OWNS the four same-Host parity proofs: it spawns each of
   // them itself and aggregates their results into the explicit read-gap
