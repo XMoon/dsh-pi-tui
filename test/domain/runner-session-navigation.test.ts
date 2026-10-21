@@ -1731,7 +1731,7 @@ const B3_QUESTION: readonly B3Question[] = [
   { id: 'q-c', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] },
 ]
 
-test('finding C (1): the real /new quiesce parks on a LIVE Question — A keeps the presentation until the user really answers', async (t) => {
+test('the real /new quiesce parks on a LIVE Question — A keeps the presentation until the user really answers', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-new-')
   const sessionA = fakeSession({
@@ -1797,7 +1797,7 @@ test('finding C (1): the real /new quiesce parks on a LIVE Question — A keeps 
   }
 })
 
-test('finding C (2): the real /fork publication withdraws A\'s live modal while the Host cancellation is STILL in flight', async (t) => {
+test('the real /fork publication withdraws A\'s live modal while the Host cancellation is STILL in flight', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-fork-')
   const sessionA = fakeSession({
@@ -1888,7 +1888,7 @@ test('finding C (2): the real /fork publication withdraws A\'s live modal while 
   }
 })
 
-test('finding C (3): a real publication withdraws a MOUNTED continued form and re-scopes its attention', async (t) => {
+test('a real publication withdraws a MOUNTED continued form and re-scopes its attention', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-switch-')
   const sessionA = fakeSession({
@@ -1944,7 +1944,7 @@ test('finding C (3): a real publication withdraws a MOUNTED continued form and r
   }
 })
 
-test('finding C (4): switching away and BACK restores the continued entry from the official projection', async (t) => {
+test('switching away and BACK restores the continued entry from the official projection', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-return-')
   const previousHome = process.env.DSH_HOME
@@ -2090,7 +2090,7 @@ test('finding C/F6 (5): a real publication withdraws A\'s live APPROVAL prompt w
   }
 })
 
-test('finding F10 (6): a replaced subject\'s request that arrives AFTER the publication is never mounted (production path)', async (t) => {
+test('a replaced subject\'s request that arrives AFTER the publication is never mounted (production path)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-late-')
   const sessionA = fakeSession({
@@ -2195,7 +2195,7 @@ test('finding F10 (6): a replaced subject\'s request that arrives AFTER the publ
   }
 })
 
-test('finding F13: the DEFAULT PiTui branch still forwards a foreign-session request to the app (the new policy is renderer-owned only)', async (t) => {
+test('the DEFAULT PiTui branch still forwards a foreign-session request to the app (the new policy is renderer-owned only)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-pitui-')
   const previousHome = process.env.DSH_HOME
@@ -2241,7 +2241,7 @@ test('finding F13: the DEFAULT PiTui branch still forwards a foreign-session req
     'the default branch delegated the foreign-session request to the app')
 })
 
-test('finding F14 (7): a REAL opening rollback retires the opening target\'s presentation with NO extra trigger', async (t) => {
+test('a REAL opening rollback retires the opening target\'s presentation with NO extra trigger', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-rollback-')
   const sessionA = fakeSession({
