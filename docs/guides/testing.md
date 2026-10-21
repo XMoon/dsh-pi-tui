@@ -115,6 +115,15 @@ not happen within the time we happened to wait". If the observation window
 is shortened, the shortening needs a causal reason: an upstream barrier
 that provably covers every producer of the effect.
 
+**A state change is not a painted frame.** A controller that sets its
+phase, model or status and only THEN asks for a repaint lets a test observe
+the new state while the terminal still shows the old frame. When the case
+asserts what is PAINTED — or sends a key the surface only accepts once the
+action is visible — wait for the FRAME, not for the controller state. The
+same applies to a key: an input that a fence drops (not holds) is lost for
+good, so a wait that ends before the surface is ready loses the command
+rather than delaying it.
+
 ### 6. Discoverability & Execution Cost
 
 A new test must be found by the lane that owns it. The lanes are PATTERNS
