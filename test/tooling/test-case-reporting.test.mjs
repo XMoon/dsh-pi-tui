@@ -207,11 +207,14 @@ test('the title transform removes every code family the tree uses', () => {
     ['A5b-6: the composition root introduces no new type', 'the composition root introduces no new type'],
     ['B4A-07 a resize re-budgets the window', 'a resize re-budgets the window'],
     ['PR5 §1C-3 (R6-1): only the winner is subtracted', 'only the winner is subtracted'],
-    // `(review round 4)` is a REVIEW qualifier, not part of the code —
-    // it stays, because it says which review produced the case.
-    ['PR4 F2b.2 (review round 4): a fulfilled observation is an issue', '(review round 4): a fulfilled observation is an issue'],
-    // The bracketed REVIEW qualifier is not the code — it stays.
-    ['§D2 (review round 3 ruling): Direct keeps the mirror', '(review round 3 ruling): Direct keeps the mirror'],
+    // A bracketed qualifier that DIRECTLY follows the code is part of
+    // the LABEL: it names the review or the variant, and it goes with
+    // the code.
+    ['PR4 F2b.2 (review round 4): a fulfilled observation is an issue', 'a fulfilled observation is an issue'],
+    ['§D2 (review round 3 ruling): Direct keeps the mirror', 'Direct keeps the mirror'],
+    // A bracket that qualifies a WORD is not the label: `shell` is the
+    // subject, and `(Remote, CARRIER_GAP)` qualifies it.
+    ['L6 §37 shell (Remote, CARRIER_GAP): the shell routes the turn', 'shell (Remote, CARRIER_GAP): the shell routes the turn'],
     ['§18.1 the Remote route never hands over', 'the Remote route never hands over'],
     ['A06/Focus: an idle compaction keeps the chronology', 'an idle compaction keeps the chronology'],
     ['B3 F6.1: a real answer freezes the countdown', 'a real answer freezes the countdown'],

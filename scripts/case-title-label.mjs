@@ -42,7 +42,55 @@
  * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and
  * a few carry a letter separator (`AC-1`, `PR-A`).
  */
-const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Remote|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|\d{1,3}\([a-z]\)?|\b[a-z]\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
+/**
+ * A code ATOM: one segment of a code label.
+ *
+ * The families the repository uses: a short uppercase family (`A5b`,
+ * `TS8`, `B4A`, `PR5`, `H3A`, `L6`, `F10` …), optionally with a dotted
+ * sub-number (`D2.1`, `F2b.2`, `P1.1`), a letter suffix (`B4B-10b`),
+ * a dash-qualified second code (`A5b-6`, `S3-R0`), or a word suffix
+ * (`B4B-delete-fallback`).
+ *
+ * A few families start with a DIGIT instead of a letter (`3B`, `2B`),
+ * and a few carry a letter separator (`AC-1`, `PR-A`).
+ */
+const CODE_ATOM = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:\+[A-Za-z]+)?|\d+\.\d+[a-z]?|\d+[A-Z]\d*|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|RFL-\d+|\d{1,2}\/\d{1,2})$/u
+
+/**
+ * A RANGE code: `E2–E5`, `I1–I6`.
+ *
+ * The plan numbers a range of cases, and the range is written with an
+ * en-dash between two codes — a form the plain atom cannot express,
+ * because the dash is in the middle rather than after the family.
+ */
+const CODE_RANGE_TOKEN = /^[A-Z]{1,4}\d+–[A-Z]{1,4}\d+$/u
+
+/**
+ * A code LABEL: one atom, or several atoms joined by a slash.
+ *
+ * The chain is matched by SPLITTING the token on the slash and matching
+ * each segment, rather than by one nested pattern. The nested form could
+ * not express a numeric segment after a numeric one — `B4B-04/05` and
+ * `P1-1/P1-3/P1-4` are the plan's own forms — and every attempt to
+ * express it in one pattern started eating the segment that followed.
+ */
+function isCodeToken(token) {
+  if (token === '') return false
+  if (CODE_ATOM.test(token)) return true
+  if (CODE_RANGE_TOKEN.test(token)) return true
+  if (!token.includes('/')) return false
+  const segments = token.split('/')
+  if (segments.length < 2) return false
+  return segments.every((segment, index) => {
+    if (CODE_ATOM.test(segment)) return true
+    // A bare numeric segment continues a numeric code: `B4B-04/05`.
+    if (index > 0 && /^\d{1,4}$/u.test(segment)) return true
+    // A qualifier names the variant: `A06/Focus`, `B2/Direct`. It may
+    // carry a level suffix: `B2/Direct-L6`.
+    if (index > 0 && QUALIFIER_TOKEN.test(segment)) return true
+    return index > 0 && /^(?:Direct|Remote|Focus)-L\d$/u.test(segment)
+  })
+}
 
 /**
  * A SECTION marker: a pointer into the plan that wrote the test.
@@ -185,7 +233,7 @@ function isLabelToken(token, first, colonForm = false) {
   if (QUALIFIER_TOKEN.test(token)) {
     return first ? false : true
   }
-  return CODE_TOKEN.test(token)
+  return isCodeToken(token)
     || SINGLE_LETTER_SLASH_TOKEN.test(token)
     || STEP_LABEL_TOKEN.test(token)
     || FINDING_LABEL_TOKEN.test(token)
@@ -272,9 +320,13 @@ export function splitLeadingLabel(title) {
   // A BRACKETED head is ONE token: `(ctrl-r harness)` is a single label,
   // and splitting it on the space inside the bracket would make the
   // bracket a token of its own.
+  // The head is split into tokens on WHITESPACE, but a BRACKETED part
+  // is ONE token: `(Direct negative control)` is a single qualifier, and
+  // splitting it on the spaces would make the pieces look like separate
+  // words.
   const rawTokens = /^\(.+\)$/u.test(split.head)
     ? [split.head]
-    : split.head.split(/\s+/u).filter(token => token !== '')
+    : (split.head.match(/\([^)]*\)|\S+/gu) ?? []).filter(token => token !== '')
   if (rawTokens.length === 0) return null
   const tokens = []
   for (const token of rawTokens) {
@@ -304,16 +356,55 @@ export function splitLeadingLabel(title) {
     }
   }
   if (consumed === 0) return null
-  const label = tokens.slice(0, consumed).join(' ')
   // The tokens the label did NOT consume are part of the SENTENCE.
   //
   // `B3 F4 control: with no settled entry …` — the code is `B3 F4`, and
   // `control` is the CATEGORY the case belongs to. The category is part of
   // what the title says, and dropping it would make the title say less
   // than it did.
-  const kept = tokens.slice(consumed).join(' ')
+  // A BRACKETED qualifier that follows the label belongs to the LABEL:
+  // `(Direct negative control)`, `(review round 4)`, `(F2)`. The bracket
+  // says WHICH variant the case covers, so it goes with the label and is
+  // removed with it — and it must be part of the LABEL, or a consumer
+  // that compares the title's content words against the label would read
+  // the bracket's words as content the rewrite had dropped.
+  // The bracket may sit in the HEAD (the colon form: `CCR-8 (Direct
+  // negative control): …`) or right after it (the space form:
+  // `PR5 §1C-3 (R6-1) …`).
+  // The bracket is part of the LABEL only when it DIRECTLY follows the
+  // code: `CCR-8 (Direct negative control)`. When a WORD sits between
+  // them (`L6 §37 shell (Remote, CARRIER_GAP)`), the word is the subject
+  // and the bracket qualifies it — so the bracket belongs to the
+  // sentence.
+  const headBracket = /(\S+)\s+(\([^)]*\))\s*$/.exec(split.head)
+  const restBracket = /^\s*(\([^)]*\))/.exec(split.rest)
+  // A head bracket is part of the label only when the token BEFORE it is
+  // itself a code: `CCR-8 (Direct negative control)`. With a word in
+  // between (`shell (Remote, CARRIER_GAP)`), the word is the subject.
+  const headCode = headBracket === null ? null : headBracket[1]
+  const headBracketIsLabel = headBracket !== null && headCode !== null && isCodeToken(headCode)
+  const bracketCandidate = headBracketIsLabel
+    ? headBracket[2]
+    : (restBracket === null ? null : restBracket[1])
+  const bracket = bracketCandidate !== null && isLabelToken(bracketCandidate, true) ? bracketCandidate : ''
+  // A bracket that came from the HEAD is already among the head's tokens;
+  // one that came from the REST is not. So the label takes the head's
+  // tokens minus a head bracket, plus a rest bracket.
+  const labelTokens = headBracketIsLabel && bracket !== ''
+    ? tokens.filter(token => token !== bracket)
+    : tokens
+  const label = labelTokens.slice(0, consumed).join(' ') + (bracket === '' ? '' : ` ${bracket}`)
+  // A head bracket means the HEAD held `<code> (qualifier)`, so the words
+  // between the code and the bracket are the head's remaining tokens.
+  const kept = labelTokens.slice(consumed).join(' ')
   const rest = split.rest.trimStart()
-  const sentence = kept === '' ? rest : `${kept}: ${rest}`
+  const afterBracket = bracket === '' || headBracketIsLabel
+    ? rest
+    : rest.slice(bracket.length).trimStart()
+  // The bracket is part of the LABEL, so the rewrite removes it. What
+  // remains is the words between the label and the colon, then the
+  // sentence.
+  const sentence = kept === '' ? afterBracket : `${kept}: ${afterBracket}`
   // A label that is ONE bare token with no sentence after it is the whole
   // title (`B3`, `L6`), not a label.
   if (consumed === tokens.length && tokens.length === 1 && sentence === '') return null
