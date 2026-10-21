@@ -255,3 +255,95 @@ test('the recorded REPOSITORY-root path is compared against the TEST-root path',
   assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
   assert.equal(aggregate.observedFileCount, EXPECTED.size)
 })
+
+test('a MISSING case fails the aggregate when a baseline is known', (t) => {
+  // The file partition proves every FILE was covered. It does not prove
+  // every CASE inside those files was recorded: a recorder that dropped
+  // one case would still leave every file covered.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedCases: 4,
+    expectedSkipped: 0,
+  })
+  assert.ok(aggregate.failures.length > 0, 'a missing case must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /recorded 3 case\(s\), but the baseline is 4/u)
+})
+
+test('an EXTRA skipped case fails the aggregate when a baseline is known', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], results: { 'tui/three.test.ts': 'skip' } })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedCases: 3,
+    expectedSkipped: 0,
+  })
+  assert.ok(aggregate.failures.length > 0, 'an extra skip must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /recorded 1 skipped case\(s\), but the baseline is 0/u)
+})
+
+test('the aggregate accepts a split that matches the baseline exactly', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedCases: 3,
+    expectedSkipped: 0,
+  })
+  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
+})
+
+test('a shard from an EARLIER attempt fails the aggregate', (t) => {
+  // A re-run of the same workflow has the same run id and the same commit;
+  // only the attempt tells them apart.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+    expectedRunAttempt: '2',
+  })
+  assert.ok(aggregate.failures.length > 0, 'an earlier attempt must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /belongs to attempt 1, not 2/u)
+})
+
+test('a shard that records NO attempt fails the aggregate when one is expected', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+    expectedRunAttempt: '2',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a missing attempt must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /recorded no run attempt/u)
+})

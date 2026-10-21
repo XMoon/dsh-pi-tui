@@ -87,8 +87,26 @@ function main() {
   // of the aggregate job, which is the run that is doing the aggregating.
   const expectedSha = process.env.DSH_EXPECTED_SHA ?? null
   const expectedRunId = process.env.DSH_EXPECTED_RUN_ID ?? null
+  const expectedRunAttempt = process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null
+  // The baseline the shards' case counts are compared against. Without it
+  // the aggregate only proves that every FILE was covered — not that every
+  // CASE in those files was recorded.
+  const expectedCases = process.env.DSH_EXPECTED_CASES === undefined
+    ? null
+    : Number(process.env.DSH_EXPECTED_CASES)
+  const expectedSkipped = process.env.DSH_EXPECTED_SKIPPED === undefined
+    ? null
+    : Number(process.env.DSH_EXPECTED_SKIPPED)
 
-  const aggregate = verifyShards({ shardsRoot, total, expectedSha, expectedRunId })
+  const aggregate = verifyShards({
+    shardsRoot,
+    total,
+    expectedSha,
+    expectedRunId,
+    expectedRunAttempt,
+    expectedCases,
+    expectedSkipped,
+  })
 
   if (outIndex !== -1) {
     writeFileSync(args[outIndex + 1], `${JSON.stringify(aggregate, null, 2)}\n`)
@@ -126,6 +144,9 @@ export function verifyShards({
   total,
   expectedSha = null,
   expectedRunId = null,
+  expectedRunAttempt = null,
+  expectedCases = null,
+  expectedSkipped = null,
   expectedFiles: expectedFilesOverride,
 }) {
   const failures = []
@@ -220,6 +241,16 @@ export function verifyShards({
           failures.push(`the shard ${directory} belongs to run ${spec.runId}, not ${expectedRunId}`)
         }
       }
+      if (expectedRunAttempt !== null) {
+        // A re-run of the same workflow has the same run id and the same
+        // commit, and only the attempt tells them apart. An artifact from
+        // an earlier attempt must not be counted towards this one.
+        if (spec.runAttempt === undefined || spec.runAttempt === null || spec.runAttempt === '') {
+          failures.push(`the shard ${directory} recorded no run attempt: its identity is unknown`)
+        } else if (String(spec.runAttempt) !== String(expectedRunAttempt)) {
+          failures.push(`the shard ${directory} belongs to attempt ${spec.runAttempt}, not ${expectedRunAttempt}`)
+        }
+      }
     }
     totalCases += shardCases.length
     totalSkipped += skipped
@@ -249,6 +280,26 @@ export function verifyShards({
     }
   }
 
+  // The case and skip BASELINE.
+  //
+  // The file partition proves that every test FILE was covered. It does
+  // NOT prove that every CASE inside those files was recorded: a recorder
+  // that silently dropped one case would still leave every file covered.
+  // The counts are therefore compared against an independent baseline — the
+  // unsharded lane's own totals — and a difference in either direction
+  // fails: a missing case is a lost case, and an extra skip is a case that
+  // did not run.
+  if (expectedCases !== null && !Number.isNaN(expectedCases)) {
+    if (totalCases !== expectedCases) {
+      failures.push(`the shards recorded ${totalCases} case(s), but the baseline is ${expectedCases}`)
+    }
+  }
+  if (expectedSkipped !== null && !Number.isNaN(expectedSkipped)) {
+    if (totalSkipped !== expectedSkipped) {
+      failures.push(`the shards recorded ${totalSkipped} skipped case(s), but the baseline is ${expectedSkipped}`)
+    }
+  }
+
   return {
     lane: LANE,
     shardTotal: total,
@@ -256,6 +307,8 @@ export function verifyShards({
     observedFileCount: seenFiles.size,
     totalCases,
     totalSkipped,
+    expectedCases,
+    expectedSkipped,
     shards,
     failures,
   }

@@ -182,20 +182,21 @@ function splitLabel(title) {
 }
 
 /**
- * Remove a leading code label from one title.
+ * The label a title starts with, and the sentence after it.
+ *
+ * The label is the longest run of label TOKENS at the start of the title.
+ * A `/`-joined token is one token (`A06/Focus`), and a `PR D` pair is one
+ * token.
  *
  * @param {string} title - the current title.
- * @returns {string} the title without its leading code.
+ * @returns {{label: string, sentence: string}|null} the split, or null
+ *   when the title has no label.
  */
-export function stripCodePrefix(title) {
+export function splitLeadingLabel(title) {
   const split = splitLabel(title)
-  if (split === null) return title
-  // The head is examined token by token. A `/`-joined token is one token
-  // (`A06/Focus`), and a `PR D` pair is one token.
+  if (split === null) return null
   const rawTokens = split.head.split(/\s+/u).filter(token => token !== '')
-  if (rawTokens.length === 0) return title
-  // A `PR D` pair is ONE label token: the pull-request code and its
-  // single-letter sub-label are one thing.
+  if (rawTokens.length === 0) return null
   const tokens = []
   for (const token of rawTokens) {
     const previous = tokens[tokens.length - 1]
@@ -210,21 +211,41 @@ export function stripCodePrefix(title) {
     if (!isLabelToken(token, index === 0)) break
     consumed = index + 1
   }
-  if (consumed === 0) return title
-  // A label that is only a BARE code is not a label: `B3` alone is the
-  // whole title, and there is no sentence to keep. But a code WITH a
-  // qualifier (`A06/Focus`, `A5b/TS2`) names a variant, and the sentence
-  // after it is the behaviour.
-  if (consumed === tokens.length && tokens.length === 1) {
-    // A label that is ONE token is only a label when there is a SENTENCE
-    // after it. A bare code with nothing after it (`B3`, `L6`) is the
-    // whole title, and there is nothing to keep.
-    if (split.rest.trim() === '') return title
-  }
-  // The label's own words are dropped; the sentence keeps the rest.
-  const rest = split.rest.trimStart()
-  if (rest === '') return title
-  return rest
+  if (consumed === 0) return null
+  const label = tokens.slice(0, consumed).join(' ')
+  const sentence = split.rest.trimStart()
+  // A label that is ONE bare token with no sentence after it is the whole
+  // title (`B3`, `L6`), not a label.
+  if (consumed === tokens.length && tokens.length === 1 && sentence === '') return null
+  if (sentence === '') return null
+  return { label, sentence }
+}
+
+/**
+ * Whether a title LED BY a code label.
+ *
+ * The audit and the transform MUST agree on what a code is: an audit that
+ * uses its own pattern can silently stop reporting the very titles the
+ * transform would change, and a "no code-led titles" report that is based
+ * on a narrower pattern is a false assurance.
+ *
+ * @param {string} title - the current title.
+ * @returns {boolean} true when the title starts with a code label.
+ */
+export function hasLeadingCodePrefix(title) {
+  return splitLeadingLabel(title) !== null
+}
+
+/**
+ * Remove a leading code label from one title.
+ *
+ * @param {string} title - the current title.
+ * @returns {string} the title without its leading code.
+ */
+export function stripCodePrefix(title) {
+  const split = splitLeadingLabel(title)
+  if (split === null) return title
+  return split.sentence
 }
 
 function main() {
