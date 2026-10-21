@@ -223,7 +223,7 @@ test('an unavailable child SessionStatus leaves the Session-owned fields ABSENT 
   })
 })
 
-test('keeps no A residue', () => {
+test('child A → child B keeps no A residue', () => {
   const h = makeHarness()
   h.setStatus('child-a', {
     sessionId: 'child-a',
@@ -252,7 +252,7 @@ test('keeps no A residue', () => {
   assert.equal(snap.usage.tokens, undefined)
 })
 
-test('main re-derives the main subject from the main session', () => {
+test('child → main re-derives the main subject from the main session', () => {
   const h = makeHarness()
   h.setStatus('main', { sessionId: 'main', cwd: '/parent/ws', model: { provider: 'parent', model: 'm' } })
   h.setStatus('child-a', { sessionId: 'child-a', cwd: '/a', model: { provider: 'p', model: 'a' } })
