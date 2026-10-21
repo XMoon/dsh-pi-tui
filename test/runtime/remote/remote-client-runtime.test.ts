@@ -597,7 +597,7 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
           }
         },
       })
-      handle!.append('retained output\n')
+      handle!.append('live output\n\n')
       await waitFor('the known job to appear in the Client roster', () => {
         const rows = client.jobs.state.getSnapshot().rows[ownerId] ?? []
         return rows.some(row => String(row.id) === String(jobId))

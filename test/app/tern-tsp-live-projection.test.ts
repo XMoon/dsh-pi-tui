@@ -1361,7 +1361,7 @@ test('surface.commitStatus publishes ONE atomic store transaction on PiTui', asy
           title: 'title',
           workspaceRoot: '/w',
           todos: [
-            { content: 'todo one', status: 'pending' },
+            { content: 'todo two', status: 'pending' },
             { content: 'todo two', status: 'pending' },
           ],
         } as never,

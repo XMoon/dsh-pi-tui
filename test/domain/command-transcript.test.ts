@@ -683,7 +683,7 @@ test('a subagent/descriptor materializes no TranscriptMessage regardless of plac
   continuable.apply([
     descriptor(0, 'continuable'),
     event('turn/start', { turn: 0 }, 1),
-    userMessage('work', 2),
+    userMessage('answer', 2),
     assistantMessage('answer', 3),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
   ])
@@ -693,7 +693,7 @@ test('a subagent/descriptor materializes no TranscriptMessage regardless of plac
   oneShot.apply([
     event('turn/start', { turn: 0 }, 0),
     descriptor(1, 'one-shot'),
-    userMessage('work', 2),
+    userMessage('answer', 2),
     assistantMessage('answer', 3),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
   ])

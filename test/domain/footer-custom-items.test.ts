@@ -400,7 +400,7 @@ test('a valid command definition parses with the user:* id contract', () => {
   assert.equal(effectiveCustomCommandRefreshMs({ ...VALID_CLOCK, refreshIntervalMs: 5000 }), 5000)
   assert.equal(effectiveCustomCommandTimeoutMs(parsed!), 300)
   assert.equal(effectiveCustomCommandTimeoutMs({ ...VALID_CLOCK, timeoutMs: 300 }), 300)
-  // Explicit values round-trip.
+  // Explicit 30s round-trip.
   const explicit = parseFooterCustomItem({ ...VALID_CLOCK, refreshIntervalMs: 10000, timeoutMs: 500 })
   assert.deepEqual(explicit, { ...VALID_CLOCK, refreshIntervalMs: 10000, timeoutMs: 500 })
 })

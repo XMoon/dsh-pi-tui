@@ -473,7 +473,7 @@ async function mountSettingsWorkspace(
   dispose(): void
 }> {
   const vt = new VirtualTerminal(120, 40)
-  const owned: OwnedRunner = (_label, task, options) => {
+  const owned: OwnedRunner = (_label, done, options) => {
     void Promise.resolve()
       .then(() => task())
       .then(result => options.onResult?.(result), error => options.onError?.(error))

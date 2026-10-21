@@ -27,7 +27,7 @@ test('childOwnEvents cuts seeded parent history after the inherited ownership ma
   const log = [
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
     event(1, 'turn/start', { turn: 1 }),
-    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'parent reply' }] } }),
+    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'parent closing' }] } }),
     parentNotice,
     event(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
     event(7, 'session/end-seed', { inherited: true }),
@@ -54,7 +54,7 @@ test('childOwnEvents keeps child history across every untagged resume marker', (
   const log = [
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
     event(1, 'session/end-seed', { inherited: true }),
-    event(2, 'user/message', { content: [{ type: 'text', text: 'first turn' }], source: { kind: 'user' } }),
+    event(2, 'user/message', { content: [{ type: 'text', text: 'third turn' }], source: { kind: 'user' } }),
     event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'first reply' }] } }),
     event(4, 'session/end-seed', {}),
     event(5, 'user/message', { content: [{ type: 'text', text: 'resumed turn' }], source: { kind: 'user' } }),
