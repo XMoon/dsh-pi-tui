@@ -25,6 +25,19 @@ function historyFiles(workRoot: string): string[] {
   return readdirSync(dir).filter(name => name.endsWith('.jsonl')).map(name => join(dir, name))
 }
 
+/**
+ * Wait until the composer HAS the text.
+ *
+ * The composer holding the text is the completion signal for a typed line:
+ * the Enter that follows needs the draft, and the draft is the composer's
+ * own fact on the wire. A fixed settle after the typing only guessed how
+ * long the hand-off takes.
+ */
+async function awaitComposer(fixture: DirectTspFixture, text: string): Promise<void> {
+  await waitFor(`the composer to hold ${JSON.stringify(text)}`, () =>
+    latestComposerText(fixture.pane.output.text()) === text, 25_000)
+}
+
 /** The latest controlled editor text on the wire for `dock.composer`. */
 function latestComposerText(wire: string): string | undefined {
   let text: string | undefined
@@ -65,7 +78,7 @@ test('a GENUINE Host command with a TUI builtin name keeps its Host sink', async
   try {
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/settings')
-    await directSettle()
+    await awaitComposer(fixture, '/settings')
     fixture.pane.input.type('\r')
     await waitFor('the Host command sink', () => calls.length > 0, 25_000)
     assert.equal(calls.length, 1, 'the genuine Host command handler ran exactly once')
@@ -94,7 +107,7 @@ test('installed Session Browser capability never captures Host-owned command nam
     await waitForInputDelivery(fixture.pane)
     for (const name of names) {
       fixture.pane.input.type(`/${name}`)
-      await directSettle()
+      await awaitComposer(fixture, `/${name}`)
       fixture.pane.input.type('\r')
       await waitFor(`the genuine Host /${name} sink`, () => calls.length === names.indexOf(name) + 1, 25_000)
     }
@@ -117,7 +130,7 @@ test('/sessions without a negotiated Browser is refused and restores the draft',
   try {
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/sessions')
-    await directSettle()
+    await awaitComposer(fixture, '/sessions')
     assert.equal(latestComposerText(fixture.pane.output.text()), '/sessions',
       'the command draft is present before submission')
     fixture.pane.input.type('\r')
@@ -154,7 +167,7 @@ test('a FAILING Host command rolls the draft back into the composer', async (t) 
   try {
     await directSettle(4_000)
     fixture.pane.input.type('/failing')
-    await directSettle()
+    await awaitComposer(fixture, '/failing')
     assert.equal(latestComposerText(fixture.pane.output.text()), '/failing')
     // NEGATIVE CONTROLS: the producer facts are all zero before the gesture —
     // so the post-gesture waits below can only be satisfied by the submit
@@ -198,7 +211,7 @@ test('a refused `!` line writes NO input-history row (accepted prompt does)', as
     await waitForInputDelivery(fixture.pane)
     // A refused user-shell line: the refusal sits BEFORE any history write.
     fixture.pane.input.type('!echo hi')
-    await directSettle()
+    await awaitComposer(fixture, '!echo hi')
     fixture.pane.input.type('\r')
     await waitFor('the shell refusal', () =>
       fixture.pane.output.text().includes('User-shell UI is not available in TSP'), 25_000)
@@ -215,7 +228,7 @@ test('a refused `!` line writes NO input-history row (accepted prompt does)', as
     // POSITIVE CONTROL for the same store: an accepted prompt DOES persist a row,
     // so the empty result above is a real refusal, not a missing store.
     fixture.pane.input.type('an accepted prompt')
-    await directSettle()
+    await awaitComposer(fixture, 'an accepted prompt')
     fixture.pane.input.type('\r')
     await waitFor('the history row', () => historyFiles(fixture.workRoot).length > 0, 25_000)
     // Assert on the PARSED records, not a substring: the accepted prompt's own
@@ -260,7 +273,7 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         await waitForInputDelivery(fixture.pane)
         // Start a real turn; its model stream is HELD so the turn stays running.
         fixture.pane.input.type('first prompt')
-        await directSettle()
+        await awaitComposer(fixture, 'first prompt')
         fixture.pane.input.type('\r')
         await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
         await waitFor('the first settled prompt', () => recorder.calls() === 1 && promptCalls.length === 1, 25_000)
@@ -268,7 +281,7 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         const beforeSettled = recorder.calls()
         // The second submission while the turn runs, with the chosen gesture.
         fixture.pane.input.type('second prompt')
-        await directSettle()
+        await awaitComposer(fixture, 'second prompt')
         fixture.pane.input.type(gesture === 'enter' ? '\r' : CTRL_ENTER)
         // The AUTHORITATIVE delivery: wait for THE SECOND WRITE'S OWN SETTLED
         // RECORD (index `beforeSettled` — never `at(-1)` of a possibly-still
@@ -323,7 +336,7 @@ test('Esc during a RUNNING turn cancels the turn through the existing path (no e
   try {
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('cancel me')
-    await directSettle()
+    await awaitComposer(fixture, 'cancel me')
     fixture.pane.input.type('\r')
     await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
     // Escape maps to the EXISTING application cancel path (never an exit).
@@ -369,7 +382,7 @@ test('a REJECTED session cancel surfaces a renderer-neutral error notice (never 
   try {
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('cancel rejection case')
-    await directSettle()
+    await awaitComposer(fixture, 'cancel rejection case')
     fixture.pane.input.type('\r')
     await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
     fixture.pane.input.type('\u001b')
@@ -405,7 +418,7 @@ test('a registered extension contribution runs (never refused by the TSP builtin
   try {
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/extprobe')
-    await directSettle()
+    await awaitComposer(fixture, '/extprobe')
     fixture.pane.input.type('\r')
     await waitFor('the extension contribution handler', () => calls.length > 0, 25_000)
     assert.deepEqual(calls, ['extprobe'], 'the registered extension contribution ran exactly once')
@@ -439,7 +452,7 @@ test('an advertised Skill that is gone at execution is consumed with an explicit
   try {
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/fixture-skill')
-    await directSettle()
+    await awaitComposer(fixture, '/fixture-skill')
     fixture.pane.input.type('\r')
     await waitFor('the explicit error for the vanished Skill', () =>
       fixture.pane.output.text().includes('unknown skill'), 25_000)
@@ -467,7 +480,7 @@ test('a resolvable Skill invocation keeps its agent-facing route while Browser c
   try {
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/fixture-skill')
-    await directSettle()
+    await awaitComposer(fixture, '/fixture-skill')
     fixture.pane.input.type('\r')
     await waitFor('the skill invocation to reach the model', () =>
       fixture.pane.output.text().includes('skill turn ran'), 25_000)

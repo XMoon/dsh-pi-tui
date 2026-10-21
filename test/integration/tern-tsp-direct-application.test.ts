@@ -17,7 +17,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createDirectTspFixture, directSettle, waitFor } from '../support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from '../support/direct-tsp-fixture.ts'
 
 /** The latest controlled editor text on the wire for `dock.composer`. */
 function latestComposerText(wire: string): string | undefined {
@@ -51,8 +51,11 @@ test('a TSP Enter drives a REAL Agent turn and the streamed reply reaches the pa
   const promptCalls: Array<{ readonly sessionId: string; readonly mode: 'queue' | 'steer'; readonly message: unknown; readonly agentStatus: string; readonly outcome: { readonly kind: string } }> = []
   const recorder = fixture.recordPrompts(call => { promptCalls.push(call) })
   try {
-    await directSettle(3_000)
-    await directSettle(2_000)
+    // The tty becoming DELIVERABLE is the runner's readiness signal — the
+    // renderer HOLDS the keys that arrive before its bind and replays them in
+    // arrival order, so a key sent after this wait is never lost. The fixed
+    // startup sleeps only guessed how long that took.
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('hello official direct')
     await directSettle()
     assert.equal(latestComposerText(fixture.pane.output.text()), 'hello official direct',
