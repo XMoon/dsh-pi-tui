@@ -123,7 +123,7 @@ jobs:
           echo "shard_total=$DSH_SHARD_TOTAL" >> "$GITHUB_OUTPUT"
           echo "test_concurrency=$DSH_TEST_CONCURRENCY" >> "$GITHUB_OUTPUT"
           echo "the measurement will run these shards: $shards"
-          echo "with this test concurrency: ${DSH_TEST_CONCURRENCY:-Node's default}"
+          echo "with this test concurrency: ${DSH_TEST_CONCURRENCY:-the Node default}"
 
   # ---------------------------------------------------------------------------
   # The MEASUREMENT itself: one job per shard, each on its own runner.
