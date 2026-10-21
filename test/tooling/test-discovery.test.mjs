@@ -11,6 +11,7 @@
  *   test/tui/b.test.ts
  *   test/fixtures/data.ts
  *   test/support/helper.ts
+ *   test/compat/should-not-run.test.ts
  *
  * @module @xmoon76/dsh-pi-tui/test/test-discovery.test
  */
@@ -35,11 +36,17 @@ function syntheticTree(life) {
   mkdirSync(join(root, 'tui'), { recursive: true })
   mkdirSync(join(root, 'fixtures'), { recursive: true })
   mkdirSync(join(root, 'support'), { recursive: true })
+  mkdirSync(join(root, 'compat'), { recursive: true })
   writeFileSync(join(root, 'root.test.ts'), '')
   writeFileSync(join(root, 'app', 'session', 'a.test.ts'), '')
   writeFileSync(join(root, 'tui', 'b.test.ts'), '')
   writeFileSync(join(root, 'fixtures', 'data.ts'), '')
   writeFileSync(join(root, 'support', 'helper.ts'), '')
+  // A TEST FILE inside an infrastructure directory: the exclusion is by
+  // DIRECTORY, so this file must never be discovered — the fact that the
+  // real `compat/` holds only configuration today must not be what makes
+  // the rule hold.
+  writeFileSync(join(root, 'compat', 'should-not-run.test.ts'), '')
   return root
 }
 
@@ -59,6 +66,7 @@ test('discovery never treats the infrastructure directories as test files', (t) 
   const found = discoverTestFiles(root, ['.test.ts', '.test.mjs'])
   assert.ok(!found.some(rel => rel.startsWith('support/')), 'support/ is infrastructure')
   assert.ok(!found.some(rel => rel.startsWith('fixtures/')), 'fixtures/ is infrastructure')
+  assert.ok(!found.some(rel => rel.startsWith('compat/')), 'compat/ is infrastructure')
   assert.ok(!found.some(rel => rel.includes('/support/')), 'a nested support/ is infrastructure too')
   // The exclusion is by DIRECTORY, not by filename: a file NAMED like a test
   // inside an infrastructure directory is still infrastructure.
@@ -146,6 +154,8 @@ test('the pattern language matches one segment with * and any depth with **', ()
 test('the infrastructure-path rule is by directory segment', () => {
   assert.equal(isInfrastructurePath('support/helper.ts'), true)
   assert.equal(isInfrastructurePath('fixtures/data.ts'), true)
+  assert.equal(isInfrastructurePath('compat/dsh-mode.json'), true)
+  assert.equal(isInfrastructurePath('compat/should-not-run.test.ts'), true)
   assert.equal(isInfrastructurePath('tui/support/helper.ts'), true)
   assert.equal(isInfrastructurePath('supporting/helper.ts'), false,
     'a directory that merely starts with "support" is not infrastructure')
@@ -162,6 +172,7 @@ test('the REAL repository tree is discovered without loss or duplication', (t) =
   assert.equal(new Set(real).size, real.length, 'the real discovery must not contain a duplicate')
   assert.ok(!real.some(rel => rel.startsWith('support/')), 'the real support/ must be excluded')
   assert.ok(!real.some(rel => rel.startsWith('fixtures/')), 'the real fixtures/ must be excluded')
+  assert.ok(!real.some(rel => rel.startsWith('compat/')), 'the real compat/ must be excluded')
 })
 
 // ── The real lane membership ───────────────────────────────────────────────
@@ -194,6 +205,7 @@ test('the infrastructure directories are never part of a lane', async (t) => {
     for (const rel of resolveLane(root, lane.patterns, lane.suffixes, lane.exclude ?? [])) {
       assert.ok(!rel.startsWith('support/'), `${name} must not own ${rel}`)
       assert.ok(!rel.startsWith('fixtures/'), `${name} must not own ${rel}`)
+      assert.ok(!rel.startsWith('compat/'), `${name} must not own ${rel}`)
     }
   }
 })
