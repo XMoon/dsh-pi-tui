@@ -49,10 +49,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  * runner at a disposable tree. The two have to agree, so a stray
  * environment variable cannot redirect a qualification run on its own.
  */
-function resolveTestRoot(explicit) {
+export function resolveTestRoot(explicit, environment = process.env) {
   const canonical = join(ROOT, 'test')
   if (explicit === undefined) return canonical
-  const override = process.env.DSH_TEST_ROOT
+  const override = environment.DSH_TEST_ROOT
   if (override === undefined) {
     throw new Error('--test-root requires DSH_TEST_ROOT to name the same directory')
   }

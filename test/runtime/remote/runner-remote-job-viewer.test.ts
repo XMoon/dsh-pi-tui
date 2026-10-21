@@ -369,7 +369,7 @@ async function openJobRow(fx: JobViewerFixture, label: string): Promise<void> {
   fx.fixture.vt.sendInput('\r')
 }
 
-test('steps 1-8 + negatives (c) /no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
+test('the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -541,7 +541,7 @@ test('steps 1-8 + negatives (c) /no-retry/no-ctx.jobs.read: the REAL Job viewer 
   assert.match(restored, /killed/u, `the restored browser row must show the converged status:\n${restored}`)
 })
 
-test('+ 11(b): a SECOND real Job stops through the Task-Center row confirmation (the SAME semantic operation) and the Job-detail observer is released and re-acquired exactly once', async (t) => {
+test('a SECOND real Job stops through the Task-Center row confirmation (the SAME semantic operation) and the Job-detail observer is released and re-acquired exactly once', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx

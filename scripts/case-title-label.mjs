@@ -226,7 +226,13 @@ const FINDING_LABEL_TOKEN = /^findings?\s+[A-Z]{1,4}\d*(?:\/[A-Z]{1,4}\d*)*$/u
  * The plan numbers its steps, and the step number is a local label of the
  * same kind as a case code.
  */
-const STEP_LABEL_TOKEN = /^step\s+\d+(?:\s*[+/]\s*(?:step\s+\d+|[A-Z]{1,4}\d+[a-z]?|§\s*[\d.A-Z]+(?:\s+Must\s+\d+)?))*$/u
+/**
+ * A part of a `step N` label: a step number, a code, a sub-case letter or
+ * a word.
+ */
+const STEP_PART = /^(?:steps?\s+\d+(?:[-–]\d+)?|[A-Z]{1,4}\d+[a-z]?|§\s*[\d.A-Z]+(?:\s+Must\s+\d+)?|\d+\([a-z]\)|\/?[A-Za-z][A-Za-z.-]*(?:\/[A-Za-z][A-Za-z.-]*)*(?:\s+\([a-z]\))?)$/u
+
+const STEP_LABEL_TOKEN = /^steps?\s+\d+(?:[-–]\d+)?(?:\s*[+/]\s*(?:steps?\s+\d+(?:[-–]\d+)?|[A-Z]{1,4}\d+[a-z]?|§\s*[\d.A-Z]+(?:\s+Must\s+\d+)?|\d+\([a-z]\)|[A-Za-z][A-Za-z-]*))*$/u
 
 /**
  * A `PR` code with a single-letter sub-label: `PR D`, `PR E`.
@@ -373,12 +379,26 @@ export function splitLeadingLabel(title) {
     : (split.head.match(/\([^)]*\)|\S+/gu) ?? []).filter(token => token !== '')
   if (rawTokens.length === 0) return null
   const tokens = []
-  for (const token of rawTokens) {
+  let skipped = -1
+  for (const [rawIndex, token] of rawTokens.entries()) {
+    if (rawIndex === skipped) continue
     const previous = tokens[tokens.length - 1]
     // A `PR D` pair and a `step 8` pair are ONE label token: the code and
     // its sub-label are one thing, not two.
     if (previous !== undefined && (PR_SUB_LABEL.test(`${previous} ${token}`) || STEP_LABEL_TOKEN.test(`${previous} ${token}`) || FINDING_LABEL_TOKEN.test(`${previous} ${token}`) || ASSERTION_LABEL_TOKEN.test(`${previous} ${token}`) || SECTION_SUB_CASE.test(`${previous} ${token}`) || WORD_SUB_CASE.test(`${previous} ${token} ${tokens[tokens.length + 1] ?? ''}`))) {
       tokens[tokens.length - 1] = `${previous} ${token}`
+      continue
+    }
+    // A word with its bracketed qualifier is ONE part: `negatives (c)`.
+    if (previous !== undefined && /^[A-Za-z][A-Za-z.-]*$/u.test(previous) && /^\([a-z]\)$/u.test(token)) {
+      tokens[tokens.length - 1] = `${previous} ${token}`
+      continue
+    }
+    // A `§N Must M` part is THREE tokens: the section, the `Must` and the
+    // number. They are ONE part of the step label.
+    if (previous !== undefined && /^§\s*[\d.A-Z]+$/u.test(previous) && token === 'Must' && /^\d+$/u.test(rawTokens[rawTokens.indexOf(token) + 1] ?? '')) {
+      tokens[tokens.length - 1] = `${previous} ${token} ${rawTokens[rawTokens.indexOf(token) + 1]}`
+      skipped = rawTokens.indexOf(token) + 1
       continue
     }
     tokens.push(token)
@@ -390,11 +410,43 @@ export function splitLeadingLabel(title) {
     // A `step N` label carries its trailing parts: `step 8 / §5 Must 17`.
     // They are ONE label, so the loop keeps consuming while the next
     // token is a label part too.
+    // A `step N` label carries its trailing parts: `step 8 / §5 Must 17`,
+    // `step 10 + 11(b)`, `steps 1-8 + negatives (c)/no-retry`. They are ONE
+    // label, so the loop keeps consuming while the next token is a label
+    // part — and the `+` / `/` that JOIN them is part of the label too.
     if (STEP_LABEL_TOKEN.test(token)) {
       let next = index + 1
-      while (next < tokens.length && isLabelToken(tokens[next], false)) {
-        consumed = next + 1
-        next += 1
+      while (next < tokens.length) {
+        const candidate = tokens[next]
+        if (isLabelToken(candidate, false)) {
+          consumed = next + 1
+          next += 1
+          continue
+        }
+        // A part that is not a label token on its own, but IS a step
+        // part: `11(b)`, `negatives (c)`, `/no-retry/no-ctx.jobs.read`.
+        if (STEP_PART.test(candidate)) {
+          consumed = next + 1
+          next += 1
+          continue
+        }
+        // A `+` or `/` that JOINS two label parts: the part after it is a
+        // step number, a code, a sub-case letter or a word.
+        if (candidate === '+' || candidate === '/') {
+          const part = tokens[next + 1]
+          if (part !== undefined && STEP_PART.test(part)) {
+            consumed = next + 2
+            next += 2
+            // `§5 Must 17` is ONE part made of two tokens.
+            const trailing = tokens[next]
+            if (trailing !== undefined && /^Must\s+\d+$/u.test(trailing) && /^§/u.test(part)) {
+              consumed = next + 1
+              next += 1
+            }
+            continue
+          }
+        }
+        break
       }
       break
     }
