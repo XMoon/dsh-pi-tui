@@ -33,6 +33,22 @@ import { spawnSync } from 'node:child_process'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
+
+/**
+ * The current nesting depth of the measurement.
+ *
+ * `Number(undefined)` is `NaN`, and `NaN ?? 0` is still `NaN` — the `??`
+ * operator only replaces `null` and `undefined`, not a value that is not a
+ * number. So the depth has to be read explicitly.
+ *
+ * @param {string|undefined} raw - the environment value.
+ * @returns {number} the depth, 0 when it is absent or unreadable.
+ */
+function depthOf(raw) {
+  if (raw === undefined || raw === '') return 0
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : 0
+}
 const RUNNER = join(ROOT, 'scripts', 'run-test-lane.mjs')
 
 /**
@@ -69,7 +85,7 @@ function runLane(t, { files, jsonl }) {
       // and if it ever did, the depth limit stops it before it can
       // exhaust the machine's memory. The lane runner passes the variable
       // on to the child, so the depth counts the nesting.
-      DSH_LANE_MEASUREMENT_DEPTH: String((Number(process.env.DSH_LANE_MEASUREMENT_DEPTH) ?? 0) + 1),
+      DSH_LANE_MEASUREMENT_DEPTH: String(depthOf(process.env.DSH_LANE_MEASUREMENT_DEPTH) + 1),
     },
   })
   return {
@@ -95,7 +111,7 @@ const TWO_CASES = [
 test('the lane runner WRITES the case records when the opt-in variable is set', (t) => {
   // A runaway recursion is the failure mode this file is most able to
   // cause, so the depth is bounded here as well as in the child.
-  const depth = Number(process.env.DSH_LANE_MEASUREMENT_DEPTH) ?? 0
+  const depth = depthOf(process.env.DSH_LANE_MEASUREMENT_DEPTH)
   if (depth > 2) {
     t.skip('the lane measurement recursion is already too deep')
     return

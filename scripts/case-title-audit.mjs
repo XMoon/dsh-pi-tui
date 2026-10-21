@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { hasLeadingCodePrefix } from './strip-code-prefix.mjs'
+import { hasLeadingCodePrefix } from './case-title-label.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 

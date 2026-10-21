@@ -1,53 +1,34 @@
 #!/usr/bin/env node
 /**
- * The CODE-PREFIX STRIPPER: remove a leading plan/milestone code from a
- * case title.
+ * The LABEL GRAMMAR: what this repository's case titles call a plan,
+ * milestone or review label.
  *
  * The policy (`docs/guides/testing.md` §7) says a case title must not be
- * LED BY a plan, milestone or review code: `A5b`, `B4A-07`, `PR5`,
- * `M3-4`, `RFL-002`, `TS2` … are local labels from the effort that wrote
- * the test, and a reader of a CI log does not have that effort.
+ * LED BY such a label. The title audit needs to RECOGNISE one, and the
+ * recognition has to be exact: a title that leads with a plan code is a
+ * finding, and a title that leads with an ordinary word is not. So the
+ * grammar lives in ONE place, and both the audit and the tests use it.
  *
- * The rewrite is deliberately the SMALLEST one that removes the code and
- * keeps the sentence:
+ * The label families this repository uses:
  *
- *   'A5b: the composition zone is one facade'  ->  'the composition zone is one facade'
- *   'PR5 negative control: an indeterminate'  ->  'an indeterminate prompt result'
+ *   - a code atom: `A5b`, `TS8`, `B4A-07`, `PR5`, `L6`, `F10`, `D2.1`,
+ *     `B4B-10b`, `A5b/TS2`, `S3-R0`, `RFL-002`, `3B`, `AC-1`, `PR-A`;
+ *   - a plan section marker: `§18.1`, `§1C-3`, `§D2`, `§14/J12`;
+ *   - a bracketed code: `(R6-1)`, `(F2)`, `(3)`, `(10)`;
+ *   - a review label: `finding C (1)`, `findings F6/F7`, `assertion 7`,
+ *     `step 8 / §5 Must 17`;
+ *   - a compound-label qualifier: `Direct`, `Remote`, `Focus`,
+ *     `OWNER-RULED`;
+ *   - a lowercase qualifier word: `negative control`, `static`,
+ *     `headless`.
  *
- * It never rewrites the English, never reorders it, and never invents an
- * outcome. A title whose code is followed by a phrase that already reads as
- * a sentence keeps that phrase exactly.
+ * A label is the longest run of such tokens at the START of a title. The
+ * words after it belong to the SENTENCE: `B3 F4 control: …` is the label
+ * `B3 F4` followed by the category `control`, and both parts matter.
  *
- * ## How the label is found
- *
- * The title is split into a HEAD and a SENTENCE at the first separator
- * that ends a label (a colon, a dash, or a space before a lowercase
- * word). The HEAD is then examined TOKEN BY TOKEN: a token is part of the
- * label when it is a code, a section marker, a bracketed code, a
- * compound-label qualifier, or a listed qualifier word. The label is the
- * longest run of such tokens from the start.
- *
- * The token walk is used instead of one big pattern because the
- * repository's labels use every order of their parts (`PR5 §1C-3 (R6-1)`,
- * `PR4 F2b.2 (review round 4)`, `§D2 (review round 3 ruling)`,
- * `A06/Focus`, `B3 F6.1`, `PR D`) and enumerating the orders in a
- * pattern is how the pattern starts eating the sentence.
- *
- * The transform is a REPORT: it prints what it would change, and only
- * writes when it is asked to. The reviewer decides which of the changes to
- * keep — a title can carry a code that is genuinely part of its meaning.
- *
- * Usage:
- *   node scripts/strip-code-prefix.mjs --inventory inventory.json
- *   node scripts/strip-code-prefix.mjs --file test/foo.test.ts --write
- * @module @xmoon76/dsh-pi-tui/scripts/strip-code-prefix
+ * @module @xmoon76/dsh-pi-tui/scripts/case-title-label
  */
 
-import { readFileSync, writeFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * A code ATOM: a single label token that names an effort.
@@ -365,198 +346,4 @@ export function stripCodePrefix(title) {
   const split = splitLeadingLabel(title)
   if (split === null) return title
   return split.sentence
-}
-
-function main() {
-  const args = process.argv.slice(2)
-  const inventoryIndex = args.indexOf('--inventory')
-  const fileIndex = args.indexOf('--file')
-  const write = args.includes('--write')
-
-  if (fileIndex !== -1) {
-    const path = resolve(ROOT, args[fileIndex + 1])
-    const source = readFileSync(path, 'utf8')
-    const changed = rewriteSource(source)
-    if (changed === source) {
-      console.log(`no leading code found in ${args[fileIndex + 1]}`)
-      return
-    }
-    if (write) {
-      writeFileSync(path, changed)
-      console.log(`rewrote ${args[fileIndex + 1]}`)
-    } else {
-      console.log(changed)
-    }
-    return
-  }
-
-  if (inventoryIndex === -1) {
-    console.error('usage: node scripts/strip-code-prefix.mjs --inventory <file> | --file <path> [--write]')
-    process.exit(2)
-  }
-
-  const inventory = JSON.parse(readFileSync(args[inventoryIndex + 1], 'utf8'))
-  const changes = []
-  for (const record of inventory.cases) {
-    const next = stripCodePrefix(record.name)
-    if (next !== record.name) {
-      changes.push({ file: record.file, line: record.line, from: record.name, to: next })
-    }
-  }
-  console.log(`candidates: ${changes.length} of ${inventory.caseCount}`)
-  for (const change of changes) {
-    console.log(`${change.file}:${change.line}\n  - ${change.from}\n  + ${change.to}`)
-  }
-}
-
-/**
- * Rewrite every case title in one source file.
- *
- * Only the TITLE STRING LITERALS of `test()` / `it()` calls are touched.
- * The source is edited as TEXT (not re-printed by a parser), so the
- * formatting of the file is preserved exactly and only the literal changes.
- *
- * @param {string} source - the file's content.
- * @returns {string} the rewritten content.
- */
-export function rewriteSource(source) {
-  // A `test(` / `it(` call, then the FIRST string literal after it.
-  //
-  // The call must be CODE, not a string that happens to contain
-  // `test('…')` — a test that builds a source fixture as an ARRAY OF
-  // STRINGS would otherwise have its fixture rewritten, and the fixture
-  // is what the case is about.
-  const callPattern = /\b(?:test|it)\(\s*(['"`])/gu
-  let result = ''
-  let last = 0
-  for (const match of source.matchAll(callPattern)) {
-    if (isInsideAString(source, match.index)) continue
-    const quote = match[1]
-    const start = match.index + match[0].length
-    const end = findStringEnd(source, start, quote)
-    if (end === -1) continue
-    const literal = source.slice(start, end)
-    // A template literal with an interpolation carries a computed name; it is
-    // left alone, because its final text is not knowable from the source.
-    if (quote === '`' && literal.includes('${')) continue
-    const next = stripCodePrefix(literal)
-    if (next === literal) continue
-    result += source.slice(last, start) + next
-    last = end
-  }
-  result += source.slice(last)
-  return result
-}
-
-/**
- * Whether the `/` at `position` is a DIVISION rather than a regex literal.
- *
- * A division follows a value — an identifier, a number or a closing
- * bracket — while a regex literal follows an operator, a keyword or the
- * start of an expression.
- */
-function isDivision(source, position) {
-  let index = position - 1
-  while (index >= 0 && /\s/u.test(source[index])) index -= 1
-  if (index < 0) return false
-  return /[\w$)\]]/u.test(source[index])
-}
-
-/**
- * The index just past the regex literal that starts at `position`.
- *
- * @returns {number} the index, or -1 when this is not a regex literal.
- */
-function findRegexEnd(source, position) {
-  let index = position + 1
-  let inClass = false
-  while (index < source.length) {
-    const char = source[index]
-    if (char === '\\') {
-      index += 2
-      continue
-    }
-    if (char === '[') inClass = true
-    else if (char === ']') inClass = false
-    else if (char === '/' && !inClass) {
-      // The flags follow the closing slash.
-      let end = index + 1
-      while (end < source.length && /[a-z]/u.test(source[end])) end += 1
-      return end
-    } else if (char === '\n') {
-      return -1
-    }
-    index += 1
-  }
-  return -1
-}
-
-/**
- * Whether an index falls inside a string literal.
- *
- * A `test(` inside a string is TEXT, not a call: a fixture that contains
- * a sample case title must not be rewritten, because the fixture is the
- * subject of the case that holds it.
- *
- * @param {string} source - the file's content.
- * @param {number} index - the index to test.
- * @returns {boolean} true when the index is inside a string.
- */
-function isInsideAString(source, index) {
-  let quote = null
-  for (let position = 0; position < index; position += 1) {
-    const char = source[position]
-    if (char === '\\') {
-      position += 1
-      continue
-    }
-    // A COMMENT is not code: an apostrophe in a comment does not open a
-    // string, and counting it would make every `test(` after the comment
-    // look like text.
-    if (quote === null && char === '/' && source[position + 1] === '/') {
-      const newline = source.indexOf('\n', position)
-      position = newline === -1 ? source.length : newline
-      continue
-    }
-    if (quote === null && char === '/' && source[position + 1] === '*') {
-      const close = source.indexOf('*/', position)
-      position = close === -1 ? source.length : close + 1
-      continue
-    }
-    // A REGEX literal is not a string: `/DSH session ([^\s\"]+)/gu` carries
-    // a double quote, and counting it would open a string that never
-    // closes — so every `test(` after it would look like text.
-    if (quote === null && char === '/' && !isDivision(source, position)) {
-      const close = findRegexEnd(source, position)
-      if (close !== -1) {
-        position = close
-        continue
-      }
-    }
-    if (quote === null) {
-      if (char === "'" || char === '"' || char === '`') quote = char
-      continue
-    }
-    if (char === quote) quote = null
-  }
-  return quote !== null
-}
-
-/** The index just past the string literal that starts at `start`. */
-function findStringEnd(source, start, quote) {
-  let index = start
-  while (index < source.length) {
-    const char = source[index]
-    if (char === '\\') {
-      index += 2
-      continue
-    }
-    if (char === quote) return index
-    index += 1
-  }
-  return -1
-}
-
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main()
 }
