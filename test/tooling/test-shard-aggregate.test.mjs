@@ -88,7 +88,41 @@ test('a MISSING shard fails the aggregate', (t) => {
   writeShard(root, 'shard-1', { files: FILES })
   const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
   assert.ok(aggregate.failures.length > 0, 'a missing shard must fail the aggregate')
-  assert.match(aggregate.failures.join('\n'), /expected 2 shard directories, found 1/u)
+  assert.match(aggregate.failures.join('\n'), /expected 2 shard directories .*found 1/u)
+})
+
+test('two Node versions are two SEPARATE partitions, and both are accepted', (t) => {
+  // Each Node version runs the WHOLE lane, so the two versions have the
+  // SAME file list. Comparing them against each other would report every
+  // file as belonging to two shards — so each version is proved on its
+  // own.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-versions-')
+  // A DISJOINT split of the files, the same one for each Node version.
+  const first = FILES.slice(0, 1)
+  const second = FILES.slice(1)
+  writeShard(root, 'shard-1-node24', { files: first })
+  writeShard(root, 'shard-2-node24', { files: second })
+  writeShard(root, 'shard-1-node22', { files: first })
+  writeShard(root, 'shard-2-node22', { files: second })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate, null, 2))
+  assert.deepEqual(aggregate.versions.map(entry => entry.node).sort(), ['22', '24'])
+  // Every version observed the whole lane.
+  assert.equal(aggregate.observedFileCount, EXPECTED.size)
+})
+
+test('a MISSING shard on ONE Node version fails that version', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-version-missing-')
+  const first = FILES.slice(0, 1)
+  const second = FILES.slice(1)
+  writeShard(root, 'shard-1-node24', { files: first })
+  writeShard(root, 'shard-1-node22', { files: first })
+  writeShard(root, 'shard-2-node22', { files: second })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.ok(aggregate.failures.length > 0, 'the version with a missing shard must fail')
+  assert.match(aggregate.failures.join('\n'), /for Node 24/u)
 })
 
 test('a shard that produced NO record fails the aggregate', (t) => {

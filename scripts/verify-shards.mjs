@@ -40,6 +40,20 @@ const LANE = 'product'
 
 /** The case records of one shard directory. */
 /**
+ * The Node version a shard directory ran on.
+ *
+ * The directories are `<shard>-node<version>`; a directory that does not
+ * carry a version is its own group.
+ *
+ * @param {string} directory - the directory path.
+ * @returns {string} the Node version, or '(unversioned)'.
+ */
+function nodeVersionOf(directory) {
+  const match = /-node(\d+(?:\.\d+)*)$/u.exec(basename(directory))
+  return match === null ? '(unversioned)' : match[1]
+}
+
+/**
  * The directories that hold shard records.
  *
  * A shard's records are the `cases.jsonl` file. They are found by
@@ -191,16 +205,40 @@ export function verifyShards({
   // extracts DIRECTLY into the target directory. So the records are found
   // by looking for them, not by assuming a layout.
   const shardDirectories = findShardDirectories(shardsRoot)
-  if (shardDirectories.length !== total) {
-    failures.push(`expected ${total} shard directories, found ${shardDirectories.length}: ${shardDirectories.join(', ')}`)
+
+  // The shard directories are grouped by the Node version they ran on:
+  // `<shard>-node<version>`. Each group is its OWN complete partition of
+  // the lane, and each one has to prove that its union is the whole lane
+  // and that its shards are pairwise disjoint.
+  //
+  // They must NOT be compared against each other: two Node versions run
+  // the same files, so their file lists are identical, and a cross-version
+  // comparison would report every file as belonging to two shards.
+  const groups = new Map()
+  for (const directory of shardDirectories) {
+    const version = nodeVersionOf(directory)
+    if (!groups.has(version)) groups.set(version, [])
+    groups.get(version).push(directory)
+  }
+  if (groups.size === 0) {
+    failures.push(`expected ${total} shard directories, found 0`)
   }
 
-  const seenFiles = new Map()
   let totalCases = 0
   let totalSkipped = 0
   const shards = []
+  const versions = []
+  // Every Node version is a complete partition of the lane, so they all
+  // observe the SAME file count. The first group's is the report's.
+  let observedFileCount = 0
 
-  for (const shardDirectory of shardDirectories) {
+  for (const [version, directories] of groups) {
+    const seenFiles = new Map()
+    versions.push({ node: version, shardCount: directories.length })
+    if (directories.length !== total) {
+      failures.push(`expected ${total} shard directories for Node ${version}, found ${directories.length}: ${directories.join(', ')}`)
+    }
+    for (const shardDirectory of directories) {
     const directory = basename(shardDirectory)
     const cases = readShardCases(shardDirectory)
     const spec = readShardSpec(shardDirectory)
@@ -313,17 +351,19 @@ export function verifyShards({
       wallClockSeconds: spec?.wallClockSeconds ?? null,
       availableParallelism: spec?.cpu?.availableParallelism ?? null,
     })
-  }
-
-  // The union must be the whole lane.
-  for (const file of expectedFiles) {
-    if (!seenFiles.has(file)) {
-      failures.push(`the file ${file} belongs to no shard: its cases never ran`)
     }
-  }
-  for (const file of seenFiles.keys()) {
-    if (!expectedFiles.has(file)) {
-      failures.push(`the file ${file} is not part of the ${LANE} lane`)
+
+    // The union must be the whole lane — for THIS Node version.
+    if (versions.length === 1) observedFileCount = seenFiles.size
+    for (const file of expectedFiles) {
+      if (!seenFiles.has(file)) {
+        failures.push(`the file ${file} belongs to no shard on Node ${version}: its cases never ran`)
+      }
+    }
+    for (const file of seenFiles.keys()) {
+      if (!expectedFiles.has(file)) {
+        failures.push(`the file ${file} is not part of the ${LANE} lane (Node ${version})`)
+      }
     }
   }
 
@@ -351,12 +391,13 @@ export function verifyShards({
     lane: LANE,
     shardTotal: total,
     expectedFileCount: expectedFiles.size,
-    observedFileCount: seenFiles.size,
+    observedFileCount: observedFileCount,
     totalCases,
     totalSkipped,
     expectedCases,
     expectedSkipped,
     shards,
+    versions,
     failures,
   }
 }
