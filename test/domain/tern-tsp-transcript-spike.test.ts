@@ -961,3 +961,92 @@ test('T-working: a proven Working tool-jobs notice renders inside the Work secti
   assert.ok(JSON.stringify(noticeNode.props).includes('tool-jobs'),
     'the producer identity remains the visible card header')
 })
+
+// ── Markdown fence fidelity through the PRODUCTION projection ───────────────
+//
+// The assistant body reaches the client as ONE `md` node whose `text` is the
+// model's own answer. The Tern client reads a ```mermaid / ```svg fence out
+// of that text and draws it as a vector graphic, so the fence bytes must
+// arrive intact. These cases pin that chain: the real folder, the real
+// projection and the real mapper, with the sanitizer as the ONLY transform.
+
+/** One settled assistant answer, as the durable `assistant/message` event. */
+function assistantAnswer(seq: number, id: string, text: string): SessionEvent {
+  return ev('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId(id), role: 'assistant',
+      content: [{ type: 'text', text }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+  }, seq)
+}
+
+/** The `md` body node of the assistant row in a projected view. */
+function assistantBodyText(view: View, folder: TranscriptFolder, keys: TranscriptNodeKeys): string {
+  const assistant = rowOf(folder, message => message.kind === 'assistant')
+  const card = nodeOf(view, `main.${keys.keyFor(assistant)}`)
+  const body = nodeOf(view, `${card.id}.body`)
+  assert.equal(body.kind, 'md', 'the assistant body is an `md` node')
+  return String(body.props['text'])
+}
+
+const FENCE_ANSWERS: readonly (readonly [string, string])[] = [
+  ['a mermaid fence', '```mermaid\ngraph TD\n  A[App] --> B[Surface]\n```'],
+  ['an svg fence', '```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#eee"/></svg>\n```'],
+  ['an unclosed mermaid fence', '```mermaid\ngraph TD\n  A[App] --> B[Surface]\n'],
+  ['a nested fence', '````markdown\n```mermaid\ngraph TD\n```\n````'],
+  ['a fence with CJK labels', '```mermaid\ngraph TD\n  A[中文] --> B[图]\n```'],
+  ['a fence inside prose', 'before\n\n```mermaid\ngraph TD\n  A --> B\n```\n\nafter'],
+]
+
+test('T-fence: a fence in an assistant answer reaches the md node byte for byte', () => {
+  for (const [name, answer] of FENCE_ANSWERS) {
+    const folder = new TranscriptFolder()
+    folder.apply([assistantAnswer(1, `fence-${name}`, answer)])
+    const keys = new TranscriptNodeKeys()
+    const view = viewOf(folder, keys)
+
+    // The canonical message is the authority and stays byte-exact.
+    const message = rowOf(folder, row => row.kind === 'assistant')
+    assert.equal(message.kind === 'assistant' ? message.text : undefined, answer,
+      `${name}: the fold keeps the answer verbatim`)
+
+    // The md node carries exactly that answer: no truncation, no rewriting.
+    assert.equal(assistantBodyText(view, folder, keys), answer,
+      `${name}: the md node carries the answer verbatim`)
+  }
+})
+
+test('T-fence: the md body is the sanitizer output, never a re-projection of the answer', () => {
+  const folder = new TranscriptFolder()
+  // A control byte inside the fence: the sanitizer removes it, and the fence
+  // structure around it must survive.
+  const answer = '```mermaid\ngraph TD\n  A["\u001b[31mred\u001b[0m"] --> B\n```'
+  folder.apply([assistantAnswer(1, 'fence-hostile', answer)])
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+
+  const message = rowOf(folder, row => row.kind === 'assistant')
+  assert.equal(message.kind === 'assistant' ? message.text : undefined, answer,
+    'the canonical message keeps the raw bytes')
+  const body = assistantBodyText(view, folder, keys)
+  assert.ok(!body.includes('\u001b'), 'no ESC reaches the md node')
+  assert.ok(body.startsWith('```mermaid\n'), 'the fence opener survives')
+  assert.ok(body.endsWith('\n```'), 'the fence closer survives')
+  assert.ok(body.includes('A["red"]'), 'the payload keeps its text')
+})
+
+test('T-fence: a user answer carries its fence verbatim too', () => {
+  const answer = '```mermaid\ngraph TD\n  A --> B\n```'
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage(1, 'fence-user', answer)])
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+
+  const user = rowOf(folder, row => row.kind === 'user')
+  const card = nodeOf(view, `main.${keys.keyFor(user)}`)
+  const body = nodeOf(view, `${card.id}.body`)
+  assert.equal(body.kind, 'md')
+  assert.equal(body.props['text'], answer, 'the user body carries the fence verbatim')
+})

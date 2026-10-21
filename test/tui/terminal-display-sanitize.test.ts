@@ -247,3 +247,68 @@ test('sanitizedPhysicalLine folds any projection onto one physical row', () => {
   assert.equal(sanitizedPhysicalLine('\u001b]0;PWNED\u0007title'), 'title')
   assert.equal(sanitizedPhysicalLine('a\u001b[2Jb'), 'ab')
 })
+
+// ── Markdown fence fidelity ────────────────────────────────────────────────
+//
+// A Markdown fence is the CLIENT's parsing unit: the Tern client reads a
+// ```mermaid / ```svg fence out of the `md` text and draws it as a vector
+// graphic. The sanitizer is the ONLY text transformation between the model's
+// answer and that `md` node, so a change here can silently turn a diagram
+// back into literal source. These cases pin the fence bytes.
+
+/** A fence and its payload must survive the plain projection VERBATIM. */
+const FENCE_CASES: readonly (readonly [string, string])[] = [
+  ['a mermaid fence', '```mermaid\ngraph TD\n  A[App] --> B[Surface]\n```'],
+  ['a mermaid fence with CJK labels', '```mermaid\ngraph TD\n  A[中文] --> B[图]\n```'],
+  ['an svg fence', '```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#eee"/></svg>\n```'],
+  ['a fence indented inside a list', '  ```mermaid\n  graph TD\n    A --> B\n  ```'],
+  ['a fence nested in a markdown fence', '````markdown\n```mermaid\ngraph TD\n```\n````'],
+  ['a fence with trailing spaces', '```mermaid\ngraph TD   \n  A --> B   \n```   '],
+  ['a tilde fence', '~~~mermaid\ngraph TD\n  A --> B\n~~~'],
+  ['a fence with an upper-case language', '```Mermaid\ngraph TD\n  A --> B\n```'],
+  ['a fence with info attributes', '```mermaid title="x"\ngraph TD\n  A --> B\n```'],
+  ['an UNCLOSED fence', '```mermaid\ngraph TD\n  A[App] --> B[Surface]\n'],
+  ['a plain code fence', '```ts\nconst a = 1\n```'],
+  ['a fence inside prose', 'before\n\n```mermaid\ngraph TD\n  A --> B\n```\n\nafter'],
+]
+
+test('a Markdown fence and its payload survive the plain projection byte for byte', () => {
+  for (const [name, fence] of FENCE_CASES) {
+    assert.equal(sanitizeDisplayText(fence), fence, `${name} must survive the plain projection verbatim`)
+  }
+})
+
+test('a fence inside prose survives while the prose around it is projected', () => {
+  const source = 'before\n\n```mermaid\ngraph TD\n  A --> B\n```\n\nafter'
+  const projected = sanitizeDisplayText(source)
+  // The whole block survives, not just a fragment: a fence the client cannot
+  // parse is drawn as literal source, so ANY byte change to the fence is a
+  // broken diagram.
+  assert.ok(projected.includes('```mermaid\ngraph TD\n  A --> B\n```'),
+    `the fence block survives byte for byte:\n${JSON.stringify(projected)}`)
+  assert.ok(projected.includes('before') && projected.includes('after'), 'the prose survives')
+})
+
+test('a fence whose payload carries control bytes loses ONLY the control bytes', () => {
+  // The control sequence is removed; the fence structure and the payload text
+  // around it are untouched, so the client still sees a fence.
+  const projected = sanitizeDisplayText('```mermaid\ngraph TD\n  A["\u001b[31mred\u001b[0m"] --> B\n```')
+  assertPlainSafe(projected)
+  assert.ok(projected.startsWith('```mermaid\n'), 'the fence opener survives')
+  assert.ok(projected.endsWith('\n```'), 'the fence closer survives')
+  assert.ok(projected.includes('A["red"]'), 'the payload keeps its text and loses only the escape')
+})
+
+test('TAB inside a fence becomes spaces, and the fence structure still survives', () => {
+  // The plain policy's documented TAB rule (three spaces) applies to a fence
+  // payload like any other text; the fence delimiters are untouched.
+  const projected = sanitizeDisplayText('```mermaid\ngraph TD\n\tA --> B\n```')
+  assert.equal(projected, '```mermaid\ngraph TD\n   A --> B\n```')
+  assert.ok(projected.startsWith('```mermaid'), 'the fence opener survives')
+  assert.ok(projected.endsWith('```'), 'the fence closer survives')
+})
+
+test('a CRLF fence normalizes its line endings and keeps every fence line', () => {
+  const projected = sanitizeDisplayText('```mermaid\r\ngraph TD\r\n  A --> B\r\n```')
+  assert.equal(projected, '```mermaid\ngraph TD\n  A --> B\n```')
+})
