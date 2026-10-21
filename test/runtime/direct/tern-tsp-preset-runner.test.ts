@@ -509,9 +509,25 @@ test('the picker default write persists through the official profile plane', asy
     await clearComposer(fixture.pane)
     fixture.pane.key('/preset default fixture-a\r')
     await waitFor('the typed verb writes the same document', () => presetDefaultRow(patchPath) === 'fixture-a')
+    // The reopened panel reads the DEFAULT from the authority, and the
+    // authority is the registry's effective default — not the saved document.
+    // The document being written does not mean the effective default has
+    // flipped yet, so the panel can be reopened while the authority still
+    // reports the previous default, and the badge would be missing. Wait for
+    // the authority the panel will read.
+    await waitFor('the effective default to follow the write', () =>
+      (fixture.ctx.get('agentPresets') as { defaultId: string }).defaultId === 'fixture-a')
     // A reopened panel reads the new default from the authority.
     fixture.pane.key('/preset\r')
-    await waitFor('reopened', () => props(fixture.pane).state === 'ready')
+    // The wait is for the BADGE the case asserts, not for the panel's state:
+    // the picker can reach its `ready` phase while the roster it will read —
+    // the one the badge is derived from — is still on its way, and a state
+    // that arrives first would make the assertion read a frame painted
+    // before the authority reached the panel.
+    await waitFor('the reopened panel to show the default', () => {
+      const badges = (items(fixture.pane).find((entry) => entry.id === 'preset:fixture-a')?.badges ?? []) as Array<{ text: string }>
+      return badges.some((badge) => badge.text === 'Default')
+    })
     const reopenedBadges = (items(fixture.pane).find((entry) => entry.id === 'preset:fixture-a')?.badges ?? []) as Array<{ text: string }>
     assert.deepEqual(reopenedBadges, [{ text: 'Default' }], 'the reopened panel reads the default from the authority')
     fixture.pane.key('\u001b')
