@@ -20,7 +20,7 @@
  *   - the file list is sorted, so the execution order does not depend on the
  *     filesystem.
  *
- * Usage: node scripts/run-test-lane.mjs <lane> [--shard=<index>/<total>]
+ * Usage: node scripts/run-test-lane.mjs <lane>
  * @module @xmoon76/dsh-pi-tui/scripts/run-test-lane
  */
 
@@ -45,38 +45,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  */
 const TEST_ROOT = process.env.DSH_TEST_ROOT ?? join(ROOT, 'test')
 
-/**
- * Parse the optional `--shard=<index>/<total>` argument.
- *
- * The shard is Node's OWN `--test-shard`: it partitions the test FILES it
- * is given, so the shards of one lane are disjoint by construction and the
- * union of all of them is the whole lane. The repository does not implement
- * its own partitioning — a second, divergent partitioner could disagree
- * with the runner about which file belongs where, and the aggregate would
- * then silently lose a file.
- *
- * @param {string[]} args - the command line arguments.
- * @returns {string|undefined} the Node shard argument, or undefined.
- */
-export function parseShard(args) {
-  const argument = args.find(entry => entry.startsWith('--shard='))
-  if (argument === undefined) return undefined
-  const value = argument.slice('--shard='.length)
-  const match = /^(\d+)\/(\d+)$/u.exec(value)
-  if (match === null) {
-    throw new Error(`the shard must be written as <index>/<total>, got: ${value}`)
-  }
-  const index = Number(match[1])
-  const total = Number(match[2])
-  if (total < 1) {
-    throw new Error(`the shard total must be at least 1, got: ${total}`)
-  }
-  if (index < 1 || index > total) {
-    throw new Error(`the shard index must be between 1 and ${total}, got: ${index}`)
-  }
-  return `${index}/${total}`
-}
-
 function main() {
   const laneName = process.argv[2]
   if (laneName === undefined) {
@@ -89,8 +57,6 @@ function main() {
     process.exit(2)
   }
   // The optional shard. It is a runner ARGUMENT, not a mode: the default
-  // `pnpm test:product` runs the WHOLE lane exactly as before.
-  const shard = parseShard(process.argv.slice(3))
   // The lane's patterns are relative to the test root.
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
   // The file list is passed RELATIVE to the repository root, and the child
@@ -132,7 +98,6 @@ function main() {
   const child = spawn(process.execPath, [
     '--test',
     ...reporterArgs,
-    ...(shard === undefined ? [] : [`--test-shard=${shard}`]),
     ...relativeFiles,
   ], {
     cwd: workingDirectory,
@@ -177,9 +142,8 @@ function main() {
   })
 }
 
-// The runner is a SCRIPT; the module is also imported by the tooling tests
-// to reach `parseShard`. Running it only when it IS the entry point keeps
-// the import side-effect free.
+// The runner is a SCRIPT. Running it only when it IS the entry point keeps
+// importing it side-effect free.
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main()
 }

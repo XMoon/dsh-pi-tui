@@ -332,7 +332,6 @@
     "report:zero-consumer-exports": "node scripts/report-zero-consumer-exports.mjs",
     "report:case-inventory": "node scripts/case-inventory.mjs --lane product --out temp/case-inventory.json && node scripts/case-inventory.mjs --lane tooling --out temp/case-inventory-tooling.json",
     "report:case-titles": "node scripts/case-title-audit.mjs",
-    "report:runner-spec": "node scripts/runner-spec.mjs",
     "bench:parallel": "node scripts/parallel-benchmark.mjs",
     "baseline:fixed-waits": "node scripts/generate-fixed-wait-baseline.mjs",
     "gate:keybindings": "node --import tsx/esm scripts/check-host-keybindings.mts",

@@ -25,9 +25,7 @@ import { spawnSync } from 'node:child_process'
 
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
-import { parseShard } from '../../scripts/run-test-lane.mjs'
-import { hasLeadingCodePrefix, stripCodePrefix, rewriteSource } from '../../scripts/strip-code-prefix.mjs'
-import { collectRunnerSpec } from '../../scripts/runner-spec.mjs'
+import { hasLeadingCodePrefix, stripCodePrefix } from '../../scripts/case-title-label.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 const REPORTER = join(ROOT, 'scripts', 'test-case-reporter.mjs')
@@ -171,15 +169,6 @@ test('without the JSONL destination the reporter still prints the human report',
   assert.match(run.stdout, /the first case passes/u)
 })
 
-test('the shard argument accepts a well-formed shard and rejects a malformed one', () => {
-  assert.equal(parseShard([]), undefined)
-  assert.equal(parseShard(['--shard=1/4']), '1/4')
-  assert.equal(parseShard(['--shard=4/4']), '4/4')
-  for (const malformed of ['--shard=0/4', '--shard=5/4', '--shard=1/0', '--shard=abc', '--shard=1']) {
-    assert.throws(() => parseShard([malformed]), /shard/u, `must reject: ${malformed}`)
-  }
-})
-
 test('the title transform removes a leading code and keeps the sentence', () => {
   assert.equal(
     stripCodePrefix('A5b: the composition zone is one facade plus its bootstrap helpers'),
@@ -207,68 +196,6 @@ test('the title transform leaves a title without a leading code ALONE', () => {
 
 test('the title transform does not strip a title that IS only a code', () => {
   assert.equal(stripCodePrefix('B3'), 'B3')
-})
-
-test('the title transform does not rewrite a fixture that CONTAINS a case title', () => {
-  // A test that builds a source fixture as an array of strings holds a
-  // sample case title. That fixture is the SUBJECT of the case, so
-  // rewriting it would change what the case proves.
-  const source = [
-    "import { test } from 'node:test'",
-    "const fixture = [",
-    "  \"test('A5b: the composition zone is one facade', () => {})\",",
-    "]",
-  ].join('\n')
-  assert.equal(rewriteSource(source), source, 'a fixture inside a string must not be rewritten')
-})
-
-test('the title transform rewrites only the title literal of a case', () => {
-  const source = [
-    "import { test } from 'node:test'",
-    "test('A5b: the composition zone is one facade', () => {})",
-    "const label = 'A5b: not a title'",
-    'test(`A5b: a computed ${value} title`, () => {})',
-  ].join('\n')
-  const rewritten = rewriteSource(source)
-  assert.match(rewritten, /test\('the composition zone is one facade'/u)
-  // A string that is not a case title is not touched.
-  assert.match(rewritten, /const label = 'A5b: not a title'/u)
-  // A template with an interpolation carries a computed name; it is left
-  // alone, because its final text is not knowable from the source.
-  assert.match(rewritten, /test\(`A5b: a computed \$\{value\} title`/u)
-})
-
-test('the runner specification reports the real machine, and marks what it cannot see', () => {
-  const spec = collectRunnerSpec()
-  assert.equal(typeof spec.node.version, 'string')
-  assert.equal(typeof spec.cpu.availableParallelism, 'number')
-  assert.ok(spec.cpu.availableParallelism >= 1)
-  // The cgroup reading is either measured or explicitly unavailable — it is
-  // never replaced by the runner family's public label.
-  if (spec.cgroup.cpu.available === false) {
-    assert.equal(spec.cgroup.cpu.quotaUs, null)
-  } else {
-    assert.equal(typeof spec.cgroup.cpu.cgroupVersion, 'string')
-  }
-})
-
-test('the runner specification with a wall clock is still valid JSON', (t) => {
-  // The measured wall clock used to be APPENDED to the specification file
-  // as `wall_clock_seconds=42`, which made the JSON invalid — so the
-  // aggregate could not read the very file that held the measurement. The
-  // wall clock is now a FIELD of the document.
-  const dir = testLifecycle(t).tempDir('dsh-runner-spec-')
-  {
-    const path = join(dir, 'runner-spec.json')
-    const result = spawnSync(
-      process.execPath,
-      [join(ROOT, 'scripts', 'runner-spec.mjs'), '--wall-clock-seconds', '42', '--out', path],
-      { cwd: ROOT, encoding: 'utf8' },
-    )
-    assert.equal(result.status, 0, result.stderr)
-    const spec = JSON.parse(readFileSync(path, 'utf8'))
-    assert.equal(spec.wallClockSeconds, 42)
-  }
 })
 
 test('the title transform removes every code family the tree uses', () => {
