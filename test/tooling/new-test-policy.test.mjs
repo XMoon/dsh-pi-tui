@@ -2,24 +2,25 @@
  * The New Test Policy's OBJECTIVE guard: the rules that can be checked
  * without a human judgement.
  *
- * The policy (`docs/guides/testing.md`) has six rules. Three of them are
- * review judgements (Ownership First's judgement half, Contract First,
- * Evidence Integrity). This suite proves the OTHER three are enforced by
- * the repository itself:
+ * The policy (`docs/guides/testing.md`) has six rules. Most of them are
+ * review judgements — Contract First, Evidence Integrity, Ownership
+ * First's judgement half, and Rule 4's narrow-fake rule (whether a fake
+ * exposes more capability than its consumer USES depends on what the test is
+ * trying to prove, which no static check can decide; `docs/guides/
+ * code-review.md` §2 carries that question instead).
+ *
+ * This suite proves the parts that ARE decidable:
  *
  *   - Rule 6 (Discoverability): a test file is found by the lane that owns
  *     it, the lanes never overlap, the infrastructure directories are never
  *     part of a lane, and a lane that matches nothing FAILS CLOSED;
- *   - Rule 4 (Minimal Test Infrastructure): a shared fixture may not be
- *     WIDENED beyond the capability its consumers use — the narrow-fake
- *     rule has an objective floor;
  *   - Rule 5 (Deterministic Async Testing): a fixed sleep must be either
  *     bounded by a named constant or carry a stated reason.
  *
  * It also runs the SYNTHETIC placement the policy's acceptance requires: a
  * new Domain test, a new Integration test and a new Tooling test are
- * placed, and the policy's own rules must place them in the right lane and
- * find them in the right verification entry point.
+ * placed in an ISOLATED root, and the policy's own rules must place them in
+ * the right lane and find them in the right verification entry point.
  *
  * @module @xmoon76/dsh-pi-tui/test/tooling/new-test-policy.test
  */
@@ -36,15 +37,6 @@ import { LANES } from '../../scripts/test-lanes.mjs'
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..')
 const TEST_ROOT = join(REPO_ROOT, 'test')
-
-/** The lane that owns a file, or `undefined` when no lane owns it. */
-function ownerOf(rel) {
-  for (const [name, lane] of Object.entries(LANES)) {
-    const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-    if (files.includes(rel)) return name
-  }
-  return undefined
-}
 
 // ── Rule 6: Discoverability ───────────────────────────────────────────────
 

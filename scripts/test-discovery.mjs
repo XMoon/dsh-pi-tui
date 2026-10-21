@@ -34,11 +34,12 @@ import { join, relative, sep } from 'node:path'
 
 /**
  * The directories under `test/` that hold INFRASTRUCTURE, not test files.
- * Their contents are shared harness code and test input data; a test file
- * placed inside one would be a placement mistake, so the discovery rule
- * excludes them by DIRECTORY rather than by filename.
+ * Their contents are shared harness code, test input data and the DSH
+ * compatibility configuration; a test file placed inside one would be a
+ * placement mistake, so the discovery rule excludes them by DIRECTORY
+ * rather than by filename.
  */
-export const TEST_INFRASTRUCTURE_DIRECTORIES = ['support', 'fixtures']
+export const TEST_INFRASTRUCTURE_DIRECTORIES = ['support', 'fixtures', 'compat']
 
 /** The test-file suffixes the discovery rule recognizes. */
 export const TEST_FILE_SUFFIXES = ['.test.ts', '.test.mjs']
