@@ -366,7 +366,10 @@ test('a hydration that NEVER commits stays fail-closed (Loading retained, no sub
     assert.deepEqual(submissions, [], 'no submit crossed the never-lifted fence')
     // The LIFECYCLE intents stay live (the fence must not lock the user in).
     harness.input.type('\u001b')
-    await settle()
+    // The cancel intent is the completion signal, and the case asserts it:
+    // a fixed wait only guessed how long the lifecycle intent took to reach
+    // the host.
+    await awaitFact(() => cancels === 1, 'the cancel intent to reach the host')
     assert.equal(cancels, 1, 'Escape still reaches the cancel intent (fail-closed, never locked)')
     assert.equal(exits, 0, 'the fence itself never exits the TUI')
   } finally {
