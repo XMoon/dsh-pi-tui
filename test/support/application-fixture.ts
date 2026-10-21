@@ -19,7 +19,7 @@
  * The fixture adds NO Host service, no second Agent/Session registry and no
  * fake adapter into the verified path: it only mounts the production runner on
  * the already-booted Context.
- * @module @xmoon76/dsh-pi-tui/test/support/s4-d3-application-fixture
+ * @module @xmoon76/dsh-pi-tui/test/support/application-fixture
  */
 
 import { mkdirSync } from 'node:fs'
@@ -34,7 +34,7 @@ import {
   startS4D2Host,
   type OptionalBundleHost,
   type OptionalBundleHostOptions,
-} from './s4-d2-optional-bundle-fixture.ts'
+} from './optional-bundle-fixture.ts'
 import { testLifecycle } from './temp-lifecycle.ts'
 
 export interface S4D3ApplicationOptions extends OptionalBundleHostOptions {

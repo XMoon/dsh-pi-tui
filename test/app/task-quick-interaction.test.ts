@@ -26,7 +26,7 @@
  * - S14 `/tasks` Full works with Quick hidden (search filter applied);
  * - F11 focused Quick consumes Host submit/steer actions without touching the hidden draft.
  *
- * @module @xmoon76/dsh-pi-tui/task-quick-b4b-interaction.test
+ * @module @xmoon76/dsh-pi-tui/task-quick-interaction.test
  */
 
 import assert from 'node:assert/strict'

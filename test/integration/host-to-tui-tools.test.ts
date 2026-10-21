@@ -12,7 +12,7 @@
  * `DELIBERATELY ABSENT`: the user's real DSH_HOME/credentials, network
  * installs, a physical terminal and any TUI screen row this fixture does not
  * mount.
- * @module @xmoon76/dsh-pi-tui/s4-d3-host-to-tui-tools.test
+ * @module @xmoon76/dsh-pi-tui/host-to-tui-tools.test
  */
 
 import assert from 'node:assert/strict'
@@ -25,8 +25,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   skippedInstallationReason,
   type S4D2BundleId,
-} from '../support/s4-d2-optional-bundle-fixture.ts'
-import { startS4D3Application } from '../support/s4-d3-application-fixture.ts'
+} from '../support/optional-bundle-fixture.ts'
+import { startS4D3Application } from '../support/application-fixture.ts'
 
 const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies S4D2BundleId
 const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies S4D2BundleId

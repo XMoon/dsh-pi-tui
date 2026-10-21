@@ -292,8 +292,8 @@ test('cancellation and the DeepSeek Fetch API path keep their official semantics
 // ── D3-2: the settings change → next real tool → mounted TUI sink ──────────
 
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { startS4D3Application, type S4D3Application } from '../../support/s4-d3-application-fixture.ts'
-import { skippedInstallationReason } from '../../support/s4-d2-optional-bundle-fixture.ts'
+import { startS4D3Application, type S4D3Application } from '../../support/application-fixture.ts'
+import { skippedInstallationReason } from '../../support/optional-bundle-fixture.ts'
 
 class WebL6Adapter extends LlmAdapter {
   private queue: Array<{ readonly kind: 'tool'; name: string; arguments: string; callId: string } | { readonly kind: 'text'; text: string }> = []

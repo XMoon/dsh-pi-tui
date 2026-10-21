@@ -4,7 +4,7 @@
  * Remote namespaces, same Connection generation), the bundle exposes only
  * the M3-3A surfaces, and disposal drops adapter caches ahead of the Client
  * Context.
- * @module @xmoon76/dsh-pi-tui/remote-m3a-assembly.test
+ * @module @xmoon76/dsh-pi-tui/remote-semantic-assembly.test
  */
 
 import assert from 'node:assert/strict'

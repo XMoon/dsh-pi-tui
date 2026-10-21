@@ -23,7 +23,7 @@
  *   passive window acknowledges NOTHING; and a display seam without Task Center
  *   support mounts nothing.
  *
- * @module @xmoon76/dsh-pi-tui/task-quick-b4a-composition.test
+ * @module @xmoon76/dsh-pi-tui/task-quick-composition.test
  */
 
 import assert from 'node:assert/strict'

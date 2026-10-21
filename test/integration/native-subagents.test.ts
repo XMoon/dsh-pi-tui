@@ -7,7 +7,7 @@
  * row mounts, and the real native start either produces a genuine failure
  * (missing auth / unsupported platform) or a genuine success. A scripted or
  * mocked native success is never accepted.
- * @module @xmoon76/dsh-pi-tui/s4-d2-native-subagents.test
+ * @module @xmoon76/dsh-pi-tui/native-subagents.test
  */
 
 import assert from 'node:assert/strict'
@@ -20,7 +20,7 @@ import {
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
-} from '../support/s4-d2-optional-bundle-fixture.ts'
+} from '../support/optional-bundle-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const B13 = '@deepseek-ai/dsh-subagent-claude-code' satisfies S4D2BundleId

@@ -8,7 +8,7 @@
  * - dynamic command unload;
  * - selected theme unload → built-in fallback;
  * - async autocomplete cancellation/latest-only commit.
- * @module @xmoon76/dsh-pi-tui/extension-registry-m5.test
+ * @module @xmoon76/dsh-pi-tui/extension-registry.test
  */
 
 import assert from 'node:assert/strict'

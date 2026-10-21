@@ -1058,7 +1058,7 @@ second authority:
   `setEditorText`; a newer owner that took the seat during the close keeps the
   keyboard and the current editor.
 
-Evidence: `test/app/history-seat-b3b-lifecycle.test.ts` (H3B-01…H3B-12: the real
+Evidence: `test/app/history-seat-lifecycle.test.ts` (H3B-01…H3B-12: the real
 `SessionScopeAuthority` + ownership core + `bindSessionRuntime` publication over
 a real `TuiApp`/`VirtualTerminal`, Question/Approval FIFO park/restore, A→B→A
 and same-id re-owner refusal, the failed/pre-commit switch, a deferred
@@ -1096,6 +1096,6 @@ this section records only the seat/geometry mechanics:
   subscription; a session-generation reset clears it with the other Task Center
   mirrors.
 
-Evidence: `test/app/task-quick-b4b-interaction.test.ts`,
+Evidence: `test/app/task-quick-interaction.test.ts`,
 `test/app/task-quick-accessory.test.ts`, `test/app/fullscreen-widget-parity.test.ts`,
 `test/app/surface-lifecycle-closure.test.ts`.

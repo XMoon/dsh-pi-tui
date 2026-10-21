@@ -6360,7 +6360,7 @@
     }
    },
    "tests": [
-    "packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame and hard/soft-wrap boundary witnesses; transient history/autocomplete/jump/paste gates; stale-width guard; native Down preservation; jump arm/no-match completion/control abort reason; and known-fact consumption and raw snapshot/map edge equivalence without a second map build; test/task-quick-b4b-interaction.test.ts: zero same-layout input composes/map builds, rewrap and resize correction, width-4 clamp, and coalesced same-turn payloads"
+    "packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame and hard/soft-wrap boundary witnesses; transient history/autocomplete/jump/paste gates; stale-width guard; native Down preservation; jump arm/no-match completion/control abort reason; and known-fact consumption and raw snapshot/map edge equivalence without a second map build; test/task-quick-interaction.test.ts: zero same-layout input composes/map builds, rewrap and resize correction, width-4 clamp, and coalesced same-turn payloads"
    ],
    "upstream": {
     "equivalence": "NO",

@@ -28,7 +28,7 @@
  * The fixture NEVER fabricates a bundle package: when the provisioned official
  * artifacts are absent it reports an explicit `BLOCKED` reason instead of
  * substituting a local same-name package.
- * @module @xmoon76/dsh-pi-tui/test/support/s4-d2-optional-bundle-fixture
+ * @module @xmoon76/dsh-pi-tui/test/support/optional-bundle-fixture
  */
 
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'

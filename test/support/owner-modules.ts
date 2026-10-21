@@ -188,8 +188,8 @@ export function ownerFile(rel: string): string {
  * This mirrors the unwrap in `scripts/application-architecture-gate.mjs`
  * (`findDirectAdapterConstructions`). It lives here, next to the production
  * walkers it guards, because BOTH A5b AST guards
- * (`test/architecture/a5-composition-inventory.test.ts` and
- * `test/architecture/a5b-bootstrap-closure.test.ts`) share it: keeping one definition means
+ * (`test/architecture/composition-inventory.test.ts` and
+ * `test/architecture/bootstrap-closure.test.ts`) share it: keeping one definition means
  * a wrapper the architecture gate unwraps can never silently bypass an A5b
  * scan.
  *

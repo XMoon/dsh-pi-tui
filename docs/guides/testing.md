@@ -213,9 +213,9 @@ ordinary English without any prefix.
 
 A file name that already carries a MEANINGFUL subject keeps it, even when
 its prefix is a milestone: `s4-d2-auto-review.test.ts` names the Auto
-Review capability it covers, and renaming it would lose that. The test is
-whether the name lets a reader find the behaviour, not whether the prefix
-happened to be a project code.
+Review capability it covers, so only the milestone goes and the file becomes
+`auto-review.test.ts`. The test is whether the name lets a reader find the
+behaviour, not whether the prefix happened to be a project code.
 
 The full name is `test/<production-owner>/<contract-or-behaviour>.test.<ext>`
 in kebab-case. The directory supplies the ownership; the basename names

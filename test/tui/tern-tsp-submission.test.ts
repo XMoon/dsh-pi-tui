@@ -487,7 +487,7 @@ test('the TSP renderer declares the switch-dropping stale-restore contract', asy
   // submission's restore must be suppressed (`retainsStaleDraftRestore()`
   // === false). The suppression itself lives in the submission runtime —
   // its REAL async regression (old busy steer parked at prepare → the
-  // switch → the stale settle) is in a3-writer-admission.test.ts; this case
+  // switch → the stale settle) is in writer-admission.test.ts; this case
   // pins the renderer's capability answer and that the composer has no
   // hidden second owner (the port mutator stays the only writer).
   const submissions: string[] = []

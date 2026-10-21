@@ -1,10 +1,10 @@
 /**
  * S4-D2 B05/B07/B08 — Host-tool runtime qualification over the real rc.2
- * Optional bundle patches (see `s4-d2-optional-bundle-fixture.ts`).
+ * Optional bundle patches (see `optional-bundle-fixture.ts`).
  *
  * This file is established first by D2-1 with the B05 off→enable→restart→real
  * tool registry proof; the remaining global-tool bundles join in D2-4.
- * @module @xmoon76/dsh-pi-tui/s4-d2-host-tools.test
+ * @module @xmoon76/dsh-pi-tui/host-tools.test
  */
 
 import assert from 'node:assert/strict'
@@ -20,7 +20,7 @@ import {
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
-} from '../support/s4-d2-optional-bundle-fixture.ts'
+} from '../support/optional-bundle-fixture.ts'
 
 const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies S4D2BundleId
 

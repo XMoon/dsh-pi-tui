@@ -22,7 +22,7 @@
  * Owner publication itself is NEVER faked: `core.setCurrentOwner` runs inside
  * the real `runOrdinaryCommit` / `runForkCommit` / `runFirstSessionCommit` via
  * `bindSessionRuntime`.
- * @module @xmoon76/dsh-pi-tui/history-seat-b3b-lifecycle.test
+ * @module @xmoon76/dsh-pi-tui/history-seat-lifecycle.test
  */
 
 import assert from 'node:assert/strict'

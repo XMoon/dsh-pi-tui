@@ -7,7 +7,7 @@
  * the real `subagent-spawn-in-process` child provider and the four generated
  * official preset declarations. A scripted LLM answers only the teammate turns
  * (the Lead calls the real tools directly through the real ToolRuntime).
- * @module @xmoon76/dsh-pi-tui/s4-d2-agent-team.test
+ * @module @xmoon76/dsh-pi-tui/agent-team.test
  */
 
 import assert from 'node:assert/strict'
@@ -20,7 +20,7 @@ import {
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
-} from '../support/s4-d2-optional-bundle-fixture.ts'
+} from '../support/optional-bundle-fixture.ts'
 
 const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies S4D2BundleId
 const skip = skippedInstallationReason([B01])
