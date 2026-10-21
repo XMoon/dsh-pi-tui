@@ -420,10 +420,21 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await settle()
   vt.sendInput('\r') // Inspect
   await waitFor(() => controller.installView()?.phase === 'confirm', 'the real Host inspection')
+  // The controller's phase is set BEFORE it asks for a repaint, so the state
+  // can be 'confirm' while the terminal still shows the inspecting frame.
+  // The Install key is refused in that window (the workspace requires the
+  // install action to be PAINTED), so the confirmation is waited for as a
+  // FRAME, not as controller state.
+  await waitFor(() => /offered version 1\.0\.0/u.test(vt.getViewport().join('\n')),
+    'the confirmation frame is painted')
   assert.match(vt.getViewport().join('\n'), /offered version 1\.0\.0/)
   vt.sendInput('\r') // Install
   await waitFor(() => controller.installView()?.phase === 'done', 'the real Host local install')
   await waitFor(() => controller.status().state === 'ready', 'the authoritative install reread')
+  // The controller's state leads the repaint, so the result is waited for as
+  // a FRAME: the outcome summary is what the case actually asserts.
+  await waitFor(() => /installed version 1\.0\.0/u.test(vt.getViewport().join('\n')),
+    'the install outcome frame is painted')
   const view = vt.getViewport().join('\n')
   assert.match(view, /installed version 1\.0\.0/)
   assert.equal((view.match(/Done in/g) ?? []).length, 1, 'the Host package output is shown once, not twice')
@@ -456,7 +467,10 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   vt.sendInput('\r') // Disable…
   await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
     'the real Host disable + authoritative reread')
-  await vt.waitForRender()
+  // The controller's state leads the repaint: the toggled row is waited for
+  // as a FRAME, so the case never reads a frame painted before the change.
+  await waitFor(() => /Enabled\s+No/u.test(vt.getViewport().join('\n')),
+    'the toggled row is painted')
   assert.match(vt.getViewport().join('\n'), /Enabled\s+No/)
 
   vt.sendInput('\x1b[B') // Enable… -> Remove…
@@ -473,7 +487,10 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   vt.sendInput('\r') // confirm
   await waitFor(() => controller.model().cards.every(card => card.name !== seeded.bundleName),
     'the real Host removal + authoritative reread')
-  await vt.waitForRender()
+  // The controller's state leads the repaint: the emptied list is waited for
+  // as a FRAME, so the case never reads a frame painted before the removal.
+  await waitFor(() => /No matching plugins|No plugins/u.test(vt.getViewport().join('\n')),
+    'the emptied plugin list is painted')
   assert.match(vt.getViewport().join('\n'), /No matching plugins|No plugins/)
   assert.equal((await port.snapshot()).bundles.find(candidate => candidate.name === seeded.bundleName), undefined)
 })
