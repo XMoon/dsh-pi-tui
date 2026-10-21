@@ -1,5 +1,5 @@
 {
-  "digest": "d33e19a36ecd3c65a7f94dc50f8bbc863519f021cbda6a1553cdbfdb24179c30",
+  "digest": "84ad20c17b7ed1969685cb6851b6b91f9b026c3f8659f5e6d8acd21a20042fce",
   "inputs": [
     {
       "path": "package.json",
@@ -24,17 +24,41 @@
       "present": false,
       "sha256": null,
       "why": "an ignore file changes which files are packed"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "present": true,
+      "sha256": "5f599de953b01bc019ea3599918ff9a4fd22a70b1629c896f4fc1f9b26bbc4f7",
+      "why": "the lockfile pins the build toolchain that produces the payload"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "present": true,
+      "sha256": "f4bcbac66f3b809cb86e1fc0990eb6441b39f978e2840d73fd4e94397b139125",
+      "why": "the workspace layout decides how pnpm resolves and packs"
+    },
+    {
+      "path": "scripts/compare-tarballs.mjs",
+      "present": true,
+      "sha256": "3790b9ce9655a32c0e4b8151f3494269cca4ffd749a5e430fb4b82caa918808c",
+      "why": "the comparator defines what equivalent means"
+    },
+    {
+      "path": "scripts/pack-equivalence-protocol.json",
+      "present": true,
+      "sha256": "e967dc7a3db071eadedc8b80b7770f55950107c2e5eae38f01c39870778d231a",
+      "why": "the protocol is the pair of commands being compared"
     }
   ],
   "proof": {
     "equivalent": true,
+    "mode": "npm",
+    "node": "24",
     "entryCount": 37,
     "differingFiles": [],
     "manifestDifferences": [],
-    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39651970677",
-    "commit": "6f6f9901a0ebc40f9344517db6d2e9212d0ef9c9",
-    "mode": "npm",
-    "platform": "ubuntu-latest / Node 24",
-    "note": "A change to any listed input DIGEST reopens this proof: the equality is a gated property, not a permanent one."
+    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39658295346",
+    "commit": "0f4369b0a3e337b01c46f607c03d5509d6b60524",
+    "note": "A change to any digested input, to this proof's MODE or NODE, or a missing/false proof reopens the question."
   }
 }
