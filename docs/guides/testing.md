@@ -207,7 +207,7 @@ case, and do not add a comment to a case whose title already says it.
 
 **Files are named by owner, not by the case.** A test file's name states
 the production owner it covers. A file whose name is only a code or a
-milestone (`m3-4-pr4-guards.test.ts`) hides that owner and should be
+milestone (a `m3-4-pr4-guards.test.ts`) hides that owner and should be
 renamed to the contract it actually guards. The file's cases then read as
 ordinary English without any prefix.
 
@@ -223,8 +223,8 @@ the behaviour without requiring any project history.
 
 #### Worked examples
 
-These show the SHAPE of the title to aim for. The tool removes the code
-label mechanically; the rest is the author's judgement.
+These show the SHAPE of the title to aim for. Removing the code label is
+mechanical; the rest is the author's judgement.
 
 | Instead of | Write |
 |---|---|
