@@ -193,7 +193,7 @@ test('P1.2 absolute: @/tmp/ searches the absolute scope', async (t) => {
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
 })
 
-test('§23 matrix: attachment commands share the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
+test('matrix: attachment commands share the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
   const life = testLifecycle(t)
   // ../../ fixture for /image: workspace = /root/alpha/beta/workspace;
   // ../../alpha targets /root/alpha/alpha/pics.
@@ -339,7 +339,7 @@ test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact'
   assert.equal(app.seatTextForTest(), '@ab', 'backspace edits the draft')
 })
 
-test('§23 matrix: the classifier gates @ and attachment commands only', () => {
+test('matrix: the classifier gates @ and attachment commands only', () => {
   const set = new Set(['attach', 'image'])
   assert.equal(classifyFileCompletionContext('@foo', set).kind, 'mention')
   assert.equal(classifyFileCompletionContext('text @foo', set).kind, 'mention')
@@ -356,7 +356,7 @@ test('§23 matrix: the classifier gates @ and attachment commands only', () => {
   assert.equal(classifyFileCompletionContext('ordinary ./path', set).kind, 'none')
 })
 
-test('§23 matrix: quoted @ completes and stays quoted', async (t) => {
+test('matrix: quoted @ completes and stays quoted', async (t) => {
   const life = testLifecycle(t)
   const { workspace } = outsideCwdFixture(life)
   const root = workspace
@@ -367,7 +367,7 @@ test('§23 matrix: quoted @ completes and stays quoted', async (t) => {
   assert.ok(result.items.some(item => item.value === '@"local.txt"'))
 })
 
-test('§23 matrix: symlink directories keep the trailing slash', async (t) => {
+test('matrix: symlink directories keep the trailing slash', async (t) => {
   const life = testLifecycle(t)
   const { workspace } = outsideCwdFixture(life)
   const root = workspace
@@ -382,7 +382,7 @@ test('§23 matrix: symlink directories keep the trailing slash', async (t) => {
   assert.ok(result.items.some(item => item.value === '@linkdir/'), 'a symlinked dir must complete with /')
 })
 
-test('§22: fd/fdfind detection prefers fd then fdfind', (t) => {
+test('fd/fdfind detection prefers fd then fdfind', (t) => {
   const life = testLifecycle(t)
   const saved = process.env.PATH
   try {
@@ -452,7 +452,7 @@ printf '%s\\0' './visible.txt'
   assert.ok(result.items.some(item => item.value === '@visible.txt'))
 })
 
-test('§23 matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
+test('matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
   // The domain resolver is environment-neutral: these pure pins supply the
   // facts explicitly instead of reading the process environment.
   const environment: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
@@ -882,7 +882,7 @@ test('a sessionless @dir/ lists children (direct children listing)', async (t) =
 
 // ── §24 headless integration: TuiApp + TuiEditor + MentionProvider ─────────
 
-test('§24 A: @src → dropdown → Tab → @src/ → children dropdown', async (t) => {
+test('A: @src → dropdown → Tab → @src/ → children dropdown', async (t) => {
   const life = testLifecycle(t)
   const { startApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
@@ -899,7 +899,7 @@ test('§24 A: @src → dropdown → Tab → @src/ → children dropdown', async 
   await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
 })
 
-test('§24 B: /image src → dropdown → Tab → /image src/ → children dropdown', async (t) => {
+test('B: /image src → dropdown → Tab → /image src/ → children dropdown', async (t) => {
   const life = testLifecycle(t)
   const { startImageApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
@@ -916,7 +916,7 @@ test('§24 B: /image src → dropdown → Tab → /image src/ → children dropd
   await pollUntil(() => vt.getViewport().join('\n').includes('wanted.ts'), 'children must appear after accept')
 })
 
-test('§24 C: hello ./src<Tab> opens no dropdown', async (t) => {
+test('C: hello ./src<Tab> opens no dropdown', async (t) => {
   const life = testLifecycle(t)
   const { startApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root
@@ -941,7 +941,7 @@ test('§24 C: hello ./src<Tab> opens no dropdown', async (t) => {
   assert.equal(app.seatTextForTest(), 'hello ./src', 'the draft is untouched')
 })
 
-test('§24 E: sessionless @dir/ lists children through the app chain', async (t) => {
+test('E: sessionless @dir/ lists children through the app chain', async (t) => {
   const life = testLifecycle(t)
   const { startApp } = await import('../support/app-harness.ts')
   const root = largeWorkspaceFixture(life).root

@@ -2790,7 +2790,7 @@ test('whole-PR F2: an ordinary line under a Host name a LIVE skill wrapper share
   assert.deepEqual(steered.content.map(block => block.text), ['/grilling args'],
     'the RAW line steers — never a rewritten skill invocation')
 })
-test('§D3 immediate echo (review F11): an argued line of a host-resolved name echoes BEFORE the FIFO turn it waits behind', async (t) => {
+test('immediate echo (review F11): an argued line of a host-resolved name echoes BEFORE the FIFO turn it waits behind', async (t) => {
   // The submit-time echo gate must consume the SAME §D3 line authority as
   // the delivery/attachment/dispatch gates: a HOST-RESOLVED name is never a
   // TUI-local line — `/export foo` (execute-kind Host /export resolves the

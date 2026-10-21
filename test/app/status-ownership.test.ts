@@ -72,7 +72,7 @@ function surfaceOwner() {
 
 const access = (store: StatusStore): AccessStatus => store.snapshot().access
 
-test('§6.4 (1) an unrelated legacy refresh never clears the projection-owned preset', () => {
+test('an unrelated legacy refresh never clears the projection-owned preset', () => {
   const { app, store, dispose } = mountedStore()
   try {
     // The semantic owner commits the projection value (the status-runtime path).
@@ -91,7 +91,7 @@ test('§6.4 (1) an unrelated legacy refresh never clears the projection-owned pr
   }
 })
 
-test('§6.4 (2) an absent legacy permission produces NO permission field mutation', () => {
+test('an absent legacy permission produces NO permission field mutation', () => {
   const { app, store, dispose } = mountedStore()
   try {
     const before = access(store)
@@ -105,7 +105,7 @@ test('§6.4 (2) an absent legacy permission produces NO permission field mutatio
   }
 })
 
-test('§6.4 (3) the real surface owner reset is the explicit clear', () => {
+test('the real surface owner reset is the explicit clear', () => {
   const surface = surfaceOwner()
   try {
     surface.status.update({
@@ -131,7 +131,7 @@ test('§6.4 (3) the real surface owner reset is the explicit clear', () => {
   }
 })
 
-test('§6.4 (4) a legacy value still projects when a Direct composition supplies one', () => {
+test('a legacy value still projects when a Direct composition supplies one', () => {
   const { app, store, dispose } = mountedStore()
   try {
     app.setStatus({ model: 'm', cwd: '/tmp/direct', branch: '', turns: 0, steps: 0, permission: 'danger-full-access' })
@@ -143,7 +143,7 @@ test('§6.4 (4) a legacy value still projects when a Direct composition supplies
   }
 })
 
-test('§6.4 (5) the generation-bump wiring retires the subject sections', () => {
+test('the generation-bump wiring retires the subject sections', () => {
   // The composition's ownership-core reset hook is the ONLY caller: it must
   // invoke the surface's explicit subject reset (a switch cannot leak the
   // old preset while the new subject's projection is pending).
