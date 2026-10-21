@@ -83,6 +83,17 @@ const PRESET = 'm3a-smoke-preset'
 const MAIN = 'm3a-main'
 const CHILD = 'm3a-child'
 const BARE = 'm3a-bare'
+/**
+ * The bound on a settlement wait.
+ *
+ * It is a DEADLINE, not the expected duration: the settlement is observed,
+ * not waited for, so the bound only says how long a settlement that never
+ * arrives is tolerated before the case fails with the word it observed. The
+ * write chain (the app-owned write channel, the config port, the Host write,
+ * the authoritative re-read and the classification) is a handful of awaited
+ * steps; a loaded runner stretches it, it never stalls it.
+ */
+const SETTLEMENT_TIMEOUT_MS = 30_000
 
 /** The L5 stub llm route shape (enough adapter for real composition). */
 class StubLlmAdapter extends LlmAdapter {
@@ -466,7 +477,18 @@ async function mountSettingsWorkspace(
 ): Promise<{
   open(): Promise<void>
   key(data: string): Promise<void>
-  settle(): Promise<void>
+  /**
+   * Wait for the workspace's SETTLED status word.
+   *
+   * The write chain is asynchronous by nature (the app-owned write channel →
+   * the config port → the Host write → the authoritative re-read → the
+   * classification), so the settlement arrives on an unknown turn. A fixed
+   * window would read the IN-FLIGHT frame (`Saving…`) whenever the machine
+   * is loaded, and the assertion would then judge a frame the product never
+   * promised. This waits for the REAL settlement and reports the word it
+   * actually observed when the deadline passes.
+   */
+  settleUntil(pattern: RegExp, label: string): Promise<void>
   /** The mounted surface, for asserting the LIVE runtime fact a commit really changed. */
   app: TuiApp
   view(): string
@@ -533,9 +555,36 @@ async function mountSettingsWorkspace(
     get: (target, property) => property in target ? target[property as string] : () => undefined,
   }) as unknown as TuiCommandRunner
   registerTuiCommandsWithDirectSeams(runner)
-  const settle = async (): Promise<void> => {
-    for (let index = 0; index < 8; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
-    await vt.waitForRender()
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  /**
+   * Wait for the workspace's SETTLED status word.
+   *
+   * The write chain is asynchronous by nature (the app-owned write channel →
+   * the config port → the Host write → the authoritative re-read → the
+   * classification), so the settlement arrives on an unknown turn. A fixed
+   * window would read the IN-FLIGHT frame (`Saving…`) whenever the machine
+   * is loaded, and the assertion would then judge a frame the product never
+   * promised. This waits for the REAL settlement and reports the word it
+   * actually observed when the deadline passes.
+   */
+  const settleUntil = async (pattern: RegExp, label: string): Promise<void> => {
+    const deadline = Date.now() + SETTLEMENT_TIMEOUT_MS
+    for (;;) {
+      // Drain the terminal's own write queue, then read the frame: a frame
+      // that is still being painted must not be read as the settled one.
+      await vt.flush()
+      const frame = view()
+      if (pattern.test(frame)) return
+      if (Date.now() >= deadline) {
+        // The OBSERVED word, not a guess: the reader must be able to tell
+        // "the write never settled" from "the write settled as something
+        // else".
+        const observed = (frame.replace(/\s+/gu, ' ').match(/Status\s+([A-Za-z…]+)/) ?? [])[1] ?? 'no status word'
+        assert.fail(`${label} never settled: the workspace still shows "${observed}"\n${frame}`)
+      }
+      // Yield the event loop so the write chain can make progress.
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+    }
   }
   return {
     async open(): Promise<void> {
@@ -548,9 +597,9 @@ async function mountSettingsWorkspace(
       vt.sendInput(data)
       await vt.waitForRender()
     },
-    settle,
+    settleUntil,
     app,
-    view: () => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n'),
+    view,
     dispose: () => { if (!app.isDisposed()) app.dispose() },
   }
 }
@@ -1196,7 +1245,7 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     await fixture.key('\x1b[B') // full -> compact, still only a preview
     assert.match(fixture.view(), /> compact/)
     await fixture.key('\r') // explicit confirm
-    await fixture.settle()
+    await fixture.settleUntil(/Status\s+Verified/, 'the display-preset write')
 
     assert.match(fixture.view(), /Status\s+Verified/, `the UI verified the commit:\n${fixture.view()}`)
     // The REAL Host document changed — the mirror's re-read is not the only witness.
@@ -1256,19 +1305,19 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     }
     /** Reopen the choice and step ONE candidate down (the display candidates are the
      *  fixed `full, compact, focus` vocabulary and the choice starts on the persisted
-     *  one), then confirm. */
-    const chooseNextPreset = async (): Promise<void> => {
+     *  one), then confirm and wait for the settlement the write must reach. */
+    const chooseNextPreset = async (expected: RegExp, label: string): Promise<void> => {
       await fixture.key('\r')
       assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose value/)
       await fixture.key('\x1b[B')
       assert.match(fixture.view(), /> focus/, `the highlighted candidate is the next preset:\n${fixture.view()}`)
       await fixture.key('\r')
-      await fixture.settle()
+      await fixture.settleUntil(expected, label)
     }
     try {
       // A refused official mutate is a REFUSAL: the UI says so and the Host is intact.
       failMutate = true
-      await chooseNextPreset()
+      await chooseNextPreset(/Status\s+Not saved/, 'the refused display-preset write')
       const refusedFrame = fixture.view().replace(/\s+/gu, ' ')
       assert.match(
         refusedFrame,
@@ -1286,7 +1335,7 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
       // requested value, which proves the value is in place but never that THIS request
       // was accepted, so the outcome is `Outcome unknown`. The Host state and that
       // classification are asserted TOGETHER.
-      await chooseNextPreset()
+      await chooseNextPreset(/Status\s+Outcome unknown/, 'the write whose readback could not complete')
       const hostAfter = hostDescriptorUnpatched()
       const unverifiedFrame = fixture.view().replace(/\s+/gu, ' ')
       assert.equal(hostAfter?.displayPreset, 'focus', 'the Host authority really committed the write')
@@ -1375,7 +1424,7 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
     await fixture.key('\x1b[B') // dark -> light
     assert.match(fixture.view(), /> light/)
     await fixture.key('\r') // confirm
-    await fixture.settle()
+    await fixture.settleUntil(/Status\s+Verified/, 'the theme write')
     assert.match(
       fixture.view().replace(/\s+/gu, ' '),
       /Status Verified · the authoritative read agrees/,
