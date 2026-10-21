@@ -26,13 +26,13 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 
 import { discoverTestFiles, resolveLane } from '../../scripts/test-discovery.mjs'
 import { fixedWaitHelpers, fixedWaitsOf } from '../../scripts/fixed-wait-helpers.mjs'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { LANES } from '../../scripts/test-lanes.mjs'
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..')
@@ -137,8 +137,8 @@ test('the pre-existing fixed-wait baseline still matches the tree', () => {
  * The rules under test take the test root as a parameter, so the synthetic
  * placement is verified against a disposable root instead.
  */
-function isolatedTestRoot() {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-policy-probe-'))
+function isolatedTestRoot(t) {
+  const root = testLifecycle(t).tempDir('dsh-policy-probe-')
   for (const directory of ['domain', 'integration', 'tooling', 'architecture', 'support']) {
     mkdirSync(join(root, directory), { recursive: true })
   }
@@ -155,8 +155,7 @@ test('a new Domain, Integration and Tooling test land in the right lane', async 
     { rel: 'integration/synthetic-policy-probe.test.mjs', lane: 'product', suffix: '.test.mjs' },
     { rel: 'tooling/synthetic-policy-probe.test.mjs', lane: 'tooling', suffix: '.test.mjs' },
   ]
-  const root = isolatedTestRoot()
-  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const root = isolatedTestRoot(t)
   // The tooling lane's pattern set covers the architecture area as well, so
   // the isolated root needs a file there for the lane to resolve at all.
   writeFileSync(
@@ -184,14 +183,14 @@ test('a new Domain, Integration and Tooling test land in the right lane', async 
   }
 })
 
-test('a NEW long wait through a shared helper is caught', () => {
+test('a NEW long wait through a shared helper is caught', (t) => {
   // The regression for the review finding: the guard must see a fixed wait
   // that goes through a SHARED helper (`directSettle(ms)`), not only a
   // literal `setTimeout` in the test file. A new test that waits 30 seconds
   // through the helper must be caught exactly like a literal one.
   // The probe lives in an ISOLATED root: a synthetic file in the real
   // test tree would be discovered by a CONCURRENT runner.
-  const root = isolatedTestRoot()
+  const root = isolatedTestRoot(t)
   try {
     const probe = 'integration/synthetic-long-wait-probe.test.ts'
     const path = join(root, probe)
@@ -212,14 +211,14 @@ test('a NEW long wait through a shared helper is caught', () => {
     assert.deepEqual(waits, [5],
       'a long wait through the shared helper must be reported as an unreasoned fixed wait')
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    // The lifecycle removes the root when the test ends.
   }
 })
 
-test('a NEW long literal wait is caught', () => {
+test('a NEW long literal wait is caught', (t) => {
   // The same regression for the literal form, so both shapes are covered by
   // the same guard.
-  const root = isolatedTestRoot()
+  const root = isolatedTestRoot(t)
   try {
     const probe = 'integration/synthetic-literal-wait-probe.test.ts'
     const path = join(root, probe)
@@ -236,17 +235,17 @@ test('a NEW long literal wait is caught', () => {
     assert.deepEqual(waits, [4],
       'a long literal wait must be reported as an unreasoned fixed wait')
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    // The lifecycle removes the root when the test ends.
   }
 })
 
-test('a shared wait helper is discovered by its IMPLEMENTATION, not its name', () => {
+test('a shared wait helper is discovered by its IMPLEMENTATION, not its name', (t) => {
   // The review's finding: a helper named `sleep(timeoutMs)` was not
   // discovered, because the discovery matched the PARAMETER NAME
   // `millis|ms|delay|durationMs`. The derivation must be name-independent:
   // a helper whose body waits a `setTimeout` whose delay comes from one of
   // its OWN parameters is a fixed-wait helper by construction.
-  const root = isolatedTestRoot()
+  const root = isolatedTestRoot(t)
   try {
     const probe = 'support/synthetic-sleep-helper.ts'
     const path = join(root, probe)
@@ -261,6 +260,6 @@ test('a shared wait helper is discovered by its IMPLEMENTATION, not its name', (
     assert.ok(helpers.has('sleep'),
       'a helper that waits a parameter-driven setTimeout must be discovered, whatever its name')
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    // The lifecycle removes the root when the test ends.
   }
 })
