@@ -25,10 +25,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 
 import { verifyShards } from '../../scripts/verify-shards.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+
+const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 
 /** The lane's files, as a synthetic two-shard split. */
 const FILES = ['app/one.test.ts', 'app/two.test.ts', 'tui/three.test.ts']
@@ -346,4 +350,116 @@ test('a shard that records NO attempt fails the aggregate when one is expected',
   })
   assert.ok(aggregate.failures.length > 0, 'a missing attempt must fail the aggregate')
   assert.match(aggregate.failures.join('\n'), /recorded no run attempt/u)
+})
+
+test('the CLI reads the case and skip baseline from the environment', (t) => {
+  // The API-level tests prove the CHECKS; this proves the PATH. A
+  // verifier whose live entry point drops the expectations would accept a
+  // shard set that lost a case, and every API-level test would still
+  // pass.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-cli-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
+  const expectedFiles = join(root, 'expected-files.txt')
+  writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
+  const run = spawnSync(process.execPath, [
+    join(ROOT, 'scripts', 'verify-shards.mjs'),
+    '--shards', root,
+    '--total', '2',
+    '--expected-files', expectedFiles,
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      NODE_TEST_CONTEXT: undefined,
+      // The baseline says FOUR cases; the shards recorded THREE.
+      DSH_EXPECTED_CASES: '4',
+      DSH_EXPECTED_SKIPPED: '0',
+    },
+  })
+  assert.notEqual(run.status, 0, 'the CLI must fail on a lost case')
+  assert.match(run.stderr, /but the baseline is 4/u)
+})
+
+test('the CLI reads the run attempt from the environment', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-cli-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
+  const expectedFiles = join(root, 'expected-files.txt')
+  writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
+  const run = spawnSync(process.execPath, [
+    join(ROOT, 'scripts', 'verify-shards.mjs'),
+    '--shards', root,
+    '--total', '2',
+    '--expected-files', expectedFiles,
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      NODE_TEST_CONTEXT: undefined,
+      DSH_EXPECTED_SHA: 'sha-1',
+      DSH_EXPECTED_RUN_ID: 'run-1',
+      DSH_EXPECTED_RUN_ATTEMPT: '2',
+    },
+  })
+  assert.notEqual(run.status, 0, 'the CLI must fail on a foreign attempt')
+  assert.match(run.stderr, /belongs to attempt 1, not 2/u)
+})
+
+test('the CLI accepts a shard set that matches the baseline exactly', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-cli-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
+  const expectedFiles = join(root, 'expected-files.txt')
+  writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
+  const run = spawnSync(process.execPath, [
+    join(ROOT, 'scripts', 'verify-shards.mjs'),
+    '--shards', root,
+    '--total', '2',
+    '--expected-files', expectedFiles,
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      NODE_TEST_CONTEXT: undefined,
+      DSH_EXPECTED_CASES: '3',
+      DSH_EXPECTED_SKIPPED: '0',
+    },
+  })
+  assert.equal(run.status, 0, run.stderr)
+  assert.match(run.stdout, /the shard aggregate is the whole lane/u)
+})
+
+test('the CLI refuses a malformed baseline instead of disabling the check', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-cli-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
+  const expectedFiles = join(root, 'expected-files.txt')
+  writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
+  const run = spawnSync(process.execPath, [
+    join(ROOT, 'scripts', 'verify-shards.mjs'),
+    '--shards', root,
+    '--total', '2',
+    '--expected-files', expectedFiles,
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      NODE_TEST_CONTEXT: undefined,
+      DSH_EXPECTED_CASES: 'many',
+    },
+  })
+  assert.notEqual(run.status, 0, 'a malformed baseline must fail')
+  assert.match(run.stderr, /must be a non-negative integer/u)
 })
