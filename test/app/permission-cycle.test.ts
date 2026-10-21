@@ -29,14 +29,14 @@ import { DirectPermissionConfig } from '../../src/runtime/direct/config-direct.t
 
 /* ──────────────────────── the projection mapper ──────────────────────── */
 
-test('§6.1 the permissions projection view maps onto the status DTO', () => {
+test('the permissions projection view maps onto the status DTO', () => {
   const status = detachedSessionStatus('s', {
     permissions: { currentValue: 'workspace-write' },
   }, undefined)
   assert.equal(status.permission, 'workspace-write')
 })
 
-test('§6.1 a foreign/absent permissions view reads absent (never guessed)', () => {
+test('a foreign/absent permissions view reads absent (never guessed)', () => {
   assert.equal(detachedSessionStatus('s', {}, undefined).permission, undefined)
   assert.equal(detachedSessionStatus('s', { permissions: null }, undefined).permission, undefined)
   assert.equal(detachedSessionStatus('s', { permissions: { currentValue: '' } }, undefined).permission, undefined)
@@ -125,7 +125,7 @@ function harness(options: {
   }
 }
 
-test('§6.3 the gesture owner supplies NO signal of its own — the composition owns the lifetime fallback', async () => {
+test('the gesture owner supplies NO signal of its own — the composition owns the lifetime fallback', async () => {
   // The official `/permission` command requires a signal, so the cycle must
   // never invent one here. This owner-level test only pins that fact; the
   // production fallback (bootstrap's runner lifetime signal) is proven on the
@@ -137,7 +137,7 @@ test('§6.3 the gesture owner supplies NO signal of its own — the composition 
     'the status owner never fabricates an AbortSignal for the gesture write')
 })
 
-test('§6.3 no live scope / empty catalog / single current preset dispatch NOTHING', async () => {
+test('no live scope / empty catalog / single current preset dispatch NOTHING', async () => {
   const states = [
     harness({ noScope: true }),
     harness({ names: [] }),
@@ -151,7 +151,7 @@ test('§6.3 no live scope / empty catalog / single current preset dispatch NOTHI
   }
 })
 
-test('§6.3 the cycle computes next from the projection current and dispatches EXACTLY ONE apply', async () => {
+test('the cycle computes next from the projection current and dispatches EXACTLY ONE apply', async () => {
   const h = harness({ current: 'read-only' })
   h.runtime.cyclePermission()
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -161,7 +161,7 @@ test('§6.3 the cycle computes next from the projection current and dispatches E
     'the notice is the gesture feedback')
 })
 
-test('§6.3 applied does NOT install the value locally — no status repaint claims the commit', async () => {
+test('applied does NOT install the value locally — no status repaint claims the commit', async () => {
   const h = harness({ current: 'read-only' })
   const commits: unknown[] = []
   ;(h.deps.surface as unknown as { commitStatus: (patch: unknown) => void }).commitStatus = (patch: unknown) => {
@@ -178,7 +178,7 @@ test('§6.3 applied does NOT install the value locally — no status repaint cla
     'no optimistic committed-preset repaint (§D7 — the projection repaints)')
 })
 
-test('§6.3 a stale scope after the await notifies NOTHING (no replacement-session contamination)', async () => {
+test('a stale scope after the await notifies NOTHING (no replacement-session contamination)', async () => {
   const h = harness({ current: 'read-only', staleAfterApply: true })
   h.runtime.cyclePermission()
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -196,7 +196,7 @@ test('§6.3/§16 a same-id transport rollover during the apply notifies NOTHING 
   assert.deepEqual(h.notices, [], 'a stale transport must not notify/repaint the replacement binding (§16)')
 })
 
-test('§6.3 an indeterminate outcome reports the unknown settle truthfully (never as failure, never retried)', async () => {
+test('an indeterminate outcome reports the unknown settle truthfully (never as failure, never retried)', async () => {
   const h = harness({
     current: 'read-only',
     outcome: { kind: 'indeterminate', reason: 'the permission switch was dispatched but cancelled before its result arrived' },
@@ -210,7 +210,7 @@ test('§6.3 an indeterminate outcome reports the unknown settle truthfully (neve
   assert.doesNotMatch(h.notices[0]!.message, /unavailable|failed/, 'an indeterminate settle is never masked as unavailable/failed')
 })
 
-test('§6.3 an unavailable outcome surfaces truthfully (never a retry)', async () => {
+test('an unavailable outcome surfaces truthfully (never a retry)', async () => {
   const h = harness({ current: 'read-only', outcome: { kind: 'unavailable', cause: 'permission' } })
   h.runtime.cyclePermission()
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -219,7 +219,7 @@ test('§6.3 an unavailable outcome surfaces truthfully (never a retry)', async (
   assert.match(h.notices[0]!.message, /unavailable/)
 })
 
-test('§6.3 a rejected apply reports the failure without retrying', async () => {
+test('a rejected apply reports the failure without retrying', async () => {
   const h = harness({ current: 'workspace-write', outcome: { kind: 'throw', error: new Error('wire exploded') } })
   h.runtime.cyclePermission()
   // The owned settlement defers through runOwned's promise chain.
@@ -228,7 +228,7 @@ test('§6.3 a rejected apply reports the failure without retrying', async () => 
   assert.match(h.notices[0]?.message ?? '', /wire exploded/)
 })
 
-test('§6.3 danger-full-access keeps its warning severity', async () => {
+test('danger-full-access keeps its warning severity', async () => {
   const h = harness({ current: 'workspace-write' })
   h.runtime.cyclePermission()
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -236,7 +236,7 @@ test('§6.3 danger-full-access keeps its warning severity', async () => {
   assert.equal(h.notices[0]?.kind, 'error')
 })
 
-test('§6.3 an unknown projection current cycles from the catalog start (never a guessed index)', async () => {
+test('an unknown projection current cycles from the catalog start (never a guessed index)', async () => {
   const h = harness({ current: 'custom-unknown' })
   h.runtime.cyclePermission()
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -244,7 +244,7 @@ test('§6.3 an unknown projection current cycles from the catalog start (never a
     'an unmatched current cycles to the first catalog option')
 })
 
-test('§7.5 negative lock: the authority path never touches the Host permissionPresets service', () => {
+test('negative lock: the authority path never touches the Host permissionPresets service', () => {
   const source = readFileSync(new URL('../../src/app/surface/status-runtime.ts', import.meta.url), 'utf8')
   const cycle = source.slice(
     source.indexOf('const cyclePermission = (): void => {'),
@@ -257,7 +257,7 @@ test('§7.5 negative lock: the authority path never touches the Host permissionP
     'the authority path never calls a synchronous preset set')
 })
 
-test('§6.2 the Direct permission catalog exposes the composed Auto contribution without leaking a mutable table', () => {
+test('the Direct permission catalog exposes the composed Auto contribution without leaking a mutable table', () => {
   const ctx = new Context()
   const names = ['read-only', 'workspace-write', 'auto']
   ctx.provide('permissionPresets', { names } as never)

@@ -263,7 +263,7 @@ test('scenario 3: a PROVABLE window always prefers the fold — running is only 
   assert.equal(h.working(), true, 'the fold wins when the window proves the boundary (never the raw bit)')
 })
 
-test('§6.5 fence: a hydration whose owner was replaced while the reader await elapsed commits NOTHING', async () => {
+test('fence: a hydration whose owner was replaced while the reader await elapsed commits NOTHING', async () => {
   const h = harness() as ReturnType<typeof harness> & { init(): Promise<void> }
   h.setWindow([{ type: 'turn/start', seq: 0 }], false)
   h.setRunning(true)
@@ -273,7 +273,7 @@ test('§6.5 fence: a hydration whose owner was replaced while the reader await e
   assert.equal(h.working(), undefined)
 })
 
-test('§6.5 fence: a CURRENT owner commits normally (the fence never blocks the live path)', async () => {
+test('fence: a CURRENT owner commits normally (the fence never blocks the live path)', async () => {
   const h = harness() as ReturnType<typeof harness> & { init(): Promise<void> }
   h.setWindow([{ type: 'turn/start', seq: 0 }], false)
   h.setRunning(false)
@@ -282,7 +282,7 @@ test('§6.5 fence: a CURRENT owner commits normally (the fence never blocks the 
   assert.equal(h.working(), true)
 })
 
-test('§6.5 fence: a Connection/binding ROLLOVER during the reader await commits NOTHING (no TUI owner change)', async () => {
+test('fence: a Connection/binding ROLLOVER during the reader await commits NOTHING (no TUI owner change)', async () => {
   const h = harness() as ReturnType<typeof harness> & { init(): Promise<void> }
   h.setWindow([{ type: 'turn/start', seq: 0 }], false)
   h.setRunning(true)
@@ -296,7 +296,7 @@ test('§6.5 fence: a Connection/binding ROLLOVER during the reader await commits
   assert.equal(h.working(), undefined)
 })
 
-test('§6.5 seed identity: a rollover AFTER the reader fence still leaves the outcome stamped with the STALE token', async () => {
+test('seed identity: a rollover AFTER the reader fence still leaves the outcome stamped with the STALE token', async () => {
   const h = harness() as ReturnType<typeof harness> & { init(): Promise<void> }
   h.setWindow([{ type: 'turn/start', seq: 0 }], false)
   h.setRunning(false)

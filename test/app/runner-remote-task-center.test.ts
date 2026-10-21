@@ -618,7 +618,7 @@ test('§11/§14.13: one-shot B and nested C are READ-ONLY from the root surface 
   await new Promise(resolve => setTimeout(resolve, 200))
 })
 
-test('§14: no Remote Task/child path reads the process-local subagents authority', async (t) => {
+test('no Remote Task/child path reads the process-local subagents authority', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
   // The Direct Task adapter's business authority is
