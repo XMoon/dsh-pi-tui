@@ -10,7 +10,7 @@
  * be expressed, so the lock now proves that shape is gone: no paired resolver,
  * and every `/skill` path threads ONE atomically captured scope through
  * `loadSkill` and the per-Agent prompt admission.
- * @module @xmoon76/dsh-pi-tui/a3-command-identity.test
+ * @module @xmoon76/dsh-pi-tui/command-identity.test
  */
 
 import assert from 'node:assert/strict'

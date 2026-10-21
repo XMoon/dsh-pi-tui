@@ -3,7 +3,7 @@
  * paste content (steer / getDraft / the external-editor suspend rollback)
  * and the Windows URL launcher must quote transcript-controlled URLs
  * against cmd.exe metacharacter injection.
- * @module @xmoon76/dsh-pi-tui/re-vendor-round2.test
+ * @module @xmoon76/dsh-pi-tui/expanded-paste-and-url-quoting.test
  */
 
 import assert from 'node:assert/strict'

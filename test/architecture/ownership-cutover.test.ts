@@ -4,7 +4,7 @@
  * through the injected SessionOwnerAccess provider (Direct composition today,
  * Remote from M3-2) into the core slot, and no sessionId→Agent lookup
  * reconstructs currentness.
- * @module @xmoon76/dsh-pi-tui/a2-ownership-cutover.test
+ * @module @xmoon76/dsh-pi-tui/ownership-cutover.test
  */
 
 import assert from 'node:assert/strict'
@@ -154,7 +154,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
   // lock reads the owner that now builds it AND the exact injection site that
   // feeds it. The A5b-6 retention policy (the retained snapshot + the
   // same-session fence) is Task-Center-owned and reads both at CALL time
-  // (locked in test/architecture/a5b-bootstrap-closure.test.ts).
+  // (locked in test/architecture/bootstrap-closure.test.ts).
   //
   // The injection lock is scoped to the ONE `createTaskSource({...})` argument
   // object on purpose: a whole-composition-surface `includes` is satisfied by

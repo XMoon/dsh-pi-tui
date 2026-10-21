@@ -2185,8 +2185,8 @@ test('a hostile single-row model label keeps its painted click map', async () =>
 
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { startS4D3Application } from '../support/s4-d3-application-fixture.ts'
-import { skippedInstallationReason } from '../support/s4-d2-optional-bundle-fixture.ts'
+import { startS4D3Application } from '../support/application-fixture.ts'
+import { skippedInstallationReason } from '../support/optional-bundle-fixture.ts'
 
 class FlashAdapter extends LlmAdapter {
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {

@@ -1,7 +1,7 @@
 /**
  * S4-D2 B09/B10/B11 — Session Titles, Badge Skill and Ralph over the real
  * rc.2 Optional bundle patches (implementation plan §5 D2-5).
- * @module @xmoon76/dsh-pi-tui/s4-d2-projections-workflow.test
+ * @module @xmoon76/dsh-pi-tui/projections-workflow.test
  */
 
 import assert from 'node:assert/strict'
@@ -20,7 +20,7 @@ import {
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
-} from '../../support/s4-d2-optional-bundle-fixture.ts'
+} from '../../support/optional-bundle-fixture.ts'
 
 const B09 = '@deepseek-ai/dsh-experimental-session-titles-bundle' satisfies S4D2BundleId
 const B10 = '@deepseek-ai/dsh-experimental-badge-skill-bundle' satisfies S4D2BundleId

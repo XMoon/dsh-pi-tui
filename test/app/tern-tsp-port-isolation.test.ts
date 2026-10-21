@@ -19,7 +19,7 @@
  *   renderer-neutral notify (never a PiTui member), while the local-card
  *   members stay on the app.
  *
- * @module @xmoon76/dsh-pi-tui/tern-tsp-pr3b-ports.test
+ * @module @xmoon76/dsh-pi-tui/tern-tsp-port-isolation.test
  */
 
 import assert from 'node:assert/strict'

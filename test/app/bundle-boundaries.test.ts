@@ -15,7 +15,7 @@
  * VirtualTerminal; no network, credentials or real package install.
  * `DELIBERATELY ABSENT`: the user's real Profile, public registries and the
  * physical terminal.
- * @module @xmoon76/dsh-pi-tui/s4-d3-bundle-boundaries.test
+ * @module @xmoon76/dsh-pi-tui/bundle-boundaries.test
  */
 
 import assert from 'node:assert/strict'
@@ -232,8 +232,8 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
 
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { startS4D3Application } from '../support/s4-d3-application-fixture.ts'
-import { skippedInstallationReason, type S4D2BundleId } from '../support/s4-d2-optional-bundle-fixture.ts'
+import { startS4D3Application } from '../support/application-fixture.ts'
+import { skippedInstallationReason, type S4D2BundleId } from '../support/optional-bundle-fixture.ts'
 
 type BoundaryScript =
   | { readonly kind: 'tool'; readonly name: string; readonly arguments: string; readonly callId: string }

@@ -19,7 +19,7 @@
  *    `withWriter`, which delegates to `SessionRuntime.withWriter`; the runner
  *    holds no direct `barrier.runWriter` site and the command layer no
  *    `withSessionWriter`.
- * @module @xmoon76/dsh-pi-tui/a3-writer-admission.test
+ * @module @xmoon76/dsh-pi-tui/writer-admission.test
  */
 
 import assert from 'node:assert/strict'

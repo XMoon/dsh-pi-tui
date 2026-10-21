@@ -15,7 +15,7 @@
  * P11 rc.2 Question wire surfaces (the live forwarded request, the
  * `attachWait` claim, the non-cancelling timeout, the late-answer mapping).
  *
- * @module @xmoon76/dsh-pi-tui/remote-m3a-semantics-smoke.test
+ * @module @xmoon76/dsh-pi-tui/remote-semantics-smoke.test
  */
 
 import assert from 'node:assert/strict'

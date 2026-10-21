@@ -6,7 +6,7 @@
  * REAL mounted Host prerequisite/route where the TUI profile can mount it, uses
  * a controlled local endpoint only for external transport, and records the
  * exact missing prerequisite instead of inventing a TUI Web UI.
- * @module @xmoon76/dsh-pi-tui/s4-d2-web-anchored.test
+ * @module @xmoon76/dsh-pi-tui/web-anchored.test
  */
 
 import assert from 'node:assert/strict'
@@ -19,7 +19,7 @@ import {
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
-} from '../support/s4-d2-optional-bundle-fixture.ts'
+} from '../support/optional-bundle-fixture.ts'
 
 const B02 = '@deepseek-ai/dsh-experimental-voice-input-bundle' satisfies S4D2BundleId
 const B04 = '@deepseek-ai/dsh-experimental-inspector-profile' satisfies S4D2BundleId

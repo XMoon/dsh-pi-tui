@@ -133,7 +133,7 @@ test('the composition ROOT owns every composition site (the entry owns none)', (
   // TS2: the composition ROOT is the whole composition zone — the facade plus
   // every `src/app/bootstrap/**` helper. The entry stays excluded absolutely;
   // "the root owns it" means the zone owns it (the helper split is checked by
-  // the per-module location locks in test/architecture/a5b-bootstrap-closure.test.ts).
+  // the per-module location locks in test/architecture/bootstrap-closure.test.ts).
   const files = compositionSources().map(({ rel }) => rel)
   assert.equal(files[0], 'src/index.ts', 'the composition surface must start with the package entry')
   assert.equal(files[1], 'src/app/bootstrap.ts', 'the composition facade must follow the entry')

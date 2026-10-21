@@ -8,7 +8,7 @@
  * prompt. A REAL `write` tool body is the observable sink: an allowed call
  * creates the file, a refused/aborted/errored call executes no body at all and
  * leaves a durable `tool/result` error.
- * @module @xmoon76/dsh-pi-tui/s4-d2-auto-review.test
+ * @module @xmoon76/dsh-pi-tui/auto-review.test
  */
 
 import assert from 'node:assert/strict'
@@ -28,7 +28,7 @@ import {
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
-} from '../support/s4-d2-optional-bundle-fixture.ts'
+} from '../support/optional-bundle-fixture.ts'
 
 const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies S4D2BundleId
 const skip = skippedInstallationReason([B03])
