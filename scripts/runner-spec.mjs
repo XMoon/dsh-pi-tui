@@ -89,6 +89,13 @@ function command(command, args) {
 export function collectRunnerSpec() {
   const pnpm = command('pnpm', ['--version'])
   return {
+    // The IDENTITY of the run, in the two short forms the aggregate proof
+    // compares. A shard that does not agree with the aggregating run on
+    // these is a shard of a DIFFERENT run, and counting it would claim a
+    // coverage nobody measured.
+    sha: process.env.GITHUB_SHA ?? null,
+    runId: process.env.GITHUB_RUN_ID ?? null,
+    runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
     node: {
       version: process.version,
       execPath: process.execPath,
