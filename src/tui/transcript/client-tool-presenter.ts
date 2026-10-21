@@ -205,9 +205,13 @@ function emptyWriteDiff(
  *   `<type>file</type>` envelope. The envelope body comes back as `content`,
  *   the degradation path the SDK documents for a UI without a rich read card.
  *
- * A shape the Host presenter would reject must not become a view here either:
- * both branches have to agree, and the settled card renders whichever view
- * comes first.
+ * For every RECOGNIZED first-party shape this mirrors the Host presenter
+ * exactly, so the two branches agree on those. It is NOT a universal parity
+ * claim: this reader is name-agnostic and decodes by SHAPE, while the Host
+ * calls the definition that actually ran. A structurally read-shaped payload
+ * on some other tool's result is therefore decoded as a read card here even
+ * though that tool's own presenter would decline it — the accepted structural
+ * boundary recorded on `emptyWriteDiff`, not a first-party defect.
  */
 function metaPathView(
   meta: unknown,
