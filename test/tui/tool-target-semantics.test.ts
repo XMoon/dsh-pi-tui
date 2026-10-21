@@ -30,6 +30,9 @@ import { TranscriptNodeKeys, transcriptView } from '../../src/tui/tsp/transcript
 
 const T0 = 1_700_000_000_000
 
+/** One read envelope, in the shape the fs read tool writes into its result. */
+const READ_ENVELOPE = '<path>src/a.ts</path>\n<type>file</type>\n<content>\n1: a\n</content>'
+
 function ev(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
   return { type, seq: SessionSeq(seq), time: T0 + seq, data } as SessionEvent
 }
@@ -145,15 +148,21 @@ test('a search row whose displayed target is the tool\'s own proven pattern clai
   assert.equal(node.props['targetKind'], 'pattern')
 })
 
-test('a terminal row whose displayed target IS the tool\'s own command claims the command kind', () => {
+test('a terminal row never claims a kind: the command is a deferred capability, not a missing one', () => {
+  // The registered bash tool proves the command, and here the displayed
+  // summary IS that command — so the string-identity proof would hold. The
+  // `command` kind is nevertheless NOT claimed in this round: it is a
+  // deferred capability whose closure needs the DISPLAYED string to change
+  // (an independent visible-content decision), and this round's scope is
+  // `path` + `pattern` only.
   const { node } = toolNodeOf([
     ev('turn/start', { turn: 1 }, 0),
-    toolCall(1, 'c1', 'bash', { command: 'pnpm test:product' }),
+    toolCall(1, 'c1', 'bash', { command: 'pnpm test:product', description: 'pnpm test:product' }),
     toolResult(2, 'c1', 'ok'),
   ], BASH_PRESENTER)
   assert.ok(node !== undefined, 'the tool node exists')
   assert.equal(node.props['target'], 'pnpm test:product')
-  assert.equal(node.props['targetKind'], 'command')
+  assert.equal(node.props['targetKind'], 'text', 'the command kind is deferred, not claimed')
 })
 
 // ── The refusals ───────────────────────────────────────────────────────────
@@ -384,19 +393,19 @@ test('a presenter that throws leaves the row with the plain text kind', () => {
 
 // ── The Remote branch ──────────────────────────────────────────────────────
 
-test('the Remote branch reaches the path kind for the tools whose OWN result metadata states a path', () => {
-  // The Client-derived presenter never consults a Host registry. It derives a
-  // diff view from the raw edit/write arguments, and it reads the TOOL-AUTHORED
-  // result metadata for the read family. So a Remote read row reaches the same
-  // path kind as a Direct one, without a Host field and without inferring by
-  // tool name.
+test('the Remote branch reaches the path kind only from TOOL-AUTHORED result metadata', () => {
+  // The Client-derived presenter never consults a Host registry. Its CALL
+  // views are derived from the tool name, so they are a name-keyed GUESS and
+  // prove nothing; its RESULT view comes from the tool's own result metadata,
+  // which IS a tool-authored statement. So a Remote read row reaches the
+  // same path kind as a Direct one — from the metadata, not from the name.
   const remote = createClientToolPresenter()
-  const kindsOf = (name: string, args: Record<string, unknown>, meta?: unknown): unknown => {
+  const kindsOf = (name: string, args: Record<string, unknown>, meta?: unknown, text = 'ok'): unknown => {
     const folder = new TranscriptFolder()
     folder.apply([
       ev('turn/start', { turn: 1 }, 0),
       toolCall(1, 'c1', name, args),
-      toolResult(2, 'c1', 'ok', meta),
+      toolResult(2, 'c1', text, meta),
     ])
     const keys = new TranscriptNodeKeys()
     const view = View.from({
@@ -410,12 +419,43 @@ test('the Remote branch reaches the path kind for the tools whose OWN result met
 
   assert.equal(kindsOf('read', { file_path: 'src/a.ts' }, {
     path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1,
-  }), 'path', 'the tool-authored metadata states the path the head displays')
-  assert.equal(kindsOf('edit', { file_path: 'src/a.ts', old_string: 'a', new_string: 'b' }), 'path',
-    'the Remote branch derives the edit path from the raw arguments')
-  assert.equal(kindsOf('write', { file_path: 'src/b.ts', content: 'x' }), 'path')
+  }, READ_ENVELOPE), 'path', 'the tool-authored metadata states the path the head displays')
+  assert.equal(kindsOf('read', { file_path: 'src/a.ts' }, {
+    path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1,
+  }), 'text', 'without the envelope the content describes nothing, so there is no proof')
   assert.equal(kindsOf('read', { file_path: 'src/a.ts' }), 'text',
     'without the tool-authored metadata there is no proof, so the row stays plain')
   assert.equal(kindsOf('glob', { pattern: 'src/**/*.ts' }), 'text',
     'a search pattern is provable only from the registered call view')
+  assert.equal(kindsOf('edit', { file_path: 'src/a.ts', old_string: 'a', new_string: 'b' }), 'text',
+    'the Remote call view is derived from the tool NAME, so it is not a proof')
+  assert.equal(kindsOf('write', { file_path: 'src/b.ts', content: 'x' }), 'text',
+    'the Remote call view is derived from the tool NAME, so it is not a proof')
+})
+
+test('a name-derived view never proves a path, even when it matches the displayed target', () => {
+  // A PLUGIN may register its own tool under a built-in name, and the
+  // registry lets a scoped registration SHADOW a global one. The Client
+  // branch derives its views from that name, so a plugin's `file_path`
+  // holding a URL would otherwise be labelled a path — while the Direct
+  // branch, which resolves the actual scoped definition, would not.
+  const remote = createClientToolPresenter()
+  const args = { file_path: 'https://example.test/item', old_string: 'a', new_string: 'b' }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'c1', 'edit', args),
+    toolResult(2, 'c1', 'ok'),
+  ])
+  const keys = new TranscriptNodeKeys()
+  const view = View.from({
+    main: transcriptView(projectTranscriptStructure(folder.messages()), keys, {
+      cwd: '/repo',
+      toolPresenter: remote,
+    }),
+  })
+  const node = flatten(view).find(candidate => candidate.kind === 'tool')
+  assert.ok(node !== undefined, 'the tool node exists')
+  assert.equal(node.props['target'], 'https://example.test/item')
+  assert.equal(node.props['targetKind'], 'text', 'a name-derived view proves nothing')
 })

@@ -16,6 +16,9 @@ import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-
 
 const presenter = createClientToolPresenter()
 
+/** One read envelope, in the shape the fs read tool writes into its result. */
+const READ_ENVELOPE = '<path>src/a.ts</path>\n<type>file</type>\n<content>\n1: a\n</content>'
+
 test('edit: a diff card derived from the call arguments (old/new strings)', () => {
   const view = presenter.call('edit', JSON.stringify({ path: 'src/a.ts', old_string: 'before', new_string: 'after' }))
   assert.deepEqual(view, {
@@ -72,22 +75,107 @@ test('result: a settled view comes only from the TOOL-AUTHORED result metadata',
   assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: 'nope' }), undefined)
   // A payload that names a path but carries NO window is not the read shape.
   assert.equal(presenter.result('read', '{}', { content: [], isError: false, meta: { path: 'src/a.ts' } }), undefined)
-  // An EMPTY path proves no file.
-  assert.equal(presenter.result('read', '{}', {
-    content: [], isError: false, meta: { path: '', offset: 1, lines: [], totalLines: 1 },
+  // An EMPTY path proves no file. On the DIFF shape the path guard is what
+  // refuses it (the envelope-path equality only guards the read shape).
+  assert.equal(presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { path: '', diffs: [{ path: 'src/a.ts', oldText: 'a', newText: 'b' }] },
+  }), undefined)
+  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: READ_ENVELOPE }],
+    isError: false,
+    meta: { path: '', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 },
   }), undefined)
   // An empty or foreign diff list proves no file either.
   assert.equal(presenter.result('write', '{}', { content: [], isError: false, meta: { path: 'src/a.ts', diffs: [] } }), undefined)
   assert.equal(presenter.result('write', '{}', { content: [], isError: false, meta: { path: 'src/a.ts', diffs: [{ foo: 1 }] } }), undefined)
   // The tool's OWN metadata: the read view the tool declared.
-  const read = presenter.result('read', '{}', {
-    content: [],
+  const read = presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: READ_ENVELOPE }],
     isError: false,
     meta: { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1, lang: 'ts' },
   })
   assert.ok(read !== undefined && read.card === 'read')
   assert.equal(read.path, 'src/a.ts')
   assert.equal(read.lang, 'ts')
+})
+
+test('result: a row whose args are not a JSON object yields no view', () => {
+  // The Direct bridge parses the args JSON BEFORE consulting the tool, so a
+  // row whose args are not a JSON object never reaches a Host `presentResult`
+  // at all. A MERGED read group is exactly that row: its args are the literal
+  // `'2 files'` and it INHERITS the first read's metadata and result blocks.
+  // If the Client derivation ignored this gate, the merged group would render
+  // as ONE file instead of the two-file tree the card actually shows.
+  assert.equal(presenter.result('read', '2 files', {
+    content: [{ type: 'text', text: READ_ENVELOPE }],
+    isError: false,
+    meta: { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 },
+  }), undefined)
+})
+
+test('result: a failed call yields no view', () => {
+  // The tool's own Host `presentResult` returns nothing for a failed call; the
+  // Client derivation must agree, or the two branches render a failure
+  // differently.
+  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: READ_ENVELOPE }],
+    isError: true,
+    meta: { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 },
+  }), undefined)
+})
+
+test('result: the result content must be the ONE envelope the view describes', () => {
+  const meta = { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 }
+  // A content that is not a text block describes nothing.
+  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'image' } as never], isError: false, meta,
+  }), undefined)
+  // A content that is not an envelope at all describes nothing.
+  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: 'ok' }], isError: false, meta,
+  }), undefined)
+  // An envelope for a DIFFERENT path than the metadata proves nothing.
+  assert.equal(presenter.result('read', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: '<path>other.ts</path>\n<type>file</type>\n<content>\n1: a\n</content>' }],
+    isError: false, meta,
+  }), undefined)
+})
+
+test('result: a malformed diff entry is refused instead of reaching the diff renderer', () => {
+  // The renderer reads `hunk.newText` as a string; an entry that lacks it
+  // would throw. The tool's own `diffsFromMeta` validates every entry, and
+  // the Client derivation must validate the same way.
+  const malformed = presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { path: 'src/a.ts', diffs: [{ path: 'src/a.ts' }] },
+  })
+  assert.equal(malformed, undefined)
+  // An entry whose `newText` is not a string is refused even when every
+  // other field is well-formed.
+  const noNewText = presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { path: 'src/a.ts', diffs: [{ path: 'src/a.ts', oldText: null }] },
+  })
+  assert.equal(noNewText, undefined)
+  // An entry whose `oldText` is neither a string nor null is refused.
+  const badOldText = presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { path: 'src/a.ts', diffs: [{ path: 'src/a.ts', oldText: 7, newText: 'b' }] },
+  })
+  assert.equal(badOldText, undefined)
+  // A well-formed entry still yields the diff view the tool declared.
+  const wellFormed = presenter.result('write', JSON.stringify({ file_path: 'src/a.ts' }), {
+    content: [{ type: 'text', text: 'written' }],
+    isError: false,
+    meta: { path: 'src/a.ts', diffs: [{ path: 'src/a.ts', oldText: 'a', newText: 'b' }] },
+  })
+  assert.ok(wellFormed !== undefined && wellFormed.card === 'diff')
+  assert.deepEqual(wellFormed.diffs, [{ path: 'src/a.ts', oldText: 'a', newText: 'b' }])
 })
 
 test('negative lock: no Host tool registry, no presenter callbacks, no wire surface', () => {

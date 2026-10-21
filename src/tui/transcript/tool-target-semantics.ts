@@ -36,9 +36,10 @@
  *   (`web_fetch`) and a todo array (`todo_write`); only the declared kind
  *   tells them apart.
  *
- * The result is a CONSERVATIVE SUBSET of the SDK's vocabulary: `command`,
- * `path`, `pattern` and the default `text`. `query` is never claimed here —
- * no registered tool declares a query-bearing call view.
+ * The result is a CONSERVATIVE SUBSET of the SDK's vocabulary: `path`,
+ * `pattern` and the default `text`. `command` is NOT claimed in this round —
+ * it is a deferred capability, and `query` is never claimed because no
+ * registered tool declares a query-bearing call view.
  * @module @xmoon76/dsh-pi-tui/tui/transcript/tool-target-semantics
  */
 
@@ -46,12 +47,21 @@ import type { ToolCallKind, ToolCallView, ToolResultView } from '@deepseek-ai/ds
 import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 import type { ToolPresenter } from './tool-presentation.ts'
 
-/** The SDK's tool-target vocabulary, restricted to what this module proves. */
-export type ToolTargetKind = 'command' | 'path' | 'pattern' | 'text'
+/**
+ * The SDK's tool-target vocabulary, restricted to what this module proves.
+ *
+ * `command` is deliberately NOT in this set: it is a deferred capability for
+ * a later round, not a missing one (see `toolTargetKind`).
+ */
+export type ToolTargetKind = 'path' | 'pattern' | 'text'
 
 /** The presentation read one tool row needs. */
 export interface ToolTargetFacts {
-  /** The registered tool's call view (undefined when the tool declares none). */
+  /**
+   * The REGISTERED tool's call view, or undefined when the tool declares
+   * none — OR when the bridge's views are not tool-authored (the Client
+   * branch derives them from the tool name, which is a guess, not a proof).
+   */
   readonly callView: ToolCallView | undefined
   /** The registered tool's result view (undefined when the tool declares none). */
   readonly resultView: ToolResultView | undefined
@@ -152,13 +162,12 @@ export function toolTargetKind(
   facts: ToolTargetFacts,
   cwd: string | undefined,
 ): ToolTargetKind {
-  // A terminal call view proves a COMMAND — but only when the displayed
-  // string IS that command. (For `bash` the head shows the tool's
-  // `description`, so the proof does not hold and the row stays `text`.)
-  // The `card: 'terminal'` shape is itself the tool author's declaration that
-  // this call IS a shell command, so no extra kind check is needed here.
-  const call = facts.callView
-  if (call !== undefined && call.card === 'terminal' && call.title === displayed) return 'command'
+  // `command` is NOT claimed in this round. It is a DEFERRED capability, not
+  // a missing one: the registered bash tool proves the command, but the DSH
+  // head shows the tool's `description`, so the two are different strings and
+  // the string-identity proof does not hold. Claiming it would need the
+  // DISPLAYED string to change (an independent visible-content decision),
+  // which is out of this round's scope.
 
   // A search call view proves a PATTERN — but only a tool that DECLARES the
   // `search` kind may: its salient raw input is then the pattern it searches
@@ -190,7 +199,13 @@ export function toolTargetFactsOf(
   message: Extract<TranscriptMessage, { kind: 'tool' }>,
 ): ToolTargetFacts {
   if (presenter === undefined) return { callView: undefined, resultView: undefined }
-  const callView = presenter.call(message.name, message.args)
+  // A call view is PROOF only when the REGISTERED tool author declared it. The
+  // Client branch derives its call views from the tool name and the raw args:
+  // that repeats a name-keyed guess, and a plugin may register its own tool
+  // under a built-in name, so the name cannot even identify the built-in. Such
+  // a view proves nothing about what the string IS, and it must not be read as
+  // a path/pattern proof.
+  const callView = presenter.callViewIsToolAuthored === true ? presenter.call(message.name, message.args) : undefined
   let resultView: ToolResultView | undefined
   try {
     resultView = presenter.result(message.name, message.args, {
