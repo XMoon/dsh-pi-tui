@@ -97,7 +97,7 @@ test('initial measure happens once; the value is cached for cheap refreshes', ()
   assert.equal(counting.measureCalls, 1, '100 cheap refreshes never measure')
 })
 
-test('19.2 hard gate: 100 UI-only refresh cycles -> measureCalls stays 0', () => {
+test('100 UI-only refresh cycles -> measureCalls stays 0', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(42_000)
   coordinator.bind('session-a')
@@ -110,7 +110,7 @@ test('19.2 hard gate: 100 UI-only refresh cycles -> measureCalls stays 0', () =>
   assert.equal(coordinator.valueFor('session-a'), undefined, 'no measurement was ever made')
 })
 
-test('19.3 long-session independence: cheap refresh cost never touches the reader', () => {
+test('cheap refresh cost never touches the reader', () => {
   const coordinator = new ContextMeasurementCoordinator()
   // The reader's cost grows with session length — but it must never run
   // for cheap refreshes, so the cost is irrelevant.
@@ -180,7 +180,7 @@ test('a stale/foreign session id is refused: no measurement can commit under the
   assert.equal(coordinator.snapshot().sessionId, 'session-current', 'the bound identity never changed')
 })
 
-test('19.6 failure regression: undefined and throwing readers keep last-good, recover later', () => {
+test('undefined and throwing readers keep last-good, recover later', () => {
   const coordinator = new ContextMeasurementCoordinator()
   let calls = 0
   let fail = true
@@ -215,7 +215,7 @@ test('19.6 failure regression: undefined and throwing readers keep last-good, re
   assert.equal(throwing.isDirty(), true, 'the dirty flag survives the throw (retry armed)')
 })
 
-test('19.5 first-paint ordering: the deferred measure runs AFTER the paint turn, fenced', () => {
+test('the deferred measure runs AFTER the paint turn, fenced', () => {
   const order: string[] = []
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(30_000)

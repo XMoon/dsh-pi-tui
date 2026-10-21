@@ -2335,7 +2335,7 @@ test('finding F14 (7): a REAL opening rollback retires the opening target\'s pre
   }
 })
 
-test('(8): signal-less live requests are settled by the REAL retirement, not by TUI exit', async (t) => {
+test('signal-less live requests are settled by the REAL retirement, not by TUI exit', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-nosig-')
   const sessionA = fakeSession({
@@ -2390,7 +2390,7 @@ test('(8): signal-less live requests are settled by the REAL retirement, not by 
   }
 })
 
-test('(9): an open Alt+Q list does not survive a real Session replacement', async (t) => {
+test('an open Alt+Q list does not survive a real Session replacement', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-altq-switch-')
   const sessionA = fakeSession({
@@ -2559,12 +2559,12 @@ async function expectPublicationWindowCurrentness(
   }
 }
 
-test('(10): the replaced modal leaves the seat AT the owner publication, before the new owner is initialized (fork and /new)', async (t) => {
+test('the replaced modal leaves the seat AT the owner publication, before the new owner is initialized (fork and /new)', async (t) => {
   await expectPublicationWindowCurrentness(t, 'fork')
   await expectPublicationWindowCurrentness(t, 'new')
 })
 
-test('(11): the commit-time withdrawal performs NO Host projection read (a throwing read cannot reach it)', async (t) => {
+test('the commit-time withdrawal performs NO Host projection read (a throwing read cannot reach it)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-commitread-')
   const sessionA = fakeSession({

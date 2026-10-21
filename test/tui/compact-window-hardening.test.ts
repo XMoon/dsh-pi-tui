@@ -41,7 +41,7 @@ const ambient = (turn: number, label: string): TranscriptMessage => ({
 
 // --- 9.1 cluster at the window edge ---------------------------------------
 
-test('9.1 a window clusters only the visible raw members and never invents an off-window owner', () => {
+test('a window clusters only the visible raw members and never invents an off-window owner', () => {
   // The original run had four ambient rows; this window starts at the third.
   const c = ambient(1, 'ctx-c')
   const d = ambient(1, 'ctx-d')
@@ -52,7 +52,7 @@ test('9.1 a window clusters only the visible raw members and never invents an of
   assert.ok(!clusters[0]!.members.some(member => member.kind === 'system' && (member.label === 'ctx-a' || member.label === 'ctx-b')))
 })
 
-test('9.1 the window-summary marker never merges or joins an ambient run', () => {
+test('the window-summary marker never merges or joins an ambient run', () => {
   const a = ambient(1, 'ctx-a')
   const b = ambient(1, 'ctx-b')
   const before = clusterAdjacentAmbientContext([summaryRow('… 4 older turns'), a, b])
@@ -63,7 +63,7 @@ test('9.1 the window-summary marker never merges or joins an ambient run', () =>
   assert.equal(after.clusters.length, 0, 'the summary marker ends the run: no cross-marker merge')
 })
 
-test('9.1 a page change refreshes the container owner and drops the old disclosure state', async () => {
+test('a page change refreshes the container owner and drops the old disclosure state', async () => {
   const { vt, app } = startApp()
   const a = ambient(1, 'ctx-a')
   const b = ambient(1, 'ctx-b')
@@ -89,7 +89,7 @@ test('9.1 a page change refreshes the container owner and drops the old disclosu
   assert.equal(app.expandedContextClusterOwnersForTest().size, 0)
 })
 
-test('9.1 an A -> B -> A page round-trip on the SAME message objects never resurrects a dropped owner', async () => {
+test('an A -> B -> A page round-trip on the SAME message objects never resurrects a dropped owner', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
   const workOwner = thinking(1, 'page A run')
@@ -129,7 +129,7 @@ test('9.1 an A -> B -> A page round-trip on the SAME message objects never resur
 
 // --- 9.2 Work at the window edge ------------------------------------------
 
-test('9.2 a window beginning mid-Process folds only the visible rows', () => {
+test('a window beginning mid-Process folds only the visible rows', () => {
   const messages = [thinking(2, 'mid-run reasoning'), tool(2, 'RESULT_MID')]
   const blocks = projectCompact(messages, noOptions)
   assert.equal(blocks.length, 1)
@@ -139,7 +139,7 @@ test('9.2 a window beginning mid-Process folds only the visible rows', () => {
   assert.equal(span?.owner, messages[0], 'the first visible Process row owns the span')
 })
 
-test('9.2 a window ending mid-Process keeps the single trailing row and no off-window member', () => {
+test('a window ending mid-Process keeps the single trailing row and no off-window member', () => {
   const messages = [tool(2, 'RESULT_END')]
   const blocks = projectCompact(messages, noOptions)
   const span = blocks[0]!.kind === 'work' ? blocks[0]!.span : undefined
@@ -147,7 +147,7 @@ test('9.2 a window ending mid-Process keeps the single trailing row and no off-w
   assert.equal(span?.owner, messages[0])
 })
 
-test('9.2 a window-summary before Process never joins the Work span', () => {
+test('a window-summary before Process never joins the Work span', () => {
   const messages = [summaryRow('… 4 older turns'), thinking(2, 'run'), tool(2, 'ok')]
   const blocks = projectCompact(messages, noOptions)
   assert.deepEqual(blocks.map(block => block.kind), ['message', 'work'])
@@ -155,7 +155,7 @@ test('9.2 a window-summary before Process never joins the Work span', () => {
   assert.deepEqual(span?.members, [messages[1], messages[2]], 'the summary never becomes a Work member')
 })
 
-test('9.2 the window prune keeps owners that are still projected when paging from another preset', async () => {
+test('the window prune keeps owners that are still projected when paging from another preset', async () => {
   const { vt, app } = startApp()
   const owner = thinking(1, 'page run')
   const page = [owner, tool(1, 'ok')]
@@ -182,7 +182,7 @@ test('9.2 the window prune keeps owners that are still projected when paging fro
     `the span stays expanded in Compact:\n${vt.getViewport().join('\n')}`)
 })
 
-test('9.2 a Work disclosure from an older window is not re-applied to a new page owner', async () => {
+test('a Work disclosure from an older window is not re-applied to a new page owner', async () => {
   const { vt, app } = startApp()
   const oldOwner = thinking(1, 'old run')
   app.setTranscript([oldOwner, tool(1, 'old result')], new Map(), { mode: 'history', endTurn: 1, firstTurn: 1, lastTurn: 1 })
@@ -241,7 +241,7 @@ test('a window at the true tail (hasNewer=false) keeps the latest preview', asyn
 
 // --- 9.3 restored legacy Context inside a window ---------------------------
 
-test('9.3 a restored legacy Context window presents safely with no crash', async () => {
+test('a restored legacy Context window presents safely with no crash', async () => {
   const { vt, app } = startApp()
   const legacyRecall: TranscriptMessage = {
     kind: 'system', turn: 1, text: 'recalled payload', context: true,

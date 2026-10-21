@@ -1020,7 +1020,7 @@ test('M. mergeCause preserves an existing cause and aggregates secondaries', () 
   assert.equal(untouched.cause, undefined)
 })
 
-test('M2. the Client composition never crosses the Host legacy-settings boundary', () => {
+test('the Client composition never crosses the Host legacy-settings boundary', () => {
   // Only Host bootstrap owns the legacy settings migration (plan §23): the
   // Client composition must not import the migration, read `profileContext`,
   // or open `$DSH_HOME/settings.yaml(.imported)`. The scan is deliberately
@@ -1042,7 +1042,7 @@ test('M2. the Client composition never crosses the Host legacy-settings boundary
 // M3 - disposeRemoteContributions: per-step isolation, non-truncating
 // ---------------------------------------------------------------------------
 
-test('M3. disposeRemoteContributions isolates failures and runs every disposer in reverse', async () => {
+test('disposeRemoteContributions isolates failures and runs every disposer in reverse', async () => {
   const executionOrder: string[] = []
   const sentinel = new Error('contribution disposal failure')
   const errors = await disposeRemoteContributions([
@@ -1156,7 +1156,7 @@ test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and S
     await host.dispose()
   })
 
-  await t.test('PEER-1. the real unary Fetch carrier passes the exact Host Connection owner Peer', () => {
+  await t.test('the real unary Fetch carrier passes the exact Host Connection owner Peer', () => {
     assert.ok(fetchObservations.length > 0, 'runtime readiness must have issued at least one real unary call through the carrier')
     for (const observation of fetchObservations) {
       assert.ok(Object.is(observation.peer, connection.browserPeer),
@@ -1166,7 +1166,7 @@ test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and S
     }
   })
 
-  await t.test('PEER-2. the real Gateway stream carrier passes the SAME owner Peer and opens a real logical stream', async () => {
+  await t.test('the real Gateway stream carrier passes the SAME owner Peer and opens a real logical stream', async () => {
     const reference = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
     try {
       await reference.ready
@@ -1182,7 +1182,7 @@ test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and S
       'every logical stream must speak for browserPeer')
   })
 
-  await t.test('PEER-3. the same official Gateway admits the owner and refuses a no-policy guest for the IDENTICAL request', async () => {
+  await t.test('the same official Gateway admits the owner and refuses a no-policy guest for the IDENTICAL request', async () => {
     restoreFetchObservation()
     const shared = connection.createSharedFetchHandler('/api')
     const ownerEnvelope = await (await shared.fetch(unaryRemoteRequest('session/list', 'm3-peer-owner'), connection.browserPeer))
@@ -1202,7 +1202,7 @@ test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and S
     }
   })
 
-  await t.test('PEER-4. a disposed Peer is refused by the Gateway, and the owner Peer dies with the Connection fiber', async () => {
+  await t.test('a disposed Peer is refused by the Gateway, and the owner Peer dies with the Connection fiber', async () => {
     const disposedGuest = connection.createPeer({ principal: { kind: 'test-guest', guest: 'disposed' } })
     await disposedGuest.dispose()
     const shared = connection.createSharedFetchHandler('/api')

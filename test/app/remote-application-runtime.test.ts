@@ -239,7 +239,7 @@ test('C. disposeTransport disposes the Client UI subtree FIRST, then adapters, t
     'the ordinary Host Session store must remain servable')
 })
 
-test('C2. disposeTransport preserves errors from every step and never truncates the backend-internal cleanup', async (t) => {
+test('disposeTransport preserves errors from every step and never truncates the backend-internal cleanup', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
@@ -284,7 +284,7 @@ test('C2. disposeTransport preserves errors from every step and never truncates 
   await assert.doesNotReject(() => runtime.selected.disposeTransport())
 })
 
-test('C3. the Client UI subtree disposes independently before the official Client core, with a separate Host-negative service (M3-6 PR1)', async (t) => {
+test('the Client UI subtree disposes independently before the official Client core, with a separate Host-negative service (M3-6 PR1)', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
@@ -333,7 +333,7 @@ test('C3. the Client UI subtree disposes independently before the official Clien
   await host.dispose()
 })
 
-test('D1. a Host-side wire construction failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async (t) => {
+test('a Host-side wire construction failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   // A foreign fileUploads double makes the REAL Host row fail loudly inside
@@ -359,7 +359,7 @@ test('D1. a Host-side wire construction failure unwinds the mounted M3 fibers an
   await host.dispose()
 })
 
-test('D2. a post-wire application composition failure (Client exists) unwinds the wire and surfaces the original error', async (t) => {
+test('a post-wire application composition failure (Client exists) unwinds the wire and surfaces the original error', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
