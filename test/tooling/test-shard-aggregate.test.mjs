@@ -112,6 +112,32 @@ test('two Node versions are two SEPARATE partitions, and both are accepted', (t)
   assert.equal(aggregate.observedFileCount, EXPECTED.size)
 })
 
+test('each Node version is compared against the baseline ON ITS OWN', (t) => {
+  // A version may skip a different number of cases than another — the
+  // optional-bundle skip depends on what that version's environment
+  // provides. So the baseline is compared per version, not across the
+  // whole run.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-version-baseline-')
+  const first = FILES.slice(0, 1)
+  const second = FILES.slice(1)
+  writeShard(root, 'shard-1-node24', { files: first })
+  writeShard(root, 'shard-2-node24', { files: second })
+  writeShard(root, 'shard-1-node22', { files: first })
+  writeShard(root, 'shard-2-node22', { files: second })
+  // Each version runs the WHOLE lane, so each version's case count is the
+  // lane's own count — the same number for every version. The fixture
+  // writes one case per file.
+  const cases = FILES.length
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED, expectedCases: cases, expectedSkipped: 0 })
+  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
+  assert.deepEqual(aggregate.versions.map(entry => entry.node).sort(), ['22', '24'])
+  // Each version reports its OWN counts.
+  for (const version of aggregate.versions) {
+    assert.equal(version.cases, cases, `Node ${version.node} must report its own case count`)
+  }
+})
+
 test('a MISSING shard on ONE Node version fails that version', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-shard-version-missing-')

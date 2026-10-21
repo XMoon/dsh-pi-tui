@@ -217,8 +217,8 @@ export function verifyShards({
   const groups = new Map()
   for (const directory of shardDirectories) {
     const version = nodeVersionOf(directory)
-    if (!groups.has(version)) groups.set(version, [])
-    groups.get(version).push(directory)
+    if (!groups.has(version)) groups.set(version, { version, directories: [], cases: 0, skipped: 0 })
+    groups.get(version).directories.push(directory)
   }
   if (groups.size === 0) {
     failures.push(`expected ${total} shard directories, found 0`)
@@ -232,9 +232,10 @@ export function verifyShards({
   // observe the SAME file count. The first group's is the report's.
   let observedFileCount = 0
 
-  for (const [version, directories] of groups) {
+  for (const group of groups.values()) {
+    const { version, directories } = group
     const seenFiles = new Map()
-    versions.push({ node: version, shardCount: directories.length })
+    // The version's own counts are filled in after its shards are counted.
     if (directories.length !== total) {
       failures.push(`expected ${total} shard directories for Node ${version}, found ${directories.length}: ${directories.join(', ')}`)
     }
@@ -339,6 +340,8 @@ export function verifyShards({
     }
     totalCases += shardCases.length
     totalSkipped += skipped
+    group.cases += shardCases.length
+    group.skipped += skipped
     shards.push({
       shard: directory,
       fileCount: shardFiles.length,
@@ -352,6 +355,8 @@ export function verifyShards({
       availableParallelism: spec?.cpu?.availableParallelism ?? null,
     })
     }
+
+    versions.push({ node: version, shardCount: directories.length, cases: group.cases, skipped: group.skipped })
 
     // The union must be the whole lane — for THIS Node version.
     if (versions.length === 1) observedFileCount = seenFiles.size
@@ -376,14 +381,23 @@ export function verifyShards({
   // unsharded lane's own totals — and a difference in either direction
   // fails: a missing case is a lost case, and an extra skip is a case that
   // did not run.
-  if (expectedCases !== null && !Number.isNaN(expectedCases)) {
-    if (totalCases !== expectedCases) {
-      failures.push(`the shards recorded ${totalCases} case(s), but the baseline is ${expectedCases}`)
+  //
+  // The counts are compared PER GROUP, not across the whole run: each Node
+  // version is its own partition, and a version may skip a different
+  // number of cases than another — the optional-bundle skip depends on
+  // what that version's environment provides.
+  for (const group of groups.values()) {
+    const cases = group.cases
+    const skipped = group.skipped
+    if (expectedCases !== null && !Number.isNaN(expectedCases)) {
+      if (cases !== expectedCases) {
+        failures.push(`the shards on Node ${group.version} recorded ${cases} case(s), but the baseline is ${expectedCases}`)
+      }
     }
-  }
-  if (expectedSkipped !== null && !Number.isNaN(expectedSkipped)) {
-    if (totalSkipped !== expectedSkipped) {
-      failures.push(`the shards recorded ${totalSkipped} skipped case(s), but the baseline is ${expectedSkipped}`)
+    if (expectedSkipped !== null && !Number.isNaN(expectedSkipped)) {
+      if (skipped !== expectedSkipped) {
+        failures.push(`the shards on Node ${group.version} recorded ${skipped} skipped case(s), but the baseline is ${expectedSkipped}`)
+      }
     }
   }
 
