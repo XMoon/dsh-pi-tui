@@ -46,7 +46,8 @@ import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
-import { toolPresenterFrom, type ToolDefinitionLike, type ToolPresenter } from '../../src/tui/transcript/tool-presentation.ts'
+import { toolCardHeader, toolPresenterFrom, type ToolDefinitionLike, type ToolPresenter } from '../../src/tui/transcript/tool-presentation.ts'
+import { toolTargetFactsOf, toolTargetKind } from '../../src/tui/transcript/tool-target-semantics.ts'
 import { TranscriptNodeKeys, transcriptView } from '../../src/tui/tsp/transcript-view.ts'
 
 const T0 = 1_700_000_000_000
@@ -287,15 +288,14 @@ test('the registered tools the head displays a COUNT for keep the plain text kin
 
 // ── Direct / Remote parity, measured on the REAL registry ─────────────────
 
-test('the two branches agree on the read family, which the tool-authored metadata proves', () => {
-  // The parity question, scoped to what this file MEASURES: for the read
-  // family the two branches reach the same kind, because both read the
-  // tool's OWN result metadata — a real source, not a name-keyed guess.
+test('both branches prove the path of ONE settled read from its tool-authored metadata', () => {
+  // Exactly what this case asserts: for ONE successful read whose metadata and
+  // envelope describe the same single file, the Direct branch and the Client
+  // branch both reach `path`. That is the whole measured claim.
   //
-  // This is NOT a claim about every registered tool: the matrix below is the
-  // exact set this case measures (read, and the two refusals). The search
-  // family's divergence is pinned by the NEXT case, and the edit/write
-  // divergence by the one after it.
+  // It is NOT a family-wide matrix and NOT a claim about every registered
+  // tool. The search family has its own case below, the edit family another,
+  // and the refusals have their own cases elsewhere in this file.
   const remote = createClientToolPresenter()
   const kindWith = (
     presenter: ToolPresenter,
@@ -336,12 +336,15 @@ test('the two branches agree on the read family, which the tool-authored metadat
   )
 })
 
-test('the two branches differ on the edit family, whose Remote call view is a name-keyed guess', () => {
-  // The Remote bridge derives its edit/write call view from the tool NAME and
-  // the raw arguments. A plugin may register its own tool under a built-in
-  // name, so that view is a guess and cannot PROVE that the displayed string
-  // is a path. The Direct branch resolves the actual scoped definition, so it
-  // can. The difference is the price of never guessing by name.
+test('an edit with NO result metadata is proven by Direct and refused by the Client', () => {
+  // This case measures ONE running-shaped edit: call args only, no result
+  // metadata. There the Direct branch has the registered tool's own
+  // `presentCall`, while the Client's call view is derived from the tool NAME
+  // (a guess, so it is not proof). A plugin may register its own tool under a
+  // built-in name, which is why that guess cannot be trusted.
+  //
+  // It does NOT measure a settled edit: with result metadata present the two
+  // branches agree, and the real-execution case below covers that.
   const remote = createClientToolPresenter()
   const kindWith = (
     presenter: ToolPresenter,
@@ -372,11 +375,14 @@ test('the two branches differ on the edit family, whose Remote call view is a na
     'the Remote branch refuses: its call view is derived from the tool name')
 })
 
-test('the two branches differ on the search family, whose pattern only the registered call view proves', () => {
-  // A PATTERN is provable only from the registered call view, because the
-  // search tools' result metadata carries the RESULTS, not the pattern. The
-  // Remote branch stays plain there. This is a measured fact about the two
-  // branches' authorities — not a product contract.
+test('one glob call proves its pattern on Direct and stays plain on the Client', () => {
+  // This case measures ONE glob call. A PATTERN is provable only from the
+  // registered call view, because the search tools' result metadata carries
+  // the RESULTS, not the pattern. The Client branch stays plain.
+  //
+  // `grep` is not separately exercised here; it shares the same shape (a
+  // `search`-kind call view whose raw input is the pattern), so this is a
+  // sample, not a family-wide matrix.
   const remote = createClientToolPresenter()
   const kindWith = (presenter: ToolPresenter): unknown => {
     const folder = new TranscriptFolder()
@@ -445,4 +451,58 @@ test('a REAL read execution yields the SAME view on both branches', async (t) =>
     assert.equal(clientView[field], directView[field], `the two branches agree on ${field}`)
   }
   assert.deepEqual(clientView.lines, directView.lines, 'the two branches agree on the lines')
+})
+
+test('a REAL settled read asked for by a RELATIVE path still claims the path kind', async () => {
+  // The two stages of a real call spell one file differently: `presentCall`
+  // repeats the argument the model wrote (`package.json`), while the result
+  // metadata reports the path the tool resolved (an absolute path). The
+  // classifier must read that as ONE file. Unioning the two representations
+  // would demote the row to `text` exactly when the call finishes.
+  const relative = 'package.json'
+  const args = { file_path: relative }
+  const outcome = await ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: ToolCallId('call-b1-relative'),
+    name: 'read',
+    arguments: args,
+    agent: owner,
+  })
+  assert.equal(outcome.isError, false, 'the real relative read succeeded')
+
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'c1', 'read', args),
+    // The REAL result content: the read envelope is what the tool's own
+    // presenter parses, so a placeholder body would prove nothing.
+    ev('tool/result', {
+      turn: 1,
+      step: 0,
+      message: {
+        id: MessageId('result-c1'),
+        role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [...outcome.content],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+      ...outcome.meta === undefined ? {} : { meta: outcome.meta },
+    }, 2),
+  ])
+  const row = folder.messages().find((m): m is Extract<typeof m, { kind: 'tool' }> => m.kind === 'tool')
+  assert.ok(row !== undefined, 'the folded row exists')
+  const cwd = process.cwd()
+  const header = toolCardHeader('read', row.args, cwd)
+  const facts = toolTargetFactsOf(presenter, row)
+  const callPath = (facts.callView as { locations?: { path?: string }[] } | undefined)?.locations?.[0]?.path
+  const resultPath = (facts.resultView as { card: string; path?: string } | undefined)?.path
+  assert.equal(callPath, relative, 'the call view repeats the RELATIVE argument')
+  assert.ok(resultPath !== undefined && resultPath.startsWith('/'), 'the result view reports the resolved ABSOLUTE path')
+  assert.notEqual(callPath, resultPath, 'the two stages spell the same file differently')
+  assert.equal(header.summary, relative, 'the head shows the argument the model wrote')
+  assert.equal(
+    toolTargetKind(header.summary, facts, cwd),
+    'path',
+    'one file is one path, however each stage spells it',
+  )
 })

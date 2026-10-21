@@ -294,6 +294,80 @@ test('a row proving SEVERAL paths keeps the plain text kind', () => {
   assert.equal(node.props['targetKind'], 'text')
 })
 
+test('a settled call whose result spells the SAME file absolutely still claims the path', () => {
+  // The two stages legitimately spell one file differently: the call view
+  // repeats the argument the model wrote (`src/a.ts`), the settled result
+  // reports the path the tool resolved (`/tmp/ws/src/a.ts`). Unioning the two
+  // would read one file as two and lose the kind exactly when the call
+  // finishes — the settled result is the authority, so the row keeps `path`.
+  const { node } = toolNodeOf([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'c1', 'read', { file_path: 'src/a.ts' }),
+    toolResult(2, 'c1', 'ok', { path: '/tmp/ws/src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 }),
+  ], {
+    presentCall: () => ({ card: 'generic', title: 'Read', kind: 'read', locations: [{ path: 'src/a.ts' }] }),
+    presentResult: () => ({
+      card: 'read',
+      path: '/tmp/ws/src/a.ts',
+      offset: 1,
+      lines: [{ number: 1, text: 'a' }],
+      totalLines: 1,
+    }),
+  }, '/tmp/ws')
+  assert.ok(node !== undefined, 'the tool node exists')
+  assert.equal(node.props['target'], 'src/a.ts')
+  assert.equal(node.props['targetKind'], 'path', 'one file is one path, however each stage spells it')
+})
+
+test('the RUNNING state keeps the path before any result view exists', () => {
+  // While the call is still running there is no result view, so the call view
+  // is what proves the path. The settled case above must not regress it.
+  const { node } = toolNodeOf([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'c1', 'read', { file_path: 'src/a.ts' }),
+  ], {
+    presentCall: () => ({ card: 'generic', title: 'Read', kind: 'read', locations: [{ path: 'src/a.ts' }] }),
+  })
+  assert.ok(node !== undefined, 'the tool node exists')
+  assert.equal(node.props['status'], 'running')
+  assert.equal(node.props['targetKind'], 'path')
+})
+
+test('a settled result that touches SEVERAL files still refuses the single-path claim', () => {
+  // The multi-file refusal must survive the "the settled result is the
+  // authority" rule: a patch over two files proves two paths, and the head
+  // shows one string.
+  const { node } = toolNodeOf([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'c1', 'patch', { patch: 'x' }),
+    toolResult(2, 'c1', 'patched', {
+      path: 'src/a.ts',
+      diffs: [
+        { path: 'src/a.ts', oldText: 'a', newText: 'A' },
+        { path: 'src/b.ts', oldText: 'b', newText: 'B' },
+      ],
+    }),
+  ], {
+    presentCall: () => ({
+      card: 'diff',
+      title: 'Apply patch (2 files)',
+      diffs: [
+        { path: 'src/a.ts', oldText: null, newText: 'p' },
+        { path: 'src/b.ts', oldText: null, newText: 'p' },
+      ],
+    }),
+    presentResult: () => ({
+      card: 'diff',
+      diffs: [
+        { path: 'src/a.ts', oldText: 'a', newText: 'A' },
+        { path: 'src/b.ts', oldText: 'b', newText: 'B' },
+      ],
+    }),
+  })
+  assert.ok(node !== undefined, 'the tool node exists')
+  assert.equal(node.props['targetKind'], 'text')
+})
+
 test('a result view whose path DISAGREES with the displayed path keeps the plain text kind', () => {
   // The call view proves `src/a.ts` and the result view proves a DIFFERENT
   // path. Two proven paths, one displayed string: the displayed string is not
