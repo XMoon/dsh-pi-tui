@@ -651,7 +651,7 @@ test('app disposal cancels a configurator paste-prefix timer', async (t) => {
   vt.sendInput('\x1b') // arm the ambiguous paste-prefix timer
   app.dispose()
   t.mock.timers.tick(30)
-  assert.equal(model.state().addQuery, 'cache', 'disposal must prevent stale Escape replay')
+  assert.equal(model.state().addQuery, 'cache', 'final disposal must prevent stale Escape replay')
 })
 
 test('malformed paste prefixes preserve Escape, arrows, and following text', async () => {
@@ -1541,10 +1541,10 @@ test('the preview shows the dim [command] placeholder for a draft and the commit
   // No committed cache yet: the row preview shows the placeholder.
   assert.ok(vt.getViewport().join('\n').includes('[command]'), 'the draft preview must show the placeholder')
   // The runtime commits a cache: the unchanged draft now shows the value.
-  app.setFooterCommandItemValue('user:clock', '30')
+  app.setFooterCommandItemValue('user:clock', '14:30')
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('30'), `the committed cache must preview:\n${view}`)
+  assert.ok(view.includes('14:30'), `the committed cache must preview:\n${view}`)
   assert.ok(!view.includes('[command]'), 'the placeholder must disappear once the cache exists')
   app.stop()
 })
@@ -1554,9 +1554,9 @@ test('a modified draft command never shows the old committed cache', async () =>
   const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
   const draft = new FooterCustomItemCatalog(committed)
   openWithCommand(app, committed, draft)
-  app.setFooterCommandItemValue('user:clock', '30')
+  app.setFooterCommandItemValue('user:clock', '14:30')
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('30'))
+  assert.ok(vt.getViewport().join('\n').includes('14:30'))
   // Edit the command in the draft: the preview must fall back to the
   // placeholder — never pretend the old cache is the new command's result.
   vt.sendInput('\r') // row
@@ -1567,7 +1567,7 @@ test('a modified draft command never shows the old committed cache', async () =>
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('[command]'), `a modified draft must show the placeholder:\n${view}`)
-  assert.ok(!view.includes('30'), 'the stale cache must not be shown for a modified draft')
+  assert.ok(!view.includes('14:30'), 'the stale cache must not be shown for a modified draft')
   app.stop()
 })
 

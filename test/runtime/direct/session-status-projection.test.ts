@@ -201,7 +201,7 @@ test('a RETAINED Session with no live Agent still answers its own status', () =>
         modelSelection: { lastUsed: { provider: 'p', model: 'child' } },
         contextPressure: { projectedTokens: 100, contextWindow: 2000 },
         tokenUsage: { uncachedInputTokens: 5, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
-        todos: [{ content: 'todo', status: 'in_progress' }],
+        todos: [{ content: 'child todo', status: 'in_progress' }],
       },
       main: { contextPressure: { projectedTokens: 900 }, todos: [{ content: 'parent todo', status: 'pending' }] },
     },
@@ -214,7 +214,7 @@ test('a RETAINED Session with no live Agent still answers its own status', () =>
     cwd: '/child/ws',
     model: { provider: 'p', model: 'child' },
     context: { projectedTokens: 100, contextWindow: 2000 },
-    todos: [{ content: 'todo', status: 'in_progress' }],
+    todos: [{ content: 'child todo', status: 'in_progress' }],
     usage: { uncachedInputTokens: 5, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
   }, 'the retained Session own facts only — the live MAIN session must not fill any field')
 })

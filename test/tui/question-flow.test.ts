@@ -566,7 +566,7 @@ test('expand resets when the question changes', () => {
   ], 38)
   render(f, 100)
   f.handleInput('e') // expand q1
-  assert.ok(render(f, 100).join('\n').includes('e collapse'), `must be expanded: \n${render(f, 100).join('\n')}`)
+  assert.ok(render(f, 100).join('\n').includes('e collapse'), `q1 must be expanded:\n${render(f, 100).join('\n')}`)
   f.handleInput('\x1b[C') // → q2: must open COLLAPSED (the old code leaked the
   // expanded view forward — only ←/Enter reset the body view).
   const q2 = render(f, 100).join('\n')
@@ -1052,7 +1052,7 @@ test('optionless question: Esc-back navigation reaches the previous question (P1
   f.handleInput('\x1b[D') // ← back to Q2 (drafts survive)
   let view = render(f, 100).join('\n')
   assert.ok(view.includes('Second?'), `← must return to Q2:\n${view}`)
-  assert.ok(view.includes('←→ edit'), `must be in the edit layer after ← from review: \n${view}`)
+  assert.ok(view.includes('←→ edit'), `Q2 must be in the edit layer after ← from review:\n${view}`)
   f.handleInput('\x1b') // Esc: leave Q2's edit (navigation layer)
   assert.equal(cancelled, 0, `Esc on Q2 edit must NOT cancel the flow: got ${cancelled}`)
   f.handleInput('\x1b[D') // ← pages back to Q1 (navigation layer)
@@ -1117,7 +1117,7 @@ test('free-text input never leaks across questions (round-3 P1)', () => {
   render(f, 100)
   f.handleInput('\r') // enter Q2 edit
   const q2Edit = render(f, 100).join('\n')
-  assert.ok(!q2Edit.includes('abc'), `edit must not show Q1's committed text:\n${q2Edit}`)
+  assert.ok(!q2Edit.includes('abc'), `Q2 edit must not show Q1's committed text:\n${q2Edit}`)
 })
 
 test('clearing a committed free-text answer is not resurrected by Esc→navigation→re-edit', () => {
@@ -1252,7 +1252,7 @@ test('an explicit skip clears the live draft (no stale text beside (skipped))', 
   f.handleInput('\x1b[D') // ← back to Q1
   view = render(f, 100).join('\n')
   assert.ok(view.includes('First?'), `← must return to Q1:\n${view}`)
-  assert.ok(view.includes('(skipped)'), `must stay skipped: \n${view}`)
+  assert.ok(view.includes('(skipped)'), `Q1 must stay skipped:\n${view}`)
   // Re-entering the edit must not resurrect skipped text.
   f.handleInput('\x1b') // Q1 navigation (re-entered from Q2)
   f.handleInput('\r') // ↵ re-enter the edit
@@ -1681,8 +1681,8 @@ test('multi-select: Space toggles, Enter continues without toggling', () => {
   let view = render(f, 100).join('\n')
   f.handleInput(' ') // Space on A → checked, still Q1
   view = render(f, 100).join('\n')
-  assert.ok(view.includes('✓ Q1'), `must be answered after Space: \n${view}`)
-  assert.ok(view.includes('[✓] A'), `must be checked: \n${view}`)
+  assert.ok(view.includes('✓ Q1'), `Q1 must be answered after Space:\n${view}`)
+  assert.ok(view.includes('[✓] A'), `A must be checked:\n${view}`)
   assert.ok(view.includes('Second?') === false, `Space must stay on Q1:\n${view}`)
   f.handleInput('\x1b[B') // ↓ to B
   f.handleInput(' ') // Space on B → A+B checked, still Q1
@@ -1718,7 +1718,7 @@ test('multi-select: Enter on an ordinary option does NOT toggle it', () => {
   f.handleInput('\r') // Enter: continue — B stays unchecked
   const review = render(f, 100).join('\n')
   assert.ok(review.includes('A'), `Enter must reach the review page:\n${review}`)
-  assert.ok(!review.includes('B\n'), `must not appear as an answer: \n${review}`)
+  assert.ok(!review.includes('B\n'), `B must not appear as an answer:\n${review}`)
   f.handleInput('\r') // submit
   assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
 })
@@ -1742,7 +1742,7 @@ test('multi-select: digits toggle without advancing', () => {
   f.handleInput('2') // toggle B off again
   view = render(f, 100).join('\n')
   assert.ok(!view.includes('[✓] B'), `digit 2 must untoggle B:\n${view}`)
-  assert.ok(view.includes('[✓] A'), `must stay checked: \n${view}`)
+  assert.ok(view.includes('[✓] A'), `A must stay checked:\n${view}`)
   f.handleInput('\r') // Enter continues → review
   render(f, 100)
   f.handleInput('\r') // submit

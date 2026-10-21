@@ -550,13 +550,13 @@ test('the Remote branch never grows the Direct compat read — an absent binding
   const source = remoteSource({
     state: state(['child'], { child: listRow('child', 1, { cwd: '/child' }) }),
     // The retained child binding owns OTHER facts but not `modelSelection`.
-    bindings: { child: binding({ title: 'title', contextPressure: { projectedTokens: 12 } }) },
+    bindings: { child: binding({ title: 'child title', contextPressure: { projectedTokens: 12 } }) },
   })
   const reader = new RemoteSessionReader(source, generation.source)
   const status = reader.sessionStatus('child')
   assert.equal(status?.model, undefined,
     'an absent Remote modelSelection face reads UNKNOWN — the Direct compat read must not reach this branch')
-  assert.equal(status?.title, 'title', 'the other binding facts are unaffected')
+  assert.equal(status?.title, 'child title', 'the other binding facts are unaffected')
   assert.equal(status?.cwd, '/child')
   generation.set(undefined)
   assert.equal(new RemoteSessionReader(source, generation.source).sessionStatus('child'), undefined,

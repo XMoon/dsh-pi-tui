@@ -585,13 +585,13 @@ test('TuiApp: closing a capturing overlay restores the underlying overlay seat A
   await vt.waitForRender()
   const b = app.openPicker([{ value: 'b', label: 'overlay B' }], () => {}, () => {})
   await vt.waitForRender()
-  assert.ok(view().includes('overlay B'), `must be visible: \n${view()}`)
+  assert.ok(view().includes('overlay B'), `B must be visible:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'overlay')
 
   b.close?.()
   await vt.waitForRender()
-  assert.ok(view().includes('overlay A'), `must be restored: \n${view()}`)
-  assert.ok(!view().includes('overlay B'), `must be gone: \n${view()}`)
+  assert.ok(view().includes('overlay A'), `A must be restored:\n${view()}`)
+  assert.ok(!view().includes('overlay B'), `B must be gone:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'overlay', 'the restored A owns the derived seat')
   assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
     'the restored A holds physical focus, not the editor')

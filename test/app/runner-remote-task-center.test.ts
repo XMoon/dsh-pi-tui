@@ -11,7 +11,8 @@
  *   whole-log projection rows the presentation harness mounts
  * - the real `@deepseek-ai/dsh-subagent` Host service, whose plugin
  *   registration is what makes the official `subagentCatalog` /
- *   `subagent`Session projections readable over the wire * - REAL durable parent/child catalog facts: parent Sessions carrying
+ *   `subagent` (identity) Session projections readable over the wire
+ * - REAL durable parent/child catalog facts: parent Sessions carrying
  *   `subagent/catalog` SessionEvents, child Sessions carrying their own
  *   `subagent/descriptor` and `subagent/catalog` (the nested grandchild)
  * - the official Client/Gateway path over the real in-process carrier and
@@ -301,7 +302,7 @@ function flat(view: string): string {
   return view.replace(/\s+/gu, ' ')
 }
 
-test('`/tasks` renders the REAL Remote descendant tree and the child row opens the REAL child viewer', async (t) => {
+test('L6 §11/§14.4-5-6: `/tasks` renders the REAL Remote descendant tree and the child row opens the REAL child viewer', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
   // A parent-session pending echo: while the MAIN surface owns the queue it is
@@ -1444,8 +1445,8 @@ test('the OPEN Task Center + child viewer survive a normal reconnect in place �
   const childBindingBefore = sessions.binding(SessionId(CHILD_A_ID))
   assert.ok(mainBindingBefore !== undefined && childBindingBefore !== undefined,
     'both the main and the child binding are retained before the reconnect')
-  app.setDraft('draft kept across reconnect')
-  assert.equal(app.getDraft(), 'draft kept across reconnect',
+  app.setDraft('child draft kept across reconnect')
+  assert.equal(app.getDraft(), 'child draft kept across reconnect',
     'the draft text is present before the reconnect')
 
   // ── The OFFICIAL reconnect (the same carrier the presentation suite
@@ -1477,7 +1478,7 @@ test('the OPEN Task Center + child viewer survive a normal reconnect in place �
   // 4-5. The viewer stays on the same child and the draft is preserved.
   assert.equal(viewport().includes('childa answer 30'), true,
     'the child viewer keeps showing its own subject')
-  assert.equal(app.getDraft(), 'draft kept across reconnect',
+  assert.equal(app.getDraft(), 'child draft kept across reconnect',
     'the user draft is not cleared by the transport reconnect')
 
   // 6. The B generation rehydrates the offline child truth.

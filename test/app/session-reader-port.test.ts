@@ -836,7 +836,7 @@ test('an ABSENT modelSelection key reads THIS child Session’s own request head
   const services = {
     sessionProjections: projectionsFace({
       'child-a': {
-        title: 'title',
+        title: 'child title',
         permissions: { currentValue: 'workspace-write' },
         contextPressure: { pressureTokens: 300, contextWindow: 4000 },
         tokenUsage: { uncachedInputTokens: 21, outputTokens: 9, cacheReadTokens: 0, cacheWriteTokens: 0 },
@@ -853,7 +853,7 @@ test('an ABSENT modelSelection key reads THIS child Session’s own request head
   assert.ok(status, 'the attached child Session must answer')
   assert.deepEqual(status.model, { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
     'the compat read must surface the child Session’s own used route')
-  assert.equal(status.title, 'title', 'the other official projection facts stay intact')
+  assert.equal(status.title, 'child title', 'the other official projection facts stay intact')
   assert.equal(status.cwd, '/child-ws')
   assert.equal(status.permission, 'workspace-write')
   assert.deepEqual(status.todos, [{ content: 'CHILD-TODO', status: 'pending' }])
@@ -865,7 +865,7 @@ test('an ABSENT modelSelection key reads THIS child Session’s own request head
   const control = new DirectSessionReader(host(services), resolvers, NO_DURABLE_MODEL_SELECTION)
   assert.equal(control.sessionStatus('child-a')?.model, undefined,
     'CONTROL: without the compat read the same attached Session reads no model')
-  assert.equal(control.sessionStatus('child-a')?.title, 'title')
+  assert.equal(control.sessionStatus('child-a')?.title, 'child title')
 })
 
 test('the compat read consumes the Session’s incremental request-header cache and never scans the log', () => {

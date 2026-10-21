@@ -196,7 +196,7 @@ test('Badge Skill: real provider, skills-capable presets and no minimal skill to
   const minimal = await host.createAgent(SessionId('s4-d2-b10-minimal'), { cwd: work })
   await presets.select(minimal, 'minimal')
   assert.equal(host.hasTool('skill', minimal), false, 'minimal never gains a skill tool it does not declare')
-  assert.equal(host.hasTool('skill', undefined), false, 'is a provider, not a global model tool')
+  assert.equal(host.hasTool('skill', undefined), false, 'B10 is a provider, not a global model tool')
 
   // OFF + restart: the provider and the catalog entry disappear from the real
   // Host registry; the preset-local skill tools are unchanged by B10.

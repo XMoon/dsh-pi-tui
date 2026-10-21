@@ -2240,7 +2240,7 @@ test('a queued submission is visible while an earlier FIFO submission is still i
   await waitForRenderView(vt)
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('❯ B visible while A runs'),
-    `must be visible before A releases the FIFO turn: \n${view}`)
+    `B must be visible before A releases the FIFO turn:\n${view}`)
   assert.equal(harness.host.followedUp.length, 0, 'B must still be waiting behind A')
 
   releaseSlow?.()
@@ -3410,7 +3410,7 @@ test('whole-PR F1 control: the SAME vanished SAME-NAME line (no attachment) is d
 
 test('whole-PR F1: a vanished genuine Host name is NOT reclaimed by a live skill wrapper (sticky non-invocation)', async (t) => {
   // The discriminating case for the STICKY submit-time non-invocation: the
-  // genuine Host `/grilling`does not claim `/grilling args`, so
+  // genuine Host `/grilling` (execute-kind) does not claim `/grilling args`, so
   // the line is an ordinary submission; the name then disappears while a LIVE
   // skill wrapper `/grilling` remains. Without the sticky authority the wrapper
   // term owns the line, and the skill route delivers the wrapper's skill body

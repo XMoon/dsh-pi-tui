@@ -742,7 +742,7 @@ test('a surface-close failure still releases the session and stays visible', asy
   assert.equal(handle.closeCalls(), 1, 'the session is still closed, so the tty is released')
 })
 
-test('`n` beyond the last replay step is a no-op, never a crash', async () => {
+test('T9: `n` beyond the last replay step is a no-op, never a crash', async () => {
   const presses = Array.from({ length: STEPS.length + 3 }, () => keyInput('n')).concat([keyInput('q')])
   const handle = stubSession(presses)
   const result = await runTernTranscriptSpike({ connect: async () => handle.session, io: { write: () => {} } })

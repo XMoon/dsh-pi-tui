@@ -192,7 +192,7 @@ async function startQuick(options: {
     },
     ...(options.descendants === undefined ? {} : {
       taskRead: {
-        currentKey: () => 'sess-main',
+        currentKey: () => 'g1:sess-main',
         currentSessionId: () => 'sess-main',
         readTask: async () => ({
           parentSessionId: 'sess-main',
@@ -826,7 +826,7 @@ test('a parked Question enters the projection; a refused reopen reports no surfa
   vt.sendInput('\r')
   await vt.waitForRender()
   await sleep(20)
-  assert.ok(reopens.includes('c1'), `the Enter must reopen through the controller entry:\n${reopens.join(' |')}`)
+  assert.ok(reopens.includes('s1:c1'), `the Enter must reopen through the controller entry:\n${reopens.join(' |')}`)
   assert.deepEqual(observedCallbackResults(), [true], 'the successful reopen reports the TRUE outcome')
   assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'the commit leaves Quick after the Question route')
 
@@ -842,7 +842,7 @@ test('a parked Question enters the projection; a refused reopen reports no surfa
   vt.sendInput('\r')
   await vt.waitForRender()
   await sleep(20)
-  assert.equal(reopens.filter(id => id === 'c1').length, 2, 'exactly the refusal dispatch happened')
+  assert.equal(reopens.filter(id => id === 's1:c1').length, 2, 'exactly the refusal dispatch happened')
   assert.deepEqual(observedCallbackResults(), [true, false], 'the refused reopen reports the FALSE outcome through the same callback')
   assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'a refused reopen keeps Quick closed (no fabricated reopen surface)')
 })

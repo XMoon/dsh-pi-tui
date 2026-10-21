@@ -874,9 +874,9 @@ test('one anchor owns several Tool relations and re-derives them on a replacemen
   folder.apply([
     turnStart(1, T0, 0),
     toolCall({ callId: 't1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
-    toolResult('t1', 1, 0, T0 + 1_500, 2, 'ok'),
+    toolResult('t1', 1, 0, T0 + 1_500, 2, 't1 ok'),
     toolCall({ callId: 't2', name: 'read', turn: 1, step: 0, time: T0 + 4_000, seq: 3, args: '{"file_path":"t2.ts"}' }),
-    toolResult('t2', 1, 0, T0 + 4_500, 4, 'ok'),
+    toolResult('t2', 1, 0, T0 + 4_500, 4, 't2 ok'),
   ])
   // The reply became visible at +2s: t1 (started +1s) stays before it, t2
   // (started +4s) follows it.

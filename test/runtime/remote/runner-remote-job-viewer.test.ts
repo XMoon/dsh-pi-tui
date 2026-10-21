@@ -369,20 +369,20 @@ async function openJobRow(fx: JobViewerFixture, label: string): Promise<void> {
   fx.fixture.vt.sendInput('\r')
 }
 
-test('steps 1-8 + negatives (c) /no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
+test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
 
   // ── §15 step 1-2: the real Remote composition + the resumed main Session.
-  assert.equal(fx.fixture.override.selected.kind, 'remote', 'the selected core must be the Remote aggregate')
+  assert.equal(fx.fixture.override.selected.kind, 'remote', '§15.1 the selected core must be the Remote aggregate')
   assert.equal(fx.fixture.override.selected.backend.kind, 'remote')
   assert.equal(
     fx.fixture.aggregate.backendRuntime.semantics.jobObservation instanceof RemoteJobObservationPort,
     true,
-    'the ONE selected-Job observation/Stop mutation must be the Remote wire adapter, never the Direct `ctx.jobs` adapter',
+    '§15.1 the ONE selected-Job observation/Stop mutation must be the Remote wire adapter, never the Direct `ctx.jobs` adapter',
   )
-  assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main', 'the resumed main Session owns the surface')
+  assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main', '§15.2 the resumed main Session owns the surface')
 
   // ── §15 step 3: ONE real Host background Job owned by a live Agent of the
   // resumed Session, visible in the Session's Job roster.
@@ -416,7 +416,7 @@ test('steps 1-8 + negatives (c) /no-retry/no-ctx.jobs.read: the REAL Job viewer 
   await waitFor('the appended output reached the viewer body without a registry read', () =>
     view().includes(JOB_ONE_APPENDED.trim()), 20_000)
   // §15 step 9: a live PROGRESS change converges through the same observation.
-  job.handle().updateProgress('compiling')
+  job.handle().updateProgress('3/10 compiling')
   await waitFor('the live progress line converged into the viewer body', () =>
     view().includes('Progress: 3/10 compiling'), 20_000)
   assert.equal(fx.observedText(job.id).includes(JOB_ONE_APPENDED.trim()), true,
@@ -668,7 +668,7 @@ test('the OPEN Job viewer recovers after reconnect — same detail, B output con
   const generationBefore = connection.generation.getSnapshot()?.id
   connection.reconnect()
   liveJob.handle().append('pr3-two post-reconnect line\n')
-  liveJob.handle().updateProgress('linking')
+  liveJob.handle().updateProgress('7/10 linking')
   await waitFor('a NEW DEFINED Connection generation is established', () => {
     const current = connection.generation.getSnapshot()?.id
     return current !== undefined && current !== generationBefore
@@ -708,7 +708,7 @@ test('the OPEN Job viewer recovers after reconnect — same detail, B output con
     'exactly one Host kill admission served the post-B Stop')
 })
 
-test('negative control 11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
+test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx

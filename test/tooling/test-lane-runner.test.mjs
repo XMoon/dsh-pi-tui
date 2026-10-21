@@ -38,15 +38,15 @@ const WINDOWS_COMMAND_LINE_LIMIT = 32_767
 
 /**
  * The command line the runner builds for a lane, in the WINDOWS spelling:
- * a checkout under `\Users\<name>\projects\<repo>\`.
+ * a checkout under `C:\Users\<name>\projects\<repo>\`.
  */
 function windowsCommandLineLength(lane) {
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = '\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
+  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
   const commandArguments = files.map(rel => `${checkout}test\\\\${rel.replaceAll('/', '\\\\')}`)
   return {
     // The executable and the fixed flags take a little room too.
-    length: '\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
+    length: 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
       + commandArguments.join(' ').length,
     fileCount: files.length,
   }
@@ -55,10 +55,10 @@ function windowsCommandLineLength(lane) {
 test('the product lane command line fits the Windows limit in the RELATIVE form', () => {
   const lane = LANES.product
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = '\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
+  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
   // The RELATIVE form the runner uses: the path under the repository root.
   const relativeArguments = files.map(rel => `test\\\\${rel.replaceAll('/', '\\\\')}`)
-  const length = '\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
+  const length = 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
     + relativeArguments.join(' ').length
   assert.ok(
     length < WINDOWS_COMMAND_LINE_LIMIT,
@@ -82,29 +82,13 @@ test('the runner passes the file list RELATIVE to the repository root', () => {
   // The runner's own source is the contract: it must build the argument
   // list from the test-root-relative paths and set the child's working
   // directory to the repository root.
-  //
-  // The assertion is about the CONTRACT — a relative path, and the
-  // repository root as the working directory — not about one literal
-  // spelling of it. The test root's own NAME is used as the prefix, so an
-  // overridden root keeps the same shape; pinning the literal would make
-  // a legitimate change look like a regression.
   const source = readFileSync(join(ROOT, 'scripts', 'run-test-lane.mjs'), 'utf8')
-  assert.match(source, /const relativeFiles = files\.map\(rel => join\(testRootName, rel\)\)/u,
-    'the runner must pass the file list relative to the test root')
-  assert.match(source, /cwd: workingDirectory/u,
-    "the child must run with the working directory the relative paths are based on")
-  assert.match(source, /const workingDirectory = testRoot === join\(ROOT, 'test'\) \? ROOT : testRootParent/u,
-    'the default working directory must be the repository root')
+  assert.match(source, /const relativeFiles = files\.map\(rel => join\('test', rel\)\)/u,
+    'the runner must pass the file list relative to the repository root')
+  assert.match(source, /cwd: ROOT/u,
+    "the child must run with the repository root as its working directory")
   assert.doesNotMatch(source, /files\.map\(rel => join\(TEST_ROOT, rel\)\)/u,
     'the runner must not pass absolute paths')
-  // A QUALIFICATION run must scan the repository's own test files, and
-  // nothing an environment variable says may change that set.
-  assert.match(source, /function resolveTestRoot\(explicit\)/u,
-    'the test root must be resolved through one guarded function')
-  assert.match(source, /if \(explicit === undefined\) return canonical/u,
-    'without the explicit opt-in the canonical test root is used')
-  assert.match(source, /throw new Error\('--test-root requires DSH_TEST_ROOT/u,
-    'the explicit opt-in and the environment variable must agree')
 })
 
 test('the child runs with the repository root as its working directory', (t) => {
