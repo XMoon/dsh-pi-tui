@@ -1,0 +1,278 @@
+name: Test product diagnostics
+
+# A MANUAL, MEASUREMENT-ONLY workflow.
+#
+# It exists to answer one question with data instead of guesses: what does
+# the product lane actually cost on a GitHub runner, and where does the time
+# go?
+#
+# It is deliberately NOT a required pull-request check:
+#
+#   - it adds runner minutes to every PR, and
+#   - it measures the runner, not the code.
+#
+# It changes NOTHING about the qualification contract: the packaging
+# lifecycle (`prepack` / `postpack`), the lane definitions, the test
+# assertions and the published artifact are all untouched. It runs the SAME
+# product lane and adds measurement on top.
+#
+# Every comparison must use the SAME SHA, the same DSH mode, the same
+# lockfile and the same runner image — otherwise the numbers are not
+# comparable and the run proves nothing.
+
+on:
+  # The MEASUREMENT branch. A pushed branch runs the workflow file it
+  # carries, so the measurement needs no pull request and no change to
+  # the default branch. The trigger is scoped to this branch, so it can
+  # never fire on the deliverable.
+  push:
+    branches:
+      - 'ci/test-clarity-diagnostics-*'
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'The commit SHA to measure (defaults to the dispatched ref)'
+        required: false
+        type: string
+      shard_total:
+        description: 'How many shards to split the product lane into'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+      expected_cases:
+        description: 'The case count the UNSHARDED lane reports at the same SHA, DSH mode and runner (the baseline the shards must match)'
+        required: false
+        default: '9110'
+        type: string
+      expected_skipped:
+        description: 'The skipped-case count the UNSHARDED lane reports at the same SHA, DSH mode and runner'
+        required: false
+        default: '37'
+        type: string
+      baseline_source:
+        description: 'Where the baseline came from: the SHA, the DSH mode and the run it was taken from'
+        required: false
+        default: 'the ubuntu runner at this commit, npm mode (9110 cases, 37 skips: 36 optional-bundle + 1 no fd/fdfind on PATH)'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The SHARD LIST.
+  #
+  # It is computed in ONE place and handed to the matrix as a JSON array.
+  # A matrix built from inline expressions would either carry empty entries
+  # (a job with no shard) or need a different expression per input value.
+  # The prepare job is also the place that fails loudly on an unsupported
+  # shard count, instead of running a measurement nobody can interpret.
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Resolve the shard list
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+    steps:
+      - name: Build the shard list
+        id: shards
+        env:
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '1' }}
+        run: |
+          set -euo pipefail
+          case "$DSH_SHARD_TOTAL" in
+            1) shards='[1]' ;;
+            2) shards='[1,2]' ;;
+            3) shards='[1,2,3]' ;;
+            4) shards='[1,2,3,4]' ;;
+            *) echo "unsupported shard total: $DSH_SHARD_TOTAL" >&2; exit 1 ;;
+          esac
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "the measurement will run these shards: $shards"
+
+  # ---------------------------------------------------------------------------
+  # The MEASUREMENT itself: one job per shard, each on its own runner.
+  #
+  # The shards are Node's own `--test-shard`, so they partition the lane's
+  # file set by construction: the shards are disjoint and their union is
+  # the whole lane. The aggregate job below PROVES that from the recorded
+  # file lists — it does not assume it.
+  # ---------------------------------------------------------------------------
+  product-shard:
+    name: Product shard ${{ matrix.shard }}/${{ inputs.shard_total || '1' }}
+    needs:
+      - prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+    env:
+      DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
+
+    steps:
+      - name: Checkout the measured commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      # The SAME dependency environment the ordinary CI uses: the registry
+      # distribution, the frozen lockfile, the same environment variables.
+      # A measurement taken against a different dependency graph measures a
+      # different thing.
+      - name: Prepare DSH dependency environment
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      # The machine the measurement runs on. Every value is measured or
+      # reported as unavailable; a missing cgroup file is never replaced by
+      # the runner family's public label.
+      #
+      # The specification is written AFTER the measurement, so the measured
+      # wall clock is a field of the same document as the machine it was
+      # measured on — a reader never has to correlate two files.
+      - name: Build the vendored fork and the bundle
+        run: pnpm build
+
+      # The measurement itself: the ordinary product lane, with the
+      # machine-readable case report added on top. The lane's file set, its
+      # temp root, its exit code and its signal contract are unchanged.
+      - name: Measure the product lane shard
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          start=$(date +%s)
+          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total || '1' }}
+          end=$(date +%s)
+          node scripts/runner-spec.mjs \
+            --wall-clock-seconds "$((end - start))" \
+            --out diagnostics/runner-spec.json
+
+      - name: Summarize the case distribution
+        run: |
+          set -euo pipefail
+          node scripts/case-distribution.mjs \
+            --jsonl diagnostics/cases.jsonl \
+            --out diagnostics/case-distribution.json
+
+      - name: Upload the shard diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-diagnostics-shard-${{ matrix.shard }}
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # The AGGREGATE: the proof that the shards together are the whole lane.
+  #
+  # It fails closed. A missing shard, a failed shard, a skipped shard, an
+  # overlapping file, a lost file or an unexpected skip must NOT be hidden
+  # behind a green summary.
+  # ---------------------------------------------------------------------------
+  aggregate:
+    name: Aggregate the product shards
+    needs:
+      - prepare
+      - product-shard
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout the measured commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Download every shard's diagnostics
+        uses: actions/download-artifact@v8
+        with:
+          pattern: product-diagnostics-shard-*
+          path: shards
+          # The shards are NOT merged: each one keeps its own directory, so
+          # the aggregate can tell which shard ran what and can notice a
+          # shard that is missing. Merging them would flatten exactly the
+          # distinction the proof depends on.
+
+      - name: Prove the shards are the whole lane
+        env:
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '1' }}
+          # The identity every shard must agree on. A shard from another
+          # run must not be counted towards this one: the aggregate would
+          # then claim a coverage nobody measured.
+          #
+          # The expected SHA is the commit THIS job checked out, read from
+          # the repository itself. The workflow's `inputs.sha` names the
+          # commit that was REQUESTED, which is not necessarily the one
+          # that was measured.
+          DSH_EXPECTED_RUN_ID: ${{ github.run_id }}
+          DSH_EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          # The baseline the shards' case counts are compared against. It
+          # is the UNSHARDED lane's own totals, so a recorder that dropped
+          # a case or reported an extra skip cannot pass.
+          DSH_EXPECTED_CASES: ${{ inputs.expected_cases || '9110' }}
+          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped || '37' }}
+          DSH_BASELINE_SOURCE: ${{ inputs.baseline_source || 'the unsharded lane of the same commit' }}
+        run: |
+          set -euo pipefail
+          DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
+          export DSH_EXPECTED_SHA
+          node scripts/verify-shards.mjs \
+            --shards shards \
+            --total "$DSH_SHARD_TOTAL" \
+            --out shards/aggregate.json
+          # The baseline's PROVENANCE is part of the evidence: a count on
+          # its own says nothing about which run produced it.
+          node -e "
+            const fs = require('node:fs')
+            const aggregate = JSON.parse(fs.readFileSync('shards/aggregate.json', 'utf8'))
+            aggregate.baseline = {
+              source: process.env.DSH_BASELINE_SOURCE,
+              sha: process.env.DSH_EXPECTED_SHA,
+              runId: process.env.DSH_EXPECTED_RUN_ID,
+              expectedCases: aggregate.expectedCases,
+              expectedSkipped: aggregate.expectedSkipped,
+            }
+            fs.writeFileSync('shards/aggregate.json', JSON.stringify(aggregate, null, 2) + '\n')
+          "
+
+      - name: Upload the aggregate
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-diagnostics-aggregate
+          path: shards/aggregate.json
+          if-no-files-found: warn
+          retention-days: 7

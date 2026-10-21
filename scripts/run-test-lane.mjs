@@ -36,10 +36,43 @@ import { LANES } from './test-lanes.mjs'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const TEST_ROOT = join(ROOT, 'test')
 
+/**
+ * Parse the optional `--shard=<index>/<total>` argument.
+ *
+ * The shard is Node's OWN `--test-shard`: it partitions the test FILES it
+ * is given, so the shards of one lane are disjoint by construction and the
+ * union of all of them is the whole lane. The repository does not implement
+ * its own partitioning — a second, divergent partitioner could disagree
+ * with the runner about which file belongs where, and the aggregate would
+ * then silently lose a file.
+ *
+ * @param {string[]} args - the command line arguments.
+ * @returns {string|undefined} the Node shard argument, or undefined.
+ */
+export function parseShard(args) {
+  const argument = args.find(entry => entry.startsWith('--shard='))
+  if (argument === undefined) return undefined
+  const value = argument.slice('--shard='.length)
+  const match = /^(\d+)\/(\d+)$/u.exec(value)
+  if (match === null) {
+    throw new Error(`the shard must be written as <index>/<total>, got: ${value}`)
+  }
+  const index = Number(match[1])
+  const total = Number(match[2])
+  if (total < 1) {
+    throw new Error(`the shard total must be at least 1, got: ${total}`)
+  }
+  if (index < 1 || index > total) {
+    throw new Error(`the shard index must be between 1 and ${total}, got: ${index}`)
+  }
+  return `${index}/${total}`
+}
+
 function main() {
   const laneName = process.argv[2]
+  const args = process.argv.slice(3)
   if (laneName === undefined) {
-    console.error(`usage: node scripts/run-test-lane.mjs <lane>\nlanes: ${Object.keys(LANES).join(', ')}`)
+    console.error(`usage: node scripts/run-test-lane.mjs <lane> [--shard=<index>/<total>]\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
   const lane = LANES[laneName]
@@ -60,9 +93,34 @@ function main() {
   // which the tests rely on (22 of them read `process.cwd()`).
   const relativeFiles = files.map(rel => join('test', rel))
 
+  // The optional shard. It is a runner ARGUMENT, not a mode: the default
+  // is the WHOLE lane.
+  const shard = parseShard(args)
+
+  // The MACHINE-READABLE reporter.
+  //
+  // It is opt-in: the destination variable is what turns it on. Without
+  // the variable, the lane runs exactly as it always did, with Node's own
+  // reporter and no extra file. With it, the reporter is loaded and it
+  // writes the case records NEXT TO the human report.
+  //
+  // The reporter has to be named on the COMMAND LINE — the destination
+  // variable alone does not make Node load it, so a run that set the
+  // variable but not the flag would produce no records at all, and every
+  // consumer of them would fail later with a confusing "file not found".
+  const jsonl = process.env.DSH_TEST_JSONL
+  const reporterArgs = jsonl === undefined
+    ? []
+    : [`--test-reporter=${join(ROOT, 'scripts', 'test-case-reporter.mjs')}`]
+
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
-  const child = spawn(process.execPath, ['--test', ...relativeFiles], {
+  const child = spawn(process.execPath, [
+    '--test',
+    ...reporterArgs,
+    ...(shard === undefined ? [] : [`--test-shard=${shard}`]),
+    ...relativeFiles,
+  ], {
     cwd: ROOT,
     stdio: 'inherit',
     shell: false,
