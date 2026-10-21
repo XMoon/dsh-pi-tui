@@ -180,6 +180,59 @@ test('a shard with NO recorded identity fails the aggregate', (t) => {
   assert.match(aggregate.failures.join('\n'), /recorded no runner specification/u)
 })
 
+test('a shard whose specification records NO identity at all fails the aggregate', (t) => {
+  // The specification exists and is valid JSON, but it carries neither
+  // the SHA nor the run id. A check that only compares the field when it
+  // happens to be present would accept this shard and claim a coverage
+  // nobody measured.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], spec: { cpu: { availableParallelism: 24 } } })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a shard with an empty identity must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /recorded no commit SHA/u)
+  assert.match(aggregate.failures.join('\n'), /recorded no run id/u)
+})
+
+test('a shard that records only the SHA fails the aggregate', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], spec: { sha: 'sha-1' } })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a shard missing the run id must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /recorded no run id/u)
+})
+
+test('a shard that records only the run id fails the aggregate', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], spec: { runId: 'run-1' } })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a shard missing the SHA must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /recorded no commit SHA/u)
+})
+
 test('a file that is NOT part of the lane fails the aggregate', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-shard-gate-')

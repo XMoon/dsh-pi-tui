@@ -1272,7 +1272,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
   app.stop()
 })
 
-test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Keep Editing, Discard)', async (t) => {
+test('an unsaved custom command draft NEVER executes (preview, resize, Keep Editing, Discard)', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-noexec-')
   const marker = join(dir, 'pwn')
@@ -1397,7 +1397,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
   }
 })
 
-test('PR D: a FAILED save never executes the new command (draft preserved, marker absent)', async (t) => {
+test('a FAILED save never executes the new command (draft preserved, marker absent)', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-noexec-fail-')
   const marker = join(dir, 'pwn')
@@ -1513,7 +1513,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
   }
 })
 
-test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears only after save)', async (t) => {
+test('a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears only after save)', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-noexec-ok-')
   const marker = join(dir, 'pwn')

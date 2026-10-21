@@ -306,7 +306,7 @@ test('(review round 3): the coordinator over the REAL composition keeps the last
   }
 })
 
-test('PR4 F2b.2 (review round 4): a FULFILLED-UNDEFINED skills observation is an issue, never an empty success', async () => {
+test('a FULFILLED-UNDEFINED skills observation is an issue, never an empty success', async () => {
   // The port contract declares `undefined` = "no skill registry reachable
   // for this session" (catalog-port §listHumanSkills). The composition must
   // degrade it to a skills ISSUE (the coordinator's merge keeps last-good
@@ -337,7 +337,7 @@ test('PR4 F2b.2 (review round 4): a FULFILLED-UNDEFINED skills observation is an
     'the unavailable observation degrades to a skills issue (never a silent empty success)')
 })
 
-test('PR4 F2b.2 (review round 4): the coordinator keeps the LAST-GOOD skills across a fulfilled-undefined observation; a genuinely empty complete catalog still clears', async () => {
+test('the coordinator keeps the LAST-GOOD skills across a fulfilled-undefined observation; a genuinely empty complete catalog still clears', async () => {
   let skillsState: 'good' | 'unreachable' | 'empty-complete' = 'good'
   const generation = generationSource({ id: 1 } as RemoteConnectionGeneration)
   const bindings = bindingsSource({ session: {} })

@@ -30,13 +30,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  *
  * The code families come from this repository's own effort labels:
  * `A5b`, `B4A-07`, `PR5`, `M3-4`, `RFL-002`, `TS2`, `F1`, `S4-D2`, `RC2` …
+ * and the plan-section markers (`§18.1`, `§1C-3`).
  *
- * A code is only a code when it stands ALONE as the subject — a title that
- * merely mentions a code in passing (for example inside a longer English
- * sentence) is not led by it. The check therefore anchors at the start of
- * the title and requires the code to be followed by a separator.
+ * The check reuses the TRANSFORM's own token model, so the audit and the
+ * transform can never disagree about what a code is. A title that merely
+ * mentions a code in passing is not led by it, so the check anchors at the
+ * start of the title.
  */
-const CODE_PREFIX = /^(?:[A-Z]{1,4}\d+[a-z]?(?:[-.]\d+)*|PR\d*|RFL-\d+|RC\.?\d*|MR\d*|TS\d+|F\d+|L\d)(?:[/ ]+|\s*[:—-]\s*|\s+)/u
+const CODE_PREFIX = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-\d+[a-z]?)?(?:-[A-Za-z]+)?|RFL-\d+|§\s*\d|§\s*[A-Z]\d)(?=[\s:—–-]|$)/u
 
 /**
  * A title that names a SUBJECT without naming a RESULT.

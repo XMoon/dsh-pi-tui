@@ -231,7 +231,7 @@ test('recursively reads the full descendant tree in stable pre-order with exact 
   assert.equal(client.refreshCalls, 0)
 })
 
-test('child activity comes from the official Session running bit, never catalog presence', async () => {
+test('activity comes from the official Session running bit, never catalog presence', async () => {
   const generations = createSnapshotGenerationHarness()
   const client = twoLevelFixture()
   const reader = new RemoteTaskReader(client, jobsFixture({}), generations.source)
@@ -362,7 +362,7 @@ test('regression: ready without the catalog on a BRANCH becomes an unavailable d
   ], 'a ghost branch must never present as a normal inactive child with hasChildren:false')
 })
 
-test('F4d/OWNER-RULED: a BRANCH whose projections are unavailable degrades BRANCH-LOCALLY (siblings survive)', async () => {
+test('a BRANCH whose projections are unavailable degrades BRANCH-LOCALLY (siblings survive)', async () => {
   const generations = createSnapshotGenerationHarness()
   // The official `session.projections` handler answers
   // `session/projections-unavailable` when the Session is readable but its

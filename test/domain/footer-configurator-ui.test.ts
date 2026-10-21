@@ -636,7 +636,7 @@ test('programmatic configurator close disposes a pending paste-prefix timer', as
   app.stop()
 })
 
-test('final app disposal cancels a configurator paste-prefix timer', async (t) => {
+test('app disposal cancels a configurator paste-prefix timer', async (t) => {
   const { vt, app } = startApp()
   const model = openDefault(app)
   await vt.waitForRender()
@@ -1157,7 +1157,7 @@ async function makeDirty(vt: VirtualTerminal): Promise<void> {
   await vt.waitForRender()
 }
 
-test('PR E: the selector advertises Save changes with Unsaved / No changes', async () => {
+test('the selector advertises Save changes with Unsaved / No changes', async () => {
   const { vt, app } = startApp()
   openWith(app)
   await vt.waitForRender()
@@ -1170,7 +1170,7 @@ test('PR E: the selector advertises Save changes with Unsaved / No changes', asy
   app.stop()
 })
 
-test('PR E: Enter on Save changes saves and closes the configurator', async () => {
+test('Enter on Save changes saves and closes the configurator', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let cancelled = 0
@@ -1191,7 +1191,7 @@ test('PR E: Enter on Save changes saves and closes the configurator', async () =
   app.stop()
 })
 
-test('PR E: dirty Esc opens the exit guard; Esc there keeps editing', async () => {
+test('dirty Esc opens the exit guard; Esc there keeps editing', async () => {
   const { vt, app } = startApp()
   let cancelled = 0
   openWith(app, { onCancel: () => { cancelled += 1 } })
@@ -1213,7 +1213,7 @@ test('PR E: dirty Esc opens the exit guard; Esc there keeps editing', async () =
   app.stop()
 })
 
-test('PR E: Save & Exit saves; Discard & Exit closes without saving', async () => {
+test('Save & Exit saves; Discard & Exit closes without saving', async () => {
   // Save & Exit.
   {
     const { vt, app } = startApp()
@@ -1254,7 +1254,7 @@ test('PR E: Save & Exit saves; Discard & Exit closes without saving', async () =
   }
 })
 
-test('PR E: Keep Editing returns to the selector with the draft intact', async () => {
+test('Keep Editing returns to the selector with the draft intact', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let cancelled = 0
@@ -1278,7 +1278,7 @@ test('PR E: Keep Editing returns to the selector with the draft intact', async (
   app.stop()
 })
 
-test('PR E: a failed save keeps the configurator open with the draft dirty', async () => {
+test('a failed save keeps the configurator open with the draft dirty', async () => {
   const { vt, app } = startApp()
   let attempts = 0
   let cancelled = 0
@@ -1310,7 +1310,7 @@ test('PR E: a failed save keeps the configurator open with the draft dirty', asy
   app.stop()
 })
 
-test('PR E: a save in flight refuses duplicate saves and Esc-close', async () => {
+test('a save in flight refuses duplicate saves and Esc-close', async () => {
   const { vt, app } = startApp()
   let attempts = 0
   let release: (() => void) | undefined
@@ -1332,7 +1332,7 @@ test('PR E: a save in flight refuses duplicate saves and Esc-close', async () =>
   app.stop()
 })
 
-test('PR E: the exit guard keeps all three actions visible at 40x10', async () => {
+test('the exit guard keeps all three actions visible at 40x10', async () => {
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -1353,7 +1353,7 @@ test('PR E: the exit guard keeps all three actions visible at 40x10', async () =
   app.stop()
 })
 
-test('PR E: a clean draft closes WITHOUT persisting (Save changes / S)', async () => {
+test('a clean draft closes WITHOUT persisting (Save changes / S)', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let closed = 0
@@ -1376,7 +1376,7 @@ test('PR E: a clean draft closes WITHOUT persisting (Save changes / S)', async (
   app.stop()
 })
 
-test('PR E: S on a clean draft closes without persisting', async () => {
+test('S on a clean draft closes without persisting', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let closed = 0
@@ -1391,7 +1391,7 @@ test('PR E: S on a clean draft closes without persisting', async () => {
   app.stop()
 })
 
-test('PR E: closing during an in-flight save is safe (no unhandled rejection)', async () => {
+test('closing during an in-flight save is safe (no unhandled rejection)', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -1418,7 +1418,7 @@ test('PR E: closing during an in-flight save is safe (no unhandled rejection)', 
   app.stop()
 })
 
-test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize', async () => {
+test('the Save row stays visible at 40x10 and Saving… survives a resize', async () => {
   const vt = new VirtualTerminal(40, 10)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -1482,7 +1482,7 @@ function openWithCommand(
   })
 }
 
-test('PR D: the Add picker offers Create Custom Command and the flow creates + previews it', async () => {
+test('the Add picker offers Create Custom Command and the flow creates + previews it', async () => {
   const { vt, app } = startApp()
   openWithCommand(app, [])
   await vt.waitForRender()
@@ -1516,7 +1516,7 @@ test('PR D: the Add picker offers Create Custom Command and the flow creates + p
   app.stop()
 })
 
-test('PR D: the item editor exposes Command/Refresh/Timeout for a command item', async () => {
+test('the item editor exposes Command/Refresh/Timeout for a command item', async () => {
   const { vt, app } = startApp()
   openWithCommand(app, [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }])
   await vt.waitForRender()
@@ -1533,7 +1533,7 @@ test('PR D: the item editor exposes Command/Refresh/Timeout for a command item',
   app.stop()
 })
 
-test('PR D: the preview shows the dim [command] placeholder for a draft and the committed cache when unchanged', async () => {
+test('the preview shows the dim [command] placeholder for a draft and the committed cache when unchanged', async () => {
   const { vt, app } = startApp()
   const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
   openWithCommand(app, committed)
@@ -1549,7 +1549,7 @@ test('PR D: the preview shows the dim [command] placeholder for a draft and the 
   app.stop()
 })
 
-test('PR D: a modified draft command never shows the old committed cache', async () => {
+test('a modified draft command never shows the old committed cache', async () => {
   const { vt, app } = startApp()
   const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
   const draft = new FooterCustomItemCatalog(committed)

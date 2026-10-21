@@ -691,12 +691,12 @@ function openItemMenu(m: FooterConfiguratorModel, id: string): void {
   m.activate() // row → item
 }
 
-test('PR E: isDirty starts clean on open', () => {
+test('isDirty starts clean on open', () => {
   assert.equal(model().isDirty(), false)
   assert.equal(customModel().m.isDirty(), false, 'a placed custom definition does not read as dirty')
 })
 
-test('PR E: removing an item is dirty; re-adding it at the same slot is clean', () => {
+test('removing an item is dirty; re-adding it at the same slot is clean', () => {
   const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model' }], right: [] }] }
   const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
   m.activate()
@@ -714,7 +714,7 @@ test('PR E: removing an item is dirty; re-adding it at the same slot is clean', 
   assert.equal(m.isDirty(), false, 'the restored layout matches the baseline')
 })
 
-test('PR E: item order is dirty; the order round-trip is clean (Move Mode)', () => {
+test('item order is dirty; the order round-trip is clean (Move Mode)', () => {
   const m = model()
   m.activate()
   m.startMove()
@@ -724,7 +724,7 @@ test('PR E: item order is dirty; the order round-trip is clean (Move Mode)', () 
   assert.equal(m.isDirty(), false, 'reorder back is clean')
 })
 
-test('PR E: a zone round-trip of the last left item restores clean', () => {
+test('a zone round-trip of the last left item restores clean', () => {
   const m = model()
   m.activate()
   walkToId(m, 'ext:*') // ext:* is the last left ref
@@ -734,7 +734,7 @@ test('PR E: a zone round-trip of the last left item restores clean', () => {
   assert.equal(m.isDirty(), false, 'moving back re-appends at the original slot')
 })
 
-test('PR E: an explicit auto tone normalizes against an absent tone', () => {
+test('an explicit auto tone normalizes against an absent tone', () => {
   const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', tone: 'auto' as const }], right: [] }] }
   const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
   assert.equal(m.isDirty(), false, 'tone:auto baseline is clean')
@@ -746,7 +746,7 @@ test('PR E: an explicit auto tone normalizes against an absent tone', () => {
   assert.equal(m.isDirty(), false, 'auto → absent is the same fact')
 })
 
-test('PR E: an explicit DEFAULT format is the same fact as no format', () => {
+test('an explicit DEFAULT format is the same fact as no format', () => {
   const reg = createBuiltinFooterRegistry()
   const def = reg.get('model')
   assert.ok(def !== undefined && def.formats.includes(def.defaultFormat))
@@ -764,7 +764,7 @@ test('PR E: an explicit DEFAULT format is the same fact as no format', () => {
   assert.equal(m.isDirty(), false, 'a no-op Style Enter must not read as dirty')
 })
 
-test('PR E: empty-string prefix/suffix are the same fact as absent', () => {
+test('empty-string prefix/suffix are the same fact as absent', () => {
   const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', prefix: '', suffix: '' }], right: [] }] }
   const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
   assert.equal(m.isDirty(), false, 'empty-string baseline is clean')
@@ -780,7 +780,7 @@ test('PR E: empty-string prefix/suffix are the same fact as absent', () => {
   assert.equal(m.isDirty(), false, 'a no-op Advanced commit must not read as dirty')
 })
 
-test('PR E: custom definition text and tone edits dirty; restores clean', () => {
+test('custom definition text and tone edits dirty; restores clean', () => {
   const { m } = customModel()
   openItemMenu(m, 'user:env')
   assert.equal(m.state().mode, 'item')
@@ -809,7 +809,7 @@ test('PR E: custom definition text and tone edits dirty; restores clean', () => 
   assert.equal(m.isDirty(), false, 'definition tone restore is clean')
 })
 
-test('PR E: rename and delete of a custom definition count as dirty', () => {
+test('rename and delete of a custom definition count as dirty', () => {
   const { m } = customModel()
   openItemMenu(m, 'user:env')
   // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Advanced, 4 Rename, 5 Delete.
@@ -879,7 +879,7 @@ test('a custom definition placed MULTIPLE times: rename and delete update every 
   assert.equal(catalog.has('user:env2'), false, 'the definition itself is gone')
 })
 
-test('PR E: the home selection covers rows plus the Save action', () => {
+test('the home selection covers rows plus the Save action', () => {
   const m = model()
   assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 0 })
   m.moveDown()
@@ -894,7 +894,7 @@ test('PR E: the home selection covers rows plus the Save action', () => {
   assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 1 })
 })
 
-test('PR E: addRow shifts the Save entry; removeRow reanchors the home cursor', () => {
+test('addRow shifts the Save entry; removeRow reanchors the home cursor', () => {
   const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model' }], right: [] }] }
   const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
   m.moveDown() // → Save (the only entry after row 1)
@@ -909,7 +909,7 @@ test('PR E: addRow shifts the Save entry; removeRow reanchors the home cursor', 
   assert.deepEqual(m.homeSelection(), { kind: 'row', rowIndex: 0 })
 })
 
-test('PR E: a dirty selector Esc opens exit-confirm; a clean one closes', () => {
+test('a dirty selector Esc opens exit-confirm; a clean one closes', () => {
   const m = model()
   assert.equal(m.cancel(), false, 'clean → close')
   assert.equal(m.state().mode, 'rows')
@@ -925,7 +925,7 @@ test('PR E: a dirty selector Esc opens exit-confirm; a clean one closes', () => 
   assert.equal(m.isDirty(), true, 'the draft is preserved')
 })
 
-test('PR E: exit-confirm actions route save/discard/keep', () => {
+test('exit-confirm actions route save/discard/keep', () => {
   const m = model()
   m.activate()
   m.removeActive()
@@ -942,7 +942,7 @@ test('PR E: exit-confirm actions route save/discard/keep', () => {
   assert.equal(m.exitConfirmAction(), 'keep', 'outside the guard it is a plain keep')
 })
 
-test('PR E: the saving flag gates Esc-close until the save settles', () => {
+test('the saving flag gates Esc-close until the save settles', () => {
   const m = model()
   m.activate()
   m.removeActive()
@@ -958,7 +958,7 @@ test('PR E: the saving flag gates Esc-close until the save settles', () => {
   assert.equal(m.state().mode, 'rows')
 })
 
-test('PR E: create then delete of a NEW custom item returns to clean', () => {
+test('create then delete of a NEW custom item returns to clean', () => {
   const m = model()
   m.activate() // → row 1
   m.startAdd()
@@ -1010,7 +1010,7 @@ function createCommand(m: FooterConfiguratorModel, name: string, command: string
   m.activate() // create-tone -> row (Auto tone)
 }
 
-test('PR D: the Add picker exposes BOTH create actions and the command flow creates a command item', () => {
+test('the Add picker exposes BOTH create actions and the command flow creates a command item', () => {
   const m = model()
   m.activate() // row
   m.startAdd()
@@ -1041,7 +1041,7 @@ test('PR D: the Add picker exposes BOTH create actions and the command flow crea
   assert.ok(m.state().layout.rows[0]!.left.some(ref => ref.id === 'user:Clock'))
 })
 
-test('PR D: the command create flow validates the command and cancels back to the picker', () => {
+test('the command create flow validates the command and cancels back to the picker', () => {
   const m = model()
   m.activate() // row
   m.startAdd()
@@ -1058,7 +1058,7 @@ test('PR D: the command create flow validates the command and cancels back to th
   assert.equal(m.customItem('user:Clock'), undefined, 'cancelling the flow must not create anything')
 })
 
-test('PR D: the item editor edits command, refresh, timeout and definition tone', () => {
+test('the item editor edits command, refresh, timeout and definition tone', () => {
   const m = commandModel()
   m.activate() // row
   m.activate() // item
@@ -1094,7 +1094,7 @@ test('PR D: the item editor edits command, refresh, timeout and definition tone'
   assert.equal(m.customItem('user:clock')?.tone, 'primary')
 })
 
-test('PR D: rename and delete of a command definition update every layout reference', () => {
+test('rename and delete of a command definition update every layout reference', () => {
   const m = commandModel()
   m.activate() // row
   m.activate() // item
@@ -1117,7 +1117,7 @@ test('PR D: rename and delete of a command definition update every layout refere
   assert.equal(m.customItem('user:time'), undefined)
 })
 
-test('PR D: command definition edits dirty and restore clean (command/refresh/timeout/tone)', () => {
+test('command definition edits dirty and restore clean (command/refresh/timeout/tone)', () => {
   const m = commandModel()
   assert.equal(m.isDirty(), false)
   m.activate() // row
@@ -1148,7 +1148,7 @@ test('PR D: command definition edits dirty and restore clean (command/refresh/ti
   assert.equal(m.isDirty(), true, 'a definition tone change is dirty')
 })
 
-test('PR D: an explicit default refresh/timeout is the same fact as absent (no false dirty)', () => {
+test('an explicit default refresh/timeout is the same fact as absent (no false dirty)', () => {
   const m = commandModel()
   m.activate() // row
   m.activate() // item
@@ -1167,7 +1167,7 @@ test('PR D: an explicit default refresh/timeout is the same fact as absent (no f
   assert.equal(item?.kind === 'command' ? item.timeoutMs : undefined, 300)
 })
 
-test('PR D: mixed text + command dirty detection is independent per definition', () => {
+test('mixed text + command dirty detection is independent per definition', () => {
   const catalog = new FooterCustomItemCatalog([
     CLOCK,
     { schemaVersion: 1, id: 'user:env', kind: 'text', text: 'PROD' },
@@ -1196,7 +1196,7 @@ test('PR D: mixed text + command dirty detection is independent per definition',
   assert.equal(m.isDirty(), true)
 })
 
-test('PR D: create then delete of a NEW command item returns to clean', () => {
+test('create then delete of a NEW command item returns to clean', () => {
   const m = model()
   createCommand(m, 'Temp', 'date')
   assert.equal(m.isDirty(), true)

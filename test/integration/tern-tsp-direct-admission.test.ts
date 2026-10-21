@@ -47,7 +47,7 @@ function latestComposerText(wire: string): string | undefined {
   return seen ? text : undefined
 }
 
-test('B2/Direct: a GENUINE Host command with a TUI builtin name keeps its Host sink', async (t) => {
+test('a GENUINE Host command with a TUI builtin name keeps its Host sink', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const calls: string[] = []
@@ -136,7 +136,7 @@ test('B/Direct: /sessions without a negotiated Browser is refused and restores t
   }
 })
 
-test('B2/Direct: a FAILING Host command rolls the draft back into the composer', async (t) => {
+test('a FAILING Host command rolls the draft back into the composer', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   let handlerCalls = 0
@@ -190,7 +190,7 @@ test('B2/Direct: a FAILING Host command rolls the draft back into the composer',
   }
 })
 
-test('B2/Direct: a refused `!` line writes NO input-history row (accepted prompt does)', async (t) => {
+test('a refused `!` line writes NO input-history row (accepted prompt does)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['ok'] })
@@ -309,7 +309,7 @@ for (const busyEnter of ['queue', 'steer'] as const) {
 
 // ── Cancellation while a real turn runs ─────────────────────────────────────
 
-test('B2/Direct: Esc during a RUNNING turn cancels the turn through the existing path (no exit)', async (t) => {
+test('Esc during a RUNNING turn cancels the turn through the existing path (no exit)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   let releaseStream!: () => void
@@ -344,7 +344,7 @@ test('B2/Direct: Esc during a RUNNING turn cancels the turn through the existing
   }
 })
 
-test('B2/Direct: a REJECTED session cancel surfaces a renderer-neutral error notice (never an exit)', async (t) => {
+test('a REJECTED session cancel surfaces a renderer-neutral error notice (never an exit)', async (t) => {
   // The cancel-ERROR qualification: when the semantic `SessionWriter.cancel`
   // settles `rejected` (or errors), the user-shell owner's `onResult` must
   // surface the structural message through the RENDERER-NEUTRAL notice sink
@@ -388,7 +388,7 @@ test('B2/Direct: a REJECTED session cancel surfaces a renderer-neutral error not
 
 // ── The CLIENT-EXTENSION command family ─────────────────────────────────────
 
-test('B2/Direct: a registered extension contribution runs (never refused by the TSP builtin gate)', async (t) => {
+test('a registered extension contribution runs (never refused by the TSP builtin gate)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const calls: string[] = []
@@ -420,7 +420,7 @@ test('B2/Direct: a registered extension contribution runs (never refused by the 
 
 // ── The advertised-miss path (a name the standing catalog promised) ─────────
 
-test('B2/Direct: an advertised Skill that is gone at execution is consumed with an explicit error, never a plain message or a TSP refusal', async (t) => {
+test('an advertised Skill that is gone at execution is consumed with an explicit error, never a plain message or a TSP refusal', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The GENUINE "advertised at submit, missing at execution" shape: the provider

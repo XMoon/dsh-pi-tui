@@ -256,3 +256,56 @@ test('the runner specification with a wall clock is still valid JSON', () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('the title transform removes every code family the tree uses', () => {
+  // The families below are the ones the repository's own titles use. Each
+  // one is a LABEL: it names the effort, not the behaviour.
+  const cases = [
+    ['A5b: the composition zone is one facade', 'the composition zone is one facade'],
+    ['A5b/TS2: a forbidden handler fails the zone lock', 'a forbidden handler fails the zone lock'],
+    ['A5b-6: the composition root introduces no new type', 'the composition root introduces no new type'],
+    ['B4A-07 a resize re-budgets the window', 'a resize re-budgets the window'],
+    ['PR5 §1C-3 (R6-1): only the winner is subtracted', 'only the winner is subtracted'],
+    ['PR4 F2b.2 (review round 4): a fulfilled observation is an issue', 'a fulfilled observation is an issue'],
+    ['§D2 (review round 3 ruling): Direct keeps the mirror', 'Direct keeps the mirror'],
+    ['§18.1 the Remote route never hands over', 'the Remote route never hands over'],
+    ['A06/Focus: an idle compaction keeps the chronology', 'an idle compaction keeps the chronology'],
+    ['B3 F6.1: a real answer freezes the countdown', 'a real answer freezes the countdown'],
+    ['B2/Direct-L6: a TSP Enter drives a real turn', 'a TSP Enter drives a real turn'],
+    ['E2–E5: per-card clicks layer over the preference', 'per-card clicks layer over the preference'],
+    ['D2.1: Ctrl+S steers queued occurrences', 'Ctrl+S steers queued occurrences'],
+    ['RFL-005: a cold attach verifies the first publication', 'a cold attach verifies the first publication'],
+    ['PR D: an unsaved draft never executes', 'an unsaved draft never executes'],
+    ['P1.1 headless: foo<Tab> opens no dropdown', 'foo<Tab> opens no dropdown'],
+  ]
+  for (const [from, to] of cases) {
+    assert.equal(stripCodePrefix(from), to, `must strip: ${from}`)
+  }
+})
+
+test('the title transform keeps a title that is only a code', () => {
+  // There is no sentence after the code, so there is nothing to keep.
+  assert.equal(stripCodePrefix('B3'), 'B3')
+  assert.equal(stripCodePrefix('L6'), 'L6')
+})
+
+test('the title transform keeps a qualifier that the sentence needs', () => {
+  // `Focus` and `Direct` name the variant the case covers. On their own
+  // they are the subject of the sentence, not a label.
+  assert.equal(
+    stripCodePrefix('Focus Error sanitizes AUTH failure messages'),
+    'Focus Error sanitizes AUTH failure messages',
+  )
+  assert.equal(
+    stripCodePrefix('B/Direct: sessionless resume follows the production lifecycle'),
+    'sessionless resume follows the production lifecycle',
+  )
+})
+
+test('the title transform keeps a key name that looks like a code', () => {
+  // `S` is a key, not a sub-label. Only a `PR` code may carry one.
+  assert.equal(
+    stripCodePrefix('S on a clean draft closes without persisting'),
+    'S on a clean draft closes without persisting',
+  )
+})
