@@ -49,7 +49,7 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
   return (result.content ?? []).map(block => block.type === 'text' ? block.text ?? '' : '').join('')
 }
 
-test('D2-1/B05: an official Optional bundle goes off→enable→restart-required→restart→real tool', { skip }, async t => {
+test('an official Optional bundle goes off→enable→restart-required→restart→real tool', { skip }, async t => {
   let host = await startS4D2Host(t, { bundles: [] })
   const { project, baseCommit } = seedRepository(host.root)
   const sourceHead = git(project, 'rev-parse', 'HEAD')
@@ -151,7 +151,7 @@ test('D2-1/B05: an official Optional bundle goes off→enable→restart-required
 const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies S4D2BundleId
 const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies S4D2BundleId
 
-test('B07: retained terminal process, output read, background job and restart cleanup', { skip: skippedInstallationReason([B07]) }, async t => {
+test('retained terminal process, output read, background job and restart cleanup', { skip: skippedInstallationReason([B07]) }, async t => {
   let host = await startS4D2Host(t, { bundles: [B07] })
   const work = join(host.root, 'work')
   const agent = await host.createAgent(SessionId('s4-d2-b07'), { cwd: work })
@@ -249,7 +249,7 @@ function markerChunks(text: string): StreamChunk[] {
   ]
 }
 
-test('B08: lazy workspace-scoped session search, paging/no-hit and restart re-index', { skip: skippedInstallationReason([B08]) }, async t => {
+test('lazy workspace-scoped session search, paging/no-hit and restart re-index', { skip: skippedInstallationReason([B08]) }, async t => {
   const host = await startS4D2Host(t, { bundles: [B08] })
   const adapter = new MarkerAdapter()
   host.ctx.llm.registerAdapter(['marker'], adapter)

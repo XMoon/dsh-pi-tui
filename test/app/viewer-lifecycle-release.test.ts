@@ -48,7 +48,7 @@ function span(from: string, to: string, source = viewerSource): string {
   return source.slice(start, end)
 }
 
-test('F1: the pending open controller is owned and aborted on every supersession/end path', () => {
+test('the pending open controller is owned and aborted on every supersession/end path', () => {
   const enter = span('const enterView = async (', 'const releaseViewHandle = ')
   assert.ok(enter.includes('openingAbort?.abort()'),
     'a NEW open must abort the previous in-flight one (its retained generation)')
@@ -79,7 +79,7 @@ test('F1: the pending open controller is owned and aborted on every supersession
     'the pending open is cancelled before the mounted handle is released')
 })
 
-test('F2: the viewer dispose drops the ingress BEFORE the child reference, exactly once', () => {
+test('the viewer dispose drops the ingress BEFORE the child reference, exactly once', () => {
   const dispose = span('const dispose = (): void => {', 'return {')
   assert.ok(dispose.indexOf('viewing = undefined') >= 0, 'the mounted viewer state is dropped')
   assert.ok(dispose.includes('releaseViewHandle()'),
@@ -97,7 +97,7 @@ test('F2: the viewer dispose drops the ingress BEFORE the child reference, exact
     'the live ingress goes down BEFORE the child generation is released')
 })
 
-test('F2: the runner surface disposal tears the viewer down before the surface/app teardown', () => {
+test('the runner surface disposal tears the viewer down before the surface/app teardown', () => {
   // TS2 §11 moved the idempotent client-surface teardown into the bootstrap
   // composition zone (`app/bootstrap/lifecycle.ts`), which now receives an
   // explicit `disposeViewer` seam. The ordering invariant is unchanged, and the
@@ -117,7 +117,7 @@ test('F2: the runner surface disposal tears the viewer down before the surface/a
     'the viewer seam must read the late-bound `viewerRef` exactly once')
 })
 
-test('F7: the Remote image read fails closed without a captured display subject, never late-selecting one', () => {
+test('the Remote image read fails closed without a captured display subject, never late-selecting one', () => {
   const readImage = span('readImage: (ref, context) => {', '\n      present,', bootstrapSource)
   assert.ok(readImage.includes('typeof subject'),
     'the Remote branch must require the captured display-subject token')
@@ -145,7 +145,7 @@ test('F7: the Remote image read fails closed without a captured display subject,
     'the presentation-scope seam must never be optional again')
 })
 
-test('P1: the image scope identity is the presentation LIFETIME, and the renderer stamps it at construction', () => {
+test('the image scope identity is the presentation LIFETIME, and the renderer stamps it at construction', () => {
   const scopeProvider = span('imageScope: () => {', 'readImage: (ref, context) => {', bootstrapSource)
   assert.ok(scopeProvider.includes('viewer.read()'),
     'the token follows the viewed child while its viewer is mounted')
@@ -224,7 +224,7 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
  * ingress attempt must precede it, and the collected failure must surface
  * after both attempts — a second dispose is inert (the plan's D2 form).
  */
-test('S3-R0: child re-folds are serialized, and a refused commit never overwrites the newer fold', async (t) => {
+test('child re-folds are serialized, and a refused commit never overwrites the newer fold', async (t) => {
   // C4/§2.5 owner-level barrier: read A is already in flight when a second
   // requirement is coalesced; the FIFO serializes them, A is refused as
   // superseded (writes NOTHING), and only the newer fold commits. Deterministic
@@ -314,7 +314,7 @@ test('S3-R0: child re-folds are serialized, and a refused commit never overwrite
   viewer.dispose()
 })
 
-test('M3-6 PR3: a throwing ingress disposer cannot strand the retained child binding', async () => {
+test('a throwing ingress disposer cannot strand the retained child binding', async () => {
   const order: string[] = []
   const ingressError = new Error('ingress dispose failed')
   const view: ViewerChildView<SessionPresentationEvent> = {

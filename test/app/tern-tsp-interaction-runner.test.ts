@@ -536,7 +536,7 @@ function liveOverlays(ops: readonly Op[]): string[] {
 
 // ── Approval: official request → TSP key → the ORIGINAL sink ────────────────
 
-test('B3 L6: an official approval request is answered on the TSP pane and resolves the ORIGINAL sink', async () => {
+test('an official approval request is answered on the TSP pane and resolves the ORIGINAL sink', async () => {
   const harness = await mountRunnerHarness()
   try {
     const delivered = harness.approvalRequest({
@@ -556,7 +556,7 @@ test('B3 L6: an official approval request is answered on the TSP pane and resolv
 
 // ── Question: official request → real controller → TSP form → sink ──────────
 
-test('B3 L6: an official Question request is answered through the real controller and the official sink', async () => {
+test('an official Question request is answered through the real controller and the official sink', async () => {
   const harness = await mountRunnerHarness()
   try {
     const delivered = harness.questionRequest({
@@ -578,7 +578,7 @@ test('B3 L6: an official Question request is answered through the real controlle
 
 // ── Cold continued: projection → parked count → Alt+Q → late answer ─────────
 
-test('B3 L6: a cold continued projection is parked, counted in the dock, and answered through Alt+Q', async () => {
+test('a cold continued projection is parked, counted in the dock, and answered through Alt+Q', async () => {
   const harness = await mountRunnerHarness({
     projection: {
       active: [{
@@ -608,7 +608,7 @@ test('B3 L6: a cold continued projection is parked, counted in the dock, and ans
 
 // ── The authoritative settled batch on the transcript row ───────────────────
 
-test('B3 L6: the official settled batch reaches the tool row, and an EMPTY batch never falls back', async () => {
+test('the official settled batch reaches the tool row, and an EMPTY batch never falls back', async () => {
   const harness = await mountRunnerHarness({
     projection: {
       active: [],
@@ -626,7 +626,7 @@ test('B3 L6: the official settled batch reaches the tool row, and an EMPTY batch
   }
 })
 
-test('B3 L6: an EMPTY settled batch is authoritative and does not fall back to the recorded result', async () => {
+test('an EMPTY settled batch is authoritative and does not fall back to the recorded result', async () => {
   const harness = await mountRunnerHarness({
     projection: { active: [], settled: [{ callId: 'call-b3-empty', answers: [] }] },
   })
@@ -642,7 +642,7 @@ test('B3 L6: an EMPTY settled batch is authoritative and does not fall back to t
 
 // ── Lifecycle: teardown settles the live form and closes the SDK once ───────
 
-test('B3 L6: disposal settles the live approval, closes the SDK exactly once and leaves input inert', async () => {
+test('disposal settles the live approval, closes the SDK exactly once and leaves input inert', async () => {
   const harness = await mountRunnerHarness()
   let disposed = false
   try {
@@ -667,7 +667,7 @@ test('B3 L6: disposal settles the live approval, closes the SDK exactly once and
 
 // ── F4: the settled lookup is read even when the recorded result is empty ────
 
-test('B3 F4: a settled batch reaches a row whose recorded result is EMPTY', async () => {
+test('a settled batch reaches a row whose recorded result is EMPTY', async () => {
   const harness = await mountRunnerHarness({
     projection: {
       active: [],
@@ -685,7 +685,7 @@ test('B3 F4: a settled batch reaches a row whose recorded result is EMPTY', asyn
   }
 })
 
-test('B3 F4 control: with no settled entry an empty recorded result still renders no result body', async () => {
+test('control: with no settled entry an empty recorded result still renders no result body', async () => {
   const harness = await mountRunnerHarness()
   try {
     for (const event of questionToolEvents('call-b3-no-settlement', '')) harness.route(event as never)
@@ -1071,7 +1071,7 @@ test('B3 F6.1: disposing the surface releases the live Host claim (the caller li
 
 // ── Findings F9/F10: per-request identity and admission currentness ─────────
 
-test('B3 F9: two approvals sharing ONE borrowed cancellation scope are BOTH withdrawn at publication', async () => {
+test('two approvals sharing ONE borrowed cancellation scope are BOTH withdrawn at publication', async () => {
   const harness = await mountRunnerHarness()
   try {
     // The official request's signal is a BORROWED caller cancellation scope: two
@@ -1099,7 +1099,7 @@ test('B3 F9: two approvals sharing ONE borrowed cancellation scope are BOTH with
   }
 })
 
-test('B3 F9: answering the FIRST of two shared-scope approvals does not erase the SECOND request\'s registration', async () => {
+test('answering the FIRST of two shared-scope approvals does not erase the SECOND request\'s registration', async () => {
   const harness = await mountRunnerHarness()
   try {
     const shared = new AbortController()
@@ -1124,7 +1124,7 @@ test('B3 F9: answering the FIRST of two shared-scope approvals does not erase th
   }
 })
 
-test('B3 F10: a replaced subject\'s request that arrives AFTER the publication never mounts', async () => {
+test('a replaced subject\'s request that arrives AFTER the publication never mounts', async () => {
   const harness = await mountRunnerHarness()
   let release: (() => void) | undefined
   try {
@@ -1177,7 +1177,7 @@ test('B3 F10: a replaced subject\'s request that arrives AFTER the publication n
 
 // ── Findings F11/F12: refused-admission ownership and opening consistency ────
 
-test('B3 F11: a refused approval admission is drained by the surface teardown (and its borrowed listener detached)', async () => {
+test('a refused approval admission is drained by the surface teardown (and its borrowed listener detached)', async () => {
   const harness = await mountRunnerHarness()
   let release: (() => void) | undefined
   try {
@@ -1226,7 +1226,7 @@ test('B3 F11: a refused approval admission is drained by the surface teardown (a
   }
 })
 
-test('B3 F11/P2-A: a signal-less refused admission settles fail-closed at admission (never waits for TUI exit)', async () => {
+test('A: a signal-less refused admission settles fail-closed at admission (never waits for TUI exit)', async () => {
   const harness = await mountRunnerHarness()
   let release: (() => void) | undefined
   try {
@@ -1263,7 +1263,7 @@ test('B3 F11/P2-A: a signal-less refused admission settles fail-closed at admiss
   }
 })
 
-test('B3 F12: an OPENING target\'s flow is admitted, survives the ordinary reconcile, and is retired on rollback', async () => {
+test('an OPENING target\'s flow is admitted, survives the ordinary reconcile, and is retired on rollback', async () => {
   const harness = await mountRunnerHarness()
   try {
     const token = harness.surface.openingJournal.begin('session-target')
@@ -1312,7 +1312,7 @@ test('B3 F12: an OPENING target\'s flow is admitted, survives the ordinary recon
   }
 })
 
-test('B3 F11: a request admitted only AFTER the surface ended takes the fail-closed cancellation (never a new unowned wait)', async () => {
+test('a request admitted only AFTER the surface ended takes the fail-closed cancellation (never a new unowned wait)', async () => {
   const harness = await mountRunnerHarness()
   let release: (() => void) | undefined
   try {
@@ -1368,7 +1368,7 @@ test('B3 F11: a request admitted only AFTER the surface ended takes the fail-clo
 
 // ── External review P2-1/P2-2: late continued offers and signal-less waits ──
 
-test('B3 P2-1: a late continued offer never mounts into the replacement published while it waited', async () => {
+test('a late continued offer never mounts into the replacement published while it waited', async () => {
   const harness = await mountRunnerHarness({ remainingMs: 60 })
   try {
     let outcome: string | undefined
@@ -1412,7 +1412,7 @@ test('B3 P2-1: a late continued offer never mounts into the replacement publishe
   }
 })
 
-test('B3 P2-2: signal-less live requests are settled by the replacement (fail-closed, never left hanging)', async () => {
+test('signal-less live requests are settled by the replacement (fail-closed, never left hanging)', async () => {
   const harness = await mountRunnerHarness()
   try {
     // The official signal is OPTIONAL for both kinds: these requests have no
@@ -1454,7 +1454,7 @@ test('B3 P2-2: signal-less live requests are settled by the replacement (fail-cl
   }
 })
 
-test('B3 P2-A: an inadmissible request with NO Host lifetime settles at admission (no TUI exit needed)', async () => {
+test('an inadmissible request with NO Host lifetime settles at admission (no TUI exit needed)', async () => {
   const harness = await mountRunnerHarness()
   let release: (() => void) | undefined
   try {
@@ -1515,7 +1515,7 @@ test('B3 P2-A: an inadmissible request with NO Host lifetime settles at admissio
   }
 })
 
-test('B3 P2-D: a publication withdraws several replaced approvals atomically and the successor takes over', async () => {
+test('a publication withdraws several replaced approvals atomically and the successor takes over', async () => {
   const harness = await mountRunnerHarness()
   try {
     const aRef = { session: { id: SESSION_ID } }
@@ -1561,7 +1561,7 @@ test('B3 P2-D: a publication withdraws several replaced approvals atomically and
 
 // ── External review P2-E: the SETTLE step must not run before the batch ──────
 
-test('B3 P2-E: a signal-less ACTIVE approval plus a signal-bearing QUEUED one leave in ONE batch', async () => {
+test('a signal-less ACTIVE approval plus a signal-bearing QUEUED one leave in ONE batch', async () => {
   const harness = await mountRunnerHarness()
   try {
     const aRef = { session: { id: SESSION_ID } }
@@ -1606,7 +1606,7 @@ test('B3 P2-E: a signal-less ACTIVE approval plus a signal-bearing QUEUED one le
   }
 })
 
-test('B3 P2-E: a MOUNTED continued form plus a QUEUED approval leave in ONE batch', async () => {
+test('a MOUNTED continued form plus a QUEUED approval leave in ONE batch', async () => {
   const harness = await mountRunnerHarness({
     projection: {
       active: [{
@@ -1662,7 +1662,7 @@ test('B3 P2-E: a MOUNTED continued form plus a QUEUED approval leave in ONE batc
 
 // ── External review P2-F: an ordinary event must not close the Alt+Q list ────
 
-test('B3 P2-F: an ordinary Session event keeps the Alt+Q list open (only a publication closes it)', async () => {
+test('an ordinary Session event keeps the Alt+Q list open (only a publication closes it)', async () => {
   const harness = await mountRunnerHarness({
     projection: {
       active: [{

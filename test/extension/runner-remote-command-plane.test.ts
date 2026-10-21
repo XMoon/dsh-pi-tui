@@ -340,7 +340,7 @@ async function settle(ms = 60): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
 
-test('L6 §7.4-1 TUI built-in: the Client handler runs and the Host executor is NEVER entered', async (t) => {
+test('TUI built-in: the Client handler runs and the Host executor is NEVER entered', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-builtin'
   const fixture = await mountRunner(life, { resumeSessionId: mainId })
@@ -476,7 +476,7 @@ function retainFacts(sessions: ClientSessionsFace, id: string): { referenceCount
   return { referenceCount: snapshot.referenceCount, retainedBy: { ...snapshot.retainedBy } }
 }
 
-test('F1 Remote: a card-less /copy failure is published once and produces no Host command row', async (t) => {
+test('Remote: a card-less /copy failure is published once and produces no Host command row', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-copy'
   const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
@@ -493,7 +493,7 @@ test('F1 Remote: a card-less /copy failure is published once and produces no Hos
     'the Client registry route produced no Host command/run row (so no result card exists)')
 })
 
-test('F1 Remote: a card-less /yolo unavailability is published, never reported as applied', async (t) => {
+test('Remote: a card-less /yolo unavailability is published, never reported as applied', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-yolo'
   const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
@@ -509,7 +509,7 @@ test('F1 Remote: a card-less /yolo unavailability is published, never reported a
     'the Client registry route produced no Host command/run row')
 })
 
-test('F1 Remote: a sessionless /logout target error is settled ONCE by the local command path', async (t) => {
+test('Remote: a sessionless /logout target error is settled ONCE by the local command path', async (t) => {
   const life = testLifecycle(t)
   // No resumed Session: a sessionless command runs through the controller's
   // local-command path, which already notifies its errors — the new card-less
@@ -537,7 +537,7 @@ test('F1 Remote: a sessionless /logout target error is settled ONCE by the local
  * hide a Client-route error or duplicate a Host-route one when the catalog
  * changes mid-flight. Both directions are driven deterministically below.
  */
-test('F4 Remote: a Client-route error is still published once when the Host catalog claims the name mid-flight', async (t) => {
+test('Remote: a Client-route error is still published once when the Host catalog claims the name mid-flight', async (t) => {
   // The POSIX helper gates are cleared (and macOS/Windows skipped) so the copy
   // policy's failure is deterministic; the OSC 52 write is the mid-flight hook.
   if (process.platform === 'darwin' || process.platform === 'win32') {
@@ -604,7 +604,7 @@ test('F4 Remote: a Client-route error is still published once when the Host cata
     'the invocation stayed on the Client registry route (no Host command/run row)')
 })
 
-test('F1 Remote TSP: a card-less command failure reaches the TSP Dock', async (t) => {
+test('Remote TSP: a card-less command failure reaches the TSP Dock', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-tsp'
   const { createRemoteApplicationHostFixture } = await import('../support/remote-application-fixture.ts')
@@ -677,7 +677,7 @@ test('F1 Remote TSP: a card-less command failure reaches the TSP Dock', async (t
       && typeof node.p.text === 'string' && node.p.text.includes('no assistant message yet')), 25_000)
 })
 
-test('L6 §7.4-2 extension (M3-6 PR1): the CLIENT-CONTEXT callback runs through the selected Client service; the Host-context twin and the Host executor are NEVER entered', async (t) => {
+test('extension (M3-6 PR1): the CLIENT-CONTEXT callback runs through the selected Client service; the Host-context twin and the Host executor are NEVER entered', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-ext'
   let clientCalls = 0
@@ -719,7 +719,7 @@ test('L6 §7.4-2 extension (M3-6 PR1): the CLIENT-CONTEXT callback runs through 
     'an extension callback must never reach the Host command executor')
 })
 
-test('L6 §7.4-3 Host command: executes EXACTLY ONCE through HostCommandPort', async (t) => {
+test('Host command: executes EXACTLY ONCE through HostCommandPort', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-host'
   let calls = 0
@@ -742,7 +742,7 @@ test('L6 §7.4-3 Host command: executes EXACTLY ONCE through HostCommandPort', a
     'exactly ONE command/run row — the Host command is never auto-retried or double-dispatched')
 })
 
-test('B1-B/Remote: the Remote command catalogue routes Host /sessions to its real Host sink', async (t) => {
+test('B/Remote: the Remote command catalogue routes Host /sessions to its real Host sink', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b1-b-remote-sessions-command'
   let calls = 0
@@ -770,7 +770,7 @@ test('B1-B/Remote: the Remote command catalogue routes Host /sessions to its rea
     'the Remote Host winner produced exactly one official command/run row')
 })
 
-test('L6 §7.4-4 collision (M3-6 PR1): the Host claim wins and the same-named CLIENT-CONTEXT extension callback is never invoked', async (t) => {
+test('collision (M3-6 PR1): the Host claim wins and the same-named CLIENT-CONTEXT extension callback is never invoked', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-collision'
   let hostCalls = 0
@@ -807,7 +807,7 @@ test('L6 §7.4-4 collision (M3-6 PR1): the Host claim wins and the same-named CL
   assert.equal(clientCalls, 0, 'the Host claim owns the line — the colliding Client callback never runs')
 })
 
-test('L6 §7.4-6 a sessionless TUI built-in works before the first Session and creates none', async (t) => {
+test('a sessionless TUI built-in works before the first Session and creates none', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountRunner(life, {})
   const before = fixture.host.ctx.sessions.list().length
@@ -817,7 +817,7 @@ test('L6 §7.4-6 a sessionless TUI built-in works before the first Session and c
     'a sessionless command never creates a Session')
 })
 
-test('L6 §7.4-8 /copy reaches the newest assistant message OUTSIDE the initial window by paging', async (t) => {
+test('/copy reaches the newest assistant message OUTSIDE the initial window by paging', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-copy'
   const fixture = await mountRunner(life, {
@@ -862,7 +862,7 @@ test('L6 §7.4-8 /copy reaches the newest assistant message OUTSIDE the initial 
     'the copied text is the last assistant message reached by paging')
 })
 
-test('L6 §D3 (review F2-external): a REAL Host `/export` claim wins over the same-named TUI built-in', async (t) => {
+test('§D3 (review F2-external): a REAL Host `/export` claim wins over the same-named TUI built-in', async (t) => {
   // The frozen rc.2 `dsh-session-log-export` Host plugin registers `/export`
   // (a Web-only ZIP download) — the REAL production collision. The TUI also
   // owns a Client `/export` built-in. The §D3 precedence contract: the
@@ -911,7 +911,7 @@ test('L6 §D3 (review F2-external): a REAL Host `/export` claim wins over the sa
     'the /export line executed through the OFFICIAL Host executor exactly once (the Host claim owns it)')
 })
 
-test('L6 §7.4-6 sessionless standing skill: the Remote refresh reports EXPLICIT unavailable and creates NO Session', async (t) => {
+test('sessionless standing skill: the Remote refresh reports EXPLICIT unavailable and creates NO Session', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountRunner(life, {})
   const before = fixture.host.ctx.sessions.list().length
@@ -924,7 +924,7 @@ test('L6 §7.4-6 sessionless standing skill: the Remote refresh reports EXPLICIT
     'the Remote standing refresh creates NO hidden Session')
 })
 
-test('L6 truthful-unavailable (review round 4): Remote /transcript refuses EXPLICITLY and never starts the artifact save', async (t) => {
+test('truthful-unavailable (review round 4): Remote /transcript refuses EXPLICITLY and never starts the artifact save', async (t) => {
   // The Markdown renderer reads the whole Session event history
   // (`snapshotEvents`) — no transport-neutral seam exists yet, so the
   // Remote post-success artifact save would resolve the projected agent and
@@ -973,7 +973,7 @@ test('L6 truthful-unavailable (review round 4): Remote /transcript refuses EXPLI
     'the Remote /transcript refusal never reaches the Host command executor')
 })
 
-test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement → the old snapshot cannot commit and generation B AUTOMATICALLY re-reads the Host catalog without /reload', async (t) => {
+test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old snapshot cannot commit and generation B AUTOMATICALLY re-reads the Host catalog without /reload', async (t) => {
   // The F2a install fence over the MOUNTED composition, plus the M3-6 PR2
   // automatic reconnect recovery. The stale payload is REAL by construction:
   // the gated read completes FIRST (its snapshot verifiably contains
@@ -1215,7 +1215,7 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
 
 /* ── PR5 supplement: Client self-claim reachability under running + steer ── */
 
-test('L6 PR5: TUI local commands stay reachable while the session RUNS and busy delivery resolves to STEER (the PR4 self-claim regression)', async (t) => {
+test('TUI local commands stay reachable while the session RUNS and busy delivery resolves to STEER (the PR4 self-claim regression)', async (t) => {
   // The PR4 regression shape: this Client's own TUI registrations appear in
   // the effective claim union, and the retired line-claim discriminator
   // read them as Host territory — so /status under a running session with a
@@ -1264,7 +1264,7 @@ test('L6 PR5: TUI local commands stay reachable while the session RUNS and busy 
   release()
 })
 
-test('L6 PR5: /copy under running + steer copies (the OSC 52 leg runs), never steers', async (t) => {
+test('/copy under running + steer copies (the OSC 52 leg runs), never steers', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr5-reach-copy'
   const llm = new StubStreamingLlmAdapter()
@@ -1306,7 +1306,7 @@ test('L6 PR5: /copy under running + steer copies (the OSC 52 leg runs), never st
   release()
 })
 
-test('L6 PR5: /transcript under running + steer gives the explicit unavailable error, never steers', async (t) => {
+test('/transcript under running + steer gives the explicit unavailable error, never steers', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr5-reach-transcript'
   const llm = new StubStreamingLlmAdapter()
@@ -1327,7 +1327,7 @@ test('L6 PR5: /transcript under running + steer gives the explicit unavailable e
   release()
 })
 
-test('L6 PR5 negative controls: agent-facing and Host-owned lines keep their delivery under the same condition', async (t) => {
+test('negative controls: agent-facing and Host-owned lines keep their delivery under the same condition', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr5-reach-neg'
   let hostRuns = 0
@@ -1360,7 +1360,7 @@ test('L6 PR5 negative controls: agent-facing and Host-owned lines keep their del
   release()
 })
 
-test('L6 PR5: /exit and /quit request the exit with NO session creation (sessionless alias parity)', async (t) => {
+test('/exit and /quit request the exit with NO session creation (sessionless alias parity)', async (t) => {
   const life = testLifecycle(t)
   const exits: number[] = []
   const fixture = await mountRunner(life, { appExit: code => { exits.push(code) } })
@@ -1372,7 +1372,7 @@ test('L6 PR5: /exit and /quit request the exit with NO session creation (session
   assert.equal(countSessions(), 0, '/quit exits without creating a session')
 })
 
-test('L6 PR5: /exit (the canonical alias) behaves identically sessionless', async (t) => {
+test('/exit (the canonical alias) behaves identically sessionless', async (t) => {
   const life = testLifecycle(t)
   const exits: number[] = []
   const fixture = await mountRunner(life, { appExit: code => { exits.push(code) } })

@@ -227,7 +227,7 @@ test('RCS-G2: subscribeConnectionGeneration delegates exactly — one notify whi
 })
 
 
-test('PR4 F2b (review round 3): through the REAL composition, a FAILED commands provider keeps the FULFILLED skills', async () => {
+test('(review round 3): through the REAL composition, a FAILED commands provider keeps the FULFILLED skills', async () => {
   // The production path — not a hand-made snapshot: the real command source
   // (whose readCommands rejects on a provider failure) composed by the real
   // `composeRemoteSurfaceCatalog`.
@@ -257,7 +257,7 @@ test('PR4 F2b (review round 3): through the REAL composition, a FAILED commands 
   assert.equal(snapshot.issues[0]?.provider, 'commands')
 })
 
-test('PR4 F2b (review round 3): the coordinator over the REAL composition keeps the last-good Host claims and adopts the fresh skills', async () => {
+test('(review round 3): the coordinator over the REAL composition keeps the last-good Host claims and adopts the fresh skills', async () => {
   let commandsFail = false
   let skillsVersion = 'old'
   const generation = generationSource({ id: 1 } as RemoteConnectionGeneration)

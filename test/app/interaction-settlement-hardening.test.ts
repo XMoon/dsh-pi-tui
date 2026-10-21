@@ -124,7 +124,7 @@ async function runAbortRoutedFailure(
   return lines.find(entry => entry.includes('approval abort settlement'))
 }
 
-test('M3-6 PR3 F6: a cleanup failure is recorded as an ERROR through the real owned sink (never as a cancellation)', async (t) => {
+test('a cleanup failure is recorded as an ERROR through the real owned sink (never as a cancellation)', async (t) => {
   for (const failure of [
     new Error('plain cleanup failed'),
     Object.assign(new Error('abort-shaped cleanup failed'), { name: 'AbortError' }),
@@ -139,7 +139,7 @@ test('M3-6 PR3 F6: a cleanup failure is recorded as an ERROR through the real ow
   }
 })
 
-test('M3-6 PR3 F4: multiple settlement cleanup failures aggregate in execution order', async (t) => {
+test('multiple settlement cleanup failures aggregate in execution order', async (t) => {
   const observed: unknown[] = []
   const { app } = startApp((_label, error) => observed.push(error))
   const failureA = new Error('cleanup A failed')
@@ -171,7 +171,7 @@ test('M3-6 PR3 F4: multiple settlement cleanup failures aggregate in execution o
   t.mock.restoreAll()
 })
 
-test('M3-6 PR3 F5: a queued question synchronously cancelled during handover is never mounted', async () => {
+test('a queued question synchronously cancelled during handover is never mounted', async () => {
   const { app, vt } = startApp()
   const secondController = new AbortController()
   const first = app.askQuestions(
@@ -204,7 +204,7 @@ test('M3-6 PR3 F5: a queued question synchronously cancelled during handover is 
 })
 
 /* TERMINAL fail-closed case — keep LAST in this file. */
-test('M3-6 PR3 F4: a settlement cleanup that throws undefined is not swallowed (fail-closed slot)', async (t) => {
+test('a settlement cleanup that throws undefined is not swallowed (fail-closed slot)', async (t) => {
   const { app } = startApp()
   let armed = false
   t.mock.method(app as unknown as { clearFullscreenPointerGestures(): void }, 'clearFullscreenPointerGestures', () => {

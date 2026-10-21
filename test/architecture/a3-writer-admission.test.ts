@@ -184,7 +184,7 @@ test('a stale scope refused at admission takes the distinct stale path and runs 
   ], 'a stale capture takes the stale path — never the transition refusal')
 })
 
-test('PR5: a proven prompt rejection settles structurally inside the writer — restore, ack code, guidance, no throw', async () => {
+test('a proven prompt rejection settles structurally inside the writer — restore, ack code, guidance, no throw', async () => {
   // The ordinary prompt must consume `WriteOutcome.rejected` at the submission
   // settlement owner instead of throwing its message: the reserved-submit
   // wrapper then never performs its generic restore and `runOwned.onError`
@@ -215,7 +215,7 @@ test('PR5: a proven prompt rejection settles structurally inside the writer — 
     'a proven pre-commit refusal is never reported as a stale retry or a generic failure')
 })
 
-test('PR5: the admitted prompt writer owns the settlement interval — a transition waits through rejection settlement', async () => {
+test('the admitted prompt writer owns the settlement interval — a transition waits through rejection settlement', async () => {
   // DECISION D3: no post-dispatch currentness fence exists because the writer
   // barrier IS the currentness authority for that interval. Prove it with the
   // real `SessionRuntime.withWriter` + `SessionOperationBarrier`: EVERY
@@ -270,7 +270,7 @@ test('PR5: the admitted prompt writer owns the settlement interval — a transit
   assert.equal(barrier.activeWriters, 0)
 })
 
-test('PR5 negative control: an indeterminate prompt result never restores the draft', async () => {
+test('an indeterminate prompt result never restores the draft', async () => {
   const { surface, calls } = recordingSurface({
     prepareMessage: async () => undefined,
     prompt: async () => ({
@@ -288,7 +288,7 @@ test('PR5 negative control: an indeterminate prompt result never restores the dr
   ], 'an unproven post-dispatch result is not restored and not reclassified as a rejection')
 })
 
-test('PR5 negative control: an unsupported prompt result keeps its generic failure path', async () => {
+test('an unsupported prompt result keeps its generic failure path', async () => {
   const { surface } = recordingSurface({
     prepareMessage: async () => undefined,
     prompt: async () => ({ kind: 'unsupported' as const, reason: 'prompt is not supported here' }),
@@ -487,7 +487,7 @@ function srcTsFiles(dir: URL, prefix = ''): string[] {
   return out
 }
 
-test('A3-4 static exit: index.ts has ZERO direct writer admission; commands.ts has ZERO withSessionWriter', () => {
+test('exit: index.ts has ZERO direct writer admission; commands.ts has ZERO withSessionWriter', () => {
   const index = compositionSource()
   const commands = readFileSync(new URL('../../src/commands.ts', import.meta.url), 'utf8')
   assert.equal(index.includes('ownership.barrier.runWriter('), false,
@@ -498,7 +498,7 @@ test('A3-4 static exit: index.ts has ZERO direct writer admission; commands.ts h
     'TuiCommandRunner.withSessionWriter must be deleted')
 })
 
-test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachment-intake UX fence', () => {
+test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX fence', () => {
   const commands = readFileSync(new URL('../../src/commands.ts', import.meta.url), 'utf8')
   // TS1 moved the attachment-intake fence into the artifacts command owner.
   const artifacts = readFileSync(new URL('../../src/tui/commands/artifacts.ts', import.meta.url), 'utf8')
@@ -530,7 +530,7 @@ test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachmen
   )
 })
 
-test('A3-4 static exit: SessionRuntime is the SOLE operation-barrier writer admission owner', () => {
+test('exit: SessionRuntime is the SOLE operation-barrier writer admission owner', () => {
   const root = new URL('../../src/', import.meta.url)
   const offenders = srcTsFiles(root)
     .filter(rel => rel !== 'app/session/runtime.ts')
@@ -539,7 +539,7 @@ test('A3-4 static exit: SessionRuntime is the SOLE operation-barrier writer admi
     'only SessionRuntime.withWriter may call the operation barrier')
 })
 
-test('P1-1 static: no production fence carries the transition gate into an admitted writer', () => {
+test('no production fence carries the transition gate into an admitted writer', () => {
   // The transition gate may gate a writer that has NOT yet been admitted, but
   // once a writer holds the barrier the gate must WAIT for the whole writer.
   // Re-reading `gate.busy` inside an admitted writer's fence truncates it.
@@ -701,7 +701,7 @@ async function drainUntil(done: () => boolean): Promise<boolean> {
   return done()
 }
 
-test('P1 lock: a session/writer-held steer rejection is settled by the submission owner', async () => {
+test('a session/writer-held steer rejection is settled by the submission owner', async () => {
   const calls: string[] = []
   const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
   const agent = { session: { id: 's1' }, status: 'running' }
@@ -761,7 +761,7 @@ test('P1 lock: a session/writer-held steer rejection is settled by the submissio
     'the helper never restores behind the owner (no double restore)')
 })
 
-test('PR3-B §7.3 (F2): a steer gone stale across a REPLACED owner does not reseed a switch-dropping renderer', async () => {
+test('a steer gone stale across a REPLACED owner does not reseed a switch-dropping renderer', async () => {
   // The B2 external review's pollution path, at the REAL submission runtime
   // with the REAL ownership subject authority: the busy steer's prepare
   // awaits; the owner is REPLACED (a different owner ref publishes — what a
@@ -843,7 +843,7 @@ test('PR3-B §7.3 (F2): a steer gone stale across a REPLACED owner does not rese
     'the enclosing flow never restores behind the owner')
 })
 
-test('PR3-B §7.3 (F2): the SAME-OWNER invalidated shape still restores (a failed switch kept the owner)', async () => {
+test('the SAME-OWNER invalidated shape still restores (a failed switch kept the owner)', async () => {
   // The review's probe-887 shape: the generation was invalidated (a failed
   // switch bumped it) but the OWNER is unchanged — no committed replacement
   // happened, nothing cleared the draft, and a switch-dropping renderer must
@@ -922,7 +922,7 @@ test('PR3-B §7.3 (F2): the SAME-OWNER invalidated shape still restores (a faile
     'the notice promises the restored retry')
 })
 
-test('PR3-B §7.3 (F2): the SAME stale shape on a retaining renderer (PiTui) still restores the draft', async () => {
+test('the SAME stale shape on a retaining renderer (PiTui) still restores the draft', async () => {
   // The PiTui half of the contract: the identical replaced-owner stale shape
   // merges the text back (steer.test.ts's restore family is the PiTui
   // editor's long-standing behavior). The renderer policy is the second
@@ -995,7 +995,7 @@ test('PR3-B §7.3 (F2): the SAME stale shape on a retaining renderer (PiTui) sti
 
 /* ── PR5 (plan §3.8): stale Host-command settlement makes no visible commit ── */
 
-test('PR5: a command settlement whose subject was REPLACED performs cleanup only, never a visible mutation', async () => {
+test('a command settlement whose subject was REPLACED performs cleanup only, never a visible mutation', async () => {
   // The §3.8 invariant: the Host may finish the old command and the durable
   // Host-side settlement completes, but once the captured SessionScope is no
   // longer current the old operation cannot mutate the replacement TUI
@@ -1075,7 +1075,7 @@ test('PR5: a command settlement whose subject was REPLACED performs cleanup only
     'a stale settlement performs no visible mutation (no restore/consume/ack/notice/health/artifact-save)')
 })
 
-test('PR5 positive control: a current-scope settlement performs the normal visible behavior', async () => {
+test('a current-scope settlement performs the normal visible behavior', async () => {
   const calls: string[] = []
   const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
   const deps = {

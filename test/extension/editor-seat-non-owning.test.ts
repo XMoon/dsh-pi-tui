@@ -94,7 +94,7 @@ test('EditorSeatMount never disposes its occupant (the mount contract is non-own
   assert.equal(disposed, 0, 'the mount must never dispose the seat occupant')
 })
 
-test('P1-A: a replacement editor survives a question round-trip (child tree stays alive)', async () => {
+test('a replacement editor survives a question round-trip (child tree stays alive)', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -126,7 +126,7 @@ test('P1-A: a replacement editor survives a question round-trip (child tree stay
   app.stop()
 })
 
-test('P1-B: plugin invalidate during an active question keeps the QuestionFrame mounted; the latest view mounts after settle', async () => {
+test('plugin invalidate during an active question keeps the QuestionFrame mounted; the latest view mounts after settle', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -180,7 +180,7 @@ test('P1-B: plugin invalidate during an active question keeps the QuestionFrame 
   app.stop()
 })
 
-test('P1-C: an editor winner change during an active question keeps the QuestionFrame; the latest winner mounts after settle', async () => {
+test('an editor winner change during an active question keeps the QuestionFrame; the latest winner mounts after settle', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -217,7 +217,7 @@ test('P1-C: an editor winner change during an active question keeps the Question
   app.stop()
 })
 
-test('P1-D: TuiApp.dispose releases the replacement editor exactly once', async () => {
+test('TuiApp.dispose releases the replacement editor exactly once', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -246,7 +246,7 @@ test('P1-D: TuiApp.dispose releases the replacement editor exactly once', async 
   assert.equal(disposeCalls, 1, 'a repeated dispose must not double-dispose the replacement editor')
 })
 
-test('P1-D2: TuiApp.dispose releases the replacement exactly once even with a question open', async () => {
+test('TuiApp.dispose releases the replacement exactly once even with a question open', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -272,7 +272,7 @@ test('P1-D2: TuiApp.dispose releases the replacement exactly once even with a qu
   await assert.rejects(promise, /cancelled/)
 })
 
-test('P1-E: queued question transfer keeps the editor alive but detached until the last flow closes', async () => {
+test('queued question transfer keeps the editor alive but detached until the last flow closes', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()

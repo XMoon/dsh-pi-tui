@@ -67,7 +67,7 @@ test('buildSessionTree hangs every parentSession row under its parent chain', ()
 
 // ── session lineage (plan §20): /fork + rewind children in the tree ───────
 
-test('S01: a plain /fork child hangs under its parent', () => {
+test('a plain /fork child hangs under its parent', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 4, updatedAt: 4, live: false },
     { id: 'session-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-parent', live: false },
@@ -79,7 +79,7 @@ test('S01: a plain /fork child hangs under its parent', () => {
   ])
 })
 
-test('S02: a rewind-of-rewind chain nests deeper', () => {
+test('a rewind-of-rewind chain nests deeper', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 5, updatedAt: 5, live: false },
     { id: 'session-child1', createdAt: 4, updatedAt: 4, parentSession: 'session-parent', live: false },
@@ -93,7 +93,7 @@ test('S02: a rewind-of-rewind chain nests deeper', () => {
   ])
 })
 
-test('S03: a subagent still hangs under its parent', () => {
+test('a subagent still hangs under its parent', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 4, updatedAt: 4, live: false },
     { id: 'session-sub', createdAt: 3, updatedAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
@@ -105,7 +105,7 @@ test('S03: a subagent still hangs under its parent', () => {
   ])
 })
 
-test('S04: fork and subagent siblings keep the input order', () => {
+test('fork and subagent siblings keep the input order', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-parent', createdAt: 5, updatedAt: 5, live: false },
     { id: 'session-fork', createdAt: 4, updatedAt: 4, parentSession: 'session-parent', live: false },
@@ -123,7 +123,7 @@ test('S04: fork and subagent siblings keep the input order', () => {
   ])
 })
 
-test('S05: an orphan child (parent outside the window) degrades to root depth', () => {
+test('an orphan child (parent outside the window) degrades to root depth', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-orphan-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-missing', live: false },
     { id: 'session-root', createdAt: 2, updatedAt: 2, live: false },
@@ -136,7 +136,7 @@ test('S05: an orphan child (parent outside the window) degrades to root depth', 
   assert.equal(byId.get('session-orphan-sub'), 0, 'orphan subagents degrade to root without being lost')
 })
 
-test('S06: parent cycles never loop and each row appears once', () => {
+test('parent cycles never loop and each row appears once', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-a', createdAt: 3, updatedAt: 3, parentSession: 'session-b', live: false },
     { id: 'session-b', createdAt: 2, updatedAt: 2, parentSession: 'session-a', live: false },

@@ -195,7 +195,7 @@ function officialSurface(events: readonly unknown[]): {
   return { lastUsed: state.lastUsed, next: state.pending ?? state.lastUsed }
 }
 
-test('T1: the durable read answers from the exact Session’s own request header, without the default, a listener or an append', () => {
+test('the durable read answers from the exact Session’s own request header, without the default, a listener or an append', () => {
   let defaultReads = 0
   const owner = new DirectModelSelectionOwner({
     currentSelection: () => { defaultReads += 1; return { provider: 'global', model: 'default' } },
@@ -218,7 +218,7 @@ test('T1: the durable read answers from the exact Session’s own request header
   assert.equal(defaultReads, 0, 'the empty read does not touch the default either')
 })
 
-test('T2: the compat surface is the Session’s latest USED route and its lastUsed half matches the installed reducer', () => {
+test('the compat surface is the Session’s latest USED route and its lastUsed half matches the installed reducer', () => {
   const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'global', model: 'default' }) })
   const sequences: ReadonlyArray<{ name: string; events: readonly unknown[] }> = [
     { name: 'legacy request only', events: [request('p1', 'm1', 'high')] },
@@ -264,7 +264,7 @@ test('T2: the compat surface is the Session’s latest USED route and its lastUs
   )
 })
 
-test('T9: the raw adapter-defaulted effort is preserved exactly like the official wire value', () => {
+test('the raw adapter-defaulted effort is preserved exactly like the official wire value', () => {
   const defaulted = {
     config: { provider: 'p', model: 'm', reasoningEffort: 'high' },
     adapterDefaults: { reasoningEffort: true },

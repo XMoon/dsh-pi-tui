@@ -171,7 +171,7 @@ function captureOscTitles(t: { after(fn: () => void): void }): string[] {
   return writes
 }
 
-test('B09: the real all-prompts title reaches the mounted TUI title/OSC, manual wins and a late A never paints B', { skip: skippedInstallationReason([B09]) }, async t => {
+test('the real all-prompts title reaches the mounted TUI title/OSC, manual wins and a late A never paints B', { skip: skippedInstallationReason([B09]) }, async t => {
   const adapter = new ScriptedAdapter()
   const app = await startS4D3Application(t, {
     bundles: [B09],
@@ -279,7 +279,7 @@ async function openSkillPicker(app: S4D3Application): Promise<void> {
   }
 }
 
-test('B10: the real badge Skill provider reaches the /skill surface in a skills-capable preset', { skip: skippedInstallationReason([B10]) }, async t => {
+test('the real badge Skill provider reaches the /skill surface in a skills-capable preset', { skip: skippedInstallationReason([B10]) }, async t => {
   const adapter = new ScriptedAdapter()
   const app = await startS4D3Application(t, {
     bundles: [B10],
@@ -341,7 +341,7 @@ test('B10: the real badge Skill provider reaches the /skill surface in a skills-
   assert.doesNotMatch(restarted.view(), /dsh-badge/u, 'the disabled bundle no longer contributes the skill')
 })
 
-test('B10: the minimal preset never gains a model skill tool (the human /skill surface stays provider-backed)', { skip: skippedInstallationReason([B10]) }, async t => {
+test('the minimal preset never gains a model skill tool (the human /skill surface stays provider-backed)', { skip: skippedInstallationReason([B10]) }, async t => {
   const adapter = new ScriptedAdapter()
   const app = await startS4D3Application(t, {
     bundles: [B10],
@@ -392,7 +392,7 @@ function ralphReport(summary: string): Script {
   }
 }
 
-test('B11: a real bounded Ralph round reaches the transcript/Activity UI as a foreground tool without a Job', { skip: skippedInstallationReason([B11]) }, async t => {
+test('a real bounded Ralph round reaches the transcript/Activity UI as a foreground tool without a Job', { skip: skippedInstallationReason([B11]) }, async t => {
   const adapter = new ScriptedAdapter()
   const app = await startS4D3Application(t, {
     bundles: [B11],

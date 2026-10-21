@@ -111,7 +111,7 @@ async function seedTurn(fixture: DirectTspFixture, text: string): Promise<string
 
 // ── A01: /new ───────────────────────────────────────────────────────────────
 
-test('A01: /new creates and hydrates a real new Session without a model turn', async (t) => {
+test('/new creates and hydrates a real new Session without a model turn', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A01'] })
   try {
@@ -141,7 +141,7 @@ test('A01: /new creates and hydrates a real new Session without a model turn', a
 
 // ── A02: /fork ──────────────────────────────────────────────────────────────
 
-test('A02: sessionless /fork refuses and creates no Session', async (t) => {
+test('sessionless /fork refuses and creates no Session', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A02'] })
   try {
@@ -159,7 +159,7 @@ test('A02: sessionless /fork refuses and creates no Session', async (t) => {
   }
 })
 
-test('A02: /fork forks the current conversation and publishes the child owner', async (t) => {
+test('/fork forks the current conversation and publishes the child owner', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['FORK-SOURCE'] })
   try {
@@ -182,7 +182,7 @@ test('A02: /fork forks the current conversation and publishes the child owner', 
 
 // ── A03/A04/A05: /title and /rename ─────────────────────────────────────────
 
-test('A03/A04: /title and /rename write the authoritative title and notify the dock', async (t) => {
+test('/title and /rename write the authoritative title and notify the dock', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     deltas: ['TITLE-ME'],
@@ -211,7 +211,7 @@ test('A03/A04: /title and /rename write the authoritative title and notify the d
   }
 })
 
-test('RFL-001: a rejected /title publishes ONE refusal across Dock and transcript', async (t) => {
+test('a rejected /title publishes ONE refusal across Dock and transcript', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   // No session-title service is mounted, so the REAL Direct writer rejects the
   // explicit rename deterministically. On TSP+Direct the official command
@@ -238,7 +238,7 @@ test('RFL-001: a rejected /title publishes ONE refusal across Dock and transcrip
   }
 })
 
-test('A05: bare /title regenerates the title from the conversation', async (t) => {
+test('bare /title regenerates the title from the conversation', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     deltas: ['TITLE-REFRESH'],
@@ -271,7 +271,7 @@ test('A05: bare /title regenerates the title from the conversation', async (t) =
   }
 })
 
-test('A05: bare /title and bare /rename report the blank-Session refusal on the TSP Dock', async (t) => {
+test('bare /title and bare /rename report the blank-Session refusal on the TSP Dock', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   // A REAL persisted, released, turn-boundary-BLANK Session resumed through the
   // official persistence seam: the mandated "no conversation yet" feedback.
@@ -308,7 +308,7 @@ test('A05: bare /title and bare /rename report the blank-Session refusal on the 
 
 // ── A06: /copy ──────────────────────────────────────────────────────────────
 
-test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant text', async (t) => {
+test('/copy emits the OSC 52 sequence for the authoritative last assistant text', async (t) => {
   // On macOS/Windows the shared policy attempts the native helper
   // UNCONDITIONALLY, so driving the real copy here would write the synthetic
   // text into the developer's clipboard: the case is skipped there instead.
@@ -358,7 +358,7 @@ test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant 
   }
 })
 
-test('A06: /copy without an assistant message fails visibly and copies nothing', async (t) => {
+test('/copy without an assistant message fails visibly and copies nothing', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['UNUSED'] })
   try {
@@ -378,7 +378,7 @@ test('A06: /copy without an assistant message fails visibly and copies nothing',
   }
 })
 
-test('A06: /copy reports the shared policy failure when BOTH legs fail', async (t) => {
+test('/copy reports the shared policy failure when BOTH legs fail', async (t) => {
   // The shared policy attempts the native/platform helper on macOS and Windows
   // UNCONDITIONALLY (pbcopy/clip), so this e2e cannot make that leg fail there
   // without touching the developer's real clipboard: the case is skipped on
@@ -434,7 +434,7 @@ test('A06: /copy reports the shared policy failure when BOTH legs fail', async (
 
 // ── A07: /yolo ──────────────────────────────────────────────────────────────
 
-test('A07: sessionless /yolo reports the unavailable official permission writer', async (t) => {
+test('sessionless /yolo reports the unavailable official permission writer', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A07'] })
   try {
@@ -455,7 +455,7 @@ test('A07: sessionless /yolo reports the unavailable official permission writer'
   }
 })
 
-test('A07: /yolo applies danger-full-access through the official permission writer', async (t) => {
+test('/yolo applies danger-full-access through the official permission writer', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     deltas: ['A07-APPLIED'],
@@ -485,7 +485,7 @@ test('A07: /yolo applies danger-full-access through the official permission writ
 
 // ── A08/A10/A11: /logout ────────────────────────────────────────────────────
 
-test('A08: /logout <reference> is refused on the TSP renderer and never mutates the credential', async (t) => {
+test('/logout <reference> is refused on the TSP renderer and never mutates the credential', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A08'] })
   const secret = 'sk-b2a-secret-value'
@@ -516,7 +516,7 @@ test('A08: /logout <reference> is refused on the TSP renderer and never mutates 
   }
 })
 
-test('A08: a composition without the credentials service reports the refusal and mutates nothing', async (t) => {
+test('a composition without the credentials service reports the refusal and mutates nothing', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   // The negative composition: the deployment mounts no credentials provider, so
   // the port's `available()` is false and the handler must refuse truthfully.
@@ -537,7 +537,7 @@ test('A08: a composition without the credentials service reports the refusal and
   }
 })
 
-test('A08: the TSP refusal never reaches a throwing credential port', async (t) => {
+test('the TSP refusal never reaches a throwing credential port', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A08-THROW'] })
   const ref = 'DEEPSEEK_API_KEY'
@@ -574,7 +574,7 @@ test('A08: the TSP refusal never reaches a throwing credential port', async (t) 
   }
 })
 
-test('A10: bare /logout is refused by the gate — no picker, no credential mutation', async (t) => {
+test('bare /logout is refused by the gate — no picker, no credential mutation', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A10'] })
   const ref = 'DEEPSEEK_API_KEY'
@@ -610,7 +610,7 @@ test('A10: bare /logout is refused by the gate — no picker, no credential muta
   }
 })
 
-test('A11: /logout with an unresolvable target reports the real unknown-target error', async (t) => {
+test('/logout with an unresolvable target reports the real unknown-target error', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A11'] })
   try {
@@ -630,7 +630,7 @@ test('A11: /logout with an unresolvable target reports the real unknown-target e
 
 // ── A13: the unchanged refusal matrix ───────────────────────────────────────
 
-test('A13: every remaining PiTui-only builtin stays refused with the draft restored', async (t) => {
+test('every remaining PiTui-only builtin stays refused with the draft restored', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A13'] })
   const refused = [
@@ -658,7 +658,7 @@ test('A13: every remaining PiTui-only builtin stays refused with the draft resto
 
 // ── A09: the flow-route logout branch (capability absent here) ──────────────
 
-test('A09: /logout <flow-route> is refused truthfully while no flow provider is installed', async (t) => {
+test('/logout <flow-route> is refused truthfully while no flow provider is installed', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   // The REAL authorization seam is mounted; this environment installs no
   // provider plugin that registers a flow, so the flow branch has no route to
@@ -696,7 +696,7 @@ test('A09: /logout <flow-route> is refused truthfully while no flow provider is 
 
 // ── A16: a no-panel TUI builtin is never steered into the running turn ──────
 
-test('A16: a no-panel TUI builtin executes locally while the turn runs (busyEnter=steer)', async (t) => {
+test('a no-panel TUI builtin executes locally while the turn runs (busyEnter=steer)', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   let releaseStream!: () => void
   const held = new Promise<void>(resolve => { releaseStream = resolve })
@@ -730,7 +730,7 @@ test('A16: a no-panel TUI builtin executes locally while the turn runs (busyEnte
 
 // ── F5: a late command outcome never lands on the replacement owner ────────
 
-test('F5: a /copy success that outlives its Session is not announced on the replacement', async (t) => {
+test('a /copy success that outlives its Session is not announced on the replacement', async (t) => {
   // POSIX only: the deterministic interleave needs a controllable native
   // clipboard helper (macOS/Windows attempt theirs unconditionally).
   if (process.platform === 'darwin' || process.platform === 'win32') {
@@ -850,7 +850,7 @@ test('F5: a /copy success that outlives its Session is not announced on the repl
 
 // ── F4: the result's visible owner is frozen at dispatch ───────────────────
 
-test('F4: a Host-route result keeps its own card when the Host claim is revoked mid-flight', async (t) => {
+test('a Host-route result keeps its own card when the Host claim is revoked mid-flight', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   let releaseHost!: () => void
   const hostGate = new Promise<void>(resolve => { releaseHost = resolve })
@@ -899,7 +899,7 @@ test('F4: a Host-route result keeps its own card when the Host claim is revoked 
 
 // ── A14: genuine Host same-name winners ─────────────────────────────────────
 
-test('A14: genuine Host /new, /copy, /logout, /title and /rename keep their Host sink', async (t) => {
+test('genuine Host /new, /copy, /logout, /title and /rename keep their Host sink', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const calls: string[] = []
   const names = ['new', 'copy', 'logout', 'title', 'rename'] as const
@@ -945,7 +945,7 @@ test('A14: genuine Host /new, /copy, /logout, /title and /rename keep their Host
   }
 })
 
-test('A14: an argued line of a genuine Host execute-kind command stays an ordinary prompt', async (t) => {
+test('an argued line of a genuine Host execute-kind command stays an ordinary prompt', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const calls: string[] = []
   // A genuine Host name that does NOT claim the argued line (an execute-kind

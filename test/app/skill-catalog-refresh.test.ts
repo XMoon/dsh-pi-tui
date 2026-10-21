@@ -230,7 +230,7 @@ test('a read failure reports failed, installs nothing and keeps the transition s
   assert.ok(lines.some(line => /WARN catalog unavailable/.test(line) && /registry exploded/.test(line)))
 })
 
-test('PR4 F2: a SupersededReadError from the read settles superseded (never a user-facing failure)', async () => {
+test('a SupersededReadError from the read settles superseded (never a user-facing failure)', async () => {
   // The provider detected a transport/ownership rollover itself (§2.2/§16 —
   // e.g. the combined catalog read's admission-token re-check after both
   // providers settled). That is a SUPERSESSION: no install, no WARN, and a
@@ -580,7 +580,7 @@ test('a double settled() is idempotent and cannot clear a follow-up refresh', as
   assert.deepEqual(starts, [1, 2], 'the follow-up was not cleared by the stale settle')
 })
 
-test('PR4 F2b: a FAILED commands provider degrades to an issue — the successful skills provider still updates its own field', async () => {
+test('a FAILED commands provider degrades to an issue — the successful skills provider still updates its own field', async () => {
   // Provider isolation (§2.2): the coordinator's mergePartial keeps the
   // last-good HOST commands when the commands provider failed (an empty
   // replace would erase the claim set) while a successful skills read
@@ -610,7 +610,7 @@ test('PR4 F2b: a FAILED commands provider degrades to an issue — the successfu
   }
 })
 
-test('PR4 F2a: the admission target identity is re-checked right before install (a settle→install rollover settles superseded)', async () => {
+test('the admission target identity is re-checked right before install (a settle→install rollover settles superseded)', async () => {
   // The §2.2/§16 FINAL-install fence: the transport identity captured at
   // admission must still be live immediately before installSnapshot — a
   // same-id binding rollover in the gap between the read's settle and the

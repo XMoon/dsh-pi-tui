@@ -71,7 +71,7 @@ function planReview(status: 'ok' | 'error' | 'running', result: string): Extract
 
 // --- Q1: Compact Work boundary ---------------------------------------------
 
-test('Q1 Compact: a settled question ends the Work run and renders standalone between two spans', () => {
+test('Compact: a settled question ends the Work run and renders standalone between two spans', () => {
   const questionRow = question('ok', answersJson(1, 1))
   const messages = [thinking('a'), tool('read'), questionRow, thinking('b'), tool('bash')]
   const blocks = projectCompact(messages, noOptions)
@@ -88,7 +88,7 @@ test('Q1 Compact: a settled question ends the Work run and renders standalone be
   assert.ok(!allMembers.includes(questionRow), 'the question never joins a Work span')
 })
 
-test('Q5 Compact: the question is neither counted nor chosen as the span Action preview', () => {
+test('Compact: the question is neither counted nor chosen as the span Action preview', () => {
   const questionRow = question('ok', answersJson(1, 1))
   // Question is the LAST tool before the boundary: a span before it must keep
   // its own latest meaningful Action, and the question must not be counted.
@@ -104,7 +104,7 @@ test('Q5 Compact: the question is neither counted nor chosen as the span Action 
 
 // --- Q9: a RUNNING question stays process (QuestionFlow owns it) -----------
 
-test('Q9 a running question is not surfaced as a settled card', () => {
+test('a running question is not surfaced as a settled card', () => {
   const running = question('running', '')
   assert.equal(isSurfacedInteractionTool(running), false)
   const messages = [thinking('a'), tool('read'), running, tool('bash')]
@@ -119,7 +119,7 @@ test('Q9 a running question is not surfaced as a settled card', () => {
 
 // --- Q7/Q8: partial, skipped, error and cancellation stay surfaced ---------
 
-test('Q7/Q8 a partial/skipped or errored question is still surfaced', () => {
+test('a partial/skipped or errored question is still surfaced', () => {
   const partial = question('ok', answersJson(1, 3))
   assert.equal(askAnswersSummary(partial.result), '1/3 answered')
   const partialBlocks = projectCompact([tool('read'), partial, tool('bash')], noOptions)
@@ -187,7 +187,7 @@ function planReviewTurn(): { folder: TranscriptFolder; planReviewRow: Transcript
   return { folder, planReviewRow: interactionRow }
 }
 
-test('Q2 Focus collapsed hoists the settled question outside the Thought', () => {
+test('Focus collapsed hoists the settled question outside the Thought', () => {
   const { folder, questionRow } = questionTurn()
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   const order = blocks.map(block => block.kind === 'message'
@@ -196,7 +196,7 @@ test('Q2 Focus collapsed hoists the settled question outside the Thought', () =>
   assert.deepEqual(order, ['user', 'question', 'activity', 'assistant'], 'User | Question | Working | Assistant')
 })
 
-test('Q3 Focus expanded restores the question to its exact raw chronology', () => {
+test('Focus expanded restores the question to its exact raw chronology', () => {
   const { folder, questionRow } = questionTurn()
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([TURN]), true)
   // F6 keeps Process runs inside nested Work containers; flatten them for the
@@ -211,7 +211,7 @@ test('Q3 Focus expanded restores the question to its exact raw chronology', () =
     'expanded keeps Process -> Question -> Process raw order')
 })
 
-test('Q5 Focus: the settled question is not counted as a turn tool', () => {
+test('Focus: the settled question is not counted as a turn tool', () => {
   const { folder } = questionTurn()
   const activity = folder.turnActivity(TURN)
   assert.equal(activity?.toolCalls, 2, 'only the read and bash calls count')
@@ -221,7 +221,7 @@ test('Q5 Focus: the settled question is not counted as a turn tool', () => {
 
 // --- Q6: multi-question card -------------------------------------------------
 
-test('Q6 a multi-question result summarizes N/M and expands to structured answer rows', () => {
+test('a multi-question result summarizes N/M and expands to structured answer rows', () => {
   const result = answersJson(2, 3)
   assert.equal(askAnswersSummary(result), '2/3 answered')
   const lines = askAnswersLines(result)
@@ -251,7 +251,7 @@ function rowOf(view: readonly string[], pattern: RegExp): number {
   return view.findIndex(line => pattern.test(line))
 }
 
-test('Q4 the question card disclosure is independent of the Focus root', async () => {
+test('the question card disclosure is independent of the Focus root', async () => {
   const { vt, app } = startApp('focus')
   const { folder, questionRow } = questionTurn()
   show(app, folder)
@@ -280,7 +280,7 @@ test('Q4 the question card disclosure is independent of the Focus root', async (
   assert.equal(isSurfacedInteractionTool(questionRow), true)
 })
 
-test('Q6 the settled question card renders the N/M summary and structured answers, never raw JSON', async () => {
+test('the settled question card renders the N/M summary and structured answers, never raw JSON', async () => {
   const { vt, app } = startApp('focus')
   const { folder } = questionTurn()
   show(app, folder)
@@ -295,7 +295,7 @@ test('Q6 the settled question card renders the N/M summary and structured answer
   assert.ok(!view.includes('{"answers"'), `no raw JSON is ever shown:\n${view}`)
 })
 
-test('Q10 search reaches a hidden answer and dismiss restores the collapsed card', async () => {
+test('search reaches a hidden answer and dismiss restores the collapsed card', async () => {
   const { vt, app } = startApp('focus')
   const { folder, questionRow } = questionTurn()
   show(app, folder)
@@ -320,7 +320,7 @@ test('Q10 search reaches a hidden answer and dismiss restores the collapsed card
   assert.ok(view.includes('1/1 answered'), `the settled summary remains visible:\n${view}`)
 })
 
-test('Q12 regular Compact folds the settled question card under the shared owner', async () => {
+test('regular Compact folds the settled question card under the shared owner', async () => {
   const { vt, app } = startApp('compact')
   const { folder } = questionTurn()
   show(app, folder)
@@ -424,7 +424,7 @@ test('the surfaced-interaction set is exactly ask_user_question + exit_plan_mode
 
 // --- E1–E4: exit_plan_mode / Plan review ------------------------------------
 
-test('E1/E2 exit_plan_mode is a Compact Work boundary and hoists out of collapsed Focus', () => {
+test('exit_plan_mode is a Compact Work boundary and hoists out of collapsed Focus', () => {
   const { folder, planReviewRow } = planReviewTurn()
   const compact = projectCompact(folder.messages(), noOptions)
   const compactBlock = compact.find(block => block.kind === 'message' && block.message === planReviewRow)
@@ -448,14 +448,14 @@ test('E1/E2 exit_plan_mode is a Compact Work boundary and hoists out of collapse
   assert.ok(readIndex >= 0 && reviewIndex > readIndex && bashIndex > reviewIndex, 'expanded restores raw chronology')
 })
 
-test('E3 a RUNNING exit_plan_mode stays inside Work/Working (plan approval owns it)', () => {
+test('a RUNNING exit_plan_mode stays inside Work/Working (plan approval owns it)', () => {
   const running = planReview('running', '')
   assert.equal(isSurfacedInteractionTool(running), false)
   assert.deepEqual(kindsOf(projectCompact([thinking('a'), tool('read'), running, tool('bash')], noOptions)), ['work'])
   assert.deepEqual(kindsOf(projectFocus([thinking('a'), tool('read'), running, tool('bash')], new Map(), new Set(), true)), [])
 })
 
-test('E4 exit_plan_mode never counts or previews, and its plan body stays expandable', () => {
+test('exit_plan_mode never counts or previews, and its plan body stays expandable', () => {
   const { folder, planReviewRow } = planReviewTurn()
   const activity = folder.turnActivity(TURN)
   assert.equal(activity?.toolCalls, 2, 'only the read and bash calls count')
@@ -483,7 +483,7 @@ function interactionFolder(toolName: 'ask_user_question' | 'exit_plan_mode'): {
 }
 
 for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
-  test(`R3 regular Focus: a settled ${toolName} card fails open and never follows the Focus root`, async () => {
+  test(`regular Focus: a settled ${toolName} card fails open and never follows the Focus root`, async () => {
     const { vt, app } = startApp('focus')
     const { folder } = toolName === 'ask_user_question' ? questionTurn() : planReviewTurn()
     show(app, folder)
@@ -567,7 +567,7 @@ test('R2#1 a visible settled interaction search does not open the root; Collapse
 // --- R4: searching a fail-open interaction must not open/promote the root ----
 
 for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
-  test(`R4 regular Focus: searching a fail-open ${toolName} card never opens or promotes the Thought root`, async () => {
+  test(`regular Focus: searching a fail-open ${toolName} card never opens or promotes the Thought root`, async () => {
     const { vt, app } = startApp('focus')
     const { folder, interactionRow } = interactionFolder(toolName)
     show(app, folder)
@@ -597,7 +597,7 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
   })
 }
 
-test('M3-3B a timed-out question card renders the authoritative late answer from the projection', async () => {
+test('a timed-out question card renders the authoritative late answer from the projection', async () => {
   // The call's own result recorded the timeout; the answer arrived later and
   // lives in the `userQuestions.settled` projection. The card must show what
   // the user finally answered — the durable transcript event is unchanged.
@@ -626,7 +626,7 @@ test('M3-3B a timed-out question card renders the authoritative late answer from
     'without the projection the timed-out payload is not presented as an answer')
 })
 
-test('M3-3B an EMPTY settled batch is authoritative and replaces the recorded timeout', async () => {
+test('an EMPTY settled batch is authoritative and replaces the recorded timeout', async () => {
   // rc.2 allows a settled entry whose answers batch is empty (a late reply
   // settled the question without a readable batch). The settled entry is the
   // authority: falling back to the call's own result would keep presenting the

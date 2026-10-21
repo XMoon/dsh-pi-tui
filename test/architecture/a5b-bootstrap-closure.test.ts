@@ -162,7 +162,7 @@ function assertCompositionFreeOfOwnerState(
   }
 }
 
-test('A5b: the composition zone is one facade plus its bootstrap helpers, and nothing else', () => {
+test('the composition zone is one facade plus its bootstrap helpers, and nothing else', () => {
   // Plan §8.2(1), restated durably by TS2. `compositionSources()` throws when a
   // listed file is missing, so this locks the EXISTENCE of the entry and the
   // facade; the zone is the ONLY place application composition may live, so no
@@ -185,7 +185,7 @@ test('A5b: the composition zone is one facade plus its bootstrap helpers, and no
   }
 })
 
-test('A5b: no forbidden handler exists anywhere in the bootstrap composition zone', () => {
+test('no forbidden handler exists anywhere in the bootstrap composition zone', () => {
   // Permanent replacement for the retired per-slice ledger: every A5b slice has
   // landed, so the forbidden-handler contract no longer shrinks and no longer
   // needs a migration exemption list.
@@ -195,7 +195,7 @@ test('A5b: no forbidden handler exists anywhere in the bootstrap composition zon
   assertForbiddenHandlersAbsent(zone)
 })
 
-test('A5b/TS2: a forbidden handler reintroduced in a NESTED helper fails the zone lock (mutation)', (t) => {
+test('a forbidden handler reintroduced in a NESTED helper fails the zone lock (mutation)', (t) => {
   // The real consumer, on a fixture tree: a new helper at ANY depth that
   // redeclares a forbidden handler must fail, and the same fixture without it
   // must pass — otherwise "absent from the composition zone" would only be
@@ -215,14 +215,14 @@ test('A5b/TS2: a forbidden handler reintroduced in a NESTED helper fails the zon
     'a handler reintroduced in a NESTED bootstrap helper must fail the zone lock')
 })
 
-test('A5b: the package entry is a facade and defines no application handler', () => {
+test('the package entry is a facade and defines no application handler', () => {
   const entry = compositionFile('src/index.ts')
   for (const name of FINAL_FORBIDDEN_HANDLERS) {
     assert.equal(declares(entry, name), false, `src/index.ts must not define ${name}`)
   }
 })
 
-test('A5b: no universal application/runtime dependency bag exists', () => {
+test('no universal application/runtime dependency bag exists', () => {
   // Plan §6.3/§7.6.2: the escape hatch is a new EverythingBag type that carries
   // cross-domain state. It must not appear in the composition surface or in any
   // extracted owner.
@@ -250,7 +250,7 @@ function declaredTypeNames(source: string): string[] {
   return names
 }
 
-test('A5b-6: the composition root introduces no new context/bag type', () => {
+test('the composition root introduces no new context/bag type', () => {
   // Plan §7.6.2: no new broad context/bag type carrying cross-domain state. The
   // only type the composition root has ever declared is the small pre-existing
   // `AppExit`; a new `type`/`interface`/`class` there is a bag by construction.
@@ -398,7 +398,7 @@ function tuiCommandRunnerLiterals(rel: string, source: string): TypedObjectLiter
   return typedObjectLiterals(rel, source, 'TuiCommandRunner')
 }
 
-test('A5b: tuiAppEventsLiterals detects every TuiAppEvents literal form', () => {
+test('tuiAppEventsLiterals detects every TuiAppEvents literal form', () => {
   // A rogue implementation must not be able to hide behind an ordinary
   // expression wrapper, move its type annotation onto the wrapper, or sit in a
   // non-`VariableDeclaration` position (call argument, return, property).
@@ -435,7 +435,7 @@ test('A5b: tuiAppEventsLiterals detects every TuiAppEvents literal form', () => 
   }
 })
 
-test('A5b/TS2: a typed implementation literal in a JSX attribute is caught (hard case, not a parser-kind copy)', () => {
+test('a typed implementation literal in a JSX attribute is caught (hard case, not a parser-kind copy)', () => {
   // Every caller of `typedObjectLiterals` feeds it from `productionSources()`,
   // which scans `.tsx` too. A legal JSX ATTRIBUTE position is invisible to a TS
   // parse, so a rogue `TuiAppEvents`/`TuiCommandRunner` literal could hide in a
@@ -459,7 +459,7 @@ test('A5b/TS2: a typed implementation literal in a JSX attribute is caught (hard
   assert.equal(tuiCommandRunnerLiterals('synthetic.ts', 'const rogue = <TuiCommandRunner>{ onSubmit: () => {} }\n').length, 1)
 })
 
-test('A5b: tuiCommandRunnerLiterals detects every TuiCommandRunner literal form', () => {
+test('tuiCommandRunnerLiterals detects every TuiCommandRunner literal form', () => {
   const positive: ReadonlyArray<string> = [
     'const rogue: TuiCommandRunner = { onSubmit: () => {} }\n',
     'const rogue = ({ onSubmit: () => {} } satisfies TuiCommandRunner)\n',
@@ -490,7 +490,7 @@ test('A5b: tuiCommandRunnerLiterals detects every TuiCommandRunner literal form'
   }
 })
 
-test('A5b: exactly one TuiAppEvents SEMANTIC implementation, wrappers are pass-throughs', () => {
+test('exactly one TuiAppEvents SEMANTIC implementation, wrappers are pass-throughs', () => {
   // The A5b-5 cut moved the whole TuiAppEvents implementation into
   // `app/surface/application-events.ts` (the former `surfaceEvents` literal).
   // The surface runtime legitimately overlays a SECOND literal over
@@ -523,7 +523,7 @@ test('A5b: exactly one TuiAppEvents SEMANTIC implementation, wrappers are pass-t
   )
 })
 
-test('A5b: NO production module implements a typed TuiCommandRunner object literal', () => {
+test('NO production module implements a typed TuiCommandRunner object literal', () => {
   // Plan §8.2(5)/§7.6.2: `TuiCommandRunner` is an interface, and the final A5
   // state has NO implementation literal for it — not in the composition root
   // and not anywhere else. The command owner builds the facade as the
@@ -663,7 +663,7 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
   ],
 ]
 
-test('A5b: every extracted declaration lives in its named owner, never in the composition ZONE', () => {
+test('every extracted declaration lives in its named owner, never in the composition ZONE', () => {
   // TS2 §17/§20: the "must not return" half reads the WHOLE zone, so a helper —
   // at any depth — cannot take an extracted declaration back into the
   // composition layer. The owner-side half is unchanged.
@@ -697,7 +697,7 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/client-actions.ts', 'createClientActions', 'createClientActions('],
 ]
 
-test('A5b: each extracted owner is constructed exactly once, from the composition root', () => {
+test('each extracted owner is constructed exactly once, from the composition root', () => {
   const root = compositionFile('src/app/bootstrap.ts')
   for (const [rel, factory, site] of OWNER_CONSTRUCTIONS) {
     assert.ok(
@@ -736,7 +736,7 @@ const OWNER_FACTORY_NAMES: readonly string[] = [
  *  and alias scope has ONE definition (`test/support/owner-modules.ts`). */
 const factoryCallSites = (name: string, snapshot: ParsedSourceSet): string[] => aliasAwareConstructionSites(name, snapshot)
 
-test('A5b: every extracted-owner factory is called exactly once, from the composition root', () => {
+test('every extracted-owner factory is called exactly once, from the composition root', () => {
   // The per-module location lock above reads the hand-listed root only, so a
   // second, type-correct construction added in ANY other production file leaves
   // the root count at 1 and is invisible to it. This repo-wide companion (plan
@@ -774,7 +774,7 @@ const EXTRACTED_CONSTRUCTIONS: ReadonlyArray<readonly [string, readonly string[]
   ['src/app/surface/viewer-runtime.ts', ['new TranscriptFolder(', 'new StatsFolder(', 'new TranscriptWindowController(']],
 ]
 
-test('A5b: the moved presentation constructors live in their owners, not in the composition root', () => {
+test('the moved presentation constructors live in their owners, not in the composition root', () => {
   const root = compositionFile('src/app/bootstrap.ts')
   for (const [rel, sites] of EXTRACTED_CONSTRUCTIONS) {
     const owner = ownerFile(rel)
@@ -789,7 +789,7 @@ test('A5b: the moved presentation constructors live in their owners, not in the 
   }
 })
 
-test('A5b-2: the settings owner consumes narrow surface/config capabilities', () => {
+test('the settings owner consumes narrow surface/config capabilities', () => {
   // A5b-2 review P2: taking the whole `SurfaceRuntime` and `Backend` would hand
   // the owner a large set of unrelated capabilities. It declares exactly the app
   // + status-store surface and the config slice it uses.
@@ -804,7 +804,7 @@ test('A5b-2: the settings owner consumes narrow surface/config capabilities', ()
     'the settings owner must not depend on the whole backend port')
 })
 
-test('A5b-5: the persisted busy-Enter preference is read from the settings owner', () => {
+test('the persisted busy-Enter preference is read from the settings owner', () => {
   // Review note: this is a persisted TUI input preference, not a lifecycle or
   // identity fact, so it must not travel in the event adapter's lifecycle group.
   const events = ownerFile('src/app/surface/application-events.ts')
@@ -820,7 +820,7 @@ test('A5b-5: the persisted busy-Enter preference is read from the settings owner
     'the settings owner must expose the persisted busy-Enter preference')
 })
 
-test('A5b-4: only the owner that is asked to consume the draft clears the editor', () => {
+test('only the owner that is asked to consume the draft clears the editor', () => {
   // TuiApp's own Ctrl+S path clears + notifies the editor seat BEFORE calling
   // `onSteer`, so the controller must not clear a second time there (a duplicate
   // synchronous notify/revision). The surface `steer-draft` action instead hands
@@ -843,7 +843,7 @@ test('A5b-4: only the owner that is asked to consume the draft clears the editor
     'the TuiApp onSteer seam must not pass consumeDraft')
 })
 
-test('A5b-3: the command runtime application binding is command-owned', () => {
+test('the command runtime application binding is command-owned', () => {
   // Plan §A5b-3 "Move together" lists `commandRuntime = bindCommandRuntime(...)`:
   // the binding must not stay in the composition root, and the root must reach
   // it only through the owner's single wiring step.
@@ -878,7 +878,7 @@ test('A5b-3: the command runtime application binding is command-owned', () => {
     'disposal clears the refresh request so a late skills/change is a no-op')
 })
 
-test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read late-bound', () => {
+test('the Direct-facing viewed-queue authority is viewer-owned and read late-bound', () => {
   // The A5b-6 zero-assumption sweep judged the `viewedQueueAgent` slot VIEWER
   // mutable state (plan §7.6.2) and moved it into the viewer owner. The
   // composition root keeps only the narrow late-bound CONNECTOR for the Direct
@@ -898,7 +898,7 @@ test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read l
     'the composition connector must read the viewer-owned authority late-bound (never capture by value)')
 })
 
-test('A5b-6: the composition ZONE implements no TuiAppEvents/TuiCommandRunner literal', () => {
+test('the composition ZONE implements no TuiAppEvents/TuiCommandRunner literal', () => {
   // Plan §7.6.2, second list. A literal is detected by its type annotation
   // (`: TuiAppEvents = {` / `: TuiCommandRunner = {`); the type-only references
   // the composition still needs (e.g. `TuiCommandRunner['agents']`) are fine.
@@ -916,7 +916,7 @@ test('A5b-6: the composition ZONE implements no TuiAppEvents/TuiCommandRunner li
     'the TuiAppEvents implementation must live in its owner, not the composition layer')
 })
 
-test('A5b-6: no application-owner mutable state category remains in the composition ZONE', (t) => {
+test('no application-owner mutable state category remains in the composition ZONE', (t) => {
   // Plan §7.6.2 categories: client-local history state, command claim/catalog
   // mutable slots, submission FIFO/ack/local-echo state, viewer mutable state
   // and the footer/display state machine. Each name below is a real declaration
@@ -960,7 +960,7 @@ test('A5b-6: no application-owner mutable state category remains in the composit
     'an application-owner state category reintroduced in a NESTED bootstrap helper must fail the zone lock')
 })
 
-test('A5b-6: the composition root holds exactly one ownership and scope authority', () => {
+test('the composition root holds exactly one ownership and scope authority', () => {
   // Plan §7.6.2: no second submission/session/command/viewer/surface authority.
   // The A2 authority factories are constructed exactly once in the composition
   // root; a second construction would be a second authority.
@@ -971,7 +971,7 @@ test('A5b-6: the composition root holds exactly one ownership and scope authorit
     'the composition root must construct the live-scope authority exactly once')
 })
 
-test('A5b: the Task Center viewer adapter forwards the nested depth to the viewer owner', () => {
+test('the Task Center viewer adapter forwards the nested depth to the viewer owner', () => {
   // A5b-1 review P2: the task-browser seam declares an optional 6th `depth`
   // (`TaskSurfaceSource.enterView`) and the surface routes nested/workflow
   // members through it. A composition adapter that drops it silently defaults
@@ -985,7 +985,7 @@ test('A5b: the Task Center viewer adapter forwards the nested depth to the viewe
   )
 })
 
-test('A5b-4: the submission owner derives the local-echo placement from reported facts', () => {
+test('the submission owner derives the local-echo placement from reported facts', () => {
   // Review fix P2: the composition root used to compute the official
   // `beginSubmission` placement at the connector. It must only resolve the
   // exact Agent and report `mode`/`running`/`sessionId`; the placement
@@ -1005,7 +1005,7 @@ test('A5b-4: the submission owner derives the local-echo placement from reported
     'the exposed owner seam must derive the placement from the reported facts')
 })
 
-test('A5b-4: the input-history owner owns the submission persistence policy', () => {
+test('the input-history owner owns the submission persistence policy', () => {
   // Review fix P2: trim/dedupe/cwd/file-path/detached write/last-content are
   // the input-history owner's policy; the submission controller only decides
   // WHEN to persist.
@@ -1040,7 +1040,7 @@ test('A5b-4: the input-history owner owns the submission persistence policy', ()
     'the controller must not keep a second last-content state')
 })
 
-test('A5b-6: the submission writer section is controller-owned and read late-bound', () => {
+test('the submission writer section is controller-owned and read late-bound', () => {
   // Plan §A5b-6: the last residual moves into the submission owner (the scope
   // authority + submission runtime already live there), and every external
   // consumer reads it through the controller at CALL time (the shell is built
@@ -1064,7 +1064,7 @@ test('A5b-6: the submission writer section is controller-owned and read late-bou
     'the consumers must read the owner at call time, never capture the method by value')
 })
 
-test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a root cache', () => {
+test('the jobs-read retention policy is Task-Center owner state, never a root cache', () => {
   // Finding (P2): the composition root held the retained jobs snapshot and the
   // session/generation fence — a small state machine, not composition wiring.
   // It belongs to the Task-Center owner (`TaskRuntime.attachTasks`, which
@@ -1110,7 +1110,7 @@ test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a 
     'the TaskBrowserRuntime must receive the owner-side readJobs, not a root-provided one')
 })
 
-test('A5b/TS2: legacy owner-state slots reintroduced in a NESTED helper fail the zone locks (mutation)', (t) => {
+test('legacy owner-state slots reintroduced in a NESTED helper fail the zone locks (mutation)', (t) => {
   // Rejection proof for the A5b-6 composition-side negatives. These four slots
   // are NOT in FINAL_FORBIDDEN_HANDLERS, EXTRACTED_DECLARATIONS or the five
   // category rows, so their own zone assertions are the only thing that can

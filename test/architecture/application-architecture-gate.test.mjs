@@ -1173,7 +1173,7 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
   assert.equal(remoteEdgeWrapped[0].rule, 'remote-dynamic-import-owner')
 })
 
-test('TS5 ownership boundaries are non-vacuous (app/domain/runtime -> tui locks)', () => {
+test('ownership boundaries are non-vacuous (app/domain/runtime -> tui locks)', () => {
   // The TS5 owners are exactly the files the plan names. Each direction lock
   // must reject a concrete `tui/**` import from its layer (type-only included),
   // so "the new owners are behind a seam" cannot pass vacuously.
@@ -1573,7 +1573,7 @@ test('the semantic runtime layer must not import terminal presentation (TS1)', (
   assert.deepEqual(findViolations([entry('runtime/catalog-port.ts', "import type { T } from '../runtime/backend.ts'\n")]), [])
 })
 
-test('TS8-F: the process layer owns its five forbidden inner layers under one rule id', () => {
+test('the process layer owns its five forbidden inner layers under one rule id', () => {
   // The generic runtime-imports-app|tui|client rules carve this subtree out so
   // the runtime-layer direction has ONE rule id here. The carve-out is scoped to
   // those rules only: an INDEPENDENT contract can still report the same file
@@ -1601,7 +1601,7 @@ test('TS8-F: the process layer owns its five forbidden inner layers under one ru
   )
 })
 
-test('TS8-F: the process-layer rule coexists with independent contracts (not one invariant double-reported)', () => {
+test('the process-layer rule coexists with independent contracts (not one invariant double-reported)', () => {
   // The bootstrap-composition contract and the Remote lazy-boundary contract
   // each keep their own rule id for an edge the process rule also governs.
   const staticOverlap = findViolations([entry('runtime/process/tasks.ts', "import { x } from '../../app/bootstrap.ts'\n")])
@@ -1618,7 +1618,7 @@ test('TS8-F: the process-layer rule coexists with independent contracts (not one
   )
 })
 
-test('TS8-F: the process layer rejects DSH implementation runtime edges but keeps erased type faces and Node stdlib', () => {
+test('the process layer rejects DSH implementation runtime edges but keeps erased type faces and Node stdlib', () => {
   const reject = findViolations([entry('runtime/process/tasks.ts', "import { createAgent } from '@deepseek-ai/dsh-agent'\n")])
   assert.equal(reject.length, 1)
   assert.equal(reject[0].rule, 'runtime-process-imports-dsh-implementation')
@@ -1669,7 +1669,7 @@ test('TS8-F: the process layer rejects DSH implementation runtime edges but keep
   assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "import type { Diag } from './diagnostics.ts'\n")]), [])
 })
 
-test('TS8-F: the process-layer predicates match the subtree and package boundaries', () => {
+test('the process-layer predicates match the subtree and package boundaries', () => {
   assert.ok(isRuntimeProcessSubtree('runtime/process/tasks.ts'))
   assert.ok(isRuntimeProcessSubtree('runtime/process/nested/x.ts'))
   assert.ok(!isRuntimeProcessSubtree('runtime/backend.ts'))
@@ -1749,7 +1749,7 @@ test('a retired historical feature directory must not reappear (TS8-A/TS8-C)', (
   assert.deepEqual(findRetiredSourceDirectoryViolations([...directories, 'brand-new-feature']), [])
 })
 
-test('TS8-E: the Stable extension public declaration sources reject TUI implementation imports', () => {
+test('the Stable extension public declaration sources reject TUI implementation imports', () => {
   // Plan §21 #5: a published plugin type must be nameable without the project's
   // TUI implementation. Both the type-only and the value spelling fail.
   const sources = [
@@ -1780,7 +1780,7 @@ test('TS8-E: the Stable extension public declaration sources reject TUI implemen
 
 // ── TS8-F final state (plan §11.4 assertions 1-5, §11.5) ────────────────────
 
-test('TS8-F final state: the checked-in root baseline is the CLOSED 7-stable / 0-legacy ledger', () => {
+test('state: the checked-in root baseline is the CLOSED 7-stable / 0-legacy ledger', () => {
   const baseline = readSourceRootBaseline()
   assert.deepEqual([...baseline.stable].sort(), [...FINAL_STABLE_SOURCE_ROOTS].sort(),
     'the stable root set must be exactly the seven final entries/facades')
@@ -1790,7 +1790,7 @@ test('TS8-F final state: the checked-in root baseline is the CLOSED 7-stable / 0
     'the real tree must match the closed ledger exactly')
 })
 
-test('TS8-F final state: a re-opened legacy root or a changed stable set is rejected', () => {
+test('state: a re-opened legacy root or a changed stable set is rejected', () => {
   const baseline = readSourceRootBaseline()
   const reopened = findFinalSourceRootStateViolations({ ...baseline, legacy: ['leftover.ts'] })
   assert.equal(reopened.length, 1)
@@ -1801,7 +1801,7 @@ test('TS8-F final state: a re-opened legacy root or a changed stable set is reje
     'an extra stable entry must fail')
 })
 
-test('TS8-F retired roots are a closed forbidden set (48 physical roots, builtins excluded)', () => {
+test('roots are a closed forbidden set (48 physical roots, builtins excluded)', () => {
   assert.equal(RETIRED_SOURCE_ROOTS.length, 48, 'all 48 physical roots removed by F1-F6 are forbidden')
   assert.equal(new Set(RETIRED_SOURCE_ROOTS).size, 48, 'the retired set has no duplicates')
   assert.equal(RETIRED_SOURCE_ROOTS.includes('builtins.ts'), false,
@@ -1810,7 +1810,7 @@ test('TS8-F retired roots are a closed forbidden set (48 physical roots, builtin
     'no retired root exists today and no production import names one')
 })
 
-test('TS8-F retired roots: a recreated file or a dangling old-path import is rejected', () => {
+test('roots: a recreated file or a dangling old-path import is rejected', () => {
   const recreated = findRetiredSourceRootViolations(['diff.ts', ...listSourceRootFiles()], [])
   assert.equal(recreated.length, 1)
   assert.match(recreated[0], /retired TS8-F root recreated: src\/diff\.ts/)
@@ -1856,7 +1856,7 @@ test('TS8-F retired roots: a recreated file or a dangling old-path import is rej
   ]), [])
 })
 
-test('TS8-F final assertion 7: a Remote adapter cannot import the Direct implementation (two HF1 edges excepted)', () => {
+test('assertion 7: a Remote adapter cannot import the Direct implementation (two HF1 edges excepted)', () => {
   // `direct-import-outside-composition` treats the whole runtime/** layer as
   // Direct composition, so runtime/remote was silently exempt; this check is
   // the actual assertion, and its exception is scoped to the reviewed
@@ -1895,7 +1895,7 @@ test('TS8-F final assertion 7: a Remote adapter cannot import the Direct impleme
   ]), [])
 })
 
-test('TS8-F final assertion 11: a concrete extension registry must live under extension/internal/**', () => {
+test('assertion 11: a concrete extension registry must live under extension/internal/**', () => {
   const real = collectSourceEntries()
   assert.deepEqual(findConcreteRegistryPlacementViolations(real), [],
     'the real tree keeps every concrete extension registry under extension/internal/**')
@@ -1941,7 +1941,7 @@ test('TS8-F final assertion 11: a concrete extension registry must live under ex
   ]), [])
 })
 
-test('TS8-F final assertion 14: the startup island must not reach a repository implementation module', () => {
+test('assertion 14: the startup island must not reach a repository implementation module', () => {
   const real = collectSourceEntries()
   assert.equal(real.some(entryItem => entryItem.rel === 'startup.ts'), true, 'the real startup entry exists')
   assert.deepEqual(findStartupIslandViolations(real), [],

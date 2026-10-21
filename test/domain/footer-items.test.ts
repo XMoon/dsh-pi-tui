@@ -550,7 +550,7 @@ test('an unavailable token projection renders the performance segment alone (no 
   assert.equal(compact, 'TTFB 2s · 40t/s', `the performance segment alone (compact):\n${compact}`)
 })
 
-test('PR5: unavailable recent metrics omit the performance segments (never a zero stand-in)', () => {
+test('unavailable recent metrics omit the performance segments (never a zero stand-in)', () => {
   const unavailable = snapshotWith(snap => {
     snap.usage.tokens = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 }
     snap.usage.performance = { llmMs: 8100 }
@@ -571,7 +571,7 @@ test('PR5: unavailable recent metrics omit the performance segments (never a zer
   assert.equal(render('stats-line', zero), '↑0 ↓0 | TTFB 0s · 0 tok/s')
 })
 
-test('PR5: a partially available fact renders only the formats that own it', () => {
+test('a partially available fact renders only the formats that own it', () => {
   const latencyOnly = snapshotWith(snap => {
     snap.usage.performance = { llmMs: 8100, firstTokenMs: 2_600 }
   })

@@ -64,7 +64,7 @@ async function mountPr4Host(life: TestLifecycle, presetId: string) {
   return base
 }
 
-test('L6 §7.4-9: Remote /rewind lists an out-of-window turn from turnOutline, then loadThrough + fork restores the FULL prompt', async (t) => {
+test('Remote /rewind lists an out-of-window turn from turnOutline, then loadThrough + fork restores the FULL prompt', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-rewind'
   const presetId = 'm3-4-pr4-preset'
@@ -203,7 +203,7 @@ test('L6 §7.4-9: Remote /rewind lists an out-of-window turn from turnOutline, t
   await waitFor('rewind success notice', () => vt.getViewport().join('').includes('rewound to turn 2'), 15_000)
 })
 
-test('L6 §7.4-15 stale rewind: select A\'s old turn → switch away mid-loadThrough → the old selection never forks', async (t) => {
+test('stale rewind: select A\'s old turn → switch away mid-loadThrough → the old selection never forks', async (t) => {
   // The race §2.2/§16/§4.3 fence: the picker selection for A starts the
   // official loadThrough jump, the surface switches to B while it is in
   // flight, and the release must NOT fork anything — no child session on
@@ -339,7 +339,7 @@ test('L6 §7.4-15 stale rewind: select A\'s old turn → switch away mid-loadThr
 })
 
 
-test('PR5 R7-4: a rewind pre-admission LOAD failure follows the PICKER identity (Remote async read)', async (t) => {
+test('a rewind pre-admission LOAD failure follows the PICKER identity (Remote async read)', async (t) => {
   // §3C-4: a throw from the PRE-ADMISSION region — the `loadThrough` detail
   // read, which on the Remote branch is a real async transport read (the Direct
   // adapter's is synchronous by construction, so the window is only expressible

@@ -559,7 +559,7 @@ test('rename returns the normalized accepted title and keeps the old one on reje
   assert.equal(rejected.kind === 'rejected' ? rejected.error.code : undefined, 'session/title-invalid')
 })
 
-test('PR5: a session/writer-held rename refusal is rejected with code, details and guidance', async () => {
+test('a session/writer-held rename refusal is rejected with code, details and guidance', async () => {
   // C1 qualification only: the official rc.2 `session.rename` resolves the
   // Agent before the title mutation, so writer-held proves no rename happened.
   const harness = writerHarness()

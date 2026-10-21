@@ -838,7 +838,7 @@ test('/preset on a blank session opens the roster (Host blank authority, not the
   t.app.stop()
 })
 
-test('PR5b: the preset picker [current] chip keeps textMuted on BOTH the selected and the unselected row (real overlay frame)', async () => {
+test('the preset picker [current] chip keeps textMuted on BOTH the selected and the unselected row (real overlay frame)', async () => {
   // §4.5/§12.2 + rollout PR5b requirement 4: the chip lives in the vendored
   // SettingsList value slot, whose own paint is `selected ? primary : textDim`
   // — so the cell colour is asserted in the REAL painted frame in both states,
@@ -864,7 +864,7 @@ test('PR5b: the preset picker [current] chip keeps textMuted on BOTH the selecte
   t.app.stop()
 })
 
-test('PR5b: the preset picker paints BOTH state chips whole and no retired prose marker (real overlay frame)', async () => {
+test('the preset picker paints BOTH state chips whole and no retired prose marker (real overlay frame)', async () => {
   // §4.5/§12.2 + rollout PR5b requirement 4: the `default` fact left the
   // description and became a second chip beside `[current]`; the retired
   // `default · ← current` prose must not come back in any ink. This is the
@@ -886,7 +886,7 @@ test('PR5b: the preset picker paints BOTH state chips whole and no retired prose
   t.app.stop()
 })
 
-test('PR5b/X061: the preset state chips stay WHOLE at every supported frame width (real overlay frames)', async () => {
+test('the preset state chips stay WHOLE at every supported frame width (real overlay frames)', async () => {
   // The PR #309 review P2 acceptance matrix. The vendored value slot truncates
   // by raw width, so the chip is handed to it as a WHOLE part (X061) and the
   // label column yields: the state is never cut (`[defaul`), never left with a
@@ -925,7 +925,7 @@ test('PR5b/X061: the preset state chips stay WHOLE at every supported frame widt
   }
 })
 
-test('PR5b/X061: a wide → narrow → wide resize restores both chips and keeps the row clickable', async () => {
+test('a wide → narrow → wide resize restores both chips and keeps the row clickable', async () => {
   const longId = 'a-very-long-custom-preset-name-here'
   const t = setup({
     agent: fakeAgent('s1', []),
@@ -973,7 +973,7 @@ test('PR5b/X061: a wide → narrow → wide resize restores both chips and keeps
   t.app.stop()
 })
 
-test('X061: two long same-prefix preset names stay distinguishable at 44 columns (PR #309 review)', async () => {
+test('two long same-prefix preset names stay distinguishable at 44 columns (PR #309 review)', async () => {
   // The label column at 44 columns is 25 cells for a chip-bearing row, so the
   // shared head…tail abbreviation must keep each name's own tail and the SELECTED
   // row must paint the complete `name (id)` identity in its description.
@@ -1004,7 +1004,7 @@ test('X061: two long same-prefix preset names stay distinguishable at 44 columns
   t.app.stop()
 })
 
-test('PR5b: a 19-22 character preset id stays whole in the 44-column label (PR #309 review)', async () => {
+test('a 19-22 character preset id stays whole in the 44-column label (PR #309 review)', async () => {
   // The ` (id)` suffix must never be traded away while it fits: with only 0-3
   // cells left for the friendly name a 4-cell floor made the composed label exceed
   // the 25-cell column and the renderer clipped the ID's own tail. Each of these
@@ -1809,7 +1809,7 @@ async function settlePresetThroughOuterOwner(
   }
 }
 
-test('PR5: a TRUE indeterminate /preset <id> does not restore the typed command at the outer settlement owner', async () => {
+test('a TRUE indeterminate /preset <id> does not restore the typed command at the outer settlement owner', async () => {
   const result = await settlePresetThroughOuterOwner({
     kind: 'indeterminate',
     error: { code: 'agent-preset/select-indeterminate', message: 'recompose ran but the durable append failed' },
@@ -1831,7 +1831,7 @@ test('PR5: a TRUE indeterminate /preset <id> does not restore the typed command 
     'an indeterminate switch must not stage a run-local pending preset')
 })
 
-test('PR5: a KNOWN writer-held /preset <id> rejection restores the typed command at the outer settlement owner', async () => {
+test('a KNOWN writer-held /preset <id> rejection restores the typed command at the outer settlement owner', async () => {
   const result = await settlePresetThroughOuterOwner({
     kind: 'rejected',
     error: { code: 'session/writer-held', message: SESSION_WRITER_HELD_GUIDANCE, details: { sessionId: 's1' } },

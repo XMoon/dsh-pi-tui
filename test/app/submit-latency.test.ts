@@ -143,7 +143,7 @@ test('after adoption, a DIFFERENT session is ignored (switched session marks nev
   assert.equal(sink.lines.filter(line => line.message === 'submit.user.message').length, 0)
 })
 
-test('T1 dispatch is stamped BEFORE the delivery: synchronously-emitted events log in order', () => {
+test('dispatch is stamped BEFORE the delivery: synchronously-emitted events log in order', () => {
   // The runner marks dispatch BEFORE calling the writer, so a Direct
   // in-process followup that emits inbox/turn/user events SYNCHRONOUSLY
   // still logs accept → dispatch → inbox → turn → user → assistant in
@@ -242,7 +242,7 @@ test('assistant.first AUTO-COMPLETES the timeline (a new accept starts the next)
   assert.equal(tracker.mark('s3', 'turn.start'), false, 'foreign session does not log')
 })
 
-test('T5 PREREQUISITE: a chunk from a STILL-STREAMING previous turn cannot steal assistant.first', () => {
+test('PREREQUISITE: a chunk from a STILL-STREAMING previous turn cannot steal assistant.first', () => {
   // The review's queued scenario, completed: B is accepted and dispatched
   // while turn 12 is still streaming its answer. A chunk arriving THEN is
   // turn 12\'s, not B\'s first token — it must NOT log T5 (which would

@@ -465,7 +465,7 @@ async function startMountedInstall(
   await waitForFrame(fixture.vt, /Stop installation|installing|Approve and retry/u, 'the real install to reach the Host')
 }
 
-test('A09 mounted TuiApp: hide while installing, re-enter the same attempt, Stop, and restore the real Host profile', async (t) => {
+test('mounted TuiApp: hide while installing, re-enter the same attempt, Stop, and restore the real Host profile', async (t) => {
   const packed = packFixturePackage(testLifecycle(t).tempDir('dsh-plugin-real-pkg-'), {
     name: '@s5-fixture/mounted-cancel', version: '0.0.1',
     manifest: { name: '@s5-fixture/mounted-cancel', version: '0.0.1', dsh: { bundle: { patch: [] } } },
@@ -504,7 +504,7 @@ test('A09 mounted TuiApp: hide while installing, re-enter the same attempt, Stop
   assert.equal(existsSync(join(fixture.profileDir, 'node_modules', '@s5-fixture', 'mounted-cancel')), false)
 })
 
-test('A10 mounted TuiApp: real pendingBuilds risk prompt, explicit keyboard approval, and the real marker', async (t) => {
+test('mounted TuiApp: real pendingBuilds risk prompt, explicit keyboard approval, and the real marker', async (t) => {
   const packed = packFixturePackage(testLifecycle(t).tempDir('dsh-plugin-real-pkg-'), {
     name: '@s5-fixture/mounted-build', version: '0.0.1',
     manifest: {

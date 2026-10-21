@@ -307,7 +307,7 @@ test('contextRefreshKind classifier: model-visible events measure, UI-only event
   }
 })
 
-test('P1: a session switch never shows the OLD session context through the status chain', () => {
+test('a session switch never shows the OLD session context through the status chain', () => {
   // The FULL projection chain, replayed with the runner's exact
   // refreshStatusCheap semantics: coordinator->valueFor, the store usage
   // projection (usageFromStats + plainSectionEqual patch, like the runner),
@@ -373,7 +373,7 @@ test('P1: a session switch never shows the OLD session context through the statu
   }
 })
 
-test('P2: /status forces ONE measurement through the coordinator, never a duplicate direct read', async () => {
+test('/status forces ONE measurement through the coordinator, never a duplicate direct read', async () => {
   // The real /status handler must route through the runner's
   // forceContextMeasurement (mark dirty + semantic reader + cache + cheap
   // repaint) — a direct sessionReader read from the command surface would
@@ -479,7 +479,7 @@ test('the deferred initial measure binds the captured session FIRST, then skips 
   assert.equal(coordinator.valueFor('session-old'), undefined, 'the old session value is cleared by the bind')
 })
 
-test('D2 structural gate: the status owner keeps measurement out of cheap refreshes', () => {
+test('structural gate: the status owner keeps measurement out of cheap refreshes', () => {
   // The same source-audit style as test/app/rules.test.ts: a regression that
   // reintroduces a measuring reader (or the direct tokenMeter service)
   // into a generic status refresh fails here instead of waiting for a

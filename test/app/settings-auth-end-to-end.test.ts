@@ -379,7 +379,7 @@ test('a cross-owner mouse drag never reuses the other owner press (RFL-004)', as
   h.close()
 })
 
-test('MA13: a Host approval preempts Models input, abandons the workspace and never revives the old prompt', async () => {
+test('a Host approval preempts Models input, abandons the workspace and never revives the old prompt', async () => {
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')

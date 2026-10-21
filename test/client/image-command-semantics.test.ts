@@ -240,7 +240,7 @@ test('§D3 Direct parity matrix (review round 2 external gate): the TUI-built-in
 
 /* ── PR5 supplement: the Client self-claim authority correction ─────────── */
 
-test('PR5: a TUI built-in\'s own Client registration never reads as Host territory (the PR4 self-claim regression)', () => {
+test('a TUI built-in\'s own Client registration never reads as Host territory (the PR4 self-claim regression)', () => {
   // The PR4 regression shape: on the Remote branch the TUI's own /status
   // registration appears in the EFFECTIVE claim union, so the retired
   // line-claim discriminator answered "host territory" and /status under a
@@ -270,7 +270,7 @@ test('PR5: a TUI built-in\'s own Client registration never reads as Host territo
     'a plain prompt under steer-mode busy input still steers')
 })
 
-test('PR5: /exit and /quit are sessionless aliases with identical no-session behavior', () => {
+test('/exit and /quit are sessionless aliases with identical no-session behavior', () => {
   // PR5 supplement §6: `/quit` is `/exit`'s alias (registered as such), so
   // BOTH must ride SESSIONLESS_COMMANDS — before a session exists neither
   // may create one on its way to exiting.

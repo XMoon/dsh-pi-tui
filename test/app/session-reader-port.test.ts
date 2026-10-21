@@ -831,7 +831,7 @@ function modelOwner(defaultSelection?: { provider: string; model: string }) {
   return new DirectModelSelectionOwner({ currentSelection: () => defaultSelection })
 }
 
-test('T3: an ABSENT modelSelection key reads THIS child Session’s own request header, other facts intact', () => {
+test('an ABSENT modelSelection key reads THIS child Session’s own request header, other facts intact', () => {
   const child = childSession('child-a', '/child-ws', [requestHeaderEvent('deepseek', 'child-model', 'high')])
   const services = {
     sessionProjections: projectionsFace({
@@ -868,7 +868,7 @@ test('T3: an ABSENT modelSelection key reads THIS child Session’s own request 
   assert.equal(control.sessionStatus('child-a')?.title, 'child title')
 })
 
-test('T3b: the compat read consumes the Session’s incremental request-header cache and never scans the log', () => {
+test('the compat read consumes the Session’s incremental request-header cache and never scans the log', () => {
   const child = childSession('child-a', '/child-ws', [requestHeaderEvent('deepseek', 'child-model', 'high')])
   // A Session whose LOG ACCESS IS OFF: any full-log read inside the status path
   // would throw and the reader's catch would answer `undefined` for the WHOLE
@@ -893,7 +893,7 @@ test('T3b: the compat read consumes the Session’s incremental request-header c
   assert.notEqual(status.model?.provider, 'parent', 'and never from the default')
 })
 
-test('T4: a PRESENT official modelSelection key always wins, even with both official slots null', () => {
+test('a PRESENT official modelSelection key always wins, even with both official slots null', () => {
   const child = childSession('child-present', '/child-ws', [requestHeaderEvent('local', 'local-model')])
   const resolvers = {
     sessionOf: (id: string) => String(id) === 'child-present' ? child : undefined,
@@ -914,7 +914,7 @@ test('T4: a PRESENT official modelSelection key always wins, even with both offi
     'the official projection value is never overridden by the local header')
 })
 
-test('T5: no durable child fact reads UNKNOWN (never parent/default); A→B→A follows the Session identity', () => {
+test('no durable child fact reads UNKNOWN (never parent/default); A→B→A follows the Session identity', () => {
   const childA = childSession('child-a', '/a', [requestHeaderEvent('deepseek', 'model-a')])
   const childB = childSession('child-b', '/b', [requestHeaderEvent('deepseek', 'model-b')])
   const bare = childSession('child-bare', '/bare')

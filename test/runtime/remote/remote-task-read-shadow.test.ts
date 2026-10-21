@@ -303,7 +303,7 @@ test('dispose discards an in-flight comparison', async () => {
 // rc.2 Remote wire — the carrier collapses it into `gateway/internal` — so a
 // same-shape `corrupt` comparison here is a DTO-level check of the adapter's
 // semantic mapping, never a claim of real Direct↔Remote wire parity.
-test('L4 representable-diagnostic parity: the Direct adapter and the Remote adapter produce the same snapshot through the shadow', async () => {
+test('representable-diagnostic parity: the Direct adapter and the Remote adapter produce the same snapshot through the shadow', async () => {
   const generations = createObservableGenerationHarness()
   const direct = new DirectTaskReader({
     agentFor: id => id === 'parent' || id === 'child-a' ? { status: 'running' } : undefined,
@@ -348,7 +348,7 @@ test('L4 representable-diagnostic parity: the Direct adapter and the Remote adap
   shadow.dispose()
 })
 
-test('L4 representable-diagnostic parity: an unknown-mode child is the SAME unsupported diagnostic on both backends', async () => {
+test('representable-diagnostic parity: an unknown-mode child is the SAME unsupported diagnostic on both backends', async () => {
   const generations = createObservableGenerationHarness()
   // Direct reports `unsupported` through the official listDescendants
   // diagnostic vocabulary; the Remote adapter derives it from the parent

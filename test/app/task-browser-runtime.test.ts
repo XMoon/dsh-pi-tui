@@ -712,7 +712,7 @@ test('Case F: a cross-session overlap cannot strand the NEW session in loading (
 // PR2: the generic dataset scope (plan §16.6)
 // ---------------------------------------------------------------------------
 
-test('PR2 scope: a subagents scope commits EXACTLY the scope child ids, jobs excluded', async () => {
+test('scope: a subagents scope commits EXACTLY the scope child ids, jobs excluded', async () => {
   const h = makeHarness()
   h.setJobs([])
   const listing = h.runtime.refreshCatalog()
@@ -735,7 +735,7 @@ test('PR2 scope: a subagents scope commits EXACTLY the scope child ids, jobs exc
 // one id both a Workflow member and a Task Browser external catalog row (the
 // Workflow runtime uses caller delivery, which writes no catalog row), but a
 // scope whose ids match a NON-JOB row must never drop that row silently.
-test('PR2 scope: a non-job row named by the scope stays visible (identity guard, RFL-008)', async () => {
+test('scope: a non-job row named by the scope stays visible (identity guard, RFL-008)', async () => {
   const h = makeHarness()
   h.setJobs([])
   const listing = h.runtime.refreshCatalog()
@@ -761,7 +761,7 @@ test('PR2 scope: a non-job row named by the scope stays visible (identity guard,
   assert.ok(!rows.some(row => row.kind === 'job'), 'jobs must never leak into a subagents scope')
 })
 
-test('PR2 scope: a live refresh keeps the scope (never a global leak)', async () => {
+test('scope: a live refresh keeps the scope (never a global leak)', async () => {
   const h = makeHarness()
   h.setJobs([])
   const listing = h.runtime.refreshCatalog()
@@ -790,7 +790,7 @@ test('PR2 scope: a live refresh keeps the scope (never a global leak)', async ()
     'a catalog refresh must keep the scope (the new global child must not leak)')
 })
 
-test('PR2 scope: resetting to all restores the global dataset', async () => {
+test('scope: resetting to all restores the global dataset', async () => {
   const h = makeHarness()
   h.setJobs([])
   const listing = h.runtime.refreshCatalog()
@@ -808,7 +808,7 @@ test('PR2 scope: resetting to all restores the global dataset', async () => {
     'the global dataset must be restored after the scope reset')
 })
 
-test('PR2 scope: reset() (session switch) clears the scope with the catalog', async () => {
+test('scope: reset() (session switch) clears the scope with the catalog', async () => {
   const h = makeHarness()
   h.setJobs([])
   const listing = h.runtime.refreshCatalog()
@@ -834,7 +834,7 @@ test('PR2 scope: reset() (session switch) clears the scope with the catalog', as
 // PR2 review round 1: runner-level wiring regressions
 // ---------------------------------------------------------------------------
 
-test('PR2 review: the surface wires onWorkflowAction through the single authority resolver', () => {
+test('review: the surface wires onWorkflowAction through the single authority resolver', () => {
   // A4-6: the workflow action handler moved into the surface owner (it reads
   // the browser row-identity source); the mount options wire it as the app's
   // `onWorkflowAction` sink.
@@ -853,7 +853,7 @@ test('PR2 review: the surface wires onWorkflowAction through the single authorit
     'the scoped-agent actions must open the existing Task Browser with the exact child-id scope')
 })
 
-test('PR2 review: every task-browser close path resets the dataset scope', () => {
+test('review: every task-browser close path resets the dataset scope', () => {
   const marker = 'const openTasksBrowser = ('
   const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
   // Both close paths (row selection and Esc) must reset the scope so the
@@ -877,7 +877,7 @@ test('PR2 review: every task-browser close path resets the dataset scope', () =>
     'the retired Quick→Full restore input must not reappear in the open path')
 })
 
-test('PR2 review: a scoped viewer never re-arms acknowledged global failures (review P2)', async () => {
+test('review: a scoped viewer never re-arms acknowledged global failures (review P2)', async () => {
   const h = makeHarness()
   h.setJobs([job({ id: 'j1', label: 'failed job', status: 'failed' })])
   const listing = h.runtime.refreshCatalog()
@@ -947,7 +947,7 @@ test('the surface coalesces every production catalog refresh through one gate', 
     'agent/status must never trigger a catalog refresh through the coalescing gate')
 })
 
-test('F3 regression: acknowledge/setScope commit the CURRENT roster, never a stale catalog snapshot', async () => {
+test('regression: acknowledge/setScope commit the CURRENT roster, never a stale catalog snapshot', async () => {
   const h = makeHarness()
   h.setJobs([{ id: 'j1', kind: 'bash', label: 'job j1', status: 'running', startedAt: 1 }])
   const listing = h.runtime.refreshCatalog()

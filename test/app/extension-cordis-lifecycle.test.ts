@@ -639,7 +639,7 @@ test('a duplicate subscribeState listener is rejected loudly (round-4 finding)',
 // ── M5: fiber-bound registries (commands/themes/settings/autocomplete/ ─────
 // ── keybindings) ───────────────────────────────────────────────────────────
 
-test('M5: a STALE command handle never untracks a later registration (same owner + id)', async () => {
+test('a STALE command handle never untracks a later registration (same owner + id)', async () => {
   // The ledger health record is keyed (slot, owner, id) — it cannot tell two
   // registrations of one id apart. A repeated/late cleanup of a disposed
   // handle must therefore leave a NEWER generation (same owner, same id) both
@@ -686,7 +686,7 @@ test('M5: a STALE command handle never untracks a later registration (same owner
   }
 })
 
-test('M5: command/theme/setting registrations are fiber-bound (owner unload cleans up)', async () => {
+test('command/theme/setting registrations are fiber-bound (owner unload cleans up)', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -759,7 +759,7 @@ test('M5: command/theme/setting registrations are fiber-bound (owner unload clea
   }
 })
 
-test('M5: the keybinding registry rejects non-public actions and printable keys through the PUBLIC path (round 12)', async () => {
+test('the keybinding registry rejects non-public actions and printable keys through the PUBLIC path (round 12)', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -842,7 +842,7 @@ test('M5: the keybinding registry rejects non-public actions and printable keys 
   }
 })
 
-test('P1-3: a subscription record survives detach and re-binds on the next attach (no reload needed)', async () => {
+test('a subscription record survives detach and re-binds on the next attach (no reload needed)', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -902,7 +902,7 @@ test('P1-3: a subscription record survives detach and re-binds on the next attac
   }
 })
 
-test('P1-1/P1-3/P1-4: no-arg detach releases the current surface leases', async () => {
+test('3/P1-4: no-arg detach releases the current surface leases', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -986,7 +986,7 @@ test('P1-1/P1-3/P1-4: no-arg detach releases the current surface leases', async 
   }
 })
 
-test('P1-3: attach A → attach B → late detach A leaves B bound (stale detach)', async () => {
+test('attach A → attach B → late detach A leaves B bound (stale detach)', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -1025,7 +1025,7 @@ test('P1-3: attach A → attach B → late detach A leaves B bound (stale detach
 
 // ── P1-4: managed overlays are CALLER-FIBER-OWNED ──────────────────────────
 
-test('P1-4: a plugin overlay closes automatically when the owner fiber unloads (HMR/disable)', async () => {
+test('a plugin overlay closes automatically when the owner fiber unloads (HMR/disable)', async () => {
   const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
   const { TuiApp } = await import('../../src/tui-app.ts')
   const ctx = new Context()
@@ -1078,7 +1078,7 @@ test('P1-4: a plugin overlay closes automatically when the owner fiber unloads (
   }
 })
 
-test('P1-4: explicit close then fiber unload is idempotent — no double close, no throw', async () => {
+test('explicit close then fiber unload is idempotent — no double close, no throw', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -1121,7 +1121,7 @@ test('P1-4: explicit close then fiber unload is idempotent — no double close, 
   }
 })
 
-test('P1-4: an old overlay lease is INERT after its surface disposes; it never mounts on a newer surface', async () => {
+test('an old overlay lease is INERT after its surface disposes; it never mounts on a newer surface', async () => {
   const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
   const { TuiApp } = await import('../../src/tui-app.ts')
   const ctx = new Context()

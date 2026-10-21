@@ -81,7 +81,7 @@ async function loadVimFixture(): Promise<(ctx: Context) => void> {
   }
 }
 
-test('M10: the vim fixture validates the editor-extension seam over semantic events', async () => {
+test('the vim fixture validates the editor-extension seam over semantic events', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)

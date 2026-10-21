@@ -302,7 +302,7 @@ function flat(view: string): string {
   return view.replace(/\s+/gu, ' ')
 }
 
-test('L6 §11/§14.4-5-6: `/tasks` renders the REAL Remote descendant tree and the child row opens the REAL child viewer', async (t) => {
+test('§11/§14.4-5-6: `/tasks` renders the REAL Remote descendant tree and the child row opens the REAL child viewer', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
   // A parent-session pending echo: while the MAIN surface owns the queue it is
@@ -443,7 +443,7 @@ test('L6 §11/§14.4-5-6: `/tasks` renders the REAL Remote descendant tree and t
     'the child pending echo must not leak onto the restored main surface')
 })
 
-test('L6 §14.9: the RENDERED /tasks row and badge follow the official Client Session running fact for an UNRETAINED child, with no Direct Host read', async (t) => {
+test('the RENDERED /tasks row and badge follow the official Client Session running fact for an UNRETAINED child, with no Direct Host read', async (t) => {
   const life = testLifecycle(t)
   const adapter = new HoldingAdapter()
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life, { adapter })
@@ -509,7 +509,7 @@ test('L6 §14.9: the RENDERED /tasks row and badge follow the official Client Se
     'the Remote Task read converges the child activity back to inactive from the official fact')
 })
 
-test('L6 §14.9 mutation teeth: the OLD binding-requiring activity fact cannot render the running child', async (t) => {
+test('mutation teeth: the OLD binding-requiring activity fact cannot render the running child', async (t) => {
   const life = testLifecycle(t)
   const adapter = new HoldingAdapter()
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life, { adapter })
@@ -557,7 +557,7 @@ test('L6 §14.9 mutation teeth: the OLD binding-requiring activity fact cannot r
     'the mutation targets only the surface projection; the semantic read still reports running')
 })
 
-test('L6 §11/§14.13: one-shot B and nested C are READ-ONLY from the root surface (no interactive editor, no child queue subject)', async (t) => {
+test('§11/§14.13: one-shot B and nested C are READ-ONLY from the root surface (no interactive editor, no child queue subject)', async (t) => {
   const life = testLifecycle(t)
   const { fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
 
@@ -618,7 +618,7 @@ test('L6 §11/§14.13: one-shot B and nested C are READ-ONLY from the root surfa
   await new Promise(resolve => setTimeout(resolve, 200))
 })
 
-test('L6 negative control §14: no Remote Task/child path reads the process-local subagents authority', async (t) => {
+test('§14: no Remote Task/child path reads the process-local subagents authority', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
   // The Direct Task adapter's business authority is
@@ -761,7 +761,7 @@ async function awaitChildInitialTurn(
   }
 }
 
-test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
+test('step 8 / §5 Must 17: a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
   const life = testLifecycle(t)
   // The Client-local request zone IS the sending TUI runtime's zone: pin it so
   // the zone the Remote viewer forwards is an asserted value. The official
@@ -1169,7 +1169,7 @@ function seedImageTurn(append: Append, turn: number, text: string, attachment: u
   append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child image through the CHILD Session readAttachment, and load() captures the asking subject', async (t) => {
+test('step 10 + F7: the mounted child viewer routes the durable child image through the CHILD Session readAttachment, and load() captures the asking subject', async (t) => {
   const life = testLifecycle(t)
   // The REAL inline-image render path fires the loader only when the terminal
   // reports image support (`ImageThumbnail.renderLines`); this is the
@@ -1359,7 +1359,7 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   assert.equal(settledByAttachment.get(parentImage.attachmentId)?.sessionId, PARENT_ID)
 })
 
-test('L6 F1: ending the viewer aborts a STILL-PENDING child open and releases its retained child generation without committing', async (t) => {
+test('ending the viewer aborts a STILL-PENDING child open and releases its retained child generation without committing', async (t) => {
   const life = testLifecycle(t)
   const { fixture, app, viewport } = await mountTaskCenterFixture(life)
   const clientSessions = fixture.aggregate.wire.client.sessions
@@ -1396,7 +1396,7 @@ test('L6 F1: ending the viewer aborts a STILL-PENDING child open and releases it
     `the superseded open must never paint the child transcript:\n${viewport()}`)
 })
 
-test('L6 F2: the runner teardown releases the MOUNTED child viewer child generation exactly once', async (t) => {
+test('the runner teardown releases the MOUNTED child viewer child generation exactly once', async (t) => {
   const life = testLifecycle(t)
   const { fixture, app, viewport } = await mountTaskCenterFixture(life)
   const clientSessions = fixture.aggregate.wire.client.sessions
@@ -1427,7 +1427,7 @@ test('L6 F2: the runner teardown releases the MOUNTED child viewer child generat
 // generation bump, no draft clear, no second retain, B-side truth converges).
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('L6 M3-6 PR2 §14.5: the OPEN Task Center + child viewer survive a normal reconnect in place — same bindings, no viewer bump, draft kept, B truth converges, one retain release', async (t) => {
+test('the OPEN Task Center + child viewer survive a normal reconnect in place — same bindings, no viewer bump, draft kept, B truth converges, one retain release', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
   const clientSessions = fixture.aggregate.wire.client.sessions
@@ -1567,7 +1567,7 @@ async function openTaskRow(
   throw new Error(`the Task Center never selected ${rowLabel}:\n${viewport()}`)
 }
 
-test('L6 §14 step 14: a main-Session switch fences the in-flight child open — no stale child operation reaches the replacement surface', async (t) => {
+test('step 14: a main-Session switch fences the in-flight child open — no stale child operation reaches the replacement surface', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
   const clientSessions = fixture.aggregate.wire.client.sessions
@@ -1652,7 +1652,7 @@ test('L6 §14 step 14: a main-Session switch fences the in-flight child open —
     viewport().includes('childa-late answer 32'), 20_000)
 })
 
-test('L6 negative control: the child viewer never falls back to the parent facts for a fact its own Session lacks', async (t) => {
+test('the child viewer never falls back to the parent facts for a fact its own Session lacks', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
   // The parent carries a durable fact its children do NOT have: one todo entry
@@ -1691,7 +1691,7 @@ test('L6 negative control: the child viewer never falls back to the parent facts
     'the parent todo fact survives the child viewer round trip')
 })
 
-test('L6 negative control: child A → child B leaves no cross-child residue (transcript, workspace, subject, retained generation)', async (t) => {
+test('child A → child B leaves no cross-child residue (transcript, workspace, subject, retained generation)', async (t) => {
   const life = testLifecycle(t)
   const { fixture, app, viewport } = await mountTaskCenterFixture(life)
   const clientSessions = fixture.aggregate.wire.client.sessions
@@ -1745,7 +1745,7 @@ test('L6 negative control: child A → child B leaves no cross-child residue (tr
   assert.equal(retainFacts(clientSessions, CHILD_B_ID).referenceCount, 0)
   assert.deepEqual(retainFacts(clientSessions, CHILD_A_ID).retainedBy, { tuiChildView: 1 })
 })
-test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subject and footer on the official Client Session running flip alone', async (t) => {
+test('sink: the MOUNTED Remote child viewer converges its committed subject and footer on the official Client Session running flip alone', async (t) => {
   const life = testLifecycle(t)
   const adapter = new HoldingAdapter()
   const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life, { adapter })
@@ -1943,7 +1943,7 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   releaseSecond()
 })
 
-test('L6 P1 dual-subject: the SAME attachment id loaded under the parent and child scopes keeps independent state and subscribers', async (t) => {
+test('dual-subject: the SAME attachment id loaded under the parent and child scopes keeps independent state and subscribers', async (t) => {
   const life = testLifecycle(t)
   const piTui = await import('@xmoon76/pi-tui') as unknown as {
     resetCapabilitiesCache(): void
@@ -2032,7 +2032,7 @@ test('L6 P1 dual-subject: the SAME attachment id loaded under the parent and chi
     "the parent scope's cache must not gain the child-authorized bytes")
 })
 
-test('L6 P1 reincarnation: a read stamped with the OLD child lifetime fails closed and never reaches the reopened binding', async (t) => {
+test('reincarnation: a read stamped with the OLD child lifetime fails closed and never reaches the reopened binding', async (t) => {
   const life = testLifecycle(t)
   const piTui = await import('@xmoon76/pi-tui') as unknown as {
     resetCapabilitiesCache(): void
@@ -2163,7 +2163,7 @@ test('L6 P1 reincarnation: a read stamped with the OLD child lifetime fails clos
   assert.equal(readerSpy.served.has(address), false, 'the refused ref is never served in either scope')
 })
 
-test('L6 M3-6 PR2 §14.10: a durable image read under the STILL-OWNED presentation survives a same-binding reconnect; a different binding fails closed', async (t) => {
+test('a durable image read under the STILL-OWNED presentation survives a same-binding reconnect; a different binding fails closed', async (t) => {
   // The frozen lifetime rule: a presentation captured under generation A +
   // binding X keeps its authority across a NORMAL reconnect (generation B +
   // the SAME binding X — the official adoption). A NEW image read started

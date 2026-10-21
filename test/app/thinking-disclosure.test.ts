@@ -186,7 +186,7 @@ function hintCount(view: string, verb: string): number {
 
 // ── A. Focus OFF · regular ───────────────────────────────────────────────
 
-test('A1: Focus OFF regular — Thinking exists compact with a preview and the Alt+T hint', async () => {
+test('Focus OFF regular — Thinking exists compact with a preview and the Alt+T hint', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -200,7 +200,7 @@ test('A1: Focus OFF regular — Thinking exists compact with a preview and the A
   app.stop()
 })
 
-test('A2/A3: Alt+T expands ALL Thinking full, then back to compact — never removed', async () => {
+test('Alt+T expands ALL Thinking full, then back to compact — never removed', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -223,7 +223,7 @@ test('A2/A3: Alt+T expands ALL Thinking full, then back to compact — never rem
   app.stop()
 })
 
-test('A4: Ctrl+O expands recent tool/system output but NEVER Thinking detail', async () => {
+test('Ctrl+O expands recent tool/system output but NEVER Thinking detail', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
@@ -249,7 +249,7 @@ test('A4: Ctrl+O expands recent tool/system output but NEVER Thinking detail', a
 
 // ── B. Focus OFF · fullscreen ────────────────────────────────────────────
 
-test('B1: fullscreen — clicking ONE Thinking card expands only that card', async () => {
+test('fullscreen — clicking ONE Thinking card expands only that card', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -269,7 +269,7 @@ test('B1: fullscreen — clicking ONE Thinking card expands only that card', asy
   app.stop()
 })
 
-test('B2/B3: Alt+T after a local override resets every override and bulk-toggles ALL', async () => {
+test('Alt+T after a local override resets every override and bulk-toggles ALL', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -299,7 +299,7 @@ test('B2/B3: Alt+T after a local override resets every override and bulk-toggles
 
 // ── C. Focus ON · collapsed root ─────────────────────────────────────────
 
-test('C1/C2: Focus collapsed — the Think: preview stays; Alt+T changes only the bulk preference', async () => {
+test('Focus collapsed — the Think: preview stays; Alt+T changes only the bulk preference', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
@@ -323,7 +323,7 @@ test('C1/C2: Focus collapsed — the Think: preview stays; Alt+T changes only th
 
 // ── D. Focus ON · regular expanded ───────────────────────────────────────
 
-test('D1: regular Focus expanded root — Thinking compact (never absent), Tool full', async () => {
+test('regular Focus expanded root — Thinking compact (never absent), Tool full', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
@@ -340,7 +340,7 @@ test('D1: regular Focus expanded root — Thinking compact (never absent), Tool 
   app.stop()
 })
 
-test('D2/D3: Alt+T expands Thinking full; Ctrl+O never changes it — Tool unchanged throughout', async () => {
+test('Alt+T expands Thinking full; Ctrl+O never changes it — Tool unchanged throughout', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
@@ -367,7 +367,7 @@ test('D2/D3: Alt+T expands Thinking full; Ctrl+O never changes it — Tool uncha
 
 // ── E. Focus ON · fullscreen expanded ────────────────────────────────────
 
-test('E1: Focus ON fullscreen expanded root — Thinking compact, Tool compact', async () => {
+test('Focus ON fullscreen expanded root — Thinking compact, Tool compact', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
@@ -440,7 +440,7 @@ test('E2–E5: per-card clicks layer over the bulk preference; Alt+T resets them
 
 // ── F. Focus switch ──────────────────────────────────────────────────────
 
-test('F1/F2: the Thinking preference survives Focus ON/OFF switches', async () => {
+test('the Thinking preference survives Focus ON/OFF switches', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
@@ -464,7 +464,7 @@ test('F1/F2: the Thinking preference survives Focus ON/OFF switches', async () =
 
 // ── G. Surface switch ────────────────────────────────────────────────────
 
-test('G2: a fullscreen click override never leaks into regular — regular follows the bulk only', async () => {
+test('a fullscreen click override never leaks into regular — regular follows the bulk only', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -490,7 +490,7 @@ test('G2: a fullscreen click override never leaks into regular — regular follo
 
 // ── H. Search ────────────────────────────────────────────────────────────
 
-test('H1: a search hit full-reveals ONLY the matched Thinking; the bulk preference stays compact', async () => {
+test('a search hit full-reveals ONLY the matched Thinking; the bulk preference stays compact', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -509,7 +509,7 @@ test('H1: a search hit full-reveals ONLY the matched Thinking; the bulk preferen
   app.stop()
 })
 
-test('H2: Focus collapsed search hit opens the owner Thought with the matched Thinking full', async () => {
+test('Focus collapsed search hit opens the owner Thought with the matched Thinking full', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -717,7 +717,7 @@ test('I1–I6: the /settings Thinking row is the SAME state as Alt+T (detail sem
   t.app.stop()
 })
 
-test('I7: the /settings declarative setter clears per-card overrides like Alt+T (bulk statement)', async () => {
+test('the /settings declarative setter clears per-card overrides like Alt+T (bulk statement)', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))
@@ -757,7 +757,7 @@ test('I7: the /settings declarative setter clears per-card overrides like Alt+T 
 
 // ── J. No reasoning ──────────────────────────────────────────────────────
 
-test('J1: a turn without reasoning-delta never manufactures a Thinking block', async () => {
+test('a turn without reasoning-delta never manufactures a Thinking block', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, noReasoningTurn(0))
@@ -771,7 +771,7 @@ test('J1: a turn without reasoning-delta never manufactures a Thinking block', a
 
 // ── K. Running ───────────────────────────────────────────────────────────
 
-test('P1: an override on a Thinking card OUTSIDE the visible window is still cleared by Alt+T and surface transitions', async () => {
+test('an override on a Thinking card OUTSIDE the visible window is still cleared by Alt+T and surface transitions', async () => {
   // The visible transcript is WINDOWED: a clicked card can scroll out of
   // `messages` while its override stays in the map. Alt+T and the
   // fullscreen → regular transition must reset EVERY Thinking override —
@@ -807,7 +807,7 @@ test('P1: an override on a Thinking card OUTSIDE the visible window is still cle
 
 // ── K. Running ───────────────────────────────────────────────────────────
 
-test('K2: FULL running reasoning live-appends new deltas into the open body', async () => {
+test('FULL running reasoning live-appends new deltas into the open body', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
@@ -830,7 +830,7 @@ test('K2: FULL running reasoning live-appends new deltas into the open body', as
 
 // ── L. Cache identity ────────────────────────────────────────────────────
 
-test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no stale build at 100 cols)', async () => {
+test('a wide → narrow resize re-derives the compact Thinking rows (no stale build at 100 cols)', async () => {
   // The compact card truncates AT RENDER TIME: resizing 100 → 8 must
   // keep the fixed three-row geometry with every row within the new
   // width — a stale build-time truncation would make the cached Text
@@ -863,7 +863,7 @@ test('P2a: a wide → narrow resize re-derives the compact Thinking rows (no sta
   app.stop()
 })
 
-test('P2b: a narrow → wide resize restores the untruncated preview', async () => {
+test('a narrow → wide resize restores the untruncated preview', async () => {
   // The 8-col truncation must never survive a widening: the SAME cached
   // component re-derives its rows at the new width (review finding).
   const vt = new VirtualTerminal(8, 24)
@@ -893,7 +893,7 @@ test('P2b: a narrow → wide resize restores the untruncated preview', async () 
   app.stop()
 })
 
-test('P2c: fullscreen resize keeps the compact rows stable and the click map aligned', async () => {
+test('fullscreen resize keeps the compact rows stable and the click map aligned', async () => {
   // The fullscreen click hit-map depends on stable row heights: after a
   // 100 -> 8 resize the compact Thinking card must stay exactly 3 rows
   // AND a click on the re-derived title row must still toggle the card.
@@ -944,7 +944,7 @@ test('P2c: fullscreen resize keeps the compact rows stable and the click map ali
   app.stop()
 })
 
-test('P2d: the compact card keeps a TRUE per-width reference-stable cache (width A → B → A)', async () => {
+test('the compact card keeps a TRUE per-width reference-stable cache (width A → B → A)', async () => {
   // The same component + same width must return the SAME array instance
   // even after an intermediate width — the fork's per-frame processed-line
   // reuse depends on it (review finding: a single last-width slot breaks
@@ -966,7 +966,7 @@ test('P2d: the compact card keeps a TRUE per-width reference-stable cache (width
   assert.equal(afterInvalidate.length, 3, 'the rebuilt rows keep the compact geometry')
 })
 
-test('P2: the compact Thinking card never wraps on a narrow terminal', async () => {
+test('the compact Thinking card never wraps on a narrow terminal', async () => {
   // Every compact row must truncate to the transcript CONTENT width (the
   // terminal width minus the right gutter) — a wrapped hint row would
   // break the fixed three-row geometry (review finding).
@@ -989,7 +989,7 @@ test('P2: the compact Thinking card never wraps on a narrow terminal', async () 
   app.stop()
 })
 
-test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside the transcript gutter', async () => {
+test('the compact card survives the 100 → 8 → 100 resize matrix inside the transcript gutter', async () => {
   // The right-gutter contract's resize matrix (plan §8.2):
   // the same cached component must narrow to the 6-col content width and
   // widen back to the full preview — the per-width cache keeps the fixed
@@ -1027,7 +1027,7 @@ test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside 
   app.stop()
 })
 
-test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component too', async () => {
+test('an Alt+T expanded transition rebuilds the plugin-rendered component too', async () => {
   const { RendererRegistry } = await import('../../src/extension/internal/renderer-registry.ts')
   const calls: string[] = []
   const registry = new RendererRegistry()
@@ -1054,7 +1054,7 @@ test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component to
   app.stop()
 })
 
-test('H3: collapsing an unrelated Thinking card keeps the current search reveal', async () => {
+test('collapsing an unrelated Thinking card keeps the current search reveal', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, twoThinkingTurn(0))

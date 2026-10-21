@@ -234,7 +234,7 @@ test('fullscreen toggles and transcript search are benign no-ops after dispose',
   await settle()
 })
 
-test('M3-6 PR3: one final-dispose cleanup failure cannot skip later cleanup or the generation retirement', (t) => {
+test('one final-dispose cleanup failure cannot skip later cleanup or the generation retirement', (t) => {
   // Deliberately NOT started: no process TUI slot is claimed, so this
   // fault-injected final teardown can never poison the shared process slot for
   // later tests (the plan's Step 3 isolation rule).
@@ -275,7 +275,7 @@ const nullPresentation = {
   disableFocusReporting: () => {},
 }
 
-test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge detach', () => {
+test('a throwing extension cleanup cannot strand the extension bridge detach', () => {
   const surface =  createSurfaceRuntime({
     tuiVersion: '0.0.0-test',
     notificationPresentation: nullPresentation,
@@ -306,7 +306,7 @@ test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge 
   assert.equal(detachCalls, 1, 'a second dispose is inert')
 })
 
-test('M3-6 PR3: one throwing tracked keybinding-editor disposal cannot strand its siblings', () => {
+test('one throwing tracked keybinding-editor disposal cannot strand its siblings', () => {
   // Not started: this exercises the final-dispose teardown without claiming the
   // process slot, so the failing panel can never poison the shared slot (the
   // same isolation rule as the final-dispose case above).

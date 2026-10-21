@@ -391,7 +391,7 @@ async function feed(
 
 // ── PROOF 7 ────────────────────────────────────────────────────────────────
 
-test('L6: a real turn drives the full Host -> wire -> source -> Surface -> OSC 7501 loop', async (t) => {
+test('a real turn drives the full Host -> wire -> source -> Surface -> OSC 7501 loop', async (t) => {
   const life = testLifecycle(t)
   const loop = await mountRemoteLoop(life, SESSION)
   try {
@@ -441,7 +441,7 @@ test('L6: a real turn drives the full Host -> wire -> source -> Surface -> OSC 7
 
 // ── PROOF 8 ────────────────────────────────────────────────────────────────
 
-test('L6: a displayed child viewer never takes over the main terminal root', async (t) => {
+test('a displayed child viewer never takes over the main terminal root', async (t) => {
   const life = testLifecycle(t)
   const CHILD = 'r2-l6-child'
   // The surface is displaying a CHILD viewer while the main Agent runs (plan §7.4).
@@ -494,7 +494,7 @@ test('L6: a displayed child viewer never takes over the main terminal root', asy
   }
 })
 
-test('L6: a same-id Agent replacement re-establishes the watch and drives the new turn', async (t) => {
+test('a same-id Agent replacement re-establishes the watch and drives the new turn', async (t) => {
   const life = testLifecycle(t)
   const loop = await mountRemoteLoop(life, SESSION)
   const controller = new AbortController()
@@ -587,7 +587,7 @@ test('L6: a same-id Agent replacement re-establishes the watch and drives the ne
   }
 })
 
-test('L6: opening/reconnect snapshots never notify; a real update running->idle notifies exactly once', async () => {
+test('opening/reconnect snapshots never notify; a real update running->idle notifies exactly once', async () => {
   const sessionId = 'r2-l6-notify'
   const surface = mountSurfaceProbe(sessionId, 'unfocused')
   try {
@@ -619,7 +619,7 @@ test('L6: opening/reconnect snapshots never notify; a real update running->idle 
 
 // ── PROOF 9 ────────────────────────────────────────────────────────────────
 
-test('L6: the Remote feed honors the notification mode (disabled, then re-enabled)', async () => {
+test('the Remote feed honors the notification mode (disabled, then re-enabled)', async () => {
   const sessionId = 'r2-l6-mode'
   const surface = mountSurfaceProbe(sessionId, 'off')
   try {
@@ -651,7 +651,7 @@ test('L6: the Remote feed honors the notification mode (disabled, then re-enable
   }
 })
 
-test('L6: an owner switch re-baselines the controller so a late idle never notifies', async () => {
+test('an owner switch re-baselines the controller so a late idle never notifies', async () => {
   const sessionId = 'r2-l6-owner'
   const surface = mountSurfaceProbe(sessionId, 'unfocused')
   try {
@@ -698,7 +698,7 @@ test('L6: an owner switch re-baselines the controller so a late idle never notif
   }
 })
 
-test('L6: a reconnect rebind resets seenRunning and final disposal retains a proven done', async () => {
+test('a reconnect rebind resets seenRunning and final disposal retains a proven done', async () => {
   const sessionId = 'r2-l6-retention'
   const surface = mountSurfaceProbe(sessionId, 'unfocused')
   try {

@@ -369,7 +369,7 @@ async function openJobRow(fx: JobViewerFixture, label: string): Promise<void> {
   fx.fixture.vt.sendInput('\r')
 }
 
-test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
+test('steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -541,7 +541,7 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   assert.match(restored, /killed/u, `the restored browser row must show the converged status:\n${restored}`)
 })
 
-test('L6 §15 step 10 + 11(b): a SECOND real Job stops through the Task-Center row confirmation (the SAME semantic operation) and the Job-detail observer is released and re-acquired exactly once', async (t) => {
+test('step 10 + 11(b): a SECOND real Job stops through the Task-Center row confirmation (the SAME semantic operation) and the Job-detail observer is released and re-acquired exactly once', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -620,7 +620,7 @@ test('L6 §15 step 10 + 11(b): a SECOND real Job stops through the Task-Center r
 // never replayed).
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same detail, B output converges, one observer, post-B Stop kills exactly once, no replay', async (t) => {
+test('the OPEN Job viewer recovers after reconnect — same detail, B output converges, one observer, post-B Stop kills exactly once, no replay', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -708,7 +708,7 @@ test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same 
     'exactly one Host kill admission served the post-B Stop')
 })
 
-test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
+test('11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -753,7 +753,7 @@ test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child
   await waitFor('the subagent Job workspace closed', () => !jobWorkspacePainted(view()), 10_000)
 })
 
-test('L6 §15 step 12: a main-Session switch with a Stop in flight drops the stale settlement and releases the observer without mutating the replacement surface', async (t) => {
+test('step 12: a main-Session switch with a Stop in flight drops the stale settlement and releases the observer without mutating the replacement surface', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { host, app, view } = fx
@@ -813,7 +813,7 @@ test('L6 §15 step 12: a main-Session switch with a Stop in flight drops the sta
     fx.observeReleases() === fx.observeAcquires(), 10_000)
 })
 
-test('L6 §15 step 12 (teardown variant): disposing the surface with a Stop in flight drops the stale settlement and releases the observer', async (t) => {
+test('step 12 (teardown variant): disposing the surface with a Stop in flight drops the stale settlement and releases the observer', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -839,7 +839,7 @@ test('L6 §15 step 12 (teardown variant): disposing the surface with a Stop in f
     'surface disposal must release the mounted selected-Job observer')
 })
 
-test('L6 §14/J12: a same-Session Job A -> Job B viewer replacement (with a browser close/reopen) drops A\'s stale Stop SUCCESS settlement and keeps the current viewer\'s Stop working', async (t) => {
+test('§14/J12: a same-Session Job A -> Job B viewer replacement (with a browser close/reopen) drops A\'s stale Stop SUCCESS settlement and keeps the current viewer\'s Stop working', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -898,7 +898,7 @@ test('L6 §14/J12: a same-Session Job A -> Job B viewer replacement (with a brow
   assert.equal(fx.rosterStatus(jobA.id), 'running', 'the retired A Job must be untouched')
 })
 
-test('L6 §14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR settlement, while the current viewer\'s stop ERROR still notifies', async (t) => {
+test('§14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR settlement, while the current viewer\'s stop ERROR still notifies', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx
@@ -943,7 +943,7 @@ test('L6 §14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR
     fx.notices.slice(noticesBefore).some(message => message.includes(`could not stop ${JOB_TWO_LABEL}`)), 10_000)
 })
 
-test('L6 B1-C: the Remote Client roster label reaches the Command page and Copy All copies the ORIGINAL command without a Host read', async (t) => {
+test('the Remote Client roster label reaches the Command page and Copy All copies the ORIGINAL command without a Host read', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx

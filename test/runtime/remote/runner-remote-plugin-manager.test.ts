@@ -247,7 +247,7 @@ async function enableFixtureBundleThroughPanel(fixture: Fixture, bundle: string)
     /\bDisable\b/.test(plain(fixture.vt.getViewport())), 20_000)
 }
 
-test('L6-A: the real Remote /plugins reads the real Host PluginManager through the generated Remote', async (t) => {
+test('the real Remote /plugins reads the real Host PluginManager through the generated Remote', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const bundle = fixture.host.pluginManager!.bundleName
@@ -275,7 +275,7 @@ test('L6-A: the real Remote /plugins reads the real Host PluginManager through t
   assert.match(line, /\[disabled\]/, 'the fixture bundle starts disabled (Host truth)')
 })
 
-test('L6 (M3-6 PR1): the REAL runner controller consumes the SELECTED Client service observations; a Host-context twin is never reported', async (t) => {
+test('(M3-6 PR1): the REAL runner controller consumes the SELECTED Client service observations; a Host-context twin is never reported', async (t) => {
   const life = testLifecycle(t)
   // The observation evidence is captured at the controller's OWN consumption
   // point (R1 F2 / R2 review): the test patches the production
@@ -415,7 +415,7 @@ test('L6 (M3-6 PR1): the REAL runner controller consumes the SELECTED Client ser
     'the patch is active during the test (restoration happens through the lifecycle defer)')
 })
 
-test('L6-B: the Settings → Plugins entry hosts the SAME Remote controller/panel and Back returns', async (t) => {
+test('the Settings → Plugins entry hosts the SAME Remote controller/panel and Back returns', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
 
@@ -442,7 +442,7 @@ test('L6-B: the Settings → Plugins entry hosts the SAME Remote controller/pane
     !/Settings · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
 })
 
-test('L6-C: one real Remote mutation reaches Host authority and the authoritative reread repaints', async (t) => {
+test('one real Remote mutation reaches Host authority and the authoritative reread repaints', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const profile = fixture.host.pluginManager!
@@ -487,7 +487,7 @@ test('L6-C: one real Remote mutation reaches Host authority and the authoritativ
     /restart required/i.test(plain(fixture.vt.getViewport())), 20_000)
 })
 
-test('L6-D: an external Host change invalidates an open Remote panel with no manual refresh', async (t) => {
+test('an external Host change invalidates an open Remote panel with no manual refresh', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const bundle = fixture.host.pluginManager!.bundleName
@@ -509,7 +509,7 @@ test('L6-D: an external Host change invalidates an open Remote panel with no man
     (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
 })
 
-test('L6-E: a new Connection generation rereads authoritative truth without replaying the prior mutation', async (t) => {
+test('a new Connection generation rereads authoritative truth without replaying the prior mutation', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const profile = fixture.host.pluginManager!
@@ -556,7 +556,7 @@ test('L6-E: a new Connection generation rereads authoritative truth without repl
     'reconnect rereads only; it never replays the earlier Enable mutation')
 })
 
-test('L5: the real forwarded install events reach the Remote adapter by exact request id', async (t) => {
+test('the real forwarded install events reach the Remote adapter by exact request id', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const port = fixture.aggregate.selected.backend.pluginManager
@@ -602,7 +602,7 @@ test('L5: the real forwarded install events reach the Remote adapter by exact re
   assert.equal(events.length, 2, 'a disposed install subscription delivers nothing later')
 })
 
-test('L6-F (S5 A12): a Remote mutation reply carried by a superseded Connection generation never repaints success or re-dispatches', async (t) => {
+test('(S5 A12): a Remote mutation reply carried by a superseded Connection generation never repaints success or re-dispatches', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const profile = fixture.host.pluginManager!
