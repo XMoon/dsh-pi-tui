@@ -56,6 +56,8 @@ interface Harness {
   readonly app: TuiApp
   readonly calls: readonly string[]
   readonly holdNextSetReference: () => () => void
+  /** The Host account state the Account page reads. */
+  readonly setAccountView: (view: AccountView) => void
   readonly view: () => string
   readonly rows: () => string[]
   readonly close: () => void
@@ -83,7 +85,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   const ctx = new Context()
   ctx.provide('commands', commands as never)
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
-  const accountState = { view: SIGNED_OUT }
+  const accountState: { view: AccountView } = { view: SIGNED_OUT }
   const calls: string[] = []
   let recordRows: { key: string; label: string; kind: 'grant' }[] = [
     { key: 'plugin/mykey', label: 'My Key', kind: 'grant' },
@@ -169,7 +171,9 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       account: {
         available: () => true,
         getState: async () => accountState.view,
-        watch: async function* () { yield accountState.view; await new Promise<void>(() => {}) },
+        // The Account watch subscription count: a category the user only
+        // browsed must never start one.
+        watch: async function* () { calls.push('account:watch'); yield accountState.view; await new Promise<void>(() => {}) },
         getProfile: async () => null,
         getBalance: async () => null,
         getCallbackOrigin: () => 'http://127.0.0.1:43121',
@@ -196,6 +200,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     vt,
     app,
     calls,
+    setAccountView: (view: AccountView) => { accountState.view = view },
     holdNextSetReference: () => {
       setReferenceGate = new Promise<void>(resolve => { releaseSetReference = resolve })
       return () => { releaseSetReference?.() }
@@ -626,5 +631,93 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
   await h.vt.waitForRender()
   assert.match(h.view(), /Models & Credentials/u, 'the content release did not open a provider')
   assert.match(h.view(), /^> Models/mu, 'the rail press did not select a category')
+  h.close()
+})
+
+test('a resize cycle keeps the selected category, the content focus and the page instance', async () => {
+  const h = open(200, 50)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the deeplink lands in the content')
+
+  for (const [columns, rows] of [[72, 24], [44, 20], [100, 40], [200, 50]] as const) {
+    h.vt.resize(columns, rows)
+    await h.vt.waitForRender()
+    assert.match(h.view(), /DeepSeek Account/u, `the Account page survives ${columns}x${rows}`)
+  }
+  // The content focus survived the cycle: the page still owns the keyboard.
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the content focus survived the resize cycle')
+  h.close()
+})
+
+test('the Account page keeps its Host browser attempt when the rail leaves and returns', async () => {
+  // The Host owns a browser attempt that is WAITING for the callback: the page
+  // only reads it. Leaving the page must end the page's own watch, never the
+  // Host attempt.
+  const attempt = {
+    id: 'attempt-1',
+    phase: 'waiting-browser' as const,
+    authorizeUrl: 'https://platform.example/dsh/authorize?state=abc',
+    expiresAt: Date.now() + 60_000,
+  }
+  const h = open()
+  h.setAccountView({ status: 'signed-out', links: { usageUrl: 'https://u', topUpUrl: 'https://t' }, attempt })
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /waiting-browser/u, 'the running Host attempt is on screen')
+  assert.match(h.view(), /platform\.example/u, 'the authorize URL is on screen')
+
+  const aboutRow = railRow(h, 'About')
+  await click(h, aboutRow, 1)
+  assert.match(h.view(), /dsh-pi-tui/u, 'the About page is painted after the category change')
+  const accountRow = railRow(h, 'Account')
+  await click(h, accountRow, 1)
+  assert.match(h.view(), /waiting-browser/u, 'the returned page re-reads the Host attempt')
+  assert.equal(h.calls.some(call => call.includes('cancelSignIn')), false,
+    'leaving the Account page never cancels the Host attempt')
+  h.close()
+})
+
+test('a Host callback that settles after a category change never repaints the new category', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+  await h.vt.waitForRender()
+  const before = h.view()
+  // Switch to the About home WHILE the Account watch is still settling.
+  const aboutRow = railRow(h, 'About')
+  await click(h, aboutRow, 1)
+  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  assert.match(h.view(), /dsh-pi-tui/u, 'the About page is still painted after the settlement')
+  assert.doesNotMatch(h.view(), /DeepSeek Account/u, 'the disposed Account page never repaints the new category')
+  assert.notEqual(h.view(), before, 'the frame really changed')
+  h.close()
+})
+
+test('a narrow rail selection never creates the invisible Account page, and Enter creates it exactly once', async () => {
+  const h = open(44, 20)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await h.vt.waitForRender()
+  // The narrow first frame is the About CONTENT: Esc returns to the list.
+  await key(h, '\u001b')
+  assert.match(h.rows()[0]!, /Settings · Categories/u, 'the narrow rail owns the list')
+
+  // Browsing the invisible Account category must not start a Host watch.
+  await key(h, '\u001b[B')
+  await key(h, '\u001b[B')
+  assert.equal(h.calls.filter(call => call === 'account:watch').length, 0,
+    'browsing an invisible category never starts the Account watch')
+  assert.equal(h.calls.filter(call => call === 'startSignIn').length, 0,
+    'browsing an invisible category never signs in')
+
+  // Enter creates the page exactly ONCE and shows it.
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the content focus shows the Account page')
+  assert.equal(h.calls.filter(call => call === 'account:watch').length, 1,
+    'the Account page starts exactly one watch')
   h.close()
 })
