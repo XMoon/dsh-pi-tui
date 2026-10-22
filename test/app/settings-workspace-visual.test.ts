@@ -3580,3 +3580,46 @@ test('the About content scrolls its own facts and never truncates a version valu
   assert.match(after, /DSH\s+(?:Unknown|\d+\.\d+\.\d+)/u, `the DSH version is reachable by scrolling:\n${after}`)
   h.dispose()
 })
+
+test('the direct layout holds at every size of the frozen matrix', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [80, 8], [72, 24], [44, 20], [30, 8]] as const) {
+    const h = setup({ columns, rows })
+    await h.openHome()
+    const painted = h.rowsPlain()
+    assert.equal(painted.length, rows, `the frame paints exactly ${rows} rows at ${columns}x${rows}:\n${h.view()}`)
+    assert.ok(
+      painted.some(line => /^> About/mu.test(line)) || painted.some(line => /dsh-pi-tui/u.test(line)),
+      `the About content is painted at ${columns}x${rows}:\n${h.view()}`,
+    )
+    // The last physical row always carries the action bar.
+    assert.notEqual(painted.at(-1)?.trim(), '', `the action bar is the physical last row at ${columns}x${rows}:\n${h.view()}`)
+    assertRowWidths(h, columns)
+    h.dispose()
+  }
+})
+
+test('a resize cycle keeps the selected category, the content focus and the page state', async () => {
+  const h = setup({ columns: 200, rows: 50 })
+  await h.openHome()
+  await h.walkToCategory('Models')
+  assert.match(h.view(), /Models & Credentials/u, 'the Models page is painted')
+  const modelsBody = h.view()
+
+  for (const [columns, rows] of [[72, 24], [44, 20], [100, 40], [200, 50]] as const) {
+    h.vt.resize(columns, rows)
+    await h.vt.waitForRender()
+    if (columns < 76) {
+      // A narrow terminal has no room for a rail AND a content column: the
+      // category list is the only projection, and the page is not addressable
+      // there (the plan's narrow rule).
+      assert.match(h.view(), /^> Models/mu, `the narrow rail keeps the selection at ${columns}x${rows}:\n${h.view()}`)
+      continue
+    }
+    assert.match(h.view(), /Models & Credentials/u, `the page state survives ${columns}x${rows}:\n${h.view()}`)
+  }
+  // The selection never changed: the cycle did not re-select a category, and
+  // the page was never rebuilt (its own projection is unchanged).
+  assert.match(h.view(), /^> Models/mu, 'the selected category survived the resize cycle')
+  assert.ok(h.view().includes(modelsBody.split('\n')[4] ?? ''), 'the page projection survived the cycle')
+  h.dispose()
+})

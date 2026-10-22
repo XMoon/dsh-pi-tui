@@ -721,3 +721,43 @@ test('a narrow rail selection never creates the invisible Account page, and Ente
     'the Account page starts exactly one watch')
   h.close()
 })
+
+test('the wide rail previews the real page with exactly ONE watch, and the focus transfer reuses it', async () => {
+  const h = open(120, 40)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await h.vt.waitForRender()
+  await key(h, '\u001b[B')
+  await key(h, '\u001b[B')
+  assert.match(h.view(), /DeepSeek Account/u, 'the rail previews the real Account page')
+  assert.equal(h.calls.filter(call => call === 'account:watch').length, 1,
+    'the wide rail preview starts exactly ONE watch')
+
+  // The focus transfer reuses the SAME page: no second watch.
+  await key(h, '\r')
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the focus moved into the content')
+  assert.equal(h.calls.filter(call => call === 'account:watch').length, 1,
+    'the focus transfer reuses the mounted page: no second watch')
+  h.close()
+})
+
+test('a content press released on the rail does not select the category', async () => {
+  const h = open(120, 40)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await h.vt.waitForRender()
+  const accountRow = railRow(h, 'Account')
+  await key(h, '\u001b[B')
+  await key(h, '\u001b[B')
+  const contentRow = rowOf(h, 'Status')
+  // A press in the CONTENT, released on the RAIL: the rail must not act on it.
+  // The selection stays exactly where the rail navigation left it, and the
+  // content press never runs a page action.
+  press(h, contentRow, colOf(h, contentRow, 'Status'))
+  release(h, accountRow, 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /^> Account/mu, 'the rail release did not change the selected category')
+  assert.equal(h.calls.some(call => call.includes('startSignIn')), false,
+    'the content press never ran a page action')
+  h.close()
+})
