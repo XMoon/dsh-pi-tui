@@ -1,17 +1,23 @@
 /**
- * The subject of the PR-C real-GUI flow: the PRODUCTION tool-result image
- * projection, painted by a REAL Tern GUI window.
+ * The subject of the PR-C image lanes: the PRODUCTION tool-result image
+ * projection, painted by a REAL Tern client.
  *
- * It is the GUI twin of `scripts/tern-pane-pr-c-image-subject.mts`: the same
- * production `transcriptView` output and the same official SDK blob channel.
- * The only difference is WHERE it runs - the GUI window is a multiplexer, so
- * the subject runs in one of its panes.
+ * It renders the very nodes the shipped renderer emits — the production
+ * `transcriptView` mapper over a real tool result that carries an image block
+ * — and it sends the image through the OFFICIAL SDK blob channel, exactly as
+ * `src/tui/tsp/session.ts` does. Nothing here re-implements the projection:
+ * the identity line, the node keys and the block order come from the
+ * production mapper.
+ *
+ * It is ONE subject for BOTH lanes: the headless real-pane lane and the
+ * real-GUI lane run the SAME program, and the only difference is where it
+ * runs (a headless session's pane or a GUI window's pane).
  *
  * The image bytes are a synthetic PNG generated in-process (a solid 640x360
  * canvas): no user content and no real attachment ever reaches a client.
  *
- * Usage: node --import tsx/esm scripts/tern-gui-pr-c-image-subject.mts
- * @module scripts/tern-gui-pr-c-image-subject
+ * Usage: node --import tsx/esm scripts/tern-pr-c-image-subject.mts
+ * @module scripts/tern-pr-c-image-subject
  */
 import { appendFileSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
@@ -75,8 +81,10 @@ const WIDTH = 640
 const HEIGHT = 360
 const BYTES = solidPng(WIDTH, HEIGHT, [0x2f, 0x6f, 0xed])
 
-const session = await connect({ app: 'tern-gui-pr-c-image', timeout: 2000 })
-if (!session) throw new Error('this subject must run inside a real Tern GUI pane')
+// The GUI window takes longer to hand the pane over than a headless session,
+// so the connect budget covers the slower lane.
+const session = await connect({ app: 'tern-pr-c-image', timeout: 3000 })
+if (!session) throw new Error('this subject must run inside a real Tern client')
 const surface = session.open({ mode: 'inline', title: 'pr-c-image' })
 
 /** The tool result the production projection renders: text, image, text. */
@@ -104,7 +112,7 @@ const message = {
   ],
 } as unknown as TranscriptMessage
 
-// The OFFICIAL blob channel - the same call the renderer makes, and it must
+// The OFFICIAL blob channel — the same call the renderer makes, and it must
 // precede the frame that references the blob id.
 const blobId = session.blob(BYTES, 'image/png')
 

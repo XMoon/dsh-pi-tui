@@ -10,6 +10,12 @@
  *
  *   node scripts/tern-pane-drive.mjs scripts/tern-pane-pr-c-image.mjs
  *
+ * It runs the SAME subject as the GUI lane
+ * (`scripts/tern-pr-c-image-subject.mts`): the production `transcriptView`
+ * output sent through the official SDK `session.blob()`. That is evidence for
+ * the CLIENT PAINT and proves nothing about the application's authorization
+ * path.
+ *
  * The client-side ZOOM / click / keyboard / scroll-back behaviour is NOT
  * exercised here: it needs a physical GUI, and this flow claims nothing about
  * it.
@@ -18,7 +24,7 @@
 import { join } from 'node:path'
 
 export default async function (h) {
-  const subject = join(h.repo, 'scripts', 'tern-pane-pr-c-image-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-pr-c-image-subject.mts')
 
   await h.resize(900, 640)
   const booted = await h.launch(subject)

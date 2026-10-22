@@ -11,6 +11,12 @@
  *
  *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-pr-c-image.mjs
  *
+ * It runs the SAME subject as the headless lane
+ * (`scripts/tern-pr-c-image-subject.mts`): the production `transcriptView`
+ * output sent through the official SDK `session.blob()`. That is evidence for
+ * the CLIENT PAINT and proves nothing about the application's authorization
+ * path.
+ *
  * The client's viewer affordances (the zoom control, the info button) are
  * MEASURED, never relied upon: the projection does not depend on them.
  * @module scripts/tern-gui-pr-c-image
@@ -56,7 +62,7 @@ export default async function (h) {
     `requested=${JSON.stringify(size.requested)} actual=${JSON.stringify(size.viewport)}`)
   h.measure('the window size', JSON.stringify(size))
 
-  const subject = join(h.repo, 'scripts', 'tern-gui-pr-c-image-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-pr-c-image-subject.mts')
   const booted = await h.launch(subject, { ready: '[IMAGE] shot.png' })
   h.check('the production projection is painted inside a real Tern GUI pane', booted)
   if (!booted) {
