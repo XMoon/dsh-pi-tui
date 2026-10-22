@@ -79,6 +79,7 @@ import { appendHistoryRecord, historyFilePath, loadHistoryRecords } from '../../
 import { dshHome } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -158,6 +159,7 @@ interface RemoteRunnerFixture {
   host: Awaited<ReturnType<typeof mountRemotePresentationHost>>
   runnerFiber: Fiber
   vt: VirtualTerminal
+  pane?: TspPane
   runnerApp(): unknown
   override: RemoteApplicationOverride
   aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>
@@ -225,6 +227,10 @@ export async function mountRemoteRunner(
      *  mounts: a suite that must hold the startup hydration wraps the
      *  presentation reader here (the runner reads it lazily at call time). */
     beforeRunnerMount?: (presentation: RemoteApplicationOverride['presentation']) => void
+    /** Mount the production TSP renderer over the scripted pane instead of PiTui. */
+    renderer?: 'pi-tui' | 'tsp'
+    /** Advertise native image + blobs when the TSP renderer is selected. */
+    nativeImages?: boolean
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -249,8 +255,15 @@ export async function mountRemoteRunner(
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
   const vt = new VirtualTerminal(100, 30)
-  const restoreTerminal = await import('../support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
-  life.defer(restoreTerminal)
+  let pane: TspPane | undefined
+  if (options.renderer === 'tsp') {
+    pane = installTspPane({ nativeImages: options.nativeImages })
+    life.defer(() => pane?.restore())
+    process.env.DSH_PI_TUI_RENDERER = 'tsp'
+  } else {
+    const restoreTerminal = await import('../support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+    life.defer(restoreTerminal)
+  }
 
   // The runner mounts on the SAME Host Context (the production shape: the
   // TUI is a Host plugin row; the Remote graph composes beside it in this
@@ -292,7 +305,9 @@ export async function mountRemoteRunner(
   })
   await runnerFiber
   // Let the startup composition settle (mount + initial hydration).
-  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+  await waitFor('remote runner mount', () => pane === undefined
+    ? vt.getViewport().join('').length > 0
+    : pane.frameCount() > 0, 20_000)
   const dispose = async (): Promise<void> => {
     await runnerFiber.dispose()
   }
@@ -301,6 +316,7 @@ export async function mountRemoteRunner(
     host,
     runnerFiber,
     vt,
+    ...(pane === undefined ? {} : { pane }),
     runnerApp: (): unknown => apps.at(-1),
     override,
     /** The Remote application aggregate (the official Client faces for

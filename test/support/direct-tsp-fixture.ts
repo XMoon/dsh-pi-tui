@@ -255,6 +255,13 @@ export interface DirectTspFixtureOptions {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * Advertise the NATIVE IMAGE capability on the scripted pane (the `image`
+   * kind + the `blobs` feature): a pane that does not advertise them can
+   * never carry a tool-result image, so the qualification of that path needs
+   * a pane that does.
+   */
+  readonly nativeImages?: boolean
   /** Reuse isolated persisted session files across a clean runner remount. */
   readonly workRoot?: string
   /** Replace the historical default stand-in with the official isolated
@@ -362,6 +369,7 @@ export async function createDirectTspFixture(
         modelPicker: options.modelPicker,
         presetPicker: options.presetPicker,
         sessionBrowser: options.sessionBrowser,
+        nativeImages: options.nativeImages,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
   // and clears five env vars; external-Tern and PiTui modes must leave the

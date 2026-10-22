@@ -101,6 +101,10 @@ export interface TspPane {
   /** Successfully RECORDED `x {"id":…,"keep":false}` surface frames (not a
    *  count of Session.close() calls: a failed `x` write is not recorded here). */
   closeFrames(): number
+  /** Blob ids sent by the official SDK, in order. */
+  blobIds(): readonly string[]
+  /** Ordered wire events for each write containing a blob (`b`) or frame (`f`). */
+  wireEvents(): readonly { readonly kind: 'blob' | 'frame'; readonly id?: string; readonly frame?: TspWireFrame }[]
   /** Frame ops sent, per surface, in order. */
   frameCount(): number
   /**
@@ -135,6 +139,13 @@ export function installTspPane(options: {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * Advertise the NATIVE IMAGE capability: the `image` kind and the `blobs`
+   * feature. A pane without them can never carry a tool-result image, so the
+   * capability belongs to the pane's own advertised set (exactly like the
+   * real client).
+   */
+  readonly nativeImages?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -149,6 +160,8 @@ export function installTspPane(options: {
   let heldReply: (() => void) | undefined
   const closeBodies: string[] = []
   const frameList: TspWireFrame[] = []
+  const blobList: string[] = []
+  const orderedWireEvents: Array<{ readonly kind: 'blob' | 'frame'; readonly id?: string; readonly frame?: TspWireFrame }> = []
   const unacked: TspWireFrame[] = []
   let acksHeld = false
   let frames = 0
@@ -160,8 +173,12 @@ export function installTspPane(options: {
     ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text'] : []),
     ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text'] : []),
+    ...(options.nativeImages === true ? ['image'] : []),
   ]))
-  const nativeFeatures = options.presetPicker === true || options.sessionBrowser === true ? ['scroll'] : []
+  const nativeFeatures = [
+    ...(options.presetPicker === true || options.sessionBrowser === true ? ['scroll'] : []),
+    ...(options.nativeImages === true ? ['blobs'] : []),
+  ]
   const hello = options.kinds !== undefined || options.features !== undefined
     ? {
         ...HELLO,
@@ -203,10 +220,16 @@ export function installTspPane(options: {
       throw value
     }
     for (const match of text.matchAll(/\u001b_tsp;x;([\s\S]*?)\u001b\\/g)) closeBodies.push(match[1]!)
+    for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]*);/g)) {
+      const id = match[1]!
+      blobList.push(id)
+      orderedWireEvents.push({ kind: 'blob', id })
+    }
     for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
       frames += 1
       const frame = JSON.parse(match[1]!) as WireFrame
       frameList.push(frame)
+      orderedWireEvents.push({ kind: 'frame', frame })
       // A real pane acks every frame it drew (credit flow control) — unless the
       // test is deliberately holding the acks to stall the credit.
       const ack = (): void => {
@@ -242,6 +265,8 @@ export function installTspPane(options: {
     probed: () => probed,
     closeFrames: () => closeBodies.length,
     frameCount: () => frames,
+    blobIds: () => blobList,
+    wireEvents: () => orderedWireEvents,
     frames: () => frameList,
     key: sequence => { input.type(sequence) },
     event: value => { input.type(`\u001b_tsp;e;${JSON.stringify(value)}\u001b\\`) },

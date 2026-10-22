@@ -51,6 +51,7 @@ import type { SubmissionComposerPort } from '../../app/submission/composer-port.
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
 import type { SurfaceImageBinding } from '../../app/surface/runtime.ts'
+import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
@@ -68,7 +69,8 @@ import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/ty
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES } from './transcript-view.ts'
+import type { ToolImageState } from './transcript-view.ts'
 
 /**
  * The banner the composer-active renderer pins in its dock. The PR3-A
@@ -467,6 +469,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   let imageBinding: SurfaceImageBinding | undefined
   let imageBindingInstalled = false
+  /**
+   * PR-C: the immutable image scope of the CURRENT display subject, captured
+   * ONCE per projection source. An ordinary repaint or delta REUSES it: the
+   * scope is never re-resolved when an async read settles, so a retired
+   * presentation can never read under a successor's authorization.
+   */
+  let activeImageScope: unknown | undefined
+  /**
+   * PR-C: the CURRENT presentation subscriptions, keyed by attachment id.
+   * They are short-lived presentation subscribers, NOT an image cache: the
+   * loader owns the bytes, this map owns only the "this row waits for this
+   * attachment" fact.
+   */
+  const imageSubscriptions = new Map<string, () => void>()
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -516,6 +532,132 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     applyFocus(false)
   }
 
+  /**
+   * PR-C: whether the pane can carry a native image at all. The `image` kind
+   * and the `blobs` feature are NEGOTIATED by the client — the mapper never
+   * infers them from a TypeScript prop.
+   */
+  const nativeImagesSupported = (): boolean =>
+    session.caps.kinds.includes('image') && session.caps.features.includes('blobs')
+
+  /**
+   * PR-C: the image attachments the CURRENT window projects, in window
+   * order. The row rule is the mapper's own ({@link toolRowImageBlocks}), so
+   * the reader and the view can never disagree: a row that does not project
+   * an image is never read, and a malformed reference is never read either.
+   */
+  const projectedImageRefs = (): ImageAttachmentRefLike[] => {
+    const refs: ImageAttachmentRefLike[] = []
+    const visit = (message: TranscriptMessage): void => {
+      if (message.kind !== 'tool') return
+      for (const block of toolRowImageBlocks(message)) {
+        if (imageRefProblem(block.attachment) !== undefined) continue
+        refs.push(block.attachment as ImageAttachmentRefLike)
+      }
+      for (const child of message.subCalls ?? []) visit(child)
+    }
+    for (const message of lastMessages) visit(message)
+    return refs
+  }
+
+  /** PR-C: drop every presentation subscription of the current subject. */
+  const releaseImageSubscriptions = (): void => {
+    for (const unsubscribe of imageSubscriptions.values()) unsubscribe()
+    imageSubscriptions.clear()
+  }
+
+  /**
+   * PR-C: the per-attachment render state of the current subject, prepared
+   * BEFORE the projection so the mapper stays pure and the blob is sent
+   * before the frame that references it.
+   *
+   * The `session.blob()` call is the ONE blob sender of the renderer: the
+   * SDK dedupes the content, so a repeated projection never sends the bytes
+   * twice. The 16 MiB gate is checked against the READY bytes — the
+   * reference's own byte count is identity, never a send permit.
+   */
+  const prepareImageStates = (): ReadonlyMap<string, ToolImageState> | undefined => {
+    const binding = imageBinding
+    if (binding === undefined) return undefined
+    const states = new Map<string, ToolImageState>()
+    const refs = projectedImageRefs()
+    if (!nativeImagesSupported()) {
+      for (const ref of refs) states.set(ref.attachmentId, { state: 'unsupported' })
+      return states
+    }
+    const scope = activeImageScope
+    if (scope === undefined) {
+      for (const ref of refs) states.set(ref.attachmentId, { state: 'no-scope' })
+      return states
+    }
+    for (const ref of refs) {
+      const load = binding.imageLoader.get(ref, scope)
+      if (load.state === 'idle' || load.state === 'loading') {
+        states.set(ref.attachmentId, { state: 'loading' })
+        continue
+      }
+      if (load.state === 'error') {
+        states.set(ref.attachmentId, { state: 'error' })
+        continue
+      }
+      if (load.bytes.length > MAX_IMAGE_BLOB_BYTES) {
+        states.set(ref.attachmentId, { state: 'too-large' })
+        continue
+      }
+      try {
+        states.set(ref.attachmentId, { state: 'ready', blobId: session.blob(load.bytes, ref.mediaType) })
+      } catch (error) {
+        // An unexpected blob failure is a RENDERER failure, not an image
+        // state: the tty owner is gone. It goes to the fatal lifecycle - it
+        // is never swallowed into a "the image loaded" claim.
+        routeFatal(error)
+        states.set(ref.attachmentId, { state: 'error' })
+      }
+    }
+    return states
+  }
+
+  /**
+   * PR-C: the CURRENT window's image subscriptions. An attachment that left
+   * the window is unsubscribed; a new one is subscribed BEFORE it is read.
+   * The loader dedupes the read per (scope, attachment id), so two blocks
+   * naming the same attachment read once.
+   */
+  const syncImageSubscriptions = (): void => {
+    const binding = imageBinding
+    const scope = activeImageScope
+    // PR-C: a pane that negotiated no native image reads NOTHING: the
+    // subscription set stays empty, so no attachment is even asked for.
+    if (binding === undefined || scope === undefined || !nativeImagesSupported()) {
+      releaseImageSubscriptions()
+      return
+    }
+    const wanted = new Map<string, ImageAttachmentRefLike>()
+    for (const ref of projectedImageRefs()) wanted.set(ref.attachmentId, ref)
+    for (const [id, unsubscribe] of imageSubscriptions) {
+      if (wanted.has(id)) continue
+      unsubscribe()
+      imageSubscriptions.delete(id)
+    }
+    for (const [id, ref] of wanted) {
+      if (imageSubscriptions.has(id)) continue
+      const source = projectionScope
+      const unsubscribe = binding.imageLoader.subscribe(id, () => {
+        // A settle may only repaint the subject that is still on screen: a
+        // retired source, a retired scope, a hydration window or a disposed
+        // renderer never emit a frame for it.
+        if (disposed || hydrating) return
+        if (source !== projectionScope) return
+        if (scope !== activeImageScope) return
+        if (!imageSubscriptions.has(id)) return
+        rebuildLastMain()
+        render()
+      }, scope)
+      imageSubscriptions.set(id, unsubscribe)
+      if (binding.imageLoader.get(ref, scope).state === 'idle') binding.imageLoader.load(ref, scope)
+    }
+  }
+
   /** Rebuild the canonical transcript from the last projection (same scope and
    *  source identity: a settled-answer repaint is NOT a new subject).
    *
@@ -532,6 +674,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
       ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
       preparingPreviews: lastStreamingToolPreviews,
+      toolImageStates: prepareImageStates(),
     })
   }
 
@@ -609,6 +752,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       scopeEpoch += 1
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
+      // PR-C: the retired subject's image subscriptions go with it, and the
+      // NEW subject gets its OWN immutable scope - sampled ONCE here, never
+      // re-resolved when a read settles.
+      releaseImageSubscriptions()
+      activeImageScope = imageBinding?.imageScope()
     }
     // PR3-B B3 (§3.9): remember the projection so a settled-answer lookup can
     // rebuild the native nodes WITHOUT a new fold, a new scope or a new source
@@ -617,6 +765,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // fence — a retired frame contributes no preview to the new subject.
     lastMessages = messages
     lastStreamingToolPreviews = streamingToolPreviews ?? []
+    // PR-C: the image subscriptions follow the CURRENT window: an attachment
+    // that left it is unsubscribed, a new one is subscribed and read.
+    syncImageSubscriptions()
     rebuildLastMain()
     render()
   }
@@ -676,6 +827,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // window (§3.4 row 1).
       hydrating = true
       retiredSource = projectionScope
+      // PR-C: the retired subject's image subscriptions go with it - a late
+      // settle of the outgoing subject must not repaint the incoming one.
+      releaseImageSubscriptions()
       // PR-B3: the retired subject's Preparing rows go with it — the new
       // subject's own snapshot replaces them when it commits.
       lastStreamingToolPreviews = []
@@ -1039,6 +1193,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     dispose: async () => {
       if (disposed) return
       disposed = true
+      // PR-C: the image subscriptions die BEFORE the surface closes: an
+      // in-flight read may still settle inside the loader, but it can no
+      // longer send a blob or a frame.
+      releaseImageSubscriptions()
       // PR3-B B3 (§3.5.6): the seat retires SYNCHRONOUSLY — every active and
       // queued modal promise settles (approval `cancelled`, question the flow's
       // cancellation error) before the surface/session close below, and the
