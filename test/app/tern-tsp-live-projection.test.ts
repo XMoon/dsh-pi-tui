@@ -1614,6 +1614,29 @@ function toolCallDelta(id: string, index: number, name: string | undefined, argu
 }
 
 /**
+ * Wait for a real fact ON THE WIRE, with the deadline the observation is
+ * worth. The fact is the renderer's CURRENT state (a row is on the wire, a
+ * row has left it), so a wait that never sees it FAILS the test instead of
+ * passing on a blind window.
+ */
+async function awaitWire(
+  predicate: () => boolean,
+  label: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail(`timed out waiting for ${label}`)
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+}
+
+/** The Preparing rows the wire currently shows. */
+function wireRowCount(harness: PreparingHarness): number {
+  return wirePreparingRows(harness.tern.output.text()).length
+}
+
+/**
  * The PRODUCTION Direct install's admission, in the shape the bootstrap wires
  * it (`src/app/bootstrap.ts`: `installAssistantStream({ isCurrentAgent, onInput })`):
  * the identity fence decides whether the input is forwarded AT ALL. The fence
@@ -1642,7 +1665,6 @@ test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Pre
     harness.route(ev('turn/start', { turn: 1 }, 0))
     harness.route(userMessage(1, 'user-1', 'Run the focused test.'))
     harness.surface.paintNow()
-    await settle()
 
     // The official stream input: a named tool whose arguments are still
     // arriving. The PRODUCTION owner extracts the summary and the bytes.
@@ -1653,7 +1675,7 @@ test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Pre
       toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test --filter transcript","description":"Run focused tests"}')),
     true, 'the live Agent delta is admitted')
     harness.surface.paintNow()
-    await settle()
+    await awaitWire(() => wireRowCount(harness) === 1, 'the Preparing row to reach the wire')
 
     // The owner really holds the preview (no pre-decided flag was injected).
     assert.equal(harness.previews.size, 1, 'the production preview owner holds one preview')
@@ -1667,7 +1689,7 @@ test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Pre
     // ONE repaint shows the durable tool and no Preparing row.
     harness.route(toolCall(2, 'call-bash', 'bash', { command: 'pnpm test --filter transcript', description: 'Run focused tests' }))
     harness.surface.paintNow()
-    await settle()
+    await awaitWire(() => wireRowCount(harness) === 0, 'the Preparing row to leave the wire')
     assert.equal(harness.previews.size, 0, 'the formal call cleared the preview')
     assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, 'no Preparing row survives the handoff')
     assert.ok(harness.tern.output.text().includes('"k":"tool"'), 'the durable tool row is on the wire')
@@ -1682,24 +1704,22 @@ test('B3-L02: the retry, the attempt, the step end and the turn end each clear t
     harness.route(ev('turn/start', { turn: 1 }, 0))
     harness.route(userMessage(1, 'user-1', 'Run the focused test.'))
     harness.surface.paintNow()
-    await settle()
 
     const showRow = async (id: string, name: string, args: string): Promise<void> => {
       deliverAssistantInput(harness, harness.agent(), toolCallDelta(id, 0, name, args))
       harness.surface.paintNow()
-      await settle()
-      assert.equal(wirePreparingRows(harness.tern.output.text()).length, 1, `the ${id} row is on the wire`)
+      await awaitWire(() => wireRowCount(harness) === 1, `the ${id} row to reach the wire`)
     }
     const assertCleared = async (what: string): Promise<void> => {
+      await awaitWire(() => wireRowCount(harness) === 0, `the row to leave the wire after the ${what}`)
       assert.equal(harness.previews.size, 0, `the ${what} cleared the preview owner`)
-      assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, `no ghost row survives the ${what}`)
+      assert.equal(wireRowCount(harness), 0, `no ghost row survives the ${what}`)
     }
 
     // The retry boundary: the owner drops the step's previews.
     await showRow('call-bash', 'bash', '{"command":"pnpm test"}')
     harness.route(ev('llm/retry', { turn: 1, step: 0 }, 2))
     harness.surface.paintNow()
-    await settle()
     await assertCleared('retry')
 
     // The committed attempt: the attempt's deltas never materialized, so its
@@ -1707,21 +1727,18 @@ test('B3-L02: the retry, the attempt, the step end and the turn end each clear t
     await showRow('call-read', 'read', '{"file_path":"src/a.ts"}')
     harness.route(ev('assistant/attempt', { turn: 1, step: 0 }, 3))
     harness.surface.paintNow()
-    await settle()
     await assertCleared('attempt')
 
     // The step boundary.
     await showRow('call-read-2', 'read', '{"file_path":"src/b.ts"}')
     harness.route(ev('step/end', { turn: 1, step: 0 }, 4))
     harness.surface.paintNow()
-    await settle()
     await assertCleared('step end')
 
     // The turn boundary: the whole turn's previews go with it.
     await showRow('call-bash-2', 'bash', '{"command":"pnpm test --filter transcript"}')
     harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5))
     harness.surface.paintNow()
-    await settle()
     await assertCleared('turn end')
   } finally {
     await harness.dispose()
@@ -1734,14 +1751,13 @@ test('B3-L03: a retired Agent\'s delta never reaches the preview owner', async (
     harness.route(ev('turn/start', { turn: 1 }, 0))
     harness.route(userMessage(1, 'user-1', 'Run the focused test.'))
     harness.surface.paintNow()
-    await settle()
 
     // The live Agent's delta is admitted and reaches the wire.
     assert.equal(deliverAssistantInput(harness, harness.agent(),
       toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test"}')),
     true, 'the live Agent delta is admitted')
     harness.surface.paintNow()
-    await settle()
+    await awaitWire(() => wireRowCount(harness) === 1, 'the live Preparing row to reach the wire')
     assert.equal(harness.previews.size, 1, 'the owner holds the live preview')
     const rowsBefore = wirePreparingRows(harness.tern.output.text())
     assert.equal(rowsBefore.length, 1, 'the row is on the wire')
@@ -1755,8 +1771,13 @@ test('B3-L03: a retired Agent\'s delta never reaches the preview owner', async (
     assert.equal(deliverAssistantInput(harness, retired,
       toolCallDelta('call-stale', 1, 'bash', '{"command":"pnpm test --stale"}')),
     false, 'the retired Agent delta is refused by the production admission')
+    // A frame that DOES change the transcript proves the wire settled after
+    // the refused delta: any row the refused delta had created would be in
+    // this frame too.
+    harness.route(userMessage(2, 'user-2', 'after the retired delta'))
     harness.surface.paintNow()
-    await settle()
+    await awaitWire(() => harness.tern.output.text().includes('after the retired delta'),
+      'the frame after the refused delta to reach the wire')
     assert.equal(harness.previews.size, 1, 'the refused delta changed no preview')
     const rowsAfter = wirePreparingRows(harness.tern.output.text())
     assert.equal(rowsAfter.length, 1, 'the refused delta drew no second row')
@@ -1769,9 +1790,12 @@ test('B3-L03: a retired Agent\'s delta never reaches the preview owner', async (
     assert.equal(deliverAssistantInput(harness, harness.agent(),
       toolCallDelta('call-stale-2', 2, 'bash', '{"command":"pnpm test --stale-2"}')),
     false, 'the unregistered Agent delta is refused')
+    harness.route(userMessage(3, 'user-3', 'after the unregistered delta'))
     harness.surface.paintNow()
-    await settle()
+    await awaitWire(() => harness.tern.output.text().includes('after the unregistered delta'),
+      'the frame after the second refused delta to reach the wire')
     assert.equal(harness.previews.size, 1, 'the refused delta still changed no preview')
+    assert.equal(wireRowCount(harness), 1, 'the refused delta still drew no second row')
   } finally {
     await harness.dispose()
   }
