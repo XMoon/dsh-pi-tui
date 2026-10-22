@@ -247,8 +247,12 @@ The page never infers a stored key from a route/profile.
   against the live body height and the current auth-notice rows on every input,
   not only when a frame is painted.
 - `Clear stored credential` is a single explicit confirmation for the exact
-  identity (reference vs stored record). After the clear the page re-reads the
-  store; it never claims success without the authoritative absence.
+  identity (reference vs stored record). The confirmation is enabled only by
+  the AUTHORITATIVE read of that identity: a target that is still `reading`
+  cannot be confirmed (the delete is never dispatched before the store was
+  checked), and a deeplink that opens the target reads it after the first
+  frame. After the clear the page re-reads the store; it never claims success
+  without the authoritative absence.
 - The custom provider draft is one page-local form over route → protocol →
   base URL → display name → optional key → discovered/manual model ids →
   review → create. Nothing persists before Create. Profile and credential

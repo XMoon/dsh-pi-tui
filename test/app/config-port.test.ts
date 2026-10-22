@@ -278,6 +278,23 @@ test('the keyless profile write refuses to overwrite an existing profile', async
   assert.equal(writes[0]?.revision, 9, 'the write carries the decision read revision')
 })
 
+test('the settings-only fallback reports a failed settings read', () => {
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    // NO llm service: the settings-only fallback.
+  }).providers
+  // The Models page must be able to tell "no other provider" from "the
+  // settings read failed".
+  const catalog = providers.readCatalog()
+  assert.ok(catalog.failure !== undefined, 'a failed settings read must be reported')
+  assert.match(catalog.failure, /settings projection failed/u)
+  // The /login resolver stays fail-soft: the builtin target survives.
+  assert.deepEqual(providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
+})
+
 test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
   const providers = port({
     settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),

@@ -423,6 +423,22 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     }
   }
 
+  /**
+   * The llm-pi-ai section, detached, with the read FAILURE reported (the
+   * fail-soft reader hides it, which is right for a display degradation but
+   * wrong for an authoritative read).
+   */
+  private readProviderSection(): { readonly value: unknown; readonly failure?: string } {
+    const settings = this.settings()
+    if (settings === undefined) return { value: undefined }
+    try {
+      const descriptor = (settings.describe() ?? []).find(entry => entry.ns === 'llm-pi-ai')
+      return { value: detachedSection(descriptor?.value) }
+    } catch (error) {
+      return { value: undefined, failure: safeErrorMessage(error) }
+    }
+  }
+
   /** The llm-pi-ai `providers` dict (route → apiKeyEnv), detached. */
   private readPiAiProvidersInternal(): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
     const section = this.readSectionInternal('llm-pi-ai') as
@@ -507,7 +523,11 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
    * a key is not the membership authority.
    */
   private settingsOnlyCatalog(): ProviderCatalogSnapshot {
-    const section = this.readSectionInternal('llm-pi-ai') as
+    // The section read is REPORTED here: a failed settings read must not
+    // look like "this installation has no other provider".
+    const read = this.readProviderSection()
+    if (read.failure !== undefined) return { options: [], profiles: [], failure: read.failure }
+    const section = read.value as
       | { providers?: Record<string, unknown> }
       | undefined
     const declared = section?.providers
@@ -553,7 +573,11 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
       // resolves.
       return providerOptionsFor([], () => undefined).map(option => credentialOptionOf(option))
     }
-    return this.settingsOnlyCatalog().options
+    const catalog = this.settingsOnlyCatalog()
+    if (catalog.failure === undefined) return catalog.options
+    // A failed settings read: only the builtin target (a constant
+    // reference) stays addressable for the /login and /logout resolver.
+    return providerOptionsFor([], () => undefined).map(option => credentialOptionOf(option))
   }
 
   /**

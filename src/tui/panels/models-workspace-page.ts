@@ -515,15 +515,23 @@ export class ModelsWorkspacePage implements Component {
    * latest generation may paint.
    */
   private startCatalogRead(): void {
-    if (this.disposed || this.readStarted) return
-    this.refresh()
-    // A deeplink that opened the stored-credential list: its read starts
-    // here (after the first frame), not in the constructor.
+    if (this.disposed) return
+    if (!this.readStarted) this.refresh()
+    this.startPendingReads()
+  }
+
+  /**
+   * The reads a deeplink deferred to the first frame (the stored-credential
+   * list and a clear target). They are INDEPENDENT of the catalog read's
+   * de-duplication: an explicit refresh that already started the catalog read
+   * must not swallow them (the page would stay in `Reading…` forever).
+   */
+  private startPendingReads(): void {
+    if (this.disposed) return
     if (this.pendingRecordsRead) {
       this.pendingRecordsRead = false
       this.refreshRecords()
     }
-    // A deeplink that opened a clear target: its read starts here too.
     const pendingTarget = this.pendingClearTarget
     if (pendingTarget !== undefined) {
       this.pendingClearTarget = undefined
@@ -893,7 +901,10 @@ export class ModelsWorkspacePage implements Component {
     this.cursor = 0
     this.scroll = 0
     if (target.kind === 'record') {
-      this.clear = { phase: 'ready', configured: true }
+      // The confirmation is enabled only by the AUTHORITATIVE read: until it
+      // answers, the target is `reading` and the Clear action stays disabled
+      // (a user must never confirm a delete before the store was checked).
+      this.clear = { phase: 'reading', configured: false }
       if (!deferRead) this.readClearRecord()
     } else {
       this.clear = { phase: 'reading', configured: false }
