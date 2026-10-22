@@ -53,7 +53,7 @@ import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
 import { AccountWorkflow } from '../../app/command/account-workflow.ts'
-import { packageVersion } from '../../client/launcher/version.ts'
+import { bundleVersion, dshVersion, packageVersion } from '../../client/launcher/version.ts'
 import { openExternalUrl } from '../../client/url/open.ts'
 import type {
   SettingsWorkspaceCommitOutcome,
@@ -807,6 +807,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         onCommit: commitSettingsWorkspaceField,
         createModelsPage,
         createAccountPage,
+        // The About page's two version facts: read ONCE per workspace open on
+        // the Client side. `tui` is this bundle's own version and `dsh` the
+        // installed Harness version — neither is derived from the other, and
+        // an unreadable DSH version stays `Unknown`.
+        aboutVersionFacts: { tui: bundleVersion(), dsh: dshVersion() },
         ...spec,
         onClose: () => {
           if (activeSettingsWorkspace?.token === token) activeSettingsWorkspace = undefined

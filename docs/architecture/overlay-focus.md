@@ -586,19 +586,29 @@ this ONE lease.** The Plugins category is a direct page entry,
   scroll and painted-hit-map revision are per-open; the one
   `PluginManagerController` outlives the page, and leaving the page never
   cancels an in-flight Host install.
-- **The workspace has three levels at every width; one focus state owns them.**
-  L0 `categories` → L1 `rows` → L2 `detail` is the panel's only navigation state
-  (the former wide/medium "focus owner" split is retired). ASCII `Right` advances
-  exactly one level; `Left` returns one level and is inert at L0. `Enter` follows
-  the same transitions, except that a writable L1 row enters its inline choice in
-  the same L2 transition. `Esc`/`Backspace` step back (and close at L0) — wide,
-  medium and narrow behave identically, and a new open always starts on L0.
-  `Tab`/`Shift+Tab` remain inert. Leaving the workspace is therefore always one
-  reachable key (the Action Bar is pinned to the physical last row at every
-  height, down to a one-row terminal).
+- **The workspace has ONE focus state and ONE input owner.** The category rail
+  is the selection owner and the direct content page (About, Models, Account) is
+  the content owner; the panel routes every key to the owner that currently
+  holds the focus. Selecting a category on the rail paints the selected page at
+  once while the rail keeps the focus; `Enter`/`Right` transfers the focus to
+  that page and runs no page action by itself; `Esc`/`Backspace`/`Left` returns
+  it to the rail without disposing the page. A page may only refuse a bare
+  `Left` while it owns a modal, an auth flow or a pending Host mutation, and it
+  answers that with a pure query that never reads the Host. The configuration
+  categories keep their own three-level browse (L0 `categories` → L1 `rows` →
+  L2 `detail`) inside the same focus state: ASCII `Right` advances exactly one
+  level; `Left` returns one level and is inert at L0. `Enter` follows the same
+  transitions, except that a writable L1 row enters its inline choice in the
+  same L2 transition. `Esc`/`Backspace` step back (and close at L0) — wide,
+  medium and narrow behave identically, and a new open starts on the About
+  home. `Tab`/`Shift+Tab` remain inert. Leaving the workspace is therefore
+  always one reachable key (the Action Bar is pinned to the physical last row
+  at every height, down to a one-row terminal).
 - **Width only projects panes.** Wide paints all three columns; medium derives its
   two columns purely from the current level (`categories + rows` at L0,
-  `rows + details` otherwise); narrow paints the current level alone. No second
+  `rows + details` otherwise); narrow paints the current level alone. A direct
+  content category paints the category rail and its content column (the About
+  projection or the real page) and no configuration pane. No second
   "visible window" state is stored, hidden panes are neither painted nor
   addressable, and row text is laid out against the pane width it is actually
   painted in.

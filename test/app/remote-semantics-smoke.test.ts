@@ -36,6 +36,8 @@ import type { TuiCommandRunner } from '../../src/commands.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
@@ -478,6 +480,12 @@ async function mountSettingsWorkspace(
   open(): Promise<void>
   key(data: string): Promise<void>
   /**
+   * Walk the category rail to one category. The workspace opens on its About
+   * home (Phase 3C / C2-A), so a case that drives the legacy configuration
+   * levels walks the rail first.
+   */
+  selectCategory(category: string): Promise<void>
+  /**
    * Wait for the workspace's SETTLED status word.
    *
    * The write chain is asynchronous by nature (the app-owned write channel →
@@ -538,14 +546,14 @@ async function mountSettingsWorkspace(
     refreshStatus: () => {},
     // THE point of this fixture: the real Remote settings port.
     tuiSettings: config.tuiSettings,
-    config: {
+    config: settingsDirectPageConfig({
       configReadiness: () => config.configReadiness(),
       footerCustomItems: config.footerCustomItems,
       permissions: config.permissions,
       subagentModelSelection: config.subagentModelSelection,
       web: config.web,
       credentials: config.credentials,
-    },
+    }),
     extensions: undefined,
     openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
@@ -596,6 +604,9 @@ async function mountSettingsWorkspace(
     async key(data: string): Promise<void> {
       vt.sendInput(data)
       await vt.waitForRender()
+    },
+    async selectCategory(category: string): Promise<void> {
+      await selectSettingsCategory(vt, category)
     },
     settleUntil,
     app,
@@ -1228,7 +1239,7 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     assert.ok(tuiSettings !== undefined, 'the settings section is served over the wire')
 
     await fixture.open()
-    await fixture.key('\x1b[B') // Appearance -> Display
+    await fixture.selectCategory('Display')
     await fixture.key('\r') // L0 -> L1
     await fixture.key('\r') // writable L1 -> L2 inline choice
     const initialChoice = fixture.view().replace(/\s+/gu, ' ')
@@ -1410,6 +1421,7 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
     assert.equal(settings.get().theme, 'auto', 'the profile schema default is the live reference value')
 
     await fixture.open()
+    await fixture.selectCategory('Appearance')
     await fixture.key('\r') // L0 -> L1
     await fixture.key('\r') // writable L1 -> L2 inline choice
     assert.match(fixture.view(), /Configured theme/)

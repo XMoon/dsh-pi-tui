@@ -31,6 +31,7 @@ import { SettingsRegistry } from '../../src/extension/internal/settings-registry
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { openLegacySettingsPanel } from '../support/open-legacy-settings.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 
 /** Every TuiApp constructed here is disposed after each test: the process
  * slot (the vendored fork keybindings are process-global) is released only
@@ -186,7 +187,7 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
     extensions: options.themes === undefined ? undefined : { themes: options.themes, settings: new SettingsRegistry() },
     openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
-    config: {
+    config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
       subagentModelSelection: { available: () => false },
@@ -196,7 +197,7 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
       // The credential STORE is not mounted either: the Web section's key row
       // reports unavailable instead of claiming "not configured".
       credentials: { available: () => false },
-    },
+    }),
     catalog: { models: { available: () => false } },
   }
   const runner = new Proxy(base, {

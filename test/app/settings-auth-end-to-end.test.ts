@@ -173,7 +173,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         getProfile: async () => null,
         getBalance: async () => null,
         getCallbackOrigin: () => 'http://127.0.0.1:43121',
-        startSignIn: async () => accountState.view,
+        startSignIn: async () => { calls.push('startSignIn'); return accountState.view },
         cancelSignIn: async () => accountState.view,
         signOut: async () => accountState.view,
         hasRunningAccountTasks: () => false,
@@ -333,14 +333,18 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   press(h, accountRow, 1)
   release(h, accountRow, 1)
   await h.vt.waitForRender()
-  assert.match(h.rows()[0]!, /Settings · Account/u)
-  assert.match(h.view(), /DeepSeek Account/u)
+  // A rail click SELECTS the category: the right column shows the real
+  // Account page at once, while the keyboard stays on the rail.
+  assert.match(h.rows()[0]!, /Settings · Categories/u, 'the rail click keeps the keyboard on the rail')
+  assert.match(h.view(), /^> Account/mu, 'the rail selects the Account category')
+  assert.match(h.view(), /DeepSeek Account/u, 'the right column shows the real Account page')
 
       const modelsRow = rowOf(h, 'Models')
   press(h, modelsRow, 1)
   release(h, modelsRow, 1)
   await h.vt.waitForRender()
-  assert.match(h.rows()[0]!, /Settings · Models/u)
+  assert.match(h.rows()[0]!, /Settings · Categories/u)
+  assert.match(h.view(), /^> Models/mu, 'the rail selects the Models category')
   assert.match(h.view(), /Models & Credentials/u)
   h.close()
 })
@@ -505,11 +509,122 @@ test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', 
   await h.vt.waitForRender()
   await key(h, '\r') // start provider-native sign-in
   await h.vt.waitForRender()
-  h.vt.resize(30, 8)
+  // The direct projection gives the content column the frame's remaining rows,
+  // so the select prompt stops fitting one row earlier than in the legacy
+  // projection: five terminal rows are the point where it is clipped.
+  h.vt.resize(30, 5)
   await h.vt.waitForRender()
   assert.match(h.view(), /Resize the terminal/u)
   assert.doesNotMatch(h.view(), /OAuth|Device code/u)
   await key(h, '\r')
   assert.equal(respondCalls, 0, 'Enter cannot answer an invisible select prompt')
+  h.close()
+})
+
+// ── Phase 3C / C2-A: the true two-pane navigation (root focus + real pages) ─
+//
+// The category rail SELECTS; the right column shows the selected page at
+// once; Enter/Right hands the keyboard to that page. These cases drive the
+// REAL command coordinator, the REAL workspace lease and the REAL pages.
+
+const railRow = (h: Harness, label: string): number => rowOf(h, label)
+
+test('the category rail paints the real Models and Account pages while the keyboard stays on the rail', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /dsh-pi-tui/u, 'the About home is the first frame')
+
+  // Down to Models: the right column shows the REAL Models page at once.
+  await key(h, '\u001b[B')
+  assert.match(h.view(), /Models & Credentials/u, 'the rail shows the real Models page')
+  assert.match(h.rows()[0]!, /Settings · Categories/u, 'the keyboard stays on the rail')
+
+  // Down to Account: the right column shows the REAL Account page at once.
+  await key(h, '\u001b[B')
+  assert.match(h.view(), /DeepSeek Account/u, 'the rail shows the real Account page')
+  assert.match(h.rows()[0]!, /Settings · Categories/u, 'the keyboard stays on the rail')
+  assert.equal(h.calls.some(call => call.startsWith('signIn')), false, 'moving the rail never signs in')
+  h.close()
+})
+
+test('Enter on the rail hands the keyboard to the SAME Account page without running its action', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await h.vt.waitForRender()
+  await key(h, '\u001b[B')
+  await key(h, '\u001b[B')
+  assert.match(h.view(), /DeepSeek Account/u, 'the Account page is already on screen')
+  const before = h.view()
+
+  await key(h, '\r')
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'Enter moved the focus into the content')
+  assert.equal(h.calls.some(call => call.includes('startSignIn')), false,
+    'the focus transfer must not run the highlighted Sign in action')
+  // The SAME page instance is still painted: only the chrome around it
+  // changes (the header names the new focus owner and the action bar swaps
+  // the rail hints for the page own hints).
+  const page = (frame: string): string => frame.split('\n').slice(1, -1).join('\n')
+  assert.equal(page(h.view()), page(before), 'the focus transfer repaints the same page')
+  h.close()
+})
+
+test('the content focus runs the page own action, and Esc returns to the rail without closing the lease', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the deeplink lands in the content')
+  // The page's own Enter runs the page's own action (the sign-in attempt).
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.equal(h.calls.some(call => call.includes('startSignIn')), true,
+    'the content focus runs the Account page own sign-in')
+  // Esc returns to the rail: the SAME lease, the SAME page instance.
+  await key(h, '\u001b')
+  assert.match(h.rows()[0]!, /Settings · Categories/u, 'Esc returns to the category rail')
+  assert.match(h.view(), /DeepSeek Account/u, 'the page is still mounted behind the rail')
+  h.close()
+})
+
+test('a rail selection is refused while the page owns a pending Host mutation', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  const release = h.holdNextSetReference()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await h.vt.waitForRender()
+  await key(h, '\r') // open the masked form
+  await key(h, 'sk-held')
+  await key(h, '\r') // review
+  await key(h, '\r') // submit (the write is held open)
+  await h.vt.waitForRender()
+
+  const accountRow = railRow(h, 'Account')
+  await click(h, accountRow, 1)
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the pending mutation owns the page')
+  assert.doesNotMatch(h.view(), /Settings · Account/u, 'the rail refused the category change')
+
+  release()
+  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  h.close()
+})
+
+test('a cross-owner gesture does nothing: a rail press released in the content column', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login')
+  await h.vt.waitForRender()
+  const railModels = rowOf(h, 'Models')
+  const providerRow = rowOf(h, 'Acme Gateway')
+  // A press on the RAIL, released in the CONTENT column: neither owner may
+  // act. The rail press must not select a category and the content release
+  // must not open a provider.
+  press(h, railModels, 1)
+  release(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Models & Credentials/u, 'the content release did not open a provider')
+  assert.match(h.view(), /^> Models/mu, 'the rail press did not select a category')
   h.close()
 })

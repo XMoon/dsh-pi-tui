@@ -10,70 +10,15 @@
 
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import { color, hexPaint } from '../theme/runtime.ts'
+import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
-
-/** The whale mascot variants: five original designs; one is picked once
- * per process (see WelcomeCard.whaleVariant). */
-const WELCOME_WHALES = [
-  [
-    '        o',
-    '      O',
-    '     :',
-    "  .--'---._      \\_/",
-    " (  o      `-----//",
-    ' ~~~\\_)~~~~~~~~~~~~',
-  ],
-  [
-    '       z Z',
-    "   .------._     \\_/",
-    "  (  -      `----//",
-    " ~~`~~\\_)~~~~~~~~~~",
-  ],
-  [
-    '                   *',
-    " \\_/      .-------.",
-    "  \\\\____.'     o  _>",
-    "   `-----------\\_)",
-  ],
-  [
-    '       <3',
-    '       :',
-    "   .---'--.",
-    " ( o      `.__  \\_/",
-    "   `---\\_)-----`-//",
-  ],
-  [
-    '          \\   /',
-    '           \\_/',
-    '           | |',
-    ' ~~~~~~~~~/ /~~~~~~',
-    "         '       o",
-    '               o',
-  ],
-] as const
-
-/** Brand ramp for the whale rows: cyan → blue. Fixed (not a semantic
- * token): custom themes do not override the logo gradient. */
-const WELCOME_WHALE_COLORS = [
-  '#63C7D1',
-  '#5DBBD4',
-  '#56AFD7',
-  '#50A3D9',
-  '#4996DA',
-  '#4389D8',
-] as const
+import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH } from './welcome-whale.ts'
 
 /** Cells between the whale block and the facts column in side-by-side. */
 const WELCOME_WHALE_GAP = 4
 
 /** Layout breakpoints: >= 72 side-by-side, 24..71 stacked, < 24 compact. */
 const WELCOME_SIDE_BY_SIDE_MIN_WIDTH = 72
-
-/** The widest whale row across all variants (visible width, ANSI-free).
- * All variants share this layout width so the position stays consistent
- * across picks. */
-const WELCOME_WHALE_WIDTH = Math.max(...WELCOME_WHALES.flat().map(line => visibleWidth(line)))
 
 /** Stacked minimum: the whale fills the inner width (widest variant + the
  * 4 box cells). Below this the compact text layout takes over. */
@@ -158,7 +103,7 @@ export class WelcomeCard implements Component {
     if (this.whaleVariant < 0) {
       // First render of this process: pick the variant for the whole
       // session. Resize and facts changes keep it; only a restart re-picks.
-      this.whaleVariant = Math.floor(Math.random() * WELCOME_WHALES.length)
+      this.whaleVariant = pickWelcomeWhaleVariant()
     }
     this.lastWidth = width
     const inner = Math.max(1, width - 4)
@@ -244,11 +189,7 @@ export class WelcomeCard implements Component {
   /** The picked whale variant, painted with the fixed brand gradient (rows
    * beyond the 6-color ramp reuse the last ramp color). */
   private renderWhaleLines(): string[] {
-    const whale = WELCOME_WHALES[this.whaleVariant]!
-    return whale.map((line, index) => hexPaint(
-      WELCOME_WHALE_COLORS[Math.min(index, WELCOME_WHALE_COLORS.length - 1)]!,
-      line,
-    ))
+    return renderWelcomeWhaleLines(this.whaleVariant)
   }
 
   /** Session facts in the wide/stacked column layout. The title reads

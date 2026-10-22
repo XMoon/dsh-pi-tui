@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Settings now opens on an About home and uses a real two-column layout on wide and
+  medium terminals.** The left column is the category rail (About, Models, Account,
+  Appearance, Display, Plugins, Other settings) and the right column is the real content:
+  selecting Models or Account paints its page at once, with no second Enter to open it, and
+  the keyboard stays on the rail until Enter or Right hands it to that page. Esc, Backspace
+  and Left return the keyboard to the rail and keep the page state. About shows the brand
+  mark plus the TUI and DSH versions as two independent facts (an unreadable DSH version
+  reads `Unknown`); it creates no session and writes no configuration. A narrow terminal
+  (< 76 columns) shows the About content directly, and Esc returns to the category list
+  and a second Esc closes Settings.
 - **Settings now has in-place Models and Account pages.** Models lists the Host provider
   directory, API-key presence (not a connection test) and the DeepSeek Account entry, and
   exposes provider details, a masked API-key editor, the Add Provider draft wizard, stored

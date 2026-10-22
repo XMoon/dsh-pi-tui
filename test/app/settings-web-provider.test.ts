@@ -29,6 +29,8 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { TuiSettingsDoc, WebProviderSettings } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -183,7 +185,7 @@ function setup(options: {
     setDisplayPreset: () => ({ kind: 'unchanged' }),
     refreshStatus: () => {},
     tuiSettings: { get: () => doc, replace: (next: TuiSettingsDoc) => { Object.assign(doc, next) } },
-    config: {
+    config: settingsDirectPageConfig({
       configReadiness: () => 'ready',
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
@@ -214,7 +216,7 @@ function setup(options: {
         setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
         setSearchApiBaseURL: async (url: string) => { await write(`endpoint:${url}`, () => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
       },
-    },
+    }),
     catalog: { models: { available: () => false } },
     // Explicitly ABSENT: the Proxy fallback would otherwise hand the legacy
     // editor a truthy function for a missing optional owner.
@@ -279,7 +281,13 @@ async function openOtherRows(h: Harness): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
-  const keys = h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, ENTER]
+  // The rail order is About, Models, Account, Appearance, Display, Plugins,
+  // Other settings: six Down presses reach the legacy launcher category.
+  const downs = Array.from({ length: 6 }, () => DOWN)
+  // The workspace opens on the About home: walk the rail to the legacy
+  // launcher category, then enter its Rows level.
+  await selectSettingsCategory(h.vt, 'Other settings')
+  const keys = h.vt.columns >= 96 ? [TAB, TAB, ENTER] : [ENTER]
   for (const pressed of keys) await key(h, pressed)
 }
 
@@ -318,8 +326,10 @@ test('the workspace row reports the configured providers and opens the Web secti
   t.after(h.dispose)
   h.invoke('settings')
   await h.vt.waitForRender()
-  // The Other category's Web row carries the live configured summary.
-  for (const pressed of [TAB, TAB, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  // The Other category's Web row carries the live configured summary. The
+  // workspace opens on the About home: walk the rail to Other settings first.
+  await selectSettingsCategory(h.vt, 'Other settings')
+  for (const pressed of [TAB, TAB, ENTER]) await key(h, pressed)
   assert.match(h.view(), /Web Search \/ Fetch/u)
   // Select the launcher row: its Detail carries the authoritative summary and
   // the billing/credential/Enter-configure facts (the narrow row column only
@@ -623,7 +633,7 @@ test('a workspace opened while the authority is pending paints Loading…, never
   // the pending state (without the pre-snapshot pending entry these frames
   // would carry the previous summary as current).
   await h.vt.waitForRender()
-  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the first frames of the reopened workspace are pending:\n${firstFrame}`)
   assert.doesNotMatch(firstFrame, /Search: Messages/u,
@@ -653,7 +663,7 @@ test('a new read clears the previous read ERROR: pending, not a stale Unavailabl
   t.after(release)
   h.invoke('settings')
   await h.vt.waitForRender()
-  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending again:\n${firstFrame}`)
   assert.doesNotMatch(firstFrame, /Unavailable/u, 'the previous error state does not survive into the new read')
@@ -750,7 +760,7 @@ test('an OLD read settling after a write never repaints the reopened Workspace (
   // Re-enter: the workspace open starts a read, which the gate holds.
   h.invoke('settings')
   await h.vt.waitForRender()
-  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
   await key(h, DOWN)
   await key(h, ENTER)
   for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {

@@ -772,6 +772,16 @@ export class AccountWorkspacePage implements Component {
     return this.busy !== undefined
   }
 
+  /**
+   * Whether a bare Left may yield from the page ROOT to the Settings
+   * categories. It is a pure query: it reads no Host fact and changes no
+   * business state. A pending sign-in/sign-out and the sign-out confirmation
+   * keep the Left for the page.
+   */
+  canYieldFocusToNavigation(): boolean {
+    return !this.signOutConfirm && this.busy === undefined
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true

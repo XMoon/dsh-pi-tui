@@ -9,6 +9,13 @@
 
 ### 新增
 
+- **Settings 默认进入 About 主页，宽/中屏是真正的左右两栏。** 左侧是分类导航
+  （About、Models、Account、Appearance、Display、Plugins、Other settings），右侧是
+  真实内容：选中 Models 或 Account 会立刻在右栏显示对应页面，无需再按一次
+  Enter；此时键盘仍在左栏，Enter 或 → 才把键盘交给右栏页面，Esc/Backspace/←
+  退回分类栏并保留页面状态。About 显示品牌图案与 TUI、DSH 两个版本号（DSH 版本
+  不可读时显示 Unknown），不创建会话也不写任何配置。窄屏（<76 列）直接显示
+  About 内容，Esc 返回分类列表，再按 Esc 关闭 Settings。
 - **Settings 新增 Models 与 Account 两个原位页面。** Models 列出 Host provider 目录、API key
   存在性（不是连通性测试）与 DeepSeek Account 入口，支持 provider 详情、遮蔽输入的 API key
   写入/清除、Add Provider 草稿向导、stored credential 清除确认和 provider-native 登录
