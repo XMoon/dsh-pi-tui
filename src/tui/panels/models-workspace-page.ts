@@ -314,6 +314,17 @@ function parseModelIds(text: string): string[] {
   return [...new Set(text.split(/[,\s]+/).map(part => part.trim()).filter(part => part !== ''))]
 }
 
+/** Whether a key is plain text (no control character), so it can extend
+ *  a filter. */
+function isPrintableText(data: string): boolean {
+  if (data.length === 0) return false
+  for (const character of data) {
+    const code = character.codePointAt(0) ?? 0
+    if (code < 0x20 || code === 0x7f) return false
+  }
+  return true
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -391,6 +402,9 @@ export class ModelsWorkspacePage implements Component {
   /** The route a deeplink asked for, resolved against the catalog once it
    *  arrives (never against an empty list). */
   private pendingProviderRoute: string | undefined
+  /** The Add catalog's type-to-filter text (the user narrows the provider
+   *  list without leaving the page). */
+  private catalogFilter = ''
   /** Per-wizard and per-confirmation identities: a late settlement of an
    * abandoned draft/clear target can never mutate a newer one. */
   private addSerial = 0
@@ -984,6 +998,7 @@ export class ModelsWorkspacePage implements Component {
    *  installation offers). */
   private startAddCatalog(): void {
     this.view = { kind: 'add-catalog' }
+    this.catalogFilter = ''
     this.cursor = 0
     this.scroll = 0
     this.notice = undefined
@@ -1989,8 +2004,8 @@ export class ModelsWorkspacePage implements Component {
    */
   private projectAddCatalog(width: number): Projection {
     const content: string[] = [color.textStrong('Add Provider'), '']
-    const available = this.availableCatalogRows()
-    const signIns = this.otherSignInRows()
+    const available = this.availableCatalogRows().filter(row => this.catalogMatches(row))
+    const signIns = this.otherSignInRows().filter(row => this.catalogMatches(row))
     let interactive = 0
     if (available.length > 0) {
       content.push(color.textDim('Available providers'))
@@ -2018,8 +2033,15 @@ export class ModelsWorkspacePage implements Component {
       }
     }
     if (available.length === 0 && signIns.length === 0) {
-      content.push(color.textMuted('This installation offers no further provider to add.'))
+      content.push(this.catalogFilter.trim() === ''
+        ? color.textMuted('This installation offers no further provider to add.')
+        : color.textMuted(`No provider matches "${this.catalogFilter.trim()}".`))
     }
+    // The filter line: the visible query and the number of matches.
+    const filter = this.catalogFilter
+    content.push('', color.textDim(filter === ''
+      ? 'Type to narrow the list.'
+      : `Filter: ${filter} · ${available.length + signIns.length} match${available.length + signIns.length === 1 ? '' : 'es'}`))
     content.push('', color.textDim('Browsing adds nothing. A provider is configured only by the operation you choose.'))
     if (this.notice !== undefined) content.push(color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
@@ -2304,6 +2326,9 @@ export class ModelsWorkspacePage implements Component {
     if (this.view.kind === 'list' || this.view.kind === 'records' || this.view.kind === 'logout-list') {
       segments.unshift({ text: 'r refresh', priority: 2 })
     }
+    if (this.view.kind === 'add-catalog') {
+      segments.unshift({ text: 'type to filter', priority: 3 })
+    }
     segments.push({ text: 'Esc back', priority: 8 })
     const rendered = renderActionBarRow(segments, width)
     this.paintedCopy = rendered.includes('c copy')
@@ -2343,6 +2368,9 @@ export class ModelsWorkspacePage implements Component {
       this.handlePickerInput(data)
       return 'handled'
     }
+    // The Add catalog filters by typed text: the keys that are not
+    // navigation reach the filter, and Esc clears it before it leaves.
+    if (this.view.kind === 'add-catalog' && this.handleCatalogFilterInput(data)) return 'handled'
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) return this.back()
     if (matchesKey(data, 'up')) return this.move(-1)
     if (matchesKey(data, 'down')) return this.move(1)
@@ -2491,6 +2519,46 @@ export class ModelsWorkspacePage implements Component {
       this.removePicker(picker)
       picker.onSelect(item.value)
     }
+  }
+
+  /**
+   * The Add catalog's type-to-filter. A printable key extends the filter, a
+   * backspace shortens it, and Esc clears it (Esc leaves the catalog only
+   * when there is nothing to clear). Every other key keeps its navigation
+   * meaning.
+   */
+  private handleCatalogFilterInput(data: string): boolean {
+    if (this.view.kind !== 'add-catalog') return false
+    if (matchesKey(data, 'escape')) {
+      if (this.catalogFilter === '') return false
+      this.setCatalogFilter('')
+      return true
+    }
+    if (matchesKey(data, 'backspace')) {
+      if (this.catalogFilter === '') return false
+      this.setCatalogFilter(this.catalogFilter.slice(0, -1))
+      return true
+    }
+    if (!isPrintableText(data)) return false
+    this.setCatalogFilter(this.catalogFilter + data)
+    return true
+  }
+
+  /** Apply a filter change: the selection follows the first match. */
+  private setCatalogFilter(filter: string): void {
+    this.catalogFilter = filter
+    this.cursor = 0
+    this.followCursor = true
+    this.revision += 1
+    this.requestRender()
+  }
+
+  /** Whether a catalog entry matches the current filter (its label or its
+   *  route; an empty filter matches everything). */
+  private catalogMatches(row: ModelsProviderRow): boolean {
+    const filter = this.catalogFilter.trim().toLowerCase()
+    if (filter === '') return true
+    return row.label.toLowerCase().includes(filter) || row.route.toLowerCase().includes(filter)
   }
 
   private interactiveCount(): number {

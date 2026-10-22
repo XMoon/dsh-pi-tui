@@ -228,9 +228,11 @@ The page never infers a stored key from a route/profile.
   really perform for it (a native sign-in, the prefilled setup draft, or an
   explicit manual-only reason), and `Other sign-ins` lists the sign-in flows
   that no provider profile addresses. One `Custom provider…` action opens the
-  existing draft. Browsing writes nothing; a catalog entry is activated only
-  by an explicit Enter, and a route with no supported operation states why
-  instead of claiming success.
+  existing draft. The list is narrowed by typed text (a visible filter line
+  with the match count); `Esc` clears the filter before it leaves the
+  catalog. Browsing writes nothing; a catalog entry is activated only by an
+  explicit Enter, and a route with no supported operation states why instead
+  of claiming success.
 - Provider detail shows route, profile presence, protocol, endpoint, models,
   auth kind and credential presence (presence only, not a connection test).
 - `Configure API Key` opens a page-local masked editor (the existing

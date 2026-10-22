@@ -1744,6 +1744,54 @@ test('a standalone sign-in detail shows the sign-in, not a provider profile', as
   assert.doesNotMatch(detail, /Provider · /u)
 })
 
+test('the Add catalog filters by typed text, and Esc clears the filter before it leaves', async () => {
+  const available = (route: string, label: string): ModelsProviderRow => ({
+    kind: 'reference', identity: `route:${route}`, route, label, ref: `${route.toUpperCase()}_API_KEY`,
+    configured: false, declared: false, namesCredential: false, canProvisionProfile: true, group: 'available',
+    methods: [], inFlight: false,
+    profile: { route, configured: false, displayName: label, models: [] },
+  })
+  const rows: ModelsProviderRow[] = [
+    available('anthropic', 'Anthropic'),
+    available('azure', 'Azure'),
+    available('baseten', 'Baseten'),
+  ]
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  page.handleInput('\u001b[B') // the "Add Provider…" action
+  page.handleInput('\r')
+  viewText(page)
+  assert.match(viewText(page), /Anthropic/u)
+  assert.match(viewText(page), /Baseten/u)
+  // Typing narrows the list to the matching provider.
+  page.handleInput('z')
+  const narrowed = viewText(page)
+  assert.match(narrowed, /Azure/u)
+  assert.doesNotMatch(narrowed, /Anthropic/u)
+  assert.doesNotMatch(narrowed, /Baseten/u)
+  assert.match(narrowed, /Filter: z/u)
+  // A filter with no match states it.
+  page.handleInput('z')
+  assert.match(viewText(page), /No provider matches/u)
+  // Backspace widens the filter again.
+  page.handleInput('\u007f')
+  page.handleInput('\u007f')
+  const widened = viewText(page)
+  assert.match(widened, /Anthropic/u)
+  assert.match(widened, /Baseten/u)
+  // Esc clears the filter FIRST, and only then leaves the catalog.
+  page.handleInput('z')
+  page.handleInput('\u001b')
+  const cleared = viewText(page)
+  assert.match(cleared, /Available providers/u, 'the catalog stays open and the filter is cleared')
+  assert.match(cleared, /Anthropic/u)
+  assert.doesNotMatch(cleared, /Filter: z/u)
+  page.handleInput('\u001b')
+  assert.doesNotMatch(viewText(page), /Available providers/u, 'the second Esc leaves the catalog')
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,
