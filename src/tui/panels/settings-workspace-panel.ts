@@ -704,6 +704,14 @@ export class SettingsWorkspacePanel implements Component {
     } else if (options?.initialCategory !== undefined) {
       this.categoryId = options.initialCategory
       this.focus = 'categories'
+    } else if (options?.initialModelsView !== undefined) {
+      // A Models deeplink IS the Models category.
+      this.categoryId = 'models'
+      this.focus = 'categories'
+    } else if (options?.initialAccountView !== undefined) {
+      // An Account deeplink IS the Account category.
+      this.categoryId = 'account'
+      this.focus = 'categories'
     }
     if (options?.initialModelsView !== undefined) this.mountModelsPage(options.initialModelsView)
     else if (options?.initialAccountView !== undefined) this.mountAccountPage(options.initialAccountView)
@@ -728,6 +736,13 @@ export class SettingsWorkspacePanel implements Component {
     if (this.authPageCategory !== undefined) this.closeAuthPage()
     const page = this.intents.createModelsPage?.(initial, () => this.switchToAccountContent())
     if (page === undefined) return
+    // The factory may run a synchronous callback that already changed the
+    // selection: a page built for a superseded selection must never be
+    // mounted (it would start a second Host watch for a page nobody sees).
+    if (this.disposed || this.categoryId !== 'models') {
+      page.dispose()
+      return
+    }
     this.authPage = page
     this.authPageCategory = 'models'
   }
@@ -738,6 +753,10 @@ export class SettingsWorkspacePanel implements Component {
     if (this.authPageCategory !== undefined) this.closeAuthPage()
     const page = this.intents.createAccountPage?.(initial)
     if (page === undefined) return
+    if (this.disposed || this.categoryId !== 'account') {
+      page.dispose()
+      return
+    }
     this.authPage = page
     this.authPageCategory = 'account'
   }
@@ -2213,12 +2232,27 @@ export class SettingsWorkspacePanel implements Component {
       this.resetChoice()
     }
     this.focus = focus
-    if (category === 'models') this.mountModelsPage({ view: 'list' })
-    else if (category === 'account') this.mountAccountPage({ view: 'page' })
+    // The direct page is mounted only when its content column is PAINTED: a
+    // narrow terminal that still shows the category list has no right column,
+    // and browsing an invisible category must not start a Host watch.
+    if (this.paintsDirectContent()) {
+      if (category === 'models') this.mountModelsPage({ view: 'list' })
+      else if (category === 'account') this.mountAccountPage({ view: 'page' })
+    }
     this.pressedGesture = undefined
     this.contentPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
+  }
+
+  /**
+   * Whether the direct content column is painted right now. Wide and medium
+   * always paint it beside the category rail; a narrow terminal paints it only
+   * while the content owns the focus.
+   */
+  private paintsDirectContent(): boolean {
+    if (layoutForWidth(this.intents.columns()) !== 'narrow') return true
+    return this.focus === 'content'
   }
 
   /**
