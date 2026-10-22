@@ -229,6 +229,28 @@ export interface SurfaceInputBinding {
 }
 
 /**
+ * PR-C: the ONE Client-local image binding a mounted renderer receives.
+ *
+ * It is a PRESENTATION assembly contract, never a Host capability: the two
+ * facts a renderer needs to present a durable image attachment are the loader
+ * (the single read authority and the single cache) and the scope sampler (the
+ * immutable display-subject identity the read is authorized under). The PiTui
+ * branch consumes the SAME loader instance, so a mount has exactly ONE loader
+ * and no application-wide image state.
+ */
+export interface SurfaceImageBinding {
+  /** The ONE image loader of this mount. */
+  readonly imageLoader: ImageLoader
+  /**
+   * The presentation-scope sampler. A renderer samples it ONCE per display
+   * subject and keeps the returned identity object immutably: an async settle
+   * must never re-resolve the subject, or a retired presentation could read
+   * under a successor's authorization.
+   */
+  readonly imageScope: () => unknown
+}
+
+/**
  * PR3-A: one already-connected renderer mount the composition root hands to
  * {@link SurfaceRuntime.start} instead of the default PiTui process mount.
  * The mount owns its own terminal (the TSP SDK session); the surface never
@@ -239,8 +261,13 @@ export interface SurfaceRendererMount {
   /**
    * Mount the renderer. Runs at the exact original `startProcessTui` position;
    * a throw is the runner's fatal path (never a silent PiTui fallback).
+   *
+   * PR-C: the mount receives the ONE image binding of this surface BEFORE the
+   * renderer's first projection, so the renderer can present a durable image
+   * attachment through the SAME loader and scope authority the PiTui branch
+   * uses. A renderer that ignores the binding has no image capability.
    */
-  mount(): {
+  mount(binding: SurfaceImageBinding): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
     /**
@@ -1651,7 +1678,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     resetSearchPresentation({ rebuild: false })
   }
 
-  const buildOptions = (deps: SurfaceMountDeps): TuiAppOptions => ({
+  const buildOptions = (deps: SurfaceMountDeps, imageLoader: ImageLoader): TuiAppOptions => ({
     // Ctrl+R input-history search: the runner owns the IO (the file-backed
     // source + the known-cwd identity map), the surface owns the panel
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
@@ -1662,8 +1689,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // stores the pair and never re-derives a session identity.
     captureHistoryScope: deps.captureHistoryScope,
     // The transcript image surface (plan M8/M9): the durable loader plus the
-    // dim fallback coloring.
-    imageLoader: new ImageLoader((ref, context) => deps.readImage(ref, context)),
+    // dim fallback coloring. PR-C: the loader is the ONE instance of THIS
+    // mount (constructed in `start()`), so the PiTui branch and the renderer
+    // branch share one cache and one read authority.
+    imageLoader,
     imageScope: deps.imageScope,
     imageTheme: { fallbackColor: deps.imageFallbackColor },
     present: deps.present,
@@ -1904,12 +1933,17 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // its original delegation semantics. This is read by the interaction owner,
       // which is attached AFTER this call.
       rendererOwnedPresentation = deps.renderer !== undefined
+      // PR-C: the ONE image loader of this mount. It is created HERE (the
+      // single acquire point) and handed to the renderer branch as the mount
+      // binding, so there is never a second loader, a second cache or a
+      // second read authority in the application process.
+      const imageLoader = new ImageLoader((ref, context) => deps.readImage(ref, context))
       // PR3-A: the composition root already connected a non-PiTui renderer
       // (the experimental TSP mount). Mount it at the SAME position; no
       // TuiApp exists on this branch, so every PiTui-only owner below simply
       // never receives a mounted app (their entries are input-gated).
       if (deps.renderer !== undefined) {
-        const mounted = deps.renderer.mount()
+        const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope })
         display = mounted.display
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation
@@ -1970,7 +2004,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // acquisition already asserts the final state, instead of writing idle
       // and being corrected one write later (an idle -> working flash).
       app = startProcessTui(events, {
-        ...buildOptions(deps),
+        ...buildOptions(deps, imageLoader),
         initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })

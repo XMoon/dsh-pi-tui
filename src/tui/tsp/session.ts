@@ -50,6 +50,7 @@ import type {
 import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
+import type { SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
@@ -208,6 +209,17 @@ export interface TspRenderer extends TspInputBinding {
    * call).
    */
   readonly interaction: SurfaceInteractionPresenter
+  /**
+   * PR-C: install the ONE image binding (the mount's loader and scope
+   * sampler) on this renderer. It is SYNCHRONOUS and ONE-TIME: the binding
+   * must be in place before the renderer's first tool projection, and the
+   * renderer refuses a second binding or a binding after disposal.
+   *
+   * The binding carries PRESENTATION capability only: the loader stays the
+   * single cache and read authority, and `session.blob()` stays the single
+   * blob sender.
+   */
+  readonly bindImages: (binding: SurfaceImageBinding) => void
   /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
@@ -446,6 +458,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * redraws the SAME rows instead of dropping them for one frame.
    */
   let lastStreamingToolPreviews: readonly StreamingToolPreview[] = []
+  /**
+   * PR-C: the ONE image binding of this renderer, installed by the mount
+   * BEFORE the first tool projection. It carries the mount's loader (the
+   * single cache and read authority) and the scope sampler (the immutable
+   * display-subject identity the read is authorized under). Without it the
+   * renderer has NO image capability.
+   */
+  let imageBinding: SurfaceImageBinding | undefined
+  let imageBindingInstalled = false
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -989,6 +1010,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the B0 inert one. It is installed with the mount, but the surface only
     // opts into modals once `bindInput` has committed the application wiring.
     interaction: seat.presenter,
+    // PR-C: the ONE image binding. It is installed before the first tool
+    // projection (the mount does it) and never twice.
+    bindImages: (binding) => {
+      if (disposed) throw new Error('the TSP renderer is disposed')
+      if (imageBindingInstalled) throw new Error('the TSP renderer image binding is already installed')
+      imageBindingInstalled = true
+      imageBinding = binding
+    },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')
       if (inputBound) throw new Error('the TSP renderer input is already bound')
