@@ -38,6 +38,8 @@ import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import type { TuiSettingsDoc, WebProviderSettings } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -153,7 +155,7 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
     setSessionApprovalPolicy: () => 'applied',
     currentApprovalOverride: () => undefined,
     applyFooterSettings: () => {},
-    config: {
+    config: settingsDirectPageConfig({
       configReadiness: () => 'ready',
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
@@ -171,7 +173,7 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
         setSendOriginalQuestion: async (enabled: boolean) => { write(() => { store.web.api.sendOriginalQuestion = enabled }) },
         setSearchApiBaseURL: async (url: string) => { write(() => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
       },
-    },
+    }),
     catalog: { models: { available: () => false } },
   }
   const runner = new Proxy(base, {
@@ -210,8 +212,10 @@ async function openOtherRows(h: Harness): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
-  const keys = h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, ENTER]
-  for (const pressed of keys) await key(h, pressed)
+  // The workspace opens on the About home: walk the rail to the legacy
+  // launcher category, then enter its Rows level.
+  await selectSettingsCategory(h.vt, 'Other settings')
+  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, ENTER] : [ENTER]) await key(h, pressed)
 }
 
 /** Reach the legacy Web section through the real Workspace handoff. */

@@ -8,34 +8,35 @@
  * command and then interacts with (or asserts on) the legacy rows must cross
  * that bridge through the real workspace keys and the real handoff — never by
  * calling `TuiApp.openSettings` or the legacy builder directly.
+ *
+ * Since Phase 3C / C2-A the workspace opens on its About home, so the walk
+ * starts from there: the category rail is the only selection owner.
  * @module @xmoon76/dsh-pi-tui/test/support/open-legacy-settings
  */
 
+import { selectSettingsCategory, type SettingsRailTerminal } from './settings-rail.ts'
+
 /** The minimal terminal surface the navigation drives. */
-export interface SettingsNavTerminal {
+export interface SettingsNavTerminal extends SettingsRailTerminal {
   readonly columns: number
   sendInput(data: string): void
   waitForRender(): Promise<void>
 }
 
-const DOWN = '\x1b[B'
 const ENTER = '\r'
-const TAB = '\t'
 
 /**
  * Navigate an ALREADY-OPEN Settings workspace to the legacy editor. The key
- * sequence follows the workspace's real focus model:
- *  - wide/medium (>=96 columns) open on the row list: Tab twice reaches the
- *    category list, then three DOWNs select `Other settings`
- *    (`Appearance → Display → Plugins → Other settings`);
- *  - narrow (<96 columns) open on the category list: three DOWNs select it.
- * Enter then inspects the single legacy row, and the second Enter opens it.
+ * sequence follows the workspace's real focus model: walk the category rail to
+ * `Other settings`, Enter into its Rows level, and Enter the single legacy
+ * launcher row.
  */
 export async function navigateToLegacySettings(vt: SettingsNavTerminal): Promise<void> {
-  const keys = vt.columns >= 96
-    ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER, ENTER]
-    : [DOWN, DOWN, DOWN, ENTER, ENTER]
-  for (const key of keys) {
+  // The walk reads the painted frame to find the rail, so the FIRST frame of
+  // the workspace must be on screen before the walk starts.
+  await vt.waitForRender()
+  await selectSettingsCategory(vt, 'Other settings')
+  for (const key of [ENTER, ENTER]) {
     vt.sendInput(key)
     await vt.waitForRender()
   }

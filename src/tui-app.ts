@@ -1595,6 +1595,15 @@ interface JobWorkspaceRecord {
  */
 export interface SettingsWorkspaceOpenOptions {
   /**
+   * The two version facts the `About` page shows, read once per open on the
+   * Client side: the bundle's own version and the installed Harness version
+   * (undefined = unreadable). The panel never reads a version itself.
+   */
+  readonly aboutVersionFacts: {
+    readonly tui: string
+    readonly dsh: string | undefined
+  }
+  /**
    * Invoked with the target row the opened legacy editor must focus (the
    * Settings workspace row's `legacyTargetId`), or without one when the
    * compatibility row opens the editor at its top. The target is presentation
@@ -21735,6 +21744,7 @@ export class TuiApp {
       columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       notice: () => this.currentNotice(),
+      aboutVersionFacts: options.aboutVersionFacts,
       onClose: () => record.close(),
       onOpenLegacy: (targetId?: string) => openLegacy(targetId),
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),

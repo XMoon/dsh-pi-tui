@@ -111,7 +111,12 @@ interface Harness {
   /** The live settings document the projection reads. */
   readonly doc: TuiSettingsDoc
   readonly invoke: (name?: string) => unknown
-  readonly open: () => Promise<void>
+  /** Open the workspace and walk the category rail to one category. */
+  readonly open: (category?: string) => Promise<void>
+  /** Walk the category rail to one category (the workspace is already open). */
+  readonly walkToCategory: (category: string) => Promise<void>
+  /** Open the workspace at its real entry: the About home. */
+  readonly openHome: () => Promise<void>
   readonly rowsPlain: () => string[]
   readonly view: () => string
   /** How many times the projection read the live document. */
@@ -132,6 +137,16 @@ interface Harness {
   readonly pluginPages: () => number
   readonly dispose: () => void
 }
+
+/** The painted category order of the Settings rail (the harness walks it). */
+const CATEGORY_ORDER = ['About', 'Models', 'Account', 'Appearance', 'Display', 'Plugins', 'Other settings']
+
+/** Whether the painted frame shows the Settings category rail. A narrow
+ *  terminal paints the single-column category list OR the About content, so
+ *  the rail's own labels are the witness. */
+const railVisible = (vt: VirtualTerminal): boolean =>
+  vt.getViewport().map(stripTerminalSequences)
+    .some(line => /^(?:> | {2})(?:About|Models|Account|Appearance|Display|Plugins|Other settings)(?: {2,}|\s*$)/u.test(line))
 
 function setup(options: HarnessOptions = {}): Harness {
   const columns = options.columns ?? 120
@@ -252,7 +267,27 @@ function setup(options: HarnessOptions = {}): Harness {
       web: { available: () => false },
       // The credential STORE is not mounted either: the Web section's key row
       // reports unavailable instead of claiming "not configured".
-      credentials: { available: () => false },
+      credentials: { available: () => false, recordsSupported: () => false },
+      // The Models/Account direct pages are REAL pages: the category rail
+      // mounts the selected one (Phase 3C / C2-A), so these Host seams must
+      // answer the calls a page makes while it is on screen. They report an
+      // empty, unavailable Host — no provider, no record, no account.
+      providers: {
+        available: () => false,
+        listCredentialOptions: () => [],
+        readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] }),
+        configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
+        writeProfile: async () => {},
+        writeKeylessProfile: async () => ({ kind: 'written' as const }),
+      },
+      authorization: {
+        available: () => false,
+        listTargets: () => [],
+        begin: async () => ({ kind: 'unavailable' as const }),
+        onEvent: () => () => {},
+        respond: async () => {},
+        cancel: async () => {},
+      },
       account: {
         available: () => false,
         getState: async () => { throw new Error('account unavailable') },
@@ -277,9 +312,37 @@ function setup(options: HarnessOptions = {}): Harness {
     assert.ok(definition?.handler !== undefined, `/${name} must be registered`)
     return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
   }
-  const open = async (): Promise<void> => {
+  /** Open the workspace at its REAL entry: the About home. */
+  const openHome = async (): Promise<void> => {
     invoke('settings')
     await vt.waitForRender()
+  }
+  /**
+   * Open the workspace and move the category rail to one category. The
+   * workspace's own entry is the About home (Phase 3C / C2-A), so a case that
+   * exercises the LEGACY configuration categories has to walk the rail — the
+   * same keys a user presses.
+   */
+  const open = async (category: string = 'Appearance'): Promise<void> => {
+    await openHome()
+    await walkToCategory(category)
+  }
+  /**
+   * Walk the category rail to one category. The rail is the ONLY selection
+   * owner, so the helper presses the rail's own keys.
+   */
+  const walkToCategory = async (category: string): Promise<void> => {
+    const target = CATEGORY_ORDER.indexOf(category)
+    assert.ok(target >= 0, `the harness must know the category ${JSON.stringify(category)}`)
+    if (!railVisible(vt)) {
+      // A narrow terminal opens on the About CONTENT: Esc returns to the rail.
+      vt.sendInput('\u001b')
+      await vt.waitForRender()
+    }
+    for (let index = 0; index < target; index += 1) {
+      vt.sendInput('\u001b[B')
+      await vt.waitForRender()
+    }
   }
   const rowsPlain = (): string[] => vt.getViewport().map(stripTerminalSequences)
   const view = (): string => rowsPlain().join('\n')
@@ -294,6 +357,8 @@ function setup(options: HarnessOptions = {}): Harness {
     doc,
     invoke,
     open,
+    openHome,
+    walkToCategory,
     rowsPlain,
     view,
     reads: () => reads,
@@ -395,7 +460,7 @@ test('A-02 200x60 and 160x40 paint the three-column projection with the real val
   for (const [columns, rows] of [[200, 60], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    const paneRow = rowOf(h, 'Categories (6)')
+    const paneRow = rowOf(h, 'Categories (7)')
     const paneLine = h.rowsPlain()[paneRow]!
     assert.match(paneLine, /Rows \(2\)/, 'the middle column is the current category rows')
     assert.match(paneLine, /Details/, 'the third column is the detail pane')
@@ -411,7 +476,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   // L0 paints categories + rows only; the retired header arrows never paint.
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'L0 owns the categories level')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'L0 owns the categories level')
   assert.ok(h.rowsPlain().some(line => line.includes('Rows (2)')), `the rows column exists:\n${h.view()}`)
   assert.ok(!h.view().includes('Details'), 'L0 does not paint the Detail column')
   assert.ok(!h.view().includes('←'), 'no medium header category arrows')
@@ -423,7 +488,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   // Enter advances to L1: rows + detail, no categories column.
   await key(h, '\r')
   assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'L1 paints the Detail column')
-  assert.ok(!h.view().includes('Categories (6)'), 'L1 hides the categories column')
+  assert.ok(!h.view().includes('Categories (7)'), 'L1 hides the categories column')
   // Right enters L2's inline choice directly from L1 on the same projection.
   await key(h, '\x1b[C')
   assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
@@ -925,8 +990,8 @@ test('A-15 the workspace chrome paints the live palette tokens (dark → light)'
   // The active device and the cursor share `primary`; the identity word above
   // does NOT (it is weight-only). This is the exact split the vocabulary fixes:
   // ordinary focus is never the amber `borderFocus` (which equals `warning`).
-  const paneHeadRow = rowOf(h, '[Categories (6)]')
-  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (6)]')
+  const paneHeadRow = rowOf(h, '[Categories (7)]')
+  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (7)]')
   assert.equal(h.vt.getCellFgRgb(paneHeadRow, paneHeadCol), hexToRgb(currentPalette.primary),
     'the focused pane label wears the bracketed bold primary active device')
   const cursorRow = rowOf(h, '> Appearance')
@@ -995,7 +1060,7 @@ test('the painted Copy button copies while the row list owns the keyboard focus'
 test('a click anywhere in a visible column takes that column focus', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'the categories level owns focus at open')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'the categories level owns focus at open')
   // Clicking a row selects it and takes the rows level's focus (and therefore
   // the rows + detail composition).
   const iconRow = rowOf(h, 'Icon style')
@@ -1020,7 +1085,7 @@ test('100x3 paints real content in its only body row, not pane headers', async (
   const painted = h.rowsPlain()
   assert.equal(painted.length, 3)
   assert.ok(painted.some(line => line.includes('Configured theme')), `the only body row is real content:\n${h.view()}`)
-  assert.ok(!painted.some(line => line.includes('Categories (6)')), 'the pane header yields to the content row')
+  assert.ok(!painted.some(line => line.includes('Categories (7)')), 'the pane header yields to the content row')
   h.dispose()
 })
 
@@ -1142,8 +1207,8 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   const long = `file:${'x'.repeat(300)}`
   const h = setup({ columns: 200, rows: 60, doc: { theme: long } })
   await h.open()
-  const paneRow = rowOf(h, 'Categories (6)')
-  assert.equal(cellIndexOf(h, paneRow, '[Categories (6)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
+  const paneRow = rowOf(h, 'Categories (7)')
+  assert.equal(cellIndexOf(h, paneRow, '[Categories (7)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
   assert.equal(cellIndexOf(h, paneRow, 'Rows (2)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
   assert.equal(cellIndexOf(h, paneRow, 'Details'), 22 + 2 + 42 + 2, 'the detail column starts after the 42-cell row column and a 2-cell gap')
   for (const [index, line] of h.vt.getViewport().entries()) {
@@ -1221,12 +1286,12 @@ test('A-15c an unhandled printable key is inert inside the workspace', async () 
 test('a real category/row item click takes that level and selects the item', async () => {
   const wide = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await wide.open()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'the categories level owns focus at open')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'the categories level owns focus at open')
   const displayRow = rowOf(wide, 'Display')
   press(wide, displayRow, 2)
   release(wide, displayRow, 2)
   await wide.vt.waitForRender()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'the clicked category keeps the categories level')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'the clicked category keeps the categories level')
   assert.ok(wide.rowsPlain().some(line => line.startsWith('> Display')), 'and selects the clicked category')
   await key(wide, '\x1b[B')
   assert.ok(wide.rowsPlain().some(line => line.startsWith('> Plugins')), 'Down now moves the CATEGORY, not the row')
@@ -1251,7 +1316,11 @@ test('below the body floor the Action Bar advertises only the Esc semantics', as
     const h = setup({ columns, rows })
     await h.open()
     const bar = h.rowsPlain().at(-1)!
-    assert.match(bar, /^Esc /, `the bar keeps its Esc semantics at ${columns}x${rows}`)
+    // The bar is the ONLY thing on the last row: it states the Esc semantics
+    // alone. A two-column frame puts the bar in the CONTENT column (beside
+    // the rail's own cell), so the assertion reads the bar's TEXT, not its
+    // column.
+    assert.ok(bar.includes('Esc close'), `the bar keeps its Esc semantics at ${columns}x${rows}: ${bar}`)
     for (const forbidden of ['Up/Down', 'Left', 'Right', 'Enter', 'Tab', 'r refresh', 'c copy', 'PgDn', 'PgUp']) {
       assert.ok(!bar.includes(forbidden), `${columns}x${rows} must not advertise the inert ${forbidden}: ${bar}`)
     }
@@ -1494,12 +1563,14 @@ test('/ UX-10 pre-paint keys resolve the level, never the projection: the same w
     // Deliberately do NOT await a paint: the first keys arrive before the initial
     // frame, exactly when the level — not the layout — must be the state.
     h.invoke('settings')
-    h.vt.sendInput('\x1b[C') // Right: L0 -> L1 before paint
-    h.vt.sendInput('\x1b[D') // Left: L1 -> L0, NEVER a full close
+    h.vt.sendInput('\x1b[C') // Right: the rail hands the keyboard to the About content
+    h.vt.sendInput('\x1b[D') // Left: the content yields it back, NEVER a full close
     await h.vt.waitForRender()
     assert.ok(h.view().includes('Settings'), `the pre-paint Esc must not close the workspace at ${columns}:\n${h.view()}`)
-    assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the pre-paint Esc returns to the categories level')
-    // After a paint the deeper walk behaves identically.
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the pre-paint Left returns to the categories level')
+    // The legacy levels live behind a configuration category: walk the rail
+    // to Appearance, then the deeper walk behaves identically.
+    await h.walkToCategory('Appearance')
     await key(h, '\r')
     await key(h, '\r')
     await key(h, '\x1b')
@@ -1507,20 +1578,18 @@ test('/ UX-10 pre-paint keys resolve the level, never the projection: the same w
     h.dispose()
   }
 
-  // Three keys BEFORE the first paint: Right -> Right -> Left must land on L1
-  // (neither close nor skip a level), exactly like the painted walk.
+  // Three keys BEFORE the first paint: Right -> Right -> Left must land on the
+  // rail (neither close nor skip a level), exactly like the painted walk.
   for (const [columns, rows] of [[72, 24], [100, 40], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     h.invoke('settings')
-    h.vt.sendInput('\x1b[C') // Right: L0 -> L1
-    h.vt.sendInput('\x1b[C') // Right: L1 -> L2 choice
-    h.vt.sendInput('\x1b[D') // Left: L2 -> L1, NEVER a full close
+    h.vt.sendInput('\x1b[C') // Right: the rail hands the keyboard to the About content
+    h.vt.sendInput('\x1b[C') // Right: the About content owns it; a Right is inert there
+    h.vt.sendInput('\x1b[D') // Left: the content yields it back, NEVER a full close
     await h.vt.waitForRender()
     assert.ok(h.view().includes('Settings'), `the pre-paint deep walk never closes at ${columns}:\n${h.view()}`)
-    assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/, `the pre-paint deep walk lands on L1 at ${columns}`)
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/, `the pre-paint deep walk lands on the rail at ${columns}`)
     // The rest of the walk closes exactly once from the outermost level.
-    await key(h, '\x1b')
-    await key(h, '\x1b')
     await key(h, '\x1b')
     assert.ok(h.view().includes('❯'), `the walk closes from L0 at ${columns}`)
     h.dispose()
@@ -1573,20 +1642,20 @@ test('the medium projection is a pure function of focus: L0 categories+rows, L1/
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (6)')), `L0 categories at ${columns}:\n${h.view()}`)
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (7)')), `L0 categories at ${columns}:\n${h.view()}`)
     assert.ok(!h.view().includes('Details'), 'L0 paints no Detail pane')
     assert.ok(!h.view().includes('Copy value [C]'), 'L0 publishes no Detail button')
     await key(h, '\r')
     assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'L1 paints rows+detail')
-    assert.ok(!h.view().includes('Categories (6)'), 'L1 drops the categories column')
+    assert.ok(!h.view().includes('Categories (7)'), 'L1 drops the categories column')
     await key(h, '\r')
     assert.ok(h.view().includes('Choose value'), 'L2 enters an inline choice without a second browse Enter')
     assert.ok(h.view().includes('Solarized'), 'the selected source identity remains visible')
-    assert.ok(!h.view().includes('Categories (6)'), 'L2 keeps the rows+detail projection')
+    assert.ok(!h.view().includes('Categories (7)'), 'L2 keeps the rows+detail projection')
     await key(h, '\x1b')
     assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc cancels L2 directly back to L1')
     await key(h, '\x1b')
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (6)')), 'Esc from L1 returns to categories+rows')
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (7)')), 'Esc from L1 returns to categories+rows')
     assert.ok(!h.view().includes('Details'), 'and hides the detail again')
     h.dispose()
   }
@@ -1841,7 +1910,7 @@ test('the projection table is frozen: below 76 columns one pane, 76..107 two, 10
     await h.open()
     await key(h, '\r') // L0 -> L1: the rows pane always, plus the detail when the width grants it
     const painted = h.rowsPlain()
-    assert.equal(painted.some(line => line.includes('Categories (6)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
+    assert.equal(painted.some(line => line.includes('Categories (7)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
     assert.equal(painted.some(line => line.includes('Details')), panes >= 2, `the detail pane at ${columns} columns:\n${h.view()}`)
     assertRowWidths(h, columns)
     h.dispose()
@@ -3291,7 +3360,7 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
 
       // §11.3.2/§4.5: exactly ONE chrome active device, and it is the focused pane
       // label. Wide/medium L0 put the pane header on the body's first row, so the
-      // focused `[Categories (6)]` is the ONE primary label. The narrow projection
+      // focused `[Categories (7)]` is the ONE primary label. The narrow projection
       // paints NO pane header at all (settings-workspace-panel.ts:739-803): the
       // MEASURED 72x24/44x20 frames put the plain list cursor on that row
       // (`3|> Appearance`), so the returned device list is EMPTY there.
@@ -3366,7 +3435,7 @@ test('120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column
       'the Enter / Right hint uses textMuted')
     assert.notEqual(h.vt.getCellFgRgb(entryRow, 26), hexToRgb(currentPalette.primary),
       'the entry is not the primary cursor')
-    assert.ok(h.view().includes('[Categories (6)]'), 'L0 keeps its ONE active pane device')
+    assert.ok(h.view().includes('[Categories (7)]'), 'L0 keeps its ONE active pane device')
     assert.ok(!h.view().includes('[Rows'), 'the rows column is not a second focus owner')
     assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
     h.dispose()
@@ -3418,5 +3487,96 @@ test('below the body floor the entry is not painted and every input is fail-clos
   release(h, navRow, navCol)
   await h.vt.waitForRender()
   assert.equal(h.pluginPages(), 0)
+  h.dispose()
+})
+
+// ── Phase 3C / C2-A: the About home and the true two-pane navigation ───────
+//
+// The workspace opens on its About home; the category rail selects and the
+// right column shows the selected page at once; Enter/Right hands the keyboard
+// to that page. The cases below read the PHYSICALLY painted frame.
+
+/** The first row of each of the five whale variants. The variant is picked
+ *  once per open, so the frame carries exactly one of them. */
+const WHALE_FIRST_LINES = [
+  '        o',
+  '       z Z',
+  '                   *',
+  '       <3',
+  '          \\   /',
+] as const
+
+test('the About page is the default Settings home: the whale, both versions and the selected rail entry', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await h.openHome()
+  const rows = h.rowsPlain()
+  assert.match(rows[0]!, /Settings · Categories/, 'the category rail owns the keyboard on the first frame')
+  assert.match(h.view(), /^> About/mu, 'About is the selected category')
+  assert.ok(
+    WHALE_FIRST_LINES.some(line => h.view().includes(line)),
+    `the About page paints the shared whale:\n${h.view()}`,
+  )
+  assert.match(h.view(), /dsh-pi-tui/, 'the About page names the bundle')
+  assert.match(h.view(), /TUI\s+\d+\.\d+\.\d+/u, 'the About page states the TUI version')
+  assert.match(h.view(), /DSH\s+(?:Unknown|\d+\.\d+\.\d+)/u, 'the About page states the DSH version')
+  assert.equal(h.replacements(), 0, 'the About home never writes a config document')
+  assert.equal(h.reads(), 1, 'the About home reads the settings document exactly once')
+  h.dispose()
+})
+
+test('a narrow terminal opens on the About content: Esc returns to the categories, Esc closes the workspace', async () => {
+  const h = setup({ columns: 44, rows: 20 })
+  await h.openHome()
+  assert.match(h.rowsPlain()[0]!, /Settings · About/, 'the About content owns the narrow first frame')
+  assert.match(h.view(), /dsh-pi-tui/)
+  assert.doesNotMatch(h.view(), /Settings · Categories/, 'the narrow first frame is NOT the empty L0 list')
+  await key(h, '\u001b')
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'Esc returns to the category rail')
+  assert.match(h.view(), /^> About/mu, 'the rail keeps the selected category')
+  await key(h, '\u001b')
+  assert.doesNotMatch(h.view(), /Settings · /, 'the second Esc closes the workspace')
+  h.dispose()
+})
+
+test('the direct pages paint exactly the category rail and the content column', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24]] as const) {
+    const h = setup({ columns, rows })
+    await h.openHome()
+    const painted = h.rowsPlain()
+    assert.ok(painted.some(line => /^> About/mu.test(line)), `the rail is painted at ${columns}x${rows}:\n${h.view()}`)
+    assert.ok(!h.view().includes('Rows ('), `the direct layout paints NO Rows pane at ${columns}x${rows}:\n${h.view()}`)
+    assert.ok(!h.view().includes('Details'), `the direct layout paints NO Details pane at ${columns}x${rows}:\n${h.view()}`)
+    // The single physical action bar is the last row and states the rail's
+    // keys. The two-column frame paints it in the CONTENT column.
+    assertBarIsLastRow(painted, (row, col) => h.vt.getCellFgRgb(row, col), 'Up/Down navigate · Enter/Right focus · Esc close', 24)
+    h.dispose()
+  }
+})
+
+test('a short wide terminal scrolls the category rail to the last category and hits the painted id', async () => {
+  const h = setup({ columns: 80, rows: 8 })
+  await h.openHome()
+  assert.ok(!h.view().includes('Other settings'), `the last category is not painted yet:\n${h.view()}`)
+  // The rail is the only selection owner: End reaches its last entry.
+  await key(h, '\u001b[F')
+  assert.match(h.view(), /^> Other settings/mu, `End reaches the last category:\n${h.view()}`)
+  // The painted entry is the hit target: a click on it selects that category.
+  const lastRow = rowOf(h, 'Other settings')
+  press(h, lastRow, cellIndexOf(h, lastRow, 'Other settings'))
+  release(h, lastRow, cellIndexOf(h, lastRow, 'Other settings'))
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the rail click keeps the keyboard on the rail')
+  assert.match(h.view(), /^> Other settings/mu, 'the click hit the painted category id')
+  h.dispose()
+})
+
+test('the About content scrolls its own facts and never truncates a version value', async () => {
+  const h = setup({ columns: 44, rows: 9 })
+  await h.openHome()
+  const before = h.view()
+  assert.match(before, /TUI\s+\d+\.\d+\.\d+/u, 'the first frame shows the TUI version')
+  await key(h, '\u001b[B')
+  const after = h.view()
+  assert.match(after, /DSH\s+(?:Unknown|\d+\.\d+\.\d+)/u, `the DSH version is reachable by scrolling:\n${after}`)
   h.dispose()
 })

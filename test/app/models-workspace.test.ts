@@ -1486,3 +1486,38 @@ test('a resize before frame invalidates picker mouse targets too (F7)', async ()
   page.onCellClick(2, 3)
   assert.equal(picked(), undefined, 'the live fit check must block the stale painted target')
 })
+
+// ── Phase 3C / C2-A: the Left the Settings root may claim ─────────────────
+//
+// The Settings root may take a bare Left from the page ROOT back to the
+// category rail. The page answers ONE question — "may the root claim this
+// Left?" — and never reads the Host or changes business state to answer it.
+
+test('the Models list may yield the focus to the Settings category rail', () => {
+  const { page } = open()
+  assert.equal(page.canYieldFocusToNavigation(), true,
+    'the Models list root yields a bare Left to the root')
+})
+
+test('a provider detail keeps the Left inside the Models page', () => {
+  const { page } = open({ view: 'provider', route: 'acme' })
+  assert.equal(page.canYieldFocusToNavigation(), false,
+    'a provider detail keeps the Left: the root must not skip a level')
+})
+
+test('the Add Provider draft keeps the Left inside the Models page', () => {
+  const { page } = open({ view: 'add-provider' })
+  assert.equal(page.canYieldFocusToNavigation(), false,
+    'the draft wizard keeps the Left')
+})
+
+test('a pending API-key write keeps the Left inside the Models page', async () => {
+  const { page, calls } = open({ view: 'reference', ref: 'ACME_API_KEY' })
+  // The masked editor is open: it is a Question form, and the page must not
+  // let the root claim the Left out of it.
+  send(page, '\r')
+  assert.equal(page.canYieldFocusToNavigation(), false,
+    'the masked editor keeps the Left inside the page')
+  assert.equal(calls.some(call => call.startsWith('setReference')), false,
+    'the Left never wrote anything')
+})

@@ -148,11 +148,27 @@ Command page.
 
 ## Settings Workspace
 
-`/settings` opens one fullscreen lease with three levels (L0 categories, L1
-rows, L2 detail) and one focus state. Width only projects panes (≥108 three,
-76–107 two, <76 one). The category order is `Models, Account, Appearance,
-Display, Plugins, Other settings`; `/settings` still lands on `Appearance`.
+`/settings` opens one fullscreen lease with ONE navigation focus state. The
+category rail is the selection owner; the right column is the content. Width
+only projects panes (≥108 three, 76–107 two, <76 one). The category order is
+`About, Models, Account, Appearance, Display, Plugins, Other settings`;
+`/settings` lands on `About`.
 
+- `About` is the default home: a read-only projection of the brand and the two
+  package versions (the bundle's own version and the installed DSH version as
+  two independent facts; an unreadable DSH version reads `Unknown`). It shares
+  the Welcome card's whale pattern and brand gradient, and it never creates a
+  session, reads a configuration authority or writes anything.
+- `Models` and `Account` are DIRECT content pages in the SAME lease (not
+  fabricated Settings rows and not a second alt-screen owner). Selecting either
+  on the rail paints the real page in the right column at once, while the
+  keyboard stays on the rail; `Enter`/`Right` then hands the keyboard to that
+  page and runs no page action by itself. `Esc`/`Backspace`/`Left` returns the
+  keyboard to the rail and keeps the page instance, its view, its draft and its
+  watch; only a real category change or a real close disposes it. Narrow paints
+  one page with an explicit `Esc`/Back path.
+- The four configuration categories keep their three-level browse (L0
+  categories, L1 rows, L2 detail) and their existing writers.
 - Exactly two configuration rows are writable: the configured theme and the
   transcript display setting. Browse/copy never write.
 - An L2 choice is transient; only an explicit Confirm commits one field through
@@ -163,10 +179,6 @@ Display, Plugins, Other settings`; `/settings` still lands on `Appearance`.
 - Theme auto is fenced on the runtime selection intent.
 - `Plugins` is a direct page entry inside the same lease (see Plugin Manager);
   the legacy complete editor stays reachable through `Other settings`.
-- `Models` and `Account` are DIRECT content pages in the SAME lease (not
-  fabricated Settings rows and not a second alt-screen owner). Wide/medium keep
-  the category rail; narrow paints one page with an explicit `Esc`/Back path.
-  The category rail preserves the current page identity on return.
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 

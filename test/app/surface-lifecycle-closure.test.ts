@@ -1334,6 +1334,10 @@ const settingsScreenOpen = (app: TuiApp): boolean =>
 
 /** The minimal readonly projection the lifecycle cases lease the workspace
  *  with (the real `/settings` builder is exercised by its own suite). */
+/** The About page's two version facts. A lease-lifecycle case never
+ *  asserts on their VALUE; the workspace only requires that they exist. */
+const ABOUT_VERSION_FACTS = { tui: '0.0.0-test', dsh: '0.0.0-test' }
+
 function settingsWorkspaceSource(): SettingsWorkspaceSource {
   return {
     readSnapshot: () => ({
@@ -1352,7 +1356,7 @@ function settingsWorkspaceSource(): SettingsWorkspaceSource {
 
 test('a Question preempts the Settings workspace; a blocking owner refuses a new lease and the workspace never resurrects', async () => {
   const { vt, app } = startApp()
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true, 'the Settings panel owns the physical keyboard')
 
@@ -1364,7 +1368,7 @@ test('a Question preempts the Settings workspace; a blocking owner refuses a new
 
   // A new lease while the blocking owner owns the surface is refused outright.
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /blocking modal owns the surface/,
   )
 
@@ -1388,7 +1392,7 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
 
   // Settings refuses while the Job owns the surface.
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /workspace screen is already leased/,
   )
   vt.sendInput('\x1b') // close the Job workspace
@@ -1398,13 +1402,14 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
   let closes = 0
   const handle = app.openSettingsWorkspace(settingsWorkspaceSource(), {
     onOpenLegacy: () => {},
+    aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
   // A second Settings lease and a Job lease are both refused while it owns the screen.
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /workspace screen is already leased/,
   )
   assert.throws(
@@ -1432,6 +1437,7 @@ test('TuiApp.dispose releases a leased Settings workspace exactly once', async (
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
     onOpenLegacy: () => {},
+    aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
   await vt.waitForRender()
@@ -1449,20 +1455,23 @@ test('a legacy handoff that loses the surface to a NEWER workspace never mounts 
   let innerOpened = false
   const outer = app.openSettingsWorkspace(settingsWorkspaceSource(), {
     onOpenLegacy: () => { legacyOpens += 1 },
+    aboutVersionFacts: ABOUT_VERSION_FACTS,
     // A synchronous callback during the close leases a NEWER workspace: the
     // stale handoff must then refuse instead of stacking the legacy editor on
     // the new screen.
     onClose: () => {
-      app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+      app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
       innerOpened = true
     },
   })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
-  // Narrow (80x24): categories -> Other settings -> rows -> activate the row.
-  vt.sendInput('\x1b[B'); await vt.waitForRender()
-  vt.sendInput('\x1b[B'); await vt.waitForRender()
-  vt.sendInput('\x1b[B'); await vt.waitForRender()
+  // Wide (80x24): the About home -> Other settings -> rows -> activate the row.
+  // The rail order is About, Models, Account, Appearance, Display, Plugins,
+  // Other settings: six Down presses reach the legacy launcher row.
+  for (let step = 0; step < 6; step += 1) {
+    vt.sendInput('\x1b[B'); await vt.waitForRender()
+  }
   vt.sendInput('\r'); await vt.waitForRender()
   vt.sendInput('\r'); await vt.waitForRender()
   assert.equal(innerOpened, true, 'the close callback really leased a newer workspace')
@@ -1480,6 +1489,7 @@ test('the session hydration boundary retires a leased Settings workspace exactly
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
     onOpenLegacy: () => {},
+    aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
   await vt.waitForRender()
@@ -1495,7 +1505,7 @@ test('the session hydration boundary retires a leased Settings workspace exactly
 
 test('an Approval and a Save Location both pre-empt the Settings workspace, which then refuses a new lease', async () => {
   const { vt, app } = startApp()
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
 
@@ -1503,7 +1513,7 @@ test('an Approval and a Save Location both pre-empt the Settings workspace, whic
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), false, 'the approval pre-empts the workspace')
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /blocking modal owns the surface/,
   )
   vt.sendInput('\x1b')
@@ -1511,7 +1521,7 @@ test('an Approval and a Save Location both pre-empt the Settings workspace, whic
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), false, 'the workspace must not resurrect after the approval')
 
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   const save = app.askSaveLocation(
     { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
@@ -1531,6 +1541,7 @@ test('stop() releases a leased Settings workspace once and restarts with no ghos
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
     onOpenLegacy: () => {},
+    aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
   await vt.waitForRender()
@@ -1553,7 +1564,7 @@ test('a Settings round trip preserves an open Task Browser overlay (same instanc
   harness.tasks.openTasksBrowser('full')
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1)
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
   assert.ok(!view(vt).includes('job job-a'), 'the workspace HIDES the browser rows while it owns the screen')
@@ -1572,6 +1583,7 @@ test('a legacy handoff never crosses a blocking owner started by its own close',
   let question: Promise<unknown> | undefined
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
     onOpenLegacy: () => { legacyOpens += 1 },
+    aboutVersionFacts: ABOUT_VERSION_FACTS,
     // The close callback starts a REAL blocking owner instead of a workspace.
     onClose: () => {
       question = app.askQuestions([{ id: 'q1', question: 'still there?', options: [{ label: 'yes' }] }])
@@ -1581,10 +1593,12 @@ test('a legacy handoff never crosses a blocking owner started by its own close',
     },
   })
   await vt.waitForRender()
-  // Narrow (80x24): categories -> Other settings -> rows -> activate the row.
-  vt.sendInput('\x1b[B'); await vt.waitForRender()
-  vt.sendInput('\x1b[B'); await vt.waitForRender()
-  vt.sendInput('\x1b[B'); await vt.waitForRender()
+  // Wide (80x24): the About home -> Other settings -> rows -> activate the row.
+  // The rail order is About, Models, Account, Appearance, Display, Plugins,
+  // Other settings: six Down presses reach the legacy launcher row.
+  for (let step = 0; step < 6; step += 1) {
+    vt.sendInput('\x1b[B'); await vt.waitForRender()
+  }
   vt.sendInput('\r'); await vt.waitForRender()
   vt.sendInput('\r'); await vt.waitForRender()
   assert.ok(question !== undefined, 'the close callback really started a blocking owner')
@@ -1616,7 +1630,7 @@ test('closing a workspace hands the terminal over without flushing its own docum
 
   // ── Settings: Esc is the close path the user takes ────────────────────────
   capturing = true
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.ok(captured().includes('Settings'), 'control: the live Settings document is what writes the mark')
   writes.length = 0
@@ -1693,7 +1707,7 @@ test('a workspace open unwind never flushes the partially started screen documen
     writes.length = 0
     capturing = true
     assert.throws(
-      () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} }),
+      () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
       /post-start open failure/,
     )
     await vt.waitForRender()

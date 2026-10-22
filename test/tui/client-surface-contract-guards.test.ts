@@ -495,6 +495,54 @@ test('an absent `model` projection fact is passed THROUGH, never rendered as a b
     'the card accepts an absent model fact')
 })
 
+/* ── the shared whale: ONE source for the Welcome card and the About page ── */
+
+test('the Welcome card and the Settings About page share ONE whale source', () => {
+  const whale = code('tui/components/welcome-whale.ts')
+  const card = code('tui/components/welcome-card.ts')
+  const settings = code('tui/panels/settings-workspace-panel.ts')
+
+  // The whale PATTERN and its brand ramp live in exactly ONE module.
+  assert.ok(whale.includes('WELCOME_WHALES'), 'the shared module owns the whale variants')
+  assert.ok(whale.includes('WELCOME_WHALE_COLORS'), 'the shared module owns the brand ramp')
+  assert.equal(card.includes('WELCOME_WHALES'), false,
+    'the Welcome card never keeps a second copy of the whale variants')
+  assert.equal(card.includes('WELCOME_WHALE_COLORS'), false,
+    'the Welcome card never keeps a second copy of the brand ramp')
+  assert.equal(settings.includes('WELCOME_WHALES'), false,
+    'the Settings workspace never keeps a second copy of the whale variants')
+  assert.equal(settings.includes('WELCOME_WHALE_COLORS'), false,
+    'the Settings workspace never keeps a second copy of the brand ramp')
+
+  // Both surfaces paint through the SAME renderer and the SAME width.
+  assert.ok(card.includes('renderWelcomeWhaleLines('), 'the Welcome card paints the shared whale')
+  assert.ok(settings.includes('renderWelcomeWhaleLines('), 'the About page paints the shared whale')
+  assert.ok(card.includes('WELCOME_WHALE_WIDTH'), 'the Welcome card measures the shared whale')
+  assert.ok(settings.includes('WELCOME_WHALE_WIDTH'), 'the About page measures the shared whale')
+
+  // The variant is picked ONCE per lifetime by the shared helper.
+  assert.ok(whale.includes('pickWelcomeWhaleVariant'), 'the shared module owns the variant pick')
+  assert.ok(card.includes('pickWelcomeWhaleVariant()'), 'the Welcome card picks through the shared helper')
+  assert.ok(settings.includes('pickWelcomeWhaleVariant()'), 'the About page picks through the shared helper')
+})
+
+test('the About page reads the TUI and the DSH version as TWO independent facts', () => {
+  const settings = code('tui/panels/settings-workspace-panel.ts')
+  const command = code('tui/commands/settings.ts')
+  // The panel NEVER reads a version itself: the command hands it the facts.
+  assert.equal(settings.includes('packageVersion'), false,
+    'the panel never reads the combined version helper')
+  assert.equal(settings.includes('bundleVersion'), false,
+    'the panel never reads the bundle version itself')
+  assert.ok(command.includes('bundleVersion()'), 'the command reads the bundle version')
+  assert.ok(command.includes('dshVersion()'), 'the command reads the installed DSH version')
+  // The combined helper prefers the DSH version: it may never stand in for the
+  // TUI version on the About page.
+  assert.ok(settings.includes('facts.tui'), 'the About page shows the TUI version')
+  assert.ok(settings.includes('facts.dsh'), 'the About page shows the DSH version')
+  assert.ok(settings.includes("'Unknown'"), 'an unreadable DSH version reads as Unknown')
+})
+
 
 /* ── PR5 §1C-7 (whole-PR F4): the sessionless route consumes the classifier ── */
 

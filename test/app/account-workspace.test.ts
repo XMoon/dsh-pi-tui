@@ -447,3 +447,49 @@ test('refresh is refused while an Account operation is busy (RFL-012)', async ()
   assert.match(text(page), /waiting-browser/u)
   assert.equal(page.pendingMutation(), false)
 })
+
+// ── Phase 3C / C2-A: the Left the Settings root may claim ─────────────────
+//
+// The Settings root may take a bare Left from the page ROOT back to the
+// category rail. The page answers ONE question — "may the root claim this
+// Left?" — and never reads the Host or changes business state to answer it.
+
+test('a plain Account page may yield the focus to the Settings category rail', async () => {
+  const { page } = open()
+  await flush()
+  assert.equal(page.canYieldFocusToNavigation(), true,
+    'a plain Account page yields a bare Left to the root')
+})
+
+test('the sign-out confirmation keeps the Left inside the Account page', async () => {
+  const { page, state } = open({ view: 'signout' })
+  state.view = stored()
+  await flush()
+  assert.match(text(page), /Sign out confirmation/u)
+  assert.equal(page.canYieldFocusToNavigation(), false,
+    'the sign-out confirmation keeps the Left: it must not be bypassed')
+})
+
+test('a pending Account operation keeps the Left inside the Account page', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  let release: (() => void) | undefined
+  const source = makeSource(state)
+  source.signOut = () => new Promise<AccountView>(resolve => {
+    state.calls.push('signOut')
+    release = () => { state.view = signedOut(); resolve(state.view) }
+  })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
+  page.setBodyHeight(26)
+  await flush()
+  text(page)
+  page.handleInput('\r') // confirm the sign out
+  await flush()
+  assert.equal(page.pendingMutation(), true, 'the sign-out is in flight')
+  assert.equal(page.canYieldFocusToNavigation(), false,
+    'a pending Host operation keeps the Left inside the page')
+  release?.()
+  await flush()
+  assert.equal(page.pendingMutation(), false, 'the Host settled')
+  assert.equal(page.canYieldFocusToNavigation(), true,
+    'a settled page yields the bare Left to the root again')
+})

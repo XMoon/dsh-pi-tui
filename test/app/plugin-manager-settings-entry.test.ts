@@ -19,6 +19,8 @@ import type { TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -97,13 +99,13 @@ function setup(options: { columns?: number; rows?: number } = {}): {
       pageDone = done
       return page
     },
-    config: {
+    config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
       subagentModelSelection: { available: () => false },
       web: { available: () => false },
       credentials: { available: () => false },
-    },
+    }),
     catalog: { models: { available: () => false } },
   }
   const runner = new Proxy(base, {
@@ -125,11 +127,12 @@ const release = (vt: VirtualTerminal, row: number, col: number): void => {
   vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
 }
 
-/** Move the L0 selection from Appearance to Plugins (two categories down). */
+/** Walk the Settings category rail to one category with the real keys. */
+const selectCategory = selectSettingsCategory
+
+/** Move the L0 selection to the Plugins category. */
 async function selectPlugins(vt: VirtualTerminal): Promise<void> {
-  vt.sendInput('\x1b[B')
-  vt.sendInput('\x1b[B')
-  await vt.waitForRender()
+  await selectCategory(vt, 'Plugins')
 }
 
 test('opening /settings alone never builds the inline Plugin page', async () => {
@@ -288,6 +291,7 @@ test('every other category keeps its real Rows list and level navigation', async
   const { invoke, counts, vt } = setup({ columns: 120, rows: 40 })
   await invoke('settings')
   await vt.waitForRender()
+  await selectCategory(vt, 'Appearance')
   const view = vt.getViewport()
   assert.ok(view.some(line => line.includes('Rows (2)')), `Appearance keeps its two real rows:\n${plain(view)}`)
   assert.ok(!plain(view).includes('Open Plugin Manager'), 'the Plugins affordance never leaks into another category')

@@ -2340,6 +2340,20 @@ export class ModelsWorkspacePage implements Component {
     return this.auth?.phase === 'starting' || this.auth?.phase === 'running'
   }
 
+  /**
+   * Whether a bare Left may yield from the page ROOT to the Settings
+   * categories. It is a pure query: it reads no Host fact and changes no
+   * business state. A provider detail, a draft, a picker, a Question form, a
+   * native authorization or a pending write keeps the Left for the page.
+   */
+  canYieldFocusToNavigation(): boolean {
+    return this.view.kind === 'list'
+      && this.question === undefined
+      && this.modelPicker === undefined
+      && this.picker === undefined
+      && !this.pendingMutation()
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true

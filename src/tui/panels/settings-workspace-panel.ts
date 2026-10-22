@@ -34,18 +34,31 @@ import {
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
+import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH } from '../components/welcome-whale.ts'
 import type { ModelsInitialView, ModelsPageExit, ModelsWorkspacePage } from './models-workspace-page.ts'
 import type { AccountInitialView, AccountWorkspacePage } from './account-workspace-page.ts'
 
-/** The frozen Settings categories, in the visible order: Models and Account
- * are direct content pages (like Plugins); the four configuration categories
- * keep their existing behavior. */
-export type SettingsWorkspaceCategoryId = 'models' | 'account' | 'appearance' | 'display' | 'plugins' | 'other'
+/** The frozen Settings categories, in the visible order. `About` is the
+ * default home of the workspace; `Models` and `Account` are direct content
+ * pages (like Plugins); the four configuration categories keep their existing
+ * behavior. */
+export type SettingsWorkspaceCategoryId =
+  | 'about' | 'models' | 'account' | 'appearance' | 'display' | 'plugins' | 'other'
 
-/** The navigation level: `categories` (L0) → `rows` (L1) → `detail` (L2).
+/** The navigation level of the LEGACY configuration categories: `categories`
+ *  (L0) → `rows` (L1) → `detail` (L2).
  *  This is the SAME state in every width — the layout only decides which
  *  panes of the current level are visible. */
 export type SettingsWorkspacePage = 'categories' | 'rows' | 'detail'
+
+/** The ONE navigation focus state of the workspace. The three legacy levels
+ * plus `content`: the direct page (About/Models/Account) that the category
+ * rail previews and hands the keyboard to. */
+export type SettingsWorkspaceFocus = SettingsWorkspacePage | 'content'
+
+/** The categories whose RIGHT column is a real page instead of the legacy
+ *  L0/L1/L2 configuration panes. */
+export type SettingsWorkspaceDirectCategoryId = 'about' | 'models' | 'account'
 
 /** The stable identity of one readonly pilot row. */
 export type SettingsWorkspaceRowId =
@@ -184,6 +197,16 @@ export interface SettingsWorkspaceSource {
 /** The client-local capabilities the panel consumes. */
 export interface SettingsWorkspacePanelIntents {
   /**
+   * The two version facts the `About` page shows. They are read ONCE per
+   * workspace open on the Client side: `tui` is the bundle's own version and
+   * `dsh` the installed Harness version (undefined = unreadable). Neither is
+   * a Host fact and neither is derived from the other.
+   */
+  readonly aboutVersionFacts: {
+    readonly tui: string
+    readonly dsh: string | undefined
+  }
+  /**
    * The Plugins category is a DIRECT page entry, not an empty Rows level: the
    * app owner builds the ONE PluginManagerWorkspacePanel lazily and returns it.
    * `done` is the page's normal close path (it returns to Settings); an external
@@ -299,6 +322,11 @@ export interface SettingsAuthPage extends Component {
    *  must not dispose it from USER navigation (category rail / Back / deep
    *  link). Blocking-owner teardown still bypasses this guard. */
   pendingMutation?(): boolean
+  /** Whether a bare Left may yield from the page ROOT to the Settings
+   *  categories. It never admits an exit during a child modal, an auth flow
+   *  or a pending mutation, and it never reads the Host or changes business
+   *  state: it only answers "may the root claim this Left?". */
+  canYieldFocusToNavigation?(): boolean
   invalidate(): void
   dispose(): void
 }
@@ -327,8 +355,9 @@ interface HitTarget {
 interface DetailButton {
   readonly verb: 'change' | 'retry' | 'copy' | 'legacy' | 'confirm' | 'cancel'
   readonly text: string
-  /** The candidate a confirm/cancel acts on (undefined for the other verbs). */
-  readonly value?: string
+  /** The identity the painted button acts on: the candidate it commits, or the
+   *  selected row it belongs to. It is the painted hit target's id. */
+  readonly id: string
 }
 
 interface DetailRegionProjection {
@@ -351,15 +380,47 @@ interface DetailProjection {
   readonly confirmCandidateVisible: boolean
 }
 
-const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = ['models', 'account', 'appearance', 'display', 'plugins', 'other']
+const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = [
+  'about', 'models', 'account', 'appearance', 'display', 'plugins', 'other',
+]
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
+  about: 'About',
   models: 'Models',
   account: 'Account',
   appearance: 'Appearance',
   display: 'Display',
   plugins: 'Plugins',
   other: 'Other settings',
+}
+
+/** The categories whose right column is a REAL page (About, Models, Account)
+ * instead of the legacy L0/L1/L2 configuration panes. */
+const DIRECT_CATEGORIES: readonly SettingsWorkspaceDirectCategoryId[] = ['about', 'models', 'account']
+
+/** Whether one category is a direct content page. */
+function isDirectCategory(category: SettingsWorkspaceCategoryId): category is SettingsWorkspaceDirectCategoryId {
+  return (DIRECT_CATEGORIES as readonly SettingsWorkspaceCategoryId[]).includes(category)
+}
+
+/** The typed guard for a painted category id (a hit target never casts). */
+function isCategoryId(id: string): id is SettingsWorkspaceCategoryId {
+  return (CATEGORY_ORDER as readonly string[]).includes(id)
+}
+
+/** The typed guard for a painted legacy pane id (a hit target never casts). */
+function isWorkspacePage(id: string): id is SettingsWorkspacePage {
+  return id === 'categories' || id === 'rows' || id === 'detail'
+}
+
+/** The typed guard for a painted row id (a hit target never casts). */
+function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
+  return id === 'theme'
+    || id === 'icon-style'
+    || id === 'display-preset'
+    || id === 'thinking'
+    || id === 'legacy-settings'
+    || id === 'web-settings'
 }
 
 const WIDE_CATEGORY_WIDTH = 22
@@ -400,8 +461,19 @@ function layoutForWidth(width: number): SettingsLayout {
  * body>=2 after it) and freshness/scope metadata (rows>=8, body>=3 after it).
  * The decorative rules are LAST: they are granted only when the body would still
  * keep three real rows, so decoration never crowds out readable content.
+ *
+ * `rules` is the number of decorative boundaries the projection spends: the
+ * legacy three-level projection draws a rule above AND below its body, while
+ * the direct projection draws only the upper one — its lower boundary is the
+ * content page's own action bar, which must stay the physical last row.
  */
-function planSettingsChrome(width: number, rows: number, noticeLive: boolean, choosing = false): SettingsChromePlan {
+function planSettingsChrome(
+  width: number,
+  rows: number,
+  noticeLive: boolean,
+  choosing = false,
+  rules = 2,
+): SettingsChromePlan {
   const safeRows = Math.max(1, Math.floor(rows))
   const headerRows = safeRows >= 2 ? 1 : 0
   const actionRows = 1
@@ -411,7 +483,7 @@ function planSettingsChrome(width: number, rows: number, noticeLive: boolean, ch
   const noticeRows = safeRows >= 6 && noticeLive && base - 1 >= 2 ? 1 : 0
   const metaRows = !choosing && safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
   const bodyWithoutRules = base - noticeRows - metaRows
-  const ruleRows = !choosing && bodyWithoutRules >= 5 ? 2 : 0
+  const ruleRows = !choosing && bodyWithoutRules >= 5 ? rules : 0
   const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
   return {
     width,
@@ -506,14 +578,26 @@ function freshnessText(
  */
 export class SettingsWorkspacePanel implements Component {
   private snapshot: SettingsWorkspaceSnapshot
-  private categoryId: SettingsWorkspaceCategoryId = 'appearance'
-  private rowId: SettingsWorkspaceRowId
-  /** The ONE navigation level, shared by every width; a new open always starts
-   *  on L0 so the first Enter/Esc means the same thing at any terminal size. */
-  private focus: SettingsWorkspacePage = 'categories'
+  /** The ONE selected category. `About` is the default home of the workspace. */
+  private categoryId: SettingsWorkspaceCategoryId = 'about'
+  /** The selected row of the LEGACY configuration categories; a direct page
+   *  (About/Models/Account) has no row at all. */
+  private rowId: SettingsWorkspaceRowId | undefined
+  /** The ONE navigation focus state: the three legacy levels plus the direct
+   *  page content. A new open starts on the category rail (or on the About
+   *  content in a narrow terminal, which has no room for a rail). */
+  private focus: SettingsWorkspaceFocus = 'categories'
   private categoryOffset = 0
   private rowOffset = 0
   private detailOffset = 0
+  /** The About page's own scroll offset (presentation only: it never carries
+   *  business state and it survives a switch away from About). */
+  private aboutOffset = 0
+  /** The About page's scrollable extent at the last paint. */
+  private aboutScrollExtent = 0
+  /** The whale variant of THIS open's About page: picked once per open, like
+   *  the Welcome card picks one per process. */
+  private readonly aboutWhaleVariant = pickWelcomeWhaleVariant()
   private paintedTargets: readonly HitTarget[] = []
   private paintedPanes: PaneBoxes = {}
   private paintedViewport = 1
@@ -524,7 +608,7 @@ export class SettingsWorkspacePanel implements Component {
   private pressedGesture: {
     readonly target: HitTarget
     readonly revision: number
-    readonly focus: SettingsWorkspacePage
+    readonly focus: SettingsWorkspaceFocus
     readonly categoryId: SettingsWorkspaceCategoryId
     /** The LIVE terminal geometry at press time. A resize is a gesture boundary
      *  by itself: the repaint that bumps {@link revision} is only SCHEDULED by
@@ -579,12 +663,14 @@ export class SettingsWorkspacePanel implements Component {
   /** The active Models/Account direct page (at most one). */
   private authPage: SettingsAuthPage | undefined
   private authPageCategory: 'models' | 'account' | undefined
-  /** The last painted page area (panel coordinates) for mouse translation. */
-  private paintedAuthBox: { readonly x: number; readonly top: number; readonly width: number; readonly rows: number } | undefined
-  /** The root-level identity of one press inside the auth page: a resize or a
-   *  root state change between press and release refuses the gesture even when
-   *  the page has not repainted yet. */
-  private authPressed: {
+  /** The last painted content area (panel coordinates) for mouse translation.
+   *  It covers the About page and the direct pages alike: the root owns ONE
+   *  content box and ONE press map for the whole right column. */
+  private paintedContentBox: { readonly x: number; readonly top: number; readonly width: number; readonly rows: number } | undefined
+  /** The root-level identity of one press inside the content area: a resize or
+   *  a root state change between press and release refuses the gesture even
+   *  when the page has not repainted yet. */
+  private contentPressed: {
     readonly x: number
     readonly y: number
     readonly columns: number
@@ -619,46 +705,57 @@ export class SettingsWorkspacePanel implements Component {
       this.categoryId = options.initialCategory
       this.focus = 'categories'
     }
-    if (options?.initialModelsView !== undefined) this.openModelsPage(options.initialModelsView)
-    else if (options?.initialAccountView !== undefined) this.openAccountPage(options.initialAccountView)
+    if (options?.initialModelsView !== undefined) this.mountModelsPage(options.initialModelsView)
+    else if (options?.initialAccountView !== undefined) this.mountAccountPage(options.initialAccountView)
+    else if (options?.initialRowId === undefined && options?.initialCategory === undefined) {
+      // The About default: a narrow terminal has no room for a rail AND a
+      // content column, so the About content owns the first frame there.
+      if (layoutForWidth(this.intents.columns()) === 'narrow') this.focus = 'content'
+    }
+    // A deeplink owns the CONTENT focus: its page is the whole answer.
+    if (options?.initialModelsView !== undefined || options?.initialAccountView !== undefined) {
+      this.focus = 'content'
+    }
   }
 
-  /** Open the Models direct page (the Settings category rail stays the root). */
-  private openModelsPage(initial: ModelsInitialView): void {
-    if (this.authPageCategory === 'models') {
-      this.intents.requestRender()
-      return
-    }
-    if (!this.closeAuthPageForNavigation()) return
-    const page = this.intents.createModelsPage?.(initial, () => this.openAccountPage({ view: 'page' }))
+  /**
+   * Mount the Models direct page. The page instance is the OWNER of its view,
+   * draft and watch; the root only mounts it once and disposes it when the
+   * category really changes.
+   */
+  private mountModelsPage(initial: ModelsInitialView): void {
+    if (this.authPageCategory === 'models') return
+    if (this.authPageCategory !== undefined) this.closeAuthPage()
+    const page = this.intents.createModelsPage?.(initial, () => this.switchToAccountContent())
     if (page === undefined) return
     this.authPage = page
     this.authPageCategory = 'models'
-    this.categoryId = 'models'
-    this.focus = 'categories'
-    this.pressedGesture = undefined
-    this.authPressed = undefined
-    this.bumpRevision()
-    this.intents.requestRender()
   }
 
-  /** Open the Account direct page. */
-  private openAccountPage(initial: AccountInitialView): void {
-    if (this.authPageCategory === 'account') {
-      this.intents.requestRender()
-      return
-    }
-    if (!this.closeAuthPageForNavigation()) return
+  /** Mount the Account direct page. */
+  private mountAccountPage(initial: AccountInitialView): void {
+    if (this.authPageCategory === 'account') return
+    if (this.authPageCategory !== undefined) this.closeAuthPage()
     const page = this.intents.createAccountPage?.(initial)
     if (page === undefined) return
     this.authPage = page
     this.authPageCategory = 'account'
-    this.categoryId = 'account'
-    this.focus = 'categories'
-    this.pressedGesture = undefined
-    this.authPressed = undefined
-    this.bumpRevision()
-    this.intents.requestRender()
+  }
+
+  /**
+   * The Models page's account row asks the root to switch to the Account
+   * content. The switch is IDEMPOTENT: a second request for the same category
+   * never builds a second page and never starts a second Host watch.
+   */
+  private switchToAccountContent(): void {
+    if (this.authPageHasPendingMutation()) return
+    if (this.categoryId === 'account' && this.authPageCategory === 'account') {
+      this.focus = 'content'
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
+    this.selectCategory('account', 'content')
   }
 
   private syncAuthPageBody(): void {
@@ -669,6 +766,7 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.rows(),
       this.intents.notice() !== undefined,
       false,
+      1,
     )
     page.setBodyHeight(Math.max(1, plan.bodyRows + plan.actionRows))
   }
@@ -689,8 +787,8 @@ export class SettingsWorkspacePanel implements Component {
     const page = this.authPage
     this.authPage = undefined
     this.authPageCategory = undefined
-    this.paintedAuthBox = undefined
-    this.authPressed = undefined
+    this.paintedContentBox = undefined
+    this.contentPressed = undefined
     page?.dispose()
   }
 
@@ -725,14 +823,24 @@ export class SettingsWorkspacePanel implements Component {
     this.lastRenderWidth = width
     this.lastRenderRows = liveRows
     const choosing = this.choiceField() !== undefined
-    const plan = planSettingsChrome(width, liveRows, this.intents.notice() !== undefined, choosing)
+    const direct = this.paintsDirectPage(width)
+    const plan = planSettingsChrome(
+      width,
+      liveRows,
+      this.intents.notice() !== undefined,
+      choosing,
+      direct ? 1 : 2,
+    )
     this.chrome = plan
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
     this.paintedChoiceCopy = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
-    if (this.authPage !== undefined) return this.renderAuthPage(plan)
+    if (direct) return this.renderDirectPage(plan)
+    // The legacy projection paints no content column: the content box and its
+    // press map belong to the direct layout alone.
+    this.paintedContentBox = undefined
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
@@ -751,12 +859,25 @@ export class SettingsWorkspacePanel implements Component {
     return lines.slice(0, plan.rows)
   }
 
-  /** Render the active Models/Account page inside the workspace chrome: the
-   * category rail stays visible on wide/medium; the page owns the rest of the
-   * screen, INCLUDING its own last action-bar row. */
-  private renderAuthPage(plan: SettingsChromePlan): string[] {
-    const page = this.authPage
-    if (page === undefined) return []
+  /**
+   * Whether the current category/level paints the DIRECT layout (the category
+   * rail plus one real content page) instead of the legacy L0/L1/L2 panes.
+   * A narrow terminal keeps the single-column category list: it has no room
+   * for a rail AND a content column, so the list stays the only projection
+   * until the user enters a page.
+   */
+  private paintsDirectPage(width: number): boolean {
+    if (!isDirectCategory(this.categoryId)) return false
+    return !(layoutForWidth(width) === 'narrow' && this.focus === 'categories')
+  }
+
+  /**
+   * Render the direct content page (About, Models, Account) inside the
+   * workspace chrome: the category rail stays visible on wide/medium; the
+   * content owns the rest of the screen, INCLUDING the single physical action
+   * bar on the last row.
+   */
+  private renderDirectPage(plan: SettingsChromePlan): string[] {
     const lines: string[] = []
     const targets: HitTarget[] = []
     if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
@@ -764,44 +885,151 @@ export class SettingsWorkspacePanel implements Component {
     if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0) + plan.noticeRows
-    const pageRows = Math.max(1, plan.bodyRows + plan.actionRows)
     const narrow = plan.layout === 'narrow'
     const categoryWidth = narrow ? 0 : plan.layout === 'wide' ? WIDE_CATEGORY_WIDTH : MEDIUM_CATEGORY_WIDTH
-    const pageX = narrow ? 0 : categoryWidth + COLUMN_GAP
-    const pageWidth = Math.max(1, plan.width - pageX)
-    page.setBodyHeight(pageRows)
-    const pageLines = page.render(pageWidth)
-    const categoryVisible = narrow
-      ? []
-      : CATEGORY_ORDER.slice(0, Math.min(CATEGORY_ORDER.length, pageRows)).map(id => this.categoryLine(id))
-    for (let index = 0; index < categoryVisible.length; index += 1) {
-      const line = fit(categoryVisible[index] ?? '', categoryWidth)
-      lines.push(narrow ? line : `${line}${' '.repeat(COLUMN_GAP)}${fit(pageLines[index] ?? '', pageWidth)}`)
-      targets.push({ kind: 'category', id: CATEGORY_ORDER[index]!, row: bodyTop + index, startCol: 0, endCol: categoryWidth })
-    }
-    if (narrow) {
-      for (const line of pageLines.slice(0, pageRows)) lines.push(fit(line, plan.width))
-    } else if (pageLines.length > categoryVisible.length) {
-      for (let index = categoryVisible.length; index < pageRows; index += 1) {
-        lines.push(`${fit('', categoryWidth)}${' '.repeat(COLUMN_GAP)}${fit(pageLines[index] ?? '', pageWidth)}`)
+    const contentX = narrow ? 0 : categoryWidth + COLUMN_GAP
+    const contentWidth = Math.max(1, plan.width - contentX)
+    const contentRows = Math.max(1, plan.bodyRows + plan.actionRows)
+    const contentColumn = this.renderContentColumn(contentWidth, contentRows)
+    const visible = narrow ? [] : this.visibleCategories(contentRows)
+    for (let index = 0; index < contentRows; index += 1) {
+      const content = fit(contentColumn[index] ?? '', contentWidth)
+      if (narrow) {
+        lines.push(content)
+        continue
+      }
+      const id = visible[index]
+      const rail = fit(id === undefined ? '' : this.categoryLine(id), categoryWidth)
+      lines.push(`${rail}${' '.repeat(COLUMN_GAP)}${content}`)
+      if (id !== undefined) {
+        targets.push({ kind: 'category', id, row: bodyTop + index, startCol: 0, endCol: categoryWidth })
       }
     }
-    // Pad the category rail to the page height (the page already paints its
-    // own action bar, so the root paints no second bar).
-    const boxedRows = Math.min(pageRows, pageLines.length)
-    this.paintedAuthBox = { x: pageX, top: bodyTop, width: pageWidth, rows: boxedRows }
+    this.paintedContentBox = { x: contentX, top: bodyTop, width: contentWidth, rows: contentRows }
     this.paintedPanes = {
       categories: narrow ? undefined : {
         x: 0,
         width: categoryWidth,
         contentTop: bodyTop,
-        contentRows: Math.min(CATEGORY_ORDER.length, pageRows),
-        maxOffset: Math.max(0, CATEGORY_ORDER.length - pageRows),
+        contentRows: Math.min(CATEGORY_ORDER.length, contentRows),
+        maxOffset: Math.max(0, CATEGORY_ORDER.length - contentRows),
       },
     }
     this.paintedTargets = targets
     this.paintedRevision = this.revision
     return lines.slice(0, plan.rows)
+  }
+
+  /**
+   * The content column of the direct layout. The real page owns its own lines
+   * (its last line is its action bar); the About page is a root-owned
+   * read-only projection with the root's own action bar. The single physical
+   * action bar is ALWAYS the last row: the navigation focus replaces the
+   * page's hint line, the content focus keeps it.
+   */
+  private renderContentColumn(width: number, rows: number): string[] {
+    const page = this.authPage
+    if (page !== undefined) {
+      page.setBodyHeight(rows)
+      const column = page.render(width).slice(0, rows)
+      while (column.length < rows) column.push(fit('', width))
+      if (this.focus === 'categories') {
+        column[rows - 1] = fit(this.renderNavigationActionBar(width), width)
+      }
+      return column
+    }
+    const aboutRows = Math.max(0, rows - 1)
+    // The About projection belongs to the About category alone: a direct page
+    // that is not mounted paints no content of its own.
+    const about = this.categoryId === 'about' && aboutRows > 0
+      ? this.renderAboutContent(width, aboutRows)
+      : []
+    const bar = this.focus === 'categories'
+      ? this.renderNavigationActionBar(width)
+      : this.renderAboutActionBar(width)
+    const padded = [...about]
+    while (padded.length < aboutRows) padded.push(fit('', width))
+    return [...padded.slice(0, aboutRows), fit(bar, width)]
+  }
+
+  /**
+   * The category rail's visible window. The rail scrolls with the selection
+   * (and with the wheel), so a SHORT terminal can still reach the last
+   * category and hit the RIGHT id. The rail and the legacy categories pane
+   * share ONE offset and ONE rebase rule.
+   */
+  private visibleCategories(viewport: number): readonly SettingsWorkspaceCategoryId[] {
+    const selected = CATEGORY_ORDER.indexOf(this.categoryId)
+    if (selected !== this.lastCategoryIndex || viewport !== this.lastCategoryViewport) {
+      this.categoryOffset = rebaseOffset(this.categoryOffset, selected, CATEGORY_ORDER.length, viewport)
+      this.lastCategoryIndex = selected
+      this.lastCategoryViewport = viewport
+    } else {
+      this.categoryOffset = clampOffset(this.categoryOffset, CATEGORY_ORDER.length, viewport)
+    }
+    return CATEGORY_ORDER.slice(this.categoryOffset, this.categoryOffset + viewport)
+  }
+
+  /**
+   * The About projection: the SHARED whale (the Welcome card's own pattern
+   * and brand gradient) plus the two package versions. It is a read-only
+   * projection: no row, no field, no write, and no session.
+   */
+  private renderAboutContent(width: number, rows: number): string[] {
+    const facts = this.intents.aboutVersionFacts
+    const lines: string[] = []
+    if (rows >= 9 && width >= WELCOME_WHALE_WIDTH) {
+      lines.push(...renderWelcomeWhaleLines(this.aboutWhaleVariant))
+      lines.push('')
+      lines.push(color.textStrong('dsh-pi-tui'))
+    } else {
+      lines.push(color.textStrong('🐋 dsh-pi-tui'))
+    }
+    lines.push(`${color.textDim('TUI  ')}${color.text(sanitizedPhysicalLine(facts.tui))}`)
+    lines.push(`${color.textDim('DSH  ')}${color.text(sanitizedPhysicalLine(facts.dsh ?? 'Unknown'))}`)
+    this.aboutScrollExtent = Math.max(0, lines.length - rows)
+    const offset = clampOffset(this.aboutOffset, lines.length, rows)
+    this.aboutOffset = offset
+    return lines.slice(offset, offset + rows)
+  }
+
+  /**
+   * The navigation action bar: the category rail owns the keyboard, so the
+   * bar advertises the rail's own keys — never the content page's. Below the
+   * body floor every navigation target is invisible, so only the Esc
+   * semantics survive.
+   */
+  private renderNavigationActionBar(width: number): string {
+    if (this.bodyFloor() < 1) return color.textMuted('Esc close')
+    return color.textMuted(renderActionBarRow(this.navigationActionBarSegments(), width))
+  }
+
+  /** The About page's own action bar: it scrolls and it returns to the
+   *  category rail — it never closes the workspace. */
+  private renderAboutActionBar(width: number): string {
+    if (this.bodyFloor() < 1) return color.textMuted('Esc back')
+    return color.textMuted(renderActionBarRow([
+      ...(this.aboutScrollExtent > 0 ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
+      { text: 'Esc back', priority: 8 },
+    ], width))
+  }
+
+  /** The category rail's own hints. A direct category hands the keyboard to
+   *  its content page; a legacy category steps one level deeper. */
+  private navigationActionBarSegments(): ActionBarSegment[] {
+    if (isDirectCategory(this.categoryId)) {
+      return [
+        { text: 'Up/Down navigate', priority: 4 },
+        { text: 'Enter/Right focus', priority: 6 },
+        { text: 'Esc close', priority: 8 },
+      ]
+    }
+    return [
+      { text: 'Up/Down select', priority: 4 },
+      { text: 'Right open', priority: 6 },
+      { text: 'Enter open', priority: 5 },
+      { text: 'Esc close', priority: 8 },
+    ]
   }
 
   invalidate(): void {
@@ -811,14 +1039,16 @@ export class SettingsWorkspacePanel implements Component {
 
   /** The ONE level breadcrumb, identical in every layout: `Categories` →
    *  `<Category> · Rows` → `<Category> · <Row label>` (one ` · ` join for every
-   *  trail segment, design language §4.2). It paints no hit target: the header is
-   *  no longer a category focus owner or switch. */
+   *  trail segment, design language §4.2). It names the owner that currently
+   *  receives the keyboard: the rail, the direct content page or a legacy
+   *  level. It paints no hit target: the header is no longer a category focus
+   *  owner or switch. */
   private renderHeader(plan: SettingsChromePlan): string[] {
     const row = this.selectedRow()
-    const breadcrumb = this.authPageCategory !== undefined
-      ? CATEGORY_LABELS[this.authPageCategory]
-      : this.focus === 'categories'
-        ? 'Categories'
+    const breadcrumb = this.focus === 'categories'
+      ? 'Categories'
+      : this.focus === 'content'
+        ? CATEGORY_LABELS[this.categoryId]
         : this.focus === 'rows'
           ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
           : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
@@ -843,11 +1073,13 @@ export class SettingsWorkspacePanel implements Component {
    *  unavailable one is `error` (design language §3.2 corrections). */
   private renderMetadata(plan: SettingsChromePlan): string {
     const row = this.authPage !== undefined ? undefined : this.selectedRow()
-    const scope = this.authPageCategory === 'models'
-      ? 'Host provider & credential configuration'
-      : this.authPageCategory === 'account'
-        ? 'DeepSeek Account · Host'
-        : row?.scope ?? 'TUI preferences'
+    const scope = this.categoryId === 'about'
+      ? 'About'
+      : this.authPageCategory === 'models'
+        ? 'Host provider & credential configuration'
+        : this.authPageCategory === 'account'
+          ? 'DeepSeek Account · Host'
+          : row?.scope ?? 'TUI preferences'
     const captured = new Date(this.snapshot.capturedAt)
     const hh = String(captured.getHours()).padStart(2, '0')
     const mm = String(captured.getMinutes()).padStart(2, '0')
@@ -941,15 +1173,7 @@ export class SettingsWorkspacePanel implements Component {
     let detailProjection: DetailProjection | undefined
     for (const pane of layout) {
       if (pane.page === 'categories') {
-        const selected = CATEGORY_ORDER.indexOf(this.categoryId)
-        if (selected !== this.lastCategoryIndex || contentRows !== this.lastCategoryViewport) {
-          this.categoryOffset = rebaseOffset(this.categoryOffset, selected, CATEGORY_ORDER.length, contentRows)
-          this.lastCategoryIndex = selected
-          this.lastCategoryViewport = contentRows
-        } else {
-          this.categoryOffset = clampOffset(this.categoryOffset, CATEGORY_ORDER.length, contentRows)
-        }
-        const visible = CATEGORY_ORDER.slice(this.categoryOffset, this.categoryOffset + contentRows)
+        const visible = this.visibleCategories(contentRows)
         for (let i = 0; i < visible.length; i += 1) {
           itemHits.push({ kind: 'category', id: visible[i]!, row: contentTop + i, startCol: pane.x, endCol: pane.x + pane.width })
         }
@@ -1000,7 +1224,7 @@ export class SettingsWorkspacePanel implements Component {
       for (const painted of detail.buttons) {
         itemHits.push({
           kind: painted.button.verb,
-          id: painted.button.value ?? this.rowId,
+          id: painted.button.id,
           row: buttonRow,
           startCol: pane.x + painted.startCol,
           endCol: pane.x + painted.startCol + visibleWidth(painted.button.text),
@@ -1082,15 +1306,7 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedViewport = Math.max(1, viewport)
     const out: string[] = []
     if (this.focus === 'categories') {
-      const selectedIndex = CATEGORY_ORDER.indexOf(this.categoryId)
-      if (selectedIndex !== this.lastCategoryIndex || viewport !== this.lastCategoryViewport) {
-        this.categoryOffset = rebaseOffset(this.categoryOffset, selectedIndex, CATEGORY_ORDER.length, viewport)
-        this.lastCategoryIndex = selectedIndex
-        this.lastCategoryViewport = viewport
-      } else {
-        this.categoryOffset = clampOffset(this.categoryOffset, CATEGORY_ORDER.length, viewport)
-      }
-      const visible = CATEGORY_ORDER.slice(this.categoryOffset, this.categoryOffset + viewport)
+      const visible = this.visibleCategories(viewport)
       panes.categories = { x: 0, width, contentTop: bodyTop, contentRows: viewport, maxOffset: Math.max(0, CATEGORY_ORDER.length - viewport) }
       for (let i = 0; i < visible.length; i += 1) {
         const id = visible[i]!
@@ -1145,7 +1361,7 @@ export class SettingsWorkspacePanel implements Component {
     for (const painted of detail.buttons) {
       targets.push({
         kind: painted.button.verb,
-        id: painted.button.value ?? this.rowId,
+        id: painted.button.id,
         row: buttonRow,
         startCol: painted.startCol,
         endCol: painted.startCol + visibleWidth(painted.button.text),
@@ -1431,20 +1647,20 @@ export class SettingsWorkspacePanel implements Component {
     const phase = this.editPhase
     if (phase.kind === 'choosing') {
       return [
-        { verb: 'confirm', text: 'Confirm', value: phase.candidate },
-        { verb: 'cancel', text: 'Cancel' },
+        { verb: 'confirm', text: 'Confirm', id: phase.candidate },
+        { verb: 'cancel', text: 'Cancel', id: row.id },
       ]
     }
     const buttons: DetailButton[] = []
     const edit = row.edit
     if (edit !== undefined && edit.options.length > 0 && phase.kind !== 'pending') {
-      buttons.push({ verb: 'change', text: 'Change…' })
+      buttons.push({ verb: 'change', text: 'Change…', id: row.id })
       if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified') {
-        buttons.push({ verb: 'retry', text: 'Retry save', value: phase.attempted })
+        buttons.push({ verb: 'retry', text: 'Retry save', id: phase.attempted })
       }
     }
-    if (row.value !== undefined) buttons.push({ verb: 'copy', text: `Copy value [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]` })
-    else if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…' })
+    if (row.value !== undefined) buttons.push({ verb: 'copy', text: `Copy value [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]`, id: row.id })
+    else if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…', id: row.id })
     return buttons
   }
 
@@ -1631,12 +1847,7 @@ export class SettingsWorkspacePanel implements Component {
         { text: back, priority: 8 },
       ]
     } else if (this.focus === 'categories') {
-      segments = [
-        { text: 'Up/Down select', priority: 4 },
-        { text: 'Right open', priority: 6 },
-        { text: 'Enter open', priority: 5 },
-        { text: back, priority: 8 },
-      ]
+      segments = this.navigationActionBarSegments()
     } else if (this.focus === 'rows') {
       const rowAction = row?.action === 'open-legacy' ? 'open' : row?.edit === undefined || row.edit.options.length === 0 ? 'details' : 'choose'
       segments = [
@@ -1699,9 +1910,11 @@ export class SettingsWorkspacePanel implements Component {
     return fit(painted, width)
   }
 
-  private firstRowOf(category: SettingsWorkspaceCategoryId): SettingsWorkspaceRowId {
-    const rows = this.snapshot.rows.filter(row => row.category === category)
-    return rows[0]?.id ?? this.snapshot.rows[0]?.id ?? 'theme'
+  /** The first row of ONE legacy configuration category. A direct page
+   *  (About/Models/Account) has NO row: the panel never borrows another
+   *  category's row for it. */
+  private firstRowOf(category: SettingsWorkspaceCategoryId): SettingsWorkspaceRowId | undefined {
+    return this.snapshot.rows.find(row => row.category === category)?.id
   }
 
   private indexOfRow(rows: readonly SettingsWorkspaceRow[]): number {
@@ -1766,11 +1979,13 @@ export class SettingsWorkspacePanel implements Component {
    *  allocation matters here, and that is a pure function of the height (the
    *  width only chooses the projection). */
   private bodyFloor(): number {
+    const width = this.projectionWidth()
     return planSettingsChrome(
-      this.projectionWidth(),
+      width,
       this.intents.rows(),
       this.intents.notice() !== undefined,
       this.choiceField() !== undefined,
+      this.paintsDirectPage(width) ? 1 : 2,
     ).bodyRows
   }
 
@@ -1825,21 +2040,10 @@ export class SettingsWorkspacePanel implements Component {
       this.pluginPage.handleInput?.(data)
       return
     }
-    if (this.authPage !== undefined) {
-      // Recompute the live page budget BEFORE forwarding input: a resize can
-      // arrive before its repaint frame, and Enter must not submit a form whose
-      // confirm rows are no longer visible.
-      this.syncAuthPageBody()
-      const result = this.authPage.handleInput(data)
-      if (result === 'exit') {
-        if (!this.closeAuthPageForNavigation()) return
-        this.focus = 'categories'
-        this.bumpRevision()
-        this.intents.requestRender()
-      } else if (result === 'open-account') {
-        if (this.authPageHasPendingMutation()) return
-        this.openAccountPage({ view: 'page' })
-      }
+    // The CONTENT focus belongs to the direct page: the root never forwards a
+    // navigation key to it, and the page never receives a key the root owns.
+    if (this.focus === 'content') {
+      this.handleContentInput(data)
       return
     }
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) return this.goBack()
@@ -1911,6 +2115,127 @@ export class SettingsWorkspacePanel implements Component {
     // editor, transcript or a host composer action.
   }
 
+  /**
+   * The CONTENT focus: the direct page owns the keyboard. The About page is
+   * read-only (it scrolls and it goes back); a real page owns every other key
+   * and reports its own exit.
+   */
+  private handleContentInput(data: string): void {
+    const page = this.authPage
+    if (page === undefined) {
+      if (matchesKey(data, 'escape') || matchesKey(data, 'backspace') || matchesKey(data, 'left')) {
+        this.returnToNavigation()
+        return
+      }
+      if (matchesKey(data, 'up')) return this.scrollAbout(-1)
+      if (matchesKey(data, 'down')) return this.scrollAbout(1)
+      if (matchesKey(data, 'pageUp')) return this.scrollAbout(-this.aboutPageStep())
+      if (matchesKey(data, 'pageDown')) return this.scrollAbout(this.aboutPageStep())
+      if (matchesKey(data, 'home')) return this.setAboutOffset(0)
+      if (matchesKey(data, 'end')) return this.setAboutOffset(Number.MAX_SAFE_INTEGER)
+      // Everything else is inert: the About page is a read-only projection.
+      return
+    }
+    // A bare Left may be claimed by the root ONLY when the page can safely
+    // yield the focus. It is never turned into an Esc and never bypasses a
+    // child modal, an auth flow or a pending mutation.
+    if (matchesKey(data, 'left') && page.canYieldFocusToNavigation?.() === true) {
+      this.returnToNavigation()
+      return
+    }
+    // Recompute the live page budget BEFORE forwarding input: a resize can
+    // arrive before its repaint frame, and Enter must not submit a form whose
+    // confirm rows are no longer visible.
+    this.syncAuthPageBody()
+    const result = page.handleInput(data)
+    if (result === 'exit') {
+      this.returnToNavigation()
+      return
+    }
+    if (result === 'open-account') {
+      // The child already asked the root to switch (through the idempotent
+      // `switchToAccountContent`); the root only confirms the target and never
+      // builds a second page.
+      if (this.categoryId === 'account' && this.authPageCategory === 'account') this.focus = 'content'
+    }
+  }
+
+  /** The About page's own scroll step (presentation only). */
+  private aboutPageStep(): number {
+    return Math.max(1, this.paintedContentBox?.rows ?? 1)
+  }
+
+  private scrollAbout(delta: number): void {
+    const next = Math.min(Math.max(0, this.aboutOffset + delta), this.aboutScrollExtent)
+    if (next === this.aboutOffset) return
+    this.aboutOffset = next
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private setAboutOffset(offset: number): void {
+    const next = Math.min(Math.max(0, offset), this.aboutScrollExtent)
+    if (next === this.aboutOffset) return
+    this.aboutOffset = next
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /**
+   * Return the keyboard to the category rail. The direct page KEEPS its
+   * instance, its view, its draft and its watch: only a real category change
+   * or a real close disposes it.
+   */
+  private returnToNavigation(): void {
+    if (this.focus === 'categories') return
+    this.focus = 'categories'
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /**
+   * Select ONE category. The category is the ONLY selection state: the right
+   * column follows it immediately (a direct page is mounted at once, the About
+   * projection is painted by the root), and the keyboard stays on the rail.
+   */
+  private selectCategory(category: SettingsWorkspaceCategoryId, focus: SettingsWorkspaceFocus = 'categories'): void {
+    const changed = category !== this.categoryId
+    // A Host mutation owns the page: user navigation may not abandon it.
+    if (changed && this.authPageHasPendingMutation()) return
+    if (changed) {
+      if (this.authPageCategory !== undefined && this.authPageCategory !== category) this.closeAuthPage()
+      this.categoryId = category
+      this.rowId = isDirectCategory(category) ? undefined : this.firstRowOf(category)
+      this.rowOffset = 0
+      this.detailOffset = 0
+      this.resetChoice()
+    }
+    this.focus = focus
+    if (category === 'models') this.mountModelsPage({ view: 'list' })
+    else if (category === 'account') this.mountAccountPage({ view: 'page' })
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /**
+   * Hand the keyboard to the direct page. The page is REUSED: an already
+   * mounted page is never rebuilt and never re-reads the Host.
+   */
+  private enterContent(): void {
+    const category = this.categoryId
+    if (category === 'models') this.mountModelsPage({ view: 'list' })
+    else if (category === 'account') this.mountAccountPage({ view: 'page' })
+    this.focus = 'content'
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
   /** Esc/Backspace: choosing cancels straight back to L1; otherwise step one
    *  level back in every layout. Only L0 Esc/Backspace closes the workspace. */
   private goBack(): void {
@@ -1963,25 +2288,6 @@ export class SettingsWorkspacePanel implements Component {
     this.selectCategory(CATEGORY_ORDER[next]!)
   }
 
-  private selectCategory(category: SettingsWorkspaceCategoryId, focus?: SettingsWorkspacePage): void {
-    if (this.authPageCategory !== undefined && category !== this.authPageCategory) {
-      if (!this.closeAuthPageForNavigation()) return
-    }
-    const changedCategory = category !== this.categoryId
-    const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'categories')
-    if (changedCategory || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {
-      this.leaveDetailTo(targetFocus, () => {
-        if (!changedCategory) return
-        this.categoryId = category
-        this.rowId = this.firstRowOf(category)
-        this.rowOffset = 0
-        this.detailOffset = 0
-      })
-      return
-    }
-    this.intents.requestRender()
-  }
-
   private moveRow(delta: number): void {
     const rows = this.currentRows()
     if (rows.length === 0) return
@@ -1990,7 +2296,7 @@ export class SettingsWorkspacePanel implements Component {
     this.selectRow(rows[next]!.id)
   }
 
-  private selectRow(id: SettingsWorkspaceRowId, focus?: SettingsWorkspacePage): void {
+  private selectRow(id: SettingsWorkspaceRowId, focus?: SettingsWorkspaceFocus): void {
     const changedRow = id !== this.rowId
     const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'rows')
     if (changedRow || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {
@@ -2024,12 +2330,8 @@ export class SettingsWorkspacePanel implements Component {
         this.openPluginsPage()
         return
       }
-      if (this.categoryId === 'models') {
-        this.openModelsPage({ view: 'list' })
-        return
-      }
-      if (this.categoryId === 'account') {
-        this.openAccountPage({ view: 'page' })
+      if (isDirectCategory(this.categoryId)) {
+        this.enterContent()
         return
       }
       this.leaveDetailTo('rows')
@@ -2041,14 +2343,6 @@ export class SettingsWorkspacePanel implements Component {
   /** Enter the one Detail level. Writable rows start choosing in the same
    *  transition; focus is committed before the candidate source is re-read. */
   private enterDetail(): void {
-    if (this.categoryId === 'models') {
-      this.openModelsPage({ view: 'list' })
-      return
-    }
-    if (this.categoryId === 'account') {
-      this.openAccountPage({ view: 'page' })
-      return
-    }
     const row = this.selectedRow()
     if (row?.action === 'open-legacy') {
       this.intents.onOpenLegacy(row.legacyTargetId)
@@ -2247,16 +2541,19 @@ export class SettingsWorkspacePanel implements Component {
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (this.pluginPage !== undefined) return this.pluginPage.handleMouse?.(event)
-    if (this.authPage !== undefined) {
-      const box = this.paintedAuthBox
-      if (box !== undefined && event.x >= box.x && event.x < box.x + box.width && event.y >= box.top && event.y < box.top + box.rows) {
-        return this.authPage.handleMouse?.(this.translateMouseEvent(event))
-      }
-      // A wheel over the category rail keeps scrolling the rail.
+    const inContent = this.contentAt(event.x, event.y)
+    if (this.authPage !== undefined && inContent) {
+      return this.authPage.handleMouse?.(this.translateMouseEvent(event))
     }
     if (event.type !== 'wheel') return undefined
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
+    // The About page is the root's own read-only projection: its wheel scrolls
+    // the projection, never a hidden pane.
+    if (inContent && this.authPage === undefined) {
+      this.scrollAbout(delta)
+      return { handled: true }
+    }
     const pane = this.paneAt(event.x, event.y)
     if (pane === undefined) return undefined
     if (pane === 'detail') {
@@ -2272,21 +2569,28 @@ export class SettingsWorkspacePanel implements Component {
     return { handled: true }
   }
 
+  /** Whether one panel cell belongs to the painted content column. */
+  private contentAt(x: number, y: number): boolean {
+    const box = this.paintedContentBox
+    if (box === undefined) return false
+    return x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows
+  }
+
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
-    this.authPressed = undefined
+    this.contentPressed = undefined
     if (this.pluginPage !== undefined) {
       this.pluginPage.onCellPress?.(x, y)
       return
     }
     if (this.authPage !== undefined) {
       this.syncAuthPageBody()
-      this.authPressed = undefined
-      const box = this.paintedAuthBox
+      this.contentPressed = undefined
+      const box = this.paintedContentBox
       if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
-        this.authPressed = {
+        this.contentPressed = {
           x,
           y,
           columns: this.intents.columns(),
@@ -2317,38 +2621,44 @@ export class SettingsWorkspacePanel implements Component {
     if (this.disposed) return
     if (this.pluginPage !== undefined) {
       this.pressedGesture = undefined
-      this.authPressed = undefined
+      this.contentPressed = undefined
       this.pluginPage.onCellClick?.(x, y)
       return
     }
     if (this.authPage !== undefined) {
       this.syncAuthPageBody()
-      const box = this.paintedAuthBox
+      const box = this.paintedContentBox
       if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
-        // A release inside the page consumes the gesture: any root press from
+        // A release inside the content consumes the gesture: any root press from
         // before it is stale and must never fire the category rail.
         this.pressedGesture = undefined
-        const pressed = this.authPressed
-        this.authPressed = undefined
+        const pressed = this.contentPressed
+        this.contentPressed = undefined
         if (pressed === undefined
           || pressed.columns !== this.intents.columns()
           || pressed.rows !== this.intents.rows()
           || pressed.revision !== this.revision) return
+        // The press is proven: the content owns the keyboard from now on, and
+        // the page runs its OWN action. The root's revision only moves after
+        // the page has run, so the consumed press is not refused.
+        this.focus = 'content'
         const result = this.authPage.onCellClick?.(x - box.x, y - box.top)
         if (result === 'exit') {
-          if (!this.closeAuthPageForNavigation()) return
-          this.focus = 'categories'
-          this.bumpRevision()
-          this.intents.requestRender()
-        } else if (result === 'open-account') {
-          if (this.authPageHasPendingMutation()) return
-          this.openAccountPage({ view: 'page' })
+          this.returnToNavigation()
+          return
         }
+        if (result === 'open-account') {
+          // The child already asked the root to switch (through the idempotent
+          // `switchToAccountContent`); the root never builds a second page.
+          if (this.categoryId === 'account' && this.authPageCategory === 'account') this.focus = 'content'
+        }
+        this.bumpRevision()
+        this.intents.requestRender()
         return
       }
       // A wheel/click on the category rail keeps the root's identity path; the
       // pressed gesture below was recorded by the root's own onCellPress.
-      this.authPressed = undefined
+      this.contentPressed = undefined
       this.authPage.cancelPointer?.()
     }
     const pressed = this.pressedGesture
@@ -2379,28 +2689,23 @@ export class SettingsWorkspacePanel implements Component {
 
   private activate(target: HitTarget): void {
     switch (target.kind) {
-      case 'category':
+      case 'category': {
         if (target.id === 'plugins' && this.categoryId === 'plugins') {
           this.openPluginsPage()
           return
         }
-        if (target.id === 'models') {
-          this.openModelsPage({ view: 'list' })
-          return
-        }
-        if (target.id === 'account') {
-          this.openAccountPage({ view: 'page' })
-          return
-        }
-        this.selectCategory(target.id as SettingsWorkspaceCategoryId, 'categories')
+        if (!isCategoryId(target.id)) return
+        this.selectCategory(target.id, 'categories')
         return
+      }
       case 'plugin-launch':
         // The painted affordance is the SAME direct entry Enter/Right take: no
         // L1 transition, no row selection and no second page factory.
         this.openPluginsPage()
         return
       case 'row': {
-        this.selectRow(target.id as SettingsWorkspaceRowId, 'rows')
+        if (!isWorkspaceRowId(target.id)) return
+        this.selectRow(target.id, 'rows')
         // The row's `open-legacy` action is the ONE navigation verb (never an
         // edit) and the painted row IS its target, exactly like Enter.
         const legacyRow = this.selectedRow()
@@ -2446,7 +2751,8 @@ export class SettingsWorkspacePanel implements Component {
         this.leaveDetailTo('rows')
         return
       case 'pane': {
-        const page = target.id as SettingsWorkspacePage
+        if (!isWorkspacePage(target.id)) return
+        const page = target.id
         // The Plugins category has NO L1/L2 of its own: its Rows and Details
         // columns are the direct-page description only, so the pane fallback
         // must never fabricate a level the keyboard cannot return from. Other
@@ -2461,7 +2767,7 @@ export class SettingsWorkspacePanel implements Component {
 
   /** Commit a leave-L2 transition, its atomic selection change, and choice
    *  cancellation at one revision boundary. */
-  private leaveDetailTo(page: SettingsWorkspacePage, update?: () => void): void {
+  private leaveDetailTo(page: SettingsWorkspaceFocus, update?: () => void): void {
     const cancelChoice = this.choiceField() !== undefined && page !== 'detail'
     if (this.focus === page && !cancelChoice && update === undefined) return
     if (cancelChoice) this.resetChoice()
@@ -2472,7 +2778,7 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** Make one column the keyboard owner (no-op when it already is). */
-  private takeColumnFocus(page: SettingsWorkspacePage): void {
+  private takeColumnFocus(page: SettingsWorkspaceFocus): void {
     this.leaveDetailTo(page)
   }
 
@@ -2529,7 +2835,7 @@ export class SettingsWorkspacePanel implements Component {
   /** Translate one panel-global mouse event into the page-local coordinates its
    * last-painted hit map uses. */
   private translateMouseEvent(event: TuiMouseEvent): TuiMouseEvent {
-    const box = this.paintedAuthBox
+    const box = this.paintedContentBox
     if (box === undefined) return event
     return {
       ...event,

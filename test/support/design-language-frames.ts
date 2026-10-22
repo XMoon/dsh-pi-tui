@@ -40,11 +40,16 @@ const frameText = (rows: readonly string[]): string =>
  * away." Asserts the last physical row carries the expected bar text, is really
  * painted (its first cell has an RGB foreground), and that no blank trailing row
  * pushed the bar up.
+ *
+ * `firstCell` is the column the bar STARTS at: a two-column frame (the Settings
+ * category rail and its content column) paints the bar in the CONTENT column,
+ * so its first cell is not column 0.
  */
 export function assertBarIsLastRow(
   rows: readonly string[],
   readColor: (row: number, col: number) => number | undefined,
   expectedBarText: string,
+  firstCell = 0,
 ): void {
   assert.ok(rows.length > 0, 'a frame must paint at least the pinned action bar')
   const last = rows.length - 1
@@ -52,7 +57,7 @@ export function assertBarIsLastRow(
   assert.notEqual(bar.trim(), '', `the physical last row must be the action bar, not a blank row:\n${frameText(rows)}`)
   assert.ok(bar.includes(expectedBarText),
     `the physical last row must carry ${JSON.stringify(expectedBarText)}:\n${frameText(rows)}`)
-  assert.notEqual(readColor(last, 0), undefined,
+  assert.notEqual(readColor(last, firstCell), undefined,
     `the action bar's first cell must be really painted (not a phantom plain row):\n${frameText(rows)}`)
 }
 
