@@ -264,7 +264,9 @@ test('/login acme deeplinks to the provider detail inside the Settings lease', a
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login acme')
   // The Models page reads its provider catalog after its first frame, so the
-  // deep link paints the Loading state first: wait for the settled detail.
+  // deep link paints the Loading state first and the detail after the read.
+  // (The Loading frame itself is asserted deterministically in the page-level
+  // suite: the app harness only ever holds the latest painted frame.)
   await waitForFrame(h.view, frame => /Provider · Acme Gateway/u.test(frame), () => h.vt.waitForRender(), 'the /login deeplink must reach the provider detail')
   assert.match(h.rows()[0]!, /Settings · Models/u)
   assert.match(h.view(), /Provider · Acme Gateway/u)

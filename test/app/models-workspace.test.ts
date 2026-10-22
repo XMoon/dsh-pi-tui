@@ -2001,6 +2001,67 @@ test('the single-target clear deeplink reads nothing in the constructor', async 
   assert.equal(recordsReads, 1, 'the clear read runs after the first frame')
 })
 
+test('the clear confirmation stays disabled until the authoritative read confirms the target', async () => {
+  const { source } = fakeSource()
+  const releases: (() => void)[] = []
+  source.storedCredentials = async () => {
+    await new Promise<void>(resolve => { releases.push(resolve) })
+    return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, () => {})
+  page.setBodyHeight(24)
+  // The FIRST frame is the window: the store was not read yet, so the
+  // confirmation must not be armed.
+  page.render(100)
+  const frame = viewText(page)
+  assert.match(frame, /Reading the credential store/u)
+  assert.doesNotMatch(frame, /> Clear credential/u, 'the delete must not be confirmable before the read')
+  await flush()
+  for (const release of releases) release()
+  await flush()
+  // The read answered: the state is the authority's answer, not a guess.
+  assert.match(viewText(page), /Nothing stored for this target/u)
+})
+
+test('the pending clear target cannot dispatch a delete before its read', async () => {
+  const { source, calls } = fakeSource()
+  const releases: (() => void)[] = []
+  source.storedCredentials = async () => {
+    await new Promise<void>(resolve => { releases.push(resolve) })
+    return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, () => {})
+  page.setBodyHeight(24)
+  page.render(100)
+  // The Enter lands in the window before the deferred read started.
+  page.handleInput('\r')
+  await flush()
+  assert.equal(calls.some(call => call.startsWith('delete:')), false, 'no delete may be dispatched before the read')
+})
+
+test('an explicit refresh does not swallow the deferred deep-link read', async () => {
+  const { source } = fakeSource()
+  let recordsReads = 0
+  source.storedCredentials = async () => { recordsReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, () => {})
+  page.setBodyHeight(24)
+  page.render(100)
+  // The refresh starts the catalog read before the deferred read's timer runs:
+  // the deferred read must still happen exactly once.
+  page.handleInput('r')
+  await flush()
+  assert.equal(recordsReads, 1, 'the deferred clear read must still run')
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,
