@@ -376,7 +376,8 @@ Measured, still in use and *not* introduced by this contract:
 | `─` U+2500 | every rule, the editor's top/bottom border, history's stacked divider |
 | ` · ` U+00B7 | the fact/hint separator across the chrome (D4 makes this the only separator) |
 | `↗` U+2197 | the Job `↗ Command` affordance |
-| `←` U+2190 | the question flow's chrome hints, and the keybindings UI hint `←→: edit` (`keybindings/ui/list.ts:231`) |
+| `←` U+2190 | the question flow's chrome hints, the keybindings UI hint `←→: edit` (`keybindings/ui/list.ts:231`), and the Settings Models page's back affordances (`← Back`, `← Providers`, `← Back to providers`) |
+| `→` U+2192 | the Settings Models page's prose hint `Review → Create` (never a cursor — D3's `>` owns the cursor role) |
 | `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
 | `◆` U+25C6 | the footer configurator's move-mode marker |
 | `▏` U+258F | the footer configurator's text-edit cursor |
