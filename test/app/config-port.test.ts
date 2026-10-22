@@ -171,6 +171,34 @@ test('the settings-only fallback reads the section ONCE and keeps every configur
   assert.ok(options.some(option => option.route === 'keyless'))
 })
 
+test('a failed settings read keeps the builtin target addressable for /login and /logout', () => {
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  // The Models page reports the failed read (readCatalog), but the command
+  // resolver stays fail-soft: the builtin target must survive.
+  assert.ok(providers.readCatalog().failure !== undefined)
+  const options = providers.listCredentialOptions()
+  const official = options.find(option => option.route === 'deepseek-official')
+  assert.ok(official !== undefined, 'the builtin target must stay addressable')
+  assert.equal(official.ref, 'DEEPSEEK_API_KEY')
+  assert.equal(official.canProvisionProfile, false)
+  // The directory's route stays addressable too, with the derived reference
+  // (the profile facts are unknown while the settings read failed).
+  const acme = options.find(option => option.route === 'acme')
+  assert.ok(acme !== undefined)
+  assert.equal(acme.ref, 'ACME_API_KEY')
+  assert.equal(acme.configured, false)
+})
+
 test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
   const providers = port({
     settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),

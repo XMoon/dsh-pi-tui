@@ -207,7 +207,10 @@ The page never infers a stored key from a route/profile.
   presence of an API key never decides the membership, and an unconfigured
   directory route is not a HOME row.
 - The credential/record state of a row is an INDEPENDENT fact, read after the
-  catalog: `Configured` /
+  catalog, and it has its OWN freshness: a new generation's presence is
+  `Checking…` until it answers, so the previous answer is never painted as a
+  fresh confirmation (a write's authoritative read-back keeps its priority
+  through the per-reference generation fence). `Configured` /
   `Key missing` for an API-key reference, `Signed in` / `Not signed in` for a
   provider-native sign-in, `Checking…` while the read is pending, `Outcome
   unknown` for a failed read and `Unavailable` for a backend that cannot
@@ -271,6 +274,11 @@ The page never infers a stored key from a route/profile.
   remains authoritative. That forced-teardown boundary has no safe
   adapter-only outcome.
 - Stored credential records exclude the DeepSeek Account grant.
+- The `/login` and `/logout` resolver stays fail-soft when a read fails: the
+  always-present builtin target (and the directory's routes) remain
+  addressable. A failed Remote directory read never makes the last-known
+  routes a command authority — after a reconnect they may belong to another
+  Host.
 
 ### Account page
 
