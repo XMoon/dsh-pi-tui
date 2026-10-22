@@ -42,7 +42,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/config-remote
  */
 
-import { credentialOptionsFor, getPath, providerOptionsFor, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
+import { credentialOptionsFor, getPath, providerOptionsFor, providerProfileProjectionOf, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -68,6 +68,7 @@ import type {
   PermissionConfig,
   PresetDefaultConfig,
   ProviderConfigGuide,
+  ProviderCatalogSnapshot,
   ProviderProfileConfig,
   ProviderProfileFacts,
   SubagentAllowedModelRoute,
@@ -1025,12 +1026,12 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
   listCredentialOptions(): readonly CredentialProviderOption[] {
     const directory = this.mirror.providers()
     if (directory !== undefined) {
-      return providerOptionsFor(directory, ns => this.mirror.namespace(ns)?.value)
+      return providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
         .map(option => remoteCredentialOptionOf(option))
     }
     const settingsOnly = credentialOptionsFor(piAiProvidersOf(this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value))
-    return settingsOnly.map((option, index) => {
-      const route = index === 0 ? 'deepseek-official' : option.label
+    return settingsOnly.map(option => {
+      const route = option.route ?? option.label
       return {
         ...option,
         route,
@@ -1043,6 +1044,64 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
         canProvisionProfile: canProvisionKeylessProfile(PROVIDER_SETTINGS_NS, ['providers', route], route),
       }
     })
+  }
+
+  /**
+   * The ONE provider snapshot the Models page reads. The Remote mirror is
+   * already ONE committed snapshot (one settings describe + one directory
+   * read per generation), so the projection reads the mirror and never
+   * dispatches a second wire fetch. A directory the mirror could not read
+   * degrades to the settings-only fallback (the same fail-soft rule the
+   * Direct adapter applies).
+   */
+  readCatalog(): ProviderCatalogSnapshot {
+    const directory = this.mirror.providers()
+    if (directory === undefined) return this.settingsOnlyCatalog()
+    const rawProfiles = new Map<string, unknown>()
+    for (const entry of directory) {
+      if (entry.provider.length === 0 || entry.settingsNs.length === 0) continue
+      rawProfiles.set(entry.provider, this.remoteProfileOf(entry))
+    }
+    const options = providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
+      .map(option => remoteCredentialOptionOf(option))
+    const profiles = options.map(option => remoteProviderFactsOf(
+      option.route,
+      option.label,
+      rawProfiles.get(option.route),
+    ))
+    return { options, profiles }
+  }
+
+  /** The settings-only fallback (no mirrored directory): the conventional
+   *  llm-pi-ai `providers` slot is the only profile location. */
+  private settingsOnlyCatalog(): ProviderCatalogSnapshot {
+    const section = this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value
+    const options = credentialOptionsFor(piAiProvidersOf(section)).map(option => {
+      const route = option.route ?? option.label
+      return {
+        ...option,
+        route,
+        configured: true,
+        declared: false,
+        namesCredential: true,
+        group: 'configured' as const,
+        canProvisionProfile: canProvisionKeylessProfile(PROVIDER_SETTINGS_NS, ['providers', route], route),
+      }
+    })
+    const providers = plainRecord(section)?.providers
+    const profiles = options.map(option => remoteProviderFactsOf(
+      option.route,
+      option.route,
+      plainRecord(providers)?.[option.route],
+    ))
+    return { options, profiles }
+  }
+
+  /** One directory entry's profile value, read from the mirror's ONE
+   *  committed snapshot (no wire dispatch). */
+  private remoteProfileOf(entry: ProviderCatalogEntry): unknown {
+    const section = this.mirror.namespace(entry.settingsNs)?.value
+    return entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
   }
 
   readProfile(route: string): ProviderProfileFacts {

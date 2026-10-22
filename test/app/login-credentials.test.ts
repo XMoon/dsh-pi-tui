@@ -52,6 +52,7 @@ function authCommands() {
         providers: {
           available: () => true,
           listCredentialOptions: () => OPTIONS,
+          readCatalog: () => ({ options: OPTIONS, profiles: OPTIONS.map(option => ({ route: option.route, configured: option.configured, displayName: option.label, models: [] })) }),
           readProfile: (route: string) => ({ route, configured: true, models: [] }),
           configGuide: () => ({}),
           writeProfile: async () => {},
@@ -89,12 +90,23 @@ function authCommands() {
   return { invoke, opened }
 }
 
-test('credentialOptionsFor lists deepseek official plus deduped llm-pi-ai routes', () => {
+test('credentialOptionsFor lists deepseek official plus every llm-pi-ai route', () => {
   const options = credentialOptionsFor(LLM_PI_AI_SECTION.providers)
+  // The ROUTE is the identity: the `deepseek` route names the official
+  // reference and stays a target of its own (the credential READ is
+  // deduplicated by reference in the read planner, never by dropping a
+  // provider).
   assert.deepEqual(options.map(option => option.ref), [
     'DEEPSEEK_API_KEY',
     'OPENAI_API_KEY',
+    'DEEPSEEK_API_KEY',
     'ACME_GATEWAY_API_KEY',
+  ])
+  assert.deepEqual(options.map(option => option.route), [
+    'deepseek-official',
+    'openai',
+    'deepseek',
+    'acme',
   ])
 })
 

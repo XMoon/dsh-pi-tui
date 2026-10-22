@@ -133,8 +133,14 @@ export function resolveLoginDestination(
       if (!knownRef && ROUTE_PATTERN.test(arg)) return { kind: 'models', view: 'add-provider', route: arg }
       return { kind: 'models', view: 'reference', ref: match.ref }
     }
-    const option = options.find(candidate => candidate.ref === match.option.ref)
-    if (option === undefined) return { kind: 'models', view: 'reference', ref: match.option.ref, label: match.option.label }
+    // The ROUTE is the provider identity: two routes may name the same
+    // credential reference, and the matched route must resolve to ITSELF (a
+    // reference lookup would answer with the first route sharing it).
+    const matched = match.option
+    const option = options.find(candidate => candidate.route === matched.route)
+    if (option === undefined) {
+      return { kind: 'models', view: 'reference', ref: matched.ref, label: matched.label }
+    }
     // The deepseek official builtin has no provider-profile detail page: its
     // dedicated API-key reference page is the one supported surface, and it
     // wins over any standalone flow that happens to share the route.
@@ -182,9 +188,12 @@ export function resolveLogoutDestination(
         }
       }
     }
-    const option = match.kind === 'route'
-      ? options.find(candidate => candidate.ref === match.option.ref)
-      : options.find(candidate => candidate.ref === match.ref)
+    // The ROUTE is the provider identity (see resolveLoginDestination).
+    const matched = match.kind === 'route' ? match.option : undefined
+    const matchedRef = match.kind === 'ref' ? match.ref : undefined
+    const option = matched === undefined
+      ? options.find(candidate => candidate.ref === matchedRef)
+      : options.find(candidate => candidate.route === matched.route)
     const flow = option !== undefined && option.route !== 'deepseek-official' && !option.namesCredential
       ? flowForRoute(generic, option.route)
       : undefined
@@ -231,6 +240,39 @@ export interface StoredCredentialRow {
   /** The record kind the store reports, when it reports one. */
   readonly kindHint?: string
 }
+
+/**
+ * The ONE catalog read the Models page projects from: the merged provider
+ * targets (the reference targets and the authorization flows) plus every
+ * route's profile facts, all from ONE provider snapshot.
+ *
+ * The read is a SNAPSHOT: the profile facts and the option list come from
+ * the same Host read, so a row can never mix one generation's options with
+ * another generation's profile.
+ */
+export interface ProviderCatalogRead {
+  /** The merged targets: one per provider route, plus the route-less
+   *  authorization flows. */
+  readonly targets: readonly LoginTarget[]
+  /** The provider options behind the targets (the semantic flags the page
+   *  needs: which routes the Host would really write). */
+  readonly options: readonly CredentialProviderOption[]
+  /** The profile facts by route (the Host's profile-present fact). */
+  readonly profiles: ReadonlyMap<string, ProviderProfileFacts>
+  /** Why the catalog could not be read AUTHORITATIVELY. `undefined` means
+   *  the snapshot is authoritative. */
+  readonly failure?: string
+}
+
+/**
+ * The stored RECORD presence for the whole page (one enumeration). A backend
+ * that cannot enumerate records answers `unavailable` — never an empty
+ * record list that would read as "nothing to sign out".
+ */
+export type RecordPresence =
+  | { readonly kind: 'known'; readonly records: readonly { readonly key: string; readonly route?: string }[] }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'failed'; readonly reason: string }
 
 /** One Add Provider draft (page-local until Create). */
 export interface CreateProviderDraft {
@@ -294,6 +336,52 @@ export class CredentialWorkflow {
 
   options(): readonly CredentialProviderOption[] {
     return this.genericProviderOptions()
+  }
+
+  /**
+   * The ONE catalog read: the merged targets and every route's profile facts
+   * come from ONE provider snapshot. The page projects its whole provider
+   * list from this read, so a refresh never repeats the directory
+   * enumeration or the settings read per route.
+   */
+  readCatalog(): ProviderCatalogRead {
+    const snapshot = this.deps.providers.readCatalog()
+    const options = snapshot.options.filter(option => option.route !== ACCOUNT_PROVIDER_ROUTE)
+    return {
+      targets: mergeLoginTargets(options, this.genericTargets()),
+      options,
+      profiles: new Map(snapshot.profiles.map(profile => [profile.route, profile])),
+      ...(snapshot.failure === undefined ? {} : { failure: snapshot.failure }),
+    }
+  }
+
+  /**
+   * The stored RECORD presence for the whole page: ONE enumeration. The
+   * full stored-credential list (with the per-reference audit) runs only
+   * when the user opens the Credential records view.
+   */
+  async recordPresence(): Promise<RecordPresence> {
+    const credentials = this.deps.credentials
+    if (!credentials.recordsSupported()) {
+      return { kind: 'unavailable', reason: 'this backend cannot enumerate stored records' }
+    }
+    try {
+      const records = await credentials.listRecords()
+      const targets = this.genericTargets()
+      return {
+        kind: 'known',
+        records: records
+          .filter(record => record.key !== ACCOUNT_AUTHORIZATION_KEY)
+          .map(record => {
+            // The DeepSeek Account grant is NOT a generic provider record: the
+            // Account page owns its sign-in/sign-out.
+            const owner = targets.find(target => target.key === record.key)
+            return { key: record.key, ...(owner?.route === undefined ? {} : { route: owner.route }) }
+          }),
+      }
+    } catch (error) {
+      return { kind: 'failed', reason: safeErrorMessage(error) }
+    }
   }
 
   readProfile(route: string): ProviderProfileFacts {

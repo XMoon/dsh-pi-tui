@@ -134,6 +134,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       providers: {
         available: () => true,
         listCredentialOptions: () => [],
+        readCatalog: () => ({ options: [], profiles: [] }),
         readProfile: (route: string) => ({ route, configured: false, models: [] }),
         configGuide: () => ({}),
         writeProfile: async () => {},

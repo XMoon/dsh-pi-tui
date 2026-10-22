@@ -76,6 +76,70 @@ test('providers listCredentialOptions merges the directory over PER-ENTRY sectio
   }
 })
 
+test('the provider snapshot reads the directory and the settings ONCE, whatever the provider count', () => {
+  let describes = 0
+  let enumerations = 0
+  const entries = Array.from({ length: 200 }, (_, index) => ({
+    provider: `p${index}`,
+    displayName: `P${index}`,
+    settingsNs: 'llm-pi-ai',
+    settingsPath: ['providers', `p${index}`],
+  }))
+  const section = {
+    providers: Object.fromEntries(entries.map(entry => [entry.provider, { apiKeyEnv: `${entry.provider.toUpperCase()}_KEY` }])),
+  }
+  const providers = port({
+    settings: {
+      describe: () => { describes += 1; return [{ ns: 'llm-pi-ai', value: section, user: section, revision: 1 }] },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => { enumerations += 1; return entries },
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.equal(catalog.failure, undefined)
+  assert.equal(catalog.options.length, 201, 'the builtin plus every directory route')
+  assert.equal(describes, 1, 'ONE settings describe per snapshot')
+  assert.equal(enumerations, 1, 'ONE directory enumeration per snapshot')
+  // Every route keeps its own profile facts, and a shared reference never
+  // drops a provider.
+  assert.equal(catalog.profiles.length, 201)
+  assert.equal(catalog.profiles.find(profile => profile.route === 'p7')?.configured, true)
+  // The option list is the same single-pass read.
+  assert.equal(providers.listCredentialOptions().length, 201)
+})
+
+test('a failed settings read is reported as a failed catalog, never as an empty catalog', () => {
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.ok(catalog.failure !== undefined, 'the failed read must be reported')
+  assert.equal(catalog.options.length, 0)
+})
+
+test('a throwing directory read is reported as a failed catalog', () => {
+  const providers = port({
+    settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),
+    llm: {
+      listConfigurableProviders: () => { throw new Error('directory read failed') },
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.ok(catalog.failure !== undefined)
+  // The /login parser keeps its fail-soft fallback.
+  assert.deepEqual(providers.listCredentialOptions().map(option => option.route), ['deepseek-official', 'acme'])
+})
+
 test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
   const providers = port({
     settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),

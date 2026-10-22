@@ -36,6 +36,7 @@ import {
   providerOptionsFor,
   type ProviderCatalogEntry,
   type ProviderOption,
+  providerProfileProjectionOf,
 } from '../../domain/catalog/provider.ts'
 import { cancellationError } from '../process/tasks.ts'
 import { safeErrorMessage } from '../process/errors.ts'
@@ -66,6 +67,7 @@ import type {
   PermissionConfig,
   PresetDefaultConfig,
   ProviderConfigGuide,
+  ProviderCatalogSnapshot,
   ProviderProfileConfig,
   ProviderProfileFacts,
   SubagentAllowedModelRoute,
@@ -428,27 +430,68 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     return out
   }
 
-  /** The merged /login option list as the port's CLIENT DTOs: the llm
-   * configurable-provider directory over its PER-ENTRY sections when the
-   * llm service is present, the settings-only fallback otherwise. The
-   * pure merge stays in domain/catalog/provider.ts; this adapter only wires the
-   * section reads and maps the schema facts onto the semantic
-   * `canProvisionProfile` flag (never a namespace or path across the
-   * port). */
-  listCredentialOptions(): readonly CredentialProviderOption[] {
-    const readSection = (ns: string): unknown => this.readSectionInternal(ns)
-    const llm = this.llm()
-    if (llm !== undefined) {
-      try {
-        return providerOptionsFor(llm.listConfigurableProviders(), readSection)
-          .map(option => credentialOptionOf(option))
-      } catch {
-        // A throwing directory read degrades to the settings-only fallback.
-      }
+  /**
+   * The ONE settings read of a provider snapshot: every namespace
+   * descriptor, indexed by namespace. `settings.describe()` returns ALL
+   * namespaces, so ONE call per snapshot replaces one call per provider
+   * route (the old per-route read amplified a large `llm-pi-ai` section
+   * into hundreds of reads and deep copies).
+   */
+  private readDescriptors(): { readonly byNs: ReadonlyMap<string, SettingsDescriptorLike>; readonly failure?: string } {
+    const settings = this.settings()
+    if (settings === undefined) return { byNs: new Map() }
+    try {
+      const byNs = new Map<string, SettingsDescriptorLike>()
+      for (const descriptor of settings.describe() ?? []) byNs.set(descriptor.ns, descriptor)
+      return { byNs }
+    } catch (error) {
+      // A THROWING settings read is a FAILED read: reporting it (instead of
+      // degrading to "no profiles") keeps a broken read from rendering as
+      // "no providers configured".
+      return { byNs: new Map(), failure: safeErrorMessage(error) }
     }
-    const settingsOnly = credentialOptionsFor(this.readPiAiProvidersInternal())
-    return settingsOnly.map((option, index) => {
-      const route = index === 0 ? 'deepseek-official' : option.label
+  }
+
+  /**
+   * The ONE provider snapshot of a directory: the settings are read ONCE
+   * and each namespace the directory names is detached ONCE, so every route
+   * is projected from that single read. The pure merge stays in
+   * domain/catalog/provider.ts; this adapter only wires the reads and maps
+   * the schema facts onto the semantic `canProvisionProfile` flag (never a
+   * namespace or path across the port).
+   */
+  private catalogFromDirectory(entries: readonly ProviderCatalogEntry[]): ProviderCatalogSnapshot {
+    const { byNs, failure } = this.readDescriptors()
+    if (failure !== undefined) return { options: [], profiles: [], failure }
+    const sections = new Map<string, unknown>()
+    for (const ns of new Set(entries.map(entry => entry.settingsNs))) {
+      const descriptor = byNs.get(ns)
+      if (descriptor === undefined) continue
+      const value = detachedSection(descriptor.value)
+      if (value !== undefined) sections.set(ns, value)
+    }
+    const profileOf = (entry: ProviderCatalogEntry): unknown => {
+      const section = sections.get(entry.settingsNs)
+      if (section === undefined) return undefined
+      return entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
+    }
+    const rawProfiles = new Map<string, unknown>()
+    for (const entry of entries) {
+      if (entry.provider.length === 0 || entry.settingsNs.length === 0) continue
+      rawProfiles.set(entry.provider, profileOf(entry))
+    }
+    const options = providerOptionsFor(entries, entry => providerProfileProjectionOf(profileOf(entry)))
+      .map(option => credentialOptionOf(option))
+    const profiles = options.map(option => providerFactsOf(option.route, option.label, rawProfiles.get(option.route)))
+    return { options, profiles }
+  }
+
+  /** The settings-only fallback (no llm directory): the conventional
+   *  llm-pi-ai `providers` slot is the only profile location. */
+  private settingsOnlyCatalog(): ProviderCatalogSnapshot {
+    const providers = this.readPiAiProvidersInternal()
+    const options = credentialOptionsFor(providers).map(option => {
+      const route = option.route ?? option.label
       return {
         ...option,
         route,
@@ -463,6 +506,52 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
         canProvisionProfile: isKeylessProfileSlot('llm-pi-ai', ['providers', route], route),
       }
     })
+    const section = this.readSectionInternal('llm-pi-ai') as
+      | { providers?: Record<string, unknown> }
+      | undefined
+    const profiles = options.map(option => providerFactsOf(
+      option.route,
+      option.route,
+      section?.providers?.[option.route],
+    ))
+    return { options, profiles }
+  }
+
+  /** The merged /login option list as the port's CLIENT DTOs: the llm
+   * configurable-provider directory over its PER-ENTRY sections when the
+   * llm service is present, the settings-only fallback otherwise. The
+   * pure merge stays in domain/catalog/provider.ts; this adapter only wires the
+   * section reads and maps the schema facts onto the semantic
+   * `canProvisionProfile` flag (never a namespace or path across the
+   * port). */
+  listCredentialOptions(): readonly CredentialProviderOption[] {
+    const llm = this.llm()
+    if (llm !== undefined) {
+      try {
+        return this.catalogFromDirectory(llm.listConfigurableProviders()).options
+      } catch {
+        // A throwing directory read degrades to the settings-only fallback.
+      }
+    }
+    return this.settingsOnlyCatalog().options
+  }
+
+  /**
+   * The ONE provider snapshot the Models page reads: the directory and the
+   * settings are read ONCE, and every route's profile facts come from that
+   * one read. A FAILED read is reported (`failure`), never presented as an
+   * empty catalog.
+   */
+  readCatalog(): ProviderCatalogSnapshot {
+    const llm = this.llm()
+    if (llm === undefined) return this.settingsOnlyCatalog()
+    let entries: readonly ProviderCatalogEntry[]
+    try {
+      entries = llm.listConfigurableProviders()
+    } catch (error) {
+      return { options: [], profiles: [], failure: safeErrorMessage(error) }
+    }
+    return this.catalogFromDirectory(entries)
   }
 
   readProfile(route: string): ProviderProfileFacts {

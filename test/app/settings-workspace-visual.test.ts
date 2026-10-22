@@ -275,6 +275,7 @@ function setup(options: HarnessOptions = {}): Harness {
       providers: {
         available: () => false,
         listCredentialOptions: () => [],
+        readCatalog: () => ({ options: [], profiles: [] }),
         readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] }),
         configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
         writeProfile: async () => {},

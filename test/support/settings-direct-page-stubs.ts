@@ -19,6 +19,7 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
   providers: {
     available: () => false,
     listCredentialOptions: () => [] as readonly unknown[],
+    readCatalog: () => ({ options: [] as readonly unknown[], profiles: [] as readonly unknown[] }),
     readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] as readonly string[] }),
     configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
     writeProfile: async () => {},
