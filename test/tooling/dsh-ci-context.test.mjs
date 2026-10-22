@@ -5,6 +5,8 @@ import { join } from 'node:path'
 
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
+  CI_CONFIG_DEFAULTS,
+  resolveCiConfig,
   resolveDshContext,
   resolveDshMode,
 } from '../../scripts/dsh-ci-context.mjs'
@@ -101,4 +103,81 @@ test('context uses the current DSH target in every mode and exposes the source p
   assert.equal(forcedSource.version, trackedSourceConfig.expectedVersion)
   assert.equal(forcedSource.sourceRef, trackedSourceConfig.ref)
   assert.equal(forcedSource.sourceExpectedVersion, trackedSourceConfig.expectedVersion)
+})
+
+
+// ---------------------------------------------------------------------------
+// The accelerated DAG's SHAPE.
+//
+// The three dimensions are not interchangeable, and the cost of confusing
+// them is silent: a run that says "4 shards, concurrency 8" and actually ran
+// one shard at Node's default still produces a complete-looking report. So
+// each variable is resolved ONCE here, validated, and handed to the matrix,
+// the runner and the aggregate as one record.
+// ---------------------------------------------------------------------------
+
+test('an ABSENT or EMPTY variable is the measured default, not zero', () => {
+  // Actions renders an unset `vars` entry as an empty string; treating that
+  // as 0 shards would produce an empty matrix that no job ever reports on.
+  assert.deepEqual(resolveCiConfig({}), { shardTotal: 4, shards: [1, 2, 3, 4], maxParallel: 4, testConcurrency: 'default' })
+  assert.deepEqual(resolveCiConfig({ shards: '', maxParallel: '', testConcurrency: '' }),
+    { shardTotal: 4, shards: [1, 2, 3, 4], maxParallel: 4, testConcurrency: 'default' })
+  assert.deepEqual(CI_CONFIG_DEFAULTS, { shards: 4, maxParallel: 4, testConcurrency: 'default' })
+})
+
+test('explicit integers are carried through EXACTLY', () => {
+  assert.deepEqual(resolveCiConfig({ shards: '1' }), { shardTotal: 1, shards: [1], maxParallel: 4, testConcurrency: 'default' })
+  assert.deepEqual(resolveCiConfig({ shards: '2', maxParallel: '2', testConcurrency: '8' }),
+    { shardTotal: 2, shards: [1, 2], maxParallel: 2, testConcurrency: '8' })
+  assert.deepEqual(resolveCiConfig({ shards: '3', maxParallel: '1', testConcurrency: '1' }),
+    { shardTotal: 3, shards: [1, 2, 3], maxParallel: 1, testConcurrency: '1' })
+})
+
+test('the MAX PARALLEL cap does not change the partition', () => {
+  // The cap is a scheduler knob: the same shards, fewer at once. Deriving the
+  // shard list from the cap (or the cap from the list) would silently change
+  // what "all shards" means.
+  const wide = resolveCiConfig({ shards: '4', maxParallel: '4' })
+  const narrow = resolveCiConfig({ shards: '4', maxParallel: '1' })
+  assert.deepEqual(narrow.shards, wide.shards)
+  assert.equal(narrow.shardTotal, wide.shardTotal)
+  assert.notEqual(narrow.maxParallel, wide.maxParallel)
+})
+
+test('a NONEMPTY INVALID value FAILS instead of defaulting', () => {
+  // A typo that quietly becomes the default is a run that reports a shape
+  // nobody asked for. Each of these must be an explicit error.
+  for (const [name, value] of [
+    ['CI_PRODUCT_SHARDS', '0'],
+    ['CI_PRODUCT_SHARDS', '5'],
+    ['CI_PRODUCT_SHARDS', 'two'],
+    ['CI_PRODUCT_SHARDS', '-1'],
+    ['CI_PRODUCT_MAX_PARALLEL', '0'],
+    ['CI_PRODUCT_MAX_PARALLEL', '9'],
+    ['CI_PRODUCT_MAX_PARALLEL', '4.5'],
+    ['CI_PRODUCT_TEST_CONCURRENCY', '0'],
+    ['CI_PRODUCT_TEST_CONCURRENCY', '9'],
+    ['CI_PRODUCT_TEST_CONCURRENCY', 'fast'],
+  ]) {
+    const key = name === 'CI_PRODUCT_SHARDS' ? 'shards' : name === 'CI_PRODUCT_MAX_PARALLEL' ? 'maxParallel' : 'testConcurrency'
+    assert.throws(() => resolveCiConfig({ [key]: value }), new RegExp(name, 'u'),
+      `${name}=${value} must fail the context, not default`)
+  }
+})
+
+test('the context refuses an invalid shape BEFORE anything is built', (t) => {
+  // The context job is the only place the shape is decided: an invalid value
+  // that got past it would reach the matrix as a number nobody chose.
+  assert.throws(
+    () => resolveDshContext({ eventName: 'push', ref: 'refs/heads/main', ciConfig: { shards: '9' } }),
+    /CI_PRODUCT_SHARDS/u,
+  )
+  const { path } = tempModeConfig('npm', testLifecycle(t))
+  const context = resolveDshContext({
+    eventName: 'push',
+    ref: 'refs/heads/next',
+    modeConfigPath: path,
+    ciConfig: { shards: '2', maxParallel: '1', testConcurrency: '3' },
+  })
+  assert.deepEqual(context.ci, { shardTotal: 2, shards: [1, 2], maxParallel: 1, testConcurrency: '3' })
 })
