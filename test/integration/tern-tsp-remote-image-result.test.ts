@@ -54,6 +54,110 @@ function drewImage(wire: string, blobId: string): boolean {
   return false
 }
 
+test('a Remote lifetime that retires while the read is open refuses the bytes, and the TSP sends no blob for them', async t => {
+  const life = testLifecycle(t)
+  const host = await mountRemotePresentationHost(life, 'prc-remote-image-preset')
+  await host.harness.create(SessionId(SESSION_ID), { provider: 'smoke', model: 'smoke' } as never, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(SESSION_ID)) as unknown as HostSession
+  const fixture = await mountRemoteRunner(life, {
+    presetId: 'prc-remote-image-preset', resumeSessionId: SESSION_ID, host,
+    renderer: 'tsp', nativeImages: true,
+  })
+  try {
+    const pane = fixture.pane
+    assert.ok(pane, 'the remote runner uses the scripted TSP pane')
+    const attachments = host.ctx.get('attachments') as unknown as AttachmentStore
+    const png = await realPng()
+    const image = (await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'shot.png' }]))[0]!
+    const expectedBlobId = createHash('sha256').update(png).digest('hex')
+
+    // The REAL retained binding's read is gated, so the lifetime can retire
+    // WHILE the read is open. The gate is a test-side seam on the client's
+    // read method: the read itself still traverses the real Host.
+    const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
+      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+    }
+    const retained = clientSessions.binding(SessionId(SESSION_ID))
+    assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
+    let releaseRead!: () => void
+    const gate = new Promise<void>(resolve => { releaseRead = resolve })
+    let readStarted = false
+    const originalRead = retained.session.readAttachment
+    retained.session.readAttachment = async (id: unknown) => {
+      readStarted = true
+      await gate
+      return originalRead.call(retained.session, id)
+    }
+
+    // The PRODUCTION Remote read seam is observed one-to-one: the unbound
+    // original is called through `original.call`, and the outcome is recorded.
+    const presentation = fixture.aggregate.presentation as unknown as {
+      attachments: {
+        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+      }
+    }
+    const outcomes: { readonly rejected?: string }[] = []
+    const originalDurable = presentation.attachments.readDurableImage
+    presentation.attachments.readDurableImage = function patched(this: unknown, ...args: unknown[]) {
+      return originalDurable.apply(this, args as never).then(
+        (value: unknown) => { outcomes.push({}); return value },
+        (error: unknown) => { outcomes.push({ rejected: String(error) }); throw error },
+      )
+    }
+    try {
+      session.append('turn/start', { turn: 1 })
+      session.append('step/start', { turn: 1, step: 0 })
+      session.append('tool/call', {
+        turn: 1, step: 0, callId: ToolCallId('remote-image-retired'), name: 'read_image', arguments: '{}',
+      })
+      session.append('tool/result', {
+        turn: 1, step: 0,
+        message: {
+          id: MessageId('remote-image-retired-result'), role: 'tool', toolCallId: ToolCallId('remote-image-retired'),
+          content: [{ type: 'text', text: 'Remote screenshot' }, { type: 'image', attachment: image }],
+          source: { kind: 'tool', callId: ToolCallId('remote-image-retired') },
+        },
+      }, { surfaceOp: 'append' })
+
+      await waitFor('the REAL attachment read to start', () => readStarted, 20_000)
+
+      // The REAL Connection generation rolls over while the read is open: the
+      // presentation's transport lifetime is retired under the read.
+      const connection = fixture.aggregate.wire.client.connection as unknown as {
+        generation: { getSnapshot(): { readonly id: number } | undefined }
+        reconnect(): void
+      }
+      const generationBefore = connection.generation.getSnapshot()?.id
+      connection.reconnect()
+      await waitFor('a NEW Connection generation to be established', () => {
+        const current = connection.generation.getSnapshot()
+        return current !== undefined && current.id !== generationBefore
+      }, 20_000)
+
+      releaseRead()
+      await waitFor('the refused read to settle', () => outcomes.length > 0, 20_000)
+
+      assert.equal(outcomes[0]?.rejected !== undefined, true,
+        'the production Remote read REFUSED the bytes')
+      assert.match(String(outcomes[0]?.rejected), /changed while the attachment was read|is retired/u,
+        'the refusal is the production lifetime fence')
+      // The refused bytes never reach the wire: no blob, and no frame that
+      // references the attachment.
+      assert.equal(pane.blobIds().includes(expectedBlobId), false,
+        'the refused attachment sent NO blob')
+      assert.equal(JSON.stringify(pane.frames()).includes(expectedBlobId), false,
+        'no frame references the refused attachment')
+      await waitFor('the row to state the read failure', () =>
+        pane.output.text().includes('Image read failed'), 20_000)
+    } finally {
+      presentation.attachments.readDurableImage = originalDurable
+      retained.session.readAttachment = originalRead
+    }
+  } finally {
+    await fixture.dispose()
+  }
+})
+
 test('a Remote tool-result image is authorized by its retained Session and reaches the Tern blob frame', async t => {
   const life = testLifecycle(t)
   const host = await mountRemotePresentationHost(life, 'prc-remote-image-preset')

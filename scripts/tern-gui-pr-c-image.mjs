@@ -134,10 +134,14 @@ export default async function (h) {
     JSON.stringify(viewerImage))
   h.capture('prc-gui-image-viewer', 'the client own image viewer after a real click')
 
-  // The CLOSE path: the keyboard first, then the viewer own Close control.
+  // The CLOSE path: the KEYBOARD first, asserted on its own. A viewer that
+  // only closes because the flow clicked the Close button afterwards would
+  // make this check pass for the wrong reason, so the Escape result is
+  // asserted BEFORE any fallback click.
   await h.key('escape', 800)
   const afterEscape = viewerOf(h.ctl('a11y'))
-  h.measure('the viewer after the Escape key', JSON.stringify(afterEscape === undefined ? 'closed' : 'still open'))
+  h.check('the Escape key closes the client own image viewer', afterEscape === undefined,
+    JSON.stringify(afterEscape === undefined ? 'closed' : 'the viewer is still open'))
   if (afterEscape !== undefined) {
     const close = elementsOf(afterEscape).find((element) => element.role === 'Button' && element.name === 'Close')
     h.measure('the viewer close control', JSON.stringify(close))
