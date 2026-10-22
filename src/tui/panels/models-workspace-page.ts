@@ -27,6 +27,7 @@ import {
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { QuestionFlow, type QuestionMouseGesture } from '../interaction/question.ts'
 import { authorizationFailureText, createAuthorizationFlow } from '../../app/command/authorization.ts'
 import type {
@@ -314,13 +315,18 @@ function parseModelIds(text: string): string[] {
   return [...new Set(text.split(/[,\s]+/).map(part => part.trim()).filter(part => part !== ''))]
 }
 
-/** Whether a key is plain text (no control character), so it can extend
- *  a filter. */
+/**
+ * Whether a key is plain text, so it can extend a filter. Every C0 control,
+ * DEL and C1 control (U+0080-U+009F) is refused: a C1 byte sequence can
+ * reach the component as ordinary input and would otherwise be painted as a
+ * terminal control (docs/architecture/terminal-output.md).
+ */
 function isPrintableText(data: string): boolean {
   if (data.length === 0) return false
   for (const character of data) {
     const code = character.codePointAt(0) ?? 0
     if (code < 0x20 || code === 0x7f) return false
+    if (code >= 0x80 && code <= 0x9f) return false
   }
   return true
 }
@@ -2032,16 +2038,18 @@ export class ModelsWorkspacePage implements Component {
         interactive += 1
       }
     }
+    // The visible query is display-safe text (the filter never holds a
+    // terminal control, and the projection is applied again here).
+    const shownFilter = sanitizedPhysicalLine(this.catalogFilter.trim())
     if (available.length === 0 && signIns.length === 0) {
-      content.push(this.catalogFilter.trim() === ''
+      content.push(shownFilter === ''
         ? color.textMuted('This installation offers no further provider to add.')
-        : color.textMuted(`No provider matches "${this.catalogFilter.trim()}".`))
+        : color.textMuted(`No provider matches "${shownFilter}".`))
     }
     // The filter line: the visible query and the number of matches.
-    const filter = this.catalogFilter
-    content.push('', color.textDim(filter === ''
+    content.push('', color.textDim(shownFilter === ''
       ? 'Type to narrow the list.'
-      : `Filter: ${filter} · ${available.length + signIns.length} match${available.length + signIns.length === 1 ? '' : 'es'}`))
+      : `Filter: ${shownFilter} · ${available.length + signIns.length} match${available.length + signIns.length === 1 ? '' : 'es'}`))
     content.push('', color.textDim('Browsing adds nothing. A provider is configured only by the operation you choose.'))
     if (this.notice !== undefined) content.push(color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
@@ -2540,7 +2548,9 @@ export class ModelsWorkspacePage implements Component {
       return true
     }
     if (!isPrintableText(data)) return false
-    this.setCatalogFilter(this.catalogFilter + data)
+    // The filter only ever holds display-safe text, and the painted query
+    // goes through the same projection again.
+    this.setCatalogFilter(this.catalogFilter + sanitizeDisplayText(data))
     return true
   }
 
