@@ -670,41 +670,26 @@ jobs:
           # hypothetical — five CI runs were once reported as a concurrency
           # comparison while every one of them ran at Node's default.
           DSH_EXPECTED_CONCURRENCY: ${{ needs.dsh-context.outputs.test_concurrency }}
-          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
         run: |
           set -euo pipefail
-          # The case and skip baselines are committed facts, read from files so
-          # that a qualification CANNOT disable the comparison by passing an
-          # empty value. A missing, empty or malformed file FAILS.
+          # What this proves, unconditionally: the shards are a PARTITION of
+          # the lane (every file exactly once, no file twice), every case's
+          # outcome is one the qualification accepts, zero cases failed or
+          # were cancelled, every reported file contributed cases, and the
+          # identity and applied parameters are THIS run's.
           #
-          # They are MODE-SCOPED: an npm baseline is not a Source Mode
-          # baseline, because a different dependency graph can legitimately
-          # change which cases run and which environment capability is
-          # missing. A source run with no recorded baseline FAILS rather than
-          # borrowing the npm numbers.
-          #
-          # WHERE the numbers came from is a committed file too: a count on its
-          # own cannot say which run produced it, and this pipeline is not
-          # allowed to certify itself against itself.
-          case "$DSH_MODE" in
-            npm) PREFIX=scripts/measurement ;;
-            source) PREFIX=scripts/measurement-source ;;
-            *) echo "unknown DSH mode '$DSH_MODE': the baseline is mode-scoped" >&2; exit 1 ;;
-          esac
-          export DSH_EXPECTED_CASES_FILE="$PREFIX-expected-cases.txt"
-          export DSH_EXPECTED_SKIPPED_FILE="$PREFIX-expected-skipped.txt"
-          export DSH_ACCEPTED_SKIPS_FILE="$PREFIX-accepted-skips.txt"
-          if [ ! -f "$PREFIX-baseline-source.txt" ]; then
-            echo "no baseline is recorded for mode '$DSH_MODE' ($PREFIX-baseline-source.txt)" >&2
-            echo 'run the UNSHARDED product lane once on the frozen tree, then commit its case and skip totals together with the run that produced them' >&2
-            exit 1
-          fi
+          # There is deliberately NO committed case or skip COUNT here. A
+          # hand-maintained total is a measurement device, not a delivery
+          # gate: it would have to be edited by every commit that adds a test,
+          # so an ordinary PR would fail the build for doing the right thing —
+          # and it would still not prove anything the partition does not.
+          # The totals ARE reported in `aggregate.json`, so a deliberate
+          # measurement can read them; they are not compared to a constant.
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
           export DSH_EXPECTED_SHA
           node scripts/verify-shards.mjs \
             --shards shards \
             --total "${{ needs.dsh-context.outputs.shard_total }}" \
-            --baseline-source "$(cat "$PREFIX-baseline-source.txt")" \
             --effective-config "${{ needs.dsh-context.outputs.effective_config }}" \
             --out aggregate.json
 

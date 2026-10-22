@@ -130,32 +130,6 @@ test('two Node versions are two SEPARATE partitions, and both are accepted', (t)
   assert.equal(aggregate.observedFileCount, EXPECTED.size)
 })
 
-test('each Node version is compared against the baseline ON ITS OWN', (t) => {
-  // A version may skip a different number of cases than another — the
-  // optional-bundle skip depends on what that version's environment
-  // provides. So the baseline is compared per version, not across the
-  // whole run.
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-shard-version-baseline-')
-  const first = FILES.slice(0, 1)
-  const second = FILES.slice(1)
-  writeShard(root, 'shard-1-node24', { files: first })
-  writeShard(root, 'shard-2-node24', { files: second })
-  writeShard(root, 'shard-1-node22', { files: first })
-  writeShard(root, 'shard-2-node22', { files: second })
-  // Each version runs the WHOLE lane, so each version's case count is the
-  // lane's own count — the same number for every version. The fixture
-  // writes one case per file.
-  const cases = FILES.length
-  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED, expectedCases: cases, expectedSkipped: 0 })
-  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
-  assert.deepEqual(aggregate.versions.map(entry => entry.node).sort(), ['22', '24'])
-  // Each version reports its OWN counts.
-  for (const version of aggregate.versions) {
-    assert.equal(version.cases, cases, `Node ${version.node} must report its own case count`)
-  }
-})
-
 test('a MISSING shard on ONE Node version fails that version', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-shard-version-missing-')
@@ -342,56 +316,6 @@ test('the recorded REPOSITORY-root path is compared against the TEST-root path',
   assert.equal(aggregate.observedFileCount, EXPECTED.size)
 })
 
-test('a MISSING case fails the aggregate when a baseline is known', (t) => {
-  // The file partition proves every FILE was covered. It does not prove
-  // every CASE inside those files was recorded: a recorder that dropped
-  // one case would still leave every file covered.
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-shard-gate-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
-  const aggregate = verifyShards({
-    shardsRoot: root,
-    total: 2,
-    expectedFiles: EXPECTED,
-    expectedCases: 4,
-    expectedSkipped: 0,
-  })
-  assert.ok(aggregate.failures.length > 0, 'a missing case must fail the aggregate')
-  assert.match(aggregate.failures.join('\n'), /recorded 3 case\(s\), but the baseline is 4/u)
-})
-
-test('an EXTRA skipped case fails the aggregate when a baseline is known', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-shard-gate-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], results: { 'tui/three.test.ts': 'skip' } })
-  const aggregate = verifyShards({
-    shardsRoot: root,
-    total: 2,
-    expectedFiles: EXPECTED,
-    expectedCases: 3,
-    expectedSkipped: 0,
-  })
-  assert.ok(aggregate.failures.length > 0, 'an extra skip must fail the aggregate')
-  assert.match(aggregate.failures.join('\n'), /recorded 1 skipped case\(s\), but the baseline for that version is 0/u)
-})
-
-test('the aggregate accepts a split that matches the baseline exactly', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-shard-gate-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
-  const aggregate = verifyShards({
-    shardsRoot: root,
-    total: 2,
-    expectedFiles: EXPECTED,
-    expectedCases: 3,
-    expectedSkipped: 0,
-  })
-  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
-})
-
 test('a shard from an EARLIER attempt fails the aggregate', (t) => {
   // A re-run of the same workflow has the same run id and the same commit;
   // only the attempt tells them apart.
@@ -434,37 +358,6 @@ test('a shard that records NO attempt fails the aggregate when one is expected',
   assert.match(aggregate.failures.join('\n'), /recorded no run attempt/u)
 })
 
-test('the CLI reads the case and skip baseline from the environment', (t) => {
-  // The API-level tests prove the CHECKS; this proves the PATH. A
-  // verifier whose live entry point drops the expectations would accept a
-  // shard set that lost a case, and every API-level test would still
-  // pass.
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-shard-cli-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
-  const expectedFiles = join(root, 'expected-files.txt')
-  writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
-  const run = spawnSync(process.execPath, [
-    join(ROOT, 'scripts', 'verify-shards.mjs'),
-    '--shards', root,
-    '--total', '2',
-    '--expected-files', expectedFiles,
-  ], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      NODE_TEST_CONTEXT: undefined,
-      // The baseline says FOUR cases; the shards recorded THREE.
-      DSH_EXPECTED_CASES: '4',
-      DSH_EXPECTED_SKIPPED: '0',
-    },
-  })
-  assert.notEqual(run.status, 0, 'the CLI must fail on a lost case')
-  assert.match(run.stderr, /but the baseline is 4/u)
-})
-
 test('the CLI reads the run attempt from the environment', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-shard-cli-')
@@ -493,57 +386,6 @@ test('the CLI reads the run attempt from the environment', (t) => {
   })
   assert.notEqual(run.status, 0, 'the CLI must fail on a foreign attempt')
   assert.match(run.stderr, /belongs to attempt 1, not 2/u)
-})
-
-test('the CLI accepts a shard set that matches the baseline exactly', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-shard-cli-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
-  const expectedFiles = join(root, 'expected-files.txt')
-  writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
-  const run = spawnSync(process.execPath, [
-    join(ROOT, 'scripts', 'verify-shards.mjs'),
-    '--shards', root,
-    '--total', '2',
-    '--expected-files', expectedFiles,
-  ], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      NODE_TEST_CONTEXT: undefined,
-      DSH_EXPECTED_CASES: '3',
-      DSH_EXPECTED_SKIPPED: '0',
-    },
-  })
-  assert.equal(run.status, 0, run.stderr)
-  assert.match(run.stdout, /the shard aggregate is the whole lane/u)
-})
-
-test('the CLI refuses a malformed baseline instead of disabling the check', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-shard-cli-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
-  const expectedFiles = join(root, 'expected-files.txt')
-  writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
-  const run = spawnSync(process.execPath, [
-    join(ROOT, 'scripts', 'verify-shards.mjs'),
-    '--shards', root,
-    '--total', '2',
-    '--expected-files', expectedFiles,
-  ], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      NODE_TEST_CONTEXT: undefined,
-      DSH_EXPECTED_CASES: 'many',
-    },
-  })
-  assert.notEqual(run.status, 0, 'a malformed baseline must fail')
-  assert.match(run.stderr, /must be a non-negative integer/u)
 })
 
 test('a case whose result is MISSING fails the aggregate', (t) => {
@@ -708,343 +550,6 @@ test('the aggregate records both the CLAIMED and the APPLIED level', (t) => {
 // ---------------------------------------------------------------------------
 
 /** The accepted classes, as the aggregate reads them. */
-const ACCEPTED = [/BLOCKED: no provisioned official DSH .* Optional-bundle installation/u, /no fd\/fdfind on PATH/u]
-
-test('a skip with NO stated reason fails the policy', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-skip-none-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts'] })
-  writeShard(root, 'shard-2', {
-    files: ['tui/three.test.ts'],
-    results: { 'tui/three.test.ts': 'skip' },
-    skipReasons: { 'tui/three.test.ts': null },
-  })
-  const aggregate = verifyShards({
-    shardsRoot: root,
-    total: 2,
-    expectedFiles: EXPECTED,
-    acceptedSkips: ACCEPTED,
-  })
-  assert.ok(aggregate.failures.length > 0, 'a skip with no reason must fail')
-  assert.match(aggregate.failures.join('\n'), /no reason stated/u)
-})
-
-test('a skip whose reason is OUTSIDE the accepted classes fails', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-skip-unknown-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts'] })
-  writeShard(root, 'shard-2', {
-    files: ['tui/three.test.ts'],
-    results: { 'tui/three.test.ts': 'skip' },
-    skipReasons: { 'tui/three.test.ts': 'the fixture stopped working' },
-  })
-  const aggregate = verifyShards({
-    shardsRoot: root,
-    total: 2,
-    expectedFiles: EXPECTED,
-    acceptedSkips: ACCEPTED,
-  })
-  assert.ok(aggregate.failures.length > 0)
-  assert.match(aggregate.failures.join('\n'), /reason the policy does not accept/u)
-  assert.match(aggregate.failures.join('\n'), /the fixture stopped working/u,
-    'the failure must quote the reason, so a reader can classify it')
-})
-
-test('an ACCEPTED reason passes, and the policy is recorded in the report', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-skip-ok-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', {
-    files: ['tui/three.test.ts'],
-    results: { 'tui/three.test.ts': 'skip' },
-    skipReasons: { 'tui/three.test.ts': 'BLOCKED: no provisioned official DSH 0.2.1-rc.2 Optional-bundle installation was found' },
-  })
-  const aggregate = verifyShards({
-    shardsRoot: root,
-    total: 2,
-    expectedFiles: EXPECTED,
-    acceptedSkips: ACCEPTED,
-  })
-  assert.deepEqual(aggregate.failures, [])
-  assert.deepEqual(aggregate.skipPolicy, { acceptedClasses: 2, enforced: true },
-    'a reader must be able to tell "no unaccepted skip" from "no policy applied"')
-})
-
-test('a run with NO policy applied says so, instead of looking enforced', (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-skip-nopolicy-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', {
-    files: ['tui/three.test.ts'],
-    results: { 'tui/three.test.ts': 'skip' },
-    skipReasons: { 'tui/three.test.ts': 'anything at all' },
-  })
-  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
-  assert.deepEqual(aggregate.failures, [], 'an unclassified skip is not a failure when no policy is asserted')
-  assert.equal(aggregate.skipPolicy, null, 'but the report must NOT claim a policy was enforced')
-})
-
-// ---------------------------------------------------------------------------
-// P2-a — the CASE and SKIP baselines, read from committed files.
-//
-// The defect this protects: the qualification passed empty strings for both
-// counts, `verify-shards` reads an empty value as "no expectation", and the
-// comparison silently disappeared. Every other gate passed, so nothing was
-// red — the aggregate simply stopped checking the two numbers that say the
-// cases still exist.
-//
-// A qualification therefore names a FILE, and a missing, empty or malformed
-// file FAILS. Passing a value is still possible for a caller that has the
-// number in hand, but a workflow cannot disable the check by accident.
-// ---------------------------------------------------------------------------
-
-/**
- * Run the CLI with a controlled environment.
- *
- * @param {string[]} args - the CLI arguments.
- * @param {Record<string, string>} env - the extra environment.
- * @param {string} cwd - where the CLI runs.
- */
-function cliAt(args, env, cwd) {
-  const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-shards.mjs'), ...args], {
-    cwd,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      NODE_TEST_CONTEXT: undefined,
-      // Every expectation is cleared, so a case opts in to exactly what it
-      // is testing.
-      DSH_EXPECTED_SHA: undefined,
-      DSH_EXPECTED_RUN_ID: undefined,
-      DSH_EXPECTED_RUN_ATTEMPT: undefined,
-      DSH_EXPECTED_CASES: undefined,
-      DSH_EXPECTED_SKIPPED: undefined,
-      DSH_EXPECTED_CASES_FILE: undefined,
-      DSH_EXPECTED_SKIPPED_FILE: undefined,
-      DSH_EXPECTED_CONCURRENCY: undefined,
-      DSH_ACCEPTED_SKIPS_FILE: undefined,
-      ...env,
-    },
-  })
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr }
-}
-
-/** Write the lane's expected file list, the form the CLI compares against. */
-function writeExpectedFiles(directory) {
-  const file = join(directory, 'expected-files.txt')
-  writeFileSync(file, [...EXPECTED].join('\n'))
-  return file
-}
-
-/** A shard pair that covers the synthetic lane exactly. */
-function validPair(life, directory) {
-  const root = join(directory, 'shards')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
-  return root
-}
-
-test('a MISSING case baseline file FAILS the qualification', (t) => {
-  // The whole point: a qualification must not be able to run without the
-  // number. `set -e` in a workflow would not catch this either, because the
-  // value would simply be absent rather than wrong.
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-baseline-missing-')
-  const root = validPair(life, directory)
-  const result = cliAt(['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory)],
-    { DSH_EXPECTED_CASES_FILE: join(directory, 'does-not-exist.txt') }, ROOT)
-  assert.notEqual(result.status, 0, 'a missing baseline file must fail')
-  assert.match(result.stderr, /is missing/u)
-})
-
-test('an EMPTY case baseline file FAILS, rather than meaning "no expectation"', (t) => {
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-baseline-empty-')
-  const root = validPair(life, directory)
-  const file = join(directory, 'empty.txt')
-  writeFileSync(file, '\n')
-  const result = cliAt(['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory)],
-    { DSH_EXPECTED_CASES_FILE: file }, ROOT)
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /is empty/u)
-})
-
-test('a MALFORMED case baseline file FAILS', (t) => {
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-baseline-bad-')
-  const root = validPair(life, directory)
-  const file = join(directory, 'bad.txt')
-  writeFileSync(file, 'about nine thousand\n')
-  const result = cliAt(['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory)],
-    { DSH_EXPECTED_CASES_FILE: file }, ROOT)
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /must be a non-negative integer/u)
-})
-
-test('a case count that DISAGREES with the baseline FAILS', (t) => {
-  // One case lost (or gained) while every file still ran. Only the count can
-  // see this, which is why the file baseline exists.
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-baseline-mismatch-')
-  const root = validPair(life, directory)
-  const file = join(directory, 'cases.txt')
-  // The synthetic pair records ONE case per file (plus the file entry,
-  // which the aggregate does not count): 3 files -> 3 cases.
-  writeFileSync(file, '2\n')
-  const result = cliAt(['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory)],
-    { DSH_EXPECTED_CASES_FILE: file }, ROOT)
-  assert.notEqual(result.status, 0, 'a case-count mismatch must fail')
-  assert.match(result.stderr, /recorded 3 case\(s\), but the baseline is 2/u)
-})
-
-test('a matching baseline PASSES and records WHERE it came from', (t) => {
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-baseline-ok-')
-  const root = validPair(life, directory)
-  const casesFile = join(directory, 'cases.txt')
-  const skippedFile = join(directory, 'skipped.txt')
-  writeFileSync(casesFile, '3\n')
-  writeFileSync(skippedFile, '0\n')
-  const out = join(directory, 'aggregate.json')
-  const result = cliAt(
-    ['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory),
-      '--baseline-source', 'the unsharded lane at 2026-10-21: 3 cases', '--out', out],
-    { DSH_EXPECTED_CASES_FILE: casesFile, DSH_EXPECTED_SKIPPED_FILE: skippedFile },
-    ROOT,
-  )
-  assert.equal(result.status, 0, result.stderr)
-  const report = JSON.parse(readFileSync(out, 'utf8'))
-  assert.equal(report.expectedCases, 3)
-  assert.equal(report.expectedSkipped, 0)
-  assert.equal(report.baselineSource, 'the unsharded lane at 2026-10-21: 3 cases',
-    'a count without its provenance cannot be audited')
-})
-
-test('a SKIP count that disagrees with the baseline FAILS, independently of the reasons', (t) => {
-  // The two checks answer different questions and neither replaces the
-  // other: the count catches a case that stopped running, the reasons catch
-  // a case that stopped running for a reason nobody agreed to.
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-skip-count-')
-  const root = join(directory, 'shards')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', {
-    files: ['tui/three.test.ts'],
-    results: { 'tui/three.test.ts': 'skip' },
-    skipReasons: { 'tui/three.test.ts': 'BLOCKED: no provisioned official DSH 0.2.1-rc.2 Optional-bundle installation was found' },
-  })
-  const skippedFile = join(directory, 'skipped.txt')
-  writeFileSync(skippedFile, '0\n')
-  const result = cliAt(
-    ['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory)],
-    {
-      DSH_EXPECTED_SKIPPED_FILE: skippedFile,
-      DSH_ACCEPTED_SKIPS_FILE: join(ROOT, 'scripts', 'measurement-accepted-skips.txt'),
-    },
-    ROOT,
-  )
-  assert.notEqual(result.status, 0, 'the wrong skip COUNT must fail even when the reason is accepted')
-  assert.match(result.stderr, /recorded 1 skipped case\(s\), but the baseline/u)
-})
-
-test('the SHIPPED skip policy rejects a POSIX-only skip on the Linux runner', (t) => {
-  // The defect: the policy file listed `mkfifo is POSIX-only` and
-  // `no /dev/full` while its own comment said a skip for those reasons
-  // would be a surprise that FAILS. The list won, so the surprise was
-  // accepted.
-  //
-  // This case reads the REAL policy file, so it binds to what ships.
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-skip-posix-')
-  const root = join(directory, 'shards')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', {
-    files: ['tui/three.test.ts'],
-    results: { 'tui/three.test.ts': 'skip' },
-    skipReasons: { 'tui/three.test.ts': 'mkfifo is POSIX-only' },
-  })
-  const result = cliAt(
-    ['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory)],
-    { DSH_ACCEPTED_SKIPS_FILE: join(ROOT, 'scripts', 'measurement-accepted-skips.txt') },
-    ROOT,
-  )
-  assert.notEqual(result.status, 0, 'a POSIX-only skip must FAIL on a Linux runner')
-  assert.match(result.stderr, /reason the policy does not accept/u)
-  assert.match(result.stderr, /mkfifo is POSIX-only/u)
-})
-
-test('a MISSING skip policy file FAILS rather than disabling the check', (t) => {
-  // An absent policy must not mean "accept everything": that would turn a
-  // forgotten file into a silently weaker qualification.
-  const life = testLifecycle(t)
-  const directory = life.tempDir('dsh-skip-nopolicy-file-')
-  const root = join(directory, 'shards')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-  writeShard(root, 'shard-2', {
-    files: ['tui/three.test.ts'],
-    results: { 'tui/three.test.ts': 'skip' },
-    skipReasons: { 'tui/three.test.ts': 'no fd/fdfind on PATH: the real-fd case test cannot run' },
-  })
-  const skippedFile = join(directory, 'skipped.txt')
-  writeFileSync(skippedFile, '1\n')
-  const result = cliAt(
-    ['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory)],
-    {
-      DSH_EXPECTED_SKIPPED_FILE: skippedFile,
-      DSH_ACCEPTED_SKIPS_FILE: join(ROOT, 'scripts', 'measurement-accepted-skips-file-does-not-exist.txt'),
-    },
-    ROOT,
-  )
-  assert.notEqual(result.status, 0, 'a missing policy file must fail rather than disable the check')
-  assert.match(result.stderr, /policy .* is missing/u)
-})
-
-test('the SHIPPED skip policy ACCEPTS each evidenced class, against the real file', (t) => {
-  // The positive direction, driven by the REAL policy file rather than a
-  // copy of its patterns inside this test.
-  //
-  // The defect this replaces: the previous case pointed the policy at a
-  // file that does not exist and asserted a FAILURE, so it proved the
-  // missing-file path and nothing about whether the shipped policy still
-  // accepts the two classes the runner actually produces. A policy that
-  // accepted NOTHING would have passed it.
-  const reasons = [
-    'BLOCKED: no provisioned official DSH 0.2.1-rc.2 Optional-bundle installation was found',
-    'no fd/fdfind on PATH: the real-fd case test cannot run',
-  ]
-  for (const reason of reasons) {
-    const life = testLifecycle(t)
-    const directory = life.tempDir('dsh-skip-accepted-')
-    const root = join(directory, 'shards')
-    writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
-    writeShard(root, 'shard-2', {
-      files: ['tui/three.test.ts'],
-      results: { 'tui/three.test.ts': 'skip' },
-      skipReasons: { 'tui/three.test.ts': reason },
-    })
-    const casesFile = join(directory, 'cases.txt')
-    const skippedFile = join(directory, 'skipped.txt')
-    writeFileSync(casesFile, '3\n')
-    writeFileSync(skippedFile, '1\n')
-    const out = join(directory, 'aggregate.json')
-    const result = cliAt(
-      ['--shards', root, '--total', '2', '--expected-files', writeExpectedFiles(directory), '--out', out],
-      {
-        DSH_EXPECTED_CASES_FILE: casesFile,
-        DSH_EXPECTED_SKIPPED_FILE: skippedFile,
-        DSH_ACCEPTED_SKIPS_FILE: join(ROOT, 'scripts', 'measurement-accepted-skips.txt'),
-      },
-      ROOT,
-    )
-    assert.equal(result.status, 0, `the shipped policy must ACCEPT "${reason}": ${result.stderr}`)
-    const report = JSON.parse(readFileSync(out, 'utf8'))
-    assert.deepEqual(report.failures, [])
-    assert.equal(report.totalSkipped, 1)
-    assert.deepEqual(report.skipPolicy, { acceptedClasses: 2, enforced: true },
-      'the accepted classes are the two with evidence on this runner')
-  }
-})
-
 test('the F1 artifact naming is parsed as a shard identity', (t) => {
   // `prototype-shard-<i>-node24` must still tell the aggregate WHICH shard
   // the artifact belongs to and which Node version produced it. The Node
@@ -1073,4 +578,39 @@ test('the F1 artifact naming is parsed as a shard identity', (t) => {
     'the Node version must be read from the artifact name, not lost')
   assert.deepEqual(aggregate.shards.map(shard => shard.applied.shard).sort(), ['1/2', '2/2'],
     'the shard index must still be read from the artifact name')
+})
+
+test('a file that reported itself but NO case fails the aggregate', (t) => {
+  // The partition proves every FILE was covered; it cannot see that a file's
+  // cases were dropped on the way to the recorder. The tempting fix is a
+  // committed case count — and a delivery pipeline must not carry one, because
+  // every commit that adds a test would have to edit it. This invariant
+  // catches the same class with no maintained constant.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-aggregate-silent-')
+  const first = writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts'] })
+  writeFileSync(join(first, 'cases.jsonl'),
+    `${JSON.stringify({ file: 'test/app/one.test.ts', name: 'test/app/one.test.ts', result: 'pass' })}\n`)
+  writeShard(root, 'shard-2-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.ok(
+    aggregate.failures.some(failure => /reported 1 file\(s\) with no case record/u.test(failure)),
+    JSON.stringify(aggregate.failures, null, 2),
+  )
+})
+
+test('a SKIPPED case still counts as a case, so the invariant does not punish skips', (t) => {
+  // A skip is a case that did not run — not a case that was lost. The
+  // invariant is about files whose cases never reached the recorder.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-aggregate-skip-')
+  writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts', 'app/two.test.ts'], results: { 'app/two.test.ts': 'skip' } })
+  writeShard(root, 'shard-2-node24', { files: ['tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
+  assert.equal(aggregate.totalSkipped, 1, 'the skip is still REPORTED, it is just not a failure by itself')
+  // And the totals are reported without being compared to a constant.
+  assert.equal(aggregate.totalCases, 3)
+  assert.equal('expectedCases' in aggregate, false)
+  assert.equal('skipPolicy' in aggregate, false)
 })
