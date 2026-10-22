@@ -1675,6 +1675,28 @@ test('a stale snapshot disables the authority-dependent writes', async () => {
   assert.doesNotMatch(viewText(page), /API Key Reference/u, 'a stale snapshot must not open the key editor')
 })
 
+test('a sign-in flow for a route the catalog does not offer stays discoverable', async () => {
+  // The merge appends a flow whose route no provider option covers as a
+  // standalone target: it is a sign-in, never a configured provider, and it
+  // must stay reachable.
+  const rows: ModelsProviderRow[] = [{
+    kind: 'authorization', identity: 'auth:llm-pi-ai/orphan', route: 'orphan', label: 'Orphan Sign-in',
+    key: 'llm-pi-ai/orphan', configured: false, declared: false, namesCredential: false, canProvisionProfile: false,
+    methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false,
+    profile: { route: 'orphan', configured: false, models: [] },
+  }]
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  assert.doesNotMatch(viewText(page), /Orphan Sign-in/u, 'an unconfigured flow is not a HOME row')
+  page.handleInput('\u001b[B') // the "Add Provider…" action
+  page.handleInput('\r')
+  const catalog = viewText(page)
+  assert.match(catalog, /Other sign-ins/u)
+  assert.match(catalog, /Orphan Sign-in/u, 'the standalone sign-in stays discoverable')
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,

@@ -540,7 +540,7 @@ export class ModelsWorkspacePage implements Component {
         this.providerRows = read.rows
         this.readState = read.kind === 'stale' ? 'stale' : 'ready'
         this.readFailure = read.kind === 'stale'
-          ? 'the configuration mirror is not current'
+          ? 'the last snapshot is not the current authority'
           : undefined
         this.resolvePendingProvider()
         this.readCredentialPresence(read.rows)
@@ -1764,8 +1764,8 @@ export class ModelsWorkspacePage implements Component {
         return [color.textMuted('Refreshing…')]
       case 'stale':
         return [
-          color.warning('Stale — the last provider read did not complete'),
-          color.textDim(sanitizedPhysicalLine(this.readFailure ?? 'the read failed')),
+          color.warning('Stale — the provider configuration is not current'),
+          color.textDim(sanitizedPhysicalLine(this.readFailure ?? 'the last snapshot is not the current authority')),
           color.textDim('Press r to refresh; an authority-dependent write waits for the fresh read.'),
         ]
       case 'error':
@@ -2021,11 +2021,13 @@ export class ModelsWorkspacePage implements Component {
   }
 
   /**
-   * The sign-in flows that no provider profile addresses: a foreign-scope
-   * flow, which is not a provider row at all.
+   * The sign-in flows that no provider option addresses: a route-less
+   * foreign-scope flow, and a flow for a route the configurable-provider
+   * directory does not offer (the merge appends it as a standalone target).
+   * They are sign-ins, not provider profiles.
    */
   private otherSignInRows(): readonly ModelsProviderRow[] {
-    return this.providerRows.filter(row => row.kind === 'authorization' && row.route === '')
+    return this.providerRows.filter(row => row.kind === 'authorization' && row.group === undefined)
   }
 
   /**
