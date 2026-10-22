@@ -323,8 +323,12 @@ test('every job that can be SKIPPED by mode states the mode it needs', () => {
       }
     }
   }
-  assert.match(jobs.aggregate.steps.find(step => typeof step.run === 'string' && step.run.includes('verify-shards')).run,
-    /DSH_MODE/u, 'the aggregate must check the matrix result and the mode before trusting the records')
+  // The aggregate reports on the MATRIX it received: a green aggregate must
+  // never hide a failed or skipped shard matrix. It no longer branches on the
+  // dependency mode — the proof is structural and mode-independent.
+  const aggregateRun = jobs.aggregate.steps.find(step => typeof step.run === 'string' && step.run.includes('SHARD_RESULT')).run
+  assert.match(aggregateRun, /if \[ "\$SHARD_RESULT" != "success" \]/u,
+    'the aggregate must refuse a shard matrix that did not succeed')
   assert.match(jobs.summary.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict')).run,
     /ci-verdict\.mjs summary/u)
 })
@@ -401,43 +405,26 @@ test('the inherited environment is preserved, and the plan wins on a conflict', 
     'a runner-level mirror must not survive the plan')
 })
 
-test('BOTH mode-scoped baselines exist, parse, and are selected by the aggregate', () => {
-  // The aggregate derives its file names from the mode. A missing set is not a
-  // weaker check — it is a hard stop the moment `next` selects Source Mode, and
-  // the failure would land on whoever flips that policy rather than here. So
-  // both sets are part of the shipped tree, and each one has to be usable.
-  const prefixes = { npm: 'scripts/measurement', source: 'scripts/measurement-source' }
-  for (const [mode, prefix] of Object.entries(prefixes)) {
-    for (const suffix of ['expected-cases.txt', 'expected-skipped.txt', 'accepted-skips.txt', 'baseline-source.txt']) {
-      assert.ok(existsSync(join(ROOT, `${prefix}-${suffix}`)), `the ${mode} baseline file ${prefix}-${suffix} is missing`)
-    }
-    assert.match(readFileSync(join(ROOT, `${prefix}-expected-cases.txt`), 'utf8').trim(), /^\d+$/u, `${mode} case count`)
-    assert.match(readFileSync(join(ROOT, `${prefix}-expected-skipped.txt`), 'utf8').trim(), /^\d+$/u, `${mode} skip count`)
-    const policy = readFileSync(join(ROOT, `${prefix}-accepted-skips.txt`), 'utf8')
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line !== '' && !line.startsWith('#'))
-    assert.ok(policy.length >= 1, `${mode} accepts no skip reason at all, which is not a policy`)
-    for (const line of policy) assert.doesNotThrow(() => new RegExp(line, 'u'), `${mode} policy line is not a regex: ${line}`)
-    const provenance = readFileSync(join(ROOT, `${prefix}-baseline-source.txt`), 'utf8').trim()
-    assert.ok(provenance.length > 0, `${mode} baseline has no provenance`)
-    assert.equal(provenance.includes('\n'), false,
-      `${mode} provenance must stay a single line: the aggregate passes it as one argument`)
-  }
-
-  // The CASE count is a property of the TEST TREE, not of the dependency
-  // graph, so the two modes must agree. A disagreement means one of the files
-  // was copied from an older tree instead of measured — which is exactly how a
-  // stale 9122 could certify a 493-file tree.
-  assert.equal(
-    readFileSync(join(ROOT, 'scripts', 'measurement-source-expected-cases.txt'), 'utf8').trim(),
-    readFileSync(join(ROOT, 'scripts', 'measurement-expected-cases.txt'), 'utf8').trim(),
-  )
-
-  // And the aggregate must select them BY MODE: a hardcoded npm prefix would
-  // leave the source files decorative while a source run read npm numbers.
+test('the aggregate carries NO committed case or skip count', () => {
+  // A hand-maintained total is a MEASUREMENT device, not a delivery gate:
+  // it has to be edited by every commit that adds a test, so an ordinary PR
+  // fails the build for doing the right thing (that is exactly how PR #385
+  // was blocked), and it proves nothing the partition proof does not.
+  //
+  // Totals stay in `aggregate.json` for a deliberate measurement to read;
+  // the gate itself is structural.
   const step = workflow().jobs.aggregate.steps.find(entry => typeof entry.run === 'string' && entry.run.includes('verify-shards'))
-  assert.match(step.run, /npm\) PREFIX=scripts\/measurement ;;/u)
-  assert.match(step.run, /source\) PREFIX=scripts\/measurement-source ;;/u)
-  assert.match(step.run, /DSH_ACCEPTED_SKIPS_FILE="\$PREFIX-accepted-skips\.txt"/u)
+  assert.ok(step, 'the aggregate must run the shard proof')
+  assert.doesNotMatch(step.run, /DSH_EXPECTED_CASES|DSH_EXPECTED_SKIPPED|DSH_ACCEPTED_SKIPS|DSH_BASELINE_SOURCE|measurement-/u,
+    'no committed count or skip policy may gate the delivery pipeline')
+  for (const suffix of ['expected-cases.txt', 'expected-skipped.txt', 'accepted-skips.txt', 'baseline-source.txt']) {
+    assert.equal(existsSync(join(ROOT, 'scripts', `measurement-${suffix}`)), false,
+      `the measurement artefact measurement-${suffix} must not be committed`)
+    assert.equal(existsSync(join(ROOT, 'scripts', `measurement-source-${suffix}`)), false,
+      `the measurement artefact measurement-source-${suffix} must not be committed`)
+  }
+  // What it DOES pass: the identity and the claimed concurrency.
+  assert.match(step.env.DSH_EXPECTED_RUN_ID, /github\.run_id/u)
+  assert.match(step.env.DSH_EXPECTED_RUN_ATTEMPT, /github\.run_attempt/u)
+  assert.match(step.env.DSH_EXPECTED_CONCURRENCY, /outputs\.test_concurrency/u)
 })

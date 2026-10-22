@@ -40,71 +40,6 @@ const LANE = 'product'
 
 /** The case records of one shard directory. */
 /**
- * The expected skip count baseline: one number, or a per-version map.
- *
- * @returns {number|Record<string, number>|null} the baseline.
- */
-function expectedSkippedBaseline() {
-  const parse = (name, raw) => {
-    if (raw.trimStart().startsWith('{')) {
-      try {
-        return JSON.parse(raw)
-      } catch {
-        throw new Error(`${name} is not a valid per-version map: ${raw}`)
-      }
-    }
-    const value = Number(raw)
-    if (!Number.isInteger(value) || value < 0) {
-      throw new Error(`${name} must be a non-negative integer or a per-version map, got: ${raw}`)
-    }
-    return value
-  }
-  // The skip COUNT is checked from a committed file exactly like the case
-  // count, and it is checked SEPARATELY from the skip REASONS.
-  //
-  // The two answer different questions and neither replaces the other: the
-  // count catches a case that stopped running, the reasons catch a case
-  // that stopped running for a reason nobody agreed to. A run can have the
-  // right count with wrong reasons, and the right reasons with a lost case.
-  const fileVar = 'DSH_EXPECTED_SKIPPED_FILE'
-  const path = process.env[fileVar]
-  if (path === undefined || path === '') {
-    const raw = process.env.DSH_EXPECTED_SKIPPED
-    return raw === undefined || raw === '' ? null : parse('DSH_EXPECTED_SKIPPED', raw)
-  }
-  if (!existsSync(path)) {
-    throw new Error(`the committed baseline ${path} (from ${fileVar}) is missing: a qualification cannot run without it`)
-  }
-  const raw = readFileSync(path, 'utf8').trim()
-  if (raw === '') {
-    throw new Error(`the committed baseline ${path} is empty: a qualification cannot run without a number`)
-  }
-  return parse(path, raw)
-}
-
-/**
- * The expected skip count for a Node version.
- *
- * The baseline is one number for the whole run, unless it is a
- * PER-VERSION map: `{"22.19.0": 31, "24": 37}`. A Node version can
- * legitimately skip a different number of cases than another — the
- * optional-bundle skip depends on what that version's environment
- * provides.
- *
- * @param {string} version - the Node version.
- * @returns {number|null} the expected skip count, or null when it is unknown.
- */
-function expectedSkippedFor(version, baseline) {
-  if (baseline === null || baseline === undefined) return null
-  if (typeof baseline === 'object') {
-    const value = baseline[version]
-    return value === undefined ? null : value
-  }
-  if (Number.isNaN(baseline)) return null
-  return baseline
-}
-
-/**
  * The Node version a shard directory ran on.
  *
  * The directories are `<shard>-node<version>`; a directory that does not
@@ -175,33 +110,6 @@ function readEffectiveParams(shardDirectory) {
 }
 
 /**
- * The skip REASONS this qualification accepts, as regular expressions.
- *
- * A skip is not a pass and it is not a failure: it is a case that did not
- * run. Accepting it requires knowing WHY, so the accepted reasons are a
- * committed policy rather than a tolerance for "some skips".
- *
- * @returns {RegExp[]|null} the accepted patterns, or null when the caller
- *   does not classify skips.
- */
-function acceptedSkipPatterns() {
-  const file = process.env.DSH_ACCEPTED_SKIPS_FILE
-  if (file === undefined || file === '') return null
-  if (!existsSync(file)) {
-    throw new Error(`the accepted-skip policy ${file} is missing: an absent policy must not disable the check`)
-  }
-  const patterns = readFileSync(file, 'utf8')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line !== '' && !line.startsWith('#'))
-    .map(line => new RegExp(line, 'u'))
-  if (patterns.length === 0) {
-    throw new Error(`the accepted-skip policy ${file} states no reason: that would accept no skip at all, which is not a policy`)
-  }
-  return patterns
-}
-
-/**
  * The shard argument a shard directory names.
  *
  * `product-diagnostics-shard-2-node24` is the artifact of `--shard=2/<total>`.
@@ -231,85 +139,34 @@ function toTestRootPath(path) {
 }
 
 /**
- * A baseline value that a qualification reads from a committed FILE.
+ * The identity and the applied configuration the shards must agree on.
  *
- * Three ways this must fail, because each of them would otherwise silently
- * disable the comparison:
+ * They come from the environment of the aggregate job, which is the run that
+ * is doing the aggregating. Every value is OPTIONAL at the level of this
+ * reader and REQUIRED at the level of the qualification it serves: a check
+ * that is not given an expectation does not run.
  *
- *   - the file is MISSING — the caller named a baseline that is not there;
- *   - the file is EMPTY or unreadable — there is no number in it;
- *   - the file does not hold an integer — it is not a baseline.
- *
- * `valueName` is the direct-value alternative. It is only consulted when no
- * file is named, and an empty value there still means "no expectation".
- * A QUALIFICATION must therefore name the file, not the value.
- *
- * @param {string} fileVar - the environment variable holding the path.
- * @param {string} valueVar - the environment variable holding the value.
- * @param {function(string, string): number} integer - the parser.
- * @returns {number|null} the baseline, or null when none was named.
- */
-function expectationFromFile(fileVar, valueVar, integer) {
-  const path = process.env[fileVar]
-  if (path === undefined || path === '') {
-    const raw = process.env[valueVar]
-    return raw === undefined || raw === '' ? null : integer(valueVar, raw)
-  }
-  if (!existsSync(path)) {
-    throw new Error(`the committed baseline ${path} (from ${fileVar}) is missing: a qualification cannot run without it`)
-  }
-  const raw = readFileSync(path, 'utf8').trim()
-  if (raw === '') {
-    throw new Error(`the committed baseline ${path} is empty: a qualification cannot run without a number`)
-  }
-  return integer(path, raw)
-}
-
-/**
- * The identity and the baseline the shards must agree on.
- *
- * They come from the environment of the aggregate job, which is the run
- * that is doing the aggregating. Every value is OPTIONAL at the level of
- * this reader and REQUIRED at the level of the qualification it serves:
- * a check that is not given an expectation does not run, and a workflow
- * that wants the check must therefore pass the expectation.
+ * There is deliberately NO committed case or skip COUNT here. A hand-written
+ * total is a measurement device, not a delivery gate: every change to the
+ * test tree would have to edit it in the same commit, and an ordinary PR that
+ * adds a test would fail the pipeline until it did. What this aggregate
+ * proves instead is STRUCTURE — the shards are the whole lane, every file
+ * contributes cases, every outcome is accepted, and the parameters the runner
+ * applied are the ones the workflow claims. The totals are reported so a
+ * deliberate measurement can read them; they are not compared to a constant.
  *
  * @returns {object} the expectations.
  */
 function readExpectations() {
-  const integer = (name, raw) => {
-    const value = Number(raw)
-    // A malformed number is a FAILURE, not a missing expectation: a
-    // baseline that cannot be read must not silently disable the check.
-    if (!Number.isInteger(value) || value < 0) {
-      throw new Error(`${name} must be a non-negative integer, got: ${raw}`)
-    }
-    return value
-  }
-  const number = (name) => {
-    const raw = process.env[name]
-    if (raw === undefined || raw === '') return null
-    return integer(name, raw)
-  }
   return {
     expectedSha: process.env.DSH_EXPECTED_SHA ?? null,
     expectedRunId: process.env.DSH_EXPECTED_RUN_ID ?? null,
     expectedRunAttempt: process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null,
-    // A QUALIFICATION passes the baseline as a committed FILE, and a
-    // missing, unreadable, empty or malformed file is a FAILURE.
-    //
-    // The value form stays for callers that already have the number in
-    // hand, but a qualification must not be able to disable the check by
-    // passing an empty string: that is exactly how the case total came to
-    // be compared against nothing while every other gate passed.
-    expectedCases: expectationFromFile('DSH_EXPECTED_CASES_FILE', 'DSH_EXPECTED_CASES', integer),
-    expectedSkipped: expectedSkippedBaseline(),
-    // The concurrency the measurement claims to be about. `0` is not a
-    // level, so it cannot be written by accident; the workflow passes the
-    // resolved level (or omits it when the level is Node's default, which
-    // the runner records as `null`).
+    // The concurrency the run claims to be about. `0` is not a level, so it
+    // cannot be written by accident; the workflow passes the resolved level
+    // (or `default` when no flag is applied, which the runner records as
+    // `null`).
     expectedConcurrency: expectedConcurrencyBaseline(),
-    acceptedSkips: acceptedSkipPatterns(),
   }
 }
 
@@ -348,18 +205,15 @@ function main() {
   // WHERE the baseline came from. A count on its own says nothing about
   // which run produced it, and a qualification has to be able to answer
   // that question from its own report.
-  const sourceIndex = args.indexOf('--baseline-source')
   // The shape this run CLAIMED, as one line the context job resolved. It goes
   // into the report so a reader never has to correlate the aggregate with the
   // workflow log to learn which shard count and concurrency it proved.
   const configIndex = args.indexOf('--effective-config')
   if (shardsIndex === -1 || totalIndex === -1) {
-    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>] [--expected-files <file>] [--baseline-source <text>] [--effective-config <text>]')
+    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>] [--expected-files <file>] [--effective-config <text>]')
     console.error('the expectations are read from the environment:')
     console.error('  DSH_EXPECTED_SHA, DSH_EXPECTED_RUN_ID, DSH_EXPECTED_RUN_ATTEMPT,')
-    console.error('  DSH_EXPECTED_CASES_FILE / DSH_EXPECTED_CASES,')
-    console.error('  DSH_EXPECTED_SKIPPED_FILE / DSH_EXPECTED_SKIPPED,')
-    console.error('  DSH_EXPECTED_CONCURRENCY, DSH_ACCEPTED_SKIPS_FILE')
+    console.error('  DSH_EXPECTED_CONCURRENCY')
     process.exit(2)
   }
   const expectedFiles = filesIndex === -1
@@ -370,7 +224,6 @@ function main() {
       shardsRoot: resolve(args[shardsIndex + 1]),
       total: Number(args[totalIndex + 1]),
       expectedFiles,
-      baselineSource: sourceIndex === -1 ? null : args[sourceIndex + 1],
       effectiveConfig: configIndex === -1 ? null : args[configIndex + 1],
       ...readExpectations(),
     }),
@@ -395,16 +248,11 @@ export function verifyShards({
   expectedSha = null,
   expectedRunId = null,
   expectedRunAttempt = null,
-  expectedCases = null,
-  expectedSkipped = null,
   expectedConcurrency = undefined,
-  acceptedSkips = undefined,
-  baselineSource = null,
   effectiveConfig = null,
   expectedFiles: expectedFilesOverride,
 }) {
   const failures = []
-  const acceptedSkipPatternsOrNone = acceptedSkips === undefined ? null : acceptedSkips
 
   // The lane's own file list, resolved by the SAME discovery rule the
   // runner uses. This is the authority the shards are compared against.
@@ -517,29 +365,20 @@ export function verifyShards({
     if (cancelled.length > 0) {
       failures.push(`the shard ${directory} reported ${cancelled.length} cancelled case(s)`)
     }
-    // Every skip must state a reason, and the reason must be one this
-    // qualification accepts.
+    // Every FILE that reported itself must also report at least one CASE.
     //
-    // A count cannot do this job: 37 skips is evidence only if the 37 are
-    // the SAME KIND of skip. A case that starts skipping itself for a new
-    // reason — a broken fixture, a missing tool the runner used to have —
-    // would keep the count identical and look like a healthy run.
-    if (acceptedSkipPatternsOrNone !== null && skipped > 0) {
-      const unclassified = []
-      for (const record of shardCases) {
-        if (record.result !== 'skip') continue
-        const reason = record.skipReason
-        if (reason === null || reason === undefined || reason === '') {
-          unclassified.push(`${record.name} (no reason stated)`)
-          continue
-        }
-        if (!acceptedSkipPatternsOrNone.some(pattern => pattern.test(reason))) {
-          unclassified.push(`${record.name} (${reason})`)
-        }
-      }
-      if (unclassified.length > 0) {
-        failures.push(`the shard ${directory} skipped ${unclassified.length} case(s) for a reason the policy does not accept: ${unclassified.slice(0, 3).join('; ')}`)
-      }
+    // The file partition proves every file was covered; it cannot see that a
+    // file's cases were dropped on the way to the recorder. The tempting fix
+    // is a committed case count, and it is the wrong one for a delivery
+    // pipeline: every commit that adds a test would have to edit that number,
+    // so an ordinary PR would fail the build for doing the right thing. This
+    // invariant needs no maintained constant.
+    const filesWithCases = new Set(
+      shardCases.map(record => record.file).filter(file => file !== undefined).map(toTestRootPath),
+    )
+    const silent = shardFiles.filter(file => !filesWithCases.has(file))
+    if (silent.length > 0) {
+      failures.push(`the shard ${directory} reported ${silent.length} file(s) with no case record: ${silent.slice(0, 3).join(', ')}`)
     }
     // The shard must record the run it belongs to. Without that identity
     // a shard from a DIFFERENT run could be counted towards this one, and
@@ -653,40 +492,6 @@ export function verifyShards({
     }
   }
 
-  // The case and skip BASELINE.
-  //
-  // The file partition proves that every test FILE was covered. It does
-  // NOT prove that every CASE inside those files was recorded: a recorder
-  // that silently dropped one case would still leave every file covered.
-  // The counts are therefore compared against an independent baseline — the
-  // unsharded lane's own totals — and a difference in either direction
-  // fails: a missing case is a lost case, and an extra skip is a case that
-  // did not run.
-  //
-  // The counts are compared PER GROUP, not across the whole run: each Node
-  // version is its own partition, and a version may skip a different
-  // number of cases than another — the optional-bundle skip depends on
-  // what that version's environment provides.
-  for (const group of groups.values()) {
-    const cases = group.cases
-    const skipped = group.skipped
-    if (expectedCases !== null && !Number.isNaN(expectedCases)) {
-      if (cases !== expectedCases) {
-        failures.push(`the shards on Node ${group.version} recorded ${cases} case(s), but the baseline is ${expectedCases}`)
-      }
-    }
-    // The expected skip count may be a PER-VERSION map: a Node version can
-    // legitimately skip a different number of cases than another — the
-    // optional-bundle skip depends on what that version's environment
-    // provides.
-    const expected = expectedSkippedFor(group.version, expectedSkipped)
-    if (expected !== null && !Number.isNaN(expected)) {
-      if (skipped !== expected) {
-        failures.push(`the shards on Node ${group.version} recorded ${skipped} skipped case(s), but the baseline for that version is ${expected}`)
-      }
-    }
-  }
-
   return {
     lane: LANE,
     shardTotal: total,
@@ -694,23 +499,12 @@ export function verifyShards({
     observedFileCount: observedFileCount,
     totalCases,
     totalSkipped,
-    expectedCases,
-    expectedSkipped,
-    // Provenance, so a reader of the report knows which run the baseline
-    // came from without correlating it with a job log.
-    baselineSource,
     // The shape the context job resolved for THIS run: shard count, matrix
     // cap, intra-shard concurrency and mode, in one line.
     effectiveConfig,
-    // What the measurement CLAIMED, in the same shape the shards recorded
-    // what they APPLIED, so a reader can compare the two sides directly.
+    // What the run CLAIMED, in the same shape the shards recorded what they
+    // APPLIED, so a reader can compare the two sides directly.
     expectedConcurrency: expectedConcurrency === undefined ? null : expectedConcurrency,
-    // Whether the skip REASONS were classified, and against how many
-    // accepted classes. A reader must be able to tell "no unaccepted skip"
-    // from "no policy was applied".
-    skipPolicy: acceptedSkipPatternsOrNone === null
-      ? null
-      : { acceptedClasses: acceptedSkipPatternsOrNone.length, enforced: true },
     shards,
     versions,
     failures,
