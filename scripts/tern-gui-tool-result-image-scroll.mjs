@@ -1,5 +1,5 @@
 /**
- * The PR-C real-GUI OVERFLOW flow: is the tool-result image REACHABLE in a
+ * The real-GUI lane for a LONG tool-result transcript: is the image REACHABLE in a
  * LONG transcript?
  *
  * The client virtualizes a long surface and shows its TAIL, so an image at the
@@ -16,11 +16,11 @@
  * that it INVOKED the op (that is an invocation, never a client receipt), and
  * the client's response to it is read back afterwards.
  *
- *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-pr-c-image-scroll.mjs
+ *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image-scroll.mjs
  *
  * A REAL WINDOW HAS A MINIMUM SIZE, so the flow uses a short but legal window;
  * the 400px pane of the headless lane is a headless question.
- * @module scripts/tern-gui-pr-c-image-scroll
+ * @module scripts/tern-gui-tool-result-image-scroll
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -46,7 +46,7 @@ export default async function (h) {
   const size = await h.resize(900, 420)
   h.measure('the window size', JSON.stringify(size))
 
-  const subject = join(h.repo, 'scripts', 'tern-gui-pr-c-image-scroll-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-gui-tool-result-image-scroll-subject.mts')
   const booted = await h.launch(subject, { ready: 'filler row 199' })
   h.check('the long transcript is painted inside a real Tern GUI pane', booted)
   if (!booted) {

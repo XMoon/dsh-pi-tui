@@ -104,7 +104,7 @@ function rowsOf(node: { readonly children: readonly { kind: string; props: Recor
 
 // ── T1: the result block source ─────────────────────────────────────────────
 
-test('T1-01: a text,image,text result renders the blocks in order, without repeating the flat result', () => {
+test('a text,image,text result renders the blocks in order, without repeating the flat result', () => {
   const message = toolRow([textBlock('Here is the screenshot.'), imageBlock(), textBlock('This is the area to inspect.')])
   const rows = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'b'.repeat(64) }]])))
 
@@ -124,7 +124,7 @@ test('T1-01: a text,image,text result renders the blocks in order, without repea
   )
 })
 
-test('T1-02: an image-only result renders the identity line and the native image', () => {
+test('an image-only result renders the identity line and the native image', () => {
   const message = toolRow([imageBlock()])
   const states = new Map<string, ToolImageState>([['att-shot-1', { state: 'ready', blobId: 'a'.repeat(64) }]])
   const rows = rowsOf(viewOf(message, states))
@@ -134,7 +134,7 @@ test('T1-02: an image-only result renders the identity line and the native image
   assert.equal(rows[2]?.blob, 'a'.repeat(64))
 })
 
-test('T1-03: an image,text,image result keeps BOTH image blocks in block order', () => {
+test('an image,text,image result keeps BOTH image blocks in block order', () => {
   const message = toolRow([
     imageBlock({ ...ATTACHMENT, attachmentId: 'att-a', name: 'a.png' }),
     textBlock('between'),
@@ -157,7 +157,7 @@ test('T1-03: an image,text,image result keeps BOTH image blocks in block order',
   assert.equal(rows.find(row => row.key === 'result-b2-image')?.blob, 'b'.repeat(64))
 })
 
-test('T1-04: a result WITHOUT an image block keeps its EXACT previous node shape', () => {
+test('a result WITHOUT an image block keeps its EXACT previous node shape', () => {
   const message = toolRow([textBlock('first'), textBlock('second')])
   const rows = rowsOf(viewOf(message))
 
@@ -166,7 +166,7 @@ test('T1-04: a result WITHOUT an image block keeps its EXACT previous node shape
   assert.equal(rows[1]?.kind, 'code')
 })
 
-test('T1-05: a result without an image block is byte-identical to the same row with NO blocks at all', () => {
+test('a result without an image block is byte-identical to the same row with NO blocks at all', () => {
   const withBlocks = toolRow([textBlock('first'), textBlock('second')])
   const withoutBlocks = toolRow([], { result: 'firstsecond' })
   const shape = (message: TranscriptToolMessage): unknown => viewOf(message).children.map(child => ({
@@ -177,7 +177,7 @@ test('T1-05: a result without an image block is byte-identical to the same row w
   assert.deepEqual(shape(withBlocks), shape(withoutBlocks))
 })
 
-test('T1-05b: a text-only tool row renders the EXACT node tree it rendered before PR-C', () => {
+test('a text-only tool row renders the EXACT node tree it rendered before the image path existed', () => {
   // The golden is the row shape the TSP mapper produced BEFORE the image
   // path existed: one `args` code node and one `result` code node, in that
   // order, with no image node and no second result node.
@@ -202,7 +202,7 @@ test('T1-05b: a text-only tool row renders the EXACT node tree it rendered befor
   })
 })
 
-test('T1-06: the same block index keeps the same node key, whatever the render state', () => {
+test('the same block index keeps the same node key, whatever the render state', () => {
   const message = toolRow([textBlock('before'), imageBlock()])
   const pending = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'loading' }]])))
   const ready = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'c'.repeat(64) }]])))
@@ -214,7 +214,7 @@ test('T1-06: the same block index keeps the same node key, whatever the render s
 
 // ── T2: the tool family ─────────────────────────────────────────────────────
 
-test('T2-01: a PTC child projects its OWN image blocks, under its own identity', () => {
+test('a PTC child projects its OWN image blocks, under its own identity', () => {
   const child = toolRow([textBlock('child text'), imageBlock()], {
     subCallId: 'sub-7',
     name: 'read_image',
@@ -234,7 +234,7 @@ test('T2-01: a PTC child projects its OWN image blocks, under its own identity',
   assert.equal(flat.includes('result-b1-image'), true)
 })
 
-test('T2-02: an unmatched tool row shows ITS OWN image inside the existing warning card', () => {
+test('an unmatched tool row shows ITS OWN image inside the existing warning card', () => {
   const message = toolRow([imageBlock()], { callCount: 0, status: 'error' })
   const rows = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'e'.repeat(64) }]])))
 
@@ -243,7 +243,7 @@ test('T2-02: an unmatched tool row shows ITS OWN image inside the existing warni
   assert.equal(rows.find(row => row.key === 'result-b0-image')?.blob, 'e'.repeat(64))
 })
 
-test('T2-03: a MERGED read group keeps the flat text result (its blocks are the first member\'s)', () => {
+test('a MERGED read group keeps the flat text result (its blocks are the first member\'s)', () => {
   const message = toolRow([imageBlock()], { name: 'read', callCount: 2, args: '2 files', result: 'first\n\nsecond' })
   const rows = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'f'.repeat(64) }]])))
 
@@ -252,14 +252,14 @@ test('T2-03: a MERGED read group keeps the flat text result (its blocks are the 
   assert.equal(rows.some(row => row.kind === 'image'), false, 'a merged group never projects an image')
 })
 
-test('T2-04: an ordinary single read still projects its image (the merge rule is not a blanket read rule)', () => {
+test('an ordinary single read still projects its image (the merge rule is not a blanket read rule)', () => {
   const message = toolRow([imageBlock()], { name: 'read' })
   const rows = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'g'.repeat(64) }]])))
 
   assert.equal(rows.some(row => row.kind === 'image'), true)
 })
 
-test('T2-05: an ask_user_question row keeps the settled-answer authority and its original structure', () => {
+test('an ask_user_question row keeps the settled-answer authority and its original structure', () => {
   const message = toolRow([imageBlock()], { name: 'ask_user_question', callId: 'call-1' })
   const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), {
     settledQuestionAnswersLookup: (callId: string) => (callId === 'call-1'
@@ -275,7 +275,7 @@ test('T2-05: an ask_user_question row keeps the settled-answer authority and its
   assert.equal(flat.includes('[IMAGE]'), false)
 })
 
-test('T2-06: a settled ask_user_question row with an EMPTY batch keeps the empty-batch meaning', () => {
+test('a settled ask_user_question row with an EMPTY batch keeps the empty-batch meaning', () => {
   const message = toolRow([imageBlock()], { name: 'ask_user_question', callId: 'call-2' })
   const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), {
     settledQuestionAnswersLookup: () => [],
@@ -288,7 +288,7 @@ test('T2-06: a settled ask_user_question row with an EMPTY batch keeps the empty
 
 // ── T3: the reference input and the negotiated capability ──────────────────
 
-test('T3-01: the four project raster types are presentable', () => {
+test('the four project raster types are presentable', () => {
   for (const mediaType of ['image/png', 'image/jpeg', 'image/webp', 'image/gif']) {
     const message = toolRow([imageBlock({ ...ATTACHMENT, mediaType })])
     const rows = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'i'.repeat(64) }]])))
@@ -296,7 +296,7 @@ test('T3-01: the four project raster types are presentable', () => {
   }
 })
 
-test('T3-02: a malformed reference renders an invalid-attachment line and NO image node', () => {
+test('a malformed reference renders an invalid-attachment line and NO image node', () => {
   const broken = [
     { ...ATTACHMENT, attachmentId: '' },
     { ...ATTACHMENT, width: 0 },
@@ -314,7 +314,7 @@ test('T3-02: a malformed reference renders an invalid-attachment line and NO ima
   }
 })
 
-test('T3-03: a media type outside the project raster set renders an unsupported-format line', () => {
+test('a media type outside the project raster set renders an unsupported-format line', () => {
   const message = toolRow([imageBlock({ ...ATTACHMENT, mediaType: 'image/svg+xml' })])
   const rows = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'k'.repeat(64) }]])))
 
@@ -322,7 +322,7 @@ test('T3-03: a media type outside the project raster set renders an unsupported-
   assert.match(String(rows.find(row => row.key === 'result-b0-info')?.text), /Unsupported image format$/u)
 })
 
-test('T3-04: without a negotiated image capability the row renders the unavailable line and NO image node', () => {
+test('without a negotiated image capability the row renders the unavailable line and NO image node', () => {
   const message = toolRow([imageBlock()])
   const rows = rowsOf(viewOf(message))
 
@@ -330,7 +330,7 @@ test('T3-04: without a negotiated image capability the row renders the unavailab
   assert.match(String(rows[1]?.text), /Native image display unavailable in this Tern pane$/u)
 })
 
-test('T3-05: every state renders its OWN fixed status phrase', () => {
+test('every state renders its OWN fixed status phrase', () => {
   const cases: readonly [ToolImageState, RegExp][] = [
     [{ state: 'unsupported' }, /Native image display unavailable in this Tern pane$/u],
     [{ state: 'no-scope' }, /Image unavailable for this session$/u],
@@ -345,7 +345,7 @@ test('T3-05: every state renders its OWN fixed status phrase', () => {
   }
 })
 
-test('T3-06: a READY state renders no status suffix, and a pending state renders the placeholder id', () => {
+test('a READY state renders no status suffix, and a pending state renders the placeholder id', () => {
   const ready = rowsOf(viewOf(toolRow([imageBlock()]), new Map([['att-shot-1', { state: 'ready', blobId: 'l'.repeat(64) }]])))
   assert.equal(ready.find(row => row.key === 'result-b0-info')?.text, '[IMAGE] shot.png · 640×360 · 3.8 KiB')
 
@@ -355,7 +355,7 @@ test('T3-06: a READY state renders no status suffix, and a pending state renders
   }
 })
 
-test('T3-07: the identity line runs the attachment name through the untrusted display sanitizer', () => {
+test('the identity line runs the attachment name through the untrusted display sanitizer', () => {
   const escape = String.fromCharCode(27)
   const message = toolRow([imageBlock({ ...ATTACHMENT, name: `shot${escape}[31m.png` })])
   const rows = rowsOf(viewOf(message, new Map([['att-shot-1', { state: 'error' }]])))

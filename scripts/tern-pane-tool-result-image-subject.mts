@@ -1,5 +1,5 @@
 /**
- * The subject of the PR-C real-pane flow: the PRODUCTION tool-result image
+ * The subject of the real-pane lane for the tool-result image: the PRODUCTION
  * projection, painted by a REAL Tern client.
  *
  * It renders the very nodes the shipped renderer emits — the production
@@ -12,8 +12,8 @@
  * The image bytes are a synthetic PNG generated in-process (a solid 640x360
  * canvas): no user content and no real attachment ever reaches a client.
  *
- * Usage: node --import tsx/esm scripts/tern-pane-pr-c-image-subject.mts
- * @module scripts/tern-pane-pr-c-image-subject
+ * Usage: node --import tsx/esm scripts/tern-pane-tool-result-image-subject.mts
+ * @module scripts/tern-pane-tool-result-image-subject
  */
 import { appendFileSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
@@ -77,9 +77,9 @@ const WIDTH = 640
 const HEIGHT = 360
 const BYTES = solidPng(WIDTH, HEIGHT, [0x2f, 0x6f, 0xed])
 
-const session = await connect({ app: 'tern-pane-pr-c-image', timeout: 2000 })
+const session = await connect({ app: 'tern-pane-tool-result-image', timeout: 2000 })
 if (!session) throw new Error('this subject must run inside a real Tern pane')
-const surface = session.open({ mode: 'inline', title: 'pr-c-image' })
+const surface = session.open({ mode: 'inline', title: 'tool-result-image' })
 
 /** The tool result the production projection renders: text, image, text. */
 const message = {

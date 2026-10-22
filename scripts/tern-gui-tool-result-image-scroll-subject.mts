@@ -1,5 +1,5 @@
 /**
- * The subject of the PR-C real-GUI OVERFLOW flow: a LONG transcript whose
+ * The subject of the long-transcript GUI lane: a LONG transcript whose
  * FIRST row carries the production tool-result image projection.
  *
  * It exists to answer the overflow question the short window cannot: with a
@@ -12,8 +12,8 @@
  *
  * The image bytes are a synthetic PNG generated in-process.
  *
- * Usage: node --import tsx/esm scripts/tern-gui-pr-c-image-scroll-subject.mts
- * @module scripts/tern-gui-pr-c-image-scroll-subject
+ * Usage: node --import tsx/esm scripts/tern-gui-tool-result-image-scroll-subject.mts
+ * @module scripts/tern-gui-tool-result-image-scroll-subject
  */
 import { appendFileSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
@@ -78,9 +78,9 @@ const BYTES = solidPng(WIDTH, HEIGHT, [0x2f, 0x6f, 0xed])
 /** How many filler rows follow the image row. */
 const FILLER_ROWS = 200
 
-const session = await connect({ app: 'tern-gui-pr-c-image-scroll', timeout: 2000 })
+const session = await connect({ app: 'tern-gui-tool-result-image-scroll', timeout: 2000 })
 if (!session) throw new Error('this subject must run inside a real Tern GUI pane')
-const surface = session.open({ mode: 'inline', title: 'pr-c-image-scroll' })
+const surface = session.open({ mode: 'inline', title: 'tool-result-image-scroll' })
 
 /** The image row: the PRODUCTION projection of a tool result with an image. */
 const imageRow = {
