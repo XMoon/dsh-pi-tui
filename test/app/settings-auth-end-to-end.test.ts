@@ -290,7 +290,12 @@ test('/login acme deeplinks to the provider detail inside the Settings lease', a
   ;(flowOnly as unknown as { invoke(line: string): unknown }).invoke('/login mykey')
   await flowOnly.vt.waitForRender()
   assert.match(flowOnly.rows()[0]!, /Settings · Models/u)
-  assert.match(flowOnly.view(), /Provider · My Key/u)
+  // A flow-only route is a SIGN-IN, not a provider profile: the detail shows
+  // the sign-in key and never a fake provider profile.
+  assert.match(flowOnly.view(), /Sign-in · My Key/u)
+  assert.match(flowOnly.view(), /Sign-in key/u)
+  assert.doesNotMatch(flowOnly.view(), /API protocol/u)
+  assert.doesNotMatch(flowOnly.view(), /Endpoint/u)
   flowOnly.close()
 
   const builtin = open()
