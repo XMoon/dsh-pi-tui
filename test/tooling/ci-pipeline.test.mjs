@@ -375,7 +375,10 @@ test('the install RUNS with the planned environment, not merely reporting it', (
     ...plan,
     commands: [[process.execPath, '-e', 'process.stdout.write(String(process.env.NPM_CONFIG_REGISTRY) + "|" + String(process.env.TARBALL_SMOKE_SKIP_INSTALL))']],
   })
-  const result = runPlan(probe(npm), { stdio: ['ignore', 'pipe', 'pipe'] })
+  // The BASE environment is controlled, not inherited: a CI job that already
+  // exported a registry (the same workflow does) must not change what this
+  // asserts. What is under test is the plan's effect on the child.
+  const result = runPlan(probe(npm), { stdio: ['ignore', 'pipe', 'pipe'], base: {} })
   assert.equal(result.status, 0, String(result.stderr))
   assert.equal(String(result.stdout), 'https://registry.npmjs.org/|undefined',
     'the npm install must see the registry pin, and must NOT see the source-only install skip')
@@ -383,7 +386,7 @@ test('the install RUNS with the planned environment, not merely reporting it', (
   // The same root cause reaches the Source Mode preparation: its exported
   // variables must be in the child's environment too.
   const source = depsPlan({ mode: 'source', distribution: '/pack', workspace: '/w' })
-  const sourced = runPlan(probe(source), { stdio: ['ignore', 'pipe', 'pipe'] })
+  const sourced = runPlan(probe(source), { stdio: ['ignore', 'pipe', 'pipe'], base: {} })
   assert.equal(sourced.status, 0, String(sourced.stderr))
   assert.equal(String(sourced.stdout), 'undefined|1')
 })
