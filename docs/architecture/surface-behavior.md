@@ -254,8 +254,10 @@ The page never infers a stored key from a route/profile.
   the AUTHORITATIVE read of that identity: a target that is still `reading`
   cannot be confirmed (the delete is never dispatched before the store was
   checked), and a deeplink that opens the target reads it after the first
-  frame. After the clear the page re-reads the store; it never claims success
-  without the authoritative absence.
+  frame. A clear that is IN FLIGHT owns its own state: a refresh never re-arms
+  or resets it, the confirmation stays locked until the Host answers, and the
+  same delete can never be dispatched twice. After the clear the page re-reads
+  the store; it never claims success without the authoritative absence.
 - The custom provider draft is one page-local form over route → protocol →
   base URL → display name → optional key → discovered/manual model ids →
   review → create. Nothing persists before Create. Profile and credential

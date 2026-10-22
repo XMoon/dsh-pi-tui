@@ -2102,6 +2102,45 @@ test('the deferred reads run once, are consumed by a manual refresh, and stop wh
   assert.equal(leftReads, 0, 'a view the user left must not run the stored-credential scan')
 })
 
+test('a pending delete keeps the confirmation locked while a refresh happens', async () => {
+  const { source, calls } = fakeSource()
+  const releases: (() => void)[] = []
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    await new Promise<void>(resolve => { releases.push(resolve) })
+  }
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  // The read confirmed the record: the delete can be confirmed.
+  assert.match(viewText(page), /Clear stored credential/u)
+  page.handleInput('\r') // confirm the delete
+  await flush()
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'])
+  assert.match(viewText(page), /Clearing — the Host has not confirmed yet/u)
+  // A refresh while the delete runs must not re-arm the confirmation.
+  page.handleInput('r')
+  await flush()
+  assert.match(viewText(page), /Clearing — the Host has not confirmed yet/u, 'the pending delete keeps the page locked')
+  // Esc cannot leave while the Host write is in flight.
+  page.handleInput('\u001b')
+  await flush()
+  assert.match(viewText(page), /Clearing — the Host has not confirmed yet/u, 'the page stays locked while the delete runs')
+  assert.match(viewText(page), /Clear stored credential/u, 'the confirmation view is still shown')
+  // The Host write finishes: the outcome is reported.
+  for (const release of releases) release()
+  await flush()
+  assert.match(viewText(page), /cleared/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the delete must not be dispatched twice')
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,

@@ -619,8 +619,13 @@ export class ModelsWorkspacePage implements Component {
         this.account = summary
       })
     })
-    // The refresh re-reads the authority the CURRENT view shows, once.
-    if (this.view.kind === 'reference') this.readReferenceState()
+    // The refresh re-reads the authority the CURRENT view shows, once — but
+    // never while a WRITE owns that state: a delete that is still in flight
+    // keeps its phase, so the confirmation cannot be left (or re-armed) while
+    // the Host write runs.
+    if (this.clear?.phase === 'pending') {
+      // The write owns the clear state; the catalog refresh continues.
+    } else if (this.view.kind === 'reference') this.readReferenceState()
     else if (this.view.kind === 'logout') {
       if (this.view.target.kind === 'record') this.readClearRecord()
       else this.readReferenceState()
@@ -924,6 +929,11 @@ export class ModelsWorkspacePage implements Component {
 
   private readClearRecord(): void {
     if (this.view.kind !== 'logout' || this.view.target.kind !== 'record') return
+    // A delete that is still in flight owns the clear state: a re-read must
+    // not reset its phase (the user must not be able to leave the
+    // confirmation while the Host write runs, and the same delete must not
+    // become confirmable twice).
+    if (this.clear?.phase === 'pending') return
     const key = this.view.target.key
     const serial = this.clearSerial
     const readSerial = ++this.clearReadSerial
