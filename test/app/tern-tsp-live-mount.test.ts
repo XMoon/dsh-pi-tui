@@ -1366,6 +1366,16 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
 })
 
 
+/** Wait for a real SDK-wire fact. The deadline bounds a genuine failure; the
+ * loop itself observes the production signal, never a blind fixed sleep. */
+async function awaitWireFact(predicate: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail(`timed out waiting for ${label}`)
+    await new Promise(resolve => setImmediate(resolve))
+  }
+}
+
 // ── B2-L6: the routed PTC subtree reaches the mounted production renderer ──
 
 test('B2-L6: a routed PTC child start/settle reaches the mounted renderer wire', async () => {
@@ -1410,7 +1420,10 @@ test('B2-L6: a routed PTC child start/settle reaches the mounted renderer wire',
     }, 3))
     harness.route(toolResult(4, 'code-1', 'program output'))
     harness.surface.paintNow()
-    await settle()
+    await awaitWireFact(
+      () => collectWireNodes().some(node => node.id.endsWith('.sub-code-1:code:1')),
+      'the routed PTC child to reach the mounted renderer wire',
+    )
 
     const initial = collectWireNodes()
     const child = initial.find(node => node.id.endsWith('.sub-code-1:code:1'))
@@ -1437,7 +1450,11 @@ test('B2-L6: a routed PTC child start/settle reaches the mounted renderer wire',
       content: [{ type: 'text', text: 'file.txt' }],
     }, 5))
     harness.surface.paintNow()
-    await settle()
+    await awaitWireFact(
+      () => harness.tern.frames.some(frame => frame.ops.some(op =>
+        op[0] === 'set' && op[1] === childId && (op[2] as { status?: string }).status === 'done')),
+      'the routed child settle to reach the mounted renderer wire',
+    )
 
     const last = harness.tern.frames[harness.tern.frames.length - 1]!
     assert.ok(last.ops.some(op => op[0] === 'set' && op[1] === childId
