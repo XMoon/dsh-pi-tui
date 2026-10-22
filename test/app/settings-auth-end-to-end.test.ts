@@ -464,11 +464,41 @@ test('the category rail cannot abandon a pending API-key write (pending mutation
   await h.vt.waitForRender()
   assert.match(h.view(), /Saving|write|Verified|API Key Reference/u)
 
-  const accountRow = rowOf(h, 'Account')
-  await click(h, accountRow, 1)
+  const accountRow = railEntryRow(h, 'Account')
+  await click(h, accountRow, 2)
   assert.match(h.rows()[0]!, /Settings · Models/u, 'pending mutation wins over category navigation')
-  assert.doesNotMatch(h.view(), /Settings · Account/u)
+  assert.doesNotMatch(h.view(), /^> Account/mu, 'the rail did not select the Account category')
 
+  release()
+  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  h.close()
+})
+
+test('a pending Host mutation owns the page: the rail click cannot take the keyboard away from it', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  const release = h.holdNextSetReference()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await h.vt.waitForRender()
+  await key(h, '\r') // open the masked form
+  await key(h, 'sk-held')
+  await key(h, '\r') // review
+  await key(h, '\r') // submit (the write is held open)
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the content owns the keyboard')
+
+  // A click on the ALREADY selected category must not take the keyboard away
+  // from the page that owns the pending write: the rail would otherwise be a
+  // way around the page's own refusal.
+  const modelsRow = railEntryRow(h, 'Models')
+  await click(h, modelsRow, 2)
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the focus stayed with the page that owns the pending write')
+  assert.doesNotMatch(h.rows()[0]!, /Settings · Categories/u, 'the rail did not take the keyboard')
+
+  // The page's own Esc refuses the pending write, and the workspace stays open.
+  await key(h, '\u001b')
+  assert.match(h.view(), /Settings ·/u, 'the workspace is not closed while the write is pending')
+  assert.match(h.view(), /in flight/u, 'the page states that the write is still in flight')
   release()
   for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   h.close()
@@ -533,6 +563,20 @@ test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', 
 // REAL command coordinator, the REAL workspace lease and the REAL pages.
 
 const railRow = (h: Harness, label: string): number => rowOf(h, label)
+
+/**
+ * The physical row of one CATEGORY RAIL entry. The rail owns the first 22
+ * cells of the frame, so a rail entry is found by its own cell — a plain
+ * "first row containing the label" would find the CONTENT column instead.
+ */
+const railEntryRow = (h: Harness, label: string): number => {
+  const row = h.rows().findIndex(line => {
+    const cell = line.slice(0, 22).trim()
+    return cell === label || cell === `> ${label}`
+  })
+  assert.ok(row >= 0, `the category rail must paint ${JSON.stringify(label)}:\n${h.view()}`)
+  return row
+}
 
 test('the category rail paints the real Models and Account pages while the keyboard stays on the rail', async () => {
   const h = open()

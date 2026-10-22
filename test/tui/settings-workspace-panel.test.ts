@@ -16,7 +16,6 @@ import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import {
   SettingsWorkspacePanel,
   type SettingsAuthPage,
-  type SettingsWorkspaceCategoryId,
   type SettingsWorkspacePanelIntents,
   type SettingsWorkspaceSnapshot,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
@@ -34,9 +33,9 @@ class FakePage implements SettingsAuthPage {
   readonly id: string
   readonly inputs: string[] = []
   disposed = false
-  /** The category the root believes is current when the page is built. */
-  onBuild?: (page: FakePage) => void
   exitOn: string | undefined
+  /** Whether the page owns an in-flight Host operation. */
+  pending = false
 
   constructor(id: string) {
     this.id = id
@@ -56,7 +55,7 @@ class FakePage implements SettingsAuthPage {
   onCellPress(x: number, y: number): void {}
   onCellClick(): 'handled' | 'exit' | 'open-account' { return 'handled' }
   cancelPointer(): void {}
-  pendingMutation(): boolean { return false }
+  pendingMutation(): boolean { return this.pending }
   canYieldFocusToNavigation(): boolean { return true }
   dispose(): void { this.disposed = true }
 }
@@ -64,8 +63,8 @@ class FakePage implements SettingsAuthPage {
 interface Harness {
   readonly panel: SettingsWorkspacePanel
   readonly built: FakePage[]
-  readonly closed: FakePage[]
-  readonly categories: SettingsWorkspaceCategoryId[]
+  /** How many times the workspace asked to close. */
+  readonly closes: () => number
 }
 
 function setup(options: {
@@ -77,15 +76,14 @@ function setup(options: {
   const columns = options.columns ?? 120
   const rows = options.rows ?? 40
   const built: FakePage[] = []
-  const closed: FakePage[] = []
-  const categories: SettingsWorkspaceCategoryId[] = []
+  let closes = 0
   const intents: SettingsWorkspacePanelIntents = {
     aboutVersionFacts: { tui: '0.5.3', dsh: '0.2.1-rc.2' },
     rows: () => rows,
     columns: () => columns,
     requestRender: () => {},
     notice: () => undefined,
-    onClose: () => {},
+    onClose: () => { closes += 1 },
     onOpenLegacy: () => {},
     onCopy: () => {},
     createModelsPage: (initial, openAccount) => {
@@ -104,7 +102,7 @@ function setup(options: {
     },
   }
   const panel = new SettingsWorkspacePanel({ readSnapshot: () => SNAPSHOT }, intents)
-  return { panel, built, closed, categories }
+  return { panel, built, closes: () => closes }
 }
 
 const plain = (harness: Harness, width = 120): string =>
@@ -171,4 +169,48 @@ test('the content focus hands the keyboard to the page, and Esc returns it to th
   assert.deepEqual(page.inputs, ['x', '\u001b'], 'the page owns the Esc first')
   assert.equal(h.built[1]?.disposed, false, 'returning to the rail keeps the page instance')
   assert.match(plain(h), /Settings · Categories/u, 'the rail owns the keyboard again')
+})
+
+test('a page that owns a pending Host mutation keeps the keyboard and the lease', () => {
+  const h = setup()
+  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // Models -> Account
+  h.panel.handleInput('\r') // the content takes the focus
+  const page = h.built[1]
+  assert.ok(page !== undefined)
+  page.pending = true
+
+  // A rail click on the ALREADY selected category must not take the keyboard
+  // away from the page that owns the pending operation. The rail's third entry
+  // (Account) is the painted cell the click resolves to; the frame must be
+  // painted before the gesture, exactly like a real click.
+  plain(h)
+  h.panel.onCellPress(2, 5)
+  h.panel.onCellClick(2, 5)
+  assert.match(plain(h), /Settings · Account/u, 'the focus stayed with the pending page')
+
+  // The workspace must not close under the pending operation either.
+  h.panel.handleInput('\u001b')
+  assert.match(plain(h), /Settings ·/u, 'the workspace is still open')
+
+  // Once the operation settles, the normal navigation works again: the page's
+  // own Esc reports the exit and the rail takes the keyboard back.
+  page.pending = false
+  page.exitOn = '\u001b'
+  h.panel.handleInput('\u001b')
+  assert.match(plain(h), /Settings · Categories/u, 'the rail owns the keyboard again')
+})
+
+test('a pending Host mutation keeps the workspace open even when the rail owns the keyboard', () => {
+  const h = setup()
+  h.panel.handleInput('\u001b[B') // About -> Models: the rail keeps the focus
+  assert.equal(h.closes(), 0, 'the workspace is open')
+  // The page now owns an in-flight Host operation (the page's own owner
+  // started it); the close must be refused whatever the focus is.
+  const page = h.built[0]
+  assert.ok(page !== undefined)
+  page.pending = true
+  h.panel.handleInput('\u001b')
+  assert.equal(h.closes(), 0, 'the workspace did not close under a pending Host operation')
+  assert.match(plain(h), /Settings ·/u, 'the workspace is still painted')
 })

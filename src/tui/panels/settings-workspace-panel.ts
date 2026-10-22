@@ -2217,8 +2217,11 @@ export class SettingsWorkspacePanel implements Component {
    */
   private selectCategory(category: SettingsWorkspaceCategoryId, focus: SettingsWorkspaceFocus = 'categories'): void {
     const changed = category !== this.categoryId
-    // A Host mutation owns the page: user navigation may not abandon it.
-    if (changed && this.authPageHasPendingMutation()) return
+    // A Host mutation owns the page: user navigation may not abandon it. The
+    // gate covers the MOUSE switch too: the keyboard may never leave a page
+    // whose Host operation is still in flight, so the rail can never become a
+    // way around the page's own refusal (and around the workspace close).
+    if (this.authPageHasPendingMutation() && (changed || focus !== 'content')) return
     if (changed) {
       if (this.authPageCategory !== undefined && this.authPageCategory !== category) this.closeAuthPage()
       this.categoryId = category
@@ -2267,7 +2270,9 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** Esc/Backspace: choosing cancels straight back to L1; otherwise step one
-   *  level back in every layout. Only L0 Esc/Backspace closes the workspace. */
+   *  level back in every layout. Only L0 Esc/Backspace closes the workspace.
+   *  A Host mutation owns the page: the workspace must not close (and the page
+   *  must not be disposed) under an operation that is still in flight. */
   private goBack(): void {
     if (this.focus === 'detail') {
       this.leaveDetailTo('rows')
@@ -2277,6 +2282,7 @@ export class SettingsWorkspacePanel implements Component {
       this.leaveDetailTo('categories')
       return
     }
+    if (this.authPageHasPendingMutation()) return
     this.intents.onClose()
   }
 
