@@ -694,7 +694,8 @@ test('B3-S01: the preview the renderer is given reaches the wire as ONE native r
       undefined,
       { subject: 'A' },
     )
-    await settle(120)
+    await awaitFact(() => wirePreparingRows(harness.output.text()).length === 1,
+      'the Preparing row to reach the wire')
     const wire = harness.output.text()
     const rows = wirePreparingRows(wire)
     assert.equal(rows.length, 1, 'exactly one native row on the wire')
@@ -726,7 +727,8 @@ test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', 
       undefined,
       source,
     )
-    await settle(120)
+    await awaitFact(() => wirePreparingRows(harness.output.text()).length === 1,
+      'the first Preparing row to reach the wire')
     const added = wirePreparingRows(harness.output.text())
     assert.equal(added.length, 1, 'the first frame adds the row')
     const rowId = added[0]!.id
@@ -740,7 +742,9 @@ test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', 
       undefined,
       source,
     )
-    await settle(120)
+    await awaitFact(() => wirePreparingRows(harness.output.text())
+      .some(row => row.text.includes('69 B')),
+    'the byte update to reach the wire')
     const updateOps = lastFrameOps(harness.output.text())
     assert.equal(updateOps.filter(op => op[0] === 'del').length, 0, 'the row is not deleted')
     assert.equal(updateOps.filter(op => op[0] === 'add').length, 0, 'the row is not re-added')
@@ -757,7 +761,8 @@ test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', 
       undefined,
       source,
     )
-    await settle(120)
+    await awaitFact(() => !wirePreparingRows(harness.output.text()).some(row => row.id === rowId),
+      'the Preparing row to leave the wire')
     const handoffOps = lastFrameOps(harness.output.text())
     assert.ok(handoffOps.some(op => op[0] === 'del' && op[1] === rowId), 'the Preparing row is deleted')
     const wire = harness.output.text()
@@ -780,13 +785,15 @@ test('B3-S03: the retired source\'s Preparing rows can never revive the Loading 
       undefined,
       retired,
     )
-    await settle(120)
+    await awaitFact(() => wirePreparingRows(harness.output.text()).length === 1,
+      'the first subject row to reach the wire')
     assert.equal(wirePreparingRows(harness.output.text()).length, 1, 'the first subject shows its row')
 
     // The generation bump: the renderer shows the explicit Loading state and
     // fences the retired source.
     harness.renderer.display.beginSessionHydration()
-    await settle(120)
+    await awaitFact(() => wireHasText(harness.output.text(), 'Loading session…'),
+      'the Loading state to reach the wire')
     assert.ok(wireHasText(harness.output.text(), 'Loading session…'), 'the bump shows the explicit Loading state')
     assert.equal(wirePreparingRows(harness.output.text()).length, 0, 'the retired row is gone with the Loading state')
 
@@ -801,6 +808,9 @@ test('B3-S03: the retired source\'s Preparing rows can never revive the Loading 
       undefined,
       retired,
     )
+    // The NEGATIVE observation: the retired frame must NOT arrive. The
+    // window is the SDK's own frame budget (the scripted pane acks every
+    // frame it drew, so a frame that would arrive is already on the wire).
     await settle(120)
     assert.equal(wireFrames(harness.output.text()).length, framesBeforeRetired,
       'the retired frame is DROPPED (no frame at all)')
@@ -808,6 +818,8 @@ test('B3-S03: the retired source\'s Preparing rows can never revive the Loading 
     // A settled-answer lookup resolves DURING the hydration window: its
     // repaint must not resurrect the retired rows.
     harness.renderer.interaction.setSettledQuestionAnswersLookup(() => undefined)
+    // The NEGATIVE observation: the retired rows must NOT come back. The
+    // window is the SDK's own frame budget, as above.
     await settle(120)
     const wire = harness.output.text()
     assert.ok(wireHasText(wire, 'Loading session…'), 'Loading survives the settled-answer repaint')
@@ -824,7 +836,9 @@ test('B3-S03: the retired source\'s Preparing rows can never revive the Loading 
       undefined,
       { subject: 'B' },
     )
-    await settle(120)
+    await awaitFact(() => !wireHasText(harness.output.text(), 'Loading session…')
+      && wirePreparingRows(harness.output.text()).length === 1,
+    'the new subject to reach the wire')
     const finalWire = harness.output.text()
     assert.ok(!wireHasText(finalWire, 'Loading session…'), 'the new subject lifts the Loading state')
     const rows = wirePreparingRows(finalWire)
