@@ -436,6 +436,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   let settledQuestionAnswers: SettledQuestionAnswersLookup | undefined
   let lastMessages: readonly TranscriptMessage[] = []
+  /**
+   * PR-B3: the LAST committed Preparing snapshot — the application owner's
+   * read-only projection of the live tool-call arguments. It is NOT a second
+   * preview authority: the renderer never creates, filters, re-sorts or times
+   * a preview, and it never decides when a Preparing row disappears (the
+   * owner clears the preview and the NEXT snapshot says so). It exists only
+   * so the existing `rebuildLastMain()` repaint (a settled Question answer)
+   * redraws the SAME rows instead of dropping them for one frame.
+   */
+  let lastStreamingToolPreviews: readonly StreamingToolPreview[] = []
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -486,14 +496,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   /** Rebuild the canonical transcript from the last projection (same scope and
-   *  source identity: a settled-answer repaint is NOT a new subject). */
+   *  source identity: a settled-answer repaint is NOT a new subject).
+   *
+   *  PR-B3: the hydration fence also guards this rebuild. While a NEW subject
+   *  is pending, the retired source's messages must not overwrite the
+   *  explicit Loading state — an answered-Question lookup that resolves
+   *  during that window would otherwise resurrect the old rows (and their old
+   *  Preparing rows) under the new subject's scope. */
   const rebuildLastMain = (): void => {
-    if (disposed) return
+    if (disposed || hydrating) return
     lastMain = transcriptView(projectTranscriptStructure(lastMessages), scopeKeys, {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       scopePrefix,
       ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
       ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
+      preparingPreviews: lastStreamingToolPreviews,
     })
   }
 
@@ -549,7 +566,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     messages: readonly TranscriptMessage[],
     _activities?: ReadonlyMap<number, TurnActivity>,
     _window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
-    _streamingToolPreviews?: readonly StreamingToolPreview[],
+    streamingToolPreviews?: readonly StreamingToolPreview[],
     _searchPresentation?: TranscriptSearchPresentation,
     source?: object,
   ): void => {
@@ -575,7 +592,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // PR3-B B3 (§3.9): remember the projection so a settled-answer lookup can
     // rebuild the native nodes WITHOUT a new fold, a new scope or a new source
     // identity — the settled repaint is a presentation change only.
+    // PR-B3: the Preparing snapshot is committed with it, AFTER the source
+    // fence — a retired frame contributes no preview to the new subject.
     lastMessages = messages
+    lastStreamingToolPreviews = streamingToolPreviews ?? []
     rebuildLastMain()
     render()
   }
@@ -635,6 +655,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // window (§3.4 row 1).
       hydrating = true
       retiredSource = projectionScope
+      // PR-B3: the retired subject's Preparing rows go with it — the new
+      // subject's own snapshot replaces them when it commits.
+      lastStreamingToolPreviews = []
       lastMain = loadingMain()
       render()
     },

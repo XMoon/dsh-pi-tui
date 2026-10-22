@@ -23,14 +23,16 @@
 import { ui } from '@stencil-hq/tern'
 import type { Node, Spans, Status } from '@stencil-hq/tern'
 import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
+import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import { subCallDisplayStatus } from '../../domain/transcript/folder.ts'
+import { formatBytes } from '../../domain/media/format.ts'
 import type { TranscriptMessage, TranscriptToolMessage } from '../../domain/transcript/types.ts'
 import { contextPresentationKind } from '../transcript/context-structure.ts'
 import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
-import { systemContextBody, toolCardHeader } from '../transcript/tool-presentation.ts'
+import { systemContextBody, toolCardHeader, toolTitle, relativizeToCwd } from '../transcript/tool-presentation.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -91,6 +93,20 @@ export interface TranscriptViewOptions {
    * target plain `text`, exactly as before.
    */
   readonly toolPresenter?: ToolPresenter
+  /**
+   * PR-B3: the LIVE tool-call Preparing projection — the read-only snapshot
+   * the application owner already derived from the official assistant stream
+   * (`StreamingToolPreview`). It is presentation input only: the mapper never
+   * owns a preview, never subscribes to a delta, never decides when a
+   * Preparing row disappears (the owner clears the preview and the NEXT
+   * snapshot says so) and never re-parses a partial argument payload.
+   *
+   * The rows are placed on the SAME canonical structure: only the TRAILING
+   * open Work span may adopt the rows of its own turn, every other turn fails
+   * open as standalone rows after the transcript. An absent option (or an
+   * empty array) renders exactly the tree the mapper rendered before.
+   */
+  readonly preparingPreviews?: readonly StreamingToolPreview[]
 }
 
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
@@ -318,16 +334,84 @@ function messageNode(message: TranscriptMessage, key: string, options: Transcrip
   }
 }
 
+/**
+ * PR-B3: ONE read-only Preparing row for one live tool call whose arguments
+ * are still streaming. The row is plain TEXT on the native `row` kind: no
+ * badge, no status, no icon, no timer, no action — a Preparing row states
+ * that arguments are arriving, never that a tool is running or done.
+ *
+ * The content is read, never re-derived: the name is the stream's own tool
+ * name (through the shared `toolTitle` table), the summary is the owner's
+ * already-extracted field (sanitized and folded to one line, then
+ * display-relativized against the workspace root) and the byte count is the
+ * owner's exact UTF-8 count through the shared `formatBytes`. The partial
+ * argument prefix and the start time never reach the view.
+ *
+ * The identity is the call's own id when it arrived, and the durable
+ * turn/step/index position before that — never the summary, the name or the
+ * byte count (a byte update must not re-key the row).
+ * @param cwd - the workspace root for the display-only path relativization.
+ * @param keyPrefix - the scope prefix of a STANDALONE row (a row inside a
+ * Work section is already scoped by its section's own id).
+ */
+function preparingRow(
+  preview: StreamingToolPreview,
+  cwd: string | undefined,
+  keyPrefix: string,
+): Node {
+  const key = `preparing-${preview.callId === ''
+    ? `idx-${preview.turn}-${preview.step}-${preview.index}`
+    : preview.callId}`
+  const name = preview.name ?? ''
+  const title = name === '' ? 'Preparing tool…' : `Preparing ${toolTitle(name)}…`
+  const summary = preview.summary === undefined
+    ? undefined
+    : relativizeToCwd(sanitizeDisplayText(preview.summary).replace(/\r\n|\r|\n/g, ' '), cwd)
+  return ui.row(
+    { key: `${keyPrefix}${key}`, wrap: true },
+    ui.text({ key: 'label', text: sanitizeDisplayText(title) }),
+    ...(summary === undefined ? [] : [ui.text({ key: 'summary', text: ` · ${summary}` })]),
+    ui.text({ key: 'bytes', text: ` · ${formatBytes(preview.argumentBytes)}` }),
+  )
+}
+
+/**
+ * PR-B3: the Preparing previews grouped by their durable turn — ascending
+ * turn, and inside a group ascending index. A local, per-call projection: no
+ * long-lived map, no second preview authority and no cached order.
+ */
+function groupPreparingPreviews(
+  previews: readonly StreamingToolPreview[],
+): [number, StreamingToolPreview[]][] {
+  const groups = new Map<number, StreamingToolPreview[]>()
+  for (const preview of previews) {
+    const group = groups.get(preview.turn)
+    if (group === undefined) groups.set(preview.turn, [preview])
+    else group.push(preview)
+  }
+  for (const group of groups.values()) group.sort((left, right) => left.index - right.index)
+  return [...groups.entries()].sort((left, right) => left[0] - right[0])
+}
+
 /** One native Work container keyed by its canonical span owner. Its ordered
  * structural parts place a carried snapshot-only Context cluster as a nested
- * `clusterNode` card; the flat member sequence is never re-derived here. */
-function workNode(span: TranscriptWorkSpan, keys: TranscriptNodeKeys, options: TranscriptViewOptions, prefix: string): Node {
+ * `clusterNode` card; the flat member sequence is never re-derived here. The
+ * optional Preparing rows are the LAST children of the section: they follow
+ * every durable part of the open run. */
+function workNode(
+  span: TranscriptWorkSpan,
+  keys: TranscriptNodeKeys,
+  options: TranscriptViewOptions,
+  prefix: string,
+  previews: readonly StreamingToolPreview[] = [],
+): Node {
   const head: Spans = ['Work', ` · turn ${span.turn}`]
   return ui.section(
     { key: `${prefix}work-${keys.keyFor(span.owner)}`, head },
     ...span.parts.map(part => part.kind === 'message'
       ? messageNode(part.message, keys.keyFor(part.message), options)
       : clusterNode(part.cluster, keys, options, prefix)),
+    ...previews.map(preview => preparingRow(preview, options.cwd, '')),
   )
 }
 
@@ -357,6 +441,26 @@ export function transcriptView(
   // id derives from its parent's id, so the whole rendered subtree lands in
   // the new namespace without re-keying (or re-classifying) any row.
   const prefix = options.scopePrefix ?? ''
+  // PR-B3: the Preparing placement is a PURE projection on the same canonical
+  // structure — the mapper never re-groups a row, never opens an older Work
+  // and never invents a Work owner. Only the TRAILING block may adopt
+  // Preparing rows, and only for its OWN turn: that Work run is the one still
+  // open at the end of the window. Every other turn fails open as standalone
+  // rows after the transcript (ascending turn, then ascending index).
+  const groups = groupPreparingPreviews(options.preparingPreviews ?? [])
+  const trailing = structure.length === 0 ? undefined : structure[structure.length - 1]
+  const openTurn = trailing?.kind === 'work' ? trailing.span.turn : undefined
+  /** The rows the trailing open Work adopts (empty when it adopts none). */
+  let adopted: readonly StreamingToolPreview[] = []
+  /** The rows that stand alone after the transcript. */
+  const standalone: Node[] = []
+  for (const [turn, group] of groups) {
+    if (turn === openTurn) {
+      adopted = group
+      continue
+    }
+    for (const preview of group) standalone.push(preparingRow(preview, options.cwd, prefix))
+  }
   return ui.col(
     { key: 'transcript' },
     ...structure.map(block => {
@@ -364,10 +468,11 @@ export function transcriptView(
         case 'message':
           return messageNode(block.message, `${prefix}${keys.keyFor(block.message)}`, options)
         case 'work':
-          return workNode(block.span, keys, options, prefix)
+          return workNode(block.span, keys, options, prefix, block === trailing ? adopted : [])
         case 'context-cluster':
           return clusterNode(block.cluster, keys, options, prefix)
       }
     }),
+    ...standalone,
   )
 }

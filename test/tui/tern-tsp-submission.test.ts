@@ -22,6 +22,8 @@ import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import { connect as sdkConnect, concatBytes, type TermInput, type TermOutput } from '@stencil-hq/tern'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
+import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -578,6 +580,256 @@ test('clearActiveDraft is PURE STATE — no render IO, no throw surface', async 
     assert.equal(lastComposerText(harness.output.text()), '',
       'the wire shows the empty composer through B\'s first frame')
     assert.equal(harness.renderer.composer.getDraft(), '', 'the editor stays empty through B\'s first frame')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── PR-B3: the native Preparing rows over the REAL renderer ──────────────────
+//
+// The mapper is exercised over the real `mountTspRenderer` + the shipped SDK
+// connect: the renderer receives the preview snapshot through the ONE display
+// seam (`setTranscript`) and the SDK turns the native nodes into real wire
+// frames. These cases prove the RENDERER half — the preview reaches the wire,
+// a byte update re-texts the SAME row, the formal call removes it, and a
+// retired source can never revive the retired rows.
+
+/** One durable tool row (a Work member). */
+function workTool(turn: number, callId: string, name = 'read'): Extract<TranscriptMessage, { kind: 'tool' }> {
+  return { kind: 'tool', turn, callId, name, args: '{}', result: '', status: 'running' }
+}
+
+/** One live Preparing preview (the application owner's projection). */
+function preview(overrides: Partial<StreamingToolPreview> & { readonly turn: number }): StreamingToolPreview {
+  return { callId: '', step: 0, index: 0, argumentBytes: 7, ...overrides }
+}
+
+interface WireNode {
+  readonly id: string
+  readonly k: string
+  readonly p?: Record<string, unknown>
+  readonly c?: WireNode[]
+}
+
+/** Every wire frame of the run, in order. */
+function wireFrames(wire: string): { ops: unknown[][] }[] {
+  const frames: { ops: unknown[][] }[] = []
+  for (const match of wire.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
+    frames.push(JSON.parse(match[1]!) as { ops: unknown[][] })
+  }
+  return frames
+}
+
+/** The node state the wire accumulates (add/del/set/text replayed). */
+function wireState(wire: string): Map<string, { k: string; p: Record<string, unknown>; childIds: string[] }> {
+  const nodes = new Map<string, { k: string; p: Record<string, unknown>; childIds: string[] }>()
+  const visit = (node: WireNode): void => {
+    nodes.set(node.id, { k: node.k, p: node.p ?? {}, childIds: (node.c ?? []).map(child => child.id) })
+    for (const child of node.c ?? []) visit(child)
+  }
+  for (const frame of wireFrames(wire)) {
+    for (const op of frame.ops) {
+      if (op[0] === 'add') {
+        const node = op[4] as WireNode | null | undefined
+        if (node !== undefined && node !== null) visit(node)
+      } else if (op[0] === 'del') {
+        // A delete removes the whole subtree from the client's tree.
+        const doomed = new Set<string>()
+        const collect = (id: string): void => {
+          if (doomed.has(id)) return
+          doomed.add(id)
+          for (const child of nodes.get(id)?.childIds ?? []) collect(child)
+        }
+        collect(op[1] as string)
+        for (const id of doomed) nodes.delete(id)
+      } else if (op[0] === 'set') {
+        const id = op[1] as string
+        const existing = nodes.get(id)
+        if (existing !== undefined) nodes.set(id, { ...existing, p: { ...existing.p, ...(op[2] as object) } })
+      } else if (op[0] === 'text') {
+        const id = op[1] as string
+        const existing = nodes.get(id)
+        if (existing === undefined) continue
+        const before = typeof existing.p['text'] === 'string' ? existing.p['text'] : ''
+        const value = op[3] as string
+        nodes.set(id, { ...existing, p: { ...existing.p, text: op[2] === 'append' ? before + value : value } })
+      }
+    }
+  }
+  return nodes
+}
+
+/** The native row nodes the wire currently shows, with their visible text. */
+function wirePreparingRows(wire: string): { id: string; text: string }[] {
+  const nodes = wireState(wire)
+  const rows: { id: string; text: string }[] = []
+  for (const [id, node] of nodes) {
+    if (node.k !== 'row') continue
+    rows.push({ id, text: node.childIds.map(child => String(nodes.get(child)?.p['text'] ?? '')).join('') })
+  }
+  return rows
+}
+
+/** The ops of the LAST wire frame (the renderer's own diff). */
+function lastFrameOps(wire: string): unknown[][] {
+  const frames = wireFrames(wire)
+  const last = frames[frames.length - 1]
+  assert.ok(last !== undefined, 'the renderer committed at least one frame')
+  return last.ops
+}
+
+/** Whether the wire currently shows a node with exactly this text. */
+function wireHasText(wire: string, text: string): boolean {
+  return [...wireState(wire).values()].some(node => node.p['text'] === text)
+}
+
+test('B3-S01: the preview the renderer is given reaches the wire as ONE native row', async () => {
+  const harness = await mountPane(() => {})
+  try {
+    harness.renderer.display.setTranscript(
+      [workTool(1, 'call-1')],
+      undefined,
+      undefined,
+      [preview({ turn: 1, callId: 'call-bash', name: 'bash', summary: 'Run focused tests', argumentBytes: 23 })],
+      undefined,
+      { subject: 'A' },
+    )
+    await settle(120)
+    const wire = harness.output.text()
+    const rows = wirePreparingRows(wire)
+    assert.equal(rows.length, 1, 'exactly one native row on the wire')
+    assert.equal(rows[0]!.text, 'Preparing Bash… · Run focused tests · 23 B')
+    assert.ok(wire.includes('"k":"row"'), 'the row is a native row node')
+    assert.ok(!wire.includes('"k":"badge"'), 'no badge node')
+    // The Preparing row is NOT a tool node: the durable Work tool is the only
+    // tool on the wire, and the Preparing row adds none.
+    const state = wireState(wire)
+    assert.equal([...state.values()].filter(node => node.k === 'row').length, 1, 'exactly one row node')
+    assert.equal([...state.values()].filter(node => node.k === 'tool').length, 1, 'the durable tool only')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', async () => {
+  const harness = await mountPane(() => {})
+  try {
+    const source = { subject: 'A' }
+    // The SAME durable row object across the commits: the transcript row keeps
+    // its presentation identity, so only the Preparing row changes.
+    const existing = workTool(1, 'call-1')
+    harness.renderer.display.setTranscript(
+      [existing],
+      undefined,
+      undefined,
+      [preview({ turn: 1, callId: 'call-bash', name: 'bash', summary: 'Run focused tests', argumentBytes: 23 })],
+      undefined,
+      source,
+    )
+    await settle(120)
+    const added = wirePreparingRows(harness.output.text())
+    assert.equal(added.length, 1, 'the first frame adds the row')
+    const rowId = added[0]!.id
+
+    // More streamed bytes: the SAME row, re-texted — no delete, no re-add.
+    harness.renderer.display.setTranscript(
+      [existing],
+      undefined,
+      undefined,
+      [preview({ turn: 1, callId: 'call-bash', name: 'bash', summary: 'Run focused tests', argumentBytes: 69 })],
+      undefined,
+      source,
+    )
+    await settle(120)
+    const updateOps = lastFrameOps(harness.output.text())
+    assert.equal(updateOps.filter(op => op[0] === 'del').length, 0, 'the row is not deleted')
+    assert.equal(updateOps.filter(op => op[0] === 'add').length, 0, 'the row is not re-added')
+    const textOps = updateOps.filter(op => op[0] === 'text')
+    assert.equal(textOps.length, 1, 'only the byte text changed')
+    assert.equal(textOps[0]![1], `${rowId}.bytes`)
+
+    // The formal tool call: the owner cleared the preview, so the row goes.
+    harness.renderer.display.setTranscript(
+      [existing, { kind: 'tool', turn: 1, callId: 'call-bash', name: 'bash', args: '{}', result: '', status: 'running' }],
+      undefined,
+      undefined,
+      [],
+      undefined,
+      source,
+    )
+    await settle(120)
+    const handoffOps = lastFrameOps(harness.output.text())
+    assert.ok(handoffOps.some(op => op[0] === 'del' && op[1] === rowId), 'the Preparing row is deleted')
+    const wire = harness.output.text()
+    assert.ok(!wirePreparingRows(wire).some(row => row.id === rowId), 'the row is gone from the wire')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B3-S03: the retired source\'s Preparing rows can never revive the Loading state', async () => {
+  const harness = await mountPane(() => {})
+  try {
+    const retired = { subject: 'A' }
+    const existing = workTool(1, 'call-1')
+    harness.renderer.display.setTranscript(
+      [existing],
+      undefined,
+      undefined,
+      [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })],
+      undefined,
+      retired,
+    )
+    await settle(120)
+    assert.equal(wirePreparingRows(harness.output.text()).length, 1, 'the first subject shows its row')
+
+    // The generation bump: the renderer shows the explicit Loading state and
+    // fences the retired source.
+    harness.renderer.display.beginSessionHydration()
+    await settle(120)
+    assert.ok(wireHasText(harness.output.text(), 'Loading session…'), 'the bump shows the explicit Loading state')
+    assert.equal(wirePreparingRows(harness.output.text()).length, 0, 'the retired row is gone with the Loading state')
+
+    // The RETIRED source repaints with its old Preparing rows: the fence drops
+    // the frame entirely.
+    const framesBeforeRetired = wireFrames(harness.output.text()).length
+    harness.renderer.display.setTranscript(
+      [existing],
+      undefined,
+      undefined,
+      [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })],
+      undefined,
+      retired,
+    )
+    await settle(120)
+    assert.equal(wireFrames(harness.output.text()).length, framesBeforeRetired,
+      'the retired frame is DROPPED (no frame at all)')
+
+    // A settled-answer lookup resolves DURING the hydration window: its
+    // repaint must not resurrect the retired rows.
+    harness.renderer.interaction.setSettledQuestionAnswersLookup(() => undefined)
+    await settle(120)
+    const wire = harness.output.text()
+    assert.ok(wireHasText(wire, 'Loading session…'), 'Loading survives the settled-answer repaint')
+    assert.equal(wirePreparingRows(wire).length, 0,
+      'the retired Preparing row was not resurrected by the settled-answer repaint')
+
+    // The new subject commits under a NEW source token: the normal display
+    // resumes with its OWN preview.
+    harness.renderer.display.setTranscript(
+      [workTool(2, 'call-2')],
+      undefined,
+      undefined,
+      [preview({ turn: 2, callId: 'call-read', name: 'read', argumentBytes: 12 })],
+      undefined,
+      { subject: 'B' },
+    )
+    await settle(120)
+    const finalWire = harness.output.text()
+    assert.ok(!wireHasText(finalWire, 'Loading session…'), 'the new subject lifts the Loading state')
+    const rows = wirePreparingRows(finalWire)
+    assert.equal(rows.length, 1, 'the new subject shows exactly its own row')
+    assert.equal(rows[0]!.text, 'Preparing Read… · 12 B')
   } finally {
     await harness.dispose()
   }
