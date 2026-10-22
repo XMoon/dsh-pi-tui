@@ -138,6 +138,8 @@ interface Harness {
   readonly tern: ScriptedTern
   /** Set the scope the renderer's binding hands out (per display subject). */
   scope(scope: unknown): void
+  /** The scope the renderer's binding currently hands out. */
+  scopeValue(): unknown
   dispose(): Promise<void>
 }
 
@@ -191,6 +193,9 @@ async function mountHarness(options: {
     scope(scope: unknown): void {
       activeScope = scope
     },
+    scopeValue(): unknown {
+      return activeScope
+    },
     dispose: async () => {
       await renderer.dispose()
     },
@@ -206,11 +211,21 @@ function commit(
   renderer.display.setTranscript(messages, undefined, undefined, undefined, undefined, source)
 }
 
-/** Let the loader's deferred read and the renderer's settle callbacks run. */
-async function settle(rounds = 12): Promise<void> {
-  for (let index = 0; index < rounds; index += 1) {
-    await new Promise(resolve => setTimeout(resolve, 2))
+/**
+ * Wait for an AUTHORITATIVE condition, bounded by a deadline.
+ *
+ * The condition is always a fact about the wire or the loader - the blob the
+ * SDK sent, the frame the pane received, the loader's own state - never
+ * "give the system time". A blind sleep would let a case pass for the wrong
+ * reason.
+ */
+async function until(label: string, predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
   }
+  throw new Error(`timed out waiting for ${label}`)
 }
 
 /** The image nodes the SDK actually drew, across all frames (the whole tree). */
@@ -313,10 +328,10 @@ test('T4-01: two display subjects with the SAME attachment id read their OWN byt
 
   harness.scope(scopeA)
   commit(harness.renderer, [toolRowWithImage()], sourceA)
-  await settle()
+  await until('the first subject to send its blob', () => harness.tern.blobIds().length === 1)
   harness.scope(scopeB)
   commit(harness.renderer, [toolRowWithImage()], sourceB)
-  await settle()
+  await until('the second subject to send its own blob', () => harness.tern.blobIds().length === 2)
 
   const ids = harness.tern.blobIds()
   assert.equal(ids.length, 2, 'each subject sent its own blob')
@@ -338,13 +353,13 @@ test('T4-02: a failed read of one subject never touches the other subject\'s sta
 
   harness.scope(scopeA)
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until('the denied read to settle', () => harness.loader.get(ATTACHMENT, scopeA).state === 'error')
   assert.equal(harness.loader.get(ATTACHMENT, scopeA).state, 'error')
   assert.equal(harness.loader.get(ATTACHMENT, scopeB).state, 'idle', "the other subject's scope is untouched")
 
   harness.scope(scopeB)
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until('the other subject to read its own bytes', () => harness.loader.get(ATTACHMENT, scopeB).state === 'ready')
   assert.equal(harness.loader.get(ATTACHMENT, scopeB).state, 'ready')
   assert.equal(harness.loader.get(ATTACHMENT, scopeA).state, 'error', "the failed subject keeps its own failure")
   await harness.dispose()
@@ -367,15 +382,15 @@ test('T4-03: a late settle of a RETIRED subject never sends a blob for the new s
 
   harness.scope(scopeA)
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle(4)
+  await until("the first subject's read to start", () => harness.reads.length === 1)
   assert.equal(harness.reads.length, 1, "the first subject's read is in flight")
 
   // The subject is replaced while the read is still open.
   harness.scope(scopeB)
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until('the new subject to send its blob', () => harness.tern.blobIds().length === 1)
   releaseA()
-  await settle()
+  await until("the retired subject's read to settle", () => harness.loader.get(ATTACHMENT, scopeA).state === 'ready')
 
   const ids = harness.tern.blobIds()
   assert.equal(ids.length, 1, 'only the CURRENT subject sent a blob')
@@ -389,7 +404,7 @@ test('T4-03: a late settle of a RETIRED subject never sends a blob for the new s
 test('T7-01: the blob is sent BEFORE the frame that references it', async () => {
   const harness = await mountHarness()
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until('the pane to receive the image blob', () => harness.tern.blobIds().length === 1)
 
   const blobIndex = harness.tern.events.findIndex(event => event.kind === 'blob')
   const drawn = drawnImageNodes(harness.tern)
@@ -406,11 +421,12 @@ test('T7-02: a repeated repaint of the SAME subject never re-sends the blob', as
   const harness = await mountHarness()
   const source = {}
   commit(harness.renderer, [toolRowWithImage()], source)
-  await settle()
+  await until('the first blob to be sent', () => harness.tern.blobIds().length === 1)
   const afterFirst = harness.tern.blobIds().length
+  const framesBefore = harness.tern.frames().length
   commit(harness.renderer, [toolRowWithImage()], source)
   commit(harness.renderer, [toolRowWithImage()], source)
-  await settle()
+  await until('the repeated repaints to reach the pane', () => harness.tern.frames().length > framesBefore)
 
   assert.equal(afterFirst, 1)
   assert.equal(harness.tern.blobIds().length, 1, 'the SDK dedupes the blob content')
@@ -423,7 +439,7 @@ test('T7-03: bytes over the 16 MiB blob gate are never sent', async () => {
     read: async (ref) => ({ ref, data: new Uint8Array(16 * 1024 * 1024 + 1) }),
   })
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until('the over-limit bytes to be ready', () => harness.loader.get(ATTACHMENT, harness.scopeValue()).state === 'ready')
 
   assert.deepEqual(harness.tern.blobIds(), [], 'the over-limit bytes never reach the wire')
   const frame = harness.tern.frames().at(-1)
@@ -442,13 +458,13 @@ test('T7-04: a settle after the disposal sends neither a blob nor a frame', asyn
     },
   })
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle(4)
+  await until('the gated read to start', () => harness.reads.length === 1)
   const blobsBefore = harness.tern.blobIds().length
   const framesBefore = harness.tern.frames().length
 
   await harness.dispose()
   release()
-  await settle()
+  await until('the late read to settle inside the loader', () => harness.loader.get(ATTACHMENT, harness.scopeValue()).state === 'ready')
 
   assert.equal(harness.tern.blobIds().length, blobsBefore, 'no blob is sent after the disposal')
   assert.equal(harness.tern.frames().length, framesBefore, 'no frame is sent after the disposal')
@@ -464,11 +480,16 @@ test('T8-01: a ready repaint of the SAME subject keeps the image node\'s identit
   // same transcript rows, so the presentation identity must not move.
   const messages = [toolRowWithImage()]
   commit(harness.renderer, messages, source)
-  await settle()
+  await until('the image node to be drawn', () => drawnImageNodes(harness.tern).length > 0)
   const first = drawnImageNodes(harness.tern).at(-1)
 
+  // A repaint that really CHANGES something: the SDK diffs the view, so a
+  // frame follows. An unchanged repaint would send nothing at all, and the
+  // identity assertion would be vacuous.
+  const framesBefore = harness.tern.frames().length
+  ;(messages[0] as { args: string }).args = '{"path":"other.png"}'
   commit(harness.renderer, messages, source)
-  await settle()
+  await until('the changed repaint to reach the pane', () => harness.tern.frames().length > framesBefore)
   const second = drawnImageNodes(harness.tern).at(-1)
 
   assert.equal(first?.id, second?.id, 'the image node keeps its id across a repaint')
@@ -489,12 +510,12 @@ test('T8-02: a NEW subject draws its own image and never the retired one', async
 
   harness.scope({ scope: 'A' })
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until("the first subject's blob", () => harness.tern.blobIds().length === 1)
   const aBlob = harness.tern.blobIds().at(-1)
 
   harness.scope({ scope: 'B' })
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until("the second subject's blob", () => harness.tern.blobIds().length === 2)
   const bBlob = harness.tern.blobIds().at(-1)
 
   assert.notEqual(aBlob, bBlob, 'the new subject carries its own bytes')
@@ -513,7 +534,7 @@ test('T8-03: the hydration window drops the outgoing subject\'s image subscripti
   const harness = await mountHarness()
   const source = {}
   commit(harness.renderer, [toolRowWithImage()], source)
-  await settle()
+  await until('the visible image to be subscribed', () => harness.loader.listenerCount() === 1)
   assert.equal(harness.loader.listenerCount(), 1, 'the visible image is subscribed')
 
   harness.renderer.display.beginSessionHydration()
@@ -525,7 +546,8 @@ test('T8-04: a subject with NO scope never reads and never sends a blob', async 
   const harness = await mountHarness()
   harness.scope(undefined)
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until('the row to state the unavailable reason', () =>
+    JSON.stringify(harness.tern.frames().at(-1)).includes('Image unavailable for this session'))
 
   assert.deepEqual(harness.reads, [], 'an absent scope reads nothing')
   assert.deepEqual(harness.tern.blobIds(), [], 'an absent scope sends no blob')
@@ -540,7 +562,8 @@ test('T8-05: a pane WITHOUT the image capability never reads and never sends a b
     hello: { ...HELLO, kinds: HELLO.kinds.filter(kind => kind !== 'image'), features: HELLO.features.filter(feature => feature !== 'blobs') },
   })
   commit(harness.renderer, [toolRowWithImage()], {})
-  await settle()
+  await until('the row to state the unavailable-capability reason', () =>
+    JSON.stringify(harness.tern.frames().at(-1)).includes('Native image display unavailable in this Tern pane'))
 
   assert.deepEqual(harness.reads, [], 'a pane without the capability reads nothing')
   assert.deepEqual(harness.tern.blobIds(), [])

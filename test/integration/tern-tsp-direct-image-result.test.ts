@@ -157,6 +157,8 @@ test('a tool result image is read through the REAL Direct attachment service and
     assert.deepEqual(new Uint8Array(Buffer.from(base64, 'base64')), png,
       'the wire carries the exact admitted bytes')
   } finally {
+    // The fixture's teardown disposes the app, the pane and the Host
+    // context before the next case starts: a bounded wait, not a sleep.
     await fixture.settle()
   }
 })
@@ -211,6 +213,8 @@ test('an attachment the REAL service cannot read is refused and never painted', 
     assert.equal(fixture.pane.output.text().includes('[IMAGE] missing.png'), true,
       'the identity line still names the attachment')
   } finally {
+    // The fixture's teardown disposes the app, the pane and the Host
+    // context before the next case starts: a bounded wait, not a sleep.
     await fixture.settle()
   }
 })
