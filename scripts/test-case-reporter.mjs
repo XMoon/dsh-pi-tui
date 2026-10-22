@@ -25,13 +25,17 @@
  *
  * The record shape:
  *
- *   { "file": "<repo-relative file>", "name": "<full title>", "line": <n>,
- *     "column": <n>, "nesting": <n>, "duration_ms": <n|undefined>,
- *     "result": "pass" | "fail" | "skip" | "todo" | "cancelled" }
+ *   { "file": "<repo-relative file>", "name": "<full title>",
+ *     "type": "test" | "suite", "line": <n>, "column": <n>,
+ *     "nesting": <n>, "duration_ms": <n|undefined>,
+ *     "result": "pass" | "fail" | "skip" | "todo" | "cancelled",
+ *     "skipReason": <string|null> }
  *
- * `nesting` separates a `describe()` block from the case inside it: a
- * nested entry is the SUITE, not a case, and the inventory keeps both so
- * the full title chain stays reconstructable.
+ * `type` is Node's OWN classification, and the distinction matters to every
+ * consumer: a `describe()` block is a SUITE, not a case, and `describe('x',
+ * () => {})` reports one suite and zero tests. A file's own root entry is
+ * `type: "test"` with `name === file`, which is how a file is told apart from
+ * the cases inside it. A missing `type` is recorded as `test`.
  *
  * Usage: node --test --test-reporter=scripts/test-case-reporter.mjs <files>
  * @module @xmoon76/dsh-pi-tui/scripts/test-case-reporter

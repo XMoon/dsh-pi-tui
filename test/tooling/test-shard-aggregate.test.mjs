@@ -24,7 +24,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -594,7 +594,7 @@ test('a file that reported itself but NO case fails the aggregate', (t) => {
   writeShard(root, 'shard-2-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
   const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
   assert.ok(
-    aggregate.failures.some(failure => /reported 1 file\(s\) with no case record/u.test(failure)),
+    aggregate.failures.some(failure => /reported 1 file\(s\) with no test record/u.test(failure)),
     JSON.stringify(aggregate.failures, null, 2),
   )
 })
@@ -611,6 +611,87 @@ test('a SKIPPED case still counts as a case, so the invariant does not punish sk
   assert.equal(aggregate.totalSkipped, 1, 'the skip is still REPORTED, it is just not a failure by itself')
   // And the totals are reported without being compared to a constant.
   assert.equal(aggregate.totalCases, 3)
-  assert.equal('expectedCases' in aggregate, false)
-  assert.equal('skipPolicy' in aggregate, false)
+  assert.equal('expectedCases' in aggregate, false, 'no committed total is compared')
+  assert.equal('expectedSkipped' in aggregate, false)
+})
+
+// ---------------------------------------------------------------------------
+// What the structural checks can and cannot prove.
+// ---------------------------------------------------------------------------
+
+test('a file whose only record is an EMPTY SUITE fails: a suite is not a test', (t) => {
+  // `describe('x', () => {})` reports one SUITE and zero tests. A check that
+  // counted every non-file record would accept it, and the file would look
+  // covered while executing nothing.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-aggregate-suite-')
+  const first = writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts'] })
+  const records = [
+    { file: 'test/app/one.test.ts', name: 'test/app/one.test.ts', type: 'test', result: 'pass' },
+    { file: 'test/app/one.test.ts', name: 'empty suite', type: 'suite', result: 'pass' },
+  ]
+  writeFileSync(join(first, 'cases.jsonl'), `${records.map(record => JSON.stringify(record)).join('\n')}\n`)
+  writeShard(root, 'shard-2-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.ok(
+    aggregate.failures.some(failure => /reported 1 file\(s\) with no test record/u.test(failure)),
+    JSON.stringify(aggregate.failures, null, 2),
+  )
+})
+
+test('a file with a REAL test and a suite passes', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-aggregate-suite-ok-')
+  const first = writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts'] })
+  const records = [
+    { file: 'test/app/one.test.ts', name: 'test/app/one.test.ts', type: 'test', result: 'pass' },
+    { file: 'test/app/one.test.ts', name: 'a suite', type: 'suite', result: 'pass' },
+    { file: 'test/app/one.test.ts', name: 'a real case', type: 'test', result: 'pass' },
+  ]
+  writeFileSync(join(first, 'cases.jsonl'), `${records.map(record => JSON.stringify(record)).join('\n')}\n`)
+  writeShard(root, 'shard-2-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
+})
+
+test('a skip with NO stated reason fails the policy', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-aggregate-skip-noreason-')
+  writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts'], results: { 'app/one.test.ts': 'skip' }, skipReasons: { 'app/one.test.ts': null } })
+  writeShard(root, 'shard-2-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED, acceptedSkips: [/no fd\/fdfind on PATH/u] })
+  assert.ok(aggregate.failures.some(failure => /no reason stated/u.test(failure)), JSON.stringify(aggregate.failures, null, 2))
+})
+
+test('a skip whose reason is OUTSIDE the accepted classes fails', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-aggregate-skip-outside-')
+  writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts'], results: { 'app/one.test.ts': 'skip' }, skipReasons: { 'app/one.test.ts': 'mkfifo is POSIX-only' } })
+  writeShard(root, 'shard-2-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED, acceptedSkips: [/no fd\/fdfind on PATH/u] })
+  assert.ok(aggregate.failures.some(failure => /reason the policy does not accept/u.test(failure)), JSON.stringify(aggregate.failures, null, 2))
+})
+
+test('an ACCEPTED reason passes, and the policy is recorded in the report', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-aggregate-skip-ok-')
+  writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts'], results: { 'app/one.test.ts': 'skip' }, skipReasons: { 'app/one.test.ts': 'no fd/fdfind on PATH' } })
+  writeShard(root, 'shard-2-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED, acceptedSkips: [/no fd\/fdfind on PATH/u] })
+  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
+  assert.deepEqual(aggregate.skipPolicy, { acceptedClasses: 1, enforced: true })
+})
+
+test('the SHIPPED policy is a real policy, and it rejects a POSIX-only skip', () => {
+  // The policy is read from the file the workflow passes, so this case drives
+  // the SHIPPED file rather than an inline regex list.
+  const shipped = join(ROOT, 'scripts', 'ci-accepted-skips.txt')
+  assert.ok(existsSync(shipped), 'the accepted-skip policy must be committed')
+  const lines = readFileSync(shipped, 'utf8').split('\n').map(line => line.trim()).filter(line => line !== '' && !line.startsWith('#'))
+  assert.ok(lines.length >= 1)
+  const patterns = lines.map(line => new RegExp(line, 'u'))
+  assert.ok(patterns.some(pattern => pattern.test('BLOCKED: no provisioned official DSH 0.2.1-rc.2 Optional-bundle installation was found.')), 'the optional-bundle class is evidenced')
+  assert.ok(patterns.some(pattern => pattern.test('no fd/fdfind on PATH: the real-fd case test cannot run')), 'the fd class is evidenced')
+  assert.equal(patterns.some(pattern => pattern.test('mkfifo is POSIX-only')), false, 'a POSIX-only skip means the runner changed')
+  assert.equal(patterns.some(pattern => pattern.test('no /dev/full')), false)
 })
