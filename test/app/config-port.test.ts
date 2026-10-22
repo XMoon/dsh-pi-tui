@@ -205,6 +205,28 @@ test('providers writeProfile owns the llm-pi-ai schema (the wizard never names a
   ])
 })
 
+test('the provider create is conditional: an existing route is refused, a new one is revision-checked', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision: number | undefined }> = []
+  const section = { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }
+  const providers = port({
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: section, user: section, revision: 7 }],
+      mutate: async (ns: string, ops: unknown, revision: number | undefined) => { writes.push({ ns, ops, revision }) },
+    },
+  }).providers
+  // An EXISTING route: the create must refuse it, never overwrite it.
+  await assert.rejects(
+    () => providers.writeProfile('acme', { api: 'openai-completions', baseURL: 'https://acme.example/v1' }),
+    /already exists/u,
+  )
+  assert.equal(writes.length, 0, 'a refused create must not write')
+  // A NEW route: the write is checked against the revision the decision was
+  // read at, so a profile configured in between is refused by the Host.
+  await providers.writeProfile('new-route', { api: 'openai-completions', baseURL: 'https://new.example/v1' })
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0]?.revision, 7, 'the write carries the decision read revision')
+})
+
 test('providers writeKeylessProfile writes an EMPTY profile at the adapter-resolved location', async () => {
   const writes: Array<{ ns: string; ops: unknown }> = []
   const providers = port({

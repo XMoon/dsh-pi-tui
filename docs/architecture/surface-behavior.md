@@ -249,6 +249,10 @@ The page never infers a stored key from a route/profile.
   review → create. Nothing persists before Create. Profile and credential
   writes are separate Host operations; a persisted profile with a failed key
   write is reported as a partial outcome with the exact failed stage.
+  The Create is CONDITIONAL: it writes the profile of a NEW route, it is
+  refused when the route already has a profile, and it is checked against the
+  revision its decision was read at — a provider configured in the meantime
+  is refused (the user re-reads and retries), never overwritten.
 - Provider-native sign-in uses the existing authorization attempt owner: early
   events are buffered before attempt binding, notices/URLs stay visible above
   in-page prompts, select/text/secret prompts answer through `respond`, a Host

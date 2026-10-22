@@ -604,9 +604,17 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
     if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
+    // The create is CONDITIONAL: it writes the profile of a NEW route. ONE
+    // read decides both the route's absence and the revision the write is
+    // checked against, so a profile configured in between is refused by the
+    // Host's revision guard instead of being overwritten.
+    const descriptor = readSettingsDescriptor(settings, 'llm-pi-ai')
+    if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+      throw new Error(`provider route "${route}" already exists`)
+    }
     await mutateSettings(settings, 'llm-pi-ai', [
       { op: 'set', path: ['providers', route], value: profile },
-    ])
+    ], descriptor?.revision)
   }
 
   async writeKeylessProfile(route: string): Promise<{ kind: 'written' } | { kind: 'skipped'; reason: string }> {
@@ -674,8 +682,11 @@ async function mutateSettings(
   settings: SettingsServiceLike,
   ns: string,
   ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+  expectedRevision?: number,
 ): Promise<unknown> {
-  const revision = readSettingsDescriptor(settings, ns)?.revision
+  // The revision the CALLER decided on, when it has one: the Host's
+  // revision guard then refuses a write whose namespace changed in between.
+  const revision = expectedRevision ?? readSettingsDescriptor(settings, ns)?.revision
   return settings.mutate(ns, ops, revision)
 }
 
