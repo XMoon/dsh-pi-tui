@@ -375,7 +375,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     notify: (text, kind) => { display.notify(text, kind) },
     setSettledQuestionAnswersLookup: (lookup) => {
       settledQuestionAnswers = lookup
-      rebuildLastMain()
+      if (!rebuildLastMain()) return
       render()
     },
   })
@@ -483,6 +483,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * attachment" fact.
    */
   const imageSubscriptions = new Map<string, () => void>()
+  /**
+   * PR-C: the image preparation was ABORTED by a fatal blob failure. The
+   * projection must not continue: the last committed frame stands, and the
+   * fatal lifecycle owns the exit.
+   */
+  let imageProjectionAborted = false
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -608,10 +614,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         states.set(ref.attachmentId, { state: 'ready', blobId: session.blob(load.bytes, ref.mediaType) })
       } catch (error) {
         // An unexpected blob failure is a RENDERER failure, not an image
-        // state: the tty owner is gone. It goes to the fatal lifecycle - it
-        // is never swallowed into a "the image loaded" claim.
+        // state: the tty owner is gone. It goes to the fatal lifecycle, and
+        // THIS projection is ABORTED. The read SUCCEEDED, so the row must
+        // not be mislabelled as a read failure, and no further blob may be
+        // sent after the fatal.
         routeFatal(error)
-        states.set(ref.attachmentId, { state: 'error' })
+        imageProjectionAborted = true
+        return undefined
       }
     }
     return states
@@ -650,7 +659,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (source !== projectionScope) return
         if (scope !== activeImageScope) return
         if (!imageSubscriptions.has(id)) return
-        rebuildLastMain()
+        if (!rebuildLastMain()) return
         render()
       }, scope)
       imageSubscriptions.set(id, unsubscribe)
@@ -666,16 +675,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  explicit Loading state — an answered-Question lookup that resolves
    *  during that window would otherwise resurrect the old rows (and their old
    *  Preparing rows) under the new subject's scope. */
-  const rebuildLastMain = (): void => {
-    if (disposed || hydrating) return
+  const rebuildLastMain = (): boolean => {
+    if (disposed || hydrating) return true
+    // PR-C: an aborted projection STAYS aborted. The fatal already took the
+    // renderer down, so no further blob may even be ATTEMPTED.
+    if (imageProjectionAborted) return false
+    const imageStates = prepareImageStates()
+    // PR-C: a fatal blob failure ABORTED this projection: the last committed
+    // frame stands and the caller must not render a new one.
+    if (imageProjectionAborted) return false
     lastMain = transcriptView(projectTranscriptStructure(lastMessages), scopeKeys, {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       scopePrefix,
       ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
       ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
       preparingPreviews: lastStreamingToolPreviews,
-      toolImageStates: prepareImageStates(),
+      toolImageStates: imageStates,
     })
+    return true
   }
 
   const dockView = (): Node | undefined => {
@@ -768,7 +785,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // PR-C: the image subscriptions follow the CURRENT window: an attachment
     // that left it is unsubscribed, a new one is subscribed and read.
     syncImageSubscriptions()
-    rebuildLastMain()
+    if (!rebuildLastMain()) return
     render()
   }
 

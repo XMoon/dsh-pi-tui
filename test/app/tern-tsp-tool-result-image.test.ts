@@ -90,10 +90,18 @@ class ScriptedTern {
   readonly input = new FakeInput()
   readonly output = new FakeOutput()
   readonly events: WireEvent[] = []
+  /** How many blob messages the SDK tried to write. */
+  readonly blobWrites: number[] = []
 
-  constructor(hello: typeof HELLO = HELLO) {
+  constructor(hello: typeof HELLO = HELLO, options: { readonly failBlobWrite?: boolean } = {}) {
     this.output.onWrite = bytes => {
       const text = DECODER.decode(bytes)
+      if (options.failBlobWrite === true && text.includes('\u001b_tsp;b;')) {
+        // The tty owner died mid-write: the SDK's blob call throws, exactly
+        // as it would on a broken terminal.
+        this.blobWrites.push(this.blobWrites.length)
+        throw new Error('the tty owner is gone')
+      }
       if (text.includes('\u001b[c')) {
         setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
@@ -136,6 +144,8 @@ interface Harness {
   readonly loader: ImageLoader
   readonly reads: ReadCall[]
   readonly tern: ScriptedTern
+  /** Every fatal error the renderer routed (the ONE fatal owner). */
+  readonly fatalErrors: unknown[]
   /** Set the scope the renderer's binding hands out (per display subject). */
   scope(scope: unknown): void
   /** The scope the renderer's binding currently hands out. */
@@ -153,8 +163,10 @@ const ATTACHMENT: ImageAttachmentRefLike = {
   name: 'shot.png',
 }
 
-/** A real tool row whose result carries one image block. */
-function toolRowWithImage(attachment: unknown = ATTACHMENT): TranscriptMessage {
+/** A real tool row whose result carries the given image blocks (the
+ *  default attachment when none is named). */
+function toolRowWithImage(...attachments: readonly unknown[]): TranscriptMessage {
+  const images = attachments.length === 0 ? [ATTACHMENT] : attachments
   return {
     kind: 'tool',
     turn: 1,
@@ -164,7 +176,7 @@ function toolRowWithImage(attachment: unknown = ATTACHMENT): TranscriptMessage {
     status: 'ok',
     resultBlocks: [
       { type: 'text', text: 'Here is the screenshot.' },
-      { type: 'image', attachment },
+      ...images.map(attachment => ({ type: 'image', attachment })),
     ],
   } as unknown as TranscriptMessage
 }
@@ -172,8 +184,10 @@ function toolRowWithImage(attachment: unknown = ATTACHMENT): TranscriptMessage {
 async function mountHarness(options: {
   readonly read?: (ref: ImageAttachmentRefLike, scope: unknown) => Promise<{ ref: unknown; data: Uint8Array }>
   readonly hello?: typeof HELLO
+  /** Make the pane's blob write FAIL (the tty owner died mid-send). */
+  readonly failBlobWrite?: boolean
 } = {}): Promise<Harness> {
-  const tern = new ScriptedTern(options.hello ?? HELLO)
+  const tern = new ScriptedTern(options.hello ?? HELLO, { failBlobWrite: options.failBlobWrite })
   const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
   assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
   const reads: ReadCall[] = []
@@ -183,13 +197,18 @@ async function mountHarness(options: {
     if (options.read === undefined) return { ref, data: new Uint8Array([1, 2, 3, 4]) }
     return await options.read(ref, scope)
   })
-  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  const fatalErrors: unknown[] = []
+  const renderer = mountTspRenderer(session, {
+    requestExit: () => {},
+    onFatal: (error) => { fatalErrors.push(error) },
+  })
   renderer.bindImages({ imageLoader: loader, imageScope: () => activeScope })
   return {
     renderer,
     loader,
     reads,
     tern,
+    fatalErrors,
     scope(scope: unknown): void {
       activeScope = scope
     },
@@ -469,6 +488,28 @@ test('T7-04: a settle after the disposal sends neither a blob nor a frame', asyn
   assert.equal(harness.tern.blobIds().length, blobsBefore, 'no blob is sent after the disposal')
   assert.equal(harness.tern.frames().length, framesBefore, 'no frame is sent after the disposal')
   assert.equal(harness.loader.listenerCount(), 0, 'every presentation subscription is released')
+})
+
+test('T7-05: a blob-send failure is FATAL: reported once, no further blob, and never mislabelled as a read failure', async () => {
+  const harness = await mountHarness({ failBlobWrite: true })
+  // TWO images in ONE result: the first blob fails, and the second must never
+  // be attempted after the fatal.
+  commit(harness.renderer, [toolRowWithImage(ATTACHMENT, { ...ATTACHMENT, attachmentId: 'att-2' })], {})
+  await until('the first blob attempt to fail', () => harness.tern.blobWrites.length >= 1)
+  await until('the fatal to be routed', () => harness.fatalErrors.length >= 1)
+
+  assert.equal(harness.fatalErrors.length, 1, 'the fatal is reported exactly once')
+  assert.match(String(harness.fatalErrors[0]), /the tty owner is gone/u,
+    'the fatal carries the real failure')
+  assert.equal(harness.tern.blobWrites.length, 1, 'no further blob is attempted after the fatal')
+  assert.equal(harness.loader.get(ATTACHMENT, harness.scopeValue()).state, 'ready',
+    'the READ itself succeeded: the failure was the blob send')
+  const wire = harness.tern.frames().map(frame => JSON.stringify(frame)).join('\n')
+  assert.equal(wire.includes('Image read failed'), false,
+    'a blob-send failure must not be mislabelled as a read failure')
+  assert.equal(wire.includes('Loading image'), true,
+    'the aborted projection left the last committed frame standing')
+  await harness.dispose()
 })
 
 // ── T8: the source and the rehydration ──────────────────────────────────────
