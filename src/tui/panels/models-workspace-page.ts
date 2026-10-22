@@ -411,6 +411,9 @@ export class ModelsWorkspacePage implements Component {
   /** The Add catalog's type-to-filter text (the user narrows the provider
    *  list without leaving the page). */
   private catalogFilter = ''
+  /** The initial stored-credential list read is due (the deeplink opened
+   *  that view): it runs after the first frame, never in the constructor. */
+  private pendingRecordsRead = false
   /** Per-wizard and per-confirmation identities: a late settlement of an
    * abandoned draft/clear target can never mutate a newer one. */
   private addSerial = 0
@@ -457,9 +460,11 @@ export class ModelsWorkspacePage implements Component {
         return
       case 'records':
       case 'logout-list':
-        // The stored-credential list is read ON DEMAND: entering the view
-        // starts its read (never the HOME's refresh).
-        this.enter({ kind: initial.view })
+        // The stored-credential list is read ON DEMAND — and after the first
+        // frame: the read reaches the provider configuration, so it must not
+        // run in the constructor's input path.
+        this.view = { kind: initial.view }
+        this.pendingRecordsRead = true
         return
       case 'provider':
         // The deeplink's route is resolved against the catalog once it
@@ -506,6 +511,12 @@ export class ModelsWorkspacePage implements Component {
   private startCatalogRead(): void {
     if (this.disposed || this.readStarted) return
     this.refresh()
+    // A deeplink that opened the stored-credential list: its read starts
+    // here (after the first frame), not in the constructor.
+    if (this.pendingRecordsRead) {
+      this.pendingRecordsRead = false
+      this.refreshRecords()
+    }
   }
 
   /**
@@ -540,6 +551,10 @@ export class ModelsWorkspacePage implements Component {
     // never sits inside the input handler.
     setTimeout(() => {
       if (this.disposed) return
+      // A newer generation superseded this one BEFORE the read started: the
+      // Host scan must not run at all (it is synchronous, so a queue of stale
+      // refreshes would block the event loop once per press).
+      if (serial !== this.refreshSerial) return
       this.source.run('models catalog read', async () => {
       let read: ModelsCatalogRead
       try {
@@ -598,6 +613,11 @@ export class ModelsWorkspacePage implements Component {
     for (const ref of refs) {
       const refSerial = (this.credentialReadSerials.get(ref) ?? 0) + 1
       this.credentialReadSerials.set(ref, refSerial)
+      // The credential presence has its OWN freshness: this generation has
+      // not confirmed the reference yet, so the previous answer must not be
+      // painted as a fresh confirmation (a write's authoritative read-back
+      // keeps its priority through the per-reference generation fence).
+      this.credentialStates.set(ref, { kind: 'pending' })
       this.source.run('models credential read', async () => {
         let state: ModelsCredentialState
         try {

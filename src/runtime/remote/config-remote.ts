@@ -1029,6 +1029,13 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
   listCredentialOptions(): readonly CredentialProviderOption[] {
     const directory = this.mirror.providers()
     if (directory !== undefined) {
+      if (this.mirror.providersFailure() !== undefined) {
+        // The directory read FAILED: the last-known routes are NOT a current
+        // route→credential authority (after a reconnect they may belong to
+        // another Host). Only the always-present builtin target stays
+        // addressable; the Models page reports the failure instead.
+        return providerOptionsFor([], () => undefined).map(option => remoteCredentialOptionOf(option))
+      }
       return providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
         .map(option => remoteCredentialOptionOf(option))
     }

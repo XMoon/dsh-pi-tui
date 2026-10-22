@@ -535,11 +535,21 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
   listCredentialOptions(): readonly CredentialProviderOption[] {
     const llm = this.llm()
     if (llm !== undefined) {
+      let entries: readonly ProviderCatalogEntry[]
       try {
-        return this.catalogFromDirectory(llm.listConfigurableProviders()).options
+        entries = llm.listConfigurableProviders()
       } catch {
         // A throwing directory read degrades to the settings-only fallback.
+        return this.settingsOnlyCatalog().options
       }
+      const catalog = this.catalogFromDirectory(entries)
+      if (catalog.failure === undefined) return catalog.options
+      // The SETTINGS read failed. The Models page reports that failure; the
+      // /login and /logout parser stays fail-soft: the directory's routes
+      // remain addressable (without their profile facts, so the reference is
+      // the derived one) and the always-present builtin target survives. An
+      // empty option list would drop `deepseek-official` from the resolver.
+      return providerOptionsFor(entries, () => undefined).map(option => credentialOptionOf(option))
     }
     return this.settingsOnlyCatalog().options
   }

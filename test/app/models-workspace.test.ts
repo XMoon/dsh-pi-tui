@@ -1820,6 +1820,66 @@ test('the catalog filter never paints a terminal control character', async () =>
   assert.match(viewText(page), /Filter: 文/u)
 })
 
+test('the credential presence is marked pending until the new generation confirms it', async () => {
+  const { source } = fakeSource()
+  const releases: (() => void)[] = []
+  let credentialReads = 0
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows: makeRows() })
+  source.credentialState = async ref => {
+    credentialReads += 1
+    if (credentialReads > 1) await new Promise<void>(resolve => { releases.push(resolve) })
+    return { kind: 'known' as const, configured: true }
+  }
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  assert.match(viewText(page), /Configured/u)
+  // The refresh settles the catalog, but the credential read of the new
+  // generation is still in flight: the previous answer must NOT be painted
+  // as a fresh confirmation.
+  const row = (label: string): string => page.render(100).map(stripTerminalSequences).find(line => line.includes(label)) ?? ''
+  page.handleInput('r')
+  await flush()
+  assert.doesNotMatch(row('deepseek official'), /Configured/u, 'the stale credential answer must not look confirmed')
+  assert.match(row('deepseek official'), /Checking/u)
+  for (const release of releases) release()
+  await flush()
+  assert.match(row('deepseek official'), /Configured/u)
+})
+
+test('consecutive refreshes start ONE catalog read', async () => {
+  const { source } = fakeSource()
+  let reads = 0
+  source.readCatalog = async () => { reads += 1; return { kind: 'ready' as const, rows: makeRows() } }
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  assert.equal(reads, 1)
+  // Three presses before the scheduled read starts: the superseded refreshes
+  // must not run their Host scan at all.
+  page.handleInput('r')
+  page.handleInput('r')
+  page.handleInput('r')
+  await flush()
+  assert.equal(reads, 2, 'only the newest refresh may read the catalog')
+})
+
+test('the stored-credential deeplink reads nothing in the constructor', async () => {
+  const { source } = fakeSource()
+  let catalogReads = 0
+  let recordsReads = 0
+  source.readCatalog = async () => { catalogReads += 1; return { kind: 'ready' as const, rows: makeRows() } }
+  source.storedCredentials = async () => { recordsReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'logout-list' }, () => {})
+  page.setBodyHeight(24)
+  // The constructor is the input path: the deeplink's read reaches the
+  // provider configuration, so it must wait for the first frame.
+  assert.equal(catalogReads, 0)
+  assert.equal(recordsReads, 0)
+  page.render(100)
+  await flush()
+  assert.equal(recordsReads, 1, 'the records read runs after the first frame')
+  assert.equal(catalogReads, 1)
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,

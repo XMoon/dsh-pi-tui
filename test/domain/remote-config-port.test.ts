@@ -824,6 +824,29 @@ test('the provider create is conditional: an existing route is refused, a new on
   assert.equal(state.mutateCalls[0]?.revision, 4, 'the write carries the decision read revision')
 })
 
+test('a failed directory read does not make the last-known routes a command authority', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: {} }, revision: 1 })
+    current.providers = [{
+      provider: 'acme',
+      displayName: 'Acme',
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', 'acme'],
+    }]
+  })
+  await port.describe()
+  assert.ok(port.providers.listCredentialOptions().some(option => option.route === 'acme'))
+  // The directory read now fails: the last-known routes are NOT a current
+  // route→credential authority (after a reconnect they may belong to another
+  // Host), so the command resolver must not use them.
+  state.providers = undefined
+  await port.describe()
+  const options = port.providers.listCredentialOptions()
+  assert.equal(options.some(option => option.route === 'acme'), false, 'the stale route must not be a command authority')
+  const official = options.find(option => option.route === 'deepseek-official')
+  assert.ok(official !== undefined, 'the builtin target stays addressable')
+})
+
 test('a stale configuration mirror is not projected as a current catalog', async () => {
   const { port, state } = createBackend(current => {
     current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 1 })
