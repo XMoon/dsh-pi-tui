@@ -70,9 +70,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      mode: ${{ steps.context.outputs.mode }}
-      source_ref: ${{ steps.context.outputs.source_ref }}
-      source_expected_version: ${{ steps.context.outputs.source_expected_version }}
+      # The EFFECTIVE mode this run uses, and WHERE it came from. A normal run
+      # is `resolver`; the prototype's Source Mode test entry can only change
+      # it on a prototype branch, and it says so in `mode_origin`.
+      mode: ${{ steps.mode.outputs.mode }}
+      mode_origin: ${{ steps.mode.outputs.mode_origin }}
+      source_ref: ${{ steps.mode.outputs.source_ref }}
+      source_expected_version: ${{ steps.mode.outputs.source_expected_version }}
+      # What the PRODUCTION resolver said for this event, kept as its own
+      # output so an overridden run can never be read as routing evidence.
+      resolved_mode: ${{ steps.resolved.outputs.mode }}
       fault: ${{ steps.fault.outputs.fault }}
       shard_total: ${{ steps.shards.outputs.shard_total }}
       shards: ${{ steps.shards.outputs.shards }}
@@ -90,35 +97,55 @@ jobs:
           package-manager-cache: false
 
       - name: Resolve the DSH mode
-        id: context
+        id: resolved
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
         # The mode comes from the repository's OWN resolver, with no
-        # override.
-        #
-        # An earlier version tried to force Source Mode from a committed
-        # file. It cannot work: the resolver accepts a forced mode only when
-        # it AGREES with the one derived from the event, and that derivation
-        # yields `source` only for a push to `next` (or a PR targeting it)
-        # while the tracked policy selects source. A forced `source` on these
-        # branches therefore fails at the entry — which is the honest
-        # outcome, because Source Mode is not exercisable here at all.
+        # override. Its answer is recorded even when the test entry below
+        # replaces it, because "what production routing decides" is a fact
+        # about this event and it must not disappear from the run.
         run: node scripts/dsh-ci-context.mjs
 
-      # Source Mode is REFUSED here, at the entry, before a build or a
-      # candidate can exist.
+      # THE OWNER-APPROVED TEST ENTRY (decision B).
       #
-      # It is not implemented in this prototype: the source-leak gate needs
-      # the built distribution passed explicitly and the startup smoke is
-      # npm-only, so a source-mode run would skip a gate and still produce a
-      # qualified candidate. Qualifying less than the pipeline claims is
-      # worse than refusing the mode.
+      # Source Mode cannot be RESOLVED here: `dsh-ci-context.mjs` derives
+      # `source` only for a push to `next` (or a PR targeting it) when the
+      # tracked policy selects source, and it refuses a forced mode that
+      # disagrees. So the experiment needs an entry that is not the resolver,
+      # and this is the only one: a committed switch, bound to this
+      # prototype's branches, that takes the pin from the tracked
+      # `test/compat/dsh-source.json` rather than inventing one.
+      #
+      # Every run states BOTH answers. An overridden run is an EXPERIMENT: it
+      # says nothing about whether the production routing selects Source
+      # Mode, and the pipeline refuses to qualify a source run that did not
+      # come through here (`pipeline-guard.mjs mode ... --origin`).
+      - name: Apply the prototype's Source Mode test entry
+        id: mode
+        env:
+          RESOLVED_MODE: ${{ steps.resolved.outputs.mode }}
+          RESOLVED_SOURCE_REF: ${{ steps.resolved.outputs.source_ref }}
+          RESOLVED_SOURCE_EXPECTED_VERSION: ${{ steps.resolved.outputs.source_expected_version }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          node scripts/prototype-mode.mjs \
+            --token scripts/prototype-source-mode.txt \
+            --resolved-mode "$RESOLVED_MODE" \
+            --resolved-source-ref "$RESOLVED_SOURCE_REF" \
+            --resolved-source-expected-version "$RESOLVED_SOURCE_EXPECTED_VERSION" \
+            --ref "$GITHUB_REF"
+
+      # Source Mode is accepted ONLY from the test entry above. Any other
+      # source run has no pinned ref or version, and a mode this pipeline
+      # cannot pin must not be qualified.
       - name: Refuse a dependency mode this prototype cannot qualify
         env:
-          DSH_MODE: ${{ steps.context.outputs.mode }}
-        run: node scripts/pipeline-guard.mjs mode "$DSH_MODE"
+          DSH_MODE: ${{ steps.mode.outputs.mode }}
+          DSH_MODE_ORIGIN: ${{ steps.mode.outputs.mode_origin }}
+        run: node scripts/pipeline-guard.mjs mode "$DSH_MODE" --origin "$DSH_MODE_ORIGIN"
 
       # The FAULT this run is asked to perform on itself.
       #
@@ -553,21 +580,9 @@ jobs:
           # "default" catches a pipeline that silently starts applying a
           # level nobody chose.
           DSH_EXPECTED_CONCURRENCY: default
-          # The case and skip baselines are committed facts, read from files
-          # so that a qualification CANNOT disable the comparison by passing
-          # an empty value. A missing, empty or malformed file FAILS.
-          #
-          # They are two SEPARATE checks: the count catches a case that
-          # stopped running, and the reasons below catch a case that
-          # stopped running for a reason nobody agreed to.
-          DSH_EXPECTED_CASES_FILE: scripts/measurement-expected-cases.txt
-          DSH_EXPECTED_SKIPPED_FILE: scripts/measurement-expected-skipped.txt
-          # A skip is accepted only when its REASON belongs to a pre-agreed
-          # class of missing capability or unprovisioned dependency. A count
-          # cannot carry that meaning: a case can start skipping itself for a
-          # new reason and leave the count identical.
-          DSH_ACCEPTED_SKIPS_FILE: scripts/measurement-accepted-skips.txt
-          # WHERE the baseline numbers came from, as a run a reader can open.
+          DSH_MODE: ${{ needs.context.outputs.mode }}
+          # WHERE the npm baseline numbers came from, as a run a reader can
+          # open.
           #
           # A count on its own cannot say which run produced it, and this
           # pipeline is not allowed to certify itself against itself: the
@@ -577,7 +592,7 @@ jobs:
           # A legitimate change to the number of tests must update these
           # files IN THE SAME COMMIT as the test change, citing the full
           # UNSHARDED run that produced the new numbers.
-          DSH_BASELINE_SOURCE: >-
+          DSH_BASELINE_SOURCE_NPM: >-
             run https://github.com/XMoon/dsh-pi-tui/actions/runs/39626830482
             (branch ci/test-clarity-diagnostics-20261021 at e4ee68170b69c1d5e7cd5f1940c89a92a5b4f77a,
             3 attempts, all green), UNSHARDED product lane (shard total 1,
@@ -588,17 +603,43 @@ jobs:
             committed configuration.
         run: |
           set -euo pipefail
+          # The case and skip baselines are committed facts, read from files
+          # so that a qualification CANNOT disable the comparison by passing
+          # an empty value. A missing, empty or malformed file FAILS.
+          #
+          # They are two SEPARATE checks: the count catches a case that
+          # stopped running, and the reasons below catch a case that
+          # stopped running for a reason nobody agreed to.
+          #
+          # They are also MODE-SCOPED. The npm baseline is not a Source Mode
+          # baseline: a different dependency graph can legitimately change
+          # which cases discover, which fail to provision a package, and which
+          # environment capability is missing — and a skip count carried over
+          # from the other mode would call that change either a loss or a
+          # proof. Source Mode therefore has its OWN files, and an unrecorded
+          # Source baseline FAILS rather than borrowing the npm numbers.
+          if [ "$DSH_MODE" = 'source' ]; then
+            export DSH_EXPECTED_CASES_FILE=scripts/measurement-source-expected-cases.txt
+            export DSH_EXPECTED_SKIPPED_FILE=scripts/measurement-source-expected-skipped.txt
+            export DSH_ACCEPTED_SKIPS_FILE=scripts/measurement-source-accepted-skips.txt
+            if [ ! -f scripts/measurement-source-baseline.txt ]; then
+              echo 'no Source Mode baseline is recorded (scripts/measurement-source-baseline.txt)' >&2
+              echo 'run the UNSHARDED Source Mode lane once, then commit its case and skip totals together with the run that produced them' >&2
+              exit 1
+            fi
+            BASELINE_SOURCE="$(cat scripts/measurement-source-baseline.txt)"
+          else
+            export DSH_EXPECTED_CASES_FILE=scripts/measurement-expected-cases.txt
+            export DSH_EXPECTED_SKIPPED_FILE=scripts/measurement-expected-skipped.txt
+            export DSH_ACCEPTED_SKIPS_FILE=scripts/measurement-accepted-skips.txt
+            BASELINE_SOURCE="$DSH_BASELINE_SOURCE_NPM"
+          fi
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
           export DSH_EXPECTED_SHA
-          # There is no committed baseline in this prototype: the case and
-          # skip counts are compared against the UNSHARDED lane only when a
-          # caller supplies them. What is PROVED here, unconditionally, is
-          # the partition: every file exactly once, every shard's identity
-          # and applied parameters, and zero failed or cancelled cases.
           node scripts/verify-shards.mjs \
             --shards shards \
             --total "${{ needs.context.outputs.shard_total }}" \
-            --baseline-source "$DSH_BASELINE_SOURCE" \
+            --baseline-source "$BASELINE_SOURCE" \
             --out aggregate.json
 
       - name: Upload the aggregate report
@@ -937,7 +978,20 @@ jobs:
           name: prototype-dsh-source-pack
           path: ${{ runner.temp }}/dsh-source-pack
 
+      # TWO modes, two probes, and they must not collapse into one.
+      #
+      # npm mode keeps the workspace install this matrix has always done.
+      #
+      # Source mode does NOT install this checkout at all: the fresh-install
+      # probe is deliberately independent of the workspace's node_modules,
+      # lockfile and pnpm metadata — exactly as the release pipeline's
+      # `compat-smoke` job is. Installing here would also export
+      # `TARBALL_SMOKE_SKIP_INSTALL=1`, and the tarball smoke would then skip
+      # the install it is here to prove: the Source distribution's fresh
+      # install would never be attempted, and the leg would pass on structure
+      # alone.
       - name: Prepare the dependencies for this mode
+        if: ${{ needs.context.outputs.mode == 'npm' }}
         env:
           DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
         run: |
@@ -963,6 +1017,8 @@ jobs:
           exit 1
 
       - name: Run the tarball smoke on this Node version
+        env:
+          DSH_MODE: ${{ needs.context.outputs.mode }}
         run: |
           set -euo pipefail
           mapfile -t TARBALLS < <(find provisional -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort)
@@ -970,7 +1026,15 @@ jobs:
             echo "Expected exactly one provisional tarball, found ${#TARBALLS[@]}" >&2
             exit 1
           fi
-          node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
+          # A Source Mode leg must PROVE the fresh install of the pinned
+          # distribution, not the registry graph: the distribution is the
+          # dependency graph the run claims, and the smoke's install step is
+          # the only place this matrix ever touches it.
+          if [ "$DSH_MODE" = 'source' ]; then
+            node scripts/tarball-smoke.mjs "${TARBALLS[0]}" --dsh-distribution "$RUNNER_TEMP/dsh-source-pack"
+          else
+            node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
+          fi
 
   # ---------------------------------------------------------------------------
   # THE PACK EQUIVALENCE PROOF, and WHEN it has to run again.
@@ -984,12 +1048,26 @@ jobs:
   # runs when the inputs differ from the recorded proof, or when no proof is
   # recorded at all. "No proof recorded" is deliberately a trigger, not a
   # pass: an unproven equality is not an unchanged one.
+  #
+  # The proof is SCOPED by mode. The recorded proof is an npm/Linux/Node 24
+  # record, and an npm equality says nothing about a Source Mode run whose
+  # dependency graph is a local tarball family — so a source run always takes
+  # the trigger and compares its OWN two packs.
   # ---------------------------------------------------------------------------
   equivalence:
     name: Pack equivalence (triggered)
     needs:
       - context
-    if: ${{ !cancelled() && needs['context'].result == 'success' }}
+      # In Source Mode BOTH packs run against the pinned distribution, so the
+      # proof needs the same artifact every other source job installs.
+      - source-pack
+    # `source-pack` is SKIPPED in npm mode, and a skipped dependency would
+    # otherwise skip this job — but `source-pack` may not be merely
+    # "not failed": a source run whose distribution never arrived must not run
+    # the proof against a workspace that silently fell back to the registry.
+    # Hence the mode guard, which is stricter than the `!= 'failure'` idiom the
+    # other consumers use.
+    if: ${{ !cancelled() && needs['context'].result == 'success' && (needs['context'].outputs.mode != 'source' || needs['source-pack'].result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -1004,6 +1082,13 @@ jobs:
           runtime: node@24
           cache: true
           install: false
+
+      - name: Download the pinned DSH source pack
+        if: ${{ needs.context.outputs.mode == 'source' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
 
       - name: Do the packaging inputs still match the recorded proof?
         id: trigger
@@ -1219,6 +1304,11 @@ jobs:
           DOWNSTREAM: ${{ needs.downstream.result }}
           QUALIFIED: ${{ needs.qualified.result }}
           EQUIVALENCE: ${{ needs.equivalence.result }}
+          # Not phases: the PROVENANCE of the dependency mode. A source run
+          # through the test entry is an experiment, and the summary must say
+          # so next to the verdict it accompanies.
+          MODE_ORIGIN: ${{ needs.context.outputs.mode_origin }}
+          RESOLVED_MODE: ${{ needs.context.outputs.resolved_mode }}
         run: |
           set -euo pipefail
           node scripts/pipeline-guard.mjs summary \
@@ -1233,6 +1323,8 @@ jobs:
             --phase "downstream matrix=$DOWNSTREAM" \
             --phase "qualified artifact=$QUALIFIED" \
             --phase "equivalence proof=$EQUIVALENCE" \
+            --phase "mode origin=$MODE_ORIGIN" \
+            --phase "production routing=$RESOLVED_MODE" \
             | tee pipeline-summary.txt
 
       - name: Upload the pipeline summary
