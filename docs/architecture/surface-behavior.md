@@ -215,11 +215,18 @@ The page never infers a stored key from a route/profile.
   Stored Credentials list (with its per-reference audit) is read only when the
   user opens that view, and a backend that cannot enumerate records is
   `Unavailable`, never an empty list.
-- `Add Provider` is a catalog: the unconfigured providers this installation
-  offers (and the sign-in flows no provider profile addresses) plus one
-  `Custom provider…` action that opens the existing draft. Browsing writes
-  nothing; a catalog entry is activated only by an explicit Enter, and a
-  route with no supported operation states why instead of claiming success.
+- An authority-dependent write (the API key, the stored-credential clear and
+  the native sign-in) waits for a FRESH read: while a refresh is in flight,
+  or the last refresh failed (a stale snapshot), those actions are disabled
+  and the page states that the snapshot is not current.
+- `Add Provider` is a catalog: `Available providers` lists the unconfigured
+  providers this installation offers, each with the operation this page can
+  really perform for it (a native sign-in, the prefilled setup draft, or an
+  explicit manual-only reason), and `Other sign-ins` lists the sign-in flows
+  that no provider profile addresses. One `Custom provider…` action opens the
+  existing draft. Browsing writes nothing; a catalog entry is activated only
+  by an explicit Enter, and a route with no supported operation states why
+  instead of claiming success.
 - Provider detail shows route, profile presence, protocol, endpoint, models,
   auth kind and credential presence (presence only, not a connection test).
 - `Configure API Key` opens a page-local masked editor (the existing
