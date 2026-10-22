@@ -47,12 +47,20 @@ import { projectTranscriptStructure } from '../../src/tui/transcript/structure.t
 import { toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
 import {
   createSessionPresentation,
+  applyAssistantLiveInput,
   type SessionPresentation,
 } from '../../src/app/surface/session-presentation.ts'
+import {
+  applyStreamingToolPreviewEvent,
+  type StreamingToolPreview,
+} from '../../src/app/surface/streaming-tool-preparing.ts'
+import { StatsFolder } from '../../src/domain/status/stats.ts'
+import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import type { PresentationReadSnapshot } from '../../src/runtime/presentation-read-port.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import {
   createSurfaceRuntime,
+  type SurfaceRendererMount,
   type SurfaceRuntime,
   type TranscriptProjectionFrame,
 } from '../../src/app/surface/runtime.ts'
@@ -437,13 +445,16 @@ class ScriptedTern {
   readonly output = new FakeOutput()
   /** Every frame the SDK wrote, decoded from the wire. */
   readonly frames: WireFrame[] = []
+  /** The capability reply this pane answers the SDK's probe with. */
+  readonly hello: unknown
 
-  constructor() {
+  constructor(hello: unknown = HELLO) {
+    this.hello = hello
     this.output.onWrite = bytes => {
       const text = DECODER.decode(bytes)
       if (text.includes('\u001b[c')) {
         // The official capability probe: answer as a supported Tern pane.
-        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c`), 1)
+        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(this.hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
       for (const frame of decodeFrames(text)) {
@@ -1378,5 +1389,271 @@ test('surface.commitStatus publishes ONE atomic store transaction on PiTui', asy
       'and the SAME snapshot already carries the child activity (never a parent-activity intermediate)')
   } finally {
     harness.dispose()
+  }
+})
+
+// ── PR-B3: the live Preparing projection reaches the MOUNTED TSP renderer ─────
+//
+// This is the application-level chain of the Preparing rows: an official-shaped
+// `tool-call-delta` arrives on the live assistant-stream seam, the PRODUCTION
+// preview owner extracts the name/summary/bytes, the surface's ONE repaint
+// hands the snapshot to the display seam, and the MOUNTED TSP renderer emits
+// the native row on the real wire. Nothing here injects a pre-decided
+// "attached" flag or a pre-rendered node.
+
+/** The scripted pane's capability reply, with the native kinds this lane uses. */
+const PREPARING_HELLO = {
+  ...HELLO,
+  kinds: [...HELLO.kinds, 'row', 'text'],
+}
+
+interface PreparingHarness {
+  readonly surface: SurfaceRuntime<SessionEvent>
+  readonly tern: ScriptedTern
+  /** The PRODUCTION preview map the surface reads. */
+  readonly previews: Map<string, StreamingToolPreview>
+  route(event: SessionEvent): void
+  dispose(): Promise<void>
+}
+
+/**
+ * Mount the REAL `SurfaceRuntime` over the REAL TSP renderer (the shipped SDK
+ * connect on a scripted pane) with the PRODUCTION preview owner wired in: the
+ * live assistant input folds through `applyAssistantLiveInput` and the durable
+ * events clear the map through `applyStreamingToolPreviewEvent`.
+ */
+async function mountPreparingHarness(): Promise<PreparingHarness> {
+  const tern = new ScriptedTern(PREPARING_HELLO)
+  const { session } = await openTern(tern)
+  const folder = new TranscriptFolder()
+  const stats = new StatsFolder()
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+  const previews = new Map<string, StreamingToolPreview>()
+
+  const source: SurfaceEventRoutingSource<SessionEvent> = {
+    isCleanedUp: () => false,
+    isAttachedSession: session => session.id === SESSION_ID,
+    currentSessionId: () => SESSION_ID,
+    hasLiveAgent: () => true,
+    completionOwnerId: () => undefined,
+    observeMainEvent: () => ({ refreshAgents: false }),
+    appendOpeningViewerEvent: () => false,
+    main: () => ({
+      folder: { apply: (events: readonly SessionEvent[]) => folder.apply(events) },
+      stats: { apply: (events: readonly SessionEvent[]) => stats.apply(events) },
+      get window() { return controller },
+      previews,
+      // The PRODUCTION clear path: a formal tool/call, a retry, an attempt and
+      // the step/turn boundaries all clear the map here.
+      applyToolPreview: event => applyStreamingToolPreviewEvent(previews, event),
+      refreshRecentPerformanceAvailability: () => {},
+    }),
+    viewedChildId: () => undefined,
+    viewedChild: () => { throw new Error('no viewer in this harness') },
+    mainFolder: () => folder,
+    viewedChildFolder: () => { throw new Error('no viewer in this harness') },
+    pendingSubjectId: () => undefined,
+    pendingSnapshot: () => undefined,
+    submissionEchoes: () => undefined,
+    queueTextOf: () => '',
+    exitView: () => {},
+    refreshStatusCheap: () => {},
+    refreshStatusAndWelcome: () => {},
+    refreshWorkspaceFacts: () => {},
+    applyGoalChange: () => {},
+    sessionTitleOf: () => undefined,
+    extendLoadedHistory: () => false,
+    settleLocalSubmitAck: () => {},
+    markSubmitLatency: () => {},
+    observeDurableSubmission: () => {},
+    markContextDirty: () => {},
+    refreshContextMeasurement: () => {},
+    currentWorkingFromLog: () => false,
+    flushTurn: () => {},
+    registeredAgentIs: () => false,
+    isCurrentOwnerAgent: () => false,
+    viewedChildAgent: () => undefined,
+    setViewedChildAgent: () => {},
+    setViewedQueueAgent: () => {},
+    agentForSession: () => undefined,
+    applyViewedChildAssistantInput: () => { throw new Error('no viewer in this harness') },
+    // The PRODUCTION live path: the preview owner sees the SAME official
+    // chunk the transcript fold sees.
+    applyMainAssistantInput: input => applyAssistantLiveInput(folder, stats, previews, input, toolSummaryKeys),
+  }
+
+  const surface = createSurfaceRuntime<SessionEvent>({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: nullPresentation,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    mainProgressAuthority: 'local-events',
+    terminalProgress: undefined,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
+  })
+  surface.attachEventRouting(source)
+
+  let mountedRenderer: TspRenderer | undefined
+  const renderer: SurfaceRendererMount = {
+    mount: () => {
+      mountedRenderer = mountTspRenderer(session, { requestExit: () => {} })
+      return mountedRenderer
+    },
+    releaseUnmounted: async () => { await mountedRenderer?.dispose() },
+  }
+  surface.start({
+    events: { onSubmit: () => {}, onExit: () => {} },
+    renderer,
+    workspaceRoot: '/tmp',
+    iconStyle: 'emoji',
+    displayState: { preset: 'compact' },
+    historySearchSource: { search: () => Promise.reject(new Error('not exercised by this test')) },
+    readImage: () => Promise.reject(new Error('not exercised by this test')),
+    imageScope: () => undefined,
+    present: { call: () => undefined, result: () => undefined },
+    sessionCwd: () => '/tmp',
+    captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
+    onTerminalResize: () => {},
+    copySelection: async () => false,
+    openExternalUrl: () => {},
+    readClipboardText: async () => undefined,
+    imageFallbackColor: text => text,
+  })
+
+  return {
+    surface,
+    tern,
+    previews,
+    route(event) { surface.routeSessionEvent({ id: SESSION_ID }, event) },
+    async dispose() {
+      surface.dispose()
+      await surface.whenRendererReleased()
+      await session.close()
+    },
+  }
+}
+
+/** The native row nodes the wire currently shows, with their visible text. */
+function wirePreparingRows(wire: string): { id: string; text: string }[] {
+  interface WireNode { id: string; k: string; p?: Record<string, unknown>; c?: WireNode[] }
+  const nodes = new Map<string, { k: string; p: Record<string, unknown>; childIds: string[] }>()
+  const visit = (node: WireNode): void => {
+    nodes.set(node.id, { k: node.k, p: node.p ?? {}, childIds: (node.c ?? []).map(child => child.id) })
+    for (const child of node.c ?? []) visit(child)
+  }
+  for (const match of wire.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
+    const frame = JSON.parse(match[1]!) as { ops: unknown[][] }
+    for (const op of frame.ops) {
+      if (op[0] === 'add') {
+        const node = op[4] as WireNode | null | undefined
+        if (node !== undefined && node !== null) visit(node)
+      } else if (op[0] === 'del') {
+        const doomed = new Set<string>()
+        const collect = (id: string): void => {
+          if (doomed.has(id)) return
+          doomed.add(id)
+          for (const child of nodes.get(id)?.childIds ?? []) collect(child)
+        }
+        collect(op[1] as string)
+        for (const id of doomed) nodes.delete(id)
+      } else if (op[0] === 'set') {
+        const id = op[1] as string
+        const existing = nodes.get(id)
+        if (existing !== undefined) nodes.set(id, { ...existing, p: { ...existing.p, ...(op[2] as object) } })
+      } else if (op[0] === 'text') {
+        const id = op[1] as string
+        const existing = nodes.get(id)
+        if (existing === undefined) continue
+        const before = typeof existing.p['text'] === 'string' ? existing.p['text'] : ''
+        const value = op[3] as string
+        nodes.set(id, { ...existing, p: { ...existing.p, text: op[2] === 'append' ? before + value : value } })
+      }
+    }
+  }
+  const rows: { id: string; text: string }[] = []
+  for (const [id, node] of nodes) {
+    if (node.k !== 'row') continue
+    rows.push({ id, text: node.childIds.map(child => String(nodes.get(child)?.p['text'] ?? '')).join('') })
+  }
+  return rows
+}
+
+/** The official-shaped live tool-call delta of one streaming tool call. */
+function toolCallDelta(id: string, index: number, name: string | undefined, argumentsDelta: string): AssistantLiveInput {
+  return liveChunk({
+    type: 'tool-call-delta',
+    id,
+    index,
+    ...(name === undefined ? {} : { name }),
+    argumentsDelta,
+  })
+}
+
+test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Preparing row', async () => {
+  const harness = await mountPreparingHarness()
+  try {
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'user-1', 'Run the focused test.'))
+    harness.surface.paintNow()
+    await settle()
+
+    // The official stream input: a named tool whose arguments are still
+    // arriving. The PRODUCTION owner extracts the summary and the bytes.
+    harness.surface.applyAssistantInput(toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test --filter transcript","description":"Run focused tests"}'))
+    harness.surface.paintNow()
+    await settle()
+
+    // The owner really holds the preview (no pre-decided flag was injected).
+    assert.equal(harness.previews.size, 1, 'the production preview owner holds one preview')
+    const rows = wirePreparingRows(harness.tern.output.text())
+    assert.equal(rows.length, 1, 'exactly one Preparing row reached the wire')
+    assert.ok(rows[0]!.text.startsWith('Preparing Bash…'), `the row names the tool: ${rows[0]!.text}`)
+    assert.ok(rows[0]!.text.includes('Run focused tests'), 'the owner-extracted summary is shown')
+    assert.ok(rows[0]!.text.endsWith(' B'), 'the exact byte count is shown')
+
+    // The formal tool call: the owner clears the preview BEFORE the fold, so
+    // ONE repaint shows the durable tool and no Preparing row.
+    harness.route(toolCall(2, 'call-bash', 'bash', { command: 'pnpm test --filter transcript', description: 'Run focused tests' }))
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(harness.previews.size, 0, 'the formal call cleared the preview')
+    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, 'no Preparing row survives the handoff')
+    assert.ok(harness.tern.output.text().includes('"k":"tool"'), 'the durable tool row is on the wire')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B3-L02: a retry, an attempt and a step end clear the row — no ghost survives', async () => {
+  const harness = await mountPreparingHarness()
+  try {
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'user-1', 'Run the focused test.'))
+    harness.surface.paintNow()
+    await settle()
+
+    harness.surface.applyAssistantInput(toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test"}'))
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 1, 'the row is on the wire')
+
+    // The retry boundary: the owner drops the step's previews.
+    harness.route(ev('llm/retry', { turn: 1, step: 0 }, 2))
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(harness.previews.size, 0, 'the retry cleared the preview')
+    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, 'no ghost row survives the retry')
+
+    // A second attempt, cleared by the step boundary.
+    harness.surface.applyAssistantInput(toolCallDelta('call-read', 0, 'read', '{"file_path":"src/a.ts"}'))
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 1, 'the second attempt shows its row')
+    harness.route(ev('step/end', { turn: 1, step: 0 }, 3))
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, 'the step end cleared the row')
+  } finally {
+    await harness.dispose()
   }
 })

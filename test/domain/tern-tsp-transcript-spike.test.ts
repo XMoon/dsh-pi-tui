@@ -39,7 +39,12 @@ import { SessionSeq, TOOL_NOT_STARTED, type SessionEvent } from '@deepseek-ai/ds
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock } from '../../src/tui/transcript/structure.ts'
-import { toolPresenterFrom } from '../../src/tui/transcript/tool-presentation.ts'
+import { toolPresenterFrom, toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
+import {
+  streamingToolPreviewSnapshot,
+  upsertStreamingToolPreview,
+  type StreamingToolPreview,
+} from '../../src/app/surface/streaming-tool-preparing.ts'
 import { TranscriptNodeKeys, transcriptView, type TranscriptViewOptions } from '../../scripts/support/tern-tsp-transcript-view.ts'
 import { sanitizedPhysicalLine } from '../../src/tui/presentation/lines.ts'
 import {
@@ -1638,4 +1643,286 @@ test('B2-T10: 64 direct children plus a four-level chain render in order without
   assert.equal(nodeOf(view, `${childId(64)}.result`).props['text'], 'out-64')
   assert.equal(nodeOf(view, `${parentId}.result`).props['text'], 'nested-4')
   assert.equal(nodeOf(view, `${rootId}.result`).props['text'], 'program output')
+})
+
+// ── PR-B3: the native Preparing rows ─────────────────────────────────────────
+//
+// The Preparing row is a PRESENTATION of the application owner's live
+// tool-call projection. These cases exercise the production mapper over the
+// real `View.from` encoding: the placement rule (only the trailing open Work
+// adopts its own turn's rows), the identity rule (the call's own id, the
+// durable turn/step/index before it) and the content rule (the owner's name,
+// summary and exact byte count — never a re-parsed partial argument payload).
+
+/** One live Preparing preview: the application owner's projection of a tool
+ * call whose arguments are still streaming. */
+function preview(overrides: Partial<StreamingToolPreview> & { readonly turn: number }): StreamingToolPreview {
+  return {
+    callId: '',
+    step: 0,
+    index: 0,
+    argumentBytes: 7,
+    ...overrides,
+  }
+}
+
+/** One durable tool row (a Work member) of one turn. */
+function workTool(turn: number, callId: string, name = 'read'): Extract<TranscriptMessage, { kind: 'tool' }> {
+  return { kind: 'tool', turn, callId, name, args: '{}', result: '', status: 'running' }
+}
+
+/** One standalone Context row (a non-Work boundary between two Work runs). */
+function contextRow(turn: number, text = 'injected context'): Extract<TranscriptMessage, { kind: 'system' }> {
+  return { kind: 'system', turn, text, label: 'Context', context: true }
+}
+
+/** The mapper's view of one message set with the given Preparing snapshot. */
+function viewWithPreviews(
+  messages: readonly TranscriptMessage[],
+  previews: readonly StreamingToolPreview[],
+  keys: TranscriptNodeKeys = new TranscriptNodeKeys(),
+  options: TranscriptViewOptions = {},
+): View {
+  return View.from({
+    main: transcriptView(projectTranscriptStructure(messages), keys, { ...options, preparingPreviews: previews }),
+  })
+}
+
+/** The native Preparing rows of a view, in tree order. */
+function preparingRows(view: View): FlatNode[] {
+  return flatten(view).filter(node => node.kind === 'row')
+}
+
+/** The visible text of one node's subtree (its `text` props, in order). */
+function subtreeText(view: View, id: string): string {
+  const root = view.regions[0]
+  assert.ok(root !== undefined, 'the view carries a main region')
+  const find = (tree: Tree): Tree | undefined => {
+    if (tree.id === id) return tree
+    for (const child of tree.children) {
+      const hit = find(child)
+      if (hit !== undefined) return hit
+    }
+    return undefined
+  }
+  const collect = (tree: Tree): string => {
+    const own = typeof tree.props['text'] === 'string' ? tree.props['text'] : ''
+    return own + tree.children.map(collect).join('')
+  }
+  const target = find(root)
+  assert.ok(target !== undefined, `node ${id} exists`)
+  return collect(target)
+}
+
+/** The `View.from` encoding of a view (the exact wire tree). */
+function encoding(view: View): string {
+  return JSON.stringify(view.regions)
+}
+
+test('B3-T01: an absent or empty Preparing snapshot renders the baseline byte for byte', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1'), { kind: 'user', turn: 0, text: 'go' }]
+  const baseline = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys()) })
+  const absent = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {}) })
+  const empty = viewWithPreviews(messages, [])
+  assert.equal(encoding(absent), encoding(baseline), 'the absent option changes nothing in the tree')
+  assert.equal(encoding(empty), encoding(baseline), 'the empty snapshot changes nothing in the tree')
+  assert.equal(preparingRows(empty).length, 0, 'no Preparing row exists')
+})
+
+test('B3-T02: an anonymous delta renders ONE plain text row and no status at all', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
+  const baseline = viewWithPreviews(messages, [])
+  const view = viewWithPreviews(messages, [preview({ turn: 1, argumentBytes: 7 })])
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 1, 'exactly one Preparing row')
+  assert.equal(subtreeText(view, rows[0]!.id), 'Preparing tool… · 7 B', 'the honest first frame')
+  const nodes = flatten(view)
+  assert.equal(nodes.filter(node => node.kind === 'badge').length, 0, 'no badge')
+  assert.equal(nodes.filter(node => node.kind === 'card').length, 0, 'no card')
+  assert.equal(
+    nodes.filter(node => node.kind === 'tool').length,
+    flatten(baseline).filter(node => node.kind === 'tool').length,
+    'the Preparing row adds no tool node — the durable Work tool is untouched',
+  )
+  assert.equal(rows[0]!.kind, 'row', 'the Preparing row is a plain native row')
+  const props = JSON.stringify(nodes.map(node => node.props))
+  assert.ok(!props.includes('pending'), 'no pending status')
+  assert.ok(!props.includes('ago'), 'no elapsed timer')
+  assert.ok(!props.includes('elapsed'), 'no elapsed timer')
+})
+
+test('B3-T03: a known name, the owner summary and the exact byte count are shown as they are', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
+  const view = viewWithPreviews(messages, [preview({
+    turn: 1,
+    callId: 'call-bash',
+    name: 'bash',
+    summary: 'Run focused tests',
+    argumentBytes: 23,
+    scanPrefix: '{"command":"pnpm test --filter transcript"',
+  })])
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 1)
+  assert.equal(subtreeText(view, rows[0]!.id), 'Preparing Bash… · Run focused tests · 23 B')
+  const props = JSON.stringify(flatten(view).map(node => node.props))
+  assert.ok(!props.includes('pnpm test --filter transcript'),
+    'the partial argument prefix never reaches the view')
+  // The owner keeps its own raw values; the mapper only reads them.
+  const source = preview({ turn: 1, callId: 'call-bash', name: 'bash', summary: 'Run focused tests', argumentBytes: 23 })
+  assert.equal(source.summary, 'Run focused tests')
+  assert.equal(source.argumentBytes, 23)
+})
+
+test('B3-T04: more streamed bytes update the row in place — the node id never changes', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
+  const keys = new TranscriptNodeKeys()
+  const before = viewWithPreviews(messages, [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })], keys)
+  const beforeRow = preparingRows(before)[0]!
+  const after = viewWithPreviews(messages, [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 69 })], keys)
+  const afterRow = preparingRows(after)[0]!
+  assert.equal(afterRow.id, beforeRow.id, 'the row keeps its SDK node id across a byte update')
+  assert.equal(subtreeText(after, afterRow.id), 'Preparing Bash… · 69 B')
+
+  const ops = before.ops(after, 's1')
+  assert.equal(ops.filter(op => op[0] === 'del').length, 0, 'nothing is deleted')
+  assert.equal(ops.filter(op => op[0] === 'add').length, 0, 'nothing is re-added')
+  assert.equal(ops.filter(op => op[0] === 'move').length, 0, 'nothing moves')
+  const textOps = ops.filter(op => op[0] === 'text')
+  assert.equal(textOps.length, 1, 'only the byte text changed')
+  assert.equal(textOps[0]![1], `${afterRow.id}.bytes`, 'the byte text node carries the update')
+})
+
+test('B3-T05: a late call id replaces the anonymous row — one row, new id, stable durable ids', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
+  const keys = new TranscriptNodeKeys()
+  const before = viewWithPreviews(messages, [preview({ turn: 1, step: 2, index: 0, argumentBytes: 23 })], keys)
+  const beforeRow = preparingRows(before)[0]!
+  assert.ok(beforeRow.id.endsWith('.preparing-idx-1-2-0'), `the anonymous row is keyed by its position: ${beforeRow.id}`)
+  const durableId = flatten(before).find(node => node.kind === 'tool')!.id
+
+  const after = viewWithPreviews(messages, [preview({ turn: 1, step: 2, index: 0, callId: 'call-bash', argumentBytes: 23 })], keys)
+  const afterRow = preparingRows(after)[0]!
+  assert.equal(preparingRows(after).length, 1, 'exactly one row remains')
+  assert.ok(afterRow.id.endsWith('.preparing-call-bash'), `the late id names the row: ${afterRow.id}`)
+  assert.notEqual(afterRow.id, beforeRow.id, 'the anonymous id is gone')
+  assert.ok(!flatten(after).some(node => node.id.includes('preparing-idx-')), 'the old id is fully gone')
+  assert.equal(flatten(after).find(node => node.kind === 'tool')!.id, durableId, 'the durable tool id is untouched')
+  assert.equal(flatten(after).find(node => node.kind === 'section')!.id, flatten(before).find(node => node.kind === 'section')!.id,
+    'the Work section id is untouched')
+})
+
+test('B3-T06: parallel previews render one row each, in index order, with no aggregation', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
+  const view = viewWithPreviews(messages, [
+    preview({ turn: 1, callId: 'call-b', name: 'bash', summary: 'second', argumentBytes: 43, index: 1 }),
+    preview({ turn: 1, callId: 'call-a', name: 'read', summary: 'first', argumentBytes: 28, index: 0 }),
+  ])
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 2, 'one row per preview')
+  assert.deepEqual(rows.map(row => subtreeText(view, row.id)), [
+    'Preparing Read… · first · 28 B',
+    'Preparing Bash… · second · 43 B',
+  ], 'the rows keep the index order, whatever order they arrived in')
+  const props = JSON.stringify(flatten(view).map(node => node.props))
+  assert.ok(!props.includes('+2'), 'no aggregate count')
+})
+
+test('B3-T07: only the LAST open Work adopts the rows — an older Work is never reopened', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-a'), contextRow(1), workTool(1, 'call-b')]
+  const blocks = projectTranscriptStructure(messages)
+  assert.deepEqual(blocks.map(block => block.kind), ['work', 'message', 'work'], 'the fixture is Work, Context, Work')
+  const view = viewWithPreviews(messages, [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })])
+  const sections = flatten(view).filter(node => node.kind === 'section')
+  assert.equal(sections.length, 2, 'both Work runs are rendered')
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.parent, sections[1]!.id, 'the row is a child of the LAST Work section')
+  assert.notEqual(rows[0]!.parent, sections[0]!.id, 'the older Work gained no child')
+})
+
+test('B3-T08: without an open Work the rows stand alone after the transcript', () => {
+  const withTail: TranscriptMessage[] = [workTool(1, 'call-a'), { kind: 'user', turn: 0, text: 'and now?' }]
+  const tailView = viewWithPreviews(withTail, [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })])
+  const tailRows = preparingRows(tailView)
+  assert.equal(tailRows.length, 1)
+  assert.equal(tailRows[0]!.parent, 'main', 'the row stands alone at the transcript top level')
+  const section = flatten(tailView).find(node => node.kind === 'section')!
+  assert.equal(flatten(tailView).filter(node => node.parent === section.id).length, 1,
+    'the old Work gained no child')
+
+  const withoutWork: TranscriptMessage[] = [{ kind: 'user', turn: 0, text: 'no work yet' }]
+  const noWorkView = viewWithPreviews(withoutWork, [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })])
+  assert.equal(preparingRows(noWorkView).length, 1)
+  assert.equal(preparingRows(noWorkView)[0]!.parent, 'main', 'the row stands alone')
+})
+
+test('B3-T09: previews of several turns keep their own groups — never the first turn for all', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-a'), workTool(2, 'call-b')]
+  const view = viewWithPreviews(messages, [
+    preview({ turn: 2, callId: 'call-bash', name: 'bash', argumentBytes: 23, index: 0 }),
+    preview({ turn: 1, callId: 'call-read', name: 'read', argumentBytes: 28, index: 0 }),
+  ])
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 2)
+  const sections = flatten(view).filter(node => node.kind === 'section')
+  const adopted = rows.find(row => row.parent === sections[1]!.id)
+  const standalone = rows.find(row => row.parent === 'main')
+  assert.ok(adopted !== undefined, 'the open turn is adopted by its own Work')
+  assert.ok(standalone !== undefined, 'the older turn stands alone')
+  assert.equal(subtreeText(view, adopted.id), 'Preparing Bash… · 23 B')
+  assert.equal(subtreeText(view, standalone.id), 'Preparing Read… · 28 B')
+  assert.equal(standalone.id, 'main.preparing-call-read', 'the standalone row is scope-keyed at the top level')
+})
+
+test('B3-T10: a hostile or workspace path summary is displayed safely and relatively', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
+  const hostile = 'safe\u001b]52;c;LEAK\u0007\u001b[2Jline\u000bsecond'
+  const view = viewWithPreviews(messages, [
+    preview({ turn: 1, callId: 'call-read', name: 'read', summary: '/workspace/src/index.ts', argumentBytes: 28 }),
+    preview({ turn: 1, callId: 'call-cjk', name: 'bash', summary: hostile, argumentBytes: 12, index: 1 }),
+  ], new TranscriptNodeKeys(), { cwd: '/workspace' })
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 2)
+  assert.equal(subtreeText(view, rows[0]!.id), 'Preparing Read… · src/index.ts · 28 B',
+    'a workspace path is relativized for display only')
+  assert.equal(subtreeText(view, rows[1]!.id), 'Preparing Bash… · safelinesecond · 12 B',
+    'the control bytes never reach the view and the line break became one space')
+  const props = JSON.stringify(flatten(view).map(node => node.props))
+  assert.ok(!props.includes('\u001b'), 'no raw ESC reaches a node prop')
+  assert.ok(!props.includes('\u0007'), 'no raw BEL reaches a node prop')
+  assert.ok(!props.includes('LEAK'), 'the OSC payload is dropped')
+  assert.ok(props.includes('28 B'), 'the byte count survives')
+})
+
+test('B3-T11: the formal tool call replaces the Preparing row in the same frame', () => {
+  const keys = new TranscriptNodeKeys()
+  const existing = workTool(1, 'call-1')
+  const preparing = viewWithPreviews([existing], [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })], keys)
+  const durableId = flatten(preparing).find(node => node.kind === 'tool')!.id
+  const formal: TranscriptMessage[] = [
+    existing,
+    { kind: 'tool', turn: 1, callId: 'call-bash', name: 'bash', args: '{"command":"pnpm test"}', result: '', status: 'running' },
+  ]
+  const settled = viewWithPreviews(formal, [], keys)
+  assert.equal(preparingRows(settled).length, 0, 'the Preparing row is gone')
+  assert.equal(flatten(settled).filter(node => node.kind === 'tool').length, 2, 'both durable tools are present')
+  assert.ok(flatten(settled).some(node => node.id === durableId), 'the existing durable id is stable')
+  assert.ok(!JSON.stringify(flatten(settled).map(node => node.props)).includes('Preparing'),
+    'no Preparing text remains')
+})
+
+test('B3-T12: the owner\'s anonymous-to-named update is ONE row, never a double draw', () => {
+  const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
+  const previews = new Map<string, StreamingToolPreview>()
+  upsertStreamingToolPreview(previews, { callId: '', turn: 1, step: 0, index: 0, argumentsDelta: '{"comm' }, toolSummaryKeys)
+  assert.equal(previews.size, 1, 'the anonymous preview is one entry')
+  upsertStreamingToolPreview(previews, { callId: 'call-bash', turn: 1, step: 0, index: 0, name: 'bash', argumentsDelta: 'and":"pnpm test"}' }, toolSummaryKeys)
+  assert.equal(previews.size, 1, 'the named call replaces the anonymous entry')
+  const snapshot = streamingToolPreviewSnapshot(previews)
+  assert.equal(snapshot.length, 1)
+  const view = viewWithPreviews(messages, snapshot)
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 1, 'exactly one row')
+  assert.equal(subtreeText(view, rows[0]!.id), 'Preparing Bash… · pnpm test · 23 B')
+  assert.ok(!subtreeText(view, rows[0]!.id).includes('{"comm'), 'no partial JSON is displayed')
 })
