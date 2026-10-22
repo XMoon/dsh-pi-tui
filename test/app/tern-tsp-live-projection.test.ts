@@ -1413,6 +1413,12 @@ interface PreparingHarness {
   /** The PRODUCTION preview map the surface reads. */
   readonly previews: Map<string, StreamingToolPreview>
   route(event: SessionEvent): void
+  /** The live Agent object of the main session (the identity the stream carries). */
+  agent(): object
+  /** Register a NEW live Agent for the main session (the owner's replacement). */
+  replaceAgent(): object
+  /** Retire the live Agent (the registry no longer knows it). */
+  retireAgent(): void
   dispose(): Promise<void>
 }
 
@@ -1429,6 +1435,14 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
   const stats = new StatsFolder()
   const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
   const previews = new Map<string, StreamingToolPreview>()
+  /** The live Agent registry: the identity the assistant stream carries. */
+  const agents = new Map<string, object>()
+  let currentAgent: object | undefined
+  const registerAgent = (agent: object): object => {
+    agents.set(SESSION_ID, agent)
+    currentAgent = agent
+    return agent
+  }
 
   const source: SurfaceEventRoutingSource<SessionEvent> = {
     isCleanedUp: () => false,
@@ -1470,12 +1484,14 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,
     flushTurn: () => {},
-    registeredAgentIs: () => false,
-    isCurrentOwnerAgent: () => false,
+    // The PRODUCTION identity facts: the registry knows the live Agent object
+    // and the surface knows which object owns the main session.
+    registeredAgentIs: (sessionId, agent) => agent === agents.get(sessionId),
+    isCurrentOwnerAgent: agent => currentAgent === agent,
     viewedChildAgent: () => undefined,
     setViewedChildAgent: () => {},
     setViewedQueueAgent: () => {},
-    agentForSession: () => undefined,
+    agentForSession: sessionId => agents.get(sessionId),
     applyViewedChildAssistantInput: () => { throw new Error('no viewer in this harness') },
     // The PRODUCTION live path: the preview owner sees the SAME official
     // chunk the transcript fold sees.
@@ -1520,11 +1536,19 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
     imageFallbackColor: text => text,
   })
 
+  const agent = registerAgent({ session: { id: SESSION_ID } })
+
   return {
     surface,
     tern,
     previews,
     route(event) { surface.routeSessionEvent({ id: SESSION_ID }, event) },
+    agent: () => agent,
+    replaceAgent: () => registerAgent({ session: { id: SESSION_ID } }),
+    retireAgent() {
+      agents.delete(SESSION_ID)
+      currentAgent = undefined
+    },
     async dispose() {
       surface.dispose()
       await surface.whenRendererReleased()
@@ -1589,6 +1613,29 @@ function toolCallDelta(id: string, index: number, name: string | undefined, argu
   })
 }
 
+/**
+ * The PRODUCTION Direct install's admission, in the shape the bootstrap wires
+ * it (`src/app/bootstrap.ts`: `installAssistantStream({ isCurrentAgent, onInput })`):
+ * the identity fence decides whether the input is forwarded AT ALL. The fence
+ * is the production `surface.isCurrentAssistantAgent(agent)` — the very
+ * predicate the install consults (`src/runtime/direct/assistant-stream-direct.ts`:
+ * `if (deps.isCurrentAgent(agent)) deps.onInput(input)`) — so a retired
+ * Agent's delta never reaches the preview owner.
+ *
+ * The install itself is not mounted here: it needs the Host event surface
+ * (`ctx`), and this lane must not add a Host service or a fixture-only hook.
+ * @returns whether the input was forwarded to the surface.
+ */
+function deliverAssistantInput(
+  harness: PreparingHarness,
+  agent: object,
+  input: AssistantLiveInput,
+): boolean {
+  if (!harness.surface.isCurrentAssistantAgent(agent)) return false
+  harness.surface.applyAssistantInput(input)
+  return true
+}
+
 test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Preparing row', async () => {
   const harness = await mountPreparingHarness()
   try {
@@ -1599,7 +1646,12 @@ test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Pre
 
     // The official stream input: a named tool whose arguments are still
     // arriving. The PRODUCTION owner extracts the summary and the bytes.
-    harness.surface.applyAssistantInput(toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test --filter transcript","description":"Run focused tests"}'))
+    // The input is delivered through the production identity admission.
+    assert.equal(harness.surface.isCurrentAssistantAgent(harness.agent()), true,
+      'the live Agent is the current one')
+    assert.equal(deliverAssistantInput(harness, harness.agent(),
+      toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test --filter transcript","description":"Run focused tests"}')),
+    true, 'the live Agent delta is admitted')
     harness.surface.paintNow()
     await settle()
 
@@ -1624,7 +1676,7 @@ test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Pre
   }
 })
 
-test('B3-L02: a retry, an attempt and a step end clear the row — no ghost survives', async () => {
+test('B3-L02: the retry, the attempt, the step end and the turn end each clear the row', async () => {
   const harness = await mountPreparingHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -1632,27 +1684,94 @@ test('B3-L02: a retry, an attempt and a step end clear the row — no ghost surv
     harness.surface.paintNow()
     await settle()
 
-    harness.surface.applyAssistantInput(toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test"}'))
-    harness.surface.paintNow()
-    await settle()
-    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 1, 'the row is on the wire')
+    const showRow = async (id: string, name: string, args: string): Promise<void> => {
+      deliverAssistantInput(harness, harness.agent(), toolCallDelta(id, 0, name, args))
+      harness.surface.paintNow()
+      await settle()
+      assert.equal(wirePreparingRows(harness.tern.output.text()).length, 1, `the ${id} row is on the wire`)
+    }
+    const assertCleared = async (what: string): Promise<void> => {
+      assert.equal(harness.previews.size, 0, `the ${what} cleared the preview owner`)
+      assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, `no ghost row survives the ${what}`)
+    }
 
     // The retry boundary: the owner drops the step's previews.
+    await showRow('call-bash', 'bash', '{"command":"pnpm test"}')
     harness.route(ev('llm/retry', { turn: 1, step: 0 }, 2))
     harness.surface.paintNow()
     await settle()
-    assert.equal(harness.previews.size, 0, 'the retry cleared the preview')
-    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, 'no ghost row survives the retry')
+    await assertCleared('retry')
 
-    // A second attempt, cleared by the step boundary.
-    harness.surface.applyAssistantInput(toolCallDelta('call-read', 0, 'read', '{"file_path":"src/a.ts"}'))
+    // The committed attempt: the attempt's deltas never materialized, so its
+    // step's previews must not survive as ghost rows.
+    await showRow('call-read', 'read', '{"file_path":"src/a.ts"}')
+    harness.route(ev('assistant/attempt', { turn: 1, step: 0 }, 3))
     harness.surface.paintNow()
     await settle()
-    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 1, 'the second attempt shows its row')
-    harness.route(ev('step/end', { turn: 1, step: 0 }, 3))
+    await assertCleared('attempt')
+
+    // The step boundary.
+    await showRow('call-read-2', 'read', '{"file_path":"src/b.ts"}')
+    harness.route(ev('step/end', { turn: 1, step: 0 }, 4))
     harness.surface.paintNow()
     await settle()
-    assert.equal(wirePreparingRows(harness.tern.output.text()).length, 0, 'the step end cleared the row')
+    await assertCleared('step end')
+
+    // The turn boundary: the whole turn's previews go with it.
+    await showRow('call-bash-2', 'bash', '{"command":"pnpm test --filter transcript"}')
+    harness.route(ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5))
+    harness.surface.paintNow()
+    await settle()
+    await assertCleared('turn end')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B3-L03: a retired Agent\'s delta never reaches the preview owner', async () => {
+  const harness = await mountPreparingHarness()
+  try {
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'user-1', 'Run the focused test.'))
+    harness.surface.paintNow()
+    await settle()
+
+    // The live Agent's delta is admitted and reaches the wire.
+    assert.equal(deliverAssistantInput(harness, harness.agent(),
+      toolCallDelta('call-bash', 0, 'bash', '{"command":"pnpm test"}')),
+    true, 'the live Agent delta is admitted')
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(harness.previews.size, 1, 'the owner holds the live preview')
+    const rowsBefore = wirePreparingRows(harness.tern.output.text())
+    assert.equal(rowsBefore.length, 1, 'the row is on the wire')
+
+    // The owner is replaced: the retired Agent object is no longer the
+    // registered one, so the production identity fence refuses its delta.
+    const retired = harness.agent()
+    harness.replaceAgent()
+    assert.equal(harness.surface.isCurrentAssistantAgent(retired), false,
+      'the retired Agent is not the current one')
+    assert.equal(deliverAssistantInput(harness, retired,
+      toolCallDelta('call-stale', 1, 'bash', '{"command":"pnpm test --stale"}')),
+    false, 'the retired Agent delta is refused by the production admission')
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(harness.previews.size, 1, 'the refused delta changed no preview')
+    const rowsAfter = wirePreparingRows(harness.tern.output.text())
+    assert.equal(rowsAfter.length, 1, 'the refused delta drew no second row')
+    assert.equal(rowsAfter[0]!.text, rowsBefore[0]!.text, 'the visible row is the live one, unchanged')
+
+    // A fully retired Agent (the registry no longer knows it) is refused too.
+    harness.retireAgent()
+    assert.equal(harness.surface.isCurrentAssistantAgent(harness.agent()), false,
+      'an unregistered Agent is never current')
+    assert.equal(deliverAssistantInput(harness, harness.agent(),
+      toolCallDelta('call-stale-2', 2, 'bash', '{"command":"pnpm test --stale-2"}')),
+    false, 'the unregistered Agent delta is refused')
+    harness.surface.paintNow()
+    await settle()
+    assert.equal(harness.previews.size, 1, 'the refused delta still changed no preview')
   } finally {
     await harness.dispose()
   }
