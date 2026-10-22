@@ -530,14 +530,14 @@ export class ModelsWorkspacePage implements Component {
     if (this.disposed) return
     if (this.pendingRecordsRead) {
       this.pendingRecordsRead = false
-      this.refreshRecords()
+      // Only while the page still shows that view: a user who already left
+      // must not pay the full stored-credential scan.
+      if (this.view.kind === 'records' || this.view.kind === 'logout-list') this.refreshRecords()
     }
-    const pendingTarget = this.pendingClearTarget
-    if (pendingTarget !== undefined) {
-      this.pendingClearTarget = undefined
-      if (pendingTarget.kind === 'record') this.readClearRecord()
-      else this.readReferenceState()
-    }
+    // The clear target's authority was already re-read by the catalog refresh
+    // (the refresh re-reads the current view's authority): the intent is
+    // consumed here, never read twice.
+    this.pendingClearTarget = undefined
   }
 
   /**
@@ -547,6 +547,9 @@ export class ModelsWorkspacePage implements Component {
    */
   private refreshCurrentView(): void {
     if (this.view.kind === 'records' || this.view.kind === 'logout-list') {
+      // The manual refresh IS that read: it consumes the deferred intent
+      // instead of racing it.
+      this.pendingRecordsRead = false
       this.refreshRecords()
       this.requestRender()
       return
@@ -616,7 +619,12 @@ export class ModelsWorkspacePage implements Component {
         this.account = summary
       })
     })
-    if (this.view.kind === 'logout' || this.view.kind === 'reference') this.readReferenceState()
+    // The refresh re-reads the authority the CURRENT view shows, once.
+    if (this.view.kind === 'reference') this.readReferenceState()
+    else if (this.view.kind === 'logout') {
+      if (this.view.target.kind === 'record') this.readClearRecord()
+      else this.readReferenceState()
+    }
     this.requestRender()
   }
 

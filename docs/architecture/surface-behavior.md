@@ -220,7 +220,10 @@ The page never infers a stored key from a route/profile.
 - The stored-record presence is ONE enumeration for the page. The full
   Stored Credentials list (with its per-reference audit) is read only when the
   user opens that view, and a backend that cannot enumerate records is
-  `Unavailable`, never an empty list.
+  `Unavailable`, never an empty list. A deeplink that opens that view (or a
+  clear target) reads it after the first frame — never in the input path — and
+  the deferred read is CONSUMED by the view's own refresh: a user who already
+  left the view pays no stored-credential scan, and no read happens twice.
 - An authority-dependent write (the API key, the stored-credential clear and
   the native sign-in) waits for a FRESH read: while a refresh is in flight,
   or the last snapshot is not the current authority (a stale snapshot), those
