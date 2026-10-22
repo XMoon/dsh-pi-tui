@@ -24,7 +24,8 @@ import { ui } from '@stencil-hq/tern'
 import type { Node, Spans, Status } from '@stencil-hq/tern'
 import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
-import type { TranscriptMessage } from '../../domain/transcript/types.ts'
+import { subCallDisplayStatus } from '../../domain/transcript/folder.ts'
+import type { TranscriptMessage, TranscriptToolMessage } from '../../domain/transcript/types.ts'
 import { contextPresentationKind } from '../transcript/context-structure.ts'
 import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
@@ -107,16 +108,20 @@ function isUnmatchedToolRow(message: Extract<TranscriptMessage, { kind: 'tool' }
   return message.origin === 'tool-not-started' || (message.origin === undefined && message.callCount === 0)
 }
 
-function toolBodyNodes(message: Extract<TranscriptMessage, { kind: 'tool' }>, options: TranscriptViewOptions): Node[] {
+function toolBodyNodes(
+  message: Extract<TranscriptMessage, { kind: 'tool' }>,
+  options: TranscriptViewOptions,
+  wrap = false,
+): Node[] {
   const nodes: Node[] = []
-  if (message.args !== '') nodes.push(ui.code({ key: 'args', text: sanitizeDisplayText(message.args) }))
+  if (message.args !== '') nodes.push(ui.code({ key: 'args', text: sanitizeDisplayText(message.args), ...(wrap ? { wrap: true } : {}) }))
   // The body is decided by the SHOWN result, never by the recorded payload: a
   // running `ask_user_question` row can carry an empty recorded result while
   // the official projection already settled it, and the settled batch is still
   // the authority. An absent lookup answers `''` and omits the body exactly as
   // before, so an ordinary tool row is unchanged.
   const result = shownToolResult(message, options)
-  if (result !== '') nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(result) }))
+  if (result !== '') nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(result), ...(wrap ? { wrap: true } : {}) }))
   return nodes
 }
 
@@ -134,17 +139,74 @@ function shownToolResult(message: Extract<TranscriptMessage, { kind: 'tool' }>, 
   return settled === undefined ? message.result : JSON.stringify({ answers: settled })
 }
 
+/**
+ * PR-B2: one native INLINE tool node for one PTC sub-call. Identity is the
+ * child's own durable `subCallId` (never its name, its array position or the
+ * parent's revision); header, target and status come from the same authorities
+ * as the top-level row (`toolCardHeader`, `subCallDisplayStatus`). The body is
+ * the complete child output, wrapped; a child with no header summary shows its
+ * raw args instead of a headless empty card.
+ */
+function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOptions): Node {
+  const header = toolCardHeader(child.name, child.args, options.cwd)
+  const body: Node[] = []
+  if (header.summary === '' && child.args !== '') {
+    body.push(ui.code({ key: 'args', text: sanitizeDisplayText(child.args), wrap: true }))
+  }
+  body.push(...toolChildNodes(child, options))
+  if (child.result !== '') body.push(ui.code({ key: 'result', text: sanitizeDisplayText(child.result), wrap: true }))
+  return ui.tool(
+    {
+      key: `sub-${child.subCallId!}`,
+      frame: 'inline',
+      name: sanitizedPhysicalLine(child.name),
+      title: sanitizedPhysicalLine(header.title),
+      status: toolStatus(subCallDisplayStatus(child)),
+      ...(header.summary === '' ? {} : {
+        target: sanitizedPhysicalLine(header.summary),
+        // A child target is presentation text only: no registered-tool
+        // provenance is consulted, so no command/path/pattern kind is guessed.
+        targetKind: 'text',
+      }),
+    },
+    ...body,
+  )
+}
+
+/**
+ * The ordered nested-call block of one tool card: the direct-child count head,
+ * then each child's own native inline tool in durable dispatch order. The
+ * count is the DIRECT children of this card; a child with grandchildren runs
+ * this same rule one level down (never a Work-level lookup).
+ */
+function toolChildNodes(parent: TranscriptToolMessage, options: TranscriptViewOptions): Node[] {
+  const subCalls = parent.subCalls
+  if (subCalls === undefined || subCalls.length === 0) return []
+  return [
+    ui.text({ key: 'child-head', text: `Child calls · ${subCalls.length}` }),
+    ...subCalls.map(child => childToolNode(child, options)),
+  ]
+}
+
 function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: string, options: TranscriptViewOptions): Node {
   const header = toolCardHeader(message.name, message.args, options.cwd)
-  const body = toolBodyNodes(message, options)
   if (isUnmatchedToolRow(message)) {
     const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
     return ui.card(
       { key, head: sanitizedPhysicalLine(header.title), tone: 'warning' },
       ui.badge({ key: 'provenance', text: provenance }),
-      ...body,
+      ...toolBodyNodes(message, options),
     )
   }
+  // PR-B2: only a parent that carries PTC children gets the wrapped parent
+  // body and the nested block; every other tool row keeps its previous view
+  // shape and SDK props byte-identically. The order is fixed:
+  // parent args -> child block -> parent result.
+  const hasChildren = (message.subCalls?.length ?? 0) > 0
+  const existing = toolBodyNodes(message, options, hasChildren)
+  const args = existing.filter(node => node.props.key === 'args')
+  const result = existing.filter(node => node.props.key === 'result')
+  const others = existing.filter(node => node.props.key !== 'args' && node.props.key !== 'result')
   return ui.tool(
     {
       key,
@@ -164,7 +226,10 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
         ),
       }),
     },
-    ...body,
+    ...args,
+    ...others,
+    ...toolChildNodes(message, options),
+    ...result,
   )
 }
 

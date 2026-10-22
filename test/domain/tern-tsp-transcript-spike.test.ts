@@ -35,11 +35,12 @@ import {
 } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
-import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, TOOL_NOT_STARTED, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock } from '../../src/tui/transcript/structure.ts'
-import { TranscriptNodeKeys, transcriptView } from '../../scripts/support/tern-tsp-transcript-view.ts'
+import { toolPresenterFrom } from '../../src/tui/transcript/tool-presentation.ts'
+import { TranscriptNodeKeys, transcriptView, type TranscriptViewOptions } from '../../scripts/support/tern-tsp-transcript-view.ts'
 import { sanitizedPhysicalLine } from '../../src/tui/presentation/lines.ts'
 import {
   applyReplayStep,
@@ -1049,4 +1050,592 @@ test('T-fence: a user answer carries its fence verbatim too', () => {
   const body = nodeOf(view, `${card.id}.body`)
   assert.equal(body.kind, 'md')
   assert.equal(body.props['text'], answer, 'the user body carries the fence verbatim')
+})
+
+// ── PR-B2: PTC nested native tool children ────────────────────────────────
+//
+// The production mapper renders the Folder's PTC `subCalls` tree as native
+// `ui.tool({frame:'inline'})` descendants of their OWN parent card. Every case
+// below runs the real fold, the canonical structure projector, the production
+// mapper and the real SDK `View.from`/`ops` reconciliation — never a
+// hand-authored node tree.
+
+const CODE_ARGS = { code: 'print(1)', description: 'Inspect project and run tests' }
+
+function runCodeCall(seq: number, id: string, args: Record<string, unknown> = CODE_ARGS): SessionEvent {
+  return toolCall(seq, id, 'run_code', args)
+}
+
+function ptcStart(
+  seq: number,
+  root: string,
+  parent: string,
+  sub: string,
+  name: string,
+  args: Record<string, unknown>,
+): SessionEvent {
+  return ev('tool/ptc-dispatch-start', {
+    rootCallId: ToolCallId(root),
+    parentCallId: ToolCallId(parent),
+    subCallId: ToolCallId(sub),
+    name,
+    arguments: args,
+  }, seq)
+}
+
+function ptcSettle(
+  seq: number,
+  root: string,
+  parent: string,
+  sub: string,
+  name: string,
+  args: Record<string, unknown>,
+  text: string,
+): SessionEvent {
+  return ev('tool/ptc-dispatch', {
+    rootCallId: ToolCallId(root),
+    parentCallId: ToolCallId(parent),
+    subCallId: ToolCallId(sub),
+    name,
+    arguments: args,
+    isError: false,
+    content: [{ type: 'text', text }],
+  }, seq)
+}
+
+/** One settled ROOT `tool/result` carrying the curated parent output. */
+function parentSettle(seq: number, id: string, text: string): SessionEvent {
+  return ev('tool/result', {
+    turn: 1,
+    step: 0,
+    message: {
+      id: MessageId(`result-${id}`),
+      role: 'tool',
+      toolCallId: ToolCallId(id),
+      content: [{ type: 'text', text }],
+      source: { kind: 'tool', callId: ToolCallId(id) },
+    },
+  }, seq)
+}
+
+/** The official crash-recovery diagnostic result (no durable `tool/call`). */
+function notStartedResult(seq: number, id: string, text: string): SessionEvent {
+  return ev('tool/result', {
+    turn: 1,
+    step: 0,
+    message: {
+      id: MessageId(`result-${id}`),
+      role: 'tool',
+      toolCallId: ToolCallId(id),
+      content: [{ type: 'text', text }],
+      isError: true,
+      source: { kind: 'tool', callId: ToolCallId(id) },
+    },
+    error: { name: 'ToolNotStartedError', code: TOOL_NOT_STARTED },
+  }, seq)
+}
+
+function workSection(view: View): FlatNode {
+  const work = flatten(view).find(node => node.kind === 'section')
+  assert.ok(work !== undefined, 'the fixture projects one Work section')
+  return work
+}
+
+function workChildNodeId(view: View, keys: TranscriptNodeKeys, message: TranscriptMessage): string {
+  return `${workSection(view).id}.${keys.keyFor(message)}`
+}
+
+/** The one node carrying this message's stable presentation key. */
+function nodeByMessage(view: View, keys: TranscriptNodeKeys, message: TranscriptMessage): FlatNode {
+  const suffix = `.${keys.keyFor(message)}`
+  const node = flatten(view).find(candidate => candidate.id.endsWith(suffix))
+  assert.ok(node !== undefined, `a node ends with ${suffix}`)
+  return node
+}
+
+function toolRows(folder: TranscriptFolder): Extract<TranscriptMessage, { kind: 'tool' }>[] {
+  return folder.messages().filter(
+    (message): message is Extract<TranscriptMessage, { kind: 'tool' }> => message.kind === 'tool',
+  )
+}
+
+test('B2-T01: a real PTC dispatch nests under its own root and never joins the Work top level', () => {
+  const readArgs = { file_path: 'src/a.ts' }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    runCodeCall(1, 'code-1'),
+    ptcStart(2, 'code-1', 'code-1', 'code-1:code:1', 'read', readArgs),
+    ptcSettle(3, 'code-1', 'code-1', 'code-1:code:1', 'read', readArgs, 'a.ts body'),
+    parentSettle(4, 'code-1', 'program output'),
+  ])
+  assert.deepEqual(toolRows(folder).map(row => row.name), ['run_code'], 'the fold keeps ONE top-level tool')
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+  const root = toolRows(folder)[0]!
+  const rootId = workChildNodeId(view, keys, root)
+  const work = workSection(view)
+  assert.equal(flatten(view).filter(node => node.parent === work.id && node.kind === 'tool').length, 1,
+    'the Work holds the root card only')
+
+  const childId = `${rootId}.sub-code-1:code:1`
+  const child = nodeOf(view, childId)
+  assert.equal(child.kind, 'tool', 'the sub-call is a native tool node')
+  assert.equal(child.parent, rootId, 'it is a child of its OWN root card')
+  assert.equal(child.props['frame'], 'inline')
+  assert.equal(child.props['title'], 'Read')
+  assert.equal(child.props['target'], 'src/a.ts')
+  assert.equal(child.props['targetKind'], 'text')
+  assert.equal(child.props['status'], 'done')
+  assert.equal(nodeOf(view, `${rootId}.child-head`).props['text'], 'Child calls · 1')
+  assert.equal(nodeOf(view, `${childId}.result`).props['text'], 'a.ts body')
+  // No ghost: the flattened tree carries exactly the root and its one child.
+  assert.equal(flatten(view).filter(node => node.kind === 'tool').length, 2)
+})
+
+test('B2-T02: ordered child calls carry per-child status; a child failure never fails the parent', () => {
+  const readArgs = { file_path: 'src/a.ts' }
+  const bashArgs = { command: 'pnpm test', description: 'Run tests' }
+  const writeArgs = { file_path: 'src/b.ts', content: 'hello' }
+  const folder = new TranscriptFolder()
+  const keys = new TranscriptNodeKeys()
+  folder.apply([ev('turn/start', { turn: 1 }, 0), runCodeCall(1, 'code-1')])
+  folder.apply([ptcStart(2, 'code-1', 'code-1', 'code-1:code:1', 'read', readArgs)])
+
+  const running = viewOf(folder, keys)
+  const root = toolRows(folder)[0]!
+  const rootId = workChildNodeId(running, keys, root)
+  assert.equal(nodeOf(running, rootId).props['status'], 'running', 'the parent keeps its own running status')
+  assert.equal(nodeOf(running, `${rootId}.sub-code-1:code:1`).props['status'], 'running')
+  assert.equal(nodeOf(running, `${rootId}.child-head`).props['text'], 'Child calls · 1')
+
+  folder.apply([
+    ptcSettle(3, 'code-1', 'code-1', 'code-1:code:1', 'read', readArgs, 'a.ts body'),
+    ptcStart(4, 'code-1', 'code-1', 'code-1:code:2', 'bash', bashArgs),
+    ptcSettle(5, 'code-1', 'code-1', 'code-1:code:2', 'bash', bashArgs, 'boom\n[exit code: 7]'),
+    ptcStart(6, 'code-1', 'code-1', 'code-1:code:3', 'write', writeArgs),
+    ptcSettle(7, 'code-1', 'code-1', 'code-1:code:3', 'write', writeArgs, 'wrote b'),
+  ])
+  const view = viewOf(folder, keys)
+  assert.equal(nodeOf(view, `${rootId}.child-head`).props['text'], 'Child calls · 3')
+  const readId = `${rootId}.sub-code-1:code:1`
+  const bashId = `${rootId}.sub-code-1:code:2`
+  const writeId = `${rootId}.sub-code-1:code:3`
+  assert.deepEqual(
+    flatten(view).filter(node => node.kind === 'tool').map(node => String(node.props['name'])),
+    ['run_code', 'read', 'bash', 'write'],
+    'the durable dispatch order is preserved',
+  )
+  assert.equal(nodeOf(view, readId).props['status'], 'done')
+  assert.equal(nodeOf(view, bashId).props['status'], 'error', 'the native status parses the [exit code: N] marker')
+  assert.equal(nodeOf(view, writeId).props['status'], 'done')
+  assert.equal(nodeOf(view, bashId).props['title'], 'Bash')
+  assert.equal(nodeOf(view, bashId).props['target'], 'Run tests')
+  assert.equal(nodeOf(view, `${bashId}.result`).props['text'], 'boom\n[exit code: 7]',
+    'the full child result keeps the exit marker, never stripped')
+  assert.equal(nodeOf(view, rootId).props['status'], 'running',
+    'the child error is display-only and does not change the parent status')
+
+  // §4: a child that STARTED before the parent settled may still SETTLE after
+  // it. The live Fold keeps the mounted card object, and the mapper must read
+  // its latest in-place `subCalls` (never a cached array reference) while the
+  // parent and every existing child keep their own state.
+  const lateArgs = { file_path: 'src/late.ts' }
+  folder.apply([ptcStart(8, 'code-1', 'code-1', 'code-1:code:4', 'read', lateArgs)])
+  const childRunning = viewOf(folder, keys)
+  assert.equal(nodeOf(childRunning, `${rootId}.child-head`).props['text'], 'Child calls · 4')
+  assert.equal(nodeOf(childRunning, `${rootId}.sub-code-1:code:4`).props['status'], 'running')
+
+  folder.apply([parentSettle(9, 'code-1', 'program output')])
+  const settled = viewOf(folder, keys)
+  assert.equal(nodeOf(settled, rootId).props['status'], 'done')
+  assert.equal(nodeOf(settled, bashId).props['status'], 'error', 'the later parent settle leaves the child row as-is')
+  assert.equal(nodeOf(settled, `${rootId}.result`).props['text'], 'program output')
+  assert.equal(nodeOf(settled, `${rootId}.sub-code-1:code:4`).props['status'], 'running',
+    'a child started before the parent settles stays visible while it runs')
+
+  folder.apply([ptcSettle(10, 'code-1', 'code-1', 'code-1:code:4', 'read', lateArgs, 'late body')])
+  const late = viewOf(folder, keys)
+  assert.equal(nodeOf(late, `${rootId}.child-head`).props['text'], 'Child calls · 4')
+  assert.equal(nodeOf(late, `${rootId}.sub-code-1:code:4`).props['status'], 'done',
+    'the child settles AFTER the parent without a TSP replay')
+  assert.equal(nodeOf(late, `${rootId}.sub-code-1:code:4.result`).props['text'], 'late body')
+  assert.equal(nodeOf(late, rootId).props['status'], 'done', 'the parent keeps its settled status')
+  for (const id of [readId, bashId, writeId]) {
+    assert.equal(nodeOf(late, id).props['status'], nodeOf(settled, id).props['status'],
+      `${id} keeps its own status through the late child settle`)
+  }
+})
+
+test('B2-T03: two run_code roots in one Work keep separate subtrees and stable SDK ids', () => {
+  const readArgs = { file_path: 'src/a.ts' }
+  const writeArgs = { file_path: 'src/b.ts', content: 'hello' }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    runCodeCall(1, 'code-A'),
+    ptcStart(2, 'code-A', 'code-A', 'code-A:code:1', 'read', readArgs),
+    ptcSettle(3, 'code-A', 'code-A', 'code-A:code:1', 'read', readArgs, 'a.ts body'),
+    runCodeCall(4, 'code-B'),
+    ptcStart(5, 'code-B', 'code-B', 'code-B:code:1', 'write', writeArgs),
+    parentSettle(6, 'code-A', 'A curated result'),
+  ])
+  const roots = toolRows(folder)
+  assert.deepEqual(roots.map(row => row.name), ['run_code', 'run_code'])
+  assert.equal(projectTranscriptStructure(folder.messages()).filter(block => block.kind === 'work').length, 1,
+    'both roots are members of the SAME Work span')
+
+  const keys = new TranscriptNodeKeys()
+  const before = viewOf(folder, keys)
+  const work = workSection(before)
+  const idA = `${work.id}.${keys.keyFor(roots[0]!)}`
+  const idB = `${work.id}.${keys.keyFor(roots[1]!)}`
+  const readId = `${idA}.sub-code-A:code:1`
+  const writeId = `${idB}.sub-code-B:code:1`
+  assert.equal(flatten(before).filter(node => node.kind === 'tool').length, 4, 'exactly four native tool nodes')
+  assert.equal(nodeOf(before, readId).parent, idA, 'A\'s child stays under A')
+  assert.equal(nodeOf(before, writeId).parent, idB, 'B\'s child stays under B')
+  assert.equal(nodeOf(before, readId).props['status'], 'done')
+  assert.equal(nodeOf(before, writeId).props['status'], 'running')
+  assert.equal(nodeOf(before, `${idA}.child-head`).props['text'], 'Child calls · 1')
+  assert.equal(nodeOf(before, `${idB}.child-head`).props['text'], 'Child calls · 1')
+  const idsBefore = flatten(before).map(node => node.id)
+
+  folder.apply([
+    ptcSettle(7, 'code-B', 'code-B', 'code-B:code:1', 'write', writeArgs, 'wrote b'),
+    parentSettle(8, 'code-B', 'B curated result'),
+  ])
+  const after = viewOf(folder, keys)
+  const idsAfter = flatten(after).map(node => node.id)
+  for (const id of [idA, idB, readId, writeId]) {
+    assert.ok(idsBefore.includes(id), `${id} is in the pre-settle wire tree`)
+    assert.ok(idsAfter.includes(id), `${id} keeps its SDK id after B settles`)
+  }
+  assert.equal(new Set(idsAfter).size, idsAfter.length, 'every SDK node id stays unique')
+  assert.equal(flatten(after).filter(node => node.kind === 'tool').length, 4, 'settling B adds no fifth tool node')
+  assert.equal(nodeOf(after, writeId).props['status'], 'done')
+  assert.equal(nodeOf(after, `${writeId}.result`).props['text'], 'wrote b')
+  assert.equal(nodeOf(after, idB).props['status'], 'done')
+
+  const ops = before.ops(after, 's1')
+  assert.equal(ops.filter(op => op[0] === 'del').length, 0, 'the child settle deletes nothing')
+  assert.equal(ops.filter(op => op[0] === 'move').length, 0, 'the child settle moves nothing')
+  const touched = new Set([
+    ...opIds(ops, 'add'),
+    ...opIds(ops, 'del'),
+    ...opIds(ops, 'set'),
+    ...opIds(ops, 'text'),
+  ])
+  for (const id of [idA, readId]) assert.ok(!touched.has(id), `root A/read is never touched by B's settle: ${id}`)
+  for (const id of touched) {
+    assert.ok(id === idB || id?.startsWith(`${idB}.`) || id === writeId || id?.startsWith(`${writeId}.`),
+      `B's settle only touches B's own subtree: ${id}`)
+  }
+})
+
+test('B2-T04: a three-level tree attaches every direct child to the correct parent node id', () => {
+  const childArgs = { command: 'make', description: 'Build project' }
+  const grandchildArgs = { file_path: 'nested.ts' }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    runCodeCall(1, 'code-1'),
+    ptcStart(2, 'code-1', 'code-1', 'code-1:code:1', 'bash', childArgs),
+    ptcStart(3, 'code-1', 'code-1:code:1', 'code-1:code:1:code:1', 'read', grandchildArgs),
+    ptcSettle(4, 'code-1', 'code-1:code:1', 'code-1:code:1:code:1', 'read', grandchildArgs, 'nested content'),
+    ptcSettle(5, 'code-1', 'code-1', 'code-1:code:1', 'bash', childArgs, 'built'),
+    parentSettle(6, 'code-1', 'program output'),
+  ])
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+  const root = toolRows(folder)[0]!
+  const rootId = workChildNodeId(view, keys, root)
+  const childId = `${rootId}.sub-code-1:code:1`
+  const grandchildId = `${childId}.sub-code-1:code:1:code:1`
+  assert.equal(nodeOf(view, childId).parent, rootId)
+  assert.equal(nodeOf(view, grandchildId).parent, childId, 'the grandchild hangs from child A, not the root')
+  assert.equal(nodeOf(view, `${rootId}.child-head`).props['text'], 'Child calls · 1')
+  assert.equal(nodeOf(view, `${childId}.child-head`).props['text'], 'Child calls · 1',
+    'the nested count is the child\'s own DIRECT children')
+  assert.equal(nodeOf(view, childId).props['title'], 'Bash')
+  assert.equal(nodeOf(view, childId).props['target'], 'Build project')
+  assert.equal(nodeOf(view, grandchildId).props['title'], 'Read')
+  assert.equal(nodeOf(view, grandchildId).props['target'], 'nested.ts')
+  assert.equal(nodeOf(view, `${grandchildId}.result`).props['text'], 'nested content')
+  assert.equal(flatten(view).some(node => node.id === `${grandchildId}.child-head`), false,
+    'a leaf child has no nested block')
+  assert.equal(flatten(view).filter(node => node.kind === 'tool').length, 3)
+})
+
+test('B2-T05: merged Read, ordinary, orphan and tool-not-started rows keep their pre-B2 view', () => {
+  const bashArgs = { command: 'pnpm test', description: 'Run tests' }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'read-1', 'read', { file_path: 'src/a.ts' }),
+    toolResult(2, 'read-1', 'a body'),
+    toolCall(3, 'read-2', 'read', { file_path: 'src/b.ts' }),
+    toolResult(4, 'read-2', 'b body'),
+    toolCall(5, 'bash-1', 'bash', bashArgs),
+    toolResult(6, 'bash-1', 'ok'),
+    toolResult(7, 'orphan-1', 'late replay evidence'),
+    notStartedResult(8, 'never-1', 'tool was never started'),
+  ])
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+  const nodes = flatten(view)
+  assert.equal(nodes.some(node => node.id.endsWith('.child-head')), false, 'no subtree head appears')
+  assert.equal(nodes.filter(node => node.kind === 'tool' && node.props['frame'] === 'inline').length, 0)
+  assert.equal(nodes.filter(node => node.kind === 'code' && node.props['wrap'] === true).length, 0,
+    'no row is wrapped without a PTC subtree')
+  assert.equal(nodes.filter(node => node.kind === 'tool').length, 2, 'the read group and the bash card')
+
+  const mergedRead = rowOf(folder, message => message.kind === 'tool' && message.name === 'read')
+  assert.equal(mergedRead.kind === 'tool' ? mergedRead.args : undefined, '2 files')
+  const readNode = nodeByMessage(view, keys, mergedRead)
+  assert.equal(readNode.kind, 'tool')
+  assert.deepEqual(nodeOf(view, `${readNode.id}.args`).props, { key: 'args', text: '2 files' })
+
+  const bash = rowOf(folder, message => message.kind === 'tool' && message.name === 'bash')
+  const bashNode = nodeByMessage(view, keys, bash)
+  assert.equal(bashNode.kind, 'tool')
+  assert.deepEqual(nodeOf(view, `${bashNode.id}.args`).props,
+    { key: 'args', text: JSON.stringify(bashArgs) }, 'the plain args node keeps the exact pre-B2 props')
+  assert.deepEqual(nodeOf(view, `${bashNode.id}.result`).props, { key: 'result', text: 'ok' })
+
+  const orphan = rowOf(folder, message => message.kind === 'tool' && message.result === 'late replay evidence')
+  const orphanNode = nodeByMessage(view, keys, orphan)
+  assert.equal(orphanNode.kind, 'card', 'an orphan result stays a diagnostic card')
+  assert.equal(nodeOf(view, `${orphanNode.id}.provenance`).props['text'], 'unmatched result')
+
+  const never = rowOf(folder, message => message.kind === 'tool' && message.origin === 'tool-not-started')
+  const neverNode = nodeByMessage(view, keys, never)
+  assert.equal(neverNode.kind, 'card', 'a tool-not-started row stays a diagnostic card')
+  assert.equal(nodeOf(view, `${neverNode.id}.provenance`).props['text'], 'not started')
+})
+
+test('B2-T06: an orphan PTC start/settle shows nothing until the parent arrives, then exactly once', () => {
+  const bashArgs = { command: 'ls', description: 'List files' }
+  const orphanStart = ptcStart(0, 'code-1', 'code-1', 'code-1:code:1', 'bash', bashArgs)
+  const orphanSettle = ptcSettle(1, 'code-1', 'code-1', 'code-1:code:1', 'bash', bashArgs, 'file.txt')
+  const parentCall = runCodeCall(2, 'code-1')
+  const settledParent = parentSettle(3, 'code-1', 'program output')
+
+  const folder = new TranscriptFolder()
+  folder.apply([orphanStart, orphanSettle])
+  assert.equal(folder.messages().length, 0, 'an unmatched PTC fragment fabricates no surface row')
+  const keys = new TranscriptNodeKeys()
+  const before = viewOf(folder, keys)
+  assert.equal(flatten(before).filter(node => node.kind === 'tool').length, 0)
+  assert.equal(flatten(before).some(node => node.id.endsWith('.child-head')), false)
+
+  folder.apply([parentCall, settledParent])
+  const view = viewOf(folder, keys)
+  const root = toolRows(folder)[0]!
+  const rootId = workChildNodeId(view, keys, root)
+  const childId = `${rootId}.sub-code-1:code:1`
+  assert.equal(nodeOf(view, `${rootId}.child-head`).props['text'], 'Child calls · 1')
+  assert.equal(flatten(view).filter(node => node.id.endsWith('.child-head')).length, 1, 'one child block, no duplicate')
+  assert.equal(nodeOf(view, childId).props['status'], 'done', 'the parked settle applies to the attached child')
+  assert.equal(nodeOf(view, `${childId}.result`).props['text'], 'file.txt')
+
+  // A cold replay of the same event stream reproduces exactly the same tree.
+  const replay = new TranscriptFolder()
+  replay.apply([orphanStart, orphanSettle, parentCall, settledParent])
+  assert.deepEqual(flatten(viewOf(replay, new TranscriptNodeKeys())), flatten(view),
+    'replaying the same durable events adds no duplicate child')
+})
+
+test('B2-T07: a new projection source gets a fresh scope, never the old source ids', () => {
+  const readArgs = { file_path: 'src/a.ts' }
+  const build = (): TranscriptFolder => {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      ev('turn/start', { turn: 1 }, 0),
+      runCodeCall(1, 'code-1'),
+      ptcStart(2, 'code-1', 'code-1', 'code-1:code:1', 'read', readArgs),
+      ptcSettle(3, 'code-1', 'code-1', 'code-1:code:1', 'read', readArgs, 'a.ts body'),
+      parentSettle(4, 'code-1', 'program output'),
+    ])
+    return folder
+  }
+  const scoped = (scopePrefix: string): View => View.from({
+    main: transcriptView(projectTranscriptStructure(build().messages()), new TranscriptNodeKeys(), { scopePrefix }),
+  })
+  const oldView = scoped('s1-')
+  const newView = scoped('s2-')
+  const oldIds = flatten(oldView).map(node => node.id)
+  const newIds = flatten(newView).map(node => node.id)
+  assert.ok(oldIds.every(id => id === 'main' || id.startsWith('main.s1-')), 'the old source is fully scoped')
+  assert.ok(newIds.every(id => id === 'main' || id.startsWith('main.s2-')), 'the new source is fully scoped')
+  assert.deepEqual(oldIds.filter(id => newIds.includes(id)), ['main'],
+    'the two sources share no presentation identity')
+  // Same shape and same displayed bytes: only the presentation key is scoped.
+  const shapeOf = (node: FlatNode): unknown => [
+    node.kind,
+    Object.fromEntries(Object.entries(node.props).filter(([name]) => name !== 'key')),
+  ]
+  assert.deepEqual(flatten(oldView).map(shapeOf), flatten(newView).map(shapeOf),
+    'the new scope renders the same content, never a cached stale tree')
+})
+
+test('B2-T08: hostile child name/args/result are sanitized; the Folder values stay raw', () => {
+  const hostileName = 'Read\nEvil\u001b]0;pwn\u0007'
+  const hostileArgs = { q: 'safe-args\u009b2J\u007fneedle-args' }
+  const hostileResult = 'safe-start\u001b]52;c;YXR0YWNr\u0007needle-text\u009b2J\u007fend'
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    runCodeCall(1, 'code-1'),
+    ptcStart(2, 'code-1', 'code-1', 'code-1:code:1', 'get_goal', hostileArgs),
+    ptcStart(3, 'code-1', 'code-1', 'code-1:code:2', hostileName, {}),
+    ptcSettle(4, 'code-1', 'code-1', 'code-1:code:2', hostileName, {}, hostileResult),
+    parentSettle(5, 'code-1', 'program output'),
+  ])
+  const children = toolRows(folder)[0]!.subCalls ?? []
+  const argsChild = children[0]!
+  const textChild = children[1]!
+  assert.equal(argsChild.args, JSON.stringify(hostileArgs), 'the Folder keeps the raw args value')
+  assert.equal(textChild.name, hostileName, 'the Folder keeps the raw child name')
+  assert.equal(textChild.result, hostileResult, 'the Folder keeps the raw child result')
+
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+  const rootId = workChildNodeId(view, keys, toolRows(folder)[0]!)
+  const props = JSON.stringify(flatten(view).map(node => node.props))
+  assert.ok(!props.includes('\u001b'), `no raw ESC may reach a child prop:\n${props}`)
+  assert.ok(!props.includes('YXR0YWNr'), 'no OSC 52 payload passes through')
+  assert.ok(!props.includes('\u009b'), 'no raw C1 byte passes through')
+  assert.ok(!props.includes('\u007f'), 'no raw DEL byte passes through')
+  assert.ok(props.includes('needle-args'), 'the readable args payload survives')
+  assert.ok(props.includes('needle-text'), 'the readable result payload survives')
+  assert.ok(props.includes('Read Evil'), 'the hostile name collapses to one safe physical line')
+  const argsText = String(nodeOf(view, `${rootId}.sub-code-1:code:1.args`).props['text'])
+  assert.ok(argsText.includes('needle-args'))
+  const resultText = String(nodeOf(view, `${rootId}.sub-code-1:code:2.result`).props['text'])
+  assert.ok(resultText.includes('safe-start') && resultText.includes('needle-text'))
+})
+
+test('B2-T09: a parent with children keeps its arguments/result bytes, status and target kind', () => {
+  const targetPresenter = toolPresenterFrom(name => name === 'run_code' || name === 'read'
+    ? {
+        presentCall: () => ({
+          card: 'generic' as const,
+          title: 'Read',
+          kind: 'read' as const,
+          locations: [{ path: 'src/a.ts' }],
+        }),
+      }
+    : undefined)
+  const parentArgs = { code: 'print(1)', description: 'src/a.ts' }
+  const outcome = 'curated result\nline two'
+  const build = (withChild: boolean): TranscriptFolder => {
+    const events: SessionEvent[] = [
+      ev('turn/start', { turn: 1 }, 0),
+      toolCall(1, 'code-1', 'run_code', parentArgs),
+    ]
+    if (withChild) {
+      const childArgs = { file_path: 'src/a.ts' }
+      events.push(
+        ptcStart(2, 'code-1', 'code-1', 'code-1:code:1', 'read', childArgs),
+        ptcSettle(3, 'code-1', 'code-1', 'code-1:code:1', 'read', childArgs, 'a.ts body'),
+      )
+    }
+    events.push(parentSettle(4, 'code-1', outcome))
+    const folder = new TranscriptFolder()
+    folder.apply(events)
+    return folder
+  }
+  const options: TranscriptViewOptions = { toolPresenter: targetPresenter }
+  const withFolder = build(true)
+  const withoutFolder = build(false)
+  const keysWith = new TranscriptNodeKeys()
+  const keysWithout = new TranscriptNodeKeys()
+  const withView = View.from({ main: transcriptView(projectTranscriptStructure(withFolder.messages()), keysWith, options) })
+  const withoutView = View.from({ main: transcriptView(projectTranscriptStructure(withoutFolder.messages()), keysWithout, options) })
+  const withRootId = workChildNodeId(withView, keysWith, toolRows(withFolder)[0]!)
+  const withoutRootId = workChildNodeId(withoutView, keysWithout, toolRows(withoutFolder)[0]!)
+  const argsText = JSON.stringify(parentArgs)
+
+  assert.equal(nodeOf(withView, withRootId).props['target'], 'src/a.ts')
+  assert.equal(nodeOf(withView, withRootId).props['targetKind'], 'path',
+    'the B1-proven parent target kind survives the subtree')
+  assert.equal(nodeOf(withView, withRootId).props['status'], 'done')
+  assert.deepEqual(nodeOf(withView, `${withRootId}.args`).props, { key: 'args', text: argsText, wrap: true })
+  assert.deepEqual(nodeOf(withView, `${withRootId}.result`).props, { key: 'result', text: outcome, wrap: true })
+  const childId = `${withRootId}.sub-code-1:code:1`
+  assert.equal(nodeOf(withView, childId).props['target'], 'src/a.ts')
+  assert.equal(nodeOf(withView, childId).props['targetKind'], 'text',
+    'a child target is never re-classified from the parent presenter')
+
+  assert.deepEqual(nodeOf(withoutView, withoutRootId).props, nodeOf(withView, withRootId).props,
+    'the parent tool props are unchanged by the subtree')
+  assert.deepEqual(nodeOf(withoutView, `${withoutRootId}.args`).props, { key: 'args', text: argsText },
+    'without a subtree the args node keeps its exact pre-B2 props')
+  assert.deepEqual(nodeOf(withoutView, `${withoutRootId}.result`).props, { key: 'result', text: outcome })
+  assert.equal(flatten(withoutView).some(node => node.id.endsWith('.child-head')), false)
+  assert.equal(flatten(withoutView).some(node => node.kind === 'code' && node.props['wrap'] === true), false,
+    'no childless row is wrapped')
+})
+
+test('B2-T10: 64 direct children plus a four-level chain render in order without truncation', (t) => {
+  const events: SessionEvent[] = [ev('turn/start', { turn: 1 }, 0), runCodeCall(1, 'code-1')]
+  let seq = 2
+  for (let index = 1; index <= 64; index += 1) {
+    const sub = `code-1:code:${index}`
+    const args = { command: `run-${index}`, description: `Child ${index}` }
+    events.push(
+      ptcStart(seq++, 'code-1', 'code-1', sub, 'bash', args),
+      ptcSettle(seq++, 'code-1', 'code-1', sub, 'bash', args, `out-${index}`),
+    )
+  }
+  // Four recursive descendants under the LAST direct child.
+  let parent = 'code-1:code:64'
+  const chain: string[] = []
+  for (let level = 1; level <= 4; level += 1) {
+    const sub = `${parent}:code:1`
+    const args = { file_path: `nested-${level}.ts` }
+    events.push(
+      ptcStart(seq++, 'code-1', parent, sub, 'read', args),
+      ptcSettle(seq++, 'code-1', parent, sub, 'read', args, `nested-${level}`),
+    )
+    chain.push(sub)
+    parent = sub
+  }
+  events.push(parentSettle(seq, 'code-1', 'program output'))
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  const keys = new TranscriptNodeKeys()
+  const started = performance.now()
+  const view = viewOf(folder, keys)
+  const elapsed = performance.now() - started
+  t.diagnostic(`production mapper rendered 69 native tool nodes in ${elapsed.toFixed(1)}ms`)
+  assert.ok(elapsed < 2000, `the production mapper finished a 64-child/4-level tree in ${elapsed.toFixed(1)}ms`)
+
+  const rootId = workChildNodeId(view, keys, toolRows(folder)[0]!)
+  assert.equal(nodeOf(view, `${rootId}.child-head`).props['text'], 'Child calls · 64')
+  const ids = flatten(view).map(node => node.id)
+  const childId = (index: number): string => `${rootId}.sub-code-1:code:${index}`
+  const positions = new Map(ids.map((id, index) => [id, index]))
+  for (let index = 1; index <= 64; index += 1) {
+    assert.ok(positions.has(childId(index)), `direct child ${index} is present, not truncated`)
+    if (index > 1) {
+      assert.ok(positions.get(childId(index - 1))! < positions.get(childId(index))!,
+        'direct children keep their durable dispatch order')
+    }
+  }
+  let parentId = childId(64)
+  for (const sub of chain) {
+    const id = `${parentId}.sub-${sub}`
+    const node = nodeOf(view, id)
+    assert.equal(node.parent, parentId)
+    assert.equal(node.props['status'], 'done')
+    parentId = id
+  }
+  assert.equal(flatten(view).filter(node => node.kind === 'tool').length, 69,
+    '1 root + 64 direct children + 4 recursive descendants')
+  assert.equal(nodeOf(view, childId(64)).props['title'], 'Bash')
+  assert.equal(nodeOf(view, `${childId(64)}.result`).props['text'], 'out-64')
+  assert.equal(nodeOf(view, `${parentId}.result`).props['text'], 'nested-4')
+  assert.equal(nodeOf(view, `${rootId}.result`).props['text'], 'program output')
 })

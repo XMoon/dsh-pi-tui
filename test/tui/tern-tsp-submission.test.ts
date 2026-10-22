@@ -20,7 +20,17 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
-import { connect as sdkConnect, concatBytes, type TermInput, type TermOutput } from '@stencil-hq/tern'
+import {
+  connect as sdkConnect,
+  concatBytes,
+  type Op,
+  type TermInput,
+  type TermOutput,
+  type WireNode,
+} from '@stencil-hq/tern'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 
 const ENCODER = new TextEncoder()
@@ -578,6 +588,163 @@ test('clearActiveDraft is PURE STATE — no render IO, no throw surface', async 
     assert.equal(lastComposerText(harness.output.text()), '',
       'the wire shows the empty composer through B\'s first frame')
     assert.equal(harness.renderer.composer.getDraft(), '', 'the editor stays empty through B\'s first frame')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── PR-B2 L6: the production mount projects the real PTC subtree ──────────
+//
+// The chain under test is the production application composition, not a
+// mapper-only spike: a real `TranscriptFolder` folds genuine PTC events, and
+// the fold's messages are committed through the REAL mounted `mountTspRenderer`
+// display seam into the shipped SDK surface. The child tool node and its later
+// settle are asserted on the actual wire (`f` frames), so this is source→sink
+// evidence for the nested native children; it is not a mapper-only claim.
+
+interface SubmissionWireFrame {
+  readonly sf: string
+  readonly s: number
+  readonly ops: readonly Op[]
+}
+
+function decodeWireFrames(wire: string): SubmissionWireFrame[] {
+  return [...wire.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)].map(match => JSON.parse(match[1]!) as SubmissionWireFrame)
+}
+
+function flattenWireNode(node: WireNode, out: WireNode[] = []): WireNode[] {
+  out.push(node)
+  for (const child of node.c ?? []) flattenWireNode(child, out)
+  return out
+}
+
+/** Every node the wire has ever ADDED (the current tree's node set). */
+function wireNodes(wire: string): WireNode[] {
+  const nodes: WireNode[] = []
+  for (const frame of decodeWireFrames(wire)) {
+    for (const op of frame.ops) {
+      if (op[0] === 'add') flattenWireNode(op[4], nodes)
+    }
+  }
+  return nodes
+}
+
+/** The repository's ordinary loose event envelope for fixtures. */
+function sEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+function ptcStartEvent(
+  seq: number, root: string, sub: string, name: string, args: Record<string, unknown>,
+): SessionEvent {
+  return sEvent('tool/ptc-dispatch-start', {
+    rootCallId: ToolCallId(root),
+    parentCallId: ToolCallId(root),
+    subCallId: ToolCallId(sub),
+    name,
+    arguments: args,
+  }, seq)
+}
+
+function ptcSettleEvent(
+  seq: number, root: string, sub: string, name: string, args: Record<string, unknown>, text: string,
+): SessionEvent {
+  return sEvent('tool/ptc-dispatch', {
+    rootCallId: ToolCallId(root),
+    parentCallId: ToolCallId(root),
+    subCallId: ToolCallId(sub),
+    name,
+    arguments: args,
+    isError: false,
+    content: [{ type: 'text', text }],
+  }, seq)
+}
+
+function rootCallEvent(seq: number, id: string, args: Record<string, unknown>): SessionEvent {
+  return sEvent('tool/call', {
+    turn: 1,
+    step: 0,
+    callId: ToolCallId(id),
+    name: 'run_code',
+    arguments: JSON.stringify(args),
+  }, seq)
+}
+
+function rootResultEvent(seq: number, id: string, text: string): SessionEvent {
+  return sEvent('tool/result', {
+    turn: 1,
+    step: 0,
+    message: {
+      id: MessageId(`result-${id}`),
+      role: 'tool',
+      toolCallId: ToolCallId(id),
+      content: [{ type: 'text', text }],
+      source: { kind: 'tool', callId: ToolCallId(id) },
+    },
+  }, seq)
+}
+
+test('B2-L6: the mounted renderer emits PTC child tools and settles them on the real wire', async () => {
+  const readArgs = { file_path: 'src/a.ts' }
+  const turnStart = sEvent('turn/start', { turn: 1 }, 0)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart,
+    rootCallEvent(1, 'code-1', { code: 'print(1)', description: 'Inspect project and run tests' }),
+    ptcStartEvent(2, 'code-1', 'code-1:code:1', 'read', readArgs),
+    rootResultEvent(3, 'code-1', 'program output'),
+  ])
+
+  const harness = await mountPane(() => {})
+  try {
+    // ONE stable projection-source token: the production renderer re-scopes its
+    // presentation keys on a NEW source identity, so the same subject must pass
+    // the SAME object (exactly as `SurfaceRuntime.repaintTarget` does).
+    const source = { subject: 'ptc-A' }
+    harness.renderer.display.setTranscript(folder.messages(), undefined, undefined, undefined, undefined, source)
+    await awaitFact(
+      () => wireNodes(harness.output.text()).some(node => node.id.endsWith('.sub-code-1:code:1')),
+      'the PTC child tool node to reach the real wire',
+    )
+
+    const initialNodes = wireNodes(harness.output.text())
+    const child = initialNodes.find(node => node.id.endsWith('.sub-code-1:code:1'))
+    assert.ok(child !== undefined, 'the nested child tool node is on the wire')
+    const childId = child.id
+    const rootId = childId.slice(0, -'.sub-code-1:code:1'.length)
+    assert.equal(child.k, 'tool', 'the child is a native tool node')
+    assert.equal(child.p?.['frame'], 'inline')
+    assert.equal(child.p?.['title'], 'Read')
+    assert.equal(child.p?.['target'], 'src/a.ts')
+    assert.equal(child.p?.['status'], 'running')
+    assert.equal(initialNodes.find(node => node.id === `${rootId}.child-head`)?.p?.['text'], 'Child calls · 1')
+    assert.equal(initialNodes.find(node => node.id === rootId)?.p?.['status'], 'done',
+      'the root keeps its own settled status')
+
+    // The REAL child settle enters through the same fold + production seam.
+    folder.apply([ptcSettleEvent(4, 'code-1', 'code-1:code:1', 'read', readArgs, 'file.txt')])
+    harness.renderer.display.setTranscript(folder.messages(), undefined, undefined, undefined, undefined, source)
+    await awaitFact(
+      () => decodeWireFrames(harness.output.text()).some(frame => frame.ops.some(op =>
+        op[0] === 'set' && op[1] === childId && (op[2] as { status?: string }).status === 'done')),
+      'the child settle to reach the real wire',
+    )
+
+    const frames = decodeWireFrames(harness.output.text())
+    const last = frames[frames.length - 1]!
+    const settleOp = last.ops.find(op => op[0] === 'set' && op[1] === childId)
+    assert.ok(settleOp !== undefined && (settleOp[2] as { status?: string }).status === 'done',
+      'the settle updates the SAME child node id, never a remount')
+    assert.equal(last.ops.filter(op => op[0] === 'del').length, 0, 'the child settle deletes nothing')
+    assert.equal(last.ops.filter(op => op[0] === 'move').length, 0, 'the child settle moves nothing')
+    const added = last.ops.flatMap(op => op[0] === 'add' ? flattenWireNode(op[4]) : [])
+    const resultNode = added.find(node => node.id === `${childId}.result`)
+    assert.equal(resultNode?.p?.['text'], 'file.txt', 'the complete child result reaches the wire')
+    assert.equal(resultNode?.p?.['wrap'], true)
+    assert.equal(last.ops.some(op => op[0] === 'set' && op[1] === rootId), false,
+      'the child settle never rewrites the root card')
+    assert.equal(wireNodes(harness.output.text()).filter(node => node.id === childId).length, 1,
+      'the child node was added exactly once — no remount across the settle')
   } finally {
     await harness.dispose()
   }
