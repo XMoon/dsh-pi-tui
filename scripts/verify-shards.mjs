@@ -1,0 +1,744 @@
+#!/usr/bin/env node
+/**
+ * The SHARD AGGREGATE PROOF: the shards together are the whole lane.
+ *
+ * Splitting a lane across runners is only safe if the shards are exactly a
+ * partition of it. Three things can go wrong, and all three are silent in
+ * a green CI summary:
+ *
+ *   - a LOST file: a file belongs to no shard, so its cases never ran;
+ *   - an OVERLAPPED file: a file belongs to two shards, so its cases ran
+ *     twice and the total is inflated;
+ *   - a SKIPPED shard: the shard job did not run, so a third of the lane
+ *     was never measured, and the summary would still look complete.
+ *
+ * So the aggregate compares the shards' FILE LISTS against the lane's own
+ * file list — resolved by the SAME discovery rule the runner uses — and
+ * fails closed on any difference.
+ *
+ * It also checks the CASE counts: the shards' cases must add up to the
+ * lane's own case count, and no shard may report a skip the unsharded lane
+ * does not have.
+ *
+ * Usage:
+ *   node scripts/verify-shards.mjs --shards shards --total 4 --out aggregate.json
+ * @module @xmoon76/dsh-pi-tui/scripts/verify-shards
+ */
+
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { resolveLane } from './test-discovery.mjs'
+import { LANES } from './test-lanes.mjs'
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const TEST_ROOT = join(ROOT, 'test')
+
+/** The lane the shards partition. */
+const LANE = 'product'
+
+/** The case records of one shard directory. */
+/**
+ * The expected skip count baseline: one number, or a per-version map.
+ *
+ * @returns {number|Record<string, number>|null} the baseline.
+ */
+function expectedSkippedBaseline() {
+  const parse = (name, raw) => {
+    if (raw.trimStart().startsWith('{')) {
+      try {
+        return JSON.parse(raw)
+      } catch {
+        throw new Error(`${name} is not a valid per-version map: ${raw}`)
+      }
+    }
+    const value = Number(raw)
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${name} must be a non-negative integer or a per-version map, got: ${raw}`)
+    }
+    return value
+  }
+  // The skip COUNT is checked from a committed file exactly like the case
+  // count, and it is checked SEPARATELY from the skip REASONS.
+  //
+  // The two answer different questions and neither replaces the other: the
+  // count catches a case that stopped running, the reasons catch a case
+  // that stopped running for a reason nobody agreed to. A run can have the
+  // right count with wrong reasons, and the right reasons with a lost case.
+  const fileVar = 'DSH_EXPECTED_SKIPPED_FILE'
+  const path = process.env[fileVar]
+  if (path === undefined || path === '') {
+    const raw = process.env.DSH_EXPECTED_SKIPPED
+    return raw === undefined || raw === '' ? null : parse('DSH_EXPECTED_SKIPPED', raw)
+  }
+  if (!existsSync(path)) {
+    throw new Error(`the committed baseline ${path} (from ${fileVar}) is missing: a qualification cannot run without it`)
+  }
+  const raw = readFileSync(path, 'utf8').trim()
+  if (raw === '') {
+    throw new Error(`the committed baseline ${path} is empty: a qualification cannot run without a number`)
+  }
+  return parse(path, raw)
+}
+
+/**
+ * The expected skip count for a Node version.
+ *
+ * The baseline is one number for the whole run, unless it is a
+ * PER-VERSION map: `{"22.19.0": 31, "24": 37}`. A Node version can
+ * legitimately skip a different number of cases than another — the
+ * optional-bundle skip depends on what that version's environment
+ * provides.
+ *
+ * @param {string} version - the Node version.
+ * @returns {number|null} the expected skip count, or null when it is unknown.
+ */
+function expectedSkippedFor(version, baseline) {
+  if (baseline === null || baseline === undefined) return null
+  if (typeof baseline === 'object') {
+    const value = baseline[version]
+    return value === undefined ? null : value
+  }
+  if (Number.isNaN(baseline)) return null
+  return baseline
+}
+
+/**
+ * The Node version a shard directory ran on.
+ *
+ * The directories are `<shard>-node<version>`; a directory that does not
+ * carry a version is its own group.
+ *
+ * @param {string} directory - the directory path.
+ * @returns {string} the Node version, or '(unversioned)'.
+ */
+function nodeVersionOf(directory) {
+  const match = /-node(\d+(?:\.\d+)*)$/u.exec(basename(directory))
+  return match === null ? '(unversioned)' : match[1]
+}
+
+/**
+ * The directories that hold shard records.
+ *
+ * A shard's records are the `cases.jsonl` file. They are found by
+ * looking for that file: in a per-artifact subdirectory, or directly in
+ * the root when a single artifact matched the download pattern.
+ *
+ * @param {string} shardsRoot - the directory the shards were downloaded into.
+ * @returns {string[]} the directories that hold shard records.
+ */
+function findShardDirectories(shardsRoot) {
+  if (!existsSync(shardsRoot)) return []
+  const entries = readdirSync(shardsRoot, { withFileTypes: true })
+  const directories = entries.filter(entry => entry.isDirectory()).map(entry => join(shardsRoot, entry.name))
+  // The FLAT layout: the records sit directly in the root.
+  if (existsSync(join(shardsRoot, 'cases.jsonl'))) directories.push(shardsRoot)
+  return directories
+}
+
+function readShardCases(shardDirectory) {
+  const jsonl = join(shardDirectory, 'cases.jsonl')
+  if (!existsSync(jsonl)) return []
+  return readFileSync(jsonl, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line))
+}
+
+/** The runner specification a shard recorded. */
+function readShardSpec(shardDirectory) {
+  const path = join(shardDirectory, 'runner-spec.json')
+  if (!existsSync(path)) return null
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The parameters the RUNNER actually applied, as it recorded them.
+ *
+ * This is not what the workflow asked for: it is what the runner put on the
+ * child's command line. `null` when the shard recorded nothing, which is a
+ * failure when the aggregate expects a specific configuration.
+ */
+function readEffectiveParams(shardDirectory) {
+  const path = join(shardDirectory, 'effective-params.json')
+  if (!existsSync(path)) return null
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The skip REASONS this qualification accepts, as regular expressions.
+ *
+ * A skip is not a pass and it is not a failure: it is a case that did not
+ * run. Accepting it requires knowing WHY, so the accepted reasons are a
+ * committed policy rather than a tolerance for "some skips".
+ *
+ * @returns {RegExp[]|null} the accepted patterns, or null when the caller
+ *   does not classify skips.
+ */
+function acceptedSkipPatterns() {
+  const file = process.env.DSH_ACCEPTED_SKIPS_FILE
+  if (file === undefined || file === '') return null
+  if (!existsSync(file)) {
+    throw new Error(`the accepted-skip policy ${file} is missing: an absent policy must not disable the check`)
+  }
+  const patterns = readFileSync(file, 'utf8')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '' && !line.startsWith('#'))
+    .map(line => new RegExp(line, 'u'))
+  if (patterns.length === 0) {
+    throw new Error(`the accepted-skip policy ${file} states no reason: that would accept no skip at all, which is not a policy`)
+  }
+  return patterns
+}
+
+/**
+ * The shard argument a shard directory names.
+ *
+ * `product-diagnostics-shard-2-node24` is the artifact of `--shard=2/<total>`.
+ * A directory that does not name a shard has no expected index, so the
+ * comparison is skipped rather than invented.
+ */
+function shardIndexOf(directory, total) {
+  // `shard-2`, `product-diagnostics-shard-2-node24` — the index is the
+  // digits after `shard-`, and any `-node<version>` suffix is not part of
+  // the shard argument.
+  const match = /shard-(\d+)(?:-node[\d.]+)?$/u.exec(directory)
+  if (match === null) return null
+  return `${match[1]}/${total}`
+}
+
+/**
+ * A recorded file path in the TEST-root form the discovery rule uses.
+ *
+ * The reporter records the path relative to the repository root, because
+ * that is the form a reader of a case record wants. The discovery rule
+ * returns it relative to the test root. The comparison must be between
+ * the two FORMS of one path, so the repository prefix is removed here.
+ */
+function toTestRootPath(path) {
+  const normalized = path.split('\\').join('/')
+  return normalized.startsWith('test/') ? normalized.slice('test/'.length) : normalized
+}
+
+/**
+ * A baseline value that a qualification reads from a committed FILE.
+ *
+ * Three ways this must fail, because each of them would otherwise silently
+ * disable the comparison:
+ *
+ *   - the file is MISSING — the caller named a baseline that is not there;
+ *   - the file is EMPTY or unreadable — there is no number in it;
+ *   - the file does not hold an integer — it is not a baseline.
+ *
+ * `valueName` is the direct-value alternative. It is only consulted when no
+ * file is named, and an empty value there still means "no expectation".
+ * A QUALIFICATION must therefore name the file, not the value.
+ *
+ * @param {string} fileVar - the environment variable holding the path.
+ * @param {string} valueVar - the environment variable holding the value.
+ * @param {function(string, string): number} integer - the parser.
+ * @returns {number|null} the baseline, or null when none was named.
+ */
+function expectationFromFile(fileVar, valueVar, integer) {
+  const path = process.env[fileVar]
+  if (path === undefined || path === '') {
+    const raw = process.env[valueVar]
+    return raw === undefined || raw === '' ? null : integer(valueVar, raw)
+  }
+  if (!existsSync(path)) {
+    throw new Error(`the committed baseline ${path} (from ${fileVar}) is missing: a qualification cannot run without it`)
+  }
+  const raw = readFileSync(path, 'utf8').trim()
+  if (raw === '') {
+    throw new Error(`the committed baseline ${path} is empty: a qualification cannot run without a number`)
+  }
+  return integer(path, raw)
+}
+
+/**
+ * The identity and the baseline the shards must agree on.
+ *
+ * They come from the environment of the aggregate job, which is the run
+ * that is doing the aggregating. Every value is OPTIONAL at the level of
+ * this reader and REQUIRED at the level of the qualification it serves:
+ * a check that is not given an expectation does not run, and a workflow
+ * that wants the check must therefore pass the expectation.
+ *
+ * @returns {object} the expectations.
+ */
+function readExpectations() {
+  const integer = (name, raw) => {
+    const value = Number(raw)
+    // A malformed number is a FAILURE, not a missing expectation: a
+    // baseline that cannot be read must not silently disable the check.
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${name} must be a non-negative integer, got: ${raw}`)
+    }
+    return value
+  }
+  const number = (name) => {
+    const raw = process.env[name]
+    if (raw === undefined || raw === '') return null
+    return integer(name, raw)
+  }
+  return {
+    expectedSha: process.env.DSH_EXPECTED_SHA ?? null,
+    expectedRunId: process.env.DSH_EXPECTED_RUN_ID ?? null,
+    expectedRunAttempt: process.env.DSH_EXPECTED_RUN_ATTEMPT ?? null,
+    // A QUALIFICATION passes the baseline as a committed FILE, and a
+    // missing, unreadable, empty or malformed file is a FAILURE.
+    //
+    // The value form stays for callers that already have the number in
+    // hand, but a qualification must not be able to disable the check by
+    // passing an empty string: that is exactly how the case total came to
+    // be compared against nothing while every other gate passed.
+    expectedCases: expectationFromFile('DSH_EXPECTED_CASES_FILE', 'DSH_EXPECTED_CASES', integer),
+    expectedSkipped: expectedSkippedBaseline(),
+    // The concurrency the measurement claims to be about. `0` is not a
+    // level, so it cannot be written by accident; the workflow passes the
+    // resolved level (or omits it when the level is Node's default, which
+    // the runner records as `null`).
+    expectedConcurrency: expectedConcurrencyBaseline(),
+    acceptedSkips: acceptedSkipPatterns(),
+  }
+}
+
+/**
+ * The concurrency level the measurement claims to have applied.
+ *
+ * THREE states, because "the level is Node's default" and "there is no
+ * expectation" must not collapse into the same value:
+ *
+ *   - `undefined` — no level is asserted, so no concurrency check runs;
+ *   - `'default'` — the run claims Node's own default, so the runner must
+ *     have recorded `null` (no flag). This is the state that catches a run
+ *     that CLAIMS default and silently applied a number;
+ *   - a number — the run claims that explicit level.
+ */
+function expectedConcurrencyBaseline() {
+  const raw = process.env.DSH_EXPECTED_CONCURRENCY
+  if (raw === undefined || raw === '') return undefined
+  if (raw === 'default') return 'default'
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`DSH_EXPECTED_CONCURRENCY must be a positive integer or "default", got: ${raw}`)
+  }
+  return value
+}
+
+function main() {
+  const args = process.argv.slice(2)
+  const shardsIndex = args.indexOf('--shards')
+  const totalIndex = args.indexOf('--total')
+  const outIndex = args.indexOf('--out')
+  // The expected file list. It defaults to the lane's own file list, and
+  // may be overridden with a file that lists them — one per line — so the
+  // CLI can be exercised against a synthetic lane.
+  const filesIndex = args.indexOf('--expected-files')
+  // WHERE the baseline came from. A count on its own says nothing about
+  // which run produced it, and a qualification has to be able to answer
+  // that question from its own report.
+  const sourceIndex = args.indexOf('--baseline-source')
+  // The shape this run CLAIMED, as one line the context job resolved. It goes
+  // into the report so a reader never has to correlate the aggregate with the
+  // workflow log to learn which shard count and concurrency it proved.
+  const configIndex = args.indexOf('--effective-config')
+  if (shardsIndex === -1 || totalIndex === -1) {
+    console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>] [--expected-files <file>] [--baseline-source <text>] [--effective-config <text>]')
+    console.error('the expectations are read from the environment:')
+    console.error('  DSH_EXPECTED_SHA, DSH_EXPECTED_RUN_ID, DSH_EXPECTED_RUN_ATTEMPT,')
+    console.error('  DSH_EXPECTED_CASES_FILE / DSH_EXPECTED_CASES,')
+    console.error('  DSH_EXPECTED_SKIPPED_FILE / DSH_EXPECTED_SKIPPED,')
+    console.error('  DSH_EXPECTED_CONCURRENCY, DSH_ACCEPTED_SKIPS_FILE')
+    process.exit(2)
+  }
+  const expectedFiles = filesIndex === -1
+    ? undefined
+    : new Set(readFileSync(args[filesIndex + 1], 'utf8').split('\n').filter(Boolean))
+  report(
+    verifyShards({
+      shardsRoot: resolve(args[shardsIndex + 1]),
+      total: Number(args[totalIndex + 1]),
+      expectedFiles,
+      baselineSource: sourceIndex === -1 ? null : args[sourceIndex + 1],
+      effectiveConfig: configIndex === -1 ? null : args[configIndex + 1],
+      ...readExpectations(),
+    }),
+    outIndex,
+    outIndex === -1 ? '' : args[outIndex + 1],
+  )
+}
+
+/**
+ * Verify that the shards are a partition of the lane.
+ *
+ * The function is exported so the gate test can drive it with synthetic
+ * shards: a fail-closed proof that is only exercised by a real CI run
+ * cannot be shown to fail closed.
+ *
+ * @param {{shardsRoot: string, total: number, expectedSha?: string|null, expectedRunId?: string|null, expectedFiles?: Set<string>}} options
+ * @returns {object} the aggregate report, including its failures.
+ */
+export function verifyShards({
+  shardsRoot,
+  total,
+  expectedSha = null,
+  expectedRunId = null,
+  expectedRunAttempt = null,
+  expectedCases = null,
+  expectedSkipped = null,
+  expectedConcurrency = undefined,
+  acceptedSkips = undefined,
+  baselineSource = null,
+  effectiveConfig = null,
+  expectedFiles: expectedFilesOverride,
+}) {
+  const failures = []
+  const acceptedSkipPatternsOrNone = acceptedSkips === undefined ? null : acceptedSkips
+
+  // The lane's own file list, resolved by the SAME discovery rule the
+  // runner uses. This is the authority the shards are compared against.
+  const lane = LANES[LANE]
+  const expectedFiles = expectedFilesOverride ?? new Set(
+    resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? []),
+  )
+
+  // The shards' own file lists, from the case records each shard produced.
+  //
+  // The shard directories are where each shard's records live. The
+  // download puts them in a per-artifact subdirectory — EXCEPT when a
+  // single artifact matched the pattern, which `actions/download-artifact`
+  // extracts DIRECTLY into the target directory. So the records are found
+  // by looking for them, not by assuming a layout.
+  const shardDirectories = findShardDirectories(shardsRoot)
+
+  // The shard directories are grouped by the Node version they ran on:
+  // `<shard>-node<version>`. Each group is its OWN complete partition of
+  // the lane, and each one has to prove that its union is the whole lane
+  // and that its shards are pairwise disjoint.
+  //
+  // They must NOT be compared against each other: two Node versions run
+  // the same files, so their file lists are identical, and a cross-version
+  // comparison would report every file as belonging to two shards.
+  const groups = new Map()
+  for (const directory of shardDirectories) {
+    const version = nodeVersionOf(directory)
+    if (!groups.has(version)) groups.set(version, { version, directories: [], cases: 0, skipped: 0 })
+    groups.get(version).directories.push(directory)
+  }
+  if (groups.size === 0) {
+    failures.push(`expected ${total} shard directories, found 0`)
+  }
+
+  let totalCases = 0
+  let totalSkipped = 0
+  const shards = []
+  const versions = []
+  // Every Node version is a complete partition of the lane, so they all
+  // observe the SAME file count. The first group's is the report's.
+  let observedFileCount = 0
+
+  for (const group of groups.values()) {
+    const { version, directories } = group
+    const seenFiles = new Map()
+    // The version's own counts are filled in after its shards are counted.
+    if (directories.length !== total) {
+      failures.push(`expected ${total} shard directories for Node ${version}, found ${directories.length}: ${directories.join(', ')}`)
+    }
+    for (const shardDirectory of directories) {
+    const directory = basename(shardDirectory)
+    const cases = readShardCases(shardDirectory)
+    const spec = readShardSpec(shardDirectory)
+    if (cases.length === 0) {
+      failures.push(`the shard ${directory} produced no case record: its run did not happen or did not complete`)
+      continue
+    }
+    // The FILE entries are the shard's own file list: a file is reported
+    // as one case whose name is the file's path.
+    //
+    // The reporter records the path relative to the REPOSITORY root
+    // (`test/app/one.test.ts`), while the discovery rule returns it
+    // relative to the TEST root (`app/one.test.ts`). Both forms are
+    // normalised to the test-root form here, so the comparison is between
+    // two forms of the same path and not between two different paths.
+    const shardFiles = cases
+      .filter(record => record.name === record.file)
+      .map(record => toTestRootPath(record.file))
+    for (const file of shardFiles) {
+      if (seenFiles.has(file)) {
+        failures.push(`the file ${file} belongs to two shards (${seenFiles.get(file)} and ${directory})`)
+      } else {
+        seenFiles.set(file, directory)
+      }
+    }
+    const shardCases = cases.filter(record => record.name !== record.file)
+    const skipped = shardCases.filter(record => record.result === 'skip').length
+    // A shard that produced records is NOT proof that its cases RAN.
+    //
+    // The check is an ALLOW LIST, not a deny list: a case counts as
+    // qualified only when its outcome is one this qualification accepts.
+    // A deny list would pass a record whose `result` is missing (a
+    // truncated or malformed JSONL line) and a `todo` (a case Node
+    // recognised but did not prove), because neither is `fail`,
+    // `cancelled` or `unknown` — and neither changes the case count or
+    // the skip count, so the aggregate would accept a shard set that
+    // never proved what it claims.
+    //
+    // `pass` and `skip` are the accepted outcomes: a case that ran and
+    // passed, or a case that was skipped for a reason this qualification
+    // accepts. A `todo` is a DECISION, not a pass — if a todo is ever
+    // acceptable it has to be an explicit one.
+    const ACCEPTED_RESULTS = new Set(['pass', 'skip'])
+    const unacceptable = shardCases.filter(record => !ACCEPTED_RESULTS.has(record.result))
+    if (unacceptable.length > 0) {
+      const byResult = new Map()
+      for (const record of unacceptable) {
+        const key = record.result === undefined ? '(no result)' : String(record.result)
+        byResult.set(key, (byResult.get(key) ?? 0) + 1)
+      }
+      const summary = [...byResult.entries()].map(([result, count]) => `${count} ${result}`).join(', ')
+      failures.push(`the shard ${directory} reported ${unacceptable.length} case(s) whose outcome is not accepted: ${summary}`)
+    }
+    const failed = shardCases.filter(record => record.result === 'fail')
+    const cancelled = shardCases.filter(record => record.result === 'cancelled')
+    if (failed.length > 0) {
+      failures.push(`the shard ${directory} reported ${failed.length} failing case(s): ${failed.slice(0, 3).map(record => record.name).join('; ')}`)
+    }
+    if (cancelled.length > 0) {
+      failures.push(`the shard ${directory} reported ${cancelled.length} cancelled case(s)`)
+    }
+    // Every skip must state a reason, and the reason must be one this
+    // qualification accepts.
+    //
+    // A count cannot do this job: 37 skips is evidence only if the 37 are
+    // the SAME KIND of skip. A case that starts skipping itself for a new
+    // reason — a broken fixture, a missing tool the runner used to have —
+    // would keep the count identical and look like a healthy run.
+    if (acceptedSkipPatternsOrNone !== null && skipped > 0) {
+      const unclassified = []
+      for (const record of shardCases) {
+        if (record.result !== 'skip') continue
+        const reason = record.skipReason
+        if (reason === null || reason === undefined || reason === '') {
+          unclassified.push(`${record.name} (no reason stated)`)
+          continue
+        }
+        if (!acceptedSkipPatternsOrNone.some(pattern => pattern.test(reason))) {
+          unclassified.push(`${record.name} (${reason})`)
+        }
+      }
+      if (unclassified.length > 0) {
+        failures.push(`the shard ${directory} skipped ${unclassified.length} case(s) for a reason the policy does not accept: ${unclassified.slice(0, 3).join('; ')}`)
+      }
+    }
+    // The shard must record the run it belongs to. Without that identity
+    // a shard from a DIFFERENT run could be counted towards this one, and
+    // the aggregate would claim a coverage it never measured.
+    //
+    // The identity is checked as a WHOLE: when the aggregate knows the
+    // expected SHA or run id, a shard that does not carry it — because the
+    // field is missing, null or empty — is rejected too. A check that only
+    // compares the field when it happens to be present fails OPEN on a
+    // specification that records nothing.
+    if (spec === null) {
+      failures.push(`the shard ${directory} recorded no runner specification: its identity is unknown`)
+    } else {
+      if (expectedSha !== null) {
+        if (spec.sha === undefined || spec.sha === null || spec.sha === '') {
+          failures.push(`the shard ${directory} recorded no commit SHA: its identity is unknown`)
+        } else if (spec.sha !== expectedSha) {
+          failures.push(`the shard ${directory} ran against ${spec.sha}, not ${expectedSha}`)
+        }
+      }
+      if (expectedRunId !== null) {
+        if (spec.runId === undefined || spec.runId === null || spec.runId === '') {
+          failures.push(`the shard ${directory} recorded no run id: its identity is unknown`)
+        } else if (spec.runId !== expectedRunId) {
+          failures.push(`the shard ${directory} belongs to run ${spec.runId}, not ${expectedRunId}`)
+        }
+      }
+      if (expectedRunAttempt !== null) {
+        // A re-run of the same workflow has the same run id and the same
+        // commit, and only the attempt tells them apart. An artifact from
+        // an earlier attempt must not be counted towards this one.
+        if (spec.runAttempt === undefined || spec.runAttempt === null || spec.runAttempt === '') {
+          failures.push(`the shard ${directory} recorded no run attempt: its identity is unknown`)
+        } else if (String(spec.runAttempt) !== String(expectedRunAttempt)) {
+          failures.push(`the shard ${directory} belongs to attempt ${spec.runAttempt}, not ${expectedRunAttempt}`)
+        }
+      }
+    }
+    totalCases += shardCases.length
+    totalSkipped += skipped
+    group.cases += shardCases.length
+    group.skipped += skipped
+    // The EFFECTIVE parameters the runner applied.
+    //
+    // The workflow knows what it intended; the runner recorded what it put
+    // on the child's command line. Those two differ when an argument is
+    // accepted and then dropped — which is exactly how five CI runs were
+    // once reported as a concurrency comparison while every one of them ran
+    // at Node's default.
+    //
+    // A measurement whose applied parameters are not the ones it claims is
+    // not a measurement of that configuration, so a mismatch FAILS.
+    // The shard INDEX is part of the identity: the directory names the
+    // shard the artifact belongs to, and the runner recorded the shard it
+    // was given. If they disagree, the artifact is filed under a shard
+    // whose coverage it does not hold.
+    //
+    // The concurrency is checked only when the run ASSERTS a level. The
+    // check exists because an argument accepted and then dropped is not
+    // hypothetical: five CI runs were once reported as a concurrency
+    // comparison while every one of them ran at Node's default.
+    const applied = readEffectiveParams(shardDirectory)
+    if (applied === null) {
+      failures.push(`the shard ${directory} recorded no effective parameters: what it actually ran is unknown`)
+    } else {
+      const expectedShard = shardIndexOf(directory, total)
+      if (expectedShard !== null && applied.shard !== expectedShard) {
+        failures.push(`the shard ${directory} ran the shard ${applied.shard}, not ${expectedShard}`)
+      }
+      if (expectedConcurrency === 'default') {
+        if (applied.testConcurrency !== null) {
+          failures.push(`the shard ${directory} claims Node's default concurrency but ran at ${applied.testConcurrency}`)
+        }
+      } else if (expectedConcurrency !== undefined && applied.testConcurrency !== expectedConcurrency) {
+        const actual = applied.testConcurrency === null ? "Node's default" : String(applied.testConcurrency)
+        failures.push(`the shard ${directory} ran at ${actual}, not the measured ${expectedConcurrency}`)
+      }
+    }
+    shards.push({
+      shard: directory,
+      fileCount: shardFiles.length,
+      caseCount: shardCases.length,
+      skipped,
+      failed: failed.length,
+      cancelled: cancelled.length,
+      sha: spec?.sha ?? null,
+      runId: spec?.runId ?? null,
+      applied: applied === null ? null : {
+        shard: applied.shard,
+        testConcurrency: applied.testConcurrency,
+        laneFileCount: applied.laneFileCount,
+      },
+      wallClockSeconds: spec?.wallClockSeconds ?? null,
+      availableParallelism: spec?.cpu?.availableParallelism ?? null,
+    })
+    }
+
+    versions.push({ node: version, shardCount: directories.length, cases: group.cases, skipped: group.skipped })
+
+    // The union must be the whole lane — for THIS Node version.
+    if (versions.length === 1) observedFileCount = seenFiles.size
+    for (const file of expectedFiles) {
+      if (!seenFiles.has(file)) {
+        failures.push(`the file ${file} belongs to no shard on Node ${version}: its cases never ran`)
+      }
+    }
+    for (const file of seenFiles.keys()) {
+      if (!expectedFiles.has(file)) {
+        failures.push(`the file ${file} is not part of the ${LANE} lane (Node ${version})`)
+      }
+    }
+  }
+
+  // The case and skip BASELINE.
+  //
+  // The file partition proves that every test FILE was covered. It does
+  // NOT prove that every CASE inside those files was recorded: a recorder
+  // that silently dropped one case would still leave every file covered.
+  // The counts are therefore compared against an independent baseline — the
+  // unsharded lane's own totals — and a difference in either direction
+  // fails: a missing case is a lost case, and an extra skip is a case that
+  // did not run.
+  //
+  // The counts are compared PER GROUP, not across the whole run: each Node
+  // version is its own partition, and a version may skip a different
+  // number of cases than another — the optional-bundle skip depends on
+  // what that version's environment provides.
+  for (const group of groups.values()) {
+    const cases = group.cases
+    const skipped = group.skipped
+    if (expectedCases !== null && !Number.isNaN(expectedCases)) {
+      if (cases !== expectedCases) {
+        failures.push(`the shards on Node ${group.version} recorded ${cases} case(s), but the baseline is ${expectedCases}`)
+      }
+    }
+    // The expected skip count may be a PER-VERSION map: a Node version can
+    // legitimately skip a different number of cases than another — the
+    // optional-bundle skip depends on what that version's environment
+    // provides.
+    const expected = expectedSkippedFor(group.version, expectedSkipped)
+    if (expected !== null && !Number.isNaN(expected)) {
+      if (skipped !== expected) {
+        failures.push(`the shards on Node ${group.version} recorded ${skipped} skipped case(s), but the baseline for that version is ${expected}`)
+      }
+    }
+  }
+
+  return {
+    lane: LANE,
+    shardTotal: total,
+    expectedFileCount: expectedFiles.size,
+    observedFileCount: observedFileCount,
+    totalCases,
+    totalSkipped,
+    expectedCases,
+    expectedSkipped,
+    // Provenance, so a reader of the report knows which run the baseline
+    // came from without correlating it with a job log.
+    baselineSource,
+    // The shape the context job resolved for THIS run: shard count, matrix
+    // cap, intra-shard concurrency and mode, in one line.
+    effectiveConfig,
+    // What the measurement CLAIMED, in the same shape the shards recorded
+    // what they APPLIED, so a reader can compare the two sides directly.
+    expectedConcurrency: expectedConcurrency === undefined ? null : expectedConcurrency,
+    // Whether the skip REASONS were classified, and against how many
+    // accepted classes. A reader must be able to tell "no unaccepted skip"
+    // from "no policy was applied".
+    skipPolicy: acceptedSkipPatternsOrNone === null
+      ? null
+      : { acceptedClasses: acceptedSkipPatternsOrNone.length, enforced: true },
+    shards,
+    versions,
+    failures,
+  }
+}
+
+function report(aggregate, outIndex, outPath) {
+  if (outIndex !== -1) {
+    writeFileSync(outPath, `${JSON.stringify(aggregate, null, 2)}\n`)
+  }
+
+  console.log(`lane              ${aggregate.lane}`)
+  console.log(`shards            ${aggregate.shards.length}/${aggregate.shardTotal}`)
+  console.log(`files             ${aggregate.observedFileCount}/${aggregate.expectedFileCount}`)
+  console.log(`cases             ${aggregate.totalCases}`)
+  console.log(`skipped           ${aggregate.totalSkipped}`)
+  for (const shard of aggregate.shards) {
+    console.log(`  ${shard.shard}: files=${shard.fileCount} cases=${shard.caseCount} skipped=${shard.skipped} failed=${shard.failed} wall=${shard.wallClockSeconds}s`)
+  }
+
+  if (aggregate.failures.length > 0) {
+    console.error(`\nthe shard aggregate FAILED (${aggregate.failures.length}):`)
+    for (const failure of aggregate.failures) console.error(`  - ${failure}`)
+    process.exit(1)
+  }
+  console.log('\nthe shard aggregate is the whole lane')
+}
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+}
