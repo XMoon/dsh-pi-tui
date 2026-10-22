@@ -394,13 +394,9 @@ const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   other: 'Other settings',
 }
 
-/** The categories whose right column is a REAL page (About, Models, Account)
- * instead of the legacy L0/L1/L2 configuration panes. */
-const DIRECT_CATEGORIES: readonly SettingsWorkspaceDirectCategoryId[] = ['about', 'models', 'account']
-
 /** Whether one category is a direct content page. */
 function isDirectCategory(category: SettingsWorkspaceCategoryId): category is SettingsWorkspaceDirectCategoryId {
-  return (DIRECT_CATEGORIES as readonly SettingsWorkspaceCategoryId[]).includes(category)
+  return category === 'about' || category === 'models' || category === 'account'
 }
 
 /** The typed guard for a painted category id (a hit target never casts). */
