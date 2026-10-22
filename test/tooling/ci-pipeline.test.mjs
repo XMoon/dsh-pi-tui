@@ -17,14 +17,14 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { parse as parseYaml } from 'yaml'
 
-import { depsPlan } from '../../scripts/ci-deps.mjs'
+import { depsPlan, planEnvironment, runPlan } from '../../scripts/ci-deps.mjs'
 import {
   MODE_STATUS,
   RELEASE_PHASES,
@@ -361,4 +361,80 @@ test('the accelerated DAG is the ONLY product-lane path, on every event', () => 
     const condition = typeof job.if === 'string' ? job.if : ''
     assert.doesNotMatch(condition, /github\.event_name == 'pull_request'/u, `${name} is gated to PR events`)
   }
+})
+
+test('the install RUNS with the planned environment, not merely reporting it', () => {
+  // `GITHUB_ENV` is the environment of the LATER steps. Writing the plan's
+  // variables there does nothing for the install this script is about to run,
+  // so `pnpm install` used to inherit whatever registry the runner had —
+  // while every later step read the public one. Asserting `depsPlan().env`
+  // alone cannot see that: this case drives a REAL child process and checks
+  // what it observed.
+  const npm = depsPlan({ mode: 'npm', workspace: '/w' })
+  const probe = (plan) => ({
+    ...plan,
+    commands: [[process.execPath, '-e', 'process.stdout.write(String(process.env.NPM_CONFIG_REGISTRY) + "|" + String(process.env.TARBALL_SMOKE_SKIP_INSTALL))']],
+  })
+  const result = runPlan(probe(npm), { stdio: ['ignore', 'pipe', 'pipe'] })
+  assert.equal(result.status, 0, String(result.stderr))
+  assert.equal(String(result.stdout), 'https://registry.npmjs.org/|undefined',
+    'the npm install must see the registry pin, and must NOT see the source-only install skip')
+
+  // The same root cause reaches the Source Mode preparation: its exported
+  // variables must be in the child's environment too.
+  const source = depsPlan({ mode: 'source', distribution: '/pack', workspace: '/w' })
+  const sourced = runPlan(probe(source), { stdio: ['ignore', 'pipe', 'pipe'] })
+  assert.equal(sourced.status, 0, String(sourced.stderr))
+  assert.equal(String(sourced.stdout), 'undefined|1')
+})
+
+test('the inherited environment is preserved, and the plan wins on a conflict', () => {
+  // The child still needs PATH, HOME, GITHUB_* and the rest of the job
+  // environment; the plan only overrides the variables it decides.
+  const plan = depsPlan({ mode: 'npm', workspace: '/w' })
+  const environment = planEnvironment(plan, { PATH: '/usr/bin', NPM_CONFIG_REGISTRY: 'http://mirror.invalid/' })
+  assert.equal(environment.PATH, '/usr/bin')
+  assert.equal(environment.NPM_CONFIG_REGISTRY, 'https://registry.npmjs.org/',
+    'a runner-level mirror must not survive the plan')
+})
+
+test('BOTH mode-scoped baselines exist, parse, and are selected by the aggregate', () => {
+  // The aggregate derives its file names from the mode. A missing set is not a
+  // weaker check — it is a hard stop the moment `next` selects Source Mode, and
+  // the failure would land on whoever flips that policy rather than here. So
+  // both sets are part of the shipped tree, and each one has to be usable.
+  const prefixes = { npm: 'scripts/measurement', source: 'scripts/measurement-source' }
+  for (const [mode, prefix] of Object.entries(prefixes)) {
+    for (const suffix of ['expected-cases.txt', 'expected-skipped.txt', 'accepted-skips.txt', 'baseline-source.txt']) {
+      assert.ok(existsSync(join(ROOT, `${prefix}-${suffix}`)), `the ${mode} baseline file ${prefix}-${suffix} is missing`)
+    }
+    assert.match(readFileSync(join(ROOT, `${prefix}-expected-cases.txt`), 'utf8').trim(), /^\d+$/u, `${mode} case count`)
+    assert.match(readFileSync(join(ROOT, `${prefix}-expected-skipped.txt`), 'utf8').trim(), /^\d+$/u, `${mode} skip count`)
+    const policy = readFileSync(join(ROOT, `${prefix}-accepted-skips.txt`), 'utf8')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '' && !line.startsWith('#'))
+    assert.ok(policy.length >= 1, `${mode} accepts no skip reason at all, which is not a policy`)
+    for (const line of policy) assert.doesNotThrow(() => new RegExp(line, 'u'), `${mode} policy line is not a regex: ${line}`)
+    const provenance = readFileSync(join(ROOT, `${prefix}-baseline-source.txt`), 'utf8').trim()
+    assert.ok(provenance.length > 0, `${mode} baseline has no provenance`)
+    assert.equal(provenance.includes('\n'), false,
+      `${mode} provenance must stay a single line: the aggregate passes it as one argument`)
+  }
+
+  // The CASE count is a property of the TEST TREE, not of the dependency
+  // graph, so the two modes must agree. A disagreement means one of the files
+  // was copied from an older tree instead of measured — which is exactly how a
+  // stale 9122 could certify a 493-file tree.
+  assert.equal(
+    readFileSync(join(ROOT, 'scripts', 'measurement-source-expected-cases.txt'), 'utf8').trim(),
+    readFileSync(join(ROOT, 'scripts', 'measurement-expected-cases.txt'), 'utf8').trim(),
+  )
+
+  // And the aggregate must select them BY MODE: a hardcoded npm prefix would
+  // leave the source files decorative while a source run read npm numbers.
+  const step = workflow().jobs.aggregate.steps.find(entry => typeof entry.run === 'string' && entry.run.includes('verify-shards'))
+  assert.match(step.run, /npm\) PREFIX=scripts\/measurement ;;/u)
+  assert.match(step.run, /source\) PREFIX=scripts\/measurement-source ;;/u)
+  assert.match(step.run, /DSH_ACCEPTED_SKIPS_FILE="\$PREFIX-accepted-skips\.txt"/u)
 })

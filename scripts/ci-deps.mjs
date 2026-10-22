@@ -86,6 +86,40 @@ export function depsPlan({ mode, distribution, workspace }) {
   throw new Error(`the DSH mode '${mode}' is not one this pipeline prepares dependencies for`)
 }
 
+/**
+ * The environment a planned command runs with.
+ *
+ * `GITHUB_ENV` is the environment of the LATER STEPS, not of this process:
+ * writing the plan's variables there does nothing for the install this script
+ * is about to run. Without merging them here, `pnpm install` would resolve
+ * against whatever registry the runner happens to be configured with, while
+ * every later step reads the public one — the same silent divergence the
+ * inline `NPM_CONFIG_REGISTRY=... pnpm install` form used to prevent.
+ *
+ * @param {ReturnType<typeof depsPlan>} plan - the plan.
+ * @param {NodeJS.ProcessEnv} base - the inherited environment.
+ * @returns {NodeJS.ProcessEnv} the child environment.
+ */
+export function planEnvironment(plan, base = process.env) {
+  return { ...base, ...plan.env }
+}
+
+/**
+ * Run the plan's command with the plan's environment.
+ *
+ * `spawn`, `stdio` and `cwd` are injectable so the contract can be driven
+ * against a REAL child process in a test — asserting the plan object alone
+ * would have missed exactly the defect this function exists to fix.
+ *
+ * @param {ReturnType<typeof depsPlan>} plan - the plan.
+ * @param {{spawn?: Function, stdio?: any, base?: NodeJS.ProcessEnv, cwd?: string}} [options] - overrides.
+ * @returns {import('node:child_process').SpawnSyncReturns<any>} the child result.
+ */
+export function runPlan(plan, { spawn = spawnSync, stdio = 'inherit', base = process.env, cwd = ROOT } = {}) {
+  const [command, ...commandArgs] = plan.commands[0]
+  return spawn(command, commandArgs, { stdio, cwd, env: planEnvironment(plan, base) })
+}
+
 function main() {
   const args = process.argv.slice(2)
   const valueOf = (name) => {
@@ -116,7 +150,7 @@ function main() {
   const [command, ...commandArgs] = plan.commands[0]
   // eslint-disable-next-line no-console -- the child's output IS the job log
   console.log(`preparing ${plan.mode} dependencies: ${command} ${commandArgs.join(' ')}`)
-  const result = spawnSync(command, commandArgs, { stdio: 'inherit', cwd: ROOT })
+  const result = runPlan(plan)
   if (result.status !== 0) throw new Error(`dependency preparation failed: ${command} exited ${result.status}`)
 }
 
