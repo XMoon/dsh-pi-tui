@@ -14,8 +14,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,6 +22,7 @@ import test from 'node:test'
 import { parse as parseYaml } from 'yaml'
 
 import { normalizePackInvocation, packagingInputDigest } from '../../scripts/pack-equivalence-input.mjs'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'pack-equivalence-input.mjs')
@@ -33,9 +33,7 @@ function cli(args) {
 }
 
 function scratch(t) {
-  const directory = mkdtempSync(join(tmpdir(), 'dsh-pack-eq-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  return directory
+  return testLifecycle(t).tempDir('dsh-pack-eq-')
 }
 
 test('the digest names the inputs the equality depends on', () => {
