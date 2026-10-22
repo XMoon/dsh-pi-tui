@@ -67,6 +67,12 @@ export interface ModelsProviderRow {
    * here.
    */
   readonly canProvisionProfile: boolean
+  /**
+   * The provider option's group: a CONFIGURED route, an AVAILABLE directory
+   * route this installation offers, or a hand-declared (custom) route. It is
+   * absent for a sign-in flow that no provider profile addresses.
+   */
+  readonly group?: 'configured' | 'available' | 'custom'
   readonly methods: readonly { readonly id: string; readonly label: string }[]
   readonly inFlight: boolean
   readonly profile: ProviderProfileFacts
@@ -1760,6 +1766,7 @@ export class ModelsWorkspacePage implements Component {
         return [
           color.warning('Stale — the last provider read did not complete'),
           color.textDim(sanitizedPhysicalLine(this.readFailure ?? 'the read failed')),
+          color.textDim('Press r to refresh; an authority-dependent write waits for the fresh read.'),
         ]
       case 'error':
         return [
@@ -1879,16 +1886,19 @@ export class ModelsWorkspacePage implements Component {
     } else this.copyValue = undefined
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     const actions: ActionLine[] = []
+    // An authority-dependent write waits for the FRESH read: while a refresh
+    // is in flight, or the last refresh failed (a stale snapshot), the
+    // previous answer is not a confirmation.
+    const mayWrite = this.readState === 'ready'
     if (row.kind === 'authorization' && row.methods.length > 0) {
       actions.push({
         id: 'provider:auth',
         label: row.inFlight ? 'Sign-in in progress' : this.auth?.targetIdentity === row.identity && this.auth.phase === 'authorized' ? 'Sign in again (provider)' : 'Sign in (provider)',
-        enabled: !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed'),
+        // A native sign-in writes a credential record: it waits for the fresh
+        // read like every other authority-dependent write.
+        enabled: mayWrite && !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed'),
       })
     }
-    // An authority-dependent write waits for the fresh read: while a
-    // refresh is in flight the previous answer is not a confirmation.
-    const mayWrite = this.readState !== 'refreshing'
     if (row.kind === 'reference' || (row.ref !== undefined && row.namesCredential)) {
       actions.push({ id: 'provider:reference', label: 'Configure API Key…', enabled: mayWrite })
     }
@@ -2002,26 +2012,29 @@ export class ModelsWorkspacePage implements Component {
   }
 
   /**
-   * The directory routes that are NOT configured yet. A hand-declared route
-   * is not a catalog entry (the custom wizard owns it); a route with a
-   * native flow is offered as a sign-in instead.
+   * The providers this installation offers and that are NOT configured yet:
+   * the unconfigured directory routes. A hand-declared route is not a
+   * catalog entry (the custom wizard owns it).
    */
   private availableCatalogRows(): readonly ModelsProviderRow[] {
-    return this.providerRows.filter(row =>
-      row.kind === 'reference'
-      && !row.profile.configured
-      && !row.declared)
+    return this.providerRows.filter(row => row.group === 'available')
   }
 
-  /** The sign-in flows no configured provider profile addresses: the
-   *  route-less flows and the unconfigured routes with a native flow. */
+  /**
+   * The sign-in flows that no provider profile addresses: a foreign-scope
+   * flow, which is not a provider row at all.
+   */
   private otherSignInRows(): readonly ModelsProviderRow[] {
-    return this.providerRows.filter(row =>
-      row.kind === 'authorization' && !row.profile.configured)
+    return this.providerRows.filter(row => row.kind === 'authorization' && row.route === '')
   }
 
-  /** The catalog entry's action hint. */
+  /**
+   * The catalog entry's action hint: the operation this page can really
+   * perform for it.
+   */
   private catalogHint(row: ModelsProviderRow): { readonly word: string; readonly tone: 'success' | 'warning' | 'muted' } {
+    // A provider-native flow is the supported operation for that route.
+    if (row.kind === 'authorization') return { word: 'Sign in →', tone: 'muted' }
     if (row.canProvisionProfile) return { word: 'Set up… →', tone: 'muted' }
     return { word: 'Manual setup only', tone: 'warning' }
   }

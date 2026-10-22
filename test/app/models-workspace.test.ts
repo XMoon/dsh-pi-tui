@@ -1558,7 +1558,7 @@ test('the HOME lists only the configured providers and the Add catalog holds the
     {
       // An UNCONFIGURED directory route: an Add-catalog entry, never a HOME row.
       kind: 'reference', identity: 'route:openrouter', route: 'openrouter', label: 'OpenRouter', ref: 'OPENROUTER_API_KEY',
-      configured: false, declared: false, namesCredential: false, canProvisionProfile: true,
+      configured: false, declared: false, namesCredential: false, canProvisionProfile: true, group: 'available',
       methods: [], inFlight: false,
       profile: { route: 'openrouter', configured: false, displayName: 'OpenRouter', models: [] },
     },
@@ -1657,6 +1657,22 @@ test('the R key does not read the provider catalog in the input path', async () 
   assert.equal(reads, 1, 'the R key must not read the catalog in the input handler')
   await flush()
   assert.equal(reads, 2)
+})
+
+test('a stale snapshot disables the authority-dependent writes', async () => {
+  const { source } = fakeSource()
+  // The backend's last known values, explicitly not current.
+  source.readCatalog = async () => ({ kind: 'stale' as const, rows: makeRows() })
+  const page = openWith(source, { view: 'provider', route: 'acme' }, 24)
+  await flush()
+  const frame = viewText(page)
+  assert.match(frame, /Provider · Acme Gateway/u)
+  assert.match(frame, /Stale/u, 'the page states that the snapshot is not current')
+  // The first action of a reference detail is the API-key write: it waits
+  // for the fresh read.
+  page.handleInput('\r')
+  await flush()
+  assert.doesNotMatch(viewText(page), /API Key Reference/u, 'a stale snapshot must not open the key editor')
 })
 
 test('the Models list may yield the focus to the Settings category rail', () => {
