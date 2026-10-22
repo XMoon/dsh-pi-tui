@@ -158,8 +158,9 @@ for await (const input of session) {
     // client's response is the FLOW's observation, not this record.
     if (input.key.name === 'a') {
       // The OFFICIAL scroll op, aimed at a node the client really knows: the
-      // LAST row of the long surface. 'start' is the scroll container's start,
-      // so the client's own virtualized view moves back to the head.
+      // LAST row of the long surface. It REQUESTS a scroll to the start; what
+      // the client does with that request is the FLOW's measurement, not an
+      // outcome this subject may assume.
       const ids = reconciledIds(current)
       const last = ids[ids.length - 1]
       if (last !== undefined) surface.scroll(last, 'start')
