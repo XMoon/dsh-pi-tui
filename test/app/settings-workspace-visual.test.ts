@@ -29,6 +29,7 @@ import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
 import type { TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
@@ -3604,6 +3605,9 @@ test('a resize cycle keeps the selected category, the content focus and the page
   await h.openHome()
   await h.walkToCategory('Models')
   assert.match(h.view(), /Models & Credentials/u, 'the Models page is painted')
+  // The Models page reads its provider catalog after its first frame: wait
+  // for the settled projection before the cycle compares it.
+  await waitForFrame(h.view, frame => !/Loading provider configuration/u.test(frame), () => h.vt.waitForRender(), 'the Models catalog must settle before the resize cycle')
   const modelsBody = h.view()
 
   for (const [columns, rows] of [[72, 24], [44, 20], [100, 40], [200, 50]] as const) {
