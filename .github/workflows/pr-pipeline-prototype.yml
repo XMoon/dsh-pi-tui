@@ -70,16 +70,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      # The EFFECTIVE mode this run uses, and WHERE it came from. A normal run
-      # is `resolver`; the prototype's Source Mode test entry can only change
-      # it on a prototype branch, and it says so in `mode_origin`.
-      mode: ${{ steps.mode.outputs.mode }}
-      mode_origin: ${{ steps.mode.outputs.mode_origin }}
-      source_ref: ${{ steps.mode.outputs.source_ref }}
-      source_expected_version: ${{ steps.mode.outputs.source_expected_version }}
-      # What the PRODUCTION resolver said for this event, kept as its own
-      # output so an overridden run can never be read as routing evidence.
-      resolved_mode: ${{ steps.resolved.outputs.mode }}
+      mode: ${{ steps.context.outputs.mode }}
+      source_ref: ${{ steps.context.outputs.source_ref }}
+      source_expected_version: ${{ steps.context.outputs.source_expected_version }}
       fault: ${{ steps.fault.outputs.fault }}
       shard_total: ${{ steps.shards.outputs.shard_total }}
       shards: ${{ steps.shards.outputs.shards }}
@@ -97,55 +90,37 @@ jobs:
           package-manager-cache: false
 
       - name: Resolve the DSH mode
-        id: resolved
+        id: context
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        # The mode comes from the repository's OWN resolver, with no
-        # override. Its answer is recorded even when the test entry below
-        # replaces it, because "what production routing decides" is a fact
-        # about this event and it must not disappear from the run.
+        # The mode comes from the repository's OWN resolver, with no override.
+        #
+        # Source Mode IS wired here — pinned distribution, one dependency
+        # preparation, the leak gate taking the distribution, the equivalence
+        # proof running its own two packs, the downstream fresh-install probe —
+        # and it was QUALIFIED end to end on this branch through an
+        # Owner-approved test entry (runs 39701407942 and 39702749092: pinned
+        # 687f282e built into 343 tarballs, 4 shards, 9122 cases / 37 skips /
+        # 0 failures, 8/8 smokes, Source leak gate, Node 22/24/26 fresh
+        # installs, qualified artifact 858c1199...).
+        #
+        # That ENTRY is withdrawn. A committed switch that can turn a branch
+        # into a Source Mode run is not something to leave lying around, and
+        # the resolver decides again: a source run needs `next`'s tracked
+        # policy, exactly as before.
         run: node scripts/dsh-ci-context.mjs
 
-      # THE OWNER-APPROVED TEST ENTRY (decision B).
-      #
-      # Source Mode cannot be RESOLVED here: `dsh-ci-context.mjs` derives
-      # `source` only for a push to `next` (or a PR targeting it) when the
-      # tracked policy selects source, and it refuses a forced mode that
-      # disagrees. So the experiment needs an entry that is not the resolver,
-      # and this is the only one: a committed switch, bound to this
-      # prototype's branches, that takes the pin from the tracked
-      # `test/compat/dsh-source.json` rather than inventing one.
-      #
-      # Every run states BOTH answers. An overridden run is an EXPERIMENT: it
-      # says nothing about whether the production routing selects Source
-      # Mode, and the pipeline refuses to qualify a source run that did not
-      # come through here (`pipeline-guard.mjs mode ... --origin`).
-      - name: Apply the prototype's Source Mode test entry
-        id: mode
-        env:
-          RESOLVED_MODE: ${{ steps.resolved.outputs.mode }}
-          RESOLVED_SOURCE_REF: ${{ steps.resolved.outputs.source_ref }}
-          RESOLVED_SOURCE_EXPECTED_VERSION: ${{ steps.resolved.outputs.source_expected_version }}
-          GITHUB_REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          node scripts/prototype-mode.mjs \
-            --token scripts/prototype-source-mode.txt \
-            --resolved-mode "$RESOLVED_MODE" \
-            --resolved-source-ref "$RESOLVED_SOURCE_REF" \
-            --resolved-source-expected-version "$RESOLVED_SOURCE_EXPECTED_VERSION" \
-            --ref "$GITHUB_REF"
-
-      # Source Mode is accepted ONLY from the test entry above. Any other
-      # source run has no pinned ref or version, and a mode this pipeline
-      # cannot pin must not be qualified.
+      # A source run cannot be RESOLVED here, so the mode is refused at the
+      # entry, before a build or a candidate can exist. That is not a claim
+      # that Source Mode is broken — it was qualified, above — but that this
+      # workflow has no way to PIN it on these branches, and a mode this
+      # pipeline cannot pin must not be qualified.
       - name: Refuse a dependency mode this prototype cannot qualify
         env:
-          DSH_MODE: ${{ steps.mode.outputs.mode }}
-          DSH_MODE_ORIGIN: ${{ steps.mode.outputs.mode_origin }}
-        run: node scripts/pipeline-guard.mjs mode "$DSH_MODE" --origin "$DSH_MODE_ORIGIN"
+          DSH_MODE: ${{ steps.context.outputs.mode }}
+        run: node scripts/pipeline-guard.mjs mode "$DSH_MODE"
 
       # The FAULT this run is asked to perform on itself.
       #
@@ -1304,11 +1279,6 @@ jobs:
           DOWNSTREAM: ${{ needs.downstream.result }}
           QUALIFIED: ${{ needs.qualified.result }}
           EQUIVALENCE: ${{ needs.equivalence.result }}
-          # Not phases: the PROVENANCE of the dependency mode. A source run
-          # through the test entry is an experiment, and the summary must say
-          # so next to the verdict it accompanies.
-          MODE_ORIGIN: ${{ needs.context.outputs.mode_origin }}
-          RESOLVED_MODE: ${{ needs.context.outputs.resolved_mode }}
         run: |
           set -euo pipefail
           node scripts/pipeline-guard.mjs summary \
@@ -1323,8 +1293,6 @@ jobs:
             --phase "downstream matrix=$DOWNSTREAM" \
             --phase "qualified artifact=$QUALIFIED" \
             --phase "equivalence proof=$EQUIVALENCE" \
-            --phase "mode origin=$MODE_ORIGIN" \
-            --phase "production routing=$RESOLVED_MODE" \
             | tee pipeline-summary.txt
 
       - name: Upload the pipeline summary

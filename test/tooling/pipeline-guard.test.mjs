@@ -20,7 +20,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { parse as parseYaml } from 'yaml'
 import { join, resolve } from 'node:path'
 import { dirname } from 'node:path'
@@ -30,11 +30,9 @@ import test from 'node:test'
 import { FAULT_TOKENS, REQUIRED_PHASES, checkFault, checkMode, resolveShardTotal, summarize } from '../../scripts/pipeline-guard.mjs'
 import { depsPlan } from '../../scripts/prototype-deps.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { MODE_TOKENS, TEST_ENTRY_REF_PREFIX, readModeToken, resolvePrototypeMode } from '../../scripts/prototype-mode.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'pipeline-guard.mjs')
-const MODE_SCRIPT = join(ROOT, 'scripts', 'prototype-mode.mjs')
 
 /** Every required phase, at one result. */
 function phasesAt(result) {
@@ -65,115 +63,35 @@ test('npm mode is supported', () => {
   assert.deepEqual(checkMode('npm'), { ok: true })
 })
 
-test('SOURCE mode is refused outside the prototype test entry', () => {
+test('SOURCE mode is refused at the entry: it cannot be PINNED here', () => {
   // The wiring exists (pinned pack, one dependency preparation, the leak gate
-  // taking the distribution, the equivalence proof running its own packs), but
-  // no Source Mode run can be RESOLVED into this workflow: the repository
-  // resolver derives `source` only on the `next` line when the tracked policy
-  // selects it, and it refuses a forced mode that disagrees.
+  // taking the distribution, the equivalence proof running its own packs, the
+  // downstream fresh-install probe) and it was qualified end to end on this
+  // branch through an Owner-approved test entry. The entry is WITHDRAWN, so
+  // nothing can turn a branch into a Source Mode run any more.
   //
-  // A source run that did not come through the committed test entry therefore
-  // has no pinned ref and no pinned version, and a run whose dependency graph
-  // cannot be pinned is not qualified.
+  // The refusal is not "source is unproven": it is that the repository
+  // resolver derives `source` only on the `next` line, and a source run
+  // without a pinned ref and version has nothing to qualify against.
   const verdict = checkMode('source')
   assert.equal(verdict.ok, false)
-  assert.match(verdict.reason, /committed test entry/u)
-  assert.match(verdict.reason, /pinned ref/u)
+  assert.match(verdict.reason, /cannot be RESOLVED/u)
+  assert.match(verdict.reason, /no pinned ref or version/u)
 })
 
-test('SOURCE mode is accepted from the test entry and only from it', () => {
-  assert.deepEqual(checkMode('source', 'prototype-override'), { ok: true })
-  // The origin is not decoration: `resolver` and `prototype-override` must not
-  // collapse into "the mode is source", because only the second one carries a
-  // pinned ref and version and only the second one is an experiment.
-  assert.equal(checkMode('source', 'resolver').ok, false)
-  assert.equal(checkMode('npm', 'prototype-override').ok, true)
-})
-
-test('the mode switch is a COMMITTED token the workflow reads by name', () => {
-  // A dispatch input cannot carry this decision: a push has no inputs, and a
-  // workflow that is not on the default branch cannot be dispatched at all.
-  // The switch is therefore a file in the tree, and the workflow must name it
-  // — a default buried in the script would let the tree and the run disagree.
-  assert.doesNotThrow(() => readModeToken(join(ROOT, 'scripts', 'prototype-source-mode.txt')))
-  assert.deepEqual(MODE_TOKENS, ['resolved', 'source'])
+test('the Source Mode test entry is GONE, not merely switched off', () => {
+  // An entry that can turn a branch into a Source Mode run is a capability,
+  // not a configuration value: leaving the script or the switch in the tree
+  // would let a later commit resurrect it without re-reviewing the decision.
+  assert.equal(existsSync(join(ROOT, 'scripts', 'prototype-mode.mjs')), false,
+    'the mode entry script must not stay in the tree')
+  assert.equal(existsSync(join(ROOT, 'scripts', 'prototype-source-mode.txt')), false,
+    'the committed switch must not stay in the tree')
   const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
-  assert.match(source, /--token scripts\/prototype-source-mode\.txt/u,
-    'the workflow must read the committed switch, not default to one')
-})
-
-test('the test entry takes the pin from the TRACKED source config', () => {
-  // A mode-only override would leave `source_ref` and `source_expected_version`
-  // empty, and the source-pack job would then build nothing. The values must
-  // come from the same file the production resolver reads.
-  const ref = `${TEST_ENTRY_REF_PREFIX}example`
-  const resolved = resolvePrototypeMode({ token: 'source', resolvedMode: 'npm', ref })
-  const config = JSON.parse(readFileSync(join(ROOT, 'test', 'compat', 'dsh-source.json'), 'utf8'))
-  assert.equal(resolved.mode, 'source')
-  assert.equal(resolved.modeOrigin, 'prototype-override')
-  assert.equal(resolved.sourceRef, config.ref)
-  assert.equal(resolved.sourceExpectedVersion, config.expectedVersion)
-})
-
-test('the test entry passes the resolver answer through untouched', () => {
-  const resolved = resolvePrototypeMode({
-    token: 'resolved',
-    resolvedMode: 'npm',
-    ref: 'refs/heads/main',
-  })
-  assert.deepEqual(resolved, { mode: 'npm', modeOrigin: 'resolver', sourceRef: '', sourceExpectedVersion: '' })
-})
-
-test('the mode entry writes the outputs the workflow consumes', (t) => {
-  // This case exists because the exported decision was fully tested while the
-  // SCRIPT the workflow runs was not: a reference error in the CLI's banner
-  // failed the whole pipeline at the context job, after every unit test above
-  // had passed. The output NAMES are the machine contract — a rename here
-  // silently empties `mode` downstream.
-  const outputFile = join(scratch(t), 'github-output')
-  const token = join(scratch(t), 'token.txt')
-  writeFileSync(token, 'source\n')
-  const result = spawnSync(process.execPath, [
-    MODE_SCRIPT,
-    '--token', token,
-    '--resolved-mode', 'npm',
-    '--ref', `${TEST_ENTRY_REF_PREFIX}example`,
-  ], { cwd: ROOT, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: outputFile } })
-  assert.equal(result.status, 0, result.stderr)
-  const outputs = readFileSync(outputFile, 'utf8')
-  const config = JSON.parse(readFileSync(join(ROOT, 'test', 'compat', 'dsh-source.json'), 'utf8'))
-  assert.match(outputs, /^mode=source$/mu)
-  assert.match(outputs, /^mode_origin=prototype-override$/mu)
-  assert.match(outputs, new RegExp(`^source_ref=${config.ref}$`, 'mu'))
-  assert.match(outputs, new RegExp(`^source_expected_version=${config.expectedVersion}$`, 'mu'))
-  // And the log says it is an experiment, not a routing result.
-  assert.match(result.stdout, /PROTOTYPE SOURCE MODE TEST ENTRY/u)
-  assert.match(result.stdout, /NOT evidence about the production mode routing/u)
-})
-
-test('the test entry cannot act outside the prototype branches', () => {
-  for (const ref of ['refs/heads/main', 'refs/heads/next', 'refs/pull/1/merge', 'refs/tags/v1.0.0']) {
-    assert.throws(
-      () => resolvePrototypeMode({ token: 'source', resolvedMode: 'npm', ref }),
-      /bound to refs\/heads\/ci\/pr-pipeline-prototype-/u,
-      `${ref} must not be able to turn itself into a Source Mode run`,
-    )
-  }
-})
-
-test('the test entry never masks a decision the resolver already made', () => {
-  // The entry exists because source is unreachable here, not to override a
-  // run the production routing already classified as source.
-  assert.throws(
-    () => resolvePrototypeMode({ token: 'source', resolvedMode: 'source', ref: `${TEST_ENTRY_REF_PREFIX}x` }),
-    /already selected source mode/u,
-  )
-})
-
-test('an UNKNOWN mode token is a configuration error, not "resolved"', (t) => {
-  const file = join(scratch(t), 'token.txt')
-  writeFileSync(file, 'source-mode\n')
-  assert.throws(() => readModeToken(file), /is not one of resolved\/source/u)
+  assert.doesNotMatch(source, /--force-mode/u, 'the workflow must not try to force a mode')
+  assert.doesNotMatch(source, /prototype-mode\.mjs/u, 'the workflow must not apply a mode entry')
+  assert.match(source, /run: node scripts\/dsh-ci-context\.mjs/u,
+    'the repository resolver must still resolve the mode')
 })
 
 test('a SOURCE job without the pinned distribution FAILS', () => {
@@ -208,13 +126,9 @@ test('an UNKNOWN mode is refused', () => {
 test('the CLI refuses source mode at the entry', () => {
   const result = cli(['mode', 'source'])
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /committed test entry/u)
+  assert.match(result.stderr, /cannot be RESOLVED/u)
 })
 
-test('the CLI accepts source mode from the test entry', () => {
-  const result = cli(['mode', 'source', '--origin', 'prototype-override'])
-  assert.equal(result.status, 0, result.stderr)
-})
 
 test('the CLI succeeds for npm mode', () => {
   const result = cli(['mode', 'npm'])
@@ -484,25 +398,14 @@ test('every job that installs dependencies uses the shared preparation', () => {
   assert.ok(shared >= 6, `the consumer jobs must all use the shared preparation, found ${shared}`)
 })
 
-test('the mode entry is the committed test switch, never a forced resolver mode', () => {
-  // An override that passes `--force-mode source` fails at the entry: the
-  // resolver accepts a forced mode only when it agrees with the derived one.
-  // The Owner-approved test entry is therefore a SEPARATE step whose answer is
-  // recorded with its own origin, not a flag that would fail every run.
+test('the guard is called with the mode alone, not with an entry provenance', () => {
+  // The origin argument existed only to let the withdrawn test entry through.
+  // Leaving it would be a hook for a mode this pipeline cannot pin; the guard
+  // now takes the resolver's answer and nothing else.
   const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
-  assert.doesNotMatch(source, /--force-mode/u, 'the workflow must not try to force a mode')
-  // The resolver still runs, first and unmodified — its answer is what a
-  // reader compares the override against.
-  assert.match(source, /run: node scripts\/dsh-ci-context\.mjs/u,
-    'the repository resolver must still resolve the mode')
-  // The guard is told WHERE the mode came from; passing the origin is what
-  // keeps "the mode is source" from being enough.
-  assert.match(source, /pipeline-guard\.mjs mode "\$DSH_MODE" --origin "\$DSH_MODE_ORIGIN"/u,
-    'the entry guard must receive the mode origin')
-  assert.match(source, /mode_origin: \$\{\{ steps\.mode\.outputs\.mode_origin \}\}/u,
-    'the context job must publish the mode origin')
-  assert.match(source, /resolved_mode: \$\{\{ steps\.resolved\.outputs\.mode \}\}/u,
-    'the context job must publish what production routing decided, separately')
+  assert.doesNotMatch(source, /--origin/u, 'no caller may pass a mode origin')
+  assert.match(source, /pipeline-guard\.mjs mode "\$DSH_MODE"/u,
+    'the entry guard must receive the resolved mode')
 })
 
 test('a job that needs the SKIPPED source pack still runs in npm mode', () => {

@@ -10,9 +10,8 @@
  *     ANYWAY. Source Mode needs the distribution injected into the
  *     source-leak gate and the startup smoke, and neither is wired here, so
  *     a source-mode run would SKIP a gate and still produce a qualified
- *     candidate. The prototype must refuse the mode outright instead —
- *     except through the one Owner-approved, prototype-only test entry,
- *     which is the only source of `source` the pipeline accepts.
+ *     candidate. The prototype must refuse the mode outright instead: on
+ *     these branches it cannot pin a source run at all.
  *
  *   - `summary` — the verdict accepted `skipped` as success, and the
  *     elapsed time was computed from a value that is empty when the context
@@ -22,7 +21,7 @@
  *     a green summary over a pipeline that never ran.
  *
  * Usage:
- *   node scripts/pipeline-guard.mjs mode <resolved-mode> [--origin <origin>]
+ *   node scripts/pipeline-guard.mjs mode <resolved-mode>
  *   node scripts/pipeline-guard.mjs summary --started <epoch> \
  *       --phase <name>=<result> [--phase <name>=<result> ...]
  *
@@ -130,62 +129,37 @@ export function checkFault(raw) {
 /**
  * The dependency modes this prototype can qualify.
  *
- * `source` is qualifyable ONLY through the Owner-approved test entry
- * (`scripts/prototype-source-mode.txt` = `source` on a prototype branch),
- * never through the resolver: `dsh-ci-context.mjs` derives `source` only for
- * a push to `next`, or a PR targeting `next`, when the tracked policy
- * selects it, and it refuses a forced mode that disagrees.
- */
-export const SUPPORTED_MODES = ['npm', 'source']
-
-/**
- * The origins a resolved mode can have.
+ * Source Mode is WIRED here and was qualified end to end on this branch
+ * through an Owner-approved test entry (runs 39701407942 and 39702749092).
+ * That entry is withdrawn, and this pipeline still cannot PIN source on these
+ * branches: `dsh-ci-context.mjs` derives `source` only for a push to `next`,
+ * or a PR targeting `next`, when the tracked policy selects source, and it
+ * refuses a forced mode that disagrees.
  *
- * `resolver` is the repository's own decision and is the only origin a
- * production run can have. `prototype-override` means the run came through
- * the prototype's committed test entry, which is bound to the prototype
- * branches — so the two must never collapse into "the mode is source".
+ * So the mode is refused at the entry — not because Source Mode is unproven,
+ * but because a mode this pipeline cannot pin has no ref and no version to
+ * qualify against.
  */
-export const MODE_ORIGINS = ['resolver', 'prototype-override']
+export const SUPPORTED_MODES = ['npm']
 
 /**
  * Refuse a mode the prototype cannot qualify.
  *
- * Source Mode is accepted ONLY from the test entry. That is not a formality:
- * the entry is what makes the pinned ref and version available (`source_ref`
- * is empty under the resolver on these branches), and it is what keeps the
- * experiment from being read as evidence about the production routing.
- *
  * @param {string} mode - the resolved DSH dependency mode.
- * @param {string} [origin] - where the mode came from.
  * @returns {{ok: boolean, reason?: string}} the verdict.
  */
-export function checkMode(mode, origin = 'resolver') {
+export function checkMode(mode) {
   if (mode === undefined || mode === '') {
     return { ok: false, reason: 'the DSH dependency mode was not resolved: the pipeline cannot qualify a run whose dependencies are unknown' }
   }
-  if (!SUPPORTED_MODES.includes(mode)) {
-    return { ok: false, reason: `the DSH dependency mode '${mode}' is not one this prototype can qualify` }
-  }
-  if (mode === 'source' && origin !== 'prototype-override') {
-    // The WIRING exists (pinned distribution, one dependency preparation, the
-    // leak gate taking the distribution, the equivalence proof running its own
-    // packs), but Source Mode cannot be RESOLVED into this workflow: the
-    // repository resolver derives `source` only for `next` when the tracked
-    // policy selects source, and it refuses a forced mode that disagrees.
-    //
-    // A source run that did not come through the committed test entry
-    // therefore has no pinned ref or version, and a mode this pipeline cannot
-    // pin must not be accepted as qualified.
+  if (SUPPORTED_MODES.includes(mode)) return { ok: true }
+  if (mode === 'source') {
     return {
       ok: false,
-      reason: 'Source Mode is reachable only through the prototype\'s committed test entry (scripts/prototype-source-mode.txt) on a prototype branch: the repository resolver derives it only for `next` when the tracked policy selects source. A source run outside that entry has no pinned ref or version.',
+      reason: 'Source Mode cannot be RESOLVED in this workflow: the repository resolver derives it only for `next` when the tracked policy selects source, and it refuses a forced mode that disagrees. The wiring is exercised and was qualified on this branch; on these branches a source run has no pinned ref or version, so it is not qualified here.',
     }
   }
-  if (!MODE_ORIGINS.includes(origin)) {
-    return { ok: false, reason: `the DSH dependency mode origin '${origin}' is not one this pipeline recognises` }
-  }
-  return { ok: true }
+  return { ok: false, reason: `the DSH dependency mode '${mode}' is not one this prototype can qualify` }
 }
 
 /**
@@ -273,8 +247,7 @@ function main() {
     return
   }
   if (command === 'mode') {
-    const originIndex = args.indexOf('--origin')
-    const verdict = checkMode(args[1], originIndex === -1 ? 'resolver' : args[originIndex + 1])
+    const verdict = checkMode(args[1])
     if (!verdict.ok) {
       console.error(verdict.reason)
       process.exit(1)
@@ -305,7 +278,7 @@ function main() {
     }
     return
   }
-  console.error('usage: node scripts/pipeline-guard.mjs mode <mode> [--origin <resolver|prototype-override>]')
+  console.error('usage: node scripts/pipeline-guard.mjs mode <mode>')
   console.error('       node scripts/pipeline-guard.mjs fault <file>')
   console.error('       node scripts/pipeline-guard.mjs shard-total [--file <file>] [--input <n>]')
   console.error('       node scripts/pipeline-guard.mjs summary --started <epoch> --phase <name>=<result> ...')
