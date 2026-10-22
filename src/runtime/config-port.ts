@@ -323,8 +323,15 @@ export interface ProviderProfileConfig {
   readProfile(route: string): ProviderProfileFacts
   /** The confirmed manual-edit guidance for complex profile fields. */
   configGuide(): ProviderConfigGuide
-  /** Persist one provider profile (the add-provider wizard; the adapter
-   * owns the llm-pi-ai schema). */
+  /**
+   * Persist the profile of a NEW provider route (the add-provider wizard;
+   * the adapter owns the llm-pi-ai schema).
+   *
+   * The write is CONDITIONAL: the adapter refuses when the route already
+   * has a profile, and it checks the write against the revision its own
+   * decision was read at. A profile configured in the meantime is therefore
+   * REFUSED (the caller re-reads and retries) — never overwritten.
+   */
   writeProfile(route: string, profile: Record<string, unknown>): Promise<void>
   /** After a successful authorization: write a MINIMAL keyless profile for
    * a catalog route (never an apiKeyEnv — provider-native auth keeps the

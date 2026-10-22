@@ -2140,6 +2140,11 @@ export class ModelsWorkspacePage implements Component {
     if (add.creating === true && add.result === undefined) {
       content.push('', color.textMuted('Creating — one Host write at a time; Esc reports the in-flight write instead of leaving. The dispatched write is not retried.'))
     }
+    // The disabled Create states WHY it is disabled: a muted label alone does
+    // not tell the user what to do.
+    if (add.result === undefined && this.readState !== 'ready') {
+      content.push('', color.textDim('The provider configuration is not current — Create waits for a fresh read (press r).'))
+    }
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
     if (add.result !== undefined) {

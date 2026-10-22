@@ -807,6 +807,23 @@ test('a failed provider-directory read is reported, never an authoritative empty
   assert.equal(state.describeCalls >= 1, true)
 })
 
+test('the provider create is conditional: an existing route is refused, a new one is revision-checked', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 4 })
+  })
+  await port.describe()
+  // An EXISTING route: the create must refuse it, never overwrite it.
+  await assert.rejects(
+    () => port.providers.writeProfile('acme', { api: 'openai-completions', baseURL: 'https://acme.example/v1' }),
+    /already exists/u,
+  )
+  assert.equal(state.mutateCalls.length, 0, 'a refused create must not write')
+  // A NEW route: the write carries the revision the decision was read at.
+  await port.providers.writeProfile('new-route', { api: 'openai-completions', baseURL: 'https://new.example/v1' })
+  assert.equal(state.mutateCalls.length, 1)
+  assert.equal(state.mutateCalls[0]?.revision, 4, 'the write carries the decision read revision')
+})
+
 test('a stale configuration mirror is not projected as a current catalog', async () => {
   const { port, state } = createBackend(current => {
     current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 1 })
@@ -864,9 +881,16 @@ test('provider options and keyless writes share one profile-slot rule', async ()
     { op: 'set', path: ['providers', 'acme'], value: {} },
   ])
 
-  await port.providers.writeProfile('acme', { apiKeyEnv: 'ACME_API_KEY' })
+  // The create is CONDITIONAL: `acme` already has the keyless profile, so a
+  // second write for it is refused instead of overwriting it.
+  await assert.rejects(
+    () => port.providers.writeProfile('acme', { apiKeyEnv: 'ACME_API_KEY' }),
+    /already exists/u,
+  )
+  // A route that does not exist yet is written at the SAME conventional slot.
+  await port.providers.writeProfile('acme-two', { apiKeyEnv: 'ACME_TWO_API_KEY' })
   assert.deepEqual(state.mutateCalls[state.mutateCalls.length - 1].ops, [
-    { op: 'set', path: ['providers', 'acme'], value: { apiKeyEnv: 'ACME_API_KEY' } },
+    { op: 'set', path: ['providers', 'acme-two'], value: { apiKeyEnv: 'ACME_TWO_API_KEY' } },
   ])
   await assert.rejects(() => port.providers.writeProfile('deepseek-official', {}), /invalid provider route/)
 })

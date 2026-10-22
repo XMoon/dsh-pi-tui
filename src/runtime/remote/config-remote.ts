@@ -1147,9 +1147,18 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     if (!canProvisionKeylessProfile(PROVIDER_SETTINGS_NS, ['providers', route], route)) {
       throw new Error('invalid provider route')
     }
+    // The create is CONDITIONAL (the same rule the Direct adapter applies):
+    // ONE CURRENT read decides both the route's absence and the revision the
+    // write is checked against. A profile configured in between is refused by
+    // the Host's revision guard instead of being overwritten.
+    await this.mirror.ensureCurrent()
+    const descriptor = this.mirror.namespace(PROVIDER_SETTINGS_NS)
+    if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+      throw new Error(`provider route "${route}" already exists`)
+    }
     await this.mirror.mutate(PROVIDER_SETTINGS_NS, [
       { op: 'set', path: ['providers', route], value: profile },
-    ])
+    ], descriptor?.revision)
   }
 
   async writeKeylessProfile(route: string): Promise<{ kind: 'written' } | { kind: 'skipped'; reason: string }> {
