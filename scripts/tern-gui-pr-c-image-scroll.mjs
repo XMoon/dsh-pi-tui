@@ -1,22 +1,20 @@
 /**
- * The PR-C real-GUI OVERFLOW flow: what happens to a tool-result image in a
+ * The PR-C real-GUI OVERFLOW flow: is the tool-result image REACHABLE in a
  * LONG transcript?
  *
  * The client virtualizes a long surface and shows its TAIL, so an image at the
- * top of a long transcript is out of view. The flow measures that half with
- * the client's own tree, and it DELIVERS the official SDK scroll op so the
- * other half is measured rather than assumed:
+ * top of a long transcript is out of view. This lane proves both halves with
+ * the CLIENT'S OWN paths, in a real window:
  *
- * - the image at the top is NOT in the client's tree while the tail is shown
- *   (the overflow fact);
- * - the official `scroll` op is delivered (the subject records the node it
- *   named) and the client's virtualized view is read back afterwards.
+ * - the OVERFLOW half: the image at the top is NOT in the client's tree while
+ *   the tail is shown (the client virtualizes the long surface);
+ * - the REACHABILITY half: the client's own find-in-scrollback (the same path
+ *   a user's Ctrl+F takes) scrolls the viewport back to the early row, and the
+ *   image IS on screen again.
  *
- * The reachability of an EARLY image by scrolling back is the CLIENT's pane
- * scrollback (its wheel/scrollbar), and this lane's control commands do not
- * drive that path: the measured result of the official scroll op is reported
- * as a MEASUREMENT, and the reachability stays NOT_VERIFIED in the PR record
- * rather than being claimed here.
+ * The OFFICIAL SDK scroll op is measured, not claimed: the subject records
+ * that it INVOKED the op (that is an invocation, never a client receipt), and
+ * the client's response to it is read back afterwards.
  *
  *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-pr-c-image-scroll.mjs
  *
@@ -65,20 +63,32 @@ export default async function (h) {
     JSON.stringify(tail.nodes.filter((node) => node.tag === 'img').map((node) => node.rect)))
   h.capture('prc-gui-image-long-tail', 'the long transcript showing its tail; the image row is virtualized away')
 
-  // The OFFICIAL scroll op, aimed at a node the client really knows.
+  // The OFFICIAL SDK scroll op. The subject's record proves the INVOCATION
+  // (never a client receipt), and the client's response is read back.
   await h.key('a', 1200)
   const rows = recorded(h.root)
-  const scrolled = rows.find((row) => row.scrolled === 'start')
-  h.check('the official scroll op was DELIVERED to the client', scrolled !== undefined,
+  const invoked = rows.find((row) => row.scrolled === 'start')
+  h.check('the subject INVOKED the official scroll op', invoked !== undefined,
     JSON.stringify(rows))
-  h.measure('the node the scroll op named', JSON.stringify(scrolled?.target ?? null))
-
-  const after = h.snapshot()
-  h.measure('the client view after the scroll op', JSON.stringify({
-    imageOnScreen: after.nodes.some((node) => node.tag === 'img'),
-    stillTheTail: h.has(after, 'filler row 199'),
+  h.measure('the node the scroll op named', JSON.stringify(invoked?.target ?? null))
+  const afterScroll = h.snapshot()
+  h.measure('the client view after the scroll op was invoked', JSON.stringify({
+    imageOnScreen: afterScroll.nodes.some((node) => node.tag === 'img'),
+    stillTheTail: h.has(afterScroll, 'filler row 199'),
   }))
-  const image = after.nodes.find((node) => node.tag === 'img')
-  if (image !== undefined) h.measure('the image box after the scroll op', JSON.stringify(rect(image)))
-  h.capture('prc-gui-image-long-after-scroll', 'the client view after the official scroll op was delivered')
+
+  // The CLIENT'S OWN way back to the early content: its find-in-scrollback
+  // (the user's Ctrl+F path) scrolls the viewport to the match.
+  const found = h.ctl('find', 'screenshot')
+  h.measure('the client find reply', JSON.stringify(found ?? null))
+  await h.sleep(1200)
+  const back = h.snapshot()
+  const image = back.nodes.find((node) => node.tag === 'img')
+  h.check('the client scrolled BACK to the early content and the image is on screen again',
+    image !== undefined,
+    JSON.stringify(back.nodes.filter((node) => node.tag === 'img').map((node) => node.rect)))
+  h.check('the identity line is on screen again with it', h.has(back, '[IMAGE] shot.png'),
+    h.texts(back).slice(0, 4).join(' | '))
+  if (image !== undefined) h.measure('the image box after the scroll back', JSON.stringify(rect(image)))
+  h.capture('prc-gui-image-long-head', 'the same long transcript scrolled back to the image row')
 }
