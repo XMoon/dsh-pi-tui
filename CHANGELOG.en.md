@@ -40,7 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory and the credential reads now run after the page has painted its
   first frame, and one read asks the Host for a single directory snapshot:
   before, every provider re-read the directory and the whole settings section,
-  so a large directory blocked the keyboard path for a long time.
+  so a large directory blocked the keyboard path for a long time. Opening the
+  credential list and its R refresh now paint a frame before reading as well.
+- **Credential writes wait for the authoritative read.** The `/login <REF>`
+  API-key write waits for the credential store's own read of that reference, and
+  a clear confirmation drops back to reading when it is refreshed instead of
+  letting the previous answer dispatch a delete. A custom provider whose route
+  the installed catalog already offers outside the conventional
+  `llm-pi-ai.providers` slot (a `Manual setup only` row) is refused: the page no
+  longer reports a created provider the Host would not read.
 - **Hot reloading no longer exits a running TUI.** After a linked package is
   rebuilt, DSH re-mounts the TUI's rows; the re-mounted startup row used to read
   "the launcher was ready long ago" as "the TUI never mounted" and ended the

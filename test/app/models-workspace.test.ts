@@ -277,6 +277,9 @@ test('provider detail shows Host facts and opens the masked key editor; a write 
   // Configure API Key is the first action for a reference row.
   send(page, '\r')
   assert.match(viewText(page), /API Key Reference · Acme Gateway/u)
+  // The write action waits for the credential store's own read of the ref.
+  await flush()
+  viewText(page)
   send(page, '\r')
   assert.match(viewText(page), /Enter the API key/u)
   // Type the secret; Enter commits to the review page, Enter submits.
@@ -1064,6 +1067,114 @@ test('a pending API-key write cannot be left by Esc and still verifies on settle
   resolveWrite?.()
   await flush()
   assert.match(viewText(page), /Verified/u)
+})
+
+test('the reference page waits for the store read before it offers the write', async () => {
+  const { source } = fakeSource()
+  const releases: (() => void)[] = []
+  let reads = 0
+  source.describeReference = async () => {
+    reads += 1
+    if (reads === 1) await new Promise<void>(resolve => { releases.push(resolve) })
+    return { configured: false }
+  }
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
+  await flush()
+  const reading = viewText(page)
+  assert.match(reading, /reading…/u)
+  assert.match(reading, /credential store has not answered/u)
+  assert.match(reading, /Configure API Key…/u)
+  // The action is painted but DISABLED: Enter must not open the editor while
+  // the store has not answered for this reference.
+  page.handleInput('\r')
+  assert.doesNotMatch(viewText(page), /Enter the API key/u)
+  for (const release of releases) release()
+  await flush()
+  assert.match(viewText(page), /Not set/u)
+  page.handleInput('\r')
+  assert.match(viewText(page), /Enter the API key/u)
+})
+
+test('a failed reference read keeps the write disabled until a retry answers', async () => {
+  const { source } = fakeSource()
+  let fail = true
+  source.describeReference = async () => {
+    if (fail) throw new Error('store offline')
+    return { configured: true }
+  }
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
+  await flush()
+  assert.match(viewText(page), /the credential store could not be read: store offline/u)
+  page.handleInput('\r')
+  assert.doesNotMatch(viewText(page), /Enter the API key/u)
+  fail = false
+  page.handleInput('r')
+  await flush()
+  assert.match(viewText(page), /Configured/u)
+  page.handleInput('\r')
+  assert.match(viewText(page), /Enter the API key/u)
+})
+
+test('a refresh re-reads the clear target before the confirmation can be dispatched', async () => {
+  const { source, calls } = fakeSource()
+  let configured = true
+  let reads = 0
+  const releases: (() => void)[] = []
+  source.describeReference = async () => {
+    reads += 1
+    if (reads === 2) await new Promise<void>(resolve => { releases.push(resolve) })
+    return { configured }
+  }
+  source.clearReference = async (ref: string) => { calls.push(`unset:${ref}`); configured = false }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
+  }, 24)
+  await flush()
+  assert.match(viewText(page), /Clear credential/u)
+  page.handleInput('r')
+  // The re-read drops the previous `ready` answer to `reading` immediately:
+  // the stale confirmation action is GONE, so there is nothing that can
+  // dispatch a delete while the store is being re-checked.
+  const reading = viewText(page)
+  assert.match(reading, /Reading the credential store…/u)
+  assert.doesNotMatch(reading, /Clear credential/u)
+  assert.equal(calls.some(call => call.startsWith('unset:')), false)
+  for (const release of releases) release()
+  await flush()
+  assert.match(viewText(page), /Clear credential/u)
+  page.handleInput('\r')
+  await flush()
+  assert.equal(calls.includes('unset:ACME_API_KEY'), true)
+})
+
+test('opening the records view and pressing R start no stored-credential read in the input path', async () => {
+  const { source } = fakeSource()
+  let reads = 0
+  source.storedCredentials = async () => {
+    reads += 1
+    return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  // (1) The R key in the records view is an input-path refresh.
+  const recordsPage = openWith(source, { view: 'logout-list' }, 24)
+  await flush()
+  assert.equal(reads, 1, 'the deferred first read ran')
+  recordsPage.handleInput('r')
+  assert.equal(reads, 1, 'the input handler starts no stored-credential read')
+  await flush()
+  assert.equal(reads, 2)
+  // (2) Opening the records view from the list is also an input-path start.
+  const listPage = openWith(source, { view: 'list' }, 24)
+  await flush()
+  viewText(listPage)
+  const before = reads
+  listPage.handleInput('\u001b[F') // End: the last action (model config guide)
+  listPage.handleInput('\u001b[A') // Up: Credential records
+  listPage.handleInput('\r')
+  assert.match(viewText(listPage), /Stored credentials/u)
+  assert.equal(reads, before, 'opening the view starts no read inside the input handler')
+  await flush()
+  assert.equal(reads, before + 1)
 })
 
 test('the list cursor follows into view so an off-screen provider is Enter-reachable (P2)', async () => {
@@ -2105,12 +2216,19 @@ test('the deferred reads run once, are consumed by a manual refresh, and stop wh
 test('a pending delete keeps the confirmation locked while a refresh happens', async () => {
   const { source, calls } = fakeSource()
   const releases: (() => void)[] = []
+  let deleted = false
   source.deleteRecord = async (key: string) => {
     calls.push(`delete:${key}`)
     await new Promise<void>(resolve => { releases.push(resolve) })
+    deleted = true
   }
+  // The store really REMOVES the record: the final success assertion below
+  // can only pass on the authoritative absence, because the failure text
+  // ("Not cleared: …") also contains the word "cleared".
   source.storedCredentials = async () => ({
-    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    rows: deleted
+      ? []
+      : [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
     recordCleanupUnavailable: false,
     referenceReadFailures: [],
   })
@@ -2137,8 +2255,32 @@ test('a pending delete keeps the confirmation locked while a refresh happens', a
   // The Host write finishes: the outcome is reported.
   for (const release of releases) release()
   await flush()
-  assert.match(viewText(page), /cleared/u)
+  assert.match(viewText(page), /Anthropic signed out locally — stored credential cleared/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u)
   assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the delete must not be dispatched twice')
+})
+
+test('a delete that returns but leaves the record present is NOT reported as cleared', async () => {
+  const { source, calls } = fakeSource()
+  source.deleteRecord = async (key: string) => { calls.push(`delete:${key}`) }
+  // The delete call settles, but the authoritative re-read still sees the
+  // record: the page must report the failed verification, never a success.
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  assert.match(viewText(page), /Clear stored credential/u)
+  page.handleInput('\r')
+  await flush()
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'])
+  assert.match(viewText(page), /Not cleared: the stored record is still present after the clear/u)
+  assert.doesNotMatch(viewText(page), /stored credential cleared/u)
 })
 
 test('the Models list may yield the focus to the Settings category rail', () => {
@@ -2161,9 +2303,13 @@ test('the Add Provider draft keeps the Left inside the Models page', () => {
 
 test('a pending API-key write keeps the Left inside the Models page', async () => {
   const { page, calls } = open({ view: 'reference', ref: 'ACME_API_KEY' })
-  // The masked editor is open: it is a Question form, and the page must not
-  // let the root claim the Left out of it.
+  // The reference action is offered only after the store's own read answers;
+  // once the editor is open it is a Question form, and the page must not let
+  // the root claim the Left out of it.
+  await flush()
+  viewText(page)
   send(page, '\r')
+  assert.match(viewText(page), /Enter the API key/u)
   assert.equal(page.canYieldFocusToNavigation(), false,
     'the masked editor keeps the Left inside the page')
   assert.equal(calls.some(call => call.startsWith('setReference')), false,

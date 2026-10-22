@@ -220,15 +220,24 @@ The page never infers a stored key from a route/profile.
 - The stored-record presence is ONE enumeration for the page. The full
   Stored Credentials list (with its per-reference audit) is read only when the
   user opens that view, and a backend that cannot enumerate records is
-  `Unavailable`, never an empty list. A deeplink that opens that view (or a
-  clear target) reads it after the first frame — never in the input path — and
-  the deferred read is CONSUMED by the view's own refresh: a user who already
-  left the view pays no stored-credential scan, and no read happens twice.
-- An authority-dependent write (the API key, the stored-credential clear and
-  the native sign-in) waits for a FRESH read: while a refresh is in flight,
-  or the last snapshot is not the current authority (a stale snapshot), those
-  actions are disabled and the page states that the configuration is not
-  current.
+  `Unavailable`, never an empty list. Opening that view, opening a clear target
+  and the R refresh all start their read AFTER the painted frame — never in
+  the input path — and a deferred read is CONSUMED by the view's own refresh: a
+  user who already left the view pays no stored-credential scan, and no read
+  happens twice.
+- An authority-dependent write waits for the FRESH read of its OWN authority.
+  The provider-profile actions (the native sign-in, the Add create and a
+  provider-detail Configure API Key) wait for the provider catalog: while a
+  refresh is in flight, or the last snapshot is not the current authority (a
+  stale snapshot), they are disabled and the page states that the configuration
+  is not current. The page addressed by an EXPLICIT credential reference
+  (`/login REF`) and the stored-credential clear instead wait for the credential
+  store's authoritative read of that exact identity: the reference page's write
+  is disabled until `describeReference` answers (a failed read is retried with
+  r), and a clear re-read drops the previous confirmation before the new answer
+  arrives. Those actions stay usable when the provider catalog is stale — the
+  fail-soft resolver guarantees an explicitly typed reference is addressable,
+  and the write is verified by its own read-back.
 - `Add Provider` is a catalog: `Available providers` lists the unconfigured
   providers this installation offers, each with the operation this page can
   really perform for it (a native sign-in, the prefilled setup draft, or an
@@ -266,10 +275,13 @@ The page never infers a stored key from a route/profile.
   The Create is CONDITIONAL: it writes the profile of a NEW route, it is
   refused when the route already has a profile, and it is checked against the
   revision its decision was read at — a provider configured in the meantime
-  is refused (the user re-reads and retries), never overwritten. The same
-  rule governs the keyless profile write after a native sign-in: it never
-  overwrites an existing profile, and a failed OR stale provider read
-  authorizes no write at all.
+  is refused (the user re-reads and retries), never overwritten. A directory
+  route whose profile lives OUTSIDE the conventional provider slot (the
+  catalog's `Manual setup only` rows) is refused too: the wizard can only
+  write the conventional slot, so it never reports a created provider the Host
+  would not read. The same rule governs the keyless profile write after a
+  native sign-in: it never overwrites an existing profile, and a failed OR
+  stale provider read authorizes no write at all.
 - Provider-native sign-in uses the existing authorization attempt owner: early
   events are buffered before attempt binding, notices/URLs stay visible above
   in-page prompts, select/text/secret prompts answer through `respond`, a Host
