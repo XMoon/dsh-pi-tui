@@ -188,13 +188,14 @@ The provider list and detail are detached ConfigPort projections
 (`readCatalog`, `describeReference`, `recordPresence`, `listRecords`).
 The page never infers a stored key from a route/profile.
 
-- ONE catalog read per generation: the provider rows, their profile facts and
-  the credential presence come from ONE provider snapshot (the adapter reads
-  the configurable-provider directory and the settings once per snapshot, and
-  never repeats a settings read or a deep copy per provider route). The read
-  runs AFTER the first painted frame of the page: the constructor performs no
-  Host read, so selecting `Models` on the rail paints the Loading state
-  instead of blocking the input path.
+- ONE catalog read per generation: the provider rows and their profile facts
+  come from ONE provider snapshot (the adapter reads the configurable-provider
+  directory and the settings once per snapshot, and never repeats a settings
+  read or a deep copy per provider route). The credential presence is a
+  SEPARATE, later read: one `describe` per UNIQUE reference, issued after
+  the catalog succeeds. The catalog read runs AFTER the first painted frame of
+  the page: the constructor performs no Host read, so selecting `Models` on the
+  rail paints the Loading state instead of blocking the input path.
 - The read state is explicit: `Loading` (no authoritative rows yet), `Ready`,
   `Refreshing` (a read in flight over a live snapshot), `Stale` (the last
   snapshot is not the current authority — a failed refresh over the last good
@@ -205,7 +206,8 @@ The page never infers a stored key from a route/profile.
   profile-present fact — plus the independent DeepSeek Account row. The
   presence of an API key never decides the membership, and an unconfigured
   directory route is not a HOME row.
-- The credential/record state of a row is an INDEPENDENT fact: `Configured` /
+- The credential/record state of a row is an INDEPENDENT fact, read after the
+  catalog: `Configured` /
   `Key missing` for an API-key reference, `Signed in` / `Not signed in` for a
   provider-native sign-in, `Checking…` while the read is pending, `Outcome
   unknown` for a failed read and `Unavailable` for a backend that cannot
