@@ -709,24 +709,32 @@ export class ModelsWorkspacePage implements Component {
     // the previous snapshot as if it were the Host's current fact.
     this.records = undefined
     this.recordsError = undefined
-    this.source.run('models records read', async () => {
-      try {
-        const records = await this.source.storedCredentials()
-        this.settle(() => {
-          if (serial !== this.recordsSerial) return
-          this.records = records
-          this.recordsError = undefined
-          if (this.notice?.startsWith('the stored credentials could not be read') === true) this.notice = undefined
-        })
-      } catch (error) {
-        this.settle(() => {
-          if (serial !== this.recordsSerial) return
-          this.records = undefined
-          this.recordsError = errorText(error)
-          this.notice = `the stored credentials could not be read: ${errorText(error)}`
-        })
-      }
-    })
+    // The stored-credential read scans the provider configuration
+    // SYNCHRONOUSLY before its first await, and this refresh starts in the
+    // INPUT path (the records view or the R key). The read therefore runs in
+    // a MACROTASK: the keypress is acknowledged before the scan, and a
+    // superseded generation never runs it at all.
+    setTimeout(() => {
+      if (this.disposed || serial !== this.recordsSerial) return
+      this.source.run('models records read', async () => {
+        try {
+          const records = await this.source.storedCredentials()
+          this.settle(() => {
+            if (serial !== this.recordsSerial) return
+            this.records = records
+            this.recordsError = undefined
+            if (this.notice?.startsWith('the stored credentials could not be read') === true) this.notice = undefined
+          })
+        } catch (error) {
+          this.settle(() => {
+            if (serial !== this.recordsSerial) return
+            this.records = undefined
+            this.recordsError = errorText(error)
+            this.notice = `the stored credentials could not be read: ${errorText(error)}`
+          })
+        }
+      })
+    }, 0)
   }
 
   private invalidateCredentialRead(ref: string): void {
@@ -739,6 +747,12 @@ export class ModelsWorkspacePage implements Component {
     if (ref === undefined) return
     const clearSerial = view.kind === 'logout' ? this.clearSerial : undefined
     const readSerial = ++this.referenceReadSerial
+    // A read invalidates the previous answer: the reference page waits for
+    // the fresh credential-store read before it offers a write, and a clear
+    // confirmation re-read must not keep a stale `ready` armed while the
+    // store is being re-checked. A pending/done/failed clear keeps its phase.
+    if (view.kind === 'reference') this.referenceConfigured = undefined
+    else if (this.clear?.phase === 'ready') this.clear = { phase: 'reading', configured: false }
     this.source.run('models reference read', async () => {
       try {
         const info = await this.source.describeReference(ref)
@@ -938,21 +952,29 @@ export class ModelsWorkspacePage implements Component {
     const serial = this.clearSerial
     const readSerial = ++this.clearReadSerial
     this.clear = { phase: 'reading', configured: false }
-    this.source.run('models clear target read', async () => {
-      try {
-        const records = await this.source.storedCredentials()
-        const present = records.rows.some(row => row.kind === 'record' && row.key === key)
-        this.settle(() => {
-          if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
-          this.clear = { phase: 'ready', configured: present }
-        })
-      } catch (error) {
-        this.settle(() => {
-          if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
-          this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
-        })
-      }
-    })
+    // The stored-credential read scans the provider configuration
+    // SYNCHRONOUSLY before its first await, and this read starts in the
+    // INPUT path (opening or refreshing the confirmation). The read
+    // therefore runs in a MACROTASK: the keypress is acknowledged before the
+    // scan, and a superseded read never runs it at all.
+    setTimeout(() => {
+      if (this.disposed || readSerial !== this.clearReadSerial || serial !== this.clearSerial) return
+      this.source.run('models clear target read', async () => {
+        try {
+          const records = await this.source.storedCredentials()
+          const present = records.rows.some(row => row.kind === 'record' && row.key === key)
+          this.settle(() => {
+            if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
+            this.clear = { phase: 'ready', configured: present }
+          })
+        } catch (error) {
+          this.settle(() => {
+            if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
+            this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
+          })
+        }
+      })
+    }, 0)
   }
 
   private confirmClear(): void {
@@ -1040,6 +1062,10 @@ export class ModelsWorkspacePage implements Component {
           // the pre-delete list.
           this.recordsSerial += 1
           this.records = undefined
+          // The HOME's record presence is the SAME deleted fact: a read that
+          // started before the clear must not settle as a fresh "Signed in".
+          this.recordPresenceSerial += 1
+          this.recordPresence = { kind: 'failed', reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
           this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
         })
       }
@@ -2055,10 +2081,17 @@ export class ModelsWorkspacePage implements Component {
     if (this.referenceStatus !== undefined) content.push(...this.fact('Status', this.referenceStatus, width))
     content.push('', color.textDim('The value is written directly to the Host credential store; it is never shown, logged or written to the transcript. Verified requires the store to report the reference configured after the write.'))
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
+    // The write waits for the store's own authoritative read of this exact
+    // reference: until it answers, the previous presence is not a
+    // confirmation. The action states WHY it is disabled.
+    const mayWrite = this.referenceConfigured !== undefined
+    if (!mayWrite) {
+      content.push('', color.textDim('The credential store has not answered for this reference — Configure waits for the authoritative read (press r).'))
+    }
     this.copyValue = view.ref
     const actions: ActionLine[] = []
     if (this.referencePhase !== 'pending' && this.referencePhase !== 'editing') {
-      actions.push({ id: 'reference:edit', label: 'Configure API Key…', enabled: true })
+      actions.push({ id: 'reference:edit', label: 'Configure API Key…', enabled: mayWrite })
     }
     if (this.referencePhase !== 'pending') actions.push({ id: 'reference:back', label: '← Back', enabled: true })
     return { content, actions }

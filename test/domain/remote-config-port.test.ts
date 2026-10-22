@@ -19,9 +19,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
 import type { ProviderCatalogEntry } from '../../src/domain/catalog/provider.ts'
-import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ProviderProfileConfig, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
-import { resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
+import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
 /* ------------------------------------------------------------------------- *
  * Fake structural wire backend.
@@ -308,6 +308,41 @@ function createBackend(seed?: (state: FakeState) => void) {
     connection: { generation: generation.source },
   })
   return { port, state, generation, emit, listeners, wire }
+}
+
+/** The create decision over the REAL Remote provider adapter: the other
+ *  workflow seams are inert, because these tests exercise the mirrored
+ *  catalog classification and the wire mutation sink only. */
+function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
+  return new CredentialWorkflow({
+    providers,
+    credentials: {
+      available: () => true,
+      setReference: async () => {},
+      unsetReference: async () => {},
+      recordsSupported: () => false,
+      deleteRecord: async () => {},
+      describeReference: async () => ({ configured: false }),
+      listRecords: async () => [],
+      onChanged: () => () => {},
+    },
+    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: {
+      available: () => false,
+      getState: async () => { throw new Error('unused') },
+      getProfile: async () => null,
+      getBalance: async () => null,
+      watch: async function* () {},
+      getCallbackOrigin: () => undefined,
+      startSignIn: async () => { throw new Error('unused') },
+      cancelSignIn: async () => { throw new Error('unused') },
+      signOut: async () => { throw new Error('unused') },
+      hasRunningAccountTasks: () => false,
+    },
+    catalog: { models: { available: () => false, discoverModels: async () => [] } },
+    signal: new AbortController().signal,
+    diag: { error: () => {}, warn: () => {} },
+  })
 }
 
 /* ------------------------------------------------------------------------- *
@@ -991,6 +1026,52 @@ test('provider options and keyless writes share one profile-slot rule', async ()
     { op: 'set', path: ['providers', 'acme-two'], value: { apiKeyEnv: 'ACME_TWO_API_KEY' } },
   ])
   await assert.rejects(() => port.providers.writeProfile('deepseek-official', {}), /invalid provider route/)
+})
+
+test('a mirrored manual-only route cannot be created in the conventional slot (P1)', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: {} }, revision: 1 })
+    // The route exists in the mirrored directory but its profile lives in
+    // its own section, so the Remote catalog reports it as manual-only.
+    current.providers = [{
+      provider: 'legacy',
+      displayName: 'Legacy',
+      settingsNs: 'vendor-settings',
+      settingsPath: ['provider'],
+    }]
+  })
+  await port.describe()
+  const catalog = port.providers.readCatalog()
+  assert.equal(catalog.failure, undefined)
+  const legacy = catalog.options.find(option => option.route === 'legacy')
+  assert.ok(legacy !== undefined)
+  assert.equal(legacy.configured, false, 'no profile exists yet')
+  assert.equal(legacy.canProvisionProfile, false, 'the mirrored slot is not the conventional one')
+  const workflow = workflowOver(port.providers)
+  const draft = {
+    route: 'legacy',
+    api: 'openai-completions',
+    baseURL: 'https://legacy.example/v1',
+    displayName: '',
+    models: ['legacy-1'],
+    apiKey: '',
+  }
+  // `configured === false` alone must NOT admit the create: the wire write
+  // would land in the conventional slot while the mirror keeps reading the
+  // route's own section.
+  const rejected = await workflow.createProvider(draft)
+  assert.equal(rejected.kind, 'rejected')
+  assert.match(rejected.text, /own settings section/u)
+  assert.equal(state.mutateCalls.length, 0, 'the refused create never reaches the wire mutation sink')
+  // Positive control: a route the mirrored directory does not offer at all
+  // is a fresh hand-declared route and creates in the conventional slot.
+  const created = await workflow.createProvider({ ...draft, route: 'brand-new' })
+  assert.equal(created.kind, 'created')
+  assert.equal(state.mutateCalls.length, 1)
+  assert.equal(state.mutateCalls[0]!.ns, 'llm-pi-ai')
+  assert.deepEqual(state.mutateCalls[0]!.ops, [
+    { op: 'set', path: ['providers', 'brand-new'], value: { api: 'openai-completions', baseURL: 'https://legacy.example/v1', models: [{ id: 'legacy-1' }] } },
+  ])
 })
 
 /* ------------------------------------------------------------------------- *

@@ -586,8 +586,22 @@ export class CredentialWorkflow {
         text: 'the provider configuration is not current — refresh it and add the provider again',
       }
     }
-    if (catalog.options.some(option => option.route === route && option.configured)) {
+    const existingRoute = catalog.options.find(option => option.route === route)
+    if (existingRoute?.configured === true) {
       return { kind: 'rejected', text: `provider route "${route}" already exists` }
+    }
+    // A route the installed catalog already offers with its profile OUTSIDE
+    // the conventional provider slot is not a fresh custom route: the create
+    // would write `llm-pi-ai.providers.<route>`, while the catalog keeps
+    // reading the route's own section. Refusing here (instead of trusting
+    // `configured === false`) keeps the page from reporting a created
+    // provider the Host will never read. A route the catalog does not offer
+    // at all is a genuinely new hand-declared route and stays writable.
+    if (existingRoute !== undefined && !existingRoute.canProvisionProfile) {
+      return {
+        kind: 'rejected',
+        text: `provider route "${route}" is configured by the installed catalog in its own settings section — this wizard cannot create it in the conventional provider slot; use that provider's own setup or the manual guide`,
+      }
     }
     if (!PROTOCOL_CHOICES.includes(draft.api as typeof PROTOCOL_CHOICES[number])) {
       return { kind: 'rejected', text: `invalid wire protocol "${draft.api}"` }

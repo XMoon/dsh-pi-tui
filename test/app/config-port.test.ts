@@ -15,7 +15,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { DirectConfigPort, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
-import { resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
+import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
+import type { ProviderProfileConfig } from '../../src/runtime/config-port.ts'
 
 function host(services: Record<string, unknown>): HostContextLike {
   return { get: (name) => services[name], on: () => {} }
@@ -34,6 +35,41 @@ function settings(doc: Record<string, unknown>, writes: Array<{ ns: string; ops:
 function port(services: Record<string, unknown>): DirectConfigPort {
   return new DirectConfigPort(host(services), undefined, (sessionId) =>
     sessionId === 'session-live' ? { session: { id: 'session-live' } } : undefined)
+}
+
+/** The create decision over the REAL Direct provider adapter: the other
+ *  workflow seams are inert, because these tests exercise the catalog
+ *  classification and the mutation sink only. */
+function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
+  return new CredentialWorkflow({
+    providers,
+    credentials: {
+      available: () => true,
+      setReference: async () => {},
+      unsetReference: async () => {},
+      recordsSupported: () => true,
+      deleteRecord: async () => {},
+      describeReference: async () => ({ configured: false }),
+      listRecords: async () => [],
+      onChanged: () => () => {},
+    },
+    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: {
+      available: () => false,
+      getState: async () => { throw new Error('unused') },
+      getProfile: async () => null,
+      getBalance: async () => null,
+      watch: async function* () {},
+      getCallbackOrigin: () => undefined,
+      startSignIn: async () => { throw new Error('unused') },
+      cancelSignIn: async () => { throw new Error('unused') },
+      signOut: async () => { throw new Error('unused') },
+      hasRunningAccountTasks: () => false,
+    },
+    catalog: { models: { available: () => false, discoverModels: async () => [] } },
+    signal: new AbortController().signal,
+    diag: { error: () => {}, warn: () => {} },
+  })
 }
 
 // ── provider profiles ─────────────────────────────────────────────────────
@@ -452,6 +488,64 @@ test('providers writeKeylessProfile refuses a hostile directory entry (namespace
   }).providers
   assert.deepEqual(await providers2.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'hostile or malformed directory entry for acme' })
   assert.deepEqual(writes2, [], 'a path whose leaf is NOT the route is refused')
+})
+
+test('a catalog route whose profile lives outside the conventional slot cannot be created there (P1)', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    // `legacy` exists in the directory but has NO profile yet, and its
+    // profile location is its own section — exactly the manual-only catalog
+    // row. A genuinely new hand-declared route is not in the directory at
+    // all; it is the case the custom wizard exists for.
+    settings: settings({ 'llm-pi-ai': { providers: {} } }, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'legacy', displayName: 'Legacy', settingsNs: 'llm-deepseek', settingsPath: ['legacy'] },
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  const legacy = catalog.options.find(option => option.route === 'legacy')
+  assert.ok(legacy !== undefined)
+  assert.equal(legacy.configured, false, 'no profile exists yet')
+  assert.equal(legacy.canProvisionProfile, false, 'the route is not writable in the conventional slot')
+  const workflow = workflowOver(providers)
+  const draft = {
+    route: 'legacy',
+    api: 'openai-completions',
+    baseURL: 'https://legacy.example/v1',
+    displayName: '',
+    models: ['legacy-1'],
+    apiKey: '',
+  }
+  // `configured === false` alone must NOT admit the create: writing the
+  // conventional slot would leave the catalog reading an empty own section,
+  // while the page reported a created provider.
+  const rejected = await workflow.createProvider(draft)
+  assert.equal(rejected.kind, 'rejected')
+  assert.match(rejected.text, /own settings section/u)
+  assert.equal(writes.length, 0, 'the refused create never reaches a settings mutate')
+  // Positive control: the route the catalog DOES offer in the conventional
+  // slot is created there.
+  const adopted = await workflow.createProvider({
+    ...draft,
+    route: 'acme',
+    baseURL: 'https://acme.example/v1',
+    models: ['acme-1'],
+  })
+  assert.equal(adopted.kind, 'created')
+  assert.equal(writes.length, 1)
+  assert.deepEqual(writes[0], {
+    ns: 'llm-pi-ai',
+    ops: [{ op: 'set', path: ['providers', 'acme'], value: { api: 'openai-completions', baseURL: 'https://acme.example/v1', models: [{ id: 'acme-1' }] } }],
+  })
+  // A genuinely NEW hand-declared route still creates in the conventional
+  // slot.
+  const created = await workflow.createProvider({ ...draft, route: 'brand-new' })
+  assert.equal(created.kind, 'created')
+  assert.equal(writes.length, 2)
+  assert.equal(writes[1]!.ns, 'llm-pi-ai')
 })
 
 test('providers writeKeylessProfile writes NOTHING when the route vanished from the directory', async () => {
