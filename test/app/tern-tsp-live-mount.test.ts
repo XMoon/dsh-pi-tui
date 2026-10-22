@@ -30,7 +30,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import { connect as sdkConnect, concatBytes, ui } from '@stencil-hq/tern'
-import type { Op, Session, TermInput, TermOutput } from '@stencil-hq/tern'
+import type { Op, Session, TermInput, TermOutput, WireNode } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
@@ -1363,4 +1363,108 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
   await surface.whenRendererReleased()
   assert.deepEqual(order, ['interaction-withdraw', 'renderer-release'],
     'the interaction owner is withdrawn BEFORE the renderer release starts')
+})
+
+
+// ── B2-L6: the routed PTC subtree reaches the mounted production renderer ──
+
+test('B2-L6: a routed PTC child start/settle reaches the mounted renderer wire', async () => {
+  const harness = await mountTspHarness()
+  const codeArgs = { code: 'print(1)', description: 'Inspect project and run tests' }
+  const readArgs = { file_path: 'src/a.ts' }
+  /** Every node the SDK has ever ADDED to the real surface. */
+  const collectWireNodes = (): WireNode[] => {
+    const nodes: WireNode[] = []
+    const visit = (node: WireNode): void => {
+      nodes.push(node)
+      for (const child of node.c ?? []) visit(child)
+    }
+    for (const frame of harness.tern.frames) {
+      for (const op of frame.ops) {
+        if (op[0] === 'add') visit(op[4])
+      }
+    }
+    return nodes
+  }
+  try {
+    // A genuine durable PTC sequence through the PRODUCTION route: the
+    // SessionEvent goes through `routeSessionEvent` → the real folder/window →
+    // `SurfaceRuntime.repaintTarget` → the mounted `mountTspRenderer` → the
+    // shipped SDK surface. The child START arrives while the parent is running;
+    // the parent then settles BEFORE the child's own settle.
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'Inspect and run the PTC program.'))
+    harness.route(ev('tool/call', {
+      turn: 1,
+      step: 0,
+      callId: ToolCallId('code-1'),
+      name: 'run_code',
+      arguments: JSON.stringify(codeArgs),
+    }, 2))
+    harness.route(ev('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'read',
+      arguments: readArgs,
+    }, 3))
+    harness.route(toolResult(4, 'code-1', 'program output'))
+    harness.surface.paintNow()
+    await settle()
+
+    const initial = collectWireNodes()
+    const child = initial.find(node => node.id.endsWith('.sub-code-1:code:1'))
+    assert.ok(child !== undefined, 'the routed PTC start reached the mounted renderer wire')
+    const childId = child.id
+    const rootId = childId.slice(0, -'.sub-code-1:code:1'.length)
+    assert.equal(child.k, 'tool')
+    assert.equal(child.p?.['frame'], 'inline', 'the routed child is a native inline tool')
+    assert.equal(child.p?.['status'], 'running')
+    assert.equal(initial.find(node => node.id === `${rootId}.child-head`)?.p?.['text'], 'Child calls · 1')
+    assert.equal(initial.find(node => node.id === rootId)?.p?.['status'], 'done',
+      'the parent settled before the child settle')
+    assert.equal(initial.filter(node => node.id === childId).length, 1,
+      'the routed child node was added exactly once')
+
+    // The child SETTLE is routed the same way, after the parent already settled.
+    harness.route(ev('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'read',
+      arguments: readArgs,
+      isError: false,
+      content: [{ type: 'text', text: 'file.txt' }],
+    }, 5))
+    harness.surface.paintNow()
+    await settle()
+
+    const last = harness.tern.frames[harness.tern.frames.length - 1]!
+    assert.ok(last.ops.some(op => op[0] === 'set' && op[1] === childId
+      && (op[2] as { status?: string }).status === 'done'),
+    'the routed settle updates the SAME child node on the real wire')
+    assert.equal(last.ops.filter(op => op[0] === 'del').length, 0, 'the routed settle deletes nothing')
+    assert.equal(last.ops.filter(op => op[0] === 'move').length, 0, 'the routed settle moves nothing')
+    const addedResult = last.ops
+      .flatMap(op => op[0] === 'add' ? [op[4]] : [])
+      .flatMap(node => {
+        const out: WireNode[] = []
+        const visit = (current: WireNode): void => {
+          out.push(current)
+          for (const next of current.c ?? []) visit(next)
+        }
+        visit(node)
+        return out
+      })
+      .find(node => node.id === `${childId}.result`)
+    assert.equal(addedResult?.p?.['text'], 'file.txt', 'the complete child result reaches the real wire')
+    assert.equal(addedResult?.p?.['wrap'], true)
+    assert.equal(last.ops.some(op => op[0] === 'set' && op[1] === rootId), false,
+      'the child settle never rewrites the root card')
+    assert.equal(collectWireNodes().filter(node => node.id === childId).length, 1,
+      'the child node was never remounted across the routed settle')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
 })
