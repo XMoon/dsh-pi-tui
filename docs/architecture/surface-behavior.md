@@ -196,10 +196,11 @@ The page never infers a stored key from a route/profile.
   Host read, so selecting `Models` on the rail paints the Loading state
   instead of blocking the input path.
 - The read state is explicit: `Loading` (no authoritative rows yet), `Ready`,
-  `Refreshing` (a read in flight over a live snapshot), `Stale` (a failed
-  refresh over the last good snapshot) and `Error` (no authoritative read at
-  all, with a retry). A failed read is never painted as "no providers
-  configured".
+  `Refreshing` (a read in flight over a live snapshot), `Stale` (the last
+  snapshot is not the current authority — a failed refresh over the last good
+  snapshot, or a backend mirror that is not current) and `Error` (no
+  authoritative read at all, with a retry). A failed read is never painted as
+  "no providers configured".
 - The HOME lists the CONFIGURED provider profiles — the Host's own
   profile-present fact — plus the independent DeepSeek Account row. The
   presence of an API key never decides the membership, and an unconfigured
@@ -217,8 +218,9 @@ The page never infers a stored key from a route/profile.
   `Unavailable`, never an empty list.
 - An authority-dependent write (the API key, the stored-credential clear and
   the native sign-in) waits for a FRESH read: while a refresh is in flight,
-  or the last refresh failed (a stale snapshot), those actions are disabled
-  and the page states that the snapshot is not current.
+  or the last snapshot is not the current authority (a stale snapshot), those
+  actions are disabled and the page states that the configuration is not
+  current.
 - `Add Provider` is a catalog: `Available providers` lists the unconfigured
   providers this installation offers, each with the operation this page can
   really perform for it (a native sign-in, the prefilled setup draft, or an
