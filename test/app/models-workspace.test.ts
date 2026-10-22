@@ -1792,6 +1792,34 @@ test('the Add catalog filters by typed text, and Esc clears the filter before it
   assert.doesNotMatch(viewText(page), /Available providers/u, 'the second Esc leaves the catalog')
 })
 
+test('the catalog filter never paints a terminal control character', async () => {
+  const available = (route: string, label: string): ModelsProviderRow => ({
+    kind: 'reference', identity: `route:${route}`, route, label, ref: `${route.toUpperCase()}_API_KEY`,
+    configured: false, declared: false, namesCredential: false, canProvisionProfile: true, group: 'available',
+    methods: [], inFlight: false,
+    profile: { route, configured: false, displayName: label, models: [] },
+  })
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows: [available('anthropic', 'Anthropic')] })
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  page.handleInput('\u001b[B') // the "Add Provider…" action
+  page.handleInput('\r')
+  viewText(page)
+  // A C1 control and an ESC-led sequence are refused as filter text: they
+  // must never reach the painted frame (docs/architecture/terminal-output.md).
+  page.handleInput('\u009b31m')
+  page.handleInput('\u001b]0;injected\u0007')
+  page.handleInput('\u009b')
+  const raw = page.render(100).join('\n')
+  assert.doesNotMatch(raw, /\u009b/u, 'no C1 control may reach the frame')
+  assert.doesNotMatch(raw, /\u001b\]0;/u, 'no OSC sequence may reach the frame')
+  assert.match(raw, /Type to narrow the list\./u, 'the refused keys left the filter untouched')
+  // Ordinary text — including CJK — is still filter text.
+  page.handleInput('文')
+  assert.match(viewText(page), /Filter: 文/u)
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,
