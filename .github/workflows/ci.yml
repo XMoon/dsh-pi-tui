@@ -670,6 +670,11 @@ jobs:
           # hypothetical — five CI runs were once reported as a concurrency
           # comparison while every one of them ran at Node's default.
           DSH_EXPECTED_CONCURRENCY: ${{ needs.dsh-context.outputs.test_concurrency }}
+          # WHICH skip reasons are legitimate in this environment. This is a
+          # qualification boundary, not a count: it does not change when the
+          # number of tests changes, and it is what stops a case from quietly
+          # skipping itself for a reason nobody agreed to.
+          DSH_ACCEPTED_SKIPS_FILE: scripts/ci-accepted-skips.txt
         run: |
           set -euo pipefail
           # What this proves, unconditionally: the shards are a PARTITION of
@@ -685,6 +690,12 @@ jobs:
           # and it would still not prove anything the partition does not.
           # The totals ARE reported in `aggregate.json`, so a deliberate
           # measurement can read them; they are not compared to a constant.
+          # A case count catches MORE than these checks do — one test that
+          # disappeared from a file that still runs others — and the two are
+          # not equivalent. It is still not here: the number would have to be
+          # edited by every commit that adds a test, which fails an ordinary
+          # PR for doing the right thing. That gap is a deliberate trade, not
+          # a claim that structure proves a total.
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
           export DSH_EXPECTED_SHA
           node scripts/verify-shards.mjs \

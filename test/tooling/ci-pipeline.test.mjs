@@ -405,25 +405,26 @@ test('the inherited environment is preserved, and the plan wins on a conflict', 
     'a runner-level mirror must not survive the plan')
 })
 
-test('the aggregate carries NO committed case or skip count', () => {
-  // A hand-maintained total is a MEASUREMENT device, not a delivery gate:
-  // it has to be edited by every commit that adds a test, so an ordinary PR
+test('the aggregate gates on STRUCTURE and a skip POLICY, never on a count', () => {
+  // A hand-maintained total is a MEASUREMENT device, not a delivery gate: it
+  // has to be edited by every commit that adds a test, so an ordinary PR
   // fails the build for doing the right thing (that is exactly how PR #385
-  // was blocked), and it proves nothing the partition proof does not.
-  //
-  // Totals stay in `aggregate.json` for a deliberate measurement to read;
-  // the gate itself is structural.
+  // was blocked). A skip REASON policy is a different thing — it is a
+  // qualification boundary, independent of any count, and it is what stops a
+  // case from quietly skipping itself for a reason nobody agreed to.
   const step = workflow().jobs.aggregate.steps.find(entry => typeof entry.run === 'string' && entry.run.includes('verify-shards'))
   assert.ok(step, 'the aggregate must run the shard proof')
-  assert.doesNotMatch(step.run, /DSH_EXPECTED_CASES|DSH_EXPECTED_SKIPPED|DSH_ACCEPTED_SKIPS|DSH_BASELINE_SOURCE|measurement-/u,
-    'no committed count or skip policy may gate the delivery pipeline')
-  for (const suffix of ['expected-cases.txt', 'expected-skipped.txt', 'accepted-skips.txt', 'baseline-source.txt']) {
+  assert.doesNotMatch(step.run, /DSH_EXPECTED_CASES|DSH_EXPECTED_SKIPPED|DSH_BASELINE_SOURCE|measurement-/u,
+    'no committed count or baseline may gate the delivery pipeline')
+  for (const suffix of ['expected-cases.txt', 'expected-skipped.txt', 'baseline-source.txt']) {
     assert.equal(existsSync(join(ROOT, 'scripts', `measurement-${suffix}`)), false,
       `the measurement artefact measurement-${suffix} must not be committed`)
-    assert.equal(existsSync(join(ROOT, 'scripts', `measurement-source-${suffix}`)), false,
-      `the measurement artefact measurement-source-${suffix} must not be committed`)
+    assert.equal(existsSync(join(ROOT, 'scripts', `measurement-source-${suffix}`)), false)
   }
-  // What it DOES pass: the identity and the claimed concurrency.
+  // The policy IS passed, and the file it names is committed.
+  assert.equal(step.env.DSH_ACCEPTED_SKIPS_FILE, 'scripts/ci-accepted-skips.txt')
+  assert.ok(existsSync(join(ROOT, 'scripts', 'ci-accepted-skips.txt')), 'the accepted-skip policy must be committed')
+  // The identity and the claimed concurrency are what the proof rests on.
   assert.match(step.env.DSH_EXPECTED_RUN_ID, /github\.run_id/u)
   assert.match(step.env.DSH_EXPECTED_RUN_ATTEMPT, /github\.run_attempt/u)
   assert.match(step.env.DSH_EXPECTED_CONCURRENCY, /outputs\.test_concurrency/u)

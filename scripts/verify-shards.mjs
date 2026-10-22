@@ -16,9 +16,19 @@
  * file list — resolved by the SAME discovery rule the runner uses — and
  * fails closed on any difference.
  *
- * It also checks the CASE counts: the shards' cases must add up to the
- * lane's own case count, and no shard may report a skip the unsharded lane
- * does not have.
+ * It also checks, per file, that a file which reported itself reported at
+ * least one real TEST. That is a WEAKER claim than a case count and it is
+ * deliberately so: a committed total has to be edited by every commit that
+ * adds a test, which makes an ordinary PR fail for doing the right thing.
+ * The limit is stated rather than papered over — this proves "the file ran
+ * something", NOT "every test that used to be in the file still runs". A
+ * SUITE is not a test: `describe('x', () => {})` reports a suite and zero
+ * tests, so suites are excluded from this check.
+ *
+ * Skip REASONS are classified against a committed policy. That is a
+ * qualification boundary and it is independent of any count: the policy says
+ * WHICH reasons are acceptable in this environment, not how many skips there
+ * may be.
  *
  * Usage:
  *   node scripts/verify-shards.mjs --shards shards --total 4 --out aggregate.json
@@ -139,6 +149,35 @@ function toTestRootPath(path) {
 }
 
 /**
+ * The skip REASONS this qualification accepts, as regular expressions.
+ *
+ * A skip is not a pass and it is not a failure: it is a case that did not
+ * run. Accepting it requires knowing WHY, so the accepted reasons are a
+ * committed POLICY rather than a tolerance for "some skips". The policy is
+ * independent of any count — it says which reasons are legitimate in this
+ * environment, not how many skips may occur.
+ *
+ * @returns {RegExp[]|null} the accepted patterns, or null when the caller
+ *   does not classify skips.
+ */
+function acceptedSkipPatterns() {
+  const file = process.env.DSH_ACCEPTED_SKIPS_FILE
+  if (file === undefined || file === '') return null
+  if (!existsSync(file)) {
+    throw new Error(`the accepted-skip policy ${file} is missing: an absent policy must not disable the check`)
+  }
+  const patterns = readFileSync(file, 'utf8')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '' && !line.startsWith('#'))
+    .map(line => new RegExp(line, 'u'))
+  if (patterns.length === 0) {
+    throw new Error(`the accepted-skip policy ${file} states no reason: that would accept no skip at all, which is not a policy`)
+  }
+  return patterns
+}
+
+/**
  * The identity and the applied configuration the shards must agree on.
  *
  * They come from the environment of the aggregate job, which is the run that
@@ -167,6 +206,7 @@ function readExpectations() {
     // (or `default` when no flag is applied, which the runner records as
     // `null`).
     expectedConcurrency: expectedConcurrencyBaseline(),
+    acceptedSkips: acceptedSkipPatterns(),
   }
 }
 
@@ -213,7 +253,7 @@ function main() {
     console.error('usage: node scripts/verify-shards.mjs --shards <dir> --total <n> [--out <file>] [--expected-files <file>] [--effective-config <text>]')
     console.error('the expectations are read from the environment:')
     console.error('  DSH_EXPECTED_SHA, DSH_EXPECTED_RUN_ID, DSH_EXPECTED_RUN_ATTEMPT,')
-    console.error('  DSH_EXPECTED_CONCURRENCY')
+    console.error('  DSH_EXPECTED_CONCURRENCY, DSH_ACCEPTED_SKIPS_FILE')
     process.exit(2)
   }
   const expectedFiles = filesIndex === -1
@@ -249,10 +289,12 @@ export function verifyShards({
   expectedRunId = null,
   expectedRunAttempt = null,
   expectedConcurrency = undefined,
+  acceptedSkips = undefined,
   effectiveConfig = null,
   expectedFiles: expectedFilesOverride,
 }) {
   const failures = []
+  const acceptedSkipPatternsOrNone = acceptedSkips === undefined ? null : acceptedSkips
 
   // The lane's own file list, resolved by the SAME discovery rule the
   // runner uses. This is the authority the shards are compared against.
@@ -365,20 +407,52 @@ export function verifyShards({
     if (cancelled.length > 0) {
       failures.push(`the shard ${directory} reported ${cancelled.length} cancelled case(s)`)
     }
-    // Every FILE that reported itself must also report at least one CASE.
+    // Every FILE that reported itself must also report at least one real TEST.
     //
     // The file partition proves every file was covered; it cannot see that a
-    // file's cases were dropped on the way to the recorder. The tempting fix
-    // is a committed case count, and it is the wrong one for a delivery
+    // file's tests were dropped on the way to the recorder. A committed case
+    // count would catch more, and it is the wrong instrument for a delivery
     // pipeline: every commit that adds a test would have to edit that number,
-    // so an ordinary PR would fail the build for doing the right thing. This
-    // invariant needs no maintained constant.
+    // so an ordinary PR would fail the build for doing the right thing.
+    //
+    // A SUITE is NOT a test. `describe('x', () => {})` reports one suite and
+    // zero tests, so counting every non-file record would let an empty suite
+    // stand in for a case. The recorder marks a missing type as `test`, which
+    // is why SUITE is the only exclusion.
     const filesWithCases = new Set(
-      shardCases.map(record => record.file).filter(file => file !== undefined).map(toTestRootPath),
+      shardCases
+        .filter(record => record.type !== 'suite')
+        .map(record => record.file)
+        .filter(file => file !== undefined)
+        .map(toTestRootPath),
     )
     const silent = shardFiles.filter(file => !filesWithCases.has(file))
     if (silent.length > 0) {
-      failures.push(`the shard ${directory} reported ${silent.length} file(s) with no case record: ${silent.slice(0, 3).join(', ')}`)
+      failures.push(`the shard ${directory} reported ${silent.length} file(s) with no test record: ${silent.slice(0, 3).join(', ')}`)
+    }
+    // Every skip must state a reason, and the reason must be one this
+    // qualification accepts.
+    //
+    // A count cannot do this job: a hundred skips are evidence only if they
+    // are the SAME KIND of skip. A case that starts skipping itself for a new
+    // reason — a broken fixture, a missing tool the runner used to have —
+    // would keep any total identical and look like a healthy run.
+    if (acceptedSkipPatternsOrNone !== null && skipped > 0) {
+      const unclassified = []
+      for (const record of shardCases) {
+        if (record.result !== 'skip') continue
+        const reason = record.skipReason
+        if (reason === null || reason === undefined || reason === '') {
+          unclassified.push(`${record.name} (no reason stated)`)
+          continue
+        }
+        if (!acceptedSkipPatternsOrNone.some(pattern => pattern.test(reason))) {
+          unclassified.push(`${record.name} (${reason})`)
+        }
+      }
+      if (unclassified.length > 0) {
+        failures.push(`the shard ${directory} skipped ${unclassified.length} case(s) for a reason the policy does not accept: ${unclassified.slice(0, 3).join('; ')}`)
+      }
     }
     // The shard must record the run it belongs to. Without that identity
     // a shard from a DIFFERENT run could be counted towards this one, and
@@ -505,6 +579,12 @@ export function verifyShards({
     // What the run CLAIMED, in the same shape the shards recorded what they
     // APPLIED, so a reader can compare the two sides directly.
     expectedConcurrency: expectedConcurrency === undefined ? null : expectedConcurrency,
+    // Whether the skip REASONS were classified, and against how many accepted
+    // classes. A reader must be able to tell "no unaccepted skip" from "no
+    // policy was applied".
+    skipPolicy: acceptedSkipPatternsOrNone === null
+      ? null
+      : { acceptedClasses: acceptedSkipPatternsOrNone.length, enforced: true },
     shards,
     versions,
     failures,
