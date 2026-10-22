@@ -1177,6 +1177,47 @@ test('opening the records view and pressing R start no stored-credential read in
   assert.equal(reads, before + 1)
 })
 
+test('leaving the records view before its deferred read starts cancels the scan', async () => {
+  const { source } = fakeSource()
+  let reads = 0
+  source.storedCredentials = async () => {
+    reads += 1
+    return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  page.render(100)
+  // End is the last action (model config guide), Up is Credential records.
+  page.handleInput('\u001b[F')
+  page.handleInput('\u001b[A')
+  page.handleInput('\r') // opens the view: the read is SCHEDULED, not started
+  page.handleInput('\u001b') // leave in the same batch, before the timer
+  await flush()
+  assert.equal(reads, 0, 'a view the user left before the timer pays no scan')
+})
+
+test('leaving the clear confirmation before its deferred read starts cancels the scan', async () => {
+  // The authorization row must have a stored record: only then is the clear
+  // action offered (a "Not signed in" row paints nothing to clear).
+  const { source } = fakeSource({ records: [{ key: 'llm-pi-ai/anthropic' }] })
+  let reads = 0
+  source.storedCredentials = async () => {
+    reads += 1
+    return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 24)
+  await flush()
+  page.render(100)
+  // The authorization row's actions: Sign in (provider), Clear stored
+  // credential, Guide, Back.
+  page.handleInput('\u001b[B') // -> Clear stored credential
+  page.handleInput('\r') // opens the confirmation: the read is SCHEDULED, not started
+  assert.match(viewText(page), /Reading the credential store…/u)
+  page.handleInput('\u001b') // leave in the same batch, before the timer
+  await flush()
+  assert.equal(reads, 0, 'a confirmation the user left before the timer pays no scan')
+})
+
 test('the list cursor follows into view so an off-screen provider is Enter-reachable (P2)', async () => {
   const { source } = fakeSource()
   const rows: ModelsProviderRow[] = Array.from({ length: 30 }, (_, index) => ({

@@ -716,6 +716,10 @@ export class ModelsWorkspacePage implements Component {
     // superseded generation never runs it at all.
     setTimeout(() => {
       if (this.disposed || serial !== this.recordsSerial) return
+      // Leaving the view cancels the deferred scan: the timer can fire after
+      // the navigation that left it (the same stdin batch), and the scan must
+      // never run for a view the user no longer sees.
+      if (this.view.kind !== 'records' && this.view.kind !== 'logout-list') return
       this.source.run('models records read', async () => {
         try {
           const records = await this.source.storedCredentials()
@@ -959,6 +963,11 @@ export class ModelsWorkspacePage implements Component {
     // scan, and a superseded read never runs it at all.
     setTimeout(() => {
       if (this.disposed || readSerial !== this.clearReadSerial || serial !== this.clearSerial) return
+      // Leaving the confirmation (or switching to another target) cancels the
+      // deferred scan: the timer can fire after the navigation that left it
+      // (the same stdin batch), and the scan must never run for a view the
+      // user no longer sees.
+      if (this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
       this.source.run('models clear target read', async () => {
         try {
           const records = await this.source.storedCredentials()
