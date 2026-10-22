@@ -414,6 +414,8 @@ export class ModelsWorkspacePage implements Component {
   /** The initial stored-credential list read is due (the deeplink opened
    *  that view): it runs after the first frame, never in the constructor. */
   private pendingRecordsRead = false
+  /** The initial clear-target read is due (the deeplink opened that view). */
+  private pendingClearTarget: CredentialClearTarget | undefined
   /** Per-wizard and per-confirmation identities: a late settlement of an
    * abandoned draft/clear target can never mutate a newer one. */
   private addSerial = 0
@@ -476,7 +478,11 @@ export class ModelsWorkspacePage implements Component {
         this.view = { kind: 'reference', ref: initial.ref, label: initial.label ?? initial.ref }
         return
       case 'logout':
-        this.openClear(initial.target)
+        // The clear target's read reaches the provider configuration, so it
+        // must not run in the constructor's input path: it starts after the
+        // first frame.
+        this.openClear(initial.target, true)
+        this.pendingClearTarget = initial.target
         return
     }
   }
@@ -516,6 +522,13 @@ export class ModelsWorkspacePage implements Component {
     if (this.pendingRecordsRead) {
       this.pendingRecordsRead = false
       this.refreshRecords()
+    }
+    // A deeplink that opened a clear target: its read starts here too.
+    const pendingTarget = this.pendingClearTarget
+    if (pendingTarget !== undefined) {
+      this.pendingClearTarget = undefined
+      if (pendingTarget.kind === 'record') this.readClearRecord()
+      else this.readReferenceState()
     }
   }
 
@@ -874,17 +887,17 @@ export class ModelsWorkspacePage implements Component {
 
   // ── clear confirmation (logout) ──────────────────────────────────────────
 
-  private openClear(target: CredentialClearTarget): void {
+  private openClear(target: CredentialClearTarget, deferRead = false): void {
     this.clearSerial += 1
     this.view = { kind: 'logout', target }
     this.cursor = 0
     this.scroll = 0
     if (target.kind === 'record') {
       this.clear = { phase: 'ready', configured: true }
-      this.readClearRecord()
+      if (!deferRead) this.readClearRecord()
     } else {
       this.clear = { phase: 'reading', configured: false }
-      this.readReferenceState()
+      if (!deferRead) this.readReferenceState()
     }
     this.revision += 1
     this.requestRender()

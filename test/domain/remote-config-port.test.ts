@@ -867,6 +867,61 @@ test('a failed directory read does not make the last-known routes a command auth
   assert.notEqual(clearedRoute, 'acme', 'the stale route must not become a clear target')
 })
 
+test('a stale mirror never makes the last-known references a command authority', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 3 })
+    current.providers = [{
+      provider: 'acme',
+      displayName: 'Acme',
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', 'acme'],
+    }]
+  })
+  await port.describe()
+  assert.ok(port.providers.listCredentialOptions().some(option => option.route === 'acme'))
+  // The settings read now fails: the mirror keeps the LAST KNOWN namespace,
+  // and its reference belongs to the previous generation (after a reconnect
+  // it may belong to another Host).
+  state.describeFailure = { code: 'gateway/unavailable', message: 'host gone' }
+  await assert.rejects(() => port.describe())
+  const options = port.providers.listCredentialOptions()
+  assert.equal(options.some(option => option.route === 'acme'), false, 'a stale route must not be a command authority')
+  assert.equal(options.some(option => option.ref === 'ACME_KEY'), false, 'a stale reference must not be a command authority')
+  const official = options.find(option => option.route === 'deepseek-official')
+  assert.ok(official !== undefined, 'the builtin target stays addressable')
+})
+
+test('the keyless profile write refuses to overwrite an existing profile', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 3 })
+    current.providers = [{
+      provider: 'acme',
+      displayName: 'Acme',
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', 'acme'],
+    }]
+  })
+  await port.describe()
+  // The route already has a profile: the keyless write must be SKIPPED.
+  assert.deepEqual(await port.providers.writeKeylessProfile('acme'), {
+    kind: 'skipped',
+    reason: 'provider route "acme" already has a profile',
+  })
+  assert.equal(state.mutateCalls.length, 0, 'nothing may be written')
+  // A route without a profile is written with the decision read's revision.
+  state.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: {} }, revision: 8 })
+  state.providers = [{
+    provider: 'new-route',
+    displayName: 'New',
+    settingsNs: 'llm-pi-ai',
+    settingsPath: ['providers', 'new-route'],
+  }]
+  await port.describe()
+  assert.deepEqual(await port.providers.writeKeylessProfile('new-route'), { kind: 'written' })
+  assert.equal(state.mutateCalls.length, 1)
+  assert.equal(state.mutateCalls[0]?.revision, 8, 'the write carries the decision read revision')
+})
+
 test('a stale configuration mirror is not projected as a current catalog', async () => {
   const { port, state } = createBackend(current => {
     current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 1 })

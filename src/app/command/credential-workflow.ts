@@ -402,7 +402,10 @@ export class CredentialWorkflow {
    */
   private writableOptions(): readonly CredentialProviderOption[] {
     const catalog = this.readCatalog()
-    return catalog.failure === undefined ? catalog.options : []
+    // A failed OR STALE catalog is not a write authority: the stale values
+    // may belong to another Host (a reconnect) or predate a concurrent
+    // configuration.
+    return catalog.failure === undefined && catalog.stale !== true ? catalog.options : []
   }
 
   configGuide(): ProviderConfigGuide {
@@ -575,6 +578,12 @@ export class CredentialWorkflow {
       return {
         kind: 'rejected',
         text: `the provider configuration could not be read (${catalog.failure}) — the provider was not added`,
+      }
+    }
+    if (catalog.stale === true) {
+      return {
+        kind: 'rejected',
+        text: 'the provider configuration is not current — refresh it and add the provider again',
       }
     }
     if (catalog.options.some(option => option.route === route && option.configured)) {

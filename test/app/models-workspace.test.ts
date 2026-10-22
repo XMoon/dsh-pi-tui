@@ -1934,6 +1934,73 @@ test('a failed authoritative read cannot authorize a write', async () => {
   assert.deepEqual(writes, [], 'a failed read must not write')
 })
 
+test('a stale catalog authorizes neither the keyless profile write nor the create', async () => {
+  const writes: string[] = []
+  const workflow = new CredentialWorkflow({
+    providers: {
+      available: () => true,
+      listCredentialOptions: () => [],
+      // The last known values, explicitly not current.
+      readCatalog: () => ({ options: [{ route: 'acme', label: 'Acme', ref: 'ACME_API_KEY', configured: false, declared: false, namesCredential: true, group: 'available' as const, canProvisionProfile: true }], profiles: [], stale: true }),
+      readProfile: (route: string) => ({ route, configured: false, models: [] }),
+      configGuide: () => ({}),
+      writeProfile: async (route: string) => { writes.push(`profile:${route}`) },
+      writeKeylessProfile: async (route: string) => { writes.push(`keyless:${route}`); return { kind: 'written' as const } },
+    },
+    credentials: {
+      available: () => true,
+      recordsSupported: () => true,
+      describeReference: async () => ({ configured: false }),
+      setReference: async () => {},
+      unsetReference: async () => {},
+      deleteRecord: async () => {},
+      listRecords: async () => [],
+      onChanged: () => () => {},
+    },
+    authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: {
+      available: () => false,
+      getState: async () => ({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
+      getProfile: async () => null,
+      getBalance: async () => null,
+      watch: async function* () {},
+      getCallbackOrigin: () => undefined,
+      startSignIn: async () => { throw new Error('unused') },
+      cancelSignIn: async () => { throw new Error('unused') },
+      signOut: async () => { throw new Error('unused') },
+      hasRunningAccountTasks: () => false,
+    },
+    catalog: { models: { available: () => false, discoverModels: async () => [] } },
+    signal: new AbortController().signal,
+    diag: { error: () => {}, warn: () => {} },
+  })
+  // A stale snapshot may belong to another Host: it authorizes no write.
+  assert.equal(await workflow.provisionKeylessProfile('acme'), '')
+  const outcome = await workflow.createProvider({ route: 'acme', api: 'openai-completions', baseURL: 'https://acme.example/v1', displayName: '', models: ['m1'], apiKey: '' })
+  assert.equal(outcome.kind, 'rejected')
+  assert.deepEqual(writes, [], 'a stale catalog must not write')
+})
+
+test('the single-target clear deeplink reads nothing in the constructor', async () => {
+  const { source } = fakeSource()
+  let catalogReads = 0
+  let recordsReads = 0
+  source.readCatalog = async () => { catalogReads += 1; return { kind: 'ready' as const, rows: makeRows() } }
+  source.storedCredentials = async () => { recordsReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, () => {})
+  page.setBodyHeight(24)
+  // The clear target's read reaches the provider configuration: it must wait
+  // for the first frame.
+  assert.equal(catalogReads, 0)
+  assert.equal(recordsReads, 0)
+  page.render(100)
+  await flush()
+  assert.equal(recordsReads, 1, 'the clear read runs after the first frame')
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,

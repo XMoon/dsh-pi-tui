@@ -545,11 +545,13 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
       const catalog = this.catalogFromDirectory(entries)
       if (catalog.failure === undefined) return catalog.options
       // The SETTINGS read failed. The Models page reports that failure; the
-      // /login and /logout parser stays fail-soft: the directory's routes
-      // remain addressable (without their profile facts, so the reference is
-      // the derived one) and the always-present builtin target survives. An
-      // empty option list would drop `deepseek-official` from the resolver.
-      return providerOptionsFor(entries, () => undefined).map(option => credentialOptionOf(option))
+      // /login and /logout parser stays fail-soft — but only for the facts
+      // it actually knows: the routes' credential references come from the
+      // profile, so a DERIVED reference would be a guess that can point at
+      // another provider's key. Only the builtin (whose reference is a
+      // constant) stays addressable, and an explicitly typed reference still
+      // resolves.
+      return providerOptionsFor([], () => undefined).map(option => credentialOptionOf(option))
     }
     return this.settingsOnlyCatalog().options
   }
@@ -657,9 +659,16 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // conventional llm-pi-ai slot apply.
     const llm = this.llm()
     if (llm === undefined) {
+      // ONE current read: the route's profile presence AND the revision the
+      // write is checked against. A profile that appeared in the meantime is
+      // NOT overwritten — the write is skipped and the caller re-reads.
+      const descriptor = readSettingsDescriptor(settings, 'llm-pi-ai')
+      if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+        return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+      }
       await mutateSettings(settings, 'llm-pi-ai', [
         { op: 'set', path: ['providers', route], value: {} },
-      ])
+      ], descriptor?.revision)
       return { kind: 'written' }
     }
     const directoryEntry = llm.listConfigurableProviders().find(candidate => candidate.provider === route)
@@ -678,9 +687,16 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     if (!validLayout) {
       return { kind: 'skipped', reason: `hostile or malformed directory entry for ${route}` }
     }
+    // ONE current read (see the conventional slot above): the write never
+    // overwrites a profile that exists now, and the revision fences a
+    // concurrent change between the check and the write.
+    const descriptor = readSettingsDescriptor(settings, directoryEntry.settingsNs)
+    if (getPath(descriptor?.value, path) !== undefined) {
+      return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+    }
     await mutateSettings(settings, directoryEntry.settingsNs, [
       { op: 'set', path, value: {} },
-    ])
+    ], descriptor?.revision)
     return { kind: 'written' }
   }
 }

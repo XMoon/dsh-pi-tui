@@ -257,7 +257,10 @@ The page never infers a stored key from a route/profile.
   The Create is CONDITIONAL: it writes the profile of a NEW route, it is
   refused when the route already has a profile, and it is checked against the
   revision its decision was read at — a provider configured in the meantime
-  is refused (the user re-reads and retries), never overwritten.
+  is refused (the user re-reads and retries), never overwritten. The same
+  rule governs the keyless profile write after a native sign-in: it never
+  overwrites an existing profile, and a failed OR stale provider read
+  authorizes no write at all.
 - Provider-native sign-in uses the existing authorization attempt owner: early
   events are buffered before attempt binding, notices/URLs stay visible above
   in-page prompts, select/text/secret prompts answer through `respond`, a Host
@@ -275,10 +278,12 @@ The page never infers a stored key from a route/profile.
   adapter-only outcome.
 - Stored credential records exclude the DeepSeek Account grant.
 - The `/login` and `/logout` resolver stays fail-soft when a read fails: the
-  always-present builtin target (and the directory's routes) remain
-  addressable. A failed Remote directory read never makes the last-known
-  routes a command authority — after a reconnect they may belong to another
-  Host.
+  always-present builtin target (whose reference is a constant) remains
+  addressable, and an explicitly typed reference still resolves. A route whose
+  credential reference is UNKNOWN (a failed settings read, a failed or stale
+  Remote directory read) is not offered as a route→reference authority — a
+  derived reference would be a guess that can point at another provider's
+  key, and the last-known routes may belong to another Host.
 
 ### Account page
 
