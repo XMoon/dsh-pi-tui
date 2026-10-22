@@ -2199,10 +2199,13 @@ export class SettingsWorkspacePanel implements Component {
   /**
    * Return the keyboard to the category rail. The direct page KEEPS its
    * instance, its view, its draft and its watch: only a real category change
-   * or a real close disposes it.
+   * or a real close disposes it. A page that owns an in-flight Host operation
+   * keeps the keyboard: the rail may not become a way around the page's own
+   * refusal (its Back action reports the same exit the keyboard does).
    */
   private returnToNavigation(): void {
     if (this.focus === 'categories') return
+    if (this.authPageHasPendingMutation()) return
     this.focus = 'categories'
     this.pressedGesture = undefined
     this.contentPressed = undefined

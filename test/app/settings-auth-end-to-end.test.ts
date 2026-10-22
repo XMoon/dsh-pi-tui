@@ -58,6 +58,8 @@ interface Harness {
   readonly holdNextSetReference: () => () => void
   /** The Host account state the Account page reads. */
   readonly setAccountView: (view: AccountView) => void
+  /** Hold the NEXT Account sign-in open, like a Host that has not answered. */
+  readonly holdNextStartSignIn: () => () => void
   readonly view: () => string
   readonly rows: () => string[]
   readonly close: () => void
@@ -92,6 +94,8 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   ]
   let setReferenceGate: Promise<void> | undefined
   let releaseSetReference: (() => void) | undefined
+  let signInGate: Promise<void> | undefined
+  let releaseSignIn: (() => void) | undefined
   const base: Record<string, unknown> = {
     ctx,
     app,
@@ -177,7 +181,13 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         getProfile: async () => null,
         getBalance: async () => null,
         getCallbackOrigin: () => 'http://127.0.0.1:43121',
-        startSignIn: async () => { calls.push('startSignIn'); return accountState.view },
+        startSignIn: async () => {
+          calls.push('startSignIn')
+          const gate = signInGate
+          signInGate = undefined
+          await gate
+          return accountState.view
+        },
         cancelSignIn: async () => accountState.view,
         signOut: async () => accountState.view,
         hasRunningAccountTasks: () => false,
@@ -201,6 +211,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     app,
     calls,
     setAccountView: (view: AccountView) => { accountState.view = view },
+    holdNextStartSignIn: () => {
+      signInGate = new Promise<void>(resolve => { releaseSignIn = resolve })
+      return () => { releaseSignIn?.() }
+    },
     holdNextSetReference: () => {
       setReferenceGate = new Promise<void>(resolve => { releaseSetReference = resolve })
       return () => { releaseSetReference?.() }
@@ -500,6 +514,41 @@ test('a pending Host mutation owns the page: the rail click cannot take the keyb
   assert.match(h.view(), /Settings ·/u, 'the workspace is not closed while the write is pending')
   assert.match(h.view(), /in flight/u, 'the page states that the write is still in flight')
   release()
+  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  h.close()
+})
+
+test('a pending Account operation keeps the keyboard: the painted Back action does not leave the page', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  const releaseHost = h.holdNextStartSignIn()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the deeplink lands in the content')
+
+  // The page's own Sign in starts a Host operation the Host has not answered
+  // yet: the page is busy from now on.
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.equal(h.calls.filter(call => call === 'startSignIn').length, 1, 'the sign-in reached the Host')
+  assert.match(h.view(), /the Host has not confirmed yet/u, 'the page states that the operation is in flight')
+
+  // The page's own painted Back action must not take the keyboard away from
+  // the operation that is still in flight.
+  const backRow = rowOf(h, '← Settings')
+  const backCol = colOf(h, backRow, '← Settings')
+  press(h, backRow, backCol)
+  release(h, backRow, backCol)
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the content kept the keyboard')
+  assert.doesNotMatch(h.rows()[0]!, /Settings · Categories/u, 'the rail did not take the keyboard')
+
+  // The keyboard path is the same action: Esc must not leave the page either.
+  await key(h, '\u001b')
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the content still owns the keyboard')
+  assert.match(h.view(), /still in flight/u, 'the page states that the operation is still in flight')
+
+  releaseHost()
   for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   h.close()
 })
