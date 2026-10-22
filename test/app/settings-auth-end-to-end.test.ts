@@ -854,3 +854,40 @@ test('a content press released on the rail does not select the category', async 
     'the content press never ran a page action')
   h.close()
 })
+
+test('a narrow rail selection is mounted when the terminal grows and the content column appears', async () => {
+  const h = open(44, 20)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await h.vt.waitForRender()
+  // The narrow first frame is the About content: Esc returns to the list.
+  await key(h, '\u001b')
+  await key(h, '\u001b[B')
+  await key(h, '\u001b[B')
+  assert.match(h.view(), /^> Account/mu, 'the narrow rail selected the Account category')
+  assert.equal(h.calls.filter(call => call === 'account:watch').length, 0,
+    'the narrow rail browsed an invisible category: no Account watch was started')
+
+  // The terminal grows: the right column appears and the SELECTED page must
+  // be there, created once, with exactly one Host watch.
+  h.vt.resize(100, 40)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /DeepSeek Account/u, 'the widened frame shows the real Account page')
+  assert.equal(h.calls.filter(call => call === 'account:watch').length, 1,
+    'the widened frame created the page exactly once')
+  h.close()
+})
+
+test('the Models page is mounted the same way when the terminal grows', async () => {
+  const h = open(44, 20)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await h.vt.waitForRender()
+  await key(h, '\u001b')
+  await key(h, '\u001b[B')
+  assert.match(h.view(), /^> Models/mu, 'the narrow rail selected the Models category')
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Models & Credentials/u, 'the widened frame shows the real Models page')
+  h.close()
+})

@@ -852,9 +852,17 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedChoiceCopy = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
-    if (direct) return this.renderDirectPage(plan)
+    if (direct) {
+      // The content column is on screen: the SELECTED page must exist. A page
+      // the narrow rail selected without creating it is created now — once,
+      // and only now that its column is really painted.
+      if (!this.directContentPainted) this.ensureDirectPageMounted()
+      this.directContentPainted = true
+      return this.renderDirectPage(plan)
+    }
     // The legacy projection paints no content column: the content box and its
     // press map belong to the direct layout alone.
+    this.directContentPainted = false
     this.paintedContentBox = undefined
     const lines: string[] = []
     const targets: HitTarget[] = []
@@ -884,6 +892,27 @@ export class SettingsWorkspacePanel implements Component {
   private paintsDirectPage(width: number): boolean {
     if (!isDirectCategory(this.categoryId)) return false
     return !(layoutForWidth(width) === 'narrow' && this.focus === 'categories')
+  }
+
+  /**
+   * Whether the last painted frame showed the direct content column. The
+   * column's APPEARANCE is the moment the selected page must exist: a narrow
+   * rail that selected a category without creating the (then invisible) page
+   * needs it created as soon as the column is really on screen.
+   */
+  private directContentPainted = false
+
+  /**
+   * Create the selected direct page when its content column is about to be
+   * painted and the page does not exist yet. It runs on the layout TRANSITION
+   * only: a mounted page is never rebuilt, and a category the user merely
+   * browsed in a narrow rail never starts a Host watch before its column is
+   * on screen.
+   */
+  private ensureDirectPageMounted(): void {
+    if (this.authPageCategory === this.categoryId) return
+    if (this.categoryId === 'models') this.mountModelsPage({ view: 'list' })
+    else if (this.categoryId === 'account') this.mountAccountPage({ view: 'page' })
   }
 
   /**
@@ -1000,12 +1029,27 @@ export class SettingsWorkspacePanel implements Component {
     } else {
       lines.push(color.textStrong('🐋 dsh-pi-tui'))
     }
-    lines.push(`${color.textDim('TUI  ')}${color.text(sanitizedPhysicalLine(facts.tui))}`)
-    lines.push(`${color.textDim('DSH  ')}${color.text(sanitizedPhysicalLine(facts.dsh ?? 'Unknown'))}`)
+    lines.push(...this.aboutFactRows('TUI  ', facts.tui, width))
+    lines.push(...this.aboutFactRows('DSH  ', facts.dsh ?? 'Unknown', width))
     this.aboutScrollExtent = Math.max(0, lines.length - rows)
     const offset = clampOffset(this.aboutOffset, lines.length, rows)
     this.aboutOffset = offset
     return lines.slice(offset, offset + rows)
+  }
+
+  /**
+   * One version fact as PHYSICAL rows. A version value is never truncated: it
+   * wraps onto the next row (the label keeps its column) so the whole fact
+   * stays readable by scrolling the About page.
+   */
+  private aboutFactRows(label: string, value: string, width: number): string[] {
+    const head = color.textDim(label)
+    const body = color.text(sanitizedPhysicalLine(value))
+    const bodyWidth = Math.max(1, width - visibleWidth(head))
+    const parts = wrapTextWithAnsi(body, bodyWidth)
+    const rows = parts.length === 0 ? [''] : parts
+    return rows.map((part, index) =>
+      index === 0 ? head + part : ' '.repeat(visibleWidth(head)) + part)
   }
 
   /**

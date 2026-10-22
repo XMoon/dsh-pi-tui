@@ -100,3 +100,31 @@ test('the About page reads the configuration document exactly once and writes no
   panel.render(120)
   assert.equal(reads, 1, 'the workspace reads its configuration document exactly once')
 })
+
+test('a long version fact is never truncated: it wraps, and the About page scrolls it into view', () => {
+  const long = '1.0.0-rc.1+build.20261022.deadbeef.verylongmetadata'
+  // A tall narrow frame: the whole About content is visible at once, so the
+  // fact's physical rows can be read back as ONE value.
+  const tall = openPanel({ tui: long, dsh: long }, { columns: 30, rows: 40 })
+  const frame = tall.render(30).map(stripTerminalSequences)
+  for (const line of frame) {
+    assert.ok(visibleWidth(line) <= 30, `no frame line exceeds the column: ${JSON.stringify(line)}`)
+    assert.ok(!line.includes('\u2026'), `the fact is never truncated: ${JSON.stringify(line)}`)
+  }
+  // The rows of one fact are contiguous: dropping the row breaks and the
+  // indentation rebuilds the exact value.
+  const squashed = frame.join('').replace(/[ \t]+/gu, '')
+  assert.ok(squashed.includes(long), `the whole fact is painted: ${JSON.stringify(squashed)}`)
+
+  // A short narrow frame: the fact does not fit, and the About page scrolls
+  // the rest of it into view.
+  const short = openPanel({ tui: long, dsh: long }, { columns: 30, rows: 6 })
+  const first = short.render(30).map(stripTerminalSequences)
+  assert.ok(!first.some(line => line.includes('DSH')), `the DSH fact is below the fold: ${JSON.stringify(first)}`)
+  const painted = new Set<string>()
+  for (let step = 0; step < 10; step += 1) {
+    for (const line of short.render(30).map(stripTerminalSequences)) painted.add(line)
+    short.handleInput('\u001b[B') // Down scrolls the About projection
+  }
+  assert.ok([...painted].some(line => line.includes('DSH')), 'the scroll reveals the DSH fact')
+})
