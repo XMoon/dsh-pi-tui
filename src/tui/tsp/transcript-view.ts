@@ -22,11 +22,13 @@
 
 import { ui } from '@stencil-hq/tern'
 import type { Node, Spans, Status } from '@stencil-hq/tern'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import { subCallDisplayStatus } from '../../domain/transcript/folder.ts'
 import { formatBytes } from '../../domain/media/format.ts'
+import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import type { TranscriptMessage, TranscriptToolMessage } from '../../domain/transcript/types.ts'
 import { contextPresentationKind } from '../transcript/context-structure.ts'
 import type { ContextCluster } from '../transcript/context-structure.ts'
@@ -107,6 +109,14 @@ export interface TranscriptViewOptions {
    * empty array) renders exactly the tree the mapper rendered before.
    */
   readonly preparingPreviews?: readonly StreamingToolPreview[]
+  /**
+   * PR-C: the per-attachment render state of the CURRENT display subject,
+   * keyed by attachment id. The TSP session layer fills it BEFORE every
+   * projection (it is the only owner of the loader and of the blob sender);
+   * an absent map means the renderer has no image capability at all, so an
+   * image block renders its identity line and no native image.
+   */
+  readonly toolImageStates?: ReadonlyMap<string, ToolImageState>
 }
 
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
@@ -124,21 +134,276 @@ function isUnmatchedToolRow(message: Extract<TranscriptMessage, { kind: 'tool' }
   return message.origin === 'tool-not-started' || (message.origin === undefined && message.callCount === 0)
 }
 
-function toolBodyNodes(
+/**
+ * PR-C: the raster media types the project presents as a NATIVE image
+ * attachment. The set is the project's own media vocabulary, never a
+ * negotiated client capability.
+ */
+const NATIVE_IMAGE_MEDIA_TYPES: readonly string[] = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+
+/**
+ * PR-C: the blob id of an image that is NOT ready yet — 64 lowercase hex
+ * zeros. It has the SHAPE of a real blob id, so the pane draws its own
+ * native placeholder for it. The renderer NEVER sends it: no `b` frame names
+ * it, and the real blob id replaces it under the SAME node key when the
+ * authorized read settles.
+ */
+export const PENDING_IMAGE_BLOB_ID = '0'.repeat(64)
+
+/**
+ * PR-C: the 16 MiB single-blob gate. It is the wire's own limit, checked
+ * against the READY bytes before anything is sent.
+ */
+export const MAX_IMAGE_BLOB_BYTES = 16 * 1024 * 1024
+
+/** PR-C: why one image attachment reference cannot be presented. */
+export type ImageRefProblem = 'invalid' | 'unsupported-format'
+
+/**
+ * PR-C: the external-input check on ONE image attachment reference. The
+ * reference crosses a Host boundary, so its identity and its media type are
+ * validated here — the mapper never trusts them because "the tool produced
+ * it".
+ * @param ref - the block's attachment reference (untrusted).
+ * @returns the problem, or `undefined` when the reference is presentable.
+ */
+export function imageRefProblem(ref: unknown): ImageRefProblem | undefined {
+  if (ref === null || typeof ref !== 'object') return 'invalid'
+  const candidate = ref as Partial<ImageAttachmentRefLike>
+  if (typeof candidate.attachmentId !== 'string' || candidate.attachmentId === '') return 'invalid'
+  if (typeof candidate.width !== 'number' || !Number.isSafeInteger(candidate.width) || candidate.width <= 0) return 'invalid'
+  if (typeof candidate.height !== 'number' || !Number.isSafeInteger(candidate.height) || candidate.height <= 0) return 'invalid'
+  if (typeof candidate.bytes !== 'number' || !Number.isSafeInteger(candidate.bytes) || candidate.bytes < 0) return 'invalid'
+  if (typeof candidate.mediaType !== 'string' || !NATIVE_IMAGE_MEDIA_TYPES.includes(candidate.mediaType)) return 'unsupported-format'
+  return undefined
+}
+
+/** PR-C: whether one attachment reference is a presentable native image. */
+function isPresentableImageRef(ref: unknown): ref is ImageAttachmentRefLike {
+  return imageRefProblem(ref) === undefined
+}
+
+/**
+ * PR-C: the synchronous render state of ONE projected image attachment.
+ *
+ * The TSP session layer owns the loader and the blob sender, so IT supplies
+ * this fact; the mapper only decides how to present it. The mapper never
+ * reads bytes, never awaits and never talks to the SDK.
+ */
+export type ToolImageState =
+  /** The pane negotiated neither the `image` kind nor the `blobs` feature. */
+  | { readonly state: 'unsupported' }
+  /** The display subject has no immutable image scope: nothing may be read. */
+  | { readonly state: 'no-scope' }
+  /** The authorized read has not produced bytes yet. */
+  | { readonly state: 'loading' }
+  /** The authorized read failed (denied, missing or unreadable). */
+  | { readonly state: 'error' }
+  /** The ready bytes exceed the 16 MiB blob gate and are never sent. */
+  | { readonly state: 'too-large' }
+  /** The bytes are ready and within the gate; the real blob id is carried. */
+  | { readonly state: 'ready'; readonly blobId: string }
+
+/**
+ * PR-C: one projected image block: its index inside the row's result blocks
+ * (the key material) and its attachment reference.
+ */
+export interface ProjectedImageBlock {
+  /** The block's index inside the row's result blocks. */
+  readonly index: number
+  /** The block's attachment reference (untrusted external input). */
+  readonly attachment: unknown
+}
+
+/**
+ * PR-C: whether ONE tool row renders its result BLOCK-WISE (the image path).
+ *
+ * The rule is the single owner of the row-level decision, so the mapper and
+ * the renderer's read path can never disagree about which attachment a row
+ * shows:
+ *
+ * - an `ask_user_question` row keeps its ORIGINAL node structure: the
+ *   settled-answer lookup stays the authority of its result, whatever the
+ *   row's blocks carry;
+ * - a MERGED read group keeps the flat text result: its `resultBlocks` are
+ *   the FIRST member's blocks and never describe the aggregate, so an image
+ *   would be attributed to the wrong member. The group's genuine-call
+ *   cardinality (`callCount > 1`) is the folder's own aggregation fact — a
+ *   single ordinary `read` is never blocked by it;
+ * - every other row projects its images only when its result really carries
+ *   an image block.
+ */
+export function toolRowProjectsImages(message: TranscriptToolMessage): boolean {
+  if (message.name === 'ask_user_question') return false
+  if ((message.callCount ?? 1) > 1) return false
+  const blocks = message.resultBlocks
+  if (blocks === undefined) return false
+  return blocks.some(block => block.type === 'image')
+}
+
+/**
+ * PR-C: the image blocks ONE tool row projects, in block order. The
+ * eligibility rule is {@link toolRowProjectsImages}; the blocks are returned
+ * with their index so the mapper and the reader agree on the node keys.
+ */
+export function toolRowImageBlocks(message: TranscriptToolMessage): readonly ProjectedImageBlock[] {
+  if (!toolRowProjectsImages(message)) return []
+  const blocks = message.resultBlocks ?? []
+  const out: ProjectedImageBlock[] = []
+  blocks.forEach((block, index) => {
+    if (block.type === 'image') out.push({ index, attachment: block.attachment })
+  })
+  return out
+}
+
+/**
+ * PR-C: the display name of one image attachment: the attachment's own name
+ * when it has one, else `image`. The identity line and the native image's
+ * accessible name are the SAME name — one attachment, one name.
+ */
+function imageDisplayName(ref: unknown): string {
+  const candidate = (ref === null || typeof ref !== 'object' ? undefined : ref) as Partial<ImageAttachmentRefLike> | undefined
+  return candidate !== undefined && typeof candidate.name === 'string' && candidate.name !== ''
+    ? candidate.name
+    : 'image'
+}
+
+/**
+ * PR-C: the identity segment of one image attachment: the display name (the
+ * attachment's own name, or `image`), its SOURCE pixel size and its SOURCE
+ * byte count. A malformed reference contributes only the parts that are well
+ * formed — the status phrase still says what is wrong.
+ */
+function imageIdentityText(ref: unknown): string {
+  const candidate = (ref === null || typeof ref !== 'object' ? undefined : ref) as Partial<ImageAttachmentRefLike> | undefined
+  const parts: string[] = [imageDisplayName(ref)]
+  if (candidate !== undefined
+    && typeof candidate.width === 'number' && Number.isSafeInteger(candidate.width) && candidate.width > 0
+    && typeof candidate.height === 'number' && Number.isSafeInteger(candidate.height) && candidate.height > 0) {
+    parts.push(`${candidate.width}×${candidate.height}`)
+  }
+  if (candidate !== undefined && typeof candidate.bytes === 'number' && Number.isSafeInteger(candidate.bytes) && candidate.bytes >= 0) {
+    parts.push(formatBytes(candidate.bytes))
+  }
+  return `[IMAGE] ${parts.join(' · ')}`
+}
+
+/** PR-C: the fixed status phrase of one image state (the frozen table). */
+function imageStatusText(state: ToolImageState): string | undefined {
+  switch (state.state) {
+    case 'unsupported': return 'Native image display unavailable in this Tern pane'
+    case 'no-scope': return 'Image unavailable for this session'
+    case 'loading': return 'Loading image…'
+    case 'error': return 'Image read failed'
+    case 'too-large': return 'Image exceeds 16 MiB Blob limit'
+    case 'ready': return undefined
+  }
+}
+
+/**
+ * PR-C: the nodes of ONE image block: the identity line and — when the pane
+ * supports a native image and the read produced bytes — the native image
+ * node. The identity line is ALWAYS drawn: it is the only place the reader
+ * learns WHICH attachment the row carries and what happened to it.
+ *
+ * The image node's key is the SAME for the pending and the ready state, so
+ * the pane replaces the placeholder in place instead of adding a second row.
+ */
+function imageBlockNodes(
+  block: ProjectedImageBlock,
+  state: ToolImageState | undefined,
+): Node[] {
+  const problem = imageRefProblem(block.attachment)
+  const identity = imageIdentityText(block.attachment)
+  if (problem !== undefined) {
+    const phrase = problem === 'invalid' ? 'Invalid image attachment' : 'Unsupported image format'
+    return [ui.text({ key: `result-b${block.index}-info`, text: sanitizeDisplayText(`${identity} · ${phrase}`) })]
+  }
+  const alt = sanitizeDisplayText(imageDisplayName(block.attachment))
+  const status = state === undefined ? 'Native image display unavailable in this Tern pane' : imageStatusText(state)
+  const info = status === undefined ? identity : `${identity} · ${status}`
+  const nodes: Node[] = [ui.text({ key: `result-b${block.index}-info`, text: sanitizeDisplayText(info) })]
+  if (state === undefined || state.state === 'unsupported' || state.state === 'no-scope') return nodes
+  const blob = state.state === 'ready' ? state.blobId : PENDING_IMAGE_BLOB_ID
+  nodes.push(ui.image({ key: `result-b${block.index}-image`, blob, alt }))
+  return nodes
+}
+
+/**
+ * PR-C: the block-wise result of one tool row: every non-empty text block
+ * stays a `ui.code`, every image block becomes its identity line plus the
+ * native image node. The flat result is NOT drawn again — it would
+ * duplicate the text blocks.
+ */
+function imageResultNodes(
+  blocks: readonly ContentBlock[],
+  options: TranscriptViewOptions,
+  wrap: boolean,
+): Node[] {
+  const nodes: Node[] = []
+  blocks.forEach((block, index) => {
+    if (block.type === 'text') {
+      if (block.text === '') return
+      nodes.push(ui.code({ key: `result-b${index}-text`, text: sanitizeDisplayText(block.text), ...(wrap ? { wrap: true } : {}) }))
+      return
+    }
+    if (block.type !== 'image') return
+    const projected: ProjectedImageBlock = { index, attachment: block.attachment }
+    // A malformed reference is NEVER read and never looked up: it renders its
+    // own failure line, not a state the reader has to interpret.
+    const state = isPresentableImageRef(block.attachment)
+      ? options.toolImageStates?.get(block.attachment.attachmentId)
+      : undefined
+    nodes.push(...imageBlockNodes(projected, state))
+  })
+  return nodes
+}
+
+/**
+ * PR-C: the result segment of one tool row.
+ *
+ * A row WITHOUT an image block keeps its EXACT previous shape: ONE `ui.code`
+ * with the flat shown result. A row WITH an image block renders block-wise,
+ * in block order, so the text and the image interleave exactly as the tool
+ * produced them.
+ * @param message - the tool row (top level or PTC child).
+ * @param options - the mapper inputs.
+ * @param wrap - whether the parent wraps its body.
+ * @param flatText - the flat result text (the settled-answer authority for a
+ *   top-level `ask_user_question` row, the child's own result for a child).
+ */
+function toolResultNodes(
+  message: TranscriptToolMessage,
+  options: TranscriptViewOptions,
+  wrap: boolean,
+  flatText: string,
+): Node[] {
+  if (toolRowProjectsImages(message)) {
+    return imageResultNodes(message.resultBlocks ?? [], options, wrap)
+  }
+  if (flatText === '') return []
+  return [ui.code({ key: 'result', text: sanitizeDisplayText(flatText), ...(wrap ? { wrap: true } : {}) })]
+}
+
+/** The ordered body parts of one tool row: its args and its result segment. */
+interface ToolBodyParts {
+  readonly args: Node[]
+  readonly result: Node[]
+}
+
+function toolBodyParts(
   message: Extract<TranscriptMessage, { kind: 'tool' }>,
   options: TranscriptViewOptions,
   wrap = false,
-): Node[] {
-  const nodes: Node[] = []
-  if (message.args !== '') nodes.push(ui.code({ key: 'args', text: sanitizeDisplayText(message.args), ...(wrap ? { wrap: true } : {}) }))
+): ToolBodyParts {
+  const args: Node[] = []
+  if (message.args !== '') args.push(ui.code({ key: 'args', text: sanitizeDisplayText(message.args), ...(wrap ? { wrap: true } : {}) }))
   // The body is decided by the SHOWN result, never by the recorded payload: a
   // running `ask_user_question` row can carry an empty recorded result while
   // the official projection already settled it, and the settled batch is still
   // the authority. An absent lookup answers `''` and omits the body exactly as
   // before, so an ordinary tool row is unchanged.
-  const result = shownToolResult(message, options)
-  if (result !== '') nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(result), ...(wrap ? { wrap: true } : {}) }))
-  return nodes
+  return { args, result: toolResultNodes(message, options, wrap, shownToolResult(message, options)) }
 }
 
 /**
@@ -170,7 +435,9 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
     body.push(ui.code({ key: 'args', text: sanitizeDisplayText(child.args), wrap: true }))
   }
   body.push(...toolChildNodes(child, options))
-  if (child.result !== '') body.push(ui.code({ key: 'result', text: sanitizeDisplayText(child.result), wrap: true }))
+  // PR-C: the child projects ITS OWN result blocks (recursively, with the
+  // same rule as a top-level row) — the parent's result never leaks into it.
+  body.push(...toolResultNodes(child, options, true, child.result))
   return ui.tool(
     {
       key: `sub-${child.subCallId!}`,
@@ -206,23 +473,23 @@ function toolChildNodes(parent: TranscriptToolMessage, options: TranscriptViewOp
 
 function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: string, options: TranscriptViewOptions): Node {
   const header = toolCardHeader(message.name, message.args, options.cwd)
-  if (isUnmatchedToolRow(message)) {
-    const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
-    return ui.card(
-      { key, head: sanitizedPhysicalLine(header.title), tone: 'warning' },
-      ui.badge({ key: 'provenance', text: provenance }),
-      ...toolBodyNodes(message, options),
-    )
-  }
   // PR-B2: only a parent that carries PTC children gets the wrapped parent
   // body and the nested block; every other tool row keeps its previous view
   // shape and SDK props byte-identically. The order is fixed:
   // parent args -> child block -> parent result.
   const hasChildren = (message.subCalls?.length ?? 0) > 0
-  const existing = toolBodyNodes(message, options, hasChildren)
-  const args = existing.filter(node => node.props.key === 'args')
-  const result = existing.filter(node => node.props.key === 'result')
-  const others = existing.filter(node => node.props.key !== 'args' && node.props.key !== 'result')
+  const body = toolBodyParts(message, options, hasChildren)
+  if (isUnmatchedToolRow(message)) {
+    const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
+    // PR-C: an unmatched row shows ITS OWN image blocks inside the existing
+    // warning card; the provenance badge and the card's shape are unchanged.
+    return ui.card(
+      { key, head: sanitizedPhysicalLine(header.title), tone: 'warning' },
+      ui.badge({ key: 'provenance', text: provenance }),
+      ...body.args,
+      ...body.result,
+    )
+  }
   return ui.tool(
     {
       key,
@@ -242,10 +509,9 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
         ),
       }),
     },
-    ...args,
-    ...others,
+    ...body.args,
     ...toolChildNodes(message, options),
-    ...result,
+    ...body.result,
   )
 }
 
