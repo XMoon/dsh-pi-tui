@@ -189,6 +189,12 @@ test('a page that owns a pending Host mutation keeps the keyboard and the lease'
   h.panel.onCellClick(2, 5)
   assert.match(plain(h), /Settings · Account/u, 'the focus stayed with the pending page')
 
+  // The page's own exit report (its Back action) must not take the keyboard
+  // away either: the page keeps the keyboard until the operation settles.
+  page.exitOn = '\u001b'
+  h.panel.handleInput('\u001b')
+  assert.match(plain(h), /Settings · Account/u, 'the page keeps the keyboard while its operation is in flight')
+
   // The workspace must not close under the pending operation either.
   h.panel.handleInput('\u001b')
   assert.match(plain(h), /Settings ·/u, 'the workspace is still open')
