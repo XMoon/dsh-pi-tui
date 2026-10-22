@@ -1027,15 +1027,18 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
    *  over its per-entry sections when present, the settings-only fallback
    *  otherwise (the same merge the Direct adapter wires). */
   listCredentialOptions(): readonly CredentialProviderOption[] {
+    // The routes' credential references come from the settings namespace. A
+    // failed directory read leaves the last-known ROUTES behind (after a
+    // reconnect they may belong to another Host), and a failed or stale
+    // settings read leaves the last-known REFERENCES behind. Neither may be
+    // offered as a route→reference authority: only the builtin (whose
+    // reference is a constant) stays addressable, and an explicitly typed
+    // reference still resolves. The Models page reports the failure instead.
+    if (this.mirror.providersFailure() !== undefined || this.mirror.readiness() !== 'ready') {
+      return providerOptionsFor([], () => undefined).map(option => remoteCredentialOptionOf(option))
+    }
     const directory = this.mirror.providers()
     if (directory !== undefined) {
-      if (this.mirror.providersFailure() !== undefined) {
-        // The directory read FAILED: the last-known routes are NOT a current
-        // route→credential authority (after a reconnect they may belong to
-        // another Host). Only the always-present builtin target stays
-        // addressable; the Models page reports the failure instead.
-        return providerOptionsFor([], () => undefined).map(option => remoteCredentialOptionOf(option))
-      }
       return providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
         .map(option => remoteCredentialOptionOf(option))
     }
@@ -1182,9 +1185,16 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     if (directory === undefined) {
       // The directory is not mirrored (its read degraded): the conventional
       // llm-pi-ai slot applies, exactly like Direct's settings-only fallback.
+      // ONE current read: the route's profile presence AND the revision the
+      // write is checked against. A profile that appeared in the meantime is
+      // NOT overwritten — the write is skipped and the caller re-reads.
+      const descriptor = this.mirror.namespace(PROVIDER_SETTINGS_NS)
+      if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+        return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+      }
       await this.mirror.mutate(PROVIDER_SETTINGS_NS, [
         { op: 'set', path: ['providers', route], value: {} },
-      ])
+      ], descriptor?.revision)
       return { kind: 'written' }
     }
     const entry = directory.find(candidate => candidate.provider === route)
@@ -1200,9 +1210,16 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     if (!canProvisionKeylessProfile(entry.settingsNs, path, route)) {
       return { kind: 'skipped', reason: `hostile or malformed directory entry for ${route}` }
     }
+    // ONE current read (see the conventional slot above): the write never
+    // overwrites a profile that exists now, and the revision fences a
+    // concurrent change between the check and the write.
+    const descriptor = this.mirror.namespace(entry.settingsNs)
+    if (getPath(descriptor?.value, path) !== undefined) {
+      return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+    }
     await this.mirror.mutate(entry.settingsNs, [
       { op: 'set', path, value: {} },
-    ])
+    ], descriptor?.revision)
     return { kind: 'written' }
   }
 }

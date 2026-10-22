@@ -192,12 +192,11 @@ test('a failed settings read keeps the builtin target addressable for /login and
   assert.ok(official !== undefined, 'the builtin target must stay addressable')
   assert.equal(official.ref, 'DEEPSEEK_API_KEY')
   assert.equal(official.canProvisionProfile, false)
-  // The directory's route stays addressable too, with the derived reference
-  // (the profile facts are unknown while the settings read failed).
-  const acme = options.find(option => option.route === 'acme')
-  assert.ok(acme !== undefined)
-  assert.equal(acme.ref, 'ACME_API_KEY')
-  assert.equal(acme.configured, false)
+  // The directory's route does NOT stay addressable: its credential
+  // reference lives in the profile, and a failed read cannot know it (a
+  // derived reference would point at another provider's key).
+  assert.equal(options.some(option => option.route === 'acme'), false)
+  assert.equal(options.some(option => option.ref === 'ACME_API_KEY'), false)
   // BOTH resolver paths still address the builtin: /login and /logout.
   assert.deepEqual(resolveLoginDestination('deepseek-official', options, []), {
     kind: 'models',
@@ -210,6 +209,73 @@ test('a failed settings read keeps the builtin target addressable for /login and
     view: 'logout',
     target: { kind: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'deepseek official', route: 'deepseek-official' },
   })
+})
+
+test('a failed settings read never offers a DERIVED provider reference to the resolver', () => {
+  // The real profile names SHARED_API_KEY; the derived reference would be
+  // ACME_API_KEY — another provider's key. A failed read must not present
+  // that guess as acme's reference.
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  const options = providers.listCredentialOptions()
+  assert.equal(options.some(option => option.route === 'acme'), false, 'a route with an unknown reference must not be offered')
+  assert.equal(options.some(option => option.ref === 'ACME_API_KEY'), false, 'the derived reference must not be offered')
+  // The /logout chain must not resolve acme to the derived reference.
+  const logout = resolveLogoutDestination('acme', options, [])
+  const clearedRef = logout.kind === 'models' && logout.view === 'logout' && logout.target.kind === 'reference'
+    ? logout.target.ref
+    : undefined
+  assert.notEqual(clearedRef, 'ACME_API_KEY', 'the derived reference must never become a clear target')
+})
+
+test('the keyless profile write refuses to overwrite an existing profile', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision: number | undefined }> = []
+  const section = { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }
+  const providers = port({
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: section, user: section, revision: 5 }],
+      mutate: async (ns: string, ops: unknown, revision: number | undefined) => { writes.push({ ns, ops, revision }) },
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  // The route already has a profile: the keyless write must be SKIPPED, not
+  // overwrite it.
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), {
+    kind: 'skipped',
+    reason: 'provider route "acme" already has a profile',
+  })
+  // NOT `assert.deepEqual(writes, [])`: its assertion signature would narrow
+  // the array to never[] and the later push would not compile.
+  assert.equal(writes.length, 0, 'nothing may be written')
+  // A route without a profile is written, with the revision the decision was
+  // read at.
+  const fresh = port({
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: { providers: {} }, user: { providers: {} }, revision: 9 }],
+      mutate: async (ns: string, ops: unknown, revision: number | undefined) => { writes.push({ ns, ops, revision }) },
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'new-route', displayName: 'New', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'new-route'] },
+      ],
+    },
+  }).providers
+  assert.deepEqual(await fresh.writeKeylessProfile('new-route'), { kind: 'written' })
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0]?.revision, 9, 'the write carries the decision read revision')
 })
 
 test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
