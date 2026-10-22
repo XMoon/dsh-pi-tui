@@ -21,6 +21,7 @@ import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
 import type { ProviderCatalogEntry } from '../../src/domain/catalog/provider.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
+import { resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
 /* ------------------------------------------------------------------------- *
  * Fake structural wire backend.
@@ -845,6 +846,25 @@ test('a failed directory read does not make the last-known routes a command auth
   assert.equal(options.some(option => option.route === 'acme'), false, 'the stale route must not be a command authority')
   const official = options.find(option => option.route === 'deepseek-official')
   assert.ok(official !== undefined, 'the builtin target stays addressable')
+  // BOTH resolver paths stay on the builtin: the stale route is not an
+  // authority for /login or /logout.
+  assert.deepEqual(resolveLoginDestination('deepseek-official', options, []), {
+    kind: 'models',
+    view: 'reference',
+    ref: 'DEEPSEEK_API_KEY',
+    label: 'deepseek official',
+  })
+  assert.deepEqual(resolveLogoutDestination('deepseek-official', options, []), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'deepseek official', route: 'deepseek-official' },
+  })
+  // The dangerous path is /logout: the stale route must not become a clear
+  // target (the argument falls back to the documented literal-reference
+  // reading, which addresses a reference, never the stale route).
+  const logout = resolveLogoutDestination('acme', options, [])
+  const clearedRoute = logout.kind === 'models' && logout.view === 'logout' ? logout.target.route : undefined
+  assert.notEqual(clearedRoute, 'acme', 'the stale route must not become a clear target')
 })
 
 test('a stale configuration mirror is not projected as a current catalog', async () => {
