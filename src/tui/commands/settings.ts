@@ -193,6 +193,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       const catalog = workflow.readCatalog()
       if (catalog.failure !== undefined) return { kind: 'failed' as const, reason: catalog.failure }
       const profileOf = (route: string) => catalog.profiles.get(route) ?? { route, configured: false, models: [] }
+      const optionOf = (route: string) => catalog.options.find(option => option.route === route)
       const rows = catalog.targets.map(target => target.kind === 'reference'
         ? {
             kind: 'reference' as const,
@@ -203,7 +204,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             configured: target.configured,
             declared: target.declared,
             namesCredential: target.namesCredential,
-            canProvisionProfile: catalog.options.find(option => option.route === target.route)?.canProvisionProfile === true,
+            canProvisionProfile: optionOf(target.route)?.canProvisionProfile === true,
+            ...(optionOf(target.route)?.group === undefined ? {} : { group: optionOf(target.route)!.group }),
             methods: [],
             inFlight: false,
             profile: profileOf(target.route),
@@ -218,6 +220,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             declared: false,
             namesCredential: false,
             canProvisionProfile: false,
+            // A flow that no provider option addresses (a foreign scope) has
+            // no group: it is an "Other sign-in", not a provider row.
+            ...(optionOf(target.route ?? '')?.group === undefined ? {} : { group: optionOf(target.route!)!.group }),
             methods: target.methods.map(method => ({ ...method })),
             inFlight: target.inFlight,
             profile: target.route === undefined
