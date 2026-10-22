@@ -34,6 +34,7 @@ import { MODE_TOKENS, TEST_ENTRY_REF_PREFIX, readModeToken, resolvePrototypeMode
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'pipeline-guard.mjs')
+const MODE_SCRIPT = join(ROOT, 'scripts', 'prototype-mode.mjs')
 
 /** Every required phase, at one result. */
 function phasesAt(result) {
@@ -89,11 +90,16 @@ test('SOURCE mode is accepted from the test entry and only from it', () => {
   assert.equal(checkMode('npm', 'prototype-override').ok, true)
 })
 
-test('the test entry is COMMITTED off, so a run is never an override by default', () => {
-  const token = readModeToken(join(ROOT, 'scripts', 'prototype-source-mode.txt'))
-  assert.equal(token, 'resolved',
-    'the committed switch must default to the resolver: a tree that says `source` runs the experiment')
+test('the mode switch is a COMMITTED token the workflow reads by name', () => {
+  // A dispatch input cannot carry this decision: a push has no inputs, and a
+  // workflow that is not on the default branch cannot be dispatched at all.
+  // The switch is therefore a file in the tree, and the workflow must name it
+  // — a default buried in the script would let the tree and the run disagree.
+  assert.doesNotThrow(() => readModeToken(join(ROOT, 'scripts', 'prototype-source-mode.txt')))
   assert.deepEqual(MODE_TOKENS, ['resolved', 'source'])
+  const source = readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8')
+  assert.match(source, /--token scripts\/prototype-source-mode\.txt/u,
+    'the workflow must read the committed switch, not default to one')
 })
 
 test('the test entry takes the pin from the TRACKED source config', () => {
@@ -116,6 +122,33 @@ test('the test entry passes the resolver answer through untouched', () => {
     ref: 'refs/heads/main',
   })
   assert.deepEqual(resolved, { mode: 'npm', modeOrigin: 'resolver', sourceRef: '', sourceExpectedVersion: '' })
+})
+
+test('the mode entry writes the outputs the workflow consumes', (t) => {
+  // This case exists because the exported decision was fully tested while the
+  // SCRIPT the workflow runs was not: a reference error in the CLI's banner
+  // failed the whole pipeline at the context job, after every unit test above
+  // had passed. The output NAMES are the machine contract — a rename here
+  // silently empties `mode` downstream.
+  const outputFile = join(scratch(t), 'github-output')
+  const token = join(scratch(t), 'token.txt')
+  writeFileSync(token, 'source\n')
+  const result = spawnSync(process.execPath, [
+    MODE_SCRIPT,
+    '--token', token,
+    '--resolved-mode', 'npm',
+    '--ref', `${TEST_ENTRY_REF_PREFIX}example`,
+  ], { cwd: ROOT, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: outputFile } })
+  assert.equal(result.status, 0, result.stderr)
+  const outputs = readFileSync(outputFile, 'utf8')
+  const config = JSON.parse(readFileSync(join(ROOT, 'test', 'compat', 'dsh-source.json'), 'utf8'))
+  assert.match(outputs, /^mode=source$/mu)
+  assert.match(outputs, /^mode_origin=prototype-override$/mu)
+  assert.match(outputs, new RegExp(`^source_ref=${config.ref}$`, 'mu'))
+  assert.match(outputs, new RegExp(`^source_expected_version=${config.expectedVersion}$`, 'mu'))
+  // And the log says it is an experiment, not a routing result.
+  assert.match(result.stdout, /PROTOTYPE SOURCE MODE TEST ENTRY/u)
+  assert.match(result.stdout, /NOT evidence about the production mode routing/u)
 })
 
 test('the test entry cannot act outside the prototype branches', () => {

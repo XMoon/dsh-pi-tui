@@ -129,14 +129,17 @@ function main() {
     throw new Error("--resolved-mode is required: the resolver's own answer is part of this run's record")
   }
   const ref = values.ref ?? process.env.GITHUB_REF ?? ''
+  const resolvedMode = values['resolved-mode']
   const resolved = resolvePrototypeMode({
     token: readModeToken(values.token),
-    resolvedMode: values['resolved-mode'],
+    resolvedMode,
     resolvedSourceRef: values['resolved-source-ref'] ?? '',
     resolvedSourceExpectedVersion: values['resolved-source-expected-version'] ?? '',
     ref,
     configPath: values.config ?? DEFAULT_SOURCE_CONFIG,
   })
+  // The outputs are the machine contract the workflow consumes; the banner
+  // below is for the human reading the log.
   const outputPath = process.env.GITHUB_OUTPUT
   if (typeof outputPath !== 'string' || outputPath === '') {
     throw new Error('GITHUB_OUTPUT is not set: this script exists to prepare a JOB, not a shell')
