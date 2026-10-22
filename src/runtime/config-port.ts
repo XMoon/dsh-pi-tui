@@ -288,6 +288,13 @@ export interface ProviderCatalogSnapshot {
    * failure instead of presenting "no providers".
    */
   readonly failure?: string
+  /**
+   * Whether the values are the LAST KNOWN ones and not current (a stale
+   * mirror): the directory and the settings may come from different
+   * generations, so a consumer must mark them as not current instead of
+   * presenting them as a fresh read.
+   */
+  readonly stale?: boolean
 }
 
 /** The provider-profile sub-domain: the add-provider wizard and the

@@ -15,7 +15,6 @@ import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { createAuthCommands } from '../../src/tui/commands/auth.ts'
 import {
   classifyCredentialArg,
-  credentialOptionsFor,
   resolveCredentialArg,
 } from '../../src/domain/catalog/provider.ts'
 import type { AuthDestination } from '../../src/app/command/credential-workflow.ts'
@@ -89,26 +88,6 @@ function authCommands() {
   }
   return { invoke, opened }
 }
-
-test('credentialOptionsFor lists deepseek official plus every llm-pi-ai route', () => {
-  const options = credentialOptionsFor(LLM_PI_AI_SECTION.providers)
-  // The ROUTE is the identity: the `deepseek` route names the official
-  // reference and stays a target of its own (the credential READ is
-  // deduplicated by reference in the read planner, never by dropping a
-  // provider).
-  assert.deepEqual(options.map(option => option.ref), [
-    'DEEPSEEK_API_KEY',
-    'OPENAI_API_KEY',
-    'DEEPSEEK_API_KEY',
-    'ACME_GATEWAY_API_KEY',
-  ])
-  assert.deepEqual(options.map(option => option.route), [
-    'deepseek-official',
-    'openai',
-    'deepseek',
-    'acme',
-  ])
-})
 
 test('classifyCredentialArg distinguishes a route from a literal reference', () => {
   assert.deepEqual(classifyCredentialArg('acme', OPTIONS), { kind: 'route', option: OPTIONS[2] })

@@ -1644,6 +1644,21 @@ test('a refresh marks the credential facts stale until the fresh read confirms t
   assert.doesNotMatch(viewText(page), /Stale/u)
 })
 
+test('the R key does not read the provider catalog in the input path', async () => {
+  const { source } = fakeSource()
+  let reads = 0
+  source.readCatalog = async () => { reads += 1; return { kind: 'ready' as const, rows: makeRows() } }
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  assert.equal(reads, 1)
+  page.handleInput('r')
+  // The Host read is synchronous: running it inside the key handler would
+  // stall every keypress for the length of the snapshot read.
+  assert.equal(reads, 1, 'the R key must not read the catalog in the input handler')
+  await flush()
+  assert.equal(reads, 2)
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,

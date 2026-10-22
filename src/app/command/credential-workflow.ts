@@ -262,6 +262,9 @@ export interface ProviderCatalogRead {
   /** Why the catalog could not be read AUTHORITATIVELY. `undefined` means
    *  the snapshot is authoritative. */
   readonly failure?: string
+  /** Whether the values are the LAST KNOWN ones and not current (a stale
+   *  backend mirror). */
+  readonly stale?: boolean
 }
 
 /**
@@ -352,6 +355,7 @@ export class CredentialWorkflow {
       options,
       profiles: new Map(snapshot.profiles.map(profile => [profile.route, profile])),
       ...(snapshot.failure === undefined ? {} : { failure: snapshot.failure }),
+      ...(snapshot.stale === true ? { stale: true } : {}),
     }
   }
 

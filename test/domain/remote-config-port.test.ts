@@ -793,6 +793,45 @@ test('footerCustomItems reads the USER layer for both the runtime view and persi
  * Providers.
  * ------------------------------------------------------------------------- */
 
+test('a failed provider-directory read is reported, never an authoritative empty catalog', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 1 })
+    // The wire directory read FAILS (an empty directory is a successful read).
+    current.providers = undefined
+  })
+  await port.describe()
+  const catalog = port.providers.readCatalog()
+  assert.ok(catalog.failure !== undefined, 'a failed directory read must be reported')
+  assert.match(catalog.failure, /provider directory/u)
+  assert.equal(catalog.options.length, 0)
+  assert.equal(state.describeCalls >= 1, true)
+})
+
+test('a stale configuration mirror is not projected as a current catalog', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }, revision: 1 })
+    current.providers = [{
+      provider: 'acme',
+      displayName: 'Acme',
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', 'acme'],
+    }]
+  })
+  await port.describe()
+  const fresh = port.providers.readCatalog()
+  assert.equal(fresh.failure, undefined)
+  assert.equal(fresh.stale, undefined, 'a ready mirror is a current catalog')
+  assert.equal(fresh.options.length, 2)
+  // The settings read now fails: the mirror keeps the last known values and
+  // reports them as NOT current.
+  state.describeFailure = { code: 'gateway/unavailable', message: 'host gone' }
+  await assert.rejects(() => port.describe())
+  const stale = port.providers.readCatalog()
+  assert.equal(stale.stale, true, 'a stale mirror must be marked not current')
+  assert.equal(stale.failure, undefined)
+  assert.equal(stale.options.length, 2, 'the last known values stay readable')
+})
+
 test('provider options and keyless writes share one profile-slot rule', async () => {
   const { port, state } = createBackend(current => {
     current.namespaces.set('llm-pi-ai', { ns: 'llm-pi-ai', value: { providers: {} }, revision: 1 })
