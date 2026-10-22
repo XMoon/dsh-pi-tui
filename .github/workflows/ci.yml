@@ -35,7 +35,25 @@ jobs:
       version: ${{ steps.context.outputs.version }}
       source_ref: ${{ steps.context.outputs.source_ref }}
       source_expected_version: ${{ steps.context.outputs.source_expected_version }}
+      # The accelerated DAG's shape, resolved and validated ONCE here. No
+      # consumer reads `vars.*` directly: a matrix built from one value and
+      # an aggregate from another would disagree about what "all shards"
+      # means, and nothing in the run would say so.
+      shard_total: ${{ steps.context.outputs.shard_total }}
+      shards: ${{ steps.context.outputs.shards }}
+      max_parallel: ${{ steps.context.outputs.max_parallel }}
+      test_concurrency: ${{ steps.context.outputs.test_concurrency }}
+      effective_config: ${{ steps.context.outputs.effective_config }}
+      started_epoch: ${{ steps.started.outputs.epoch }}
     steps:
+      # The instant this run's first job started. It is NOT the queue time —
+      # GitHub does not expose that — so the elapsed figure the summary prints
+      # is a LOWER BOUND of the end-to-end wall clock, and it is labelled that
+      # way. An unusable value fails the summary rather than becoming zero.
+      - name: Record the DAG start instant
+        id: started
+        run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -47,12 +65,19 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
+      # The shape variables are read through `env`, never interpolated into
+      # shell source. An ABSENT variable is the measured default; an empty one
+      # (what Actions renders an unset `vars` entry as) is the default too; a
+      # nonempty INVALID one fails here, before anything is built.
       - name: Resolve mode
         id: context
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
+          CI_PRODUCT_SHARDS: ${{ vars.CI_PRODUCT_SHARDS }}
+          CI_PRODUCT_MAX_PARALLEL: ${{ vars.CI_PRODUCT_MAX_PARALLEL }}
+          CI_PRODUCT_TEST_CONCURRENCY: ${{ vars.CI_PRODUCT_TEST_CONCURRENCY }}
         run: node scripts/dsh-ci-context.mjs
 
   # ---------------------------------------------------------------------------
@@ -345,36 +370,41 @@ jobs:
       - name: Run exact current-family gates
         run: pnpm compat:dsh:client-family
 
-  # Build the ONE artifact that is tested and eventually published.
-  #
-  # pnpm pack invokes the package lifecycle:
-  #
-  # prepack:
-  #   clean
-  #   clean:fork
-  #   build
-  #   typecheck:bundle
-  #   test:product
-  #
-  # postpack:
-  #   tarball-smoke
-  #   extension-fixture-smoke
-  #   advanced-plugin-smoke
-  #   phase4-plugin-smoke
-  #   unstable-plugin-smoke
-  #   vim-plugin-smoke
-  #   examples-plugin-smoke
-  #
-  # Do NOT rebuild in later jobs.
   # ---------------------------------------------------------------------------
-  build-and-pack:
-    name: Build and pack
+  # THE ACCELERATED DAG.
+  #
+  # What replaced the single `build-and-pack` job, and why the replacement is
+  # not weaker than the lifecycle it replaces:
+  #
+  #   `pnpm pack` used to run, on ONE runner:
+  #     prepack:  clean, clean:fork, build, typecheck:bundle, test:product
+  #     postpack: the eight public-package smokes
+  #
+  # The same WORK now happens as individually blocking jobs: ONE build, ONE
+  # typecheck, N product shards joined by an aggregate proof, a candidate pack
+  # that runs no lifecycle, and a qualification that runs the same eight
+  # smokes against the exact candidate. The one thing that is NOT re-executed
+  # is the ordinary `pnpm pack` in the release path — and that is covered by an
+  # equivalence proof with a trigger, scoped by mode/Node/platform, so an
+  # unproven equality is never assumed. See `docs/guides/releasing.md`.
+  #
+  # Every consumer proves it holds the build the build job produced, and the
+  # pack proves it consumed that build: without that proof four shards can
+  # test four different trees and every one of them looks green.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build the shared artifact
     needs:
       - dsh-context
       - prepare-dsh-source
+    # `always()` suppresses GitHub's implicit `success()` requirement on the
+    # needs, so BOTH are named here. `prepare-dsh-source` is legitimately
+    # SKIPPED in npm mode; it may not be skipped in source mode, because a
+    # source run without the pinned distribution would quietly build against
+    # the registry while the run claims Source Mode.
     if: ${{ always() && needs.dsh-context.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
@@ -391,8 +421,77 @@ jobs:
           cache: true
           install: false
 
-      - name: Set DSH source artifact path
-        run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      # `clean` FIRST, exactly like `prepack`: a build that reuses a stale
+      # `dist` is not the build this commit produces.
+      - name: Clean and build
+        run: pnpm clean && pnpm clean:fork && pnpm build
+
+      - name: Record the build identity
+        run: node scripts/build-digest.mjs --write build-digest.json
+
+      - name: Upload the shared build
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-build
+          # The build OUTPUTS only. `node_modules` is reinstalled in every
+          # consumer (it is not portable), and `src` comes from the checkout.
+          path: |
+            dist
+            packages/pi-tui/dist
+            generated
+            build-digest.json
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # TYPECHECK, ONCE.
+  #
+  # It DEPENDS on the build: `tsconfig.json` includes `src` and `test`, and
+  # those import `@xmoon76/pi-tui`, whose declarations live in the vendored
+  # fork's BUILD output. Running it four times — once per shard — would add
+  # runner-minutes and prove nothing new.
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Bundle typecheck
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - build
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
 
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
@@ -403,96 +502,788 @@ jobs:
 
       - name: Prepare DSH dependency environment
         env:
-          DSH_SOURCE_CONFIG: test/compat/dsh-source.json
+          DSH_MODE_RESOLVED: ${{ needs.dsh-context.outputs.mode }}
         run: |
           set -euo pipefail
-          if [ "$DSH_MODE" = source ]; then
-            node scripts/prepare-dsh-test-environment.mjs \
-              --mode source \
-              --distribution "$DSH_SOURCE_ARTIFACT" \
-              --workspace "$GITHUB_WORKSPACE" \
-              --config "$DSH_SOURCE_CONFIG"
-            echo 'PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false' >> "$GITHUB_ENV"
-            echo 'PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false' >> "$GITHUB_ENV"
-            echo 'TARBALL_SMOKE_SKIP_INSTALL=1' >> "$GITHUB_ENV"
-          else
-            printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
-             NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
-               npm_config_registry=https://registry.npmjs.org/ \
-               NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
-               npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
-               PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
-               PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
-               pnpm install --frozen-lockfile
-             {
-               echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
-               echo 'npm_config_registry=https://registry.npmjs.org/'
-               echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
-               echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
-             } >> "$GITHUB_ENV"
+          node scripts/ci-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      - name: Download the shared build
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-build
+          path: ${{ github.workspace }}
+
+      - name: Verify this typecheck holds the build the build job produced
+        run: node scripts/build-digest.mjs --verify build-digest.json
+
+      - name: Typecheck the bundle
+        run: pnpm typecheck:bundle
+
+  # ---------------------------------------------------------------------------
+  # THE PRODUCT SHARDS: Node's own `--test-shard`, so the partition is
+  # disjoint by construction and the aggregate only has to PROVE it.
+  # ---------------------------------------------------------------------------
+  product-shard:
+    name: Product shard ${{ matrix.shard }}/${{ needs.dsh-context.outputs.shard_total }}
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - build
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # The SCHEDULER cap. It is not the shard count: a cap larger than the
+      # shard list simply means "no extra throttling", and it never changes
+      # the partition.
+      max-parallel: ${{ fromJSON(needs.dsh-context.outputs.max_parallel) }}
+      matrix:
+        shard: ${{ fromJSON(needs.dsh-context.outputs.shards) }}
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+      DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
+      DSH_TEST_EFFECTIVE_JSON: ${{ github.workspace }}/diagnostics/effective-params.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      - name: Download the shared build
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-build
+          path: ${{ github.workspace }}
+
+      - name: Verify this shard holds the build the build job produced
+        run: node scripts/build-digest.mjs --verify build-digest.json
+
+      - name: Run this shard
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          start=$(date +%s)
+          node scripts/run-test-lane.mjs product \
+            --shard=${{ matrix.shard }}/${{ needs.dsh-context.outputs.shard_total }} \
+            --test-concurrency=${{ needs.dsh-context.outputs.test_concurrency }}
+          end=$(date +%s)
+          node scripts/runner-spec.mjs \
+            --wall-clock-seconds "$((end - start))" \
+            --out diagnostics/runner-spec.json
+
+      - name: Upload this shard's records
+        # A failed test run must still deliver its RECORDS: the aggregate is
+        # what decides, and an aggregate with no records cannot tell "the
+        # shard failed" from "the shard never ran".
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-shard-${{ matrix.shard }}-node24
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE AGGREGATE: the proof that the shards are the whole lane, and that each
+  # one ran the shard it claims.
+  #
+  # `if: always()` so a FAILED or CANCELLED shard still produces a report — the
+  # report then says why the set is invalid, instead of the aggregate being
+  # skipped and the downstream jobs silently having no proof.
+  # ---------------------------------------------------------------------------
+  aggregate:
+    name: Aggregate the shards
+    needs:
+      - dsh-context
+      - product-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Download every shard's records
+        uses: actions/download-artifact@v8
+        with:
+          pattern: product-shard-*
+          path: shards
+
+      - name: Require every shard job to have SUCCEEDED
+        env:
+          SHARD_RESULT: ${{ needs.product-shard.result }}
+        run: |
+          set -euo pipefail
+          # A green aggregate must never hide a failed shard. The matrix
+          # result is the authority for "the job ran and passed"; the record
+          # checks below are the authority for "it covered its files".
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "the product shard matrix result is '$SHARD_RESULT', not 'success'" >&2
+            exit 1
           fi
 
-      - name: Build, test and pack
+      - name: Prove the shards are the whole lane
+        env:
+          DSH_EXPECTED_RUN_ID: ${{ github.run_id }}
+          DSH_EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          # What the run CLAIMS it applied. The runner records what it
+          # actually put on the child's command line, and `verify-shards`
+          # compares the two: an argument accepted and then dropped is not
+          # hypothetical — five CI runs were once reported as a concurrency
+          # comparison while every one of them ran at Node's default.
+          DSH_EXPECTED_CONCURRENCY: ${{ needs.dsh-context.outputs.test_concurrency }}
+          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
         run: |
           set -euo pipefail
+          # The case and skip baselines are committed facts, read from files so
+          # that a qualification CANNOT disable the comparison by passing an
+          # empty value. A missing, empty or malformed file FAILS.
+          #
+          # They are MODE-SCOPED: an npm baseline is not a Source Mode
+          # baseline, because a different dependency graph can legitimately
+          # change which cases run and which environment capability is
+          # missing. A source run with no recorded baseline FAILS rather than
+          # borrowing the npm numbers.
+          #
+          # WHERE the numbers came from is a committed file too: a count on its
+          # own cannot say which run produced it, and this pipeline is not
+          # allowed to certify itself against itself.
+          case "$DSH_MODE" in
+            npm) PREFIX=scripts/measurement ;;
+            source) PREFIX=scripts/measurement-source ;;
+            *) echo "unknown DSH mode '$DSH_MODE': the baseline is mode-scoped" >&2; exit 1 ;;
+          esac
+          export DSH_EXPECTED_CASES_FILE="$PREFIX-expected-cases.txt"
+          export DSH_EXPECTED_SKIPPED_FILE="$PREFIX-expected-skipped.txt"
+          export DSH_ACCEPTED_SKIPS_FILE="$PREFIX-accepted-skips.txt"
+          if [ ! -f "$PREFIX-baseline-source.txt" ]; then
+            echo "no baseline is recorded for mode '$DSH_MODE' ($PREFIX-baseline-source.txt)" >&2
+            echo 'run the UNSHARDED product lane once on the frozen tree, then commit its case and skip totals together with the run that produced them' >&2
+            exit 1
+          fi
+          DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
+          export DSH_EXPECTED_SHA
+          node scripts/verify-shards.mjs \
+            --shards shards \
+            --total "${{ needs.dsh-context.outputs.shard_total }}" \
+            --baseline-source "$(cat "$PREFIX-baseline-source.txt")" \
+            --effective-config "${{ needs.dsh-context.outputs.effective_config }}" \
+            --out aggregate.json
 
-          # Prevent stale local artifacts from accidentally matching the glob.
+      - name: Upload the aggregate report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-aggregate
+          path: aggregate.json
+          if-no-files-found: warn
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE CANDIDATE: the package built from the SAME verified build, WITHOUT the
+  # package lifecycle.
+  #
+  # `--config.ignore-scripts=true` skips BOTH hooks: `prepack` (which would run
+  # the whole product lane again) AND `postpack` (which would run the eight
+  # smokes). So this job earns the tarball and records its digest; the QUALIFY
+  # job earns the qualification.
+  # ---------------------------------------------------------------------------
+  candidate:
+    name: Build the candidate tarball
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - build
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      - name: Download the shared build
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-build
+          path: ${{ github.workspace }}
+
+      - name: Verify the pack consumes the build the tests ran against
+        run: node scripts/build-digest.mjs --verify build-digest.json
+
+      - name: Pack WITHOUT the lifecycle
+        id: pack
+        run: |
+          set -euo pipefail
           rm -f xmoon76-dsh-pi-tui-*.tgz
+          pnpm pack --config.ignore-scripts=true --pack-destination "$GITHUB_WORKSPACE"
 
-          pnpm pack --pack-destination .
-
-      - name: Verify packed artifact
-        id: package
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mapfile -t TARBALLS < <(
-            find . -maxdepth 1 -type f \
-              -name 'xmoon76-dsh-pi-tui-*.tgz' \
-              -printf '%f\n' \
-              | sort
-          )
-
+          mapfile -t TARBALLS < <(find . -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -printf '%f\n' | sort)
           if [ "${#TARBALLS[@]}" -ne 1 ]; then
             echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
             printf '%s\n' "${TARBALLS[@]}" >&2
             exit 1
           fi
-
           TARBALL="${TARBALLS[0]}"
-
+          SHA256="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "candidate $TARBALL $SHA256"
 
-          echo "Artifact:"
-          ls -lh "$TARBALL"
+      - name: Upload the candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-candidate
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 3
 
-          echo
-          echo "SHA256:"
-          sha256sum "$TARBALL"
+  # ---------------------------------------------------------------------------
+  # THE QUALIFICATION: every gate that makes the tarball a candidate, run
+  # against the SAME tarball, after the tests and the typecheck have passed.
+  #
+  # The digest is re-computed HERE, from the downloaded bytes. The action's own
+  # digest check reports a mismatch as a WARNING, which is not a gate, so the
+  # comparison is an explicit step.
+  # ---------------------------------------------------------------------------
+  qualify:
+    name: Qualify the candidate
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - candidate
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      - name: Download the candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-candidate
+          path: candidate
+
+      - name: Prove the candidate is the tarball the pack job produced
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+          EXPECTED_TARBALL: ${{ needs.candidate.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(find candidate -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one downloaded tarball, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "${TARBALLS[0]}" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the downloaded tarball is $ACTUAL, not the produced $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+          if [ "$(basename "${TARBALLS[0]}")" != "$EXPECTED_TARBALL" ]; then
+            echo "the downloaded tarball is $(basename "${TARBALLS[0]}"), not $EXPECTED_TARBALL" >&2
+            exit 1
+          fi
+          echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
+          echo "the candidate is the produced tarball ($ACTUAL)"
+
+      # The eight postpack smokes, one step each, in the SAME order the package
+      # lifecycle runs them, each given the explicit path of the one candidate.
+      # A failing smoke stops the job, exactly like `&&` in the lifecycle. Any
+      # of them missing is a MISSING qualification.
+      - name: "Smoke 1/8: tarball"
+        run: node scripts/tarball-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 2/8: extension fixture"
+        run: node scripts/extension-fixture-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 3/8: advanced plugin"
+        run: node scripts/advanced-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 4/8: phase4 plugin"
+        run: node scripts/phase4-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 5/8: unstable plugin"
+        run: node scripts/unstable-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 6/8: vim plugin"
+        run: node scripts/vim-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 7/8: examples plugin"
+        run: node scripts/examples-plugin-smoke.mjs "$CANDIDATE"
+      - name: "Smoke 8/8: compose agent"
+        run: node scripts/compose-agent-compat-smoke.mjs "$CANDIDATE"
 
       - name: Source leak gate
         env:
-          DSH_CANDIDATE: ${{ steps.package.outputs.tarball }}
+          DSH_SOURCE_ARTIFACT: ${{ runner.temp }}/dsh-source-pack
         run: |
           set -euo pipefail
-          if [ "$DSH_MODE" = source ]; then
-            node scripts/dsh-source-leak-gate.mjs "$DSH_CANDIDATE" --distribution "$DSH_SOURCE_ARTIFACT"
+          # In Source Mode the gate must know which distribution the build
+          # consumed, or it cannot tell a legitimate source resolution from a
+          # leak. Passing nothing would run a weaker check on the same tarball
+          # and report the same green.
+          if [ "$DSH_MODE" = "source" ]; then
+            node scripts/dsh-source-leak-gate.mjs "$CANDIDATE" --distribution "$DSH_SOURCE_ARTIFACT"
           else
-            node scripts/dsh-source-leak-gate.mjs "$DSH_CANDIDATE"
+            node scripts/dsh-source-leak-gate.mjs "$CANDIDATE"
           fi
 
-      - name: Verify the TUI startup strictness handshake
+      - name: TUI startup strictness handshake
         if: env.DSH_MODE == 'npm'
-        run: pnpm smoke:startup-strictness -- "${{ steps.package.outputs.tarball }}"
+        run: pnpm smoke:startup-strictness -- "$CANDIDATE"
 
-      - name: Upload release tarball
+      # A step that does not apply must SAY so. A silent skip in a
+      # qualification is indistinguishable from a gate that ran and passed.
+      - name: Record the npm-only smoke on a source run
+        if: env.DSH_MODE == 'source'
+        run: |
+          echo 'NOT_APPLICABLE: the startup strictness smoke is npm-only; Source Mode is qualified by its own lanes'
+
+      # The digest is checked AGAIN, after the smokes, against the value the
+      # pack job recorded: a candidate replaced between the smokes and the
+      # upload must not be uploaded as the one that was qualified.
+      - name: Re-prove the candidate was not replaced during qualification
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          ACTUAL="$(sha256sum "$CANDIDATE" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the candidate changed during qualification: $ACTUAL, not $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+
+      # This artifact is PROVISIONAL: the downstream gates consume it, and it
+      # has no publication authority. The qualified job below re-proves the
+      # bytes and uploads the final artifact.
+      - name: Upload the PROVISIONAL candidate for downstream consumption
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-provisional
+          path: ${{ env.CANDIDATE }}
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE PACK EQUIVALENCE PROOF, and WHEN it has to run again.
+  #
+  # A lifecycle-free `pnpm pack` is only acceptable because its content equals
+  # an ordinary `pnpm pack`'s. That equality depends on the PACKAGING INPUTS —
+  # the manifest, the build configuration, the preset generator, the pinned
+  # pnpm — not on the source code, and not on the tests.
+  #
+  # So the proof is a GATED PROPERTY with a trigger, not a per-run cost: it runs
+  # when the inputs differ from the recorded proof, or when no proof is recorded
+  # at all. "No proof recorded" is deliberately a trigger, not a pass: an
+  # unproven equality is not an unchanged one.
+  #
+  # The proof is SCOPED by mode/Node/platform. The recorded proof is an
+  # npm/Linux/Node 24 record, and an npm equality says nothing about a Source
+  # Mode run whose dependency graph is a local tarball family — so a source run
+  # always takes the trigger and compares its OWN two packs.
+  #
+  # A release tag whose packaging inputs changed therefore runs the ordinary
+  # pack here, which is the ~400-second critical path coming back. That is an
+  # honest fail-closed exception: record the proof for the frozen release
+  # commit BEFORE tagging if the fast path is wanted.
+  # ---------------------------------------------------------------------------
+  equivalence:
+    name: Pack equivalence (triggered)
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+    if: ${{ always() && needs.dsh-context.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Download DSH source pack
+        if: env.DSH_MODE == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-source-pack
+          path: ${{ runner.temp }}/dsh-source-pack
+
+      - name: Do the packaging inputs still match the recorded proof?
+        id: trigger
+        run: |
+          set -euo pipefail
+          if node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json \
+               --mode "${{ needs.dsh-context.outputs.mode }}" --node 24 --platform "${{ runner.os }}"; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report this run's packaging input digest
+        run: node scripts/pack-equivalence-input.mjs --write packaging-inputs.json
+
+      - name: Prepare DSH dependency environment
+        if: steps.trigger.outputs.needed == 'true'
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      # The ordinary pack runs the FULL lifecycle, so it is only paid for when
+      # the trigger fires.
+      - name: Build the ordinary package
+        if: steps.trigger.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p packs
+          pnpm pack --pack-destination "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE"/xmoon76-dsh-pi-tui-*.tgz "$GITHUB_WORKSPACE/packs/"
+
+      - name: Build the CI-only package
+        if: steps.trigger.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p packs-ci-only
+          pnpm pack --pack-destination "$GITHUB_WORKSPACE" --config.ignore-scripts=true
+          mv "$GITHUB_WORKSPACE"/xmoon76-dsh-pi-tui-*.tgz "$GITHUB_WORKSPACE/packs-ci-only/"
+
+      - name: Compare the two packages by CONTENT
+        if: steps.trigger.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          ordinary="$(ls packs/*.tgz | head -1)"
+          ci_only="$(ls packs-ci-only/*.tgz | head -1)"
+          node scripts/compare-tarballs.mjs --a "$ordinary" --b "$ci_only" --out packs/pack-equivalence.json
+
+      - name: Upload the proof (and the digest this run took)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-pack-equivalence
+          path: |
+            packaging-inputs.json
+            packs/pack-equivalence.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # THE QUALIFIED ARTIFACT.
+  #
+  # It is produced HERE, and only here: after the shard aggregate proved the
+  # coverage, the typecheck passed, the candidate was packed from the verified
+  # build, the eight smokes and the leak gate passed against that exact
+  # tarball, the equivalence proof holds, AND every downstream gate succeeded.
+  #
+  # The bytes are re-proved one last time against the pack job's digest, so the
+  # artifact that earns the name is the one that was tested — not a copy that
+  # happened to land in the same directory. Nothing is rebuilt here.
+  # ---------------------------------------------------------------------------
+  qualified:
+    name: Publish the qualified artifact
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - build
+      - typecheck
+      - product-shard
+      - aggregate
+      - candidate
+      - qualify
+      - equivalence
+      - source-checks
+      - client-family-compat
+      - compat-smoke
+      - ecosystem-compat
+      - official-preset-assembly
+      - runtime-boundary
+      - security-audit
+    # `always()` suppresses the implicit success check, so EVERY need is named
+    # here AND re-checked by `ci-verdict` below. The two mode-dependent jobs are
+    # checked EXACTLY: in source mode the pinned pack must have succeeded and
+    # the npm-only client-family gate must be skipped; in npm mode the reverse.
+    # `skipped` is never accepted for a job that must prove something.
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build.result == 'success' && needs.typecheck.result == 'success' && needs.product-shard.result == 'success' && needs.aggregate.result == 'success' && needs.candidate.result == 'success' && needs.qualify.result == 'success' && needs.equivalence.result == 'success' && needs.source-checks.result == 'success' && needs['compat-smoke'].result == 'success' && needs['ecosystem-compat'].result == 'success' && needs['official-preset-assembly'].result == 'success' && needs['runtime-boundary'].result == 'success' && needs['security-audit'].result == 'success' && ((needs.dsh-context.outputs.mode == 'npm' && needs['prepare-dsh-source'].result == 'skipped' && needs['client-family-compat'].result == 'success') || (needs.dsh-context.outputs.mode == 'source' && needs['prepare-dsh-source'].result == 'success' && needs['client-family-compat'].result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Download the provisional candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-provisional
+          path: provisional
+
+      - name: Re-prove the artifact is the one every gate tested
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(find provisional -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball to qualify, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "${TARBALLS[0]}" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the artifact is $ACTUAL, not the qualified $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+          # The artifact keeps the PACKAGE'S OWN NAME, and it is uploaded from
+          # its ORIGINAL path: a copy renamed to `qualified.tgz` would not match
+          # the `xmoon76-dsh-pi-tui-*.tgz` glob a downstream consumer looks for,
+          # so the qualified artifact would be unusable by the very jobs it
+          # exists for.
+          echo "QUALIFIED_TARBALL=${TARBALLS[0]}" >> "$GITHUB_ENV"
+          echo "qualified $ACTUAL as $(basename "${TARBALLS[0]}")"
+
+      # The verdict over the WHOLE graph, from the results this job received.
+      # The `if:` above already names every need; this re-states the same rule
+      # in a form that prints a table and that tests can drive, so a phase that
+      # silently stopped reported cannot be mistaken for a pass.
+      - name: Require every upstream phase to have SUCCEEDED
+        env:
+          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-verdict.mjs qualify \
+            --mode "$DSH_MODE" \
+            --phase "dsh-context=${{ needs.dsh-context.result }}" \
+            --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
+            --phase "client-family-compat=${{ needs['client-family-compat'].result }}" \
+            --phase "build=${{ needs.build.result }}" \
+            --phase "typecheck=${{ needs.typecheck.result }}" \
+            --phase "product-shard=${{ needs.product-shard.result }}" \
+            --phase "aggregate=${{ needs.aggregate.result }}" \
+            --phase "candidate=${{ needs.candidate.result }}" \
+            --phase "qualify=${{ needs.qualify.result }}" \
+            --phase "equivalence=${{ needs.equivalence.result }}" \
+            --phase "source-checks=${{ needs['source-checks'].result }}" \
+            --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
+            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
+            --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
+            --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
+            --phase "security-audit=${{ needs['security-audit'].result }}"
+
+      - name: Upload the QUALIFIED artifact
         uses: actions/upload-artifact@v7
         with:
           name: dsh-pi-tui-tarball
-          path: ${{ steps.package.outputs.tarball }}
+          path: ${{ env.QUALIFIED_TARBALL }}
           if-no-files-found: error
           retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # The pipeline's own cost and verdict, as one record.
+  #
+  # It runs `always()` so a failed run still reports WHICH phase failed, and it
+  # requires the qualified artifact as well: a summary that calls a run green
+  # while no publishable artifact exists is worse than no summary.
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Pipeline summary
+    needs:
+      - dsh-context
+      - prepare-dsh-source
+      - build
+      - typecheck
+      - product-shard
+      - aggregate
+      - candidate
+      - qualify
+      - equivalence
+      - qualified
+      - source-checks
+      - client-family-compat
+      - compat-smoke
+      - ecosystem-compat
+      - official-preset-assembly
+      - runtime-boundary
+      - security-audit
+      - release-context
+      - release-metadata
+      - publish
+      - release
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Report the outcome of every phase
+        env:
+          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+          EFFECTIVE_CONFIG: ${{ needs.dsh-context.outputs.effective_config }}
+          STARTED: ${{ needs.dsh-context.outputs.started_epoch }}
+          IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          RELEASE_ARG=""
+          if [ "$IS_RELEASE" = "true" ]; then RELEASE_ARG="--release"; fi
+          echo "effective configuration: ${EFFECTIVE_CONFIG:-<unresolved>}"
+          node scripts/ci-verdict.mjs summary \
+            --mode "$DSH_MODE" \
+            --started "${STARTED:-}" \
+            $RELEASE_ARG \
+            --phase "dsh-context=${{ needs.dsh-context.result }}" \
+            --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
+            --phase "client-family-compat=${{ needs['client-family-compat'].result }}" \
+            --phase "build=${{ needs.build.result }}" \
+            --phase "typecheck=${{ needs.typecheck.result }}" \
+            --phase "product-shard=${{ needs['product-shard'].result }}" \
+            --phase "aggregate=${{ needs.aggregate.result }}" \
+            --phase "candidate=${{ needs.candidate.result }}" \
+            --phase "qualify=${{ needs.qualify.result }}" \
+            --phase "equivalence=${{ needs.equivalence.result }}" \
+            --phase "source-checks=${{ needs['source-checks'].result }}" \
+            --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
+            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
+            --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
+            --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
+            --phase "security-audit=${{ needs['security-audit'].result }}" \
+            --phase "qualified=${{ needs.qualified.result }}" \
+            --phase "release-context=${{ needs['release-context'].result }}" \
+            --phase "release-metadata=${{ needs['release-metadata'].result }}" \
+            --phase "publish=${{ needs.publish.result }}" \
+            --phase "release=${{ needs.release.result }}" \
+            | tee pipeline-summary.txt
+
+      - name: Upload the pipeline report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-pipeline-summary
+          path: pipeline-summary.txt
+          if-no-files-found: warn
+          retention-days: 3
 
   # ---------------------------------------------------------------------------
   # Test the EXACT packed artifact against the supported Node.js boundaries.
@@ -511,8 +1302,8 @@ jobs:
     needs:
       - dsh-context
       - prepare-dsh-source
-      - build-and-pack
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+      - qualify
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
 
     runs-on: ubuntu-latest
     env:
@@ -572,10 +1363,12 @@ jobs:
             echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
           } >> "$GITHUB_ENV"
 
-      - name: Download release tarball
+      # The PROVISIONAL artifact: these gates must run before the final
+      # qualified artifact exists, and none of them has publication authority.
+      - name: Download the provisional candidate
         uses: actions/download-artifact@v8
         with:
-          name: dsh-pi-tui-tarball
+          name: dsh-pi-tui-provisional
           path: tarball
 
       - name: Smoke-test release tarball
@@ -617,8 +1410,8 @@ jobs:
     needs:
       - dsh-context
       - prepare-dsh-source
-      - build-and-pack
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' }}
+      - qualify
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -655,10 +1448,12 @@ jobs:
             echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
           } >> "$GITHUB_ENV"
 
-      - name: Download release tarball
+      # The PROVISIONAL artifact: these gates must run before the final
+      # qualified artifact exists, and none of them has publication authority.
+      - name: Download the provisional candidate
         uses: actions/download-artifact@v8
         with:
-          name: dsh-pi-tui-tarball
+          name: dsh-pi-tui-provisional
           path: tarball
 
       - name: Install tmux
@@ -711,8 +1506,8 @@ jobs:
     needs:
       - dsh-context
       - prepare-dsh-source
-      - build-and-pack
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+      - qualify
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -772,10 +1567,12 @@ jobs:
              } >> "$GITHUB_ENV"
           fi
 
-      - name: Download release tarball
+      # The PROVISIONAL artifact: these gates must run before the final
+      # qualified artifact exists, and none of them has publication authority.
+      - name: Download the provisional candidate
         uses: actions/download-artifact@v8
         with:
-          name: dsh-pi-tui-tarball
+          name: dsh-pi-tui-provisional
           path: tarball
 
       - name: Install tmux
@@ -814,8 +1611,8 @@ jobs:
     needs:
       - dsh-context
       - prepare-dsh-source
-      - build-and-pack
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build-and-pack.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+      - qualify
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -832,10 +1629,12 @@ jobs:
           cache: true
           install: false
 
-      - name: Download release tarball
+      # The PROVISIONAL artifact: these gates must run before the final
+      # qualified artifact exists, and none of them has publication authority.
+      - name: Download the provisional candidate
         uses: actions/download-artifact@v8
         with:
-          name: dsh-pi-tui-tarball
+          name: dsh-pi-tui-provisional
           path: tarball
 
       # The smoke script runs from the repo root and imports devDependencies
@@ -951,7 +1750,8 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # Publish the EXACT artifact produced by build-and-pack.
+  # Publish the EXACT artifact produced by `qualified` — never the provisional
+  # one, and never a rebuild.
   #
   # Requirements on npmjs.com Trusted Publisher:
   #
@@ -965,14 +1765,14 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.build-and-pack.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.ecosystem-compat.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.ecosystem-compat.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
       - client-family-compat
       - release-context
       - source-checks
-      - build-and-pack
+      - qualified
       - compat-smoke
       - ecosystem-compat
       - official-preset-assembly
@@ -1081,10 +1881,11 @@ jobs:
   # Create the GitHub Release AFTER npm publish succeeded, so a visible
   # Release always means the same version is already on npm.
   #
-  # The assets are the SAME artifact chain as npm: the tarball produced by
-  # build-and-pack, smoke-tested by compat-smoke and the pi2dsh ecosystem
-  # gate, then published by publish — never a rebuild. A SHA256 file rides
-  # along for download verification.
+  # The assets are the SAME artifact chain as npm: the candidate packed from
+  # the verified build, qualified by the smokes and the leak gate, gated by
+  # compat-smoke and the pi2dsh ecosystem gate, joined by `qualified`, then
+  # published by publish — never a rebuild. A SHA256 file rides along for
+  # download verification.
   #
   # The job is re-runnable: an existing release is edited in place and assets
   # are uploaded with --clobber.
@@ -1092,13 +1893,13 @@ jobs:
   release:
     name: Create GitHub Release
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.publish.result == 'success' && needs.build-and-pack.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.publish.result == 'success' && needs.qualified.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
       - release-context
       - publish
-      - build-and-pack
+      - qualified
       - release-metadata
 
     runs-on: ubuntu-latest

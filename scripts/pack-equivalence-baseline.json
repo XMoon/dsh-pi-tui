@@ -1,0 +1,65 @@
+{
+  "digest": "ff60c0ec7b1656d075b58b0fba4dd7b19007c8cbacce6089f3f6000ddde87d23",
+  "inputs": [
+    {
+      "path": "package.json",
+      "present": true,
+      "sha256": "b9cbae7468dfd44f43df562b70008e590849a11c50fd8162359bfea8bea51870",
+      "why": "the manifest decides what is packed and how it is rewritten"
+    },
+    {
+      "path": "tsdown.config.ts",
+      "present": true,
+      "sha256": "da73e93945855305ce865c916343b3e5d3aef0ce848895195c7b1589137edb18",
+      "why": "the bundle build decides the payload files"
+    },
+    {
+      "path": "scripts/generate-dsh-presets.mjs",
+      "present": true,
+      "sha256": "01494eca7acdc0a6c3ec83ec54381f8debbc9a094c581b049512d8a4db745f9f",
+      "why": "the generated presets are part of the payload"
+    },
+    {
+      "path": ".npmignore",
+      "present": false,
+      "sha256": null,
+      "why": "an ignore file changes which files are packed"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "present": true,
+      "sha256": "5f599de953b01bc019ea3599918ff9a4fd22a70b1629c896f4fc1f9b26bbc4f7",
+      "why": "the lockfile pins the build toolchain that produces the payload"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "present": true,
+      "sha256": "f4bcbac66f3b809cb86e1fc0990eb6441b39f978e2840d73fd4e94397b139125",
+      "why": "the workspace layout decides how pnpm resolves and packs"
+    },
+    {
+      "path": "scripts/compare-tarballs.mjs",
+      "present": true,
+      "sha256": "3790b9ce9655a32c0e4b8151f3494269cca4ffd749a5e430fb4b82caa918808c",
+      "why": "the comparator defines what equivalent means"
+    },
+    {
+      "path": "scripts/pack-equivalence-protocol.json",
+      "present": true,
+      "sha256": "70398d5ed490d49e7b8edc4b98dd93a664480a3981b430dddbf1360f49316345",
+      "why": "the protocol is the pair of commands being compared"
+    }
+  ],
+  "proof": {
+    "equivalent": true,
+    "mode": "npm",
+    "node": "24",
+    "platform": "Linux",
+    "entryCount": 37,
+    "differingFiles": [],
+    "manifestDifferences": [],
+    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39663543556",
+    "commit": "f493342c3d68c8b716fc5f827296c7663dfece8b",
+    "note": "Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
+  }
+}

@@ -262,6 +262,20 @@ checks, compatibility matrix, `pi2dsh` TTY smoke, and security audit. The local
 nofork shortcut only avoids repeating the fork suite locally; it does not
 remove those CI checks.
 
+CI produces the tarball through an accelerated graph rather than through one
+`pnpm pack` invocation: one build, one bundle typecheck, N product-test shards
+joined by a coverage proof, and a lifecycle-free `pnpm pack` whose result is
+qualified by the same eight public-package smokes the `postpack` hook runs,
+plus the source-leak gate and the startup handshake. The ordinary `pnpm pack`
+is compared with the lifecycle-free one by a recorded content-equivalence
+proof, scoped to the dependency mode, the Node version and the platform, which
+re-runs a REAL comparison whenever a packaging input, the mode, the runtime or
+the recorded verdict changes. A release whose packaging inputs changed
+therefore pays for the ordinary pack again — that is the fail-closed path, not
+a regression, and the fast path must never be assumed. `scripts/ci-verdict.mjs`
+is the final gate: every required job must be exactly `success`, and the two
+mode-dependent jobs must show the status their mode requires.
+
 For CI-equivalent dependency resolution, especially after dependency changes,
 run the frozen install before the verification gate:
 
@@ -324,14 +338,23 @@ release tag. The tag starts `.github/workflows/ci.yml`:
 
 1. the parser selects the npm dist-tag from the tag prefix and independently
    derives the GitHub prerelease state from the SemVer;
-2. source checks, build/pack, compatibility and ecosystem smoke jobs, the old
-   runtime boundary, and the production dependency audit run in parallel;
-3. release metadata extracts the bilingual changelog body and checks parsed
+2. source checks, the shared build, the product-test shards, the compatibility
+   and ecosystem smoke jobs, the old runtime boundary, and the production
+   dependency audit run in parallel;
+3. the candidate tarball is packed from the verified build without the package
+   lifecycle, then qualified by the eight public-package smokes, the
+   source-leak gate and the startup handshake; the pack-equivalence proof runs
+   here whenever its trigger fires;
+4. `qualified` joins every required job — with the mode-dependent jobs checked
+   for their exact status — re-proves the candidate's SHA-256 and uploads that
+   same artifact as the only publishable one;
+5. release metadata extracts the bilingual changelog body and checks parsed
    tag version/date parity;
-4. `publish` downloads the exact tested tarball, verifies its embedded version
-   against the parsed release version, and runs `npm publish` with the selected
-   npm dist-tag via OIDC;
-5. `release` runs only after publish succeeds, then creates or updates the
+6. `publish` downloads the exact tested tarball (the qualified artifact, never
+   the provisional one), verifies its embedded version against the parsed
+   release version, and runs `npm publish` with the selected npm dist-tag via
+   OIDC;
+7. `release` runs only after publish succeeds, then creates or updates the
    GitHub Release with the correct prerelease state and uploads the tarball plus
    its SHA-256 file.
 
