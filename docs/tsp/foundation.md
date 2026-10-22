@@ -69,6 +69,7 @@ teardown → seat.dispose → retire presentational panels
 |---|---|---|
 | Durable DSH events, model/preset business writes, submission | Existing DSH/Host/Client commands and application submission controller | TSP UI state, selected row, preview, cached catalog |
 | Transcript grouping, fold/window/currentness | Existing `TranscriptFolder`, `TranscriptWindowController`, `SurfaceRuntime` projection | A second TSP transcript state machine |
+| Tool-result image content and bytes | The result's own structured content blocks, plus the existing attachment read port under the existing immutable display-subject scope | The flat result text, the tool name, the args, a path, a URL, or a second attachment cache |
 | TSP connection and terminal input lifecycle | Composition bootstrap + mounted renderer + pinned SDK | A second direct stdin reader or ad-hoc wire pump |
 | Surface regions and emitted node projection | `src/tui/tsp/session.ts` (one `surface.render`) | Independently mounted competing renderers |
 | Modal seat/keyboard precedence | `src/tui/tsp/session.ts` + `interaction.ts` and its application owner | `modal:true` as an automatic JavaScript keyboard handler |
@@ -202,6 +203,37 @@ or later build.
   business authority across wide↔narrow adaptation; component fallback/overflow
   is a product decision, not a reason to invent a second writer.
 
+### Tool-result image projection
+
+A tool result that carries structured image content is projected inside its
+existing tool card, in the result's own block order: the text blocks stay text,
+and each image block becomes an identity line plus — when the pane negotiated
+the `image` kind and the `blobs` feature — one native image node. The flat
+result text is not drawn again beside the block-wise result, and the tool card's
+own args, status, target and children are unchanged.
+
+- The authority for WHICH attachment a row shows is the result's own content
+  blocks. The tool name, the args, the flat result text and the rendered text
+  never imply an image.
+- The authority for reading the bytes is unchanged: the existing attachment
+  read port, under the existing immutable display-subject scope. The projection
+  adds no attachment cache, no read port, no permission check and no
+  session-scoped state of its own.
+- The renderer emits at most one blob per attachment through the official SDK
+  session. The single-blob size limit is the SDK's own limit and is checked
+  against the READY bytes, before anything is sent; the reference's own byte
+  count is identity, never a send permit.
+- The identity line is presentation, not authority. It names the attachment and
+  states only the outcome the application actually knows (still loading, read
+  failed, too large, unavailable for this subject). A decode failure inside the
+  client is not an application fact and is never claimed as one.
+- Sizing, zoom and click behaviour belong to the client. The projection sets no
+  size props, adds no zoom control and no image page; the client's own layout —
+  including any clipping or whitespace — is a client behaviour to be measured,
+  not a promise.
+- The image path is presentation-only: it adds no write, no new command and no
+  new user action.
+
 ## 6. Evidence tiers and qualification
 
 | Tier | May prove | Must NOT be promoted to |
@@ -222,6 +254,12 @@ must be able to fail; `measure` cannot replace acceptance. A node's rect alone
 does not prove visual non-clipping; use ancestor clipping plus an actual PNG.
 `ctl` failures fail closed; irreversible key/click/run input is one-shot and
 never retried.
+
+A durable-image path carries TWO independent obligations: the composition-depth
+proof that the bytes were read through the real read authority under the real
+scope, and the observation-tier proof that the client painted them. A painted
+bitmap does not prove the authorization, and a green read does not prove the
+paint; neither one closes the other.
 
 Never write PASS for `NOT_APPLICABLE`, `NOT_VERIFIED`, `GUI_BLOCKED` or an
 Owner-accepted limitation. Do not promote a single headless observation to a
@@ -302,6 +340,8 @@ requires the named evidence before a claim:
 | Client `error` diagnostics | Keep them diagnostic; prove any retry/fatal policy separately before adding it |
 | Close keep semantics after an initial failure | A real-client effect or upstream lifecycle change; do not claim residue from protocol shape alone |
 | Missing ACK forever | Material symptom/evidence; no speculative ACK watchdog |
+| Durable image bytes reaching a client | A real authorized read under the real display-subject scope, plus a client observation of the painted node; the two obligations are separate |
+| Client-side image zoom, click, keyboard and scroll-back | An observation on the exact client build; a class name or a rendered node is not an interaction proof |
 | GUI/IME/fonts/wheel/Remote/full-profile | A feature-specific test or an explicit Owner limitation; never retroactive PASS |
 
 Required review trigger: SDK pin/main changes, Tern build changes, a new surface
