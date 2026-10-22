@@ -57,6 +57,7 @@ function makeRows(): readonly ModelsProviderRow[] {
       inFlight: false,
       profile: { route: 'deepseek-official', configured: true, displayName: 'deepseek official', models: [] },
       canProvisionProfile: true,
+      group: 'configured',
     },
     {
       kind: 'reference',
@@ -71,6 +72,7 @@ function makeRows(): readonly ModelsProviderRow[] {
       inFlight: false,
       profile: { route: 'acme', configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] },
       canProvisionProfile: true,
+      group: 'configured',
     },
     {
       kind: 'authorization',
@@ -85,6 +87,7 @@ function makeRows(): readonly ModelsProviderRow[] {
       inFlight: false,
       profile: { route: 'anthropic', configured: true, displayName: 'Anthropic', models: [] },
       canProvisionProfile: true,
+      group: 'configured',
     },
   ]
 }
@@ -1695,6 +1698,50 @@ test('a sign-in flow for a route the catalog does not offer stays discoverable',
   const catalog = viewText(page)
   assert.match(catalog, /Other sign-ins/u)
   assert.match(catalog, /Orphan Sign-in/u, 'the standalone sign-in stays discoverable')
+})
+
+test('a stale snapshot blocks the Add Provider create', async () => {
+  const { source, calls } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'stale' as const, rows: makeRows() })
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  page.handleInput('\u001b[B') // the "Add Provider…" action
+  page.handleInput('\r')
+  viewText(page) // paint the catalog
+  page.handleInput('\u001b[B') // the "Custom provider…" action
+  page.handleInput('\r')
+  viewText(page) // paint the wizard
+  // The draft is filled through the page's own state (the shortcut the other
+  // wizard tests use) and the review is opened.
+  ;(page as unknown as { add: Record<string, unknown>; view: { kind: string } }).add = {
+    step: 'review',
+    draft: { route: 'new-route', api: 'openai-completions', baseURL: 'https://x.example/v1', displayName: '', key: '', models: ['m1'] },
+    discovering: false,
+  }
+  ;(page as unknown as { view: { kind: string } }).view = { kind: 'review' }
+  viewText(page)
+  page.handleInput('\r') // the Create action
+  await flush()
+  assert.equal(calls.some(call => call.startsWith('create:')), false, 'a stale snapshot must not create a provider')
+})
+
+test('a standalone sign-in detail shows the sign-in, not a provider profile', async () => {
+  const rows: ModelsProviderRow[] = [{
+    kind: 'authorization', identity: 'auth:llm-pi-ai/orphan', route: 'orphan', label: 'Orphan Sign-in',
+    key: 'llm-pi-ai/orphan', configured: false, declared: false, namesCredential: false, canProvisionProfile: false,
+    methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false,
+    profile: { route: 'orphan', configured: false, models: [] },
+  }]
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
+  const page = openWith(source, { view: 'provider', route: 'orphan' }, 24)
+  await flush()
+  const detail = viewText(page)
+  assert.match(detail, /Sign-in · Orphan Sign-in/u)
+  assert.match(detail, /Sign-in key/u)
+  assert.doesNotMatch(detail, /API protocol/u, 'a sign-in has no provider profile facts')
+  assert.doesNotMatch(detail, /Endpoint/u)
+  assert.doesNotMatch(detail, /Provider · /u)
 })
 
 test('the Models list may yield the focus to the Settings category rail', () => {

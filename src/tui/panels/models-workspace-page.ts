@@ -1142,6 +1142,13 @@ export class ModelsWorkspacePage implements Component {
   private createProvider(): void {
     const add = this.add
     if (add === undefined || add.step !== 'review' || add.result !== undefined || add.creating === true) return
+    // The Host write needs the current authority: a stale snapshot cannot say
+    // whether the route was configured in the meantime.
+    if (this.readState !== 'ready') {
+      this.notice = 'the provider configuration is not current — press r to refresh before creating a provider'
+      this.requestRender()
+      return
+    }
     const serial = this.addSerial
     this.add = { ...add, creating: true }
     this.requestRender()
@@ -1859,15 +1866,19 @@ export class ModelsWorkspacePage implements Component {
         actions: [{ id: 'provider:back', label: '← Providers', enabled: true }],
       }
     }
-    // A route-less authorization flow is a SIGN-IN, not a provider profile:
-    // the catalog's "Other sign-ins" section leads to it.
-    const isFlow = row.route === ''
-    const content: string[] = [color.textStrong(`${isFlow ? 'Sign-in' : 'Provider'} · ${sanitizedPhysicalLine(row.label)}`), '']
-    content.push(...this.fact(isFlow ? 'Sign-in key' : 'Route', isFlow ? (row.key ?? '—') : row.route, width))
-    content.push(...this.fact('Profile', row.profile.configured ? 'configured' : 'not configured', width))
-    content.push(...this.fact('API protocol', row.profile.api ?? 'unknown', width))
-    content.push(...this.fact('Endpoint', row.profile.baseURL ?? 'unknown', width))
-    content.push(...this.fact('Models', row.profile.models.length === 0 ? 'none listed' : row.profile.models.join(', '), width))
+    // A sign-in that no provider option addresses is a SIGN-IN, not a
+    // provider profile: it has no profile facts to show, and the catalog's
+    // "Other sign-ins" section leads to it.
+    const standalone = this.isStandaloneSignIn(row)
+    const content: string[] = [color.textStrong(`${standalone ? 'Sign-in' : 'Provider'} · ${sanitizedPhysicalLine(row.label)}`), '']
+    content.push(...this.fact(standalone ? 'Sign-in key' : 'Route', standalone ? (row.key ?? '—') : row.route, width))
+    if (standalone && row.route !== '') content.push(...this.fact('Route', row.route, width))
+    if (!standalone) {
+      content.push(...this.fact('Profile', row.profile.configured ? 'configured' : 'not configured', width))
+      content.push(...this.fact('API protocol', row.profile.api ?? 'unknown', width))
+      content.push(...this.fact('Endpoint', row.profile.baseURL ?? 'unknown', width))
+      content.push(...this.fact('Models', row.profile.models.length === 0 ? 'none listed' : row.profile.models.join(', '), width))
+    }
     content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
     const state = this.credentialStateOf(row)
     content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
@@ -1885,6 +1896,14 @@ export class ModelsWorkspacePage implements Component {
       } else this.copyValue = undefined
     } else this.copyValue = undefined
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
+    // The disabled actions state WHY they are disabled: a muted label alone
+    // does not tell the user what to do.
+    if (this.readState !== 'ready') {
+      content.push(
+        '',
+        color.textDim('The provider configuration is not current — the write actions wait for a fresh read (press r).'),
+      )
+    }
     const actions: ActionLine[] = []
     // An authority-dependent write waits for the FRESH read: while a refresh
     // is in flight, or the last refresh failed (a stale snapshot), the
@@ -1991,7 +2010,7 @@ export class ModelsWorkspacePage implements Component {
       for (const row of signIns) {
         this.addRow(
           content,
-          this.selectionLine(interactive, row.label, 'Sign in →', 'muted', width),
+          this.selectionLine(interactive, row.label, 'Sign in', 'muted', width),
           `catalog:${row.identity}`,
           width,
         )
@@ -2006,7 +2025,7 @@ export class ModelsWorkspacePage implements Component {
     this.copyValue = undefined
     const actions: ActionLine[] = [
       { id: 'catalog:custom', label: 'Custom provider…', enabled: true },
-      { id: 'catalog:back', label: '← Back', enabled: true },
+      { id: 'catalog:back', label: 'Back', enabled: true },
     ]
     return { content, actions }
   }
@@ -2027,7 +2046,17 @@ export class ModelsWorkspacePage implements Component {
    * They are sign-ins, not provider profiles.
    */
   private otherSignInRows(): readonly ModelsProviderRow[] {
-    return this.providerRows.filter(row => row.kind === 'authorization' && row.group === undefined)
+    return this.providerRows.filter(row => this.isStandaloneSignIn(row))
+  }
+
+  /**
+   * Whether a row is a STANDALONE sign-in: an authorization flow that no
+   * provider option addresses (a foreign scope, or a route the
+   * configurable-provider directory does not offer). It is a sign-in, never a
+   * provider profile.
+   */
+  private isStandaloneSignIn(row: ModelsProviderRow): boolean {
+    return row.kind === 'authorization' && row.group === undefined
   }
 
   /**
@@ -2036,8 +2065,8 @@ export class ModelsWorkspacePage implements Component {
    */
   private catalogHint(row: ModelsProviderRow): { readonly word: string; readonly tone: 'success' | 'warning' | 'muted' } {
     // A provider-native flow is the supported operation for that route.
-    if (row.kind === 'authorization') return { word: 'Sign in →', tone: 'muted' }
-    if (row.canProvisionProfile) return { word: 'Set up… →', tone: 'muted' }
+    if (row.kind === 'authorization') return { word: 'Sign in', tone: 'muted' }
+    if (row.canProvisionProfile) return { word: 'Set up', tone: 'muted' }
     return { word: 'Manual setup only', tone: 'warning' }
   }
 
@@ -2120,7 +2149,9 @@ export class ModelsWorkspacePage implements Component {
     return {
       content,
       actions: [
-        { id: 'review:create', label: 'Create', enabled: true },
+        // The create is a Host write: it waits for the FRESH read like every
+        // other authority-dependent write.
+        { id: 'review:create', label: 'Create', enabled: this.readState === 'ready' },
         { id: 'review:back', label: 'Back to edit', enabled: true },
       ],
     }
