@@ -23,6 +23,7 @@ import { DirectAuthorizationConfig } from '../../src/runtime/direct/config-direc
 import { createAuthorizationFlow, type AuthorizationSurface } from '../../src/app/command/authorization.ts'
 import { ModelsWorkspacePage, type ModelsWorkspaceSource } from '../../src/tui/panels/models-workspace-page.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 
 const KEY = credentialKey('llm-pi-ai', 'acme-oauth')
 
@@ -217,12 +218,14 @@ test('REAL Direct attempt → Models page Esc: cancel settles and the page retur
     try {
       await new Promise<void>(resolve => setImmediate(resolve))
       page.render(100)
-      // The catalog read starts after the first painted frame: let it settle
-      // before the page is driven.
-      for (let index = 0; index < 3; index += 1) {
-        await new Promise<void>(resolve => setTimeout(resolve, 0))
-      }
-      page.render(100)
+      // The catalog read starts after the first painted frame: wait for the
+      // settled projection before the page is driven.
+      await waitForFrame(
+        () => page.render(100).join('\n'),
+        frame => !/Loading provider configuration/u.test(frame),
+        async () => { await new Promise<void>(resolve => setImmediate(resolve)) },
+        'the Models catalog must settle before the page is driven',
+      )
       // The flow is not a configured provider: its sign-in path lives in the
       // Add Provider catalog ("Other sign-ins").
       page.handleInput('\u001b[B') // the "Add Provider…" action

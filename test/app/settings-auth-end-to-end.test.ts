@@ -22,6 +22,7 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import type { AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -262,7 +263,9 @@ test('/login acme deeplinks to the provider detail inside the Settings lease', a
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login acme')
-  await h.vt.waitForRender()
+  // The Models page reads its provider catalog after its first frame, so the
+  // deep link paints the Loading state first: wait for the settled detail.
+  await waitForFrame(h.view, frame => /Provider · Acme Gateway/u.test(frame), () => h.vt.waitForRender(), 'the /login deeplink must reach the provider detail')
   assert.match(h.rows()[0]!, /Settings · Models/u)
   assert.match(h.view(), /Provider · Acme Gateway/u)
   assert.match(h.view(), /https:\/\/acme\.example\/v1/u)
@@ -288,7 +291,7 @@ test('/login acme deeplinks to the provider detail inside the Settings lease', a
   const flowOnly = open()
   await flowOnly.vt.waitForRender()
   ;(flowOnly as unknown as { invoke(line: string): unknown }).invoke('/login mykey')
-  await flowOnly.vt.waitForRender()
+  await waitForFrame(flowOnly.view, frame => /Sign-in · My Key/u.test(frame), () => flowOnly.vt.waitForRender(), 'the /login deeplink must reach the sign-in detail')
   assert.match(flowOnly.rows()[0]!, /Settings · Models/u)
   // A flow-only route is a SIGN-IN, not a provider profile: the detail shows
   // the sign-in key and never a fake provider profile.
@@ -352,7 +355,7 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login')
-  await h.vt.waitForRender()
+  await waitForFrame(h.view, frame => frame.includes('Acme Gateway'), () => h.vt.waitForRender(), 'the Models page must list the provider before the press')
   const providerRow = rowOf(h, 'Acme Gateway')
   press(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
   release(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
