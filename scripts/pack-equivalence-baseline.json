@@ -51,15 +51,15 @@
     }
   ],
   "proof": {
-    "equivalent": true,
+    "equivalent": false,
     "mode": "npm",
     "node": "24",
     "platform": "Linux",
-    "entryCount": 37,
-    "differingFiles": [],
-    "manifestDifferences": [],
-    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39663543556",
-    "commit": "f493342c3d68c8b716fc5f827296c7663dfece8b",
-    "note": "Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
+    "entryCount": null,
+    "differingFiles": null,
+    "manifestDifferences": null,
+    "run": null,
+    "commit": null,
+    "note": "Re-recording on the integration branch: the previous record cited a prototype run whose branch no longer exists. This placeholder deliberately reopens the proof so the workflow performs a REAL comparison; the recording run replaces it. Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
   }
 }
