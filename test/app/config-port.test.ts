@@ -140,6 +140,37 @@ test('a throwing directory read is reported as a failed catalog', () => {
   assert.deepEqual(providers.listCredentialOptions().map(option => option.route), ['deepseek-official', 'acme'])
 })
 
+test('the settings-only fallback reads the section ONCE and keeps every configured profile', () => {
+  let describes = 0
+  const section = { providers: { acme: { apiKeyEnv: 'ACME_KEY' }, keyless: {} } }
+  const providers = port({
+    settings: {
+      describe: () => { describes += 1; return [{ ns: 'llm-pi-ai', value: section, user: section, revision: 1 }] },
+      mutate: async () => {},
+    },
+    // NO llm service: the settings-only fallback.
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.equal(describes, 1, 'ONE settings read per snapshot')
+  const acme = catalog.options.find(option => option.route === 'acme')
+  assert.ok(acme !== undefined)
+  assert.equal(acme.ref, 'ACME_KEY')
+  assert.equal(acme.configured, true)
+  // A CONFIGURED keyless profile is a provider: the presence of a key is
+  // not the membership authority.
+  const keyless = catalog.options.find(option => option.route === 'keyless')
+  assert.ok(keyless !== undefined, 'a configured keyless profile stays a provider')
+  assert.equal(keyless.configured, true)
+  assert.equal(keyless.namesCredential, false)
+  assert.equal(keyless.ref, 'KEYLESS_API_KEY')
+  assert.equal(catalog.profiles.find(profile => profile.route === 'keyless')?.configured, true)
+  // The builtin is always addressable, with or without a profile.
+  assert.equal(catalog.profiles.find(profile => profile.route === 'deepseek-official')?.configured, true)
+  // The /login list is the same route set: a visible route stays reachable.
+  const options = providers.listCredentialOptions()
+  assert.ok(options.some(option => option.route === 'keyless'))
+})
+
 test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
   const providers = port({
     settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),

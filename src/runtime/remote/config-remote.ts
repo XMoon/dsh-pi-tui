@@ -42,7 +42,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/config-remote
  */
 
-import { credentialOptionsFor, getPath, providerOptionsFor, providerProfileProjectionOf, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
+import { getPath, providerOptionsFor, providerProfileProjectionOf, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -261,23 +261,6 @@ function detachedValue(value: unknown): unknown {
   }
 }
 
-/** Read the `llm-pi-ai` section's `providers` dict detached (the settings-only
- *  fallback the Direct adapter applies when the directory is unavailable). */
-function piAiProvidersOf(section: unknown): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-  const record = plainRecord(section)
-  if (record === undefined) return undefined
-  const providers = plainRecord(record.providers)
-  if (providers === undefined) return undefined
-  const out: Record<string, { apiKeyEnv?: string } | undefined> = {}
-  for (const [route, profile] of Object.entries(providers)) {
-    const entry = plainRecord(profile)
-    out[route] = entry === undefined
-      ? (profile as { apiKeyEnv?: string } | undefined)
-      : { ...typeof entry.apiKeyEnv === 'string' ? { apiKeyEnv: entry.apiKeyEnv } : {} }
-  }
-  return out
-}
-
 /**
  * The forwarded-event seat MUST stay method-bound to its service: the Client
  * `$on` reads its own service state (`this.events`), so a detached reference
@@ -308,6 +291,14 @@ interface RemoteConfigSnapshot {
    *  failure keeps the LAST-KNOWN namespaces readable but non-current. */
   readonly settingsFailure: unknown
   readonly providers: readonly ProviderCatalogEntry[] | undefined
+  /**
+   * The provider-directory read failure, if the last directory read failed.
+   * `providers: undefined` alone cannot say WHY: the directory may be
+   * absent, or the read may have failed. A failed read keeps the LAST KNOWN
+   * directory readable and records the reason here, so a consumer can
+   * refuse to present a failed read as an authoritative catalog.
+   */
+  readonly providersFailure: string | undefined
   readonly permissionPresetNames: readonly string[]
   readonly permissionDefaultPreset: string | undefined
   readonly presetRosterDefault: string | undefined
@@ -476,6 +467,12 @@ class RemoteConfigMirror {
     return this.snapshot?.providers
   }
 
+  /** The provider-directory read failure of the last committed snapshot, if
+   *  the directory read failed. */
+  providersFailure(): string | undefined {
+    return this.snapshot?.providersFailure
+  }
+
   permissionPresetNames(): readonly string[] {
     return this.snapshot?.permissionPresetNames ?? []
   }
@@ -597,7 +594,13 @@ class RemoteConfigMirror {
         settingsFailure,
         providers: providersResult.ok && Array.isArray(providersResult.value)
           ? providersResult.value.map(copyProviderEntry)
-          : undefined,
+          // A failed directory read keeps the LAST KNOWN directory (like the
+          // settings slice) and records the reason: it is not an empty
+          // directory.
+          : this.snapshot?.providers,
+        providersFailure: providersResult.ok
+          ? undefined
+          : remoteFailureMessage(providersResult.error),
         permissionPresetNames: catalogResult.ok && Array.isArray(catalogResult.value?.options)
           ? catalogResult.value.options.flatMap(option => typeof option?.value === 'string' ? [option.value] : [])
           : [],
@@ -1029,21 +1032,7 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
       return providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
         .map(option => remoteCredentialOptionOf(option))
     }
-    const settingsOnly = credentialOptionsFor(piAiProvidersOf(this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value))
-    return settingsOnly.map(option => {
-      const route = option.route ?? option.label
-      return {
-        ...option,
-        route,
-        configured: true,
-        declared: false,
-        namesCredential: true,
-        group: 'configured' as const,
-        // The SAME adapter-owned rule the write paths apply: a hostile
-        // providers key (or the builtin) is never advertised as writable.
-        canProvisionProfile: canProvisionKeylessProfile(PROVIDER_SETTINGS_NS, ['providers', route], route),
-      }
-    })
+    return this.settingsOnlyCatalog().options
   }
 
   /**
@@ -1056,6 +1045,13 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
    */
   readCatalog(): ProviderCatalogSnapshot {
     const directory = this.mirror.providers()
+    const failure = this.mirror.providersFailure()
+    if (failure !== undefined) {
+      // A FAILED directory read is not an empty directory: the catalog is
+      // not authoritative, and the page must show the failure instead of a
+      // "no providers" list.
+      return { options: [], profiles: [], failure: `the provider directory could not be read: ${failure}` }
+    }
     if (directory === undefined) return this.settingsOnlyCatalog()
     const rawProfiles = new Map<string, unknown>()
     for (const entry of directory) {
@@ -1064,36 +1060,55 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     }
     const options = providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
       .map(option => remoteCredentialOptionOf(option))
-    const profiles = options.map(option => remoteProviderFactsOf(
-      option.route,
-      option.label,
-      rawProfiles.get(option.route),
-    ))
+    const profiles = options.map(option => {
+      const raw = rawProfiles.get(option.route)
+      // The deepseek official builtin is always addressable (the same rule
+      // the Direct adapter applies).
+      if (option.route === 'deepseek-official' && raw === undefined) {
+        return { route: option.route, configured: true, displayName: option.label, models: [] }
+      }
+      return remoteProviderFactsOf(option.route, option.label, raw)
+    })
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      return { options: [], profiles: [], failure: 'the configuration mirror is unavailable' }
+    }
+    if (readiness === 'stale') {
+      // The last known values: the directory and the settings may come from
+      // different generations, so the snapshot is explicitly NOT current.
+      return { options, profiles, stale: true }
+    }
     return { options, profiles }
   }
 
-  /** The settings-only fallback (no mirrored directory): the conventional
-   *  llm-pi-ai `providers` slot is the only profile location. */
+  /**
+   * The settings-only fallback (no mirrored directory): the conventional
+   * llm-pi-ai `providers` slot is the only profile location. Every profile
+   * route stays a provider — a keyless profile is still a CONFIGURED
+   * provider; the presence of a key is not the membership authority.
+   */
   private settingsOnlyCatalog(): ProviderCatalogSnapshot {
     const section = this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value
-    const options = credentialOptionsFor(piAiProvidersOf(section)).map(option => {
-      const route = option.route ?? option.label
-      return {
-        ...option,
-        route,
-        configured: true,
-        declared: false,
-        namesCredential: true,
-        group: 'configured' as const,
-        canProvisionProfile: canProvisionKeylessProfile(PROVIDER_SETTINGS_NS, ['providers', route], route),
+    const declared = plainRecord(plainRecord(section)?.providers)
+    const entries: ProviderCatalogEntry[] = declared === undefined
+      ? []
+      : Object.keys(declared).map(route => ({
+          provider: route,
+          displayName: route,
+          settingsNs: PROVIDER_SETTINGS_NS,
+          settingsPath: ['providers', route],
+        }))
+    const options = providerOptionsFor(entries, entry => providerProfileProjectionOf(declared?.[entry.provider]))
+      .map(option => remoteCredentialOptionOf(option))
+    const profiles = options.map(option => {
+      const raw = declared?.[option.route]
+      // The deepseek official builtin is always addressable (the same rule
+      // the Direct adapter applies).
+      if (option.route === 'deepseek-official' && raw === undefined) {
+        return { route: option.route, configured: true, displayName: option.label, models: [] }
       }
+      return remoteProviderFactsOf(option.route, option.label, raw)
     })
-    const providers = plainRecord(section)?.providers
-    const profiles = options.map(option => remoteProviderFactsOf(
-      option.route,
-      option.route,
-      plainRecord(providers)?.[option.route],
-    ))
     return { options, profiles }
   }
 

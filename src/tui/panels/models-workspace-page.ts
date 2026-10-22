@@ -104,6 +104,8 @@ export interface ModelsStoredCredentials {
  */
 export type ModelsCatalogRead =
   | { readonly kind: 'ready'; readonly rows: readonly ModelsProviderRow[] }
+  /** The LAST KNOWN rows, explicitly not current (a stale backend mirror). */
+  | { readonly kind: 'stale'; readonly rows: readonly ModelsProviderRow[] }
   | { readonly kind: 'failed'; readonly reason: string }
 
 /**
@@ -477,7 +479,6 @@ export class ModelsWorkspacePage implements Component {
    */
   private startCatalogRead(): void {
     if (this.disposed || this.readStarted) return
-    this.readStarted = true
     this.refresh()
   }
 
@@ -499,12 +500,21 @@ export class ModelsWorkspacePage implements Component {
    * this page only; a late settlement after dispose is ignored by `settle`. */
   private refresh(): void {
     if (this.disposed) return
+    // A refresh IS a read start: the armed first read must not start a
+    // SECOND read after an explicit R already started one.
+    this.readStarted = true
     const serial = ++this.refreshSerial
     // A refresh over a live snapshot is a REFRESHING state, not a blank page:
     // the rows stay visible and are marked as not yet re-confirmed.
     this.readState = this.providerRows.length === 0 ? 'loading' : 'refreshing'
     this.readFailure = undefined
-    this.source.run('models catalog read', async () => {
+    // The Host read is SYNCHRONOUS, and this refresh can start in the INPUT
+    // path (the R key). The read therefore runs in a MACROTASK: the keypress
+    // is acknowledged before the provider directory is read, and a slow read
+    // never sits inside the input handler.
+    setTimeout(() => {
+      if (this.disposed) return
+      this.source.run('models catalog read', async () => {
       let read: ModelsCatalogRead
       try {
         read = await this.source.readCatalog()
@@ -522,13 +532,16 @@ export class ModelsWorkspacePage implements Component {
           return
         }
         this.providerRows = read.rows
-        this.readState = 'ready'
-        this.readFailure = undefined
+        this.readState = read.kind === 'stale' ? 'stale' : 'ready'
+        this.readFailure = read.kind === 'stale'
+          ? 'the configuration mirror is not current'
+          : undefined
         this.resolvePendingProvider()
         this.readCredentialPresence(read.rows)
         this.readRecordPresence()
       })
-    })
+      })
+    }, 0)
     this.source.run('models account read', async () => {
       let summary: ModelsAccountSummary
       try {
@@ -1718,11 +1731,15 @@ export class ModelsWorkspacePage implements Component {
         interactive += 1
       }
     }
-    const actions: ActionLine[] = [
+    const actions: ActionLine[] = []
+    if (this.readState === 'error' || this.readState === 'stale') {
+      actions.push({ id: 'list:retry', label: 'Retry', enabled: true })
+    }
+    actions.push(
       { id: 'list:add', label: 'Add Provider…', enabled: true },
       { id: 'list:records', label: 'Credential records', enabled: true },
       { id: 'list:guide', label: 'Guide: edit complex model config manually', enabled: true },
-    ]
+    )
     content.push(...this.readStateLines())
     if (this.notice !== undefined) content.push(color.warning(this.notice))
     this.copyValue = undefined
@@ -1896,7 +1913,12 @@ export class ModelsWorkspacePage implements Component {
     }
     if (row.ref === undefined) return undefined
     if (row.namesCredential === false && row.configured) {
-      const flowKey = row.key ?? this.records?.rows.find(entry => entry.kind === 'record' && entry.route === row.route)?.key
+      // A keyless profile stores a RECORD (never the derived reference): the
+      // record presence is the HOME's fact about it.
+      const presence = this.recordPresence
+      const flowKey = row.key ?? (presence?.kind === 'known'
+        ? presence.records.find(entry => entry.route !== undefined && entry.route === row.route)?.key
+        : undefined)
       if (flowKey !== undefined) return { kind: 'record', key: flowKey, label: row.label, ...(row.route === '' ? {} : { route: row.route }) }
     }
     return { kind: 'reference', ref: row.ref, label: row.label, ...(row.route === '' ? {} : { route: row.route }) }
@@ -2494,6 +2516,10 @@ export class ModelsWorkspacePage implements Component {
       if (index >= 0) this.editAddField(index)
       return 'handled'
     }
+    if (id === 'list:retry') {
+      this.refresh()
+      return 'handled'
+    }
     if (id === 'list:add') {
       this.startAddCatalog()
       return 'handled'
@@ -2511,6 +2537,7 @@ export class ModelsWorkspacePage implements Component {
 
   private activateAction(id: string): ModelsPageExit {
     switch (id) {
+      case 'list:retry': this.refresh(); return 'handled'
       case 'list:add': this.startAddCatalog(); return 'handled'
       case 'catalog:custom': this.startAddProvider(); return 'handled'
       case 'catalog:back': this.enter({ kind: 'list' }); return 'handled'

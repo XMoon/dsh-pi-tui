@@ -193,40 +193,40 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       const catalog = workflow.readCatalog()
       if (catalog.failure !== undefined) return { kind: 'failed' as const, reason: catalog.failure }
       const profileOf = (route: string) => catalog.profiles.get(route) ?? { route, configured: false, models: [] }
-      return {
-        kind: 'ready' as const,
-        rows: catalog.targets.map(target => target.kind === 'reference'
-          ? {
-              kind: 'reference' as const,
-              identity: `route:${target.route}`,
-              route: target.route,
-              label: target.label,
-              ref: target.ref,
-              configured: target.configured,
-              declared: target.declared,
-              namesCredential: target.namesCredential,
-              canProvisionProfile: catalog.options.find(option => option.route === target.route)?.canProvisionProfile === true,
-              methods: [],
-              inFlight: false,
-              profile: profileOf(target.route),
-            }
-          : {
-              kind: 'authorization' as const,
-              identity: `auth:${target.key}`,
-              route: target.route ?? '',
-              label: target.label,
-              key: target.key,
-              configured: false,
-              declared: false,
-              namesCredential: false,
-              canProvisionProfile: false,
-              methods: target.methods.map(method => ({ ...method })),
-              inFlight: target.inFlight,
-              profile: target.route === undefined
-                ? { route: '', configured: false, models: [] }
-                : profileOf(target.route),
-            }),
-      }
+      const rows = catalog.targets.map(target => target.kind === 'reference'
+        ? {
+            kind: 'reference' as const,
+            identity: `route:${target.route}`,
+            route: target.route,
+            label: target.label,
+            ref: target.ref,
+            configured: target.configured,
+            declared: target.declared,
+            namesCredential: target.namesCredential,
+            canProvisionProfile: catalog.options.find(option => option.route === target.route)?.canProvisionProfile === true,
+            methods: [],
+            inFlight: false,
+            profile: profileOf(target.route),
+          }
+        : {
+            kind: 'authorization' as const,
+            identity: `auth:${target.key}`,
+            route: target.route ?? '',
+            label: target.label,
+            key: target.key,
+            configured: false,
+            declared: false,
+            namesCredential: false,
+            canProvisionProfile: false,
+            methods: target.methods.map(method => ({ ...method })),
+            inFlight: target.inFlight,
+            profile: target.route === undefined
+              ? { route: '', configured: false, models: [] }
+              : profileOf(target.route),
+          })
+      // A stale mirror: the LAST KNOWN rows, explicitly not current.
+      if (catalog.stale === true) return { kind: 'stale' as const, rows }
+      return { kind: 'ready' as const, rows }
     },
     accountSummary: () => workflow.accountSummary(),
     credentialState: async (ref: string) => {

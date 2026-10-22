@@ -229,29 +229,6 @@ export function providerOptionsFor(
   return options
 }
 
-/** The credential-target options for /login and /logout: the deepseek
- * official ref always first, then every llm-pi-ai provider route's
- * apiKeyEnv. `providers` is the llm-pi-ai settings
- * section's `providers` dict, or undefined when the adapter or the settings
- * service is absent — which degrades /login to the official target only.
- * Kept as the settings-only fallback when the llm directory is absent.
- *
- * The ROUTE is the identity here too: two routes that name the same
- * reference stay two entries (the credential READ is deduplicated by
- * reference in the read planner, never by dropping a provider). */
-export function credentialOptionsFor(
-  providers: Record<string, { apiKeyEnv?: string } | undefined> | undefined,
-): LoginCredentialOption[] {
-  const options: LoginCredentialOption[] = [{ label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', route: 'deepseek-official' }]
-  if (providers === undefined) return options
-  for (const [route, profile] of Object.entries(providers)) {
-    const ref = profile?.apiKeyEnv
-    if (ref === undefined || ref === '') continue
-    options.push({ label: route, ref, route })
-  }
-  return options
-}
-
 /** One resolved /login or /logout argument: a known provider ROUTE (its
  *  profile/credential target) or a literal credential REFERENCE (existing or
  *  novel). The two are distinct destinations for the Models page, so the

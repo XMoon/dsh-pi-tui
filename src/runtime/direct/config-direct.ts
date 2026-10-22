@@ -31,7 +31,6 @@ import {
   type AuthorizationPrompt,
 } from '@deepseek-ai/dsh-authorization'
 import {
-  credentialOptionsFor,
   getPath,
   providerOptionsFor,
   type ProviderCatalogEntry,
@@ -375,6 +374,18 @@ function providerFactsOf(route: string, fallbackLabel: string, profile: unknown)
   }
 }
 
+/**
+ * The detached profile facts of one option. The deepseek official builtin is
+ * the adapter itself: it has no provider-profile slot, but the route is
+ * ALWAYS addressable (the same rule the single-route read applies).
+ */
+function providerFactsFor(option: CredentialProviderOption, raw: unknown): ProviderProfileFacts {
+  if (option.route === 'deepseek-official' && raw === undefined) {
+    return { route: option.route, configured: true, displayName: option.label, models: [] }
+  }
+  return providerFactsOf(option.route, option.label, raw)
+}
+
 export class DirectProviderProfileConfig implements ProviderProfileConfig {
   private readonly ctx: HostContextLike
 
@@ -482,38 +493,35 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     }
     const options = providerOptionsFor(entries, entry => providerProfileProjectionOf(profileOf(entry)))
       .map(option => credentialOptionOf(option))
-    const profiles = options.map(option => providerFactsOf(option.route, option.label, rawProfiles.get(option.route)))
+    const profiles = options.map(option => providerFactsFor(option, rawProfiles.get(option.route)))
     return { options, profiles }
   }
 
-  /** The settings-only fallback (no llm directory): the conventional
-   *  llm-pi-ai `providers` slot is the only profile location. */
+  /**
+   * The settings-only fallback (no llm directory): the conventional
+   * llm-pi-ai `providers` slot is the only profile location.
+   *
+   * The section is read ONCE and both the options and the profile facts come
+   * from that one read. Every profile route stays a provider — a keyless
+   * profile (no `apiKeyEnv`) is still a CONFIGURED provider; the presence of
+   * a key is not the membership authority.
+   */
   private settingsOnlyCatalog(): ProviderCatalogSnapshot {
-    const providers = this.readPiAiProvidersInternal()
-    const options = credentialOptionsFor(providers).map(option => {
-      const route = option.route ?? option.label
-      return {
-        ...option,
-        route,
-        configured: true,
-        declared: false,
-        namesCredential: true,
-        group: 'configured' as const,
-        // The flag is computed through the SAME rule the llm-absent write
-        // branch applies (the conventional `providers.<route>` slot): a
-        // hostile providers key that fails the route pattern (or the
-        // builtin) is never advertised as writable.
-        canProvisionProfile: isKeylessProfileSlot('llm-pi-ai', ['providers', route], route),
-      }
-    })
     const section = this.readSectionInternal('llm-pi-ai') as
       | { providers?: Record<string, unknown> }
       | undefined
-    const profiles = options.map(option => providerFactsOf(
-      option.route,
-      option.route,
-      section?.providers?.[option.route],
-    ))
+    const declared = section?.providers
+    const entries: ProviderCatalogEntry[] = declared === undefined
+      ? []
+      : Object.keys(declared).map(route => ({
+          provider: route,
+          displayName: route,
+          settingsNs: 'llm-pi-ai',
+          settingsPath: ['providers', route],
+        }))
+    const options = providerOptionsFor(entries, entry => providerProfileProjectionOf(declared?.[entry.provider]))
+      .map(option => credentialOptionOf(option))
+    const profiles = options.map(option => providerFactsFor(option, declared?.[option.route]))
     return { options, profiles }
   }
 
