@@ -392,6 +392,19 @@ export class CredentialWorkflow {
     return this.deps.providers.readProfile(route)
   }
 
+  /**
+   * The provider options a WRITE decision may rely on (the Add Provider
+   * create and the keyless profile write).
+   *
+   * They come from the AUTHORITATIVE catalog, never from the fail-soft
+   * option list: a failed read reports every route as unconfigured, and a
+   * failed read must not authorize a write.
+   */
+  private writableOptions(): readonly CredentialProviderOption[] {
+    const catalog = this.readCatalog()
+    return catalog.failure === undefined ? catalog.options : []
+  }
+
   configGuide(): ProviderConfigGuide {
     return this.deps.providers.configGuide()
   }
@@ -515,7 +528,7 @@ export class CredentialWorkflow {
    * reported as a note (the sign-in itself succeeded), never retried. */
   async provisionKeylessProfile(route: string | undefined): Promise<string> {
     if (route === undefined) return ''
-    const option = this.options().find(candidate => candidate.route === route)
+    const option = this.writableOptions().find(candidate => candidate.route === route)
     if (option === undefined || option.configured || option.declared || !option.canProvisionProfile) return ''
     if (!this.deps.providers.available()) return ''
     try {
@@ -555,7 +568,16 @@ export class CredentialWorkflow {
         text: `invalid provider route "${route}" — lowercase letters, digits and dashes only, no leading digit`,
       }
     }
-    if (this.options().some(option => option.route === route && option.configured)) {
+    // The write decision uses the AUTHORITATIVE catalog: a failed read can
+    // neither prove the route is free nor authorize the write.
+    const catalog = this.readCatalog()
+    if (catalog.failure !== undefined) {
+      return {
+        kind: 'rejected',
+        text: `the provider configuration could not be read (${catalog.failure}) — the provider was not added`,
+      }
+    }
+    if (catalog.options.some(option => option.route === route && option.configured)) {
       return { kind: 'rejected', text: `provider route "${route}" already exists` }
     }
     if (!PROTOCOL_CHOICES.includes(draft.api as typeof PROTOCOL_CHOICES[number])) {

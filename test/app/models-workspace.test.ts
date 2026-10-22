@@ -1880,6 +1880,40 @@ test('the stored-credential deeplink reads nothing in the constructor', async ()
   assert.equal(catalogReads, 1)
 })
 
+test('a failed authoritative read cannot authorize a write', async () => {
+  // The fail-soft option list reports every route as unconfigured; a WRITE
+  // decision must not be taken from it.
+  const writes: string[] = []
+  const workflow = new CredentialWorkflow({
+    providers: {
+      available: () => true,
+      listCredentialOptions: () => [
+        { route: 'acme', label: 'Acme', ref: 'ACME_API_KEY', configured: false, declared: false, namesCredential: true, group: 'available' as const, canProvisionProfile: true },
+      ],
+      readCatalog: () => ({ options: [], profiles: [], failure: 'the settings read failed' }),
+      readProfile: (route: string) => ({ route, configured: false, models: [] }),
+      configGuide: () => ({}),
+      writeProfile: async (route: string) => { writes.push(`profile:${route}`) },
+      writeKeylessProfile: async (route: string) => { writes.push(`keyless:${route}`); return { kind: 'written' as const } },
+    },
+    credentials: { available: () => true, recordsSupported: () => true, describeReference: async () => ({ configured: false }), setReference: async () => {}, unsetReference: async () => {}, deleteRecord: async () => {} },
+    authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: { available: () => false },
+    catalog: { models: { available: () => false, discoverModels: async () => [] } },
+    signal: new AbortController().signal,
+    diag: { error: () => {}, warn: () => {} },
+  })
+  // The keyless profile write (after a native sign-in) must not run on a
+  // failed read.
+  assert.equal(await workflow.provisionKeylessProfile('acme'), '')
+  assert.deepEqual(writes, [])
+  // The create is the same: a failed read cannot prove the route is free, so
+  // the write is refused instead of guessed.
+  const outcome = await workflow.createProvider({ route: 'acme', api: 'openai-completions', baseURL: 'https://acme.example/v1', displayName: '', models: ['m1'], apiKey: '' })
+  assert.equal(outcome.kind, 'rejected')
+  assert.deepEqual(writes, [], 'a failed read must not write')
+})
+
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()
   assert.equal(page.canYieldFocusToNavigation(), true,

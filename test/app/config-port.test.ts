@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { DirectConfigPort, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
+import { resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
 function host(services: Record<string, unknown>): HostContextLike {
   return { get: (name) => services[name], on: () => {} }
@@ -197,6 +198,18 @@ test('a failed settings read keeps the builtin target addressable for /login and
   assert.ok(acme !== undefined)
   assert.equal(acme.ref, 'ACME_API_KEY')
   assert.equal(acme.configured, false)
+  // BOTH resolver paths still address the builtin: /login and /logout.
+  assert.deepEqual(resolveLoginDestination('deepseek-official', options, []), {
+    kind: 'models',
+    view: 'reference',
+    ref: 'DEEPSEEK_API_KEY',
+    label: 'deepseek official',
+  })
+  assert.deepEqual(resolveLogoutDestination('deepseek-official', options, []), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'deepseek official', route: 'deepseek-official' },
+  })
 })
 
 test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
