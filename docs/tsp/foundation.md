@@ -234,6 +234,25 @@ own args, status, target and children are unchanged.
 - The image path is presentation-only: it adds no write, no new command and no
   new user action.
 
+Reproducible runs (a real Tern client; not part of `pnpm test`/CI):
+
+```sh
+node scripts/tern-pane-drive.mjs scripts/tern-pane-tool-result-image.mjs
+DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image.mjs
+DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image-scroll.mjs
+```
+
+The headless lane mounts the production projection over one official inline
+surface and measures the client's own layout at a wide and at a NARROW
+viewport (the GUI client clamps its window, so the narrow case is a headless
+question); the GUI lanes add the real window, the client's own theme, the
+accessibility tree, a real pointer into the client's own image viewer, and the
+long-transcript reachability. Containment claims go through the visibility
+oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect. See
+[the real-pane harness guide](../guides/tern-pane-testing.md) and
+[the real-GUI guide](../guides/tern-gui-testing.md) for the run preconditions
+and the evidence rules.
+
 ## 6. Evidence tiers and qualification
 
 | Tier | May prove | Must NOT be promoted to |

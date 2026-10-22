@@ -1,5 +1,5 @@
 /**
- * The PR-C real-GUI flow: the PRODUCTION tool-result image projection, painted
+ * The real-GUI lane for the tool-result image: the PRODUCTION image projection,
  * by a REAL Tern GUI window on a REAL display.
  *
  * It answers the questions the headless lane cannot: the image is painted in
@@ -9,11 +9,11 @@
  * image's box and its clipping ancestors are measured, so "the image is on
  * screen" is a measurement and not a claim.
  *
- *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-pr-c-image.mjs
+ *   DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image.mjs
  *
  * The client's viewer affordances (the zoom control, the info button) are
  * MEASURED, never relied upon: the projection does not depend on them.
- * @module scripts/tern-gui-pr-c-image
+ * @module scripts/tern-gui-tool-result-image
  */
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -56,7 +56,7 @@ export default async function (h) {
     `requested=${JSON.stringify(size.requested)} actual=${JSON.stringify(size.viewport)}`)
   h.measure('the window size', JSON.stringify(size))
 
-  const subject = join(h.repo, 'scripts', 'tern-gui-pr-c-image-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-gui-tool-result-image-subject.mts')
   const booted = await h.launch(subject, { ready: '[IMAGE] shot.png' })
   h.check('the production projection is painted inside a real Tern GUI pane', booted)
   if (!booted) {

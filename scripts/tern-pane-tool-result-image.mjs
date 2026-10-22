@@ -1,5 +1,5 @@
 /**
- * The PR-C real-pane flow: the PRODUCTION tool-result image projection, painted
+ * The real-pane lane for the tool-result image: the PRODUCTION image projection,
  * by a REAL Tern client.
  *
  * It proves the acceptance that headless cannot: that the client really draws
@@ -8,17 +8,17 @@
  * the image, so the "Tern owns the sizing" boundary is a MEASUREMENT, never a
  * promise.
  *
- *   node scripts/tern-pane-drive.mjs scripts/tern-pane-pr-c-image.mjs
+ *   node scripts/tern-pane-drive.mjs scripts/tern-pane-tool-result-image.mjs
  *
  * The client-side ZOOM / click / keyboard / scroll-back behaviour is NOT
  * exercised here: it needs a physical GUI, and this flow claims nothing about
  * it.
- * @module scripts/tern-pane-pr-c-image
+ * @module scripts/tern-pane-tool-result-image
  */
 import { join } from 'node:path'
 
 export default async function (h) {
-  const subject = join(h.repo, 'scripts', 'tern-pane-pr-c-image-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-pane-tool-result-image-subject.mts')
 
   await h.resize(900, 640)
   const booted = await h.launch(subject)

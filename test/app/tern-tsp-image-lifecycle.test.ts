@@ -330,7 +330,7 @@ function currentImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] 
 
 // ── T4: the loader scope ────────────────────────────────────────────────────
 
-test('T4-01: two display subjects with the SAME attachment id read their OWN bytes', async () => {
+test('two display subjects with the SAME attachment id read their OWN bytes', async () => {
   const byScope = new Map<unknown, Uint8Array>()
   const harness = await mountHarness({
     read: async (ref, scope) => {
@@ -360,7 +360,7 @@ test('T4-01: two display subjects with the SAME attachment id read their OWN byt
   await harness.dispose()
 })
 
-test('T4-02: a failed read of one subject never touches the other subject\'s state', async () => {
+test('a failed read of one subject never touches the other subject\'s state', async () => {
   const harness = await mountHarness({
     read: async (ref, scope) => {
       if ((scope as { scope: string }).scope === 'A') throw new Error('the Host denied the attachment')
@@ -384,7 +384,7 @@ test('T4-02: a failed read of one subject never touches the other subject\'s sta
   await harness.dispose()
 })
 
-test('T4-03: a late settle of a RETIRED subject never sends a blob for the new subject', async () => {
+test('a late settle of a RETIRED subject never sends a blob for the new subject', async () => {
   let releaseA!: () => void
   const gate = new Promise<void>(resolve => { releaseA = resolve })
   const harness = await mountHarness({
@@ -420,7 +420,7 @@ test('T4-03: a late settle of a RETIRED subject never sends a blob for the new s
 
 // ── T7: the blob and the wire ───────────────────────────────────────────────
 
-test('T7-01: the blob is sent BEFORE the frame that references it', async () => {
+test('the blob is sent BEFORE the frame that references it', async () => {
   const harness = await mountHarness()
   commit(harness.renderer, [toolRowWithImage()], {})
   await until('the pane to receive the image blob', () => harness.tern.blobIds().length === 1)
@@ -436,7 +436,7 @@ test('T7-01: the blob is sent BEFORE the frame that references it', async () => 
   await harness.dispose()
 })
 
-test('T7-02: a repeated repaint of the SAME subject never re-sends the blob', async () => {
+test('a repeated repaint of the SAME subject never re-sends the blob', async () => {
   const harness = await mountHarness()
   const source = {}
   commit(harness.renderer, [toolRowWithImage()], source)
@@ -453,7 +453,7 @@ test('T7-02: a repeated repaint of the SAME subject never re-sends the blob', as
   await harness.dispose()
 })
 
-test('T7-03: bytes over the 16 MiB blob gate are never sent', async () => {
+test('bytes over the 16 MiB blob gate are never sent', async () => {
   const harness = await mountHarness({
     read: async (ref) => ({ ref, data: new Uint8Array(16 * 1024 * 1024 + 1) }),
   })
@@ -467,7 +467,7 @@ test('T7-03: bytes over the 16 MiB blob gate are never sent', async () => {
   await harness.dispose()
 })
 
-test('T7-04: a settle after the disposal sends neither a blob nor a frame', async () => {
+test('a settle after the disposal sends neither a blob nor a frame', async () => {
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const harness = await mountHarness({
@@ -490,7 +490,7 @@ test('T7-04: a settle after the disposal sends neither a blob nor a frame', asyn
   assert.equal(harness.loader.listenerCount(), 0, 'every presentation subscription is released')
 })
 
-test('T7-05: a blob-send failure is FATAL: reported once, no further blob, and never mislabelled as a read failure', async () => {
+test('a blob-send failure is FATAL: reported once, no further blob, and never mislabelled as a read failure', async () => {
   const harness = await mountHarness({ failBlobWrite: true })
   // TWO images in ONE result: the first blob fails, and the second must never
   // be attempted after the fatal.
@@ -514,7 +514,7 @@ test('T7-05: a blob-send failure is FATAL: reported once, no further blob, and n
 
 // ── T8: the source and the rehydration ──────────────────────────────────────
 
-test('T8-01: a ready repaint of the SAME subject keeps the image node\'s identity', async () => {
+test('a ready repaint of the SAME subject keeps the image node\'s identity', async () => {
   const harness = await mountHarness()
   const source = {}
   // The SAME carrier object: a repaint of one subject re-projects the very
@@ -537,7 +537,7 @@ test('T8-01: a ready repaint of the SAME subject keeps the image node\'s identit
   await harness.dispose()
 })
 
-test('T8-02: a NEW subject draws its own image and never the retired one', async () => {
+test('a NEW subject draws its own image and never the retired one', async () => {
   const byScope = new Map<string, Uint8Array>()
   const harness = await mountHarness({
     read: async (ref, scope) => {
@@ -571,7 +571,7 @@ test('T8-02: a NEW subject draws its own image and never the retired one', async
   await harness.dispose()
 })
 
-test('T8-03: the hydration window drops the outgoing subject\'s image subscriptions', async () => {
+test('the hydration window drops the outgoing subject\'s image subscriptions', async () => {
   const harness = await mountHarness()
   const source = {}
   commit(harness.renderer, [toolRowWithImage()], source)
@@ -583,7 +583,7 @@ test('T8-03: the hydration window drops the outgoing subject\'s image subscripti
   await harness.dispose()
 })
 
-test('T8-04: a subject with NO scope never reads and never sends a blob', async () => {
+test('a subject with NO scope never reads and never sends a blob', async () => {
   const harness = await mountHarness()
   harness.scope(undefined)
   commit(harness.renderer, [toolRowWithImage()], {})
@@ -598,7 +598,7 @@ test('T8-04: a subject with NO scope never reads and never sends a blob', async 
   await harness.dispose()
 })
 
-test('T8-05: a pane WITHOUT the image capability never reads and never sends a blob', async () => {
+test('a pane WITHOUT the image capability never reads and never sends a blob', async () => {
   const harness = await mountHarness({
     hello: { ...HELLO, kinds: HELLO.kinds.filter(kind => kind !== 'image'), features: HELLO.features.filter(feature => feature !== 'blobs') },
   })
