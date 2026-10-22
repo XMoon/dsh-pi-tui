@@ -4,9 +4,11 @@
  *
  * It exists to answer the overflow question the short window cannot: with a
  * long surface, the client virtualizes and shows the TAIL, so the image at the
- * top is out of view. The subject can then scroll its own surface back to the
- * start through the OFFICIAL SDK scroll op - the client's own scroll path, not
- * a synthetic jump - so the flow can prove the image is reachable again.
+ * top is out of view.
+ *
+ * The subject can also INVOKE the OFFICIAL SDK scroll op. That invocation is
+ * recorded here, and the flow reads the client's response back separately:
+ * the record proves the INVOCATION, never a client receipt.
  *
  * The image bytes are a synthetic PNG generated in-process.
  *
@@ -152,8 +154,8 @@ note({ ready: true, blobId, fillerRows: FILLER_ROWS })
 for await (const input of session) {
   if (input.type === 'key') {
     if (input.key.name === 'f10') break
-    // The OFFICIAL scroll op: the client scrolls its own container back to
-    // the start, so the virtualized head (with the image) is on screen again.
+    // The OFFICIAL scroll op, invoked at the client's own request path. The
+    // client's response is the FLOW's observation, not this record.
     if (input.key.name === 'a') {
       // The OFFICIAL scroll op, aimed at a node the client really knows: the
       // LAST row of the long surface. 'start' is the scroll container's start,
