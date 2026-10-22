@@ -37,6 +37,12 @@ export interface RendererSelectionDeps {
     readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
+    /**
+     * PR-C: install the ONE image binding (the mount's loader + scope
+     * sampler) on the connected renderer. It is SYNCHRONOUS and ONE-TIME:
+     * the renderer needs it before its first tool projection.
+     */
+    readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
@@ -59,16 +65,23 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
   // ordered disposal; `releaseUnmounted()` closes it when the mount was
   // rejected or never ran (idempotent, and inert after a transfer).
   return {
-    mount: () => ({
-      display: tsp.display,
-      composer: tsp.composer,
-      modelPresentation: tsp.modelPresentation,
-      presetPresentation: tsp.presetPresentation,
-      sessionBrowserPresentation: tsp.sessionBrowserPresentation,
-      interaction: tsp.interaction,
-      bindInput: (handlers) => tsp.bindInput(handlers),
-      dispose: () => tsp.dispose(),
-    }),
+    // PR-C: the image binding is installed SYNCHRONOUSLY, exactly once, at
+    // the mount — before the surface's first transcript projection. The
+    // renderer keeps the ONE loader of this mount; the wrapper never builds
+    // a second one.
+    mount: (binding) => {
+      tsp.bindImages(binding)
+      return {
+        display: tsp.display,
+        composer: tsp.composer,
+        modelPresentation: tsp.modelPresentation,
+        presetPresentation: tsp.presetPresentation,
+        sessionBrowserPresentation: tsp.sessionBrowserPresentation,
+        interaction: tsp.interaction,
+        bindInput: (handlers) => tsp.bindInput(handlers),
+        dispose: () => tsp.dispose(),
+      }
+    },
     releaseUnmounted: () => tsp.dispose(),
   }
 }
@@ -108,6 +121,7 @@ export function productionTspConnector(
   readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
+  readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
   readonly dispose: () => Promise<void>
 } | undefined> {
   return async () => {

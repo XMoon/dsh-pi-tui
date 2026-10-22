@@ -392,8 +392,11 @@ async function mountRunnerHarness(options: {
     return opened
   }
   const renderer: SurfaceRendererMount = {
-    mount: () => {
+    mount: (binding) => {
       mountedRenderer = mountTspRenderer(session, { requestExit: () => { exitCount += 1 } })
+      // PR-C: the mount hands the renderer the ONE image binding of this
+      // surface — the fake mount installs it, it never fakes success.
+      mountedRenderer.bindImages(binding)
       // Observe the REAL presenter call sizes (the unbound original is called with
       // the presenter as receiver, never `.bind`).
       const interaction = mountedRenderer.interaction

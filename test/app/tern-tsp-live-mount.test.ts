@@ -305,7 +305,7 @@ async function mountTspHarness(options: {
 
   let mountedRenderer: TspRenderer | undefined
   const renderer: SurfaceRendererMount = {
-    mount: () => {
+    mount: (binding) => {
       mountedRenderer = mountTspRenderer(session, {
         requestExit: () => {
           exitCount += 1
@@ -313,6 +313,9 @@ async function mountTspHarness(options: {
         },
         ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
       })
+      // PR-C: the mount hands the renderer the ONE image binding of this
+      // surface — the fake mount installs it, it never fakes success.
+      mountedRenderer.bindImages(binding)
       return mountedRenderer
     },
     releaseUnmounted: async () => { await mountedRenderer?.dispose() },
@@ -1334,13 +1337,20 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
   surface.start({
     events: { onSubmit: () => {}, onExit: () => {} },
     renderer: {
-      mount: () => ({
-        display,
-        composer,
-        interaction: presenter,
-        bindInput: () => {},
-        dispose: async () => { order.push('renderer-release') },
-      }),
+      // PR-C: the fake mount receives the ONE image binding of this surface.
+      // It PROVES the binding carries a real loader and a scope sampler
+      // instead of accepting a default that would hide a missing binder.
+      mount: (binding) => {
+        assert.equal(typeof binding.imageLoader.load, 'function')
+        assert.equal(typeof binding.imageScope, 'function')
+        return {
+          display,
+          composer,
+          interaction: presenter,
+          bindInput: () => {},
+          dispose: async () => { order.push('renderer-release') },
+        }
+      },
       releaseUnmounted: async () => {},
     } as SurfaceRendererMount,
     workspaceRoot: '/tmp',
