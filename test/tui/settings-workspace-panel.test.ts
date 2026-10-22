@@ -220,3 +220,21 @@ test('a pending Host mutation keeps the workspace open even when the rail owns t
   assert.equal(h.closes(), 0, 'the workspace did not close under a pending Host operation')
   assert.match(plain(h), /Settings ·/u, 'the workspace is still painted')
 })
+
+test('a narrow rail selection is mounted when the terminal grows and the content column appears', async () => {
+  const h = setup({ columns: 44, rows: 20 })
+  // The narrow first frame is the About content: Esc returns to the list.
+  h.panel.handleInput('\u001b')
+  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // Models -> Account
+  assert.equal(h.built.length, 0, 'the narrow rail browsed an invisible category: no page was created')
+
+  // The terminal grows: the content column appears and the SELECTED page must
+  // be there — created once, with its own Host watch.
+  h.panel.render(120)
+  assert.equal(h.built.length, 1, 'the widened frame created the selected page once')
+  assert.equal(h.built[0]?.id, 'account:page', 'the selected page is the Account page')
+  assert.match(plain(h, 120), /account:page page/u, 'the right column shows the real page')
+  h.panel.render(120)
+  assert.equal(h.built.length, 1, 'the page is not rebuilt on the next frame')
+})
