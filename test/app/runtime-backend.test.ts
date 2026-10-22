@@ -114,6 +114,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     providers: {
       available: () => true,
       listCredentialOptions: () => [],
+      readCatalog: () => ({ options: [], profiles: [] }),
       readProfile: (route: string) => ({ route, configured: false, models: [] }),
       configGuide: () => ({}),
       writeProfile: async () => {},

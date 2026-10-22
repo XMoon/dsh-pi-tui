@@ -139,6 +139,12 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       providers: {
         available: () => true,
         listCredentialOptions: () => OPTIONS,
+        readCatalog: () => ({
+          options: OPTIONS,
+          profiles: OPTIONS.map(option => (option.route === 'acme'
+            ? { route: option.route, configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] }
+            : { route: option.route, configured: true, displayName: option.route, models: [] })),
+        }),
         readProfile: (route: string) => route === 'acme'
           ? { route, configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] }
           : { route, configured: true, displayName: route, models: [] },

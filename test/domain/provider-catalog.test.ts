@@ -13,6 +13,7 @@ import {
   deriveKeyRef,
   getPath,
   providerOptionsFor,
+  providerProfileProjectionOf,
   type ProviderCatalogEntry,
   type ProviderOption,
 } from '../../src/domain/catalog/provider.ts'
@@ -28,7 +29,10 @@ const LLM_PI_AI_SECTION = {
   },
 }
 
-const readSection = (ns: string): unknown => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined)
+/** Project one directory entry's profile out of a settings section — the
+ *  adapter's single-snapshot projection. */
+const readProfile = (section: unknown) => (entry: ProviderCatalogEntry) =>
+  providerProfileProjectionOf(getPath(section, entry.settingsPath))
 
 test('getPath walks dotted paths into plain objects', () => {
   const section = { providers: { acme: { apiKeyEnv: 'ACME_API_KEY' } } }
@@ -69,7 +73,7 @@ test('providerOptionsFor merges the directory with the settings section', () => 
     // A catalog route with no profile and no apiKeyEnv yet.
     { provider: 'openrouter', displayName: 'openrouter', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openrouter'] },
   ]
-  const options = providerOptionsFor(entries, readSection)
+  const options = providerOptionsFor(entries, readProfile(LLM_PI_AI_SECTION))
   // Deepseek official always leads.
   assert.equal(options[0]?.label, 'deepseek official')
   assert.equal(options[0]?.ref, 'DEEPSEEK_API_KEY')
@@ -83,14 +87,16 @@ test('providerOptionsFor merges the directory with the settings section', () => 
   // A stored profile that never names a credential falls back to the derived ref.
   assert.equal(byRoute.get('anthropic')?.ref, 'ANTHROPIC_API_KEY')
   assert.equal(byRoute.get('anthropic')?.configured, true)
-  // The deepseek profile's ref is the official one: deduped, one entry only.
+  // The deepseek profile's ref is the official one, and the directory offers
+  // no `deepseek` route of its own: one entry, one route.
   assert.equal(options.filter(option => option.ref === 'DEEPSEEK_API_KEY').length, 1)
-  // A hand-declared route with no profile yet: derived ref, custom group.
-  // (Its derived ref collides with the configured `acme` profile's stored
-  // ref — the merge dedupes by ref, so the acme-gateway entry is the one
-  // dropped. This mirrors the web Models page behavior.)
-  assert.equal(byRoute.get('acme-gateway'), undefined)
-  assert.equal(options.filter(option => option.ref === 'ACME_GATEWAY_API_KEY').length, 1)
+  // A hand-declared route with no profile yet: derived ref, custom group. It
+  // SHARES the reference the configured `acme` profile names, and both stay
+  // visible — two providers, one credential target.
+  assert.equal(byRoute.get('acme-gateway')?.ref, 'ACME_GATEWAY_API_KEY')
+  assert.equal(byRoute.get('acme-gateway')?.configured, false)
+  assert.equal(byRoute.get('acme-gateway')?.group, 'custom')
+  assert.equal(options.filter(option => option.ref === 'ACME_GATEWAY_API_KEY').length, 2)
   // A catalog route with no profile: derived ref, available group.
   assert.equal(byRoute.get('openrouter')?.ref, 'OPENROUTER_API_KEY')
   assert.equal(byRoute.get('openrouter')?.configured, false)
@@ -98,8 +104,22 @@ test('providerOptionsFor merges the directory with the settings section', () => 
   assert.equal(byRoute.get('openrouter')?.group, 'available')
 })
 
+test('providerOptionsFor keeps every route that shares one credential reference', () => {
+  const entries: ProviderCatalogEntry[] = [
+    { provider: 'alpha', displayName: 'Alpha', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'alpha'] },
+    { provider: 'beta', displayName: 'Beta', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'beta'] },
+  ]
+  const section = { providers: { alpha: { apiKeyEnv: 'SHARED_API_KEY' }, beta: { apiKeyEnv: 'SHARED_API_KEY' } } }
+  const options = providerOptionsFor(entries, readProfile(section))
+  assert.deepEqual(options.map(option => option.route), ['deepseek-official', 'alpha', 'beta'])
+  // One reference, two provider rows: the reference is read once, the
+  // providers stay distinct.
+  assert.deepEqual(options.map(option => option.ref), ['DEEPSEEK_API_KEY', 'SHARED_API_KEY', 'SHARED_API_KEY'])
+  assert.equal(options.filter(option => option.ref === 'SHARED_API_KEY').length, 2)
+})
+
 test('providerOptionsFor degrades to the official target without a directory', () => {
-  const options = providerOptionsFor(undefined, readSection)
+  const options = providerOptionsFor(undefined, readProfile(LLM_PI_AI_SECTION))
   assert.deepEqual(options.map(option => option.label), ['deepseek official'])
 })
 
@@ -108,6 +128,6 @@ test('providerOptionsFor ignores entries with missing identity', () => {
     { provider: '', displayName: '', settingsNs: 'llm-pi-ai', settingsPath: [] },
     { provider: 'openai', displayName: 'openai', settingsNs: '', settingsPath: [] },
   ]
-  const options = providerOptionsFor(entries, readSection)
+  const options = providerOptionsFor(entries, readProfile(LLM_PI_AI_SECTION))
   assert.deepEqual(options.map(option => option.label), ['deepseek official'])
 })

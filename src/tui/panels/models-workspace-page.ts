@@ -60,6 +60,13 @@ export interface ModelsProviderRow {
   readonly configured: boolean
   readonly declared: boolean
   readonly namesCredential: boolean
+  /**
+   * Whether a keyless profile write for this route would be ACCEPTED by the
+   * Host. The Add catalog offers the setup path only for a route the Host
+   * would really write; every other route states why it cannot be set up
+   * here.
+   */
+  readonly canProvisionProfile: boolean
   readonly methods: readonly { readonly id: string; readonly label: string }[]
   readonly inFlight: boolean
   readonly profile: ProviderProfileFacts
@@ -77,6 +84,10 @@ export interface ModelsAccountSummary {
 export type ModelsCredentialState =
   | { readonly kind: 'known'; readonly configured: boolean; readonly source?: string }
   | { readonly kind: 'unknown'; readonly reason: string }
+  /** The backend cannot answer this question at all (e.g. it cannot
+   *  enumerate stored records) — never an empty answer that would read as
+   *  "not configured". */
+  | { readonly kind: 'unavailable'; readonly reason: string }
   | { readonly kind: 'pending' }
 
 /** The stored-credential snapshot (references + records). */
@@ -86,12 +97,38 @@ export interface ModelsStoredCredentials {
   readonly referenceReadFailures: readonly string[]
 }
 
+/**
+ * The ONE catalog read's outcome. A FAILED read is never an empty list: the
+ * page must show the failure (with a retry) instead of painting "no
+ * providers configured".
+ */
+export type ModelsCatalogRead =
+  | { readonly kind: 'ready'; readonly rows: readonly ModelsProviderRow[] }
+  | { readonly kind: 'failed'; readonly reason: string }
+
+/**
+ * The stored RECORD presence for the whole page (ONE enumeration). A backend
+ * that cannot enumerate records answers `unavailable` — never an empty key
+ * list, which would read as "nothing is signed in".
+ */
+export type ModelsRecordPresence =
+  | { readonly kind: 'known'; readonly records: readonly { readonly key: string; readonly route?: string }[] }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'failed'; readonly reason: string }
+
 /** The page's intent surface (the app/command owner implements it). */
 export interface ModelsWorkspaceSource {
   readonly available: boolean
-  rows(): readonly ModelsProviderRow[]
+  /**
+   * The ONE catalog read: every provider row, from ONE provider snapshot.
+   * The read runs off the input path (after the first painted frame), so a
+   * large provider directory never blocks the TUI's own interaction.
+   */
+  readCatalog(): Promise<ModelsCatalogRead>
   accountSummary(): Promise<ModelsAccountSummary>
   credentialState(ref: string): Promise<ModelsCredentialState>
+  /** The stored RECORD presence for the page (one enumeration). */
+  recordPresence(): Promise<ModelsRecordPresence>
   storedCredentials(): Promise<ModelsStoredCredentials>
   describeReference(ref: string): Promise<{ readonly configured: boolean; readonly source?: string }>
   setReference(ref: string, secret: string): Promise<void>
@@ -133,6 +170,7 @@ type ModelsView =
   | { readonly kind: 'list' }
   | { readonly kind: 'provider'; readonly identity: string }
   | { readonly kind: 'reference'; readonly ref: string; readonly label: string }
+  | { readonly kind: 'add-catalog' }
   | { readonly kind: 'add-provider' }
   | { readonly kind: 'review' }
   | { readonly kind: 'records' }
@@ -225,16 +263,43 @@ function fit(text: string, width: number): string {
   return padding > 0 ? clamped + ' '.repeat(padding) : clamped
 }
 
-function credentialWord(state: ModelsCredentialState): { readonly word: string; readonly tone: 'success' | 'warning' | 'muted' } {
-  if (state.kind === 'pending') return { word: 'Unknown', tone: 'muted' }
-  if (state.kind === 'unknown') return { word: 'Unknown', tone: 'warning' }
+/**
+ * The credential/record state word of one row.
+ *
+ * A reference row names an API key (`Configured` / `Key missing`), an
+ * authorization row names a provider-native sign-in (`Signed in` / `Not
+ * signed in`). A pending read says so, and a FAILED read is an unknown
+ * outcome — never a "missing" claim.
+ */
+function credentialWord(
+  state: ModelsCredentialState,
+  kind: ModelsProviderRow['kind'],
+  stale = false,
+): { readonly word: string; readonly tone: 'success' | 'warning' | 'muted' | 'error' } {
+  if (state.kind === 'pending') return { word: 'Checking…', tone: 'muted' }
+  if (state.kind === 'unavailable') return { word: 'Unavailable', tone: 'error' }
+  if (state.kind === 'unknown') return { word: 'Outcome unknown', tone: 'warning' }
+  // A refresh is in flight (or the last one failed): the previous answer is
+  // STALE and must never be painted as a fresh confirmation.
+  if (stale) return { word: 'Stale', tone: 'warning' }
+  if (kind === 'authorization') {
+    return state.configured
+      ? { word: 'Signed in', tone: 'success' }
+      : { word: 'Not signed in', tone: 'muted' }
+  }
   return state.configured
     ? { word: state.source === undefined ? 'Configured' : `Configured · ${state.source}`, tone: 'success' }
-    : { word: 'Not set', tone: 'muted' }
+    : { word: 'Key missing', tone: 'muted' }
 }
 
-function paintState(text: string, tone: 'success' | 'warning' | 'muted'): string {
-  return tone === 'success' ? color.success(text) : tone === 'warning' ? color.warning(text) : color.textMuted(text)
+function paintState(text: string, tone: 'success' | 'warning' | 'muted' | 'error'): string {
+  return tone === 'success'
+    ? color.success(text)
+    : tone === 'warning'
+      ? color.warning(text)
+      : tone === 'error'
+        ? color.error(text)
+        : color.textMuted(text)
 }
 
 function parseModelIds(text: string): string[] {
@@ -297,7 +362,27 @@ export class ModelsWorkspacePage implements Component {
   private referencePhase: 'idle' | 'editing' | 'pending' | 'verified' | 'not-saved' | 'unknown' = 'idle'
   private referenceStatus: string | undefined
   private referenceConfigured: boolean | undefined
-  private initializing = true
+  /**
+   * The page's READ state — the currentness vocabulary of the Models page.
+   * `loading` is the first frame (no authoritative rows yet), `ready` is a
+   * live snapshot, `refreshing` is a read in flight over a live snapshot,
+   * `stale` is a failed refresh over the last good snapshot, and `error` is
+   * a read that never produced an authoritative snapshot. A failed read is
+   * never painted as "no providers configured".
+   */
+  private readState: 'loading' | 'ready' | 'refreshing' | 'stale' | 'error' = 'loading'
+  /** Why the last read failed (the `stale`/`error` reason). */
+  private readFailure: string | undefined
+  /** The stored RECORD presence (one enumeration per read generation). */
+  private recordPresence: ModelsRecordPresence | undefined
+  /** The catalog read is armed by the first painted frame that shows this
+   *  page: the constructor runs in the INPUT path (the rail selection that
+   *  mounts this page), and a Host read there would freeze the whole TUI. */
+  private readArmed = false
+  private readStarted = false
+  /** The route a deeplink asked for, resolved against the catalog once it
+   *  arrives (never against an empty list). */
+  private pendingProviderRoute: string | undefined
   /** Per-wizard and per-confirmation identities: a late settlement of an
    * abandoned draft/clear target can never mutate a newer one. */
   private addSerial = 0
@@ -305,6 +390,7 @@ export class ModelsWorkspacePage implements Component {
   private clearSerial = 0
   private refreshSerial = 0
   private recordsSerial = 0
+  private recordPresenceSerial = 0
   private referenceReadSerial = 0
   /** Per-reference read generation: a mutation's authoritative re-read must
    *  invalidate an older credentialState answer for the SAME ref without
@@ -323,26 +409,35 @@ export class ModelsWorkspacePage implements Component {
     this.source = source
     this.requestRender = requestRender
     this.onOpenAccount = onOpenAccount
-    this.providerRows = source.rows()
     this.referenceEditor = initial.view === 'reference'
       ? { ref: initial.ref, label: initial.label ?? initial.ref }
       : { ref: '', label: '' }
     this.applyInitial(initial)
-    this.refresh()
+    // NO Host read here. The constructor runs in the INPUT path (the rail
+    // selection that mounts this page), and a provider-directory read there
+    // would freeze every keypress until it finished. The first painted frame
+    // shows the Loading state; the read starts right after that frame.
   }
 
   private applyInitial(initial: ModelsInitialView): void {
     switch (initial.view) {
       case 'list':
-      case 'records':
-      case 'logout-list':
       case 'guide':
       case 'add-provider':
         if (initial.view === 'add-provider') this.startAddProvider(initial.route)
         else this.view = { kind: initial.view }
         return
+      case 'records':
+      case 'logout-list':
+        // The stored-credential list is read ON DEMAND: entering the view
+        // starts its read (never the HOME's refresh).
+        this.enter({ kind: initial.view })
+        return
       case 'provider':
-        this.view = { kind: 'provider', identity: this.identityOfRoute(initial.route) }
+        // The deeplink's route is resolved against the catalog once it
+        // arrives — never against the empty list the constructor has.
+        this.pendingProviderRoute = initial.route
+        this.view = { kind: 'provider', identity: `route:${initial.route}` }
         return
       case 'reference':
         this.view = { kind: 'reference', ref: initial.ref, label: initial.label ?? initial.ref }
@@ -355,15 +450,113 @@ export class ModelsWorkspacePage implements Component {
 
   // ── data refresh ─────────────────────────────────────────────────────────
 
+  /**
+   * Arm the catalog read for the first painted frame that shows this page.
+   *
+   * The read is scheduled as a MACROTASK from the page's own render: the
+   * terminal write of the current frame happens synchronously inside the
+   * layout pass, so the scheduled task runs AFTER the user has seen the
+   * Loading frame. A read that ran in the constructor (or in the input path
+   * that mounts the page) would block the whole TUI for the length of the
+   * provider-directory read.
+   */
+  private armCatalogRead(): void {
+    if (this.disposed || this.readArmed) return
+    this.readArmed = true
+    setTimeout(() => {
+      if (this.disposed) return
+      this.startCatalogRead()
+    }, 0)
+  }
+
+  /**
+   * The ONE catalog read of a generation: the provider rows, the credential
+   * presence of every UNIQUE reference, the stored-record presence and the
+   * account summary. Every read settles on this page only, and only the
+   * latest generation may paint.
+   */
+  private startCatalogRead(): void {
+    if (this.disposed || this.readStarted) return
+    this.readStarted = true
+    this.refresh()
+  }
+
+  /**
+   * The R key re-reads the authority the CURRENT view shows: the stored
+   * credential list in the records view, the provider catalog everywhere
+   * else.
+   */
+  private refreshCurrentView(): void {
+    if (this.view.kind === 'records' || this.view.kind === 'logout-list') {
+      this.refreshRecords()
+      this.requestRender()
+      return
+    }
+    this.refresh()
+  }
+
   /** Re-read every page-owned authority. All reads are intents that settle on
    * this page only; a late settlement after dispose is ignored by `settle`. */
   private refresh(): void {
     if (this.disposed) return
     const serial = ++this.refreshSerial
-    this.providerRows = this.source.rows()
-    for (const row of this.providerRows) {
+    // A refresh over a live snapshot is a REFRESHING state, not a blank page:
+    // the rows stay visible and are marked as not yet re-confirmed.
+    this.readState = this.providerRows.length === 0 ? 'loading' : 'refreshing'
+    this.readFailure = undefined
+    this.source.run('models catalog read', async () => {
+      let read: ModelsCatalogRead
+      try {
+        read = await this.source.readCatalog()
+      } catch (error) {
+        read = { kind: 'failed', reason: errorText(error) }
+      }
+      this.settle(() => {
+        if (serial !== this.refreshSerial) return
+        if (read.kind === 'failed') {
+          // A failed read keeps the last good rows (marked stale) or reports
+          // the error when there never was one. It is never an empty list.
+          if (this.providerRows.length === 0) this.readState = 'error'
+          else this.readState = 'stale'
+          this.readFailure = read.reason
+          return
+        }
+        this.providerRows = read.rows
+        this.readState = 'ready'
+        this.readFailure = undefined
+        this.resolvePendingProvider()
+        this.readCredentialPresence(read.rows)
+        this.readRecordPresence()
+      })
+    })
+    this.source.run('models account read', async () => {
+      let summary: ModelsAccountSummary
+      try {
+        summary = await this.source.accountSummary()
+      } catch (error) {
+        summary = { available: true, failure: errorText(error) }
+      }
+      this.settle(() => {
+        if (serial !== this.refreshSerial) return
+        this.account = summary
+      })
+    })
+    if (this.view.kind === 'logout' || this.view.kind === 'reference') this.readReferenceState()
+    this.requestRender()
+  }
+
+  /**
+   * The credential presence of every UNIQUE reference the rows name. Two
+   * providers may share one reference: the reference is read ONCE per
+   * generation and both rows show that answer.
+   */
+  private readCredentialPresence(rows: readonly ModelsProviderRow[]): void {
+    const refs = new Set<string>()
+    for (const row of rows) {
       if (row.kind !== 'reference' || row.ref === undefined) continue
-      const ref = row.ref
+      refs.add(row.ref)
+    }
+    for (const ref of refs) {
       const refSerial = (this.credentialReadSerials.get(ref) ?? 0) + 1
       this.credentialReadSerials.set(ref, refSerial)
       this.source.run('models credential read', async () => {
@@ -379,24 +572,42 @@ export class ModelsWorkspacePage implements Component {
         })
       })
     }
-    this.source.run('models account read', async () => {
-      let summary: ModelsAccountSummary
+  }
+
+  /**
+   * The stored-record presence for the page: ONE enumeration. The full
+   * stored-credential list (with the per-reference audit) runs only when the
+   * user opens that view.
+   */
+  private readRecordPresence(): void {
+    // Its OWN generation: the record PRESENCE (the HOME's fact) and the
+    // stored-credential LIST (the records view) are two different reads and
+    // must never fence each other.
+    const serial = ++this.recordPresenceSerial
+    this.recordPresence = undefined
+    this.source.run('models record presence read', async () => {
+      let presence: ModelsRecordPresence
       try {
-        summary = await this.source.accountSummary()
+        presence = await this.source.recordPresence()
       } catch (error) {
-        summary = { available: true, failure: errorText(error) }
+        presence = { kind: 'failed', reason: errorText(error) }
       }
       this.settle(() => {
-        if (serial !== this.refreshSerial) return
-        this.account = summary
-        this.initializing = false
+        if (serial !== this.recordPresenceSerial) return
+        this.recordPresence = presence
       })
     })
-    // Record presence is authoritative state for the authorization rows on the
-    // MODELS HOME too, not only for the Stored credentials view.
-    this.refreshRecords()
-    if (this.view.kind === 'logout' || this.view.kind === 'reference') this.readReferenceState()
-    this.requestRender()
+  }
+
+  /** Resolve a deeplink's provider route against the catalog that just
+   *  arrived. An absent route is reported as such — the page never silently
+   *  selects another provider. */
+  private resolvePendingProvider(): void {
+    const route = this.pendingProviderRoute
+    if (route === undefined) return
+    this.pendingProviderRoute = undefined
+    if (this.view.kind !== 'provider') return
+    this.view = { kind: 'provider', identity: this.identityOfRoute(route) }
   }
 
   private refreshRecords(): void {
@@ -716,6 +927,9 @@ export class ModelsWorkspacePage implements Component {
           this.clear = present
             ? { phase: 'failed', configured: true, reason: 'the stored record is still present after the clear' }
             : { phase: 'done', configured: false, result: `${target.label} signed out locally — stored credential cleared` }
+          // The HOME's record presence is the same fact: re-read it (the
+          // minimal affected authority) instead of leaving the old answer.
+          this.readRecordPresence()
         })
       } catch (error) {
         this.settle(() => {
@@ -733,17 +947,28 @@ export class ModelsWorkspacePage implements Component {
 
   // ── add provider ────────────────────────────────────────────────────────
 
-  private startAddProvider(route?: string): void {
+  private startAddProvider(route?: string, displayName?: string): void {
     this.addSerial += 1
     this.addDiscoverySerial += 1
     this.add = {
       step: 'form',
-      draft: { route: route ?? '', api: PROTOCOL_CHOICES[0], baseURL: '', displayName: '', key: '', models: [] },
+      draft: { route: route ?? '', api: PROTOCOL_CHOICES[0], baseURL: '', displayName: displayName ?? '', key: '', models: [] },
       discovering: false,
     }
     this.view = { kind: 'add-provider' }
     this.cursor = 0
     this.scroll = 0
+    this.requestRender()
+  }
+
+  /** Open the Add Provider catalog (the unconfigured providers this
+   *  installation offers). */
+  private startAddCatalog(): void {
+    this.view = { kind: 'add-catalog' }
+    this.cursor = 0
+    this.scroll = 0
+    this.notice = undefined
+    this.revision += 1
     this.requestRender()
   }
 
@@ -923,10 +1148,9 @@ export class ModelsWorkspacePage implements Component {
         // never retried with a cached secret.
         this.add = { ...current, creating: false, result: outcome, draft: { ...current.draft, key: '' } }
         if (outcome.kind === 'created' || outcome.kind === 'profile-written-key-failed') {
-          this.providerRows = this.source.rows()
           // A persisted profile is a real new Provider row even when its key
-          // write failed; refresh its authority without changing the partial
-          // outcome copy.
+          // write failed; re-read the catalog (and its credential presence)
+          // without changing the partial outcome copy.
           this.refresh()
         }
       })
@@ -1268,6 +1492,10 @@ export class ModelsWorkspacePage implements Component {
 
   render(width: number): string[] {
     if (this.disposed) return []
+    // The first frame that shows this page arms the catalog read. The read
+    // runs as a MACROTASK, i.e. after the terminal write of this frame: the
+    // user sees the Loading state before the provider directory is read.
+    this.armCatalogRead()
     this.lastWidth = width
     this.lastHeight = this.bodyHeight
     const height = Math.max(1, this.bodyHeight)
@@ -1448,6 +1676,7 @@ export class ModelsWorkspacePage implements Component {
       case 'list': return this.projectList(width)
       case 'provider': return this.projectProvider(width)
       case 'reference': return this.projectReference(width)
+      case 'add-catalog': return this.projectAddCatalog(width)
       case 'add-provider': return this.projectAddProvider(width)
       case 'review': return this.projectReview(width)
       case 'records': return this.projectRecords(width)
@@ -1475,25 +1704,81 @@ export class ModelsWorkspacePage implements Component {
     const accountTone = accountState === 'Signed in' ? 'success' : accountState === 'Signed out' ? 'muted' : 'warning'
     this.addRow(content, this.selectionLine(0, 'DeepSeek Account', accountState, accountTone, width), 'account', width)
     let interactive = 1
-    for (const row of this.providerRows) {
-      const state = this.credentialStateOf(row)
-      const painted = credentialWord(state)
-      const text = this.selectionLine(interactive, row.label, painted.word, painted.tone, width)
-      this.addRow(content, text, `provider:${row.identity}`, width)
-      interactive += 1
+    // The HOME list shows the CONFIGURED provider profiles — the Host's own
+    // profile-present fact. An unconfigured directory route belongs to the
+    // Add catalog, and a credential is never what decides the membership.
+    const configuredRows = this.providerRows.filter(row => this.isConfiguredProvider(row))
+    if (configuredRows.length > 0) {
+      content.push(color.textDim('Configured providers'))
+      for (const row of configuredRows) {
+        const state = this.credentialStateOf(row)
+        const painted = credentialWord(state, row.kind, this.presenceIsStale())
+        const text = this.selectionLine(interactive, row.label, painted.word, painted.tone, width)
+        this.addRow(content, text, `provider:${row.identity}`, width)
+        interactive += 1
+      }
     }
     const actions: ActionLine[] = [
       { id: 'list:add', label: 'Add Provider…', enabled: true },
       { id: 'list:records', label: 'Credential records', enabled: true },
       { id: 'list:guide', label: 'Guide: edit complex model config manually', enabled: true },
     ]
-    if (this.initializing) content.push(color.textMuted('Reading Host credentials…'))
+    content.push(...this.readStateLines())
     if (this.notice !== undefined) content.push(color.warning(this.notice))
     this.copyValue = undefined
     return { content, actions }
   }
 
-  private selectionLine(index: number, label: string, value: string, tone: 'success' | 'warning' | 'muted', width: number): string {
+  /**
+   * The read-state lines under the list: the page never hides a failed or
+   * pending read behind an empty list.
+   */
+  private readStateLines(): readonly string[] {
+    switch (this.readState) {
+      case 'loading':
+        return [color.textMuted('Loading provider configuration…')]
+      case 'refreshing':
+        return [color.textMuted('Refreshing…')]
+      case 'stale':
+        return [
+          color.warning('Stale — the last provider read did not complete'),
+          color.textDim(sanitizedPhysicalLine(this.readFailure ?? 'the read failed')),
+        ]
+      case 'error':
+        return [
+          color.error(`Could not read provider configuration: ${sanitizedPhysicalLine(this.readFailure ?? 'the read failed')}`),
+          color.textDim('Press r to retry.'),
+        ]
+      case 'ready':
+        if (this.recordPresence?.kind === 'failed') {
+          return [color.warning(`The stored credential records could not be read: ${sanitizedPhysicalLine(this.recordPresence.reason)}`)]
+        }
+        if (this.recordPresence?.kind === 'unavailable') {
+          return [color.textDim('Stored credential records cannot be enumerated on this backend.')]
+        }
+        return []
+    }
+  }
+
+  /**
+   * Whether the painted credential facts are STALE: a refresh is in flight,
+   * or the last refresh failed. The rows stay visible, but their credential
+   * state is never painted as a fresh confirmation.
+   */
+  private presenceIsStale(): boolean {
+    return this.readState === 'refreshing' || this.readState === 'stale'
+  }
+
+  /**
+   * Whether a row is a CONFIGURED provider profile: the Host's own
+   * profile-present fact, with a real route. A route-less authorization
+   * flow and an unconfigured directory route are not configured providers.
+   */
+  private isConfiguredProvider(row: ModelsProviderRow): boolean {
+    return row.route !== '' && row.profile.configured
+  }
+
+  private selectionLine(index: number, label: string, value: string, tone: 'success' | 'warning' | 'muted' | 'error', width: number): string {
     const selected = index === this.cursor
     const cursor = selected ? color.primary('> ') : '  '
     const painted = sanitizedPhysicalLine(label)
@@ -1507,12 +1792,28 @@ export class ModelsWorkspacePage implements Component {
       return this.credentialStates.get(row.ref) ?? { kind: 'pending' }
     }
     if (row.kind === 'authorization') {
-      const records = this.records
-      if (records === undefined) return { kind: 'pending' }
-      if (records.recordCleanupUnavailable) return { kind: 'unknown', reason: 'this backend cannot enumerate stored records' }
-      return { kind: 'known', configured: records.rows.some(entry => entry.kind === 'record' && entry.key === row.key) }
+      return this.recordStateOf(row)
     }
     return { kind: 'known', configured: row.configured }
+  }
+
+  /**
+   * The record presence of an authorization row. A backend that cannot
+   * enumerate records is `Unavailable` (never an empty answer that would read
+   * as "not signed in"), and a failed enumeration is an unknown outcome.
+   */
+  private recordStateOf(row: ModelsProviderRow): ModelsCredentialState {
+    const presence = this.recordPresence
+    if (presence === undefined) return { kind: 'pending' }
+    // A backend that cannot enumerate records is UNAVAILABLE, never an empty
+    // answer that would read as "not signed in".
+    if (presence.kind === 'unavailable') return { kind: 'unavailable', reason: presence.reason }
+    if (presence.kind === 'failed') return { kind: 'unknown', reason: presence.reason }
+    const key = row.key
+    const configured = key === undefined
+      ? presence.records.some(entry => entry.route !== undefined && entry.route === row.route)
+      : presence.records.some(entry => entry.key === key)
+    return { kind: 'known', configured }
   }
 
   private projectProvider(width: number): Projection {
@@ -1520,17 +1821,32 @@ export class ModelsWorkspacePage implements Component {
     if (view.kind !== 'provider') return { content: [], actions: [] }
     const row = this.providerRows.find(candidate => candidate.identity === view.identity)
     if (row === undefined) {
-      return { content: [color.error(`provider entry ${view.identity} is no longer available`), '', color.textMuted('Esc goes back.')], actions: [] }
+      // A deeplink's provider is resolved against the catalog that arrives:
+      // until then the page is LOADING, never "not available".
+      if (this.readState === 'loading' || this.readState === 'refreshing') {
+        return {
+          content: [color.textMuted('Loading provider configuration…'), '', color.textMuted('Esc goes back.')],
+          actions: [{ id: 'provider:back', label: '← Providers', enabled: true }],
+        }
+      }
+      const route = this.pendingProviderRoute ?? view.identity
+      return {
+        content: [color.error(`provider "${route}" is not in the current provider catalog`), '', color.textMuted('Esc goes back.')],
+        actions: [{ id: 'provider:back', label: '← Providers', enabled: true }],
+      }
     }
-    const content: string[] = [color.textStrong(`Provider · ${sanitizedPhysicalLine(row.label)}`), '']
-    content.push(...this.fact('Route', row.route, width))
+    // A route-less authorization flow is a SIGN-IN, not a provider profile:
+    // the catalog's "Other sign-ins" section leads to it.
+    const isFlow = row.route === ''
+    const content: string[] = [color.textStrong(`${isFlow ? 'Sign-in' : 'Provider'} · ${sanitizedPhysicalLine(row.label)}`), '']
+    content.push(...this.fact(isFlow ? 'Sign-in key' : 'Route', isFlow ? (row.key ?? '—') : row.route, width))
     content.push(...this.fact('Profile', row.profile.configured ? 'configured' : 'not configured', width))
     content.push(...this.fact('API protocol', row.profile.api ?? 'unknown', width))
     content.push(...this.fact('Endpoint', row.profile.baseURL ?? 'unknown', width))
     content.push(...this.fact('Models', row.profile.models.length === 0 ? 'none listed' : row.profile.models.join(', '), width))
     content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
     const state = this.credentialStateOf(row)
-    content.push(...this.fact('Credential', credentialWord(state).word, width))
+    content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
     content.push('', color.textDim('Credential presence only — not a connection test.'))
     if (this.auth !== undefined && this.auth.targetIdentity === row.identity) {
       content.push('', color.textStrong('Sign-in'))
@@ -1553,12 +1869,15 @@ export class ModelsWorkspacePage implements Component {
         enabled: !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed'),
       })
     }
+    // An authority-dependent write waits for the fresh read: while a
+    // refresh is in flight the previous answer is not a confirmation.
+    const mayWrite = this.readState !== 'refreshing'
     if (row.kind === 'reference' || (row.ref !== undefined && row.namesCredential)) {
-      actions.push({ id: 'provider:reference', label: 'Configure API Key…', enabled: true })
+      actions.push({ id: 'provider:reference', label: 'Configure API Key…', enabled: mayWrite })
     }
     const clearTarget = this.clearTargetOf(row)
     const hasStored = state.kind === 'known' ? state.configured : true
-    actions.push({ id: 'provider:clear', label: hasStored ? 'Clear stored credential…' : 'Nothing stored to clear', enabled: clearTarget !== undefined && hasStored })
+    actions.push({ id: 'provider:clear', label: hasStored ? 'Clear stored credential…' : 'Nothing stored to clear', enabled: clearTarget !== undefined && hasStored && mayWrite })
     actions.push({ id: 'provider:guide', label: 'View model config guide', enabled: true })
     if (this.auth?.targetIdentity === row.identity && (this.auth.phase === 'running' || this.auth.phase === 'starting')) {
       actions.push({
@@ -1609,6 +1928,101 @@ export class ModelsWorkspacePage implements Component {
     }
     if (this.referencePhase !== 'pending') actions.push({ id: 'reference:back', label: '← Back', enabled: true })
     return { content, actions }
+  }
+
+  /**
+   * The Add Provider catalog: the providers this installation offers but
+   * that are NOT configured yet, plus the sign-in flows no provider profile
+   * addresses. Browsing writes nothing: an entry is only activated by an
+   * explicit Enter.
+   */
+  private projectAddCatalog(width: number): Projection {
+    const content: string[] = [color.textStrong('Add Provider'), '']
+    const available = this.availableCatalogRows()
+    const signIns = this.otherSignInRows()
+    let interactive = 0
+    if (available.length > 0) {
+      content.push(color.textDim('Available providers'))
+      for (const row of available) {
+        const hint = this.catalogHint(row)
+        this.addRow(
+          content,
+          this.selectionLine(interactive, row.label, hint.word, hint.tone, width),
+          `catalog:${row.identity}`,
+          width,
+        )
+        interactive += 1
+      }
+    }
+    if (signIns.length > 0) {
+      content.push(color.textDim('Other sign-ins'))
+      for (const row of signIns) {
+        this.addRow(
+          content,
+          this.selectionLine(interactive, row.label, 'Sign in →', 'muted', width),
+          `catalog:${row.identity}`,
+          width,
+        )
+        interactive += 1
+      }
+    }
+    if (available.length === 0 && signIns.length === 0) {
+      content.push(color.textMuted('This installation offers no further provider to add.'))
+    }
+    content.push('', color.textDim('Browsing adds nothing. A provider is configured only by the operation you choose.'))
+    if (this.notice !== undefined) content.push(color.warning(sanitizedPhysicalLine(this.notice)))
+    this.copyValue = undefined
+    const actions: ActionLine[] = [
+      { id: 'catalog:custom', label: 'Custom provider…', enabled: true },
+      { id: 'catalog:back', label: '← Back', enabled: true },
+    ]
+    return { content, actions }
+  }
+
+  /**
+   * The directory routes that are NOT configured yet. A hand-declared route
+   * is not a catalog entry (the custom wizard owns it); a route with a
+   * native flow is offered as a sign-in instead.
+   */
+  private availableCatalogRows(): readonly ModelsProviderRow[] {
+    return this.providerRows.filter(row =>
+      row.kind === 'reference'
+      && !row.profile.configured
+      && !row.declared)
+  }
+
+  /** The sign-in flows no configured provider profile addresses: the
+   *  route-less flows and the unconfigured routes with a native flow. */
+  private otherSignInRows(): readonly ModelsProviderRow[] {
+    return this.providerRows.filter(row =>
+      row.kind === 'authorization' && !row.profile.configured)
+  }
+
+  /** The catalog entry's action hint. */
+  private catalogHint(row: ModelsProviderRow): { readonly word: string; readonly tone: 'success' | 'warning' | 'muted' } {
+    if (row.canProvisionProfile) return { word: 'Set up… →', tone: 'muted' }
+    return { word: 'Manual setup only', tone: 'warning' }
+  }
+
+  /**
+   * Activate one catalog entry. A native sign-in starts the Host flow; a
+   * directory route opens the PREFILLED setup draft — the only write this
+   * page offers for it. A route with no supported operation says why
+   * instead of pretending to succeed.
+   */
+  private activateCatalogRow(row: ModelsProviderRow): void {
+    if (row.kind === 'authorization') {
+      // The flow keeps its OWN detail (its sign-in state, notice and
+      // prompt); the catalog only leads to it.
+      this.selectProvider(row.identity)
+      return
+    }
+    if (!row.canProvisionProfile) {
+      this.notice = `${row.label} has no setup path this installation can write — its profile does not live in the conventional provider slot. See the configuration guide.`
+      this.requestRender()
+      return
+    }
+    this.startAddProvider(row.route, row.label)
   }
 
   private projectAddProvider(width: number): Projection {
@@ -1865,7 +2279,7 @@ export class ModelsWorkspacePage implements Component {
     if (matchesKey(data, 'end')) return this.jump(1)
     if (matchesKey(data, 'enter')) return this.confirm()
     if (data === 'r' || data === 'R') {
-      this.refresh()
+      this.refreshCurrentView()
       return 'handled'
     }
     if (matchesKey(data, 'c') || matchesKey(data, Key.shift('c'))) {
@@ -2069,13 +2483,19 @@ export class ModelsWorkspacePage implements Component {
       }
       return 'handled'
     }
+    if (id.startsWith('catalog:')) {
+      const identity = id.slice('catalog:'.length)
+      const row = this.providerRows.find(candidate => candidate.identity === identity)
+      if (row !== undefined) this.activateCatalogRow(row)
+      return 'handled'
+    }
     if (id.startsWith('add-field:')) {
       const index = ADD_FIELDS.findIndex(field => field.id === id.slice('add-field:'.length))
       if (index >= 0) this.editAddField(index)
       return 'handled'
     }
     if (id === 'list:add') {
-      this.startAddProvider()
+      this.startAddCatalog()
       return 'handled'
     }
     if (id === 'list:records') {
@@ -2091,7 +2511,9 @@ export class ModelsWorkspacePage implements Component {
 
   private activateAction(id: string): ModelsPageExit {
     switch (id) {
-      case 'list:add': this.startAddProvider(); return 'handled'
+      case 'list:add': this.startAddCatalog(); return 'handled'
+      case 'catalog:custom': this.startAddProvider(); return 'handled'
+      case 'catalog:back': this.enter({ kind: 'list' }); return 'handled'
       case 'list:records': this.enter({ kind: 'records' }); return 'handled'
       case 'list:guide': this.enter({ kind: 'guide' }); return 'handled'
       case 'provider:auth': {
@@ -2196,6 +2618,7 @@ export class ModelsWorkspacePage implements Component {
       case 'records':
       case 'logout-list':
       case 'guide':
+      case 'add-catalog':
         this.clear = undefined
         this.enter({ kind: 'list' })
         return 'handled'

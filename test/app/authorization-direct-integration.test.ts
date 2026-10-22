@@ -181,13 +181,15 @@ test('REAL Direct attempt → Models page Esc: cancel settles and the page retur
       configured: false,
       declared: false,
       namesCredential: false,
+      canProvisionProfile: true,
       methods: [{ id: 'oauth', label: 'Sign in' }],
       inFlight: false,
       profile: { route: 'page-slow-oauth', configured: false, models: [] },
     }
     const source: ModelsWorkspaceSource = {
       available: true,
-      rows: () => [row],
+      readCatalog: async () => ({ kind: 'ready' as const, rows: [row] }),
+      recordPresence: async () => ({ kind: 'known' as const, records: [] }),
       accountSummary: async () => ({ available: false }),
       credentialState: async () => ({ kind: 'known', configured: false }),
       storedCredentials: async () => ({ rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }),
@@ -215,8 +217,18 @@ test('REAL Direct attempt → Models page Esc: cancel settles and the page retur
     try {
       await new Promise<void>(resolve => setImmediate(resolve))
       page.render(100)
-      page.handleInput('\u001b[B') // provider row
+      // The catalog read starts after the first painted frame: let it settle
+      // before the page is driven.
+      for (let index = 0; index < 3; index += 1) {
+        await new Promise<void>(resolve => setTimeout(resolve, 0))
+      }
+      page.render(100)
+      // The flow is not a configured provider: its sign-in path lives in the
+      // Add Provider catalog ("Other sign-ins").
+      page.handleInput('\u001b[B') // the "Add Provider…" action
       page.handleInput('\r')
+      page.render(100)
+      page.handleInput('\r') // the "Other sign-ins" row
       page.render(100)
       page.handleInput('\r') // Sign in
       await new Promise<void>(resolve => setImmediate(resolve))

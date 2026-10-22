@@ -56,6 +56,7 @@ function makeRows(): readonly ModelsProviderRow[] {
       methods: [],
       inFlight: false,
       profile: { route: 'deepseek-official', configured: true, displayName: 'deepseek official', models: [] },
+      canProvisionProfile: true,
     },
     {
       kind: 'reference',
@@ -69,6 +70,7 @@ function makeRows(): readonly ModelsProviderRow[] {
       methods: [],
       inFlight: false,
       profile: { route: 'acme', configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] },
+      canProvisionProfile: true,
     },
     {
       kind: 'authorization',
@@ -82,6 +84,7 @@ function makeRows(): readonly ModelsProviderRow[] {
       methods: [{ id: 'oauth', label: 'OAuth' }],
       inFlight: false,
       profile: { route: 'anthropic', configured: true, displayName: 'Anthropic', models: [] },
+      canProvisionProfile: true,
     },
   ]
 }
@@ -97,9 +100,13 @@ function fakeSource(options: FakeSourceOptions = {}) {
   const configured = options.configured ?? (() => true)
   const source: ModelsWorkspaceSource = {
     available: true,
-    rows: () => makeRows(),
+    readCatalog: async () => ({ kind: 'ready', rows: makeRows() }),
     accountSummary: async () => ({ available: true, status: options.accountStatus ?? 'signed-out' }),
     credentialState: async ref => ({ kind: 'known', configured: configured(ref) }),
+    recordPresence: async () => ({
+      kind: 'known',
+      records: (options.records ?? []).map(record => ({ key: record.key })),
+    }),
     storedCredentials: async () => ({
       rows: (options.records ?? []).map(record => ({ kind: 'record' as const, key: record.key, label: record.key, ...(record.kind === undefined ? {} : { kindHint: record.kind }) })),
       recordCleanupUnavailable: false,
@@ -124,10 +131,28 @@ function fakeSource(options: FakeSourceOptions = {}) {
   return { source, calls }
 }
 
+/**
+ * Construct the page and paint its FIRST frame. The catalog read starts
+ * after that frame (the page never reads a provider directory in the input
+ * path that mounts it), so a harness that wants the rows must paint once
+ * and let the read settle.
+ */
+function openWith(source: ModelsWorkspaceSource, initial: ModelsInitialView, height: number): ModelsWorkspacePage {
+  const page = new ModelsWorkspacePage(source, () => {}, initial, () => {})
+  page.setBodyHeight(height)
+  page.render(100)
+  return page
+}
+
 function open(initial: ModelsInitialView = { view: 'list' }): { page: ModelsWorkspacePage; calls: string[]; accountOpened: () => boolean } {
   const { source, calls } = fakeSource()
   const page = new ModelsWorkspacePage(source, () => {}, initial, () => { calls.push('open-account') })
   page.setBodyHeight(24)
+  page.render(100)
+  // The catalog read starts AFTER the first painted frame (the page never
+  // reads a provider directory in the input path): the harness paints one
+  // frame here, and the read settles in the next macrotask.
+  page.render(100)
   return { page, calls, accountOpened: () => calls.includes('open-account') }
 }
 
@@ -262,8 +287,7 @@ test('provider detail shows Host facts and opens the masked key editor; a write 
 test('clear requires the painted confirmation action and re-reads the store', async () => {
   const configured = new Set(['ACME_API_KEY'])
   const { source, calls } = fakeSource({ configured: ref => configured.has(ref) })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'provider', route: 'acme' }, 24)
   await flush()
   viewText(page)
   // Provider actions: Configure API Key, Clear stored credential, Guide, Back.
@@ -292,8 +316,7 @@ test('the config guide shows the confirmed profile patch path and never guesses 
   assert.match(viewText(page), /\/home\/u\/\.dsh\/profiles\/pi-tui\/cordis\.patch\.yml/u)
   const { source } = fakeSource()
   const noPath: ModelsWorkspaceSource = { ...source, configGuide: () => ({}) }
-  const other = new ModelsWorkspacePage(noPath, () => {}, { view: 'guide' }, () => {})
-  other.setBodyHeight(20)
+  const other = openWith(noPath, { view: 'guide' }, 20)
   assert.match(viewText(other), /unavailable/u)
 })
 
@@ -304,6 +327,7 @@ test('CredentialWorkflow.createProvider reports a profile write and a separate k
     providers: {
       available: () => true,
       listCredentialOptions: () => [],
+      readCatalog: () => ({ options: [], profiles: [] }),
       readProfile: route => ({ route, configured: false, models: [] }),
       configGuide: () => ({}),
       writeProfile: async (route, profile) => {
@@ -368,8 +392,7 @@ test('provider-native sign-in presents the Host notice and a masked prompt, then
     emit({ kind: 'settled', attemptId, status: 'authorized' })
   }
   source.provisionKeylessProfile = async route => route === 'anthropic' ? ' — provider profile recorded' : ''
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(26)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
   await flush()
   viewText(page)
   page.handleInput('\r') // Sign in (provider)
@@ -390,8 +413,7 @@ test('provider-native sign-in presents the Host notice and a masked prompt, then
 test('cancelling the Models page during a native attempt calls the Host cancel for that attempt', async () => {
   const { source, calls } = fakeSource()
   source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-9' })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 24)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -406,6 +428,7 @@ test('the stored-credential list excludes the DeepSeek Account grant (MA14)', as
     providers: {
       available: () => true,
       listCredentialOptions: () => [],
+      readCatalog: () => ({ options: [], profiles: [] }),
       readProfile: (route: string) => ({ route, configured: false, models: [] }),
       configGuide: () => ({}),
       writeProfile: async () => {},
@@ -456,16 +479,15 @@ test('Models page fits 105/80/60/40/30 columns without painting past the edge', 
 
   // Below the action budget the page refuses every invisible submit and asks
   // for a resize instead of leaving a hidden confirm target.
-  const tiny = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
-  tiny.setBodyHeight(3)
+  const tiny = openWith(source, { view: 'provider', route: 'acme' }, 3)
+  await flush()
   const tinyFrame = tiny.render(30).map(stripTerminalSequences).join('\n')
   assert.match(tinyFrame, /Resize the terminal/u)
 })
 
 test('Models mouse press/release follows the painted hit map and a resize revokes it', async () => {
   const { source, calls } = fakeSource()
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'provider', route: 'acme' }, 24)
   await flush()
   const line = (needle: string): { row: number; col: number } => {
     const lines = page.render(100).map(stripTerminalSequences)
@@ -491,6 +513,7 @@ test('Models mouse press/release follows the painted hit map and a resize revoke
   const second = fakeSource({ configured: ref => configured.has(ref) })
   const clearPage = new ModelsWorkspacePage(second.source, () => {}, { view: 'provider', route: 'acme' }, () => {})
   clearPage.setBodyHeight(24)
+  clearPage.render(100)
   await flush()
   clearPage.render(100)
   clearPage.handleInput('\u001b[B')
@@ -523,6 +546,7 @@ test('a stored credential RECORD is deleted through deleteRecord and never throu
     target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
   }, () => {})
   page.setBodyHeight(24)
+  page.render(100)
   await flush()
   const painted = viewText(page)
   assert.match(painted, /Clear stored credential/u)
@@ -549,8 +573,7 @@ test('Esc on a running native attempt cancels the exact attempt and returns to t
     return { kind: 'started', attemptId: 'auth-esc' }
   }
   source.cancelAuthorization = async id => { calls.push(`cancel:${id}`) }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(26)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -569,8 +592,7 @@ test('Esc on a running native attempt cancels the exact attempt and returns to t
 
 test('a painted but DISABLED action cannot be clicked into effect', async () => {
   const { source, calls } = fakeSource({ configured: () => false })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'provider', route: 'acme' }, 24)
   await flush()
   const lines = page.render(100).map(stripTerminalSequences)
   const row = lines.findIndex(line => line.includes('Nothing stored to clear'))
@@ -622,8 +644,7 @@ test('a withdrawn older prompt never closes the newer prompt UI (RFL-003)', asyn
     emit({ kind: 'settled', attemptId, status: 'authorized' })
   }
   source.provisionKeylessProfile = async () => ''
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(26)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -652,8 +673,7 @@ test('an older Models credential read cannot overwrite a newer refresh (RFL-002)
     }
     return { kind: 'known', configured: true }
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'list' }, 24)
   await flush()
   page.handleInput('r')
   await flush()
@@ -683,7 +703,7 @@ test('an empty masked key answer writes nothing (MA03)', async () => {
 test('the Add Provider page drives discovery → multi-select → review → create (MA04)', async () => {
   const { source, calls } = fakeSource()
   const createdRows: ModelsProviderRow[] = []
-  source.rows = () => createdRows
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows: createdRows })
   source.discoverModels = async () => [{ id: 'm1' }, { id: 'm2' }]
   source.createProvider = async draft => {
     calls.push(`create:${draft.route}:${draft.api}:${draft.baseURL}:${draft.models.join(',')}:${draft.apiKey}`)
@@ -696,14 +716,14 @@ test('the Add Provider page drives discovery → multi-select → review → cre
       configured: true,
       declared: true,
       namesCredential: true,
+      canProvisionProfile: true,
       methods: [],
       inFlight: false,
       profile: { route: draft.route, configured: true, models: [...draft.models] },
     })
     return { kind: 'created', text: `provider ${draft.route} added` }
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'add-provider', route: 'new-route' }, () => {})
-  page.setBodyHeight(30)
+  const page = openWith(source, { view: 'add-provider', route: 'new-route' }, 30)
   await flush()
   viewText(page)
   page.handleInput('\u001b[B')
@@ -770,8 +790,7 @@ test('a withdrawn older SELECT prompt can never overwrite the newer select promp
     calls.push(`respond:${attemptId}:${promptId}:${answer}`)
     emit({ kind: 'settled', attemptId, status: 'authorized' })
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(26)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -803,6 +822,7 @@ test('a pending clear cannot be left behind by Esc, and its rejected re-read sta
     target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
   }, () => {})
   page.setBodyHeight(24)
+  page.render(100)
   await flush()
   viewText(page)
   page.handleInput('\r') // confirm the clear
@@ -829,8 +849,7 @@ test('the painted ← Providers action uses the SAME cancel-and-settle path as E
   }
   source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-back' })
   source.cancelAuthorization = async id => { calls.push(`cancel:${id}`) }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(26)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
   await flush()
   viewText(page)
   page.handleInput('\r') // Sign in
@@ -850,12 +869,13 @@ test('the painted ← Providers action uses the SAME cancel-and-settle path as E
 
 test('the Models HOME reads credential-record presence for native authorization rows (P2)', async () => {
   const { source } = fakeSource({ records: [{ key: 'llm-pi-ai/anthropic', kind: 'grant' }] })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'list' }, 24)
   await flush()
   const anthropicRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Anthropic'))
   assert.ok(anthropicRow !== undefined)
-  assert.match(anthropicRow, /Configured/u, 'the home list must not show Unknown after an authoritative records read')
+  // A provider-native sign-in row reports the SIGN-IN state; the record
+  // presence is authoritative, never "Unknown" after a real read.
+  assert.match(anthropicRow, /Signed in/u, 'the home list must not show Unknown after an authoritative records read')
   assert.doesNotMatch(anthropicRow, /Unknown/u)
 })
 
@@ -866,29 +886,36 @@ test('two route-less authorization flows keep distinct identities and each opens
       kind: 'authorization', identity: 'auth:plugin-a/default', route: '', label: 'Plugin A', key: 'plugin-a/default',
       configured: false, declared: false, namesCredential: false, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false,
       profile: { route: '', configured: false, models: [] },
+      canProvisionProfile: true,
     },
     {
       kind: 'authorization', identity: 'auth:plugin-b/default', route: '', label: 'Plugin B', key: 'plugin-b/default',
       configured: false, declared: false, namesCredential: false, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false,
       profile: { route: '', configured: false, models: [] },
+      canProvisionProfile: true,
     },
   ]
-  source.rows = () => rows
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
   source.beginAuthorization = async key => { calls.push(`begin:${key}`); return { kind: 'started', attemptId: key } }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'list' }, 24)
   await flush()
   viewText(page)
-  page.handleInput('\u001b[B') // first flow
+  // A route-less flow is not a HOME row: the Add Provider catalog keeps its
+  // sign-in path discoverable ("Other sign-ins").
+  page.handleInput('\u001b[B') // the "Add Provider…" action
   page.handleInput('\r')
-  assert.match(viewText(page), /Provider · Plugin A/u)
+  assert.match(viewText(page), /Other sign-ins/u)
+  page.handleInput('\r') // the first "Other sign-ins" row
+  assert.match(viewText(page), /Sign-in · Plugin A/u)
   page.handleInput('\u001b')
   await flush()
   viewText(page)
-  page.handleInput('\u001b[B')
-  page.handleInput('\u001b[B') // second flow
+  page.handleInput('\u001b[B') // the "Add Provider…" action
   page.handleInput('\r')
-  assert.match(viewText(page), /Provider · Plugin B/u)
+  viewText(page) // paint the catalog: a row is activated only when it was painted
+  page.handleInput('\u001b[B') // the second "Other sign-ins" row
+  page.handleInput('\r')
+  assert.match(viewText(page), /Sign-in · Plugin B/u)
   page.handleInput('\r') // sign in
   await flush()
   assert.ok(calls.includes('begin:plugin-b/default'), calls.join(','))
@@ -911,8 +938,7 @@ function runningAuthSource() {
 
 test('Guide navigation during a native attempt cancels, waits for settlement and then opens the guide (P1)', async () => {
   const { source, calls, emit } = runningAuthSource()
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(26)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
   await flush()
   viewText(page)
   page.handleInput('\r') // sign in
@@ -937,8 +963,9 @@ test('Clear navigation during a native attempt uses the same cancel-and-settle p
     recordCleanupUnavailable: false,
     referenceReadFailures: [],
   })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(26)
+  // The HOME's record PRESENCE is the fact the clear action reads.
+  source.recordPresence = async () => ({ kind: 'known', records: [{ key: 'llm-pi-ai/anthropic' }] })
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -962,8 +989,7 @@ test('a verified API-key write refreshes the list projection (P2)', async () => 
   source.credentialState = async () => ({ kind: 'known', configured })
   source.describeReference = async () => ({ configured })
   source.setReference = async () => { configured = true }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -992,6 +1018,7 @@ test('a verified clear refreshes the list projection (P2)', async () => {
     target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
   }, () => {})
   page.setBodyHeight(24)
+  page.render(100)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -1007,7 +1034,7 @@ test('a verified clear refreshes the list projection (P2)', async () => {
   await flush()
   const acmeRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Acme Gateway'))
   assert.ok(acmeRow !== undefined)
-  assert.match(acmeRow, /Not set/u)
+  assert.match(acmeRow, /Key missing/u)
 })
 
 test('a pending API-key write cannot be left by Esc and still verifies on settlement (P2)', async () => {
@@ -1015,8 +1042,7 @@ test('a pending API-key write cannot be left by Esc and still verifies on settle
   const { source } = fakeSource()
   source.setReference = () => new Promise<void>(resolve => { resolveWrite = resolve })
   source.describeReference = async () => ({ configured: true })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -1046,13 +1072,13 @@ test('the list cursor follows into view so an off-screen provider is Enter-reach
     configured: true,
     declared: true,
     namesCredential: true,
+    canProvisionProfile: true,
     methods: [],
     inFlight: false,
     profile: { route: `p${index}`, configured: true, models: [] },
   }))
-  source.rows = () => rows
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
-  page.setBodyHeight(10)
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
+  const page = openWith(source, { view: 'list' }, 10)
   await flush()
   page.render(100)
   for (let index = 0; index < 20; index += 1) {
@@ -1070,10 +1096,10 @@ test('the login-method picker reserves heading and action-bar rows on a short sc
     kind: 'authorization', identity: 'auth:plugin/many', route: 'many', label: 'Many Methods',
     key: 'plugin/many', configured: false, declared: false, namesCredential: false, methods, inFlight: false,
     profile: { route: 'many', configured: false, models: [] },
+    canProvisionProfile: true,
   }]
-  source.rows = () => rows
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'many' }, () => {})
-  page.setBodyHeight(8)
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
+  const page = openWith(source, { view: 'provider', route: 'many' }, 8)
   await flush()
   page.render(100)
   page.handleInput('\r') // open the method picker
@@ -1103,8 +1129,7 @@ test('closing the Models page while a native attempt runs cancels it and the own
     const running = task()
     if (label === 'models provider sign-in') signInTask = running
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 24)
   await flush()
   viewText(page)
   page.handleInput('\r')
@@ -1124,30 +1149,30 @@ test('a failed credential-record refresh invalidates the old presence instead of
   const { source } = fakeSource({
     records: [{ key: 'llm-pi-ai/anthropic', kind: 'grant' }],
   })
-  source.storedCredentials = async () => {
-    if (mode === 'fail') throw new Error('records read failed')
+  // The HOME reads the record PRESENCE (one enumeration); the stored
+  // credential LIST is read only in its own view.
+  source.recordPresence = async () => {
+    if (mode === 'fail') return { kind: 'failed' as const, reason: 'records read failed' }
     return {
-      rows: mode === 'ok' ? [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }] : [],
-      recordCleanupUnavailable: false,
-      referenceReadFailures: [],
+      kind: 'known' as const,
+      records: mode === 'ok' ? [{ key: 'llm-pi-ai/anthropic' }] : [],
     }
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'list' }, 24)
   await flush()
   const row = (): string => page.render(100).map(stripTerminalSequences).find(line => line.includes('Anthropic')) ?? ''
-  assert.match(row(), /Configured/u)
+  assert.match(row(), /Signed in/u)
 
   mode = 'fail'
   page.handleInput('r')
   await flush()
-  assert.match(row(), /Unknown/u, 'a failed read must not keep painting the old Configured snapshot')
+  assert.match(row(), /Outcome unknown/u, 'a failed read must not keep painting the old confirmed snapshot')
   assert.match(viewText(page), /could not be read/u)
 
   mode = 'empty'
   page.handleInput('r')
   await flush()
-  assert.match(row(), /Not set/u)
+  assert.match(row(), /Not signed in/u)
   assert.doesNotMatch(viewText(page), /could not be read/u)
 })
 
@@ -1155,8 +1180,7 @@ test('Enter after a resize but before the resize frame cannot submit a clipped f
   const { source, calls } = fakeSource()
   source.setReference = async ref => { calls.push(`set:${ref}`) }
   source.describeReference = async () => ({ configured: true })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
   await flush()
   page.render(100)
   page.handleInput('\r')
@@ -1174,8 +1198,7 @@ test('a growing auth notice without a repaint disables the previously painted fo
   const { source, calls } = fakeSource()
   source.setReference = async ref => { calls.push(`set:${ref}`) }
   source.describeReference = async () => ({ configured: true })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
-  page.setBodyHeight(11)
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 11)
   await flush()
   page.render(100)
   page.handleInput('\r')
@@ -1204,8 +1227,7 @@ test('an OLD credentialState read cannot overwrite a newer API-key write read-ba
   }
   source.setReference = async () => {}
   source.describeReference = async () => ({ configured: true })
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
   await flush()
   page.render(100)
   page.handleInput('\r')
@@ -1231,15 +1253,22 @@ test('an OLD records read cannot resurrect a deleted record after the authoritat
   let deleted = false
   let calls = 0
   const { source } = fakeSource()
-  source.storedCredentials = async () => {
+  source.storedCredentials = async () => ({
+    rows: deleted
+      ? []
+      : [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  // The HOME's record PRESENCE: the FIRST read is held (the old answer),
+  // and the delete's re-read is the authoritative one.
+  source.recordPresence = async () => {
     calls += 1
-    if (calls === 2) {
+    if (calls === 1) {
       await new Promise<void>(resolve => { releaseOld = resolve })
-      return { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
+      return { kind: 'known' as const, records: [{ key: 'llm-pi-ai/anthropic' }] }
     }
-    return deleted
-      ? { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }
-      : { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
+    return { kind: 'known' as const, records: deleted ? [] : [{ key: 'llm-pi-ai/anthropic' }] }
   }
   source.deleteRecord = async () => { deleted = true }
   const page = new ModelsWorkspacePage(source, () => {}, {
@@ -1247,6 +1276,7 @@ test('an OLD records read cannot resurrect a deleted record after the authoritat
     target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
   }, () => {})
   page.setBodyHeight(26)
+  page.render(100)
   await flush()
   for (let index = 0; index < 100; index += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
@@ -1262,7 +1292,7 @@ test('an OLD records read cannot resurrect a deleted record after the authoritat
   await flush()
   const row = page.render(100).map(stripTerminalSequences).find(line => line.includes('Anthropic'))
   assert.ok(row !== undefined)
-  assert.match(row, /Not set/u, 'the old record list must not resurrect the delete')
+  assert.match(row, /Not signed in/u, 'the old record presence must not resurrect the delete')
 })
 
 test('a failed record re-read fences the old records snapshot and leaves Unknown (P2)', async () => {
@@ -1271,12 +1301,19 @@ test('a failed record re-read fences the old records snapshot and leaves Unknown
   const { source } = fakeSource()
   source.storedCredentials = async () => {
     calls += 1
-    if (calls === 2) {
-      await new Promise<void>(resolve => { releaseOld = resolve })
-      return { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
-    }
     if (calls === 3) throw new Error('record list re-read failed')
     return { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  // The HOME's record PRESENCE: the first read is held (the old answer) and
+  // the re-read after the clear FAILS — the state must be unknown, never the
+  // pre-delete snapshot.
+  source.recordPresence = async () => {
+    calls += 1
+    if (calls === 1) {
+      await new Promise<void>(resolve => { releaseOld = resolve })
+      return { kind: 'known' as const, records: [{ key: 'llm-pi-ai/anthropic' }] }
+    }
+    return { kind: 'failed' as const, reason: 'record presence re-read failed' }
   }
   source.deleteRecord = async () => {}
   const page = new ModelsWorkspacePage(source, () => {}, {
@@ -1284,6 +1321,7 @@ test('a failed record re-read fences the old records snapshot and leaves Unknown
     target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
   }, () => {})
   page.setBodyHeight(26)
+  page.render(100)
   await flush()
   for (let index = 0; index < 100; index += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
@@ -1299,7 +1337,7 @@ test('a failed record re-read fences the old records snapshot and leaves Unknown
   await flush()
   const row = page.render(100).map(stripTerminalSequences).find(line => line.includes('Anthropic'))
   assert.ok(row !== undefined)
-  assert.match(row, /Unknown/u, 'the failed re-read must fence the pre-delete snapshot')
+  assert.match(row, /Outcome unknown/u, 'the failed re-read must fence the pre-delete snapshot')
 })
 
 test('a refresh while a reference clear is pending cannot reset it to ready (RFL-009)', async () => {
@@ -1316,6 +1354,7 @@ test('a refresh while a reference clear is pending cannot reset it to ready (RFL
     target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway', route: 'acme' },
   }, () => {})
   page.setBodyHeight(26)
+  page.render(100)
   await flush()
   for (let index = 0; index < 100; index += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
@@ -1341,8 +1380,7 @@ test('a failed stored-credentials read shows the failure, not a permanent Readin
     if (fail) throw new Error('records backend unavailable')
     return { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'records' }, () => {})
-  page.setBodyHeight(24)
+  const page = openWith(source, { view: 'records' }, 24)
   await flush()
   const failed = viewText(page)
   assert.match(failed, /records backend unavailable/u)
@@ -1361,8 +1399,7 @@ test('an old model discovery cannot apply to an edited endpoint (F2)', async () 
     await new Promise<void>(resolve => { releaseDiscovery = resolve })
     return [{ id: 'old-model' }]
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'add-provider', route: 'race-route' }, () => {})
-  page.setBodyHeight(30)
+  const page = openWith(source, { view: 'add-provider', route: 'race-route' }, 30)
   await flush()
   viewText(page)
   page.handleInput('\u001b[B')
@@ -1406,17 +1443,17 @@ test('an old model discovery cannot apply to an edited endpoint (F2)', async () 
 test('a profile-written/key-failed outcome refreshes the provider list (F3)', async () => {
   const { source } = fakeSource()
   const rows: ModelsProviderRow[] = []
-  source.rows = () => rows
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
   source.createProvider = async draft => {
     rows.push({
       kind: 'reference', identity: `route:${draft.route}`, route: draft.route, label: draft.route,
       ref: 'PARTIAL_API_KEY', configured: false, declared: false, namesCredential: true,
+      canProvisionProfile: true,
       methods: [], inFlight: false, profile: { route: draft.route, configured: true, models: [...draft.models] },
     })
     return { kind: 'profile-written-key-failed', text: `provider ${draft.route} profile saved; key write failed`, reason: 'write refused' }
   }
-  const page = new ModelsWorkspacePage(source, () => {}, { view: 'add-provider', route: 'partial-route' }, () => {})
-  page.setBodyHeight(30)
+  const page = openWith(source, { view: 'add-provider', route: 'partial-route' }, 30)
   await flush()
   ;(page as unknown as { add: Record<string, unknown>; view: { kind: string } }).add = {
     step: 'review',
@@ -1492,6 +1529,120 @@ test('a resize before frame invalidates picker mouse targets too (F7)', async ()
 // The Settings root may take a bare Left from the page ROOT back to the
 // category rail. The page answers ONE question — "may the root claim this
 // Left?" — and never reads the Host or changes business state to answer it.
+
+test('the page reads NO provider catalog before its first painted frame', async () => {
+  const { source } = fakeSource()
+  let reads = 0
+  source.readCatalog = async () => { reads += 1; return { kind: 'ready' as const, rows: makeRows() } }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
+  page.setBodyHeight(24)
+  // The constructor and the first frame are the INPUT path: a provider
+  // directory read there would freeze the whole TUI.
+  assert.equal(reads, 0, 'the constructor must not read the catalog')
+  page.render(100)
+  assert.equal(reads, 0, 'the first frame must be painted before the read')
+  assert.match(viewText(page), /Loading provider configuration/u)
+  await flush()
+  assert.equal(reads, 1, 'the read runs once the frame is out')
+  assert.match(viewText(page), /Acme Gateway/u)
+})
+
+test('the HOME lists only the configured providers and the Add catalog holds the rest', async () => {
+  const rows: ModelsProviderRow[] = [
+    {
+      kind: 'reference', identity: 'route:acme', route: 'acme', label: 'Acme Gateway', ref: 'ACME_API_KEY',
+      configured: true, declared: false, namesCredential: true, canProvisionProfile: true,
+      methods: [], inFlight: false,
+      profile: { route: 'acme', configured: true, displayName: 'Acme Gateway', models: ['acme-1'] },
+    },
+    {
+      // An UNCONFIGURED directory route: an Add-catalog entry, never a HOME row.
+      kind: 'reference', identity: 'route:openrouter', route: 'openrouter', label: 'OpenRouter', ref: 'OPENROUTER_API_KEY',
+      configured: false, declared: false, namesCredential: false, canProvisionProfile: true,
+      methods: [], inFlight: false,
+      profile: { route: 'openrouter', configured: false, displayName: 'OpenRouter', models: [] },
+    },
+  ]
+  const { source, calls } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  const home = viewText(page)
+  assert.match(home, /Acme Gateway/u)
+  assert.doesNotMatch(home, /OpenRouter/u, 'an unconfigured route is not a HOME row')
+  // The catalog leads to the unconfigured route and offers the custom wizard.
+  page.handleInput('\u001b[B') // the account row
+  page.handleInput('\u001b[B') // the "Add Provider…" action
+  page.handleInput('\r')
+  const catalog = viewText(page)
+  assert.match(catalog, /Available providers/u)
+  assert.match(catalog, /OpenRouter/u)
+  assert.match(catalog, /Custom provider/u)
+  // Browsing wrote nothing: the source recorded no write call.
+  assert.deepEqual(calls, [])
+})
+
+test('a shared credential reference is read ONCE per generation and every row shows it', async () => {
+  const rows: ModelsProviderRow[] = [
+    {
+      kind: 'reference', identity: 'route:alpha', route: 'alpha', label: 'Alpha', ref: 'SHARED_API_KEY',
+      configured: true, declared: false, namesCredential: true, canProvisionProfile: true,
+      methods: [], inFlight: false,
+      profile: { route: 'alpha', configured: true, displayName: 'Alpha', models: [] },
+    },
+    {
+      kind: 'reference', identity: 'route:beta', route: 'beta', label: 'Beta', ref: 'SHARED_API_KEY',
+      configured: true, declared: false, namesCredential: true, canProvisionProfile: true,
+      methods: [], inFlight: false,
+      profile: { route: 'beta', configured: true, displayName: 'Beta', models: [] },
+    },
+  ]
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows })
+  const reads: string[] = []
+  source.credentialState = async ref => { reads.push(ref); return { kind: 'known' as const, configured: true } }
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  const home = viewText(page)
+  assert.match(home, /Alpha/u)
+  assert.match(home, /Beta/u, 'both providers of a shared reference stay visible')
+  assert.deepEqual(reads, ['SHARED_API_KEY'], 'the shared reference is read once')
+})
+
+test('a failed catalog read shows the failure, never an empty provider list', async () => {
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'failed' as const, reason: 'the provider directory is unreadable' })
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  const home = viewText(page)
+  assert.match(home, /Could not read provider configuration/u)
+  assert.match(home, /the provider directory is unreadable/u)
+  assert.doesNotMatch(home, /No providers configured/u)
+})
+
+test('a refresh marks the credential facts stale until the fresh read confirms them', async () => {
+  const { source } = fakeSource()
+  let release: (() => void) | undefined
+  let reads = 0
+  source.readCatalog = async () => {
+    reads += 1
+    if (reads > 1) await new Promise<void>(resolve => { release = resolve })
+    return { kind: 'ready' as const, rows: makeRows() }
+  }
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  assert.match(viewText(page), /Configured/u)
+  page.handleInput('r')
+  await flush()
+  // The refresh is in flight: the previous answer is stale, never a fresh
+  // confirmation.
+  assert.match(viewText(page), /Refreshing/u)
+  assert.match(viewText(page), /Stale/u)
+  release?.()
+  await flush()
+  assert.match(viewText(page), /Configured/u)
+  assert.doesNotMatch(viewText(page), /Stale/u)
+})
 
 test('the Models list may yield the focus to the Settings category rail', () => {
   const { page } = open()

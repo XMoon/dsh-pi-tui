@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Switching to the Models page no longer freezes the whole TUI.** The provider
+  directory and the credential reads now run after the page has painted its
+  first frame, and one read asks the Host for a single directory snapshot:
+  before, every provider re-read the directory and the whole settings section,
+  so a large directory blocked the keyboard path for a long time.
 - **Hot reloading no longer exits a running TUI.** After a linked package is
   rebuilt, DSH re-mounts the TUI's rows; the re-mounted startup row used to read
   "the launcher was ready long ago" as "the TUI never mounted" and ended the
@@ -45,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Models home lists only the configured providers, and adding one is now a
+  catalog.** The home groups by the Host's own profile-presence fact: the
+  connected providers and the DeepSeek Account each get a row, and the key
+  state is an independent fact (`Configured` / `Key missing` / `Signed in` /
+  `Not signed in`, `Outcome unknown` after a failed read, `Unavailable` when
+  the backend cannot answer). An unconfigured provider moved to the
+  `Add Provider` catalog, where browsing writes nothing; a hand-written
+  provider still uses the existing full wizard. The read has explicit states
+  (Loading / Ready / Refreshing / Stale / Error), and a failed read is never
+  painted as "no providers".
 - **Approvals now use a blocking editor-seat action sheet.** The complete reason
   and arguments are readable in one scrollable body (no six-line argument
   preview), with `y` allow once, `n` reject, `Esc`/`Ctrl+C` cancel, `c` copying the

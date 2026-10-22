@@ -138,24 +138,64 @@ export const PROTOCOL_CHOICES = [
 ] as const
 
 /**
+ * The per-route profile facts the merge needs. The adapter projects them
+ * from ONE settings snapshot: the merge NEVER reads a namespace itself, so a
+ * large installation pays ONE settings read (and ONE deep copy) per snapshot
+ * instead of one per provider route.
+ *
+ * `present` is the Host's own profile-present fact — a profile value exists
+ * for the route. `namedRef` is the explicit `apiKeyEnv` the profile names,
+ * when it names one.
+ */
+export interface ProviderProfileProjection {
+  /** Whether a profile value exists for the route. */
+  readonly present: boolean
+  /** The explicit `apiKeyEnv` reference, when the profile names one. */
+  readonly namedRef?: string
+}
+
+/**
+ * Project one profile value onto the merge's per-route facts: whether a
+ * profile EXISTS for the route, and the explicit `apiKeyEnv` it names.
+ * A primitive or an absent value is still a configuration fact: an absent
+ * profile is the only "not present" case.
+ */
+export function providerProfileProjectionOf(profile: unknown): ProviderProfileProjection {
+  if (profile === undefined) return { present: false }
+  if (typeof profile !== 'object' || profile === null) return { present: true }
+  const namedRef = (profile as { apiKeyEnv?: unknown }).apiKeyEnv
+  return {
+    present: true,
+    ...(typeof namedRef === 'string' ? { namedRef } : {}),
+  }
+}
+
+/**
  * Merge the configurable-provider directory with the existing settings
  * section into the /login option list.
  *
+ * The PROVIDER identity is the ROUTE: two routes that name the same
+ * credential reference are two providers, and both stay visible (the
+ * credential READ is deduplicated by reference later, in the read planner —
+ * not here, where the route is the identity). The deepseek official builtin
+ * leads and keeps its own route.
+ *
  * @param entries - the llm directory entries (or undefined when the llm
  *   service is absent — degrades to the official target only).
- * @param readSection - read one settings namespace's resolved section (the
- *   settings service's `get`); absent namespaces read as undefined.
- * @returns the merged options, deepseek official first, deduped by ref.
+ * @param readProfile - project ONE route's profile facts from the adapter's
+ *   single settings snapshot; undefined when the route's profile could not
+ *   be read at all.
+ * @returns the merged options, deepseek official first, one entry per route.
  */
 export function providerOptionsFor(
   entries: readonly ProviderCatalogEntry[] | undefined,
-  readSection: (ns: string) => unknown,
+  readProfile: (entry: ProviderCatalogEntry) => ProviderProfileProjection | undefined,
 ): ProviderOption[] {
   const options: ProviderOption[] = []
-  const seen = new Set<string>()
+  const seenRoutes = new Set<string>()
   const push = (option: ProviderOption): void => {
-    if (seen.has(option.ref)) return
-    seen.add(option.ref)
+    if (seenRoutes.has(option.route)) return
+    seenRoutes.add(option.route)
     options.push(option)
   }
   // The deepseek official adapter leads; it is the one route every deployment
@@ -166,18 +206,12 @@ export function providerOptionsFor(
   if (entries === undefined) return options
   for (const entry of entries) {
     if (entry.provider.length === 0 || entry.settingsNs.length === 0) continue
-    const section = readSection(entry.settingsNs)
-    const profile = entry.settingsPath.length === 0
-      ? section
-      : getPath(section, entry.settingsPath)
+    const profile = readProfile(entry)
     // A present profile value — object or primitive — marks the route
     // configured; only an absent one is unconfigured (a `providers.x = true`
     // or a bare string is still a declared profile).
-    const configured = profile !== undefined
-    const namedRef = configured && typeof profile === 'object' && profile !== null
-      && typeof (profile as { apiKeyEnv?: unknown }).apiKeyEnv === 'string'
-      ? (profile as { apiKeyEnv: string }).apiKeyEnv
-      : undefined
+    const configured = profile?.present === true
+    const namedRef = profile?.namedRef
     const namesCredential = namedRef !== undefined && namedRef !== ''
     const ref = namesCredential ? namedRef : deriveKeyRef(entry.provider)
     push({
@@ -197,21 +231,23 @@ export function providerOptionsFor(
 
 /** The credential-target options for /login and /logout: the deepseek
  * official ref always first, then every llm-pi-ai provider route's
- * apiKeyEnv (deduped by ref). `providers` is the llm-pi-ai settings
+ * apiKeyEnv. `providers` is the llm-pi-ai settings
  * section's `providers` dict, or undefined when the adapter or the settings
  * service is absent — which degrades /login to the official target only.
- * Kept as the settings-only fallback when the llm directory is absent. */
+ * Kept as the settings-only fallback when the llm directory is absent.
+ *
+ * The ROUTE is the identity here too: two routes that name the same
+ * reference stay two entries (the credential READ is deduplicated by
+ * reference in the read planner, never by dropping a provider). */
 export function credentialOptionsFor(
   providers: Record<string, { apiKeyEnv?: string } | undefined> | undefined,
 ): LoginCredentialOption[] {
-  const options: LoginCredentialOption[] = [{ label: 'deepseek official', ref: 'DEEPSEEK_API_KEY' }]
+  const options: LoginCredentialOption[] = [{ label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', route: 'deepseek-official' }]
   if (providers === undefined) return options
-  const seen = new Set<string>(options.map(option => option.ref))
   for (const [route, profile] of Object.entries(providers)) {
     const ref = profile?.apiKeyEnv
-    if (ref === undefined || ref === '' || seen.has(ref)) continue
-    seen.add(ref)
-    options.push({ label: route, ref })
+    if (ref === undefined || ref === '') continue
+    options.push({ label: route, ref, route })
   }
   return options
 }

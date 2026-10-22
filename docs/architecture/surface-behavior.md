@@ -185,9 +185,41 @@ only projects panes (≥108 three, 76–107 two, <76 one). The category order is
 ### Models page
 
 The provider list and detail are detached ConfigPort projections
-(`listCredentialOptions`, `readProfile`, `describeReference`, `listRecords`).
+(`readCatalog`, `describeReference`, `recordPresence`, `listRecords`).
 The page never infers a stored key from a route/profile.
 
+- ONE catalog read per generation: the provider rows, their profile facts and
+  the credential presence come from ONE provider snapshot (the adapter reads
+  the configurable-provider directory and the settings once per snapshot, and
+  never repeats a settings read or a deep copy per provider route). The read
+  runs AFTER the first painted frame of the page: the constructor performs no
+  Host read, so selecting `Models` on the rail paints the Loading state
+  instead of blocking the input path.
+- The read state is explicit: `Loading` (no authoritative rows yet), `Ready`,
+  `Refreshing` (a read in flight over a live snapshot), `Stale` (a failed
+  refresh over the last good snapshot) and `Error` (no authoritative read at
+  all, with a retry). A failed read is never painted as "no providers
+  configured".
+- The HOME lists the CONFIGURED provider profiles — the Host's own
+  profile-present fact — plus the independent DeepSeek Account row. The
+  presence of an API key never decides the membership, and an unconfigured
+  directory route is not a HOME row.
+- The credential/record state of a row is an INDEPENDENT fact: `Configured` /
+  `Key missing` for an API-key reference, `Signed in` / `Not signed in` for a
+  provider-native sign-in, `Checking…` while the read is pending, `Outcome
+  unknown` for a failed read and `Unavailable` for a backend that cannot
+  answer the question. A credential reference may be shared by several
+  providers: the reference is read ONCE per generation and every row shows
+  that answer.
+- The stored-record presence is ONE enumeration for the page. The full
+  Stored Credentials list (with its per-reference audit) is read only when the
+  user opens that view, and a backend that cannot enumerate records is
+  `Unavailable`, never an empty list.
+- `Add Provider` is a catalog: the unconfigured providers this installation
+  offers (and the sign-in flows no provider profile addresses) plus one
+  `Custom provider…` action that opens the existing draft. Browsing writes
+  nothing; a catalog entry is activated only by an explicit Enter, and a
+  route with no supported operation states why instead of claiming success.
 - Provider detail shows route, profile presence, protocol, endpoint, models,
   auth kind and credential presence (presence only, not a connection test).
 - `Configure API Key` opens a page-local masked editor (the existing
@@ -201,11 +233,11 @@ The page never infers a stored key from a route/profile.
 - `Clear stored credential` is a single explicit confirmation for the exact
   identity (reference vs stored record). After the clear the page re-reads the
   store; it never claims success without the authoritative absence.
-- `Add Provider` is one page-local draft over route → protocol → base URL →
-  display name → optional key → discovered/manual model ids → review → create.
-  Nothing persists before Create. Profile and credential writes are separate
-  Host operations; a persisted profile with a failed key write is reported as a
-  partial outcome with the exact failed stage.
+- The custom provider draft is one page-local form over route → protocol →
+  base URL → display name → optional key → discovered/manual model ids →
+  review → create. Nothing persists before Create. Profile and credential
+  writes are separate Host operations; a persisted profile with a failed key
+  write is reported as a partial outcome with the exact failed stage.
 - Provider-native sign-in uses the existing authorization attempt owner: early
   events are buffered before attempt binding, notices/URLs stay visible above
   in-page prompts, select/text/secret prompts answer through `respond`, a Host

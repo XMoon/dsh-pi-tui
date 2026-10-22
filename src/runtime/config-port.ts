@@ -260,6 +260,36 @@ export interface ProviderConfigGuide {
   readonly profilePatchPath?: string
 }
 
+/**
+ * ONE detached provider snapshot: the merged provider options (one entry per
+ * provider ROUTE) and the profile facts of every route, read in a SINGLE
+ * pass.
+ *
+ * The adapter reads the configurable-provider directory ONCE and the settings
+ * ONCE per snapshot: a large installation must never pay one settings read
+ * (and one deep copy of a large section) PER PROVIDER ROUTE. The snapshot is
+ * the one authoritative read the Models page projects from — the page never
+ * re-reads a route on its own.
+ *
+ * The ROUTE is the provider identity: two routes may name the SAME credential
+ * reference, and both stay in the snapshot (the credential READ is
+ * deduplicated by reference in the read planner, never by dropping a
+ * provider).
+ */
+export interface ProviderCatalogSnapshot {
+  /** The merged provider options, one entry per provider route. */
+  readonly options: readonly CredentialProviderOption[]
+  /** The detached profile facts of every route in `options`. */
+  readonly profiles: readonly ProviderProfileFacts[]
+  /**
+   * Why the catalog could not be read AUTHORITATIVELY (a failed directory
+   * or settings read). `undefined` means the snapshot is authoritative.
+   * A failed read is never an empty catalog: a consumer must show the
+   * failure instead of presenting "no providers".
+   */
+  readonly failure?: string
+}
+
 /** The provider-profile sub-domain: the add-provider wizard and the
  * /login merge. The adapter owns the Host schema knowledge — a consumer
  * names a ROUTE, never a settings namespace or path: the merged
@@ -275,6 +305,13 @@ export interface ProviderProfileConfig {
    * domain/catalog/provider.ts merge, wired by the adapter). Detached DTOs with
    * semantic flags only — no settings namespace or path ever crosses. */
   listCredentialOptions(): readonly CredentialProviderOption[]
+  /**
+   * The ONE provider snapshot: the merged options AND every route's profile
+   * facts, from a single directory + settings read. The Models page reads
+   * the catalog through this one method, so a refresh never repeats the
+   * directory enumeration or the settings read per route.
+   */
+  readCatalog(): ProviderCatalogSnapshot
   /** The detached profile facts of one route (the Models detail pane). */
   readProfile(route: string): ProviderProfileFacts
   /** The confirmed manual-edit guidance for complex profile fields. */

@@ -29,6 +29,9 @@
 
 ### 修复
 
+- **切到 Models 页面不再卡住整个 TUI。** provider 目录与凭据的读取改为在页面第一帧
+  画出来之后再进行，并且一次读取只问 Host 要一份目录快照：此前每列一个 provider 都会
+  重读一遍目录与整段 settings，目录一大就会在按键路径上长时间阻塞。
 - **热重载不再误退出运行中的 TUI。** DSH 在链接包重新构建后会重新挂载 TUI 的行；重新挂载
   的启动行此前把「启动器早已就绪」误判为「TUI 没有挂载」，于是以
   `required TUI surface did not mount` 结束正在运行的进程。现在只有真正经历过那一次
@@ -36,6 +39,13 @@
 
 ### 变更
 
+- **Models 首页只列出已配置的 provider，新增页变成可选目录。** 首页按 Host 里的
+  profile 是否存在来分组，已接入的 provider 与 DeepSeek Account 各占一行，Key 是否存在
+  另行独立显示（`Configured` / `Key missing` / `Signed in` / `Not signed in`，读取失败
+  显示 `Outcome unknown`，后端不支持时显示 `Unavailable`）。未配置的 provider 移到
+  `Add Provider` 的可选目录里，浏览不会写入任何东西；自有 provider 仍走原来的完整向导。
+  读取过程有明确状态：Loading / Ready / Refreshing / Stale / Error，读取失败不会显示成
+  「没有 provider」。
 - **审批改为输入框位置的阻塞式操作面板。** 审批请求现在显示在编辑器席位：完整的
   Reason/Arguments 在一个可滚动正文中阅读（不再只显示前六行参数），`y` 放行一次、
   `n` 拒绝、`Esc`/`Ctrl+C` 取消，`c` 复制收到的原始参数、`e` 展开阅读区域。全屏模式
