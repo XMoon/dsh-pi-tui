@@ -1,0 +1,23 @@
+# The skip REASONS that qualification accepts on the Source Mode runner
+# (Linux, Node 24, the pinned deepseek-harness distribution).
+#
+# This file exists SEPARATELY from `measurement-accepted-skips.txt` on
+# purpose. The two modes install different dependency graphs, so a case that
+# cannot find an unprovisioned optional bundle in one mode is not evidence
+# about the other. The npm file owns the rationale for the classes below; this
+# file owns the fact that the SAME classes were OBSERVED on the Source run.
+#
+# Measured on run 39701407942 (see `measurement-source-baseline.txt`): the 37
+# skips are 36 optional-bundle + 1 fd, matching the classes below. They were
+# not carried over from npm — the numbers happen to be equal, and the next
+# Source run is what proves they still are.
+#
+# If a class becomes required coverage, the fix is to PROVISION the capability
+# on the runner, not to keep accepting the skip.
+
+# The official DSH Optional-bundle installation is not provisioned. The case
+# names the packages it looked for.
+BLOCKED: no provisioned official DSH .* Optional-bundle installation
+
+# The real `fd`/`fdfind` integration cannot run without the binary.
+no fd/fdfind on PATH
