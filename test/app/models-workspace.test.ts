@@ -812,12 +812,13 @@ test('a withdrawn older SELECT prompt can never overwrite the newer select promp
 
 test('a pending clear cannot be left behind by Esc, and its rejected re-read stays on the same target (RFL-002)', async () => {
   const { source, calls } = fakeSource()
-  let callsToDescribe = 0
+  let blockReRead = false
   let rejectReRead: ((error: Error) => void) | undefined
   source.describeReference = async () => {
-    callsToDescribe += 1
-    if (callsToDescribe <= 2) return { configured: true }
-    return await new Promise((_resolve, reject) => { rejectReRead = reject })
+    // The re-read AFTER the clear blocks: the clear stays in flight. (The
+    // block is a flag, not a call count: the page reads the target once.)
+    if (blockReRead) return await new Promise((_resolve, reject) => { rejectReRead = reject })
+    return { configured: true }
   }
   source.clearReference = async ref => { calls.push(`unset:${ref}`) }
   const page = new ModelsWorkspacePage(source, () => {}, {
@@ -828,6 +829,7 @@ test('a pending clear cannot be left behind by Esc, and its rejected re-read sta
   page.render(100)
   await flush()
   viewText(page)
+  blockReRead = true
   page.handleInput('\r') // confirm the clear
   await flush()
   assert.ok(calls.includes('unset:ACME_API_KEY'), calls.join(','))
@@ -2060,6 +2062,44 @@ test('an explicit refresh does not swallow the deferred deep-link read', async (
   page.handleInput('r')
   await flush()
   assert.equal(recordsReads, 1, 'the deferred clear read must still run')
+})
+
+test('the deferred reads run once, are consumed by a manual refresh, and stop when the page left', async () => {
+  // (1) A reference clear target: the catalog refresh reads the target's
+  // authority ONCE — the deferred intent must not start a second read.
+  const referenceReads: string[] = []
+  const referenceSource = fakeSource()
+  referenceSource.source.describeReference = async ref => { referenceReads.push(ref); return { configured: true } }
+  const referencePage = new ModelsWorkspacePage(referenceSource.source, () => {}, {
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
+  }, () => {})
+  referencePage.setBodyHeight(24)
+  referencePage.render(100)
+  await flush()
+  assert.deepEqual(referenceReads, ['ACME_API_KEY'], 'the target is read exactly once')
+
+  // (2) A manual refresh consumes the deferred stored-credential read.
+  let recordsReads = 0
+  const listSource = fakeSource()
+  listSource.source.storedCredentials = async () => { recordsReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
+  const listPage = new ModelsWorkspacePage(listSource.source, () => {}, { view: 'logout-list' }, () => {})
+  listPage.setBodyHeight(24)
+  listPage.render(100)
+  listPage.handleInput('r')
+  await flush()
+  assert.equal(recordsReads, 1, 'the manual refresh consumes the deferred read instead of racing it')
+
+  // (3) A user who left the view pays no stored-credential scan.
+  let leftReads = 0
+  const leftSource = fakeSource()
+  leftSource.source.storedCredentials = async () => { leftReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
+  const leftPage = new ModelsWorkspacePage(leftSource.source, () => {}, { view: 'logout-list' }, () => {})
+  leftPage.setBodyHeight(24)
+  leftPage.render(100)
+  leftPage.handleInput('\u001b') // Esc leaves the list
+  await flush()
+  assert.equal(leftReads, 0, 'a view the user left must not run the stored-credential scan')
 })
 
 test('the Models list may yield the focus to the Settings category rail', () => {
