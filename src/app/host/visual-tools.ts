@@ -241,6 +241,11 @@ function releaseRegistered(
  * by the Loader: the write stays committed, and the next read of
  * {@link VISUAL_TOOLS_STATUS_SERVICE} proves the registration did not follow.
  *
+ * Reconciliation is SERIALIZED: a `tools/change` listener may synchronously
+ * write the Config back from inside a registration/disposal callback, so that
+ * request is queued and applied after the current transition reaches a
+ * consistent pair instead of interleaving two transitions.
+ *
  * @param ctx - the Host context that owns this row's fiber.
  * @param config - the resolved Config (the live `enabled` reference).
  */
@@ -248,6 +253,10 @@ export function apply(ctx: Context, config: Config): void {
   const tools = ctx.reflect.get('tools') as ToolRuntime
   let chart: RegisteredVisualTool | undefined
   let svg: RegisteredVisualTool | undefined
+  /** One synchronous reconciliation seat (see `request`). */
+  let reconciling = false
+  /** The LATEST requested target while the seat is held. */
+  let pending: boolean | undefined
   /** The LIVE PAIR fact, read from the official registry (never a second
    *  enable value): both definitions this row registered are currently the
    *  ones the registry returns. A partially released pair answers false. */
@@ -257,13 +266,28 @@ export function apply(ctx: Context, config: Config): void {
     && tools.get(SVG_TOOL_NAME) === svg.definition
   ctx.provide(VISUAL_TOOLS_STATUS_SERVICE, { applied } satisfies VisualToolsRuntimeStatus)
 
-  /** Attempt BOTH releases even when the first one throws, then surface the
-   *  collected failure: one broken `tools/change` listener must never strand
-   *  the other registration. */
+  /**
+   * Attempt BOTH releases even when the first one throws, then surface the
+   * collected failure: one broken `tools/change` listener must never strand
+   * the other registration.
+   *
+   * The pair is DETACHED before any disposer runs. A disposer emits
+   * `tools/change` synchronously, and a Host listener may re-enter the switch;
+   * that request is queued by `request()`, but it must never observe or
+   * overwrite a handle this release already owns.
+   */
   const release = (): void => {
     const errors: unknown[] = []
-    chart = releaseRegistered(tools, CHART_TOOL_NAME, chart, errors)
-    svg = releaseRegistered(tools, SVG_TOOL_NAME, svg, errors)
+    const releasingChart = chart
+    const releasingSvg = svg
+    chart = undefined
+    svg = undefined
+    const restoredChart = releaseRegistered(tools, CHART_TOOL_NAME, releasingChart, errors)
+    const restoredSvg = releaseRegistered(tools, SVG_TOOL_NAME, releasingSvg, errors)
+    // A disposer that failed BEFORE removing its definition stays retryable;
+    // nothing newer can have registered while this release holds the seat.
+    if (restoredChart !== undefined) chart = restoredChart
+    if (restoredSvg !== undefined) svg = restoredSvg
     if (errors.length === 1) throw errors[0]
     if (errors.length > 1) {
       throw new AggregateError(errors, 'visual tools: releasing both registrations failed')
@@ -296,7 +320,9 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  const reconcile = (enabled: boolean): void => {
+  /** Apply ONE settled target value; runs only while `request()` holds the
+   *  reconciliation seat. */
+  const applyState = (enabled: boolean): void => {
     if (enabled) {
       if (applied()) return
       // A partial pair (an earlier release threw after removing one entry, or a
@@ -308,9 +334,45 @@ export function apply(ctx: Context, config: Config): void {
     release()
   }
 
+  /**
+   * Serialize every reconciliation request. The Loader commits the value
+   * before dispatch, and a `tools/change` listener may synchronously write the
+   * Config back (or emit `loader/volatile-update` directly) from inside a
+   * registration or disposal callback. Re-entering the state machine there
+   * would interleave two pair transitions and could clobber a newly registered
+   * handle, so a nested request only records the LATEST target; the outer
+   * drain applies it after the current transition reaches a consistent pair.
+   */
+  const request = (enabled: boolean): void => {
+    pending = enabled
+    if (reconciling) return
+    reconciling = true
+    const failures: unknown[] = []
+    try {
+      // A failing transition must not drop a NEWER target queued by a
+      // synchronous listener during that transition: keep draining, then
+      // surface every failure after the newest settled state is applied.
+      while (pending !== undefined) {
+        const next = pending
+        pending = undefined
+        try {
+          applyState(next)
+        } catch (error) {
+          failures.push(error)
+        }
+      }
+    } finally {
+      reconciling = false
+    }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'visual tools: reconciliation failed repeatedly')
+    }
+  }
+
   ctx.on('loader/volatile-update', (paths) => {
     if (!paths.some(path => path.length === 1 && path[0] === 'enabled')) return
-    reconcile(config.enabled.get())
+    request(config.enabled.get())
   })
-  reconcile(config.enabled.get())
+  request(config.enabled.get())
 }
