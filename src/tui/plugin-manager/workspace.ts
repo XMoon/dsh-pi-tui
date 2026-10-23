@@ -228,6 +228,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private diagnosticsReveal = false
   /** Whether the CURRENT diagnostics content is taller than its body. */
   private diagnosticsScrollable = false
+  /** The painted fact spans and viewport of the LAST diagnostics frame. */
+  private diagnosticsSpans: ReadonlyMap<string, DiagnosticSpan> = new Map()
+  private diagnosticsViewport = 0
+  private diagnosticsLineCount = 0
   private readonly searchInput = new Input({ prompt: '' })
   private readonly specInput = new Input({ prompt: '' })
   private readonly registryInput = new Input({ prompt: '' })
@@ -1121,7 +1125,29 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    *  render clamps the offset to the real content height. */
   private scrollDiagnostics(direction: -1 | 1): void {
     const step = this.diagnosticsPageStep()
-    this.diagnosticsOffset = Math.max(0, this.diagnosticsOffset + direction * step)
+    const viewport = this.diagnosticsViewport
+    const max = Math.max(0, this.diagnosticsLineCount - viewport)
+    const next = Math.min(Math.max(0, this.diagnosticsOffset + direction * step), max)
+    this.diagnosticsOffset = next
+    // Keep the SELECTED fact visible: if the current selection no longer
+    // intersects the new page, select the first fact that does. This is the
+    // About page's page-scroll model, so `c` never copies an offscreen fact
+    // after paging.
+    if (viewport > 0) {
+      const facts = this.diagnosticsFacts()
+      const current = facts[this.diagnosticsSelection]
+      const currentSpan = current === undefined ? undefined : this.diagnosticsSpans.get(current.id)
+      const currentVisible = currentSpan !== undefined
+        && currentSpan.start + currentSpan.count > next
+        && currentSpan.start < next + viewport
+      if (!currentVisible) {
+        const index = facts.findIndex(fact => {
+          const span = this.diagnosticsSpans.get(fact.id)
+          return span !== undefined && span.start + span.count > next && span.start < next + viewport
+        })
+        if (index >= 0) this.diagnosticsSelection = index
+      }
+    }
     this.diagnosticsReveal = false
     this.bumpRevision()
     this.intents.requestRender()
@@ -1323,6 +1349,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const selectedId = facts[this.diagnosticsSelection]?.id
     const built = this.buildDiagnosticsLayout(plan.width, selectedId)
     const viewport = plan.bodyRows
+    this.diagnosticsSpans = built.spans
+    this.diagnosticsViewport = viewport
+    this.diagnosticsLineCount = built.lines.length
     const span = selectedId === undefined ? undefined : built.spans.get(selectedId)
     this.diagnosticsScrollable = built.lines.length > viewport
     if (span !== undefined && this.diagnosticsReveal) {

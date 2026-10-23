@@ -186,6 +186,42 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
   }
 })
 
+test('PgDn keeps a visible fact selected; Home re-reveals the first fact', async () => {
+  const diagnostics = view([
+    entry({ id: 'first-renderer', lastError: 'first error' }),
+    entry({ id: 'second-renderer', owner: 'uid:owner-b', entryId: 'entry-b', lastError: 'second error' }),
+  ])
+  const harness = await open(() => diagnostics, 30, 8)
+  try {
+    harness.vt.sendInput('d')
+    await harness.settle()
+    // Select the first contribution (Health -> Registries -> Capabilities).
+    for (let step = 0; step < 3; step += 1) {
+      harness.vt.sendInput('\x1b[B')
+      await harness.settle()
+    }
+    assert.match(plain(harness.viewport()), /^> .*fir/mu, 'the first fact starts selected')
+    // Page down until the first fact leaves the body: the page-scroll model
+    // moves the selection to the first VISIBLE fact, so `c` is never offscreen.
+    let sawSecond = false
+    for (let page = 0; page < 8; page += 1) {
+      harness.vt.sendInput('\x1b[6~') // PgDn
+      await harness.settle()
+      if (/^> .*sec/mu.test(plain(harness.viewport()))) {
+        sawSecond = true
+        break
+      }
+    }
+    assert.ok(sawSecond, 'PgDn selects a fact that is visible on the new page')
+    harness.vt.sendInput('\x1b[H') // Home
+    await harness.settle()
+    assert.match(plain(harness.viewport()), /^> Health/mu, 'Home re-reveals the first fact (Health)')
+  } finally {
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})
+
 test('mouse Copy / Copy All / Back act only on the last-painted whole affordance', async () => {
   const diagnostics = view([entry()])
   const harness = await open(() => diagnostics, 120, 40)

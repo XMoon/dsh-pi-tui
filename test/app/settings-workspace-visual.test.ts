@@ -4262,6 +4262,26 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
     assert.equal(reads.filter(kind => kind === 'stats').length, 1, `the content entry admits exactly one read: ${JSON.stringify(reads)}`)
     const frame = vt.getViewport().map(stripTerminalSequences).join('\n')
     assert.match(frame, /Session ID/, 'the About facts paint after the content entry')
+
+    // C5: close the workspace and open it through the `/status` alias. The
+    // alias is the SAME active-Direct entry: exactly one scoped stats,
+    // projection and context read, and the same About facts.
+    sendKey(vt, '\x1b') // content -> rail
+    await vt.waitForRender()
+    sendKey(vt, '\x1b') // rail -> close
+    await vt.waitForRender()
+    reads.length = 0
+    invoke('status')
+    await vt.waitForRender()
+    await settleCounted()
+    assert.equal(reads.filter(kind => kind === 'stats').length, 1,
+      `the active /status alias admits exactly one stats read: ${JSON.stringify(reads)}`)
+    assert.equal(reads.filter(kind => kind === 'projection').length, 1,
+      `the active /status alias admits exactly one projection read: ${JSON.stringify(reads)}`)
+    assert.equal(reads.filter(kind => kind === 'context').length, 1,
+      `the active /status alias admits exactly one context read: ${JSON.stringify(reads)}`)
+    assert.match(vt.getViewport().map(stripTerminalSequences).join('\n'), /Session ID/,
+      'the alias paints the same active About facts')
   } finally {
     app.dispose()
   }
