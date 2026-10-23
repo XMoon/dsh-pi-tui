@@ -106,7 +106,7 @@ export interface SessionReader {
    *  means the Host authority is unavailable; it is NEVER inferred from the
    *  transcript, rendered rows, running state, or a live Agent object. */
   blank(sessionId: string): boolean | undefined
-  /** Best-effort context occupancy for one session (the /status context
+  /** Best-effort context occupancy for one session (the About context
    * row): the official `contextPressure` projection's numerator
    * `projectedTokens ?? pressureTokens` (the same field dsh-web's
    * ContextMeter reads). `undefined` = the projection capability or value

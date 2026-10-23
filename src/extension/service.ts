@@ -1136,7 +1136,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.renderers.registerMessageRenderer(contribution, owner)
     // P1-08: the renderer registry is NOT the ledger — track its health
-    // slot explicitly so /status can observe failed/recovered states.
+    // slot explicitly so the Plugin Manager diagnostics can observe failed/recovered states.
     this.ledger.trackHealth('transcript.message.renderer', contribution.id, owner)
     let dispose: () => void
     try {

@@ -482,15 +482,13 @@ test('token-usage:pi and cache-hit:pi render the pi vocabulary with compact pres
   assert.equal(cacheSegment === null ? '' : plain(renderSpans(cacheSegment.spans)), '93.9%')
 })
 
-test('the footer stats line and the /status detail line are SEPARATE contracts', async () => {
-  // The footer's stats-line is chrome: recent metrics only, no lifetime
-  // LLM wall. The /status Stats row (formatStatsFacts) is the DETAIL
-  // surface: it keeps the labeled lifetime wall beside the recent metrics.
-  // They share the pi token vocabulary but must never be forced into string
-  // equality — the old source-consistency guard pinned them together and
-  // would have dragged the LLM wall back into every footer.
+test('the footer stats line and the About rows are SEPARATE contracts', async () => {
+  // The footer's stats line is chrome: recent metrics only, no lifetime
+  // LLM wall. The Settings/About rows are the DETAIL surface: exact numeric
+  // facts plus the labeled lifetime wall. They share the pi TOKEN vocabulary
+  // on the footer side only; About never inherits the compact `↑k` form.
   const { formatStatsLine } = await import('../../src/tui/footer/formatters.ts')
-  const { formatStatsFacts } = await import('../../src/tui/commands/status.ts')
+  const { aboutFactRows } = await import('../../src/domain/status/about.ts')
   const { sessionStatsFactsOf } = await import('../../src/domain/status/stats.ts')
   const { usageFromStats } = await import('../../src/domain/status/derive-usage.ts')
   const stats = {
@@ -510,16 +508,31 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
   const baseUsage = usageFromStats(stats)
   const usage = { ...baseUsage, performance: { ...baseUsage.performance, ...hostPerformance } }
   const footerLine = formatStatsLine(usage)
-  const detailLine = formatStatsFacts(sessionStatsFactsOf(stats, hostPerformance))
   assert.ok(!footerLine.includes('LLM'), `the footer line carries no lifetime wall:\n${footerLine}`)
   assert.ok(footerLine.includes('TTFB 2s') && footerLine.includes('40 tok/s'), `recent metrics on the footer line:\n${footerLine}`)
-  assert.ok(detailLine.includes('LLM 2m00s'), `the detail line keeps the lifetime wall:\n${detailLine}`)
-  assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('R5 40 tok/s') && detailLine.includes('All 12 tok/s'),
-    `the Host facts on the detail line:\n${detailLine}`)
-  // The token/cache prefix stays IDENTICAL between the two surfaces.
-  const tokenSegment = '↑2.6k ↓5.5k R20k CH91.9%'
-  assert.equal(footerLine.split(' | ')[0], tokenSegment, `shared pi vocabulary:\n${footerLine}`)
-  assert.ok(detailLine.includes(tokenSegment), `shared pi vocabulary:\n${detailLine}`)
+  assert.equal(footerLine.split(' | ')[0], '↑2.6k ↓5.5k R20k CH91.9%', `shared pi vocabulary:\n${footerLine}`)
+
+  const view = {
+    runtime: { tui: 'test', dsh: undefined, backend: 'direct' },
+    session: {
+      kind: 'ready',
+      sessionId: 'sess-footer-about',
+      stats: sessionStatsFactsOf(stats, hostPerformance),
+      context: 'unavailable',
+    },
+    epoch: 1,
+  } as import('../../src/domain/status/about.ts').AboutStatusView
+  const rows = aboutFactRows(view)
+  const value = (id: string): string | undefined => rows.find(row => row.id === id)?.displayValue
+  assert.equal(value('stats.llmMs'), '2m00s (120000 ms)', 'the About detail keeps the labeled lifetime wall')
+  assert.equal(value('tokens.input'), '2579', 'About keeps the exact integer, not the footer abbreviation')
+  assert.equal(value('tokens.output'), '5507')
+  assert.equal(value('tokens.cacheRead'), '20000')
+  assert.equal(value('tokens.cacheWrite'), '0')
+  assert.equal(value('tokens.cacheHitPct'), '91.9%')
+  assert.equal(value('performance.recentTTFB'), '2s')
+  assert.equal(value('performance.R5'), '40 tok/s')
+  assert.equal(value('performance.All'), '12 tok/s')
 })
 
 test('an unavailable token projection renders the performance segment alone (no orphan separator)', async () => {

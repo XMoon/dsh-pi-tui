@@ -978,7 +978,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
       sessionReader: deps.backend.sessionReader,
-      // PR D2: the /status explicit force — measure NOW through the
+      // PR D2: the explicit About/status force — measure NOW through the
       // coordinator (mark dirty + semantic reader), repaint the footer
       // cheaply, and return the fresh (or last-good) value for the panel.
       // Panel and footer share ONE cached measurement: no duplicate reads
@@ -1120,7 +1120,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       sessionBlank: deps.presets.blank,
       // PR D2: the command surface's generic refresh is UI-only (a
       // measurement-triggering command uses refreshContextMeasurement or
-      // the /status port call directly).
+      // the context-force port call directly).
       refreshStatus: () => deps.status.refresh(),
       updateWelcomeCard: () => deps.status.updateWelcomeCard(),
       openJobView: (jobId) => deps.surface.openJobView(jobId),

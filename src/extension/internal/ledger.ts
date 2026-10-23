@@ -250,14 +250,14 @@ export class ExtensionLedger {
     }
   }
 
-  /** The health snapshot (M11 /status surface; recorded since M1). */
+  /** The health snapshot (M11 Plugin Manager diagnostics; recorded since M1). */
   healthSnapshot() {
     return this.health.snapshot()
   }
 
   /** Track a NON-ledger contribution's health slot (P1-08: renderers and
    * editors live in their own registries, not the ledger — their health
-   * must still be observable via /status). Idempotent per (slot, owner, id). */
+   * must still be observable in Plugin Manager diagnostics). Idempotent per (slot, owner, id). */
   trackHealth(slot: string, id: string, owner: string): void {
     this.health.track(slot, id, owner)
   }

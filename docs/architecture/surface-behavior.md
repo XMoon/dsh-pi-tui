@@ -148,11 +148,13 @@ Command page.
 
 ## Settings Workspace
 
-`/settings` opens one fullscreen lease with ONE navigation focus state. The
-category rail is the selection owner; the right column is the content. Width
-only projects panes (≥108 three, 76–107 two, <76 one). The category order is
-`About, Models, Account, Appearance, Display, Tools, Plugins, Other settings`;
-`/settings` lands on `About`.
+`/settings` and its real alias `/status` open ONE fullscreen lease with ONE
+navigation focus state. The category rail is the selection owner; the right
+column is the content. Width only projects panes (≥108 three, 76–107 two, <76
+one). The category order is `About, Models, Account, Appearance, Display, Tools,
+Plugins, Other settings`; both names run the same handler and land on `About`
+with identical initial focus and entry-refresh behavior. `/statusline` remains
+the `/footer` alias and never enters this workspace.
 
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
   facts (the bundle's own version, the installed DSH version — `Unknown` when
@@ -509,6 +511,36 @@ public capability API,
 not a Host PASS, and is never derived from enabled/fiber/availability. The
 model/tests also own the single Owner-frozen danger confirmation, which is the
 only hazard statement.
+
+### Diagnostics page
+
+The Plugin Manager list opens a read-only Diagnostics page with `d`; it is a
+view of the SAME page/controller/workspace lease (never a Settings category, a
+second controller or a second screen owner). One immutable read produces its
+facts: the extension ledger's contribution health records, each live registry's
+contribution count, and `api().capabilities`. Contributions with a PROVEN
+`ownerEntryIds` association are grouped by owner; all others stay visible under
+`Unassociated extension contributions`. Each record shows the exact
+`extensionPoint:id`, its state and the whole `lastError` (wrapped, scrollable,
+never silently truncated), and `c` copies its exact block while `C` copies the
+whole stable report. `r` rereads this projection only; it never refreshes the
+official package inventory, and a ledger failure/recovery is reflected on the
+next painted read. With no extension service attached the page says
+`Unavailable`. Host package state, install logs and the Host inventory's
+`Stale`/error notice are NOT extension diagnostics and never label this page.
+Mouse `Copy [C]`, `Copy All [C]` and `Back` targets exist only for the whole
+affordance at its last-painted geometry; copy uses the snapshot that was
+painted.
+
+Authority: `src/app/plugin-manager/extension-inventory.ts`
+(`describeTuiExtensionDiagnostics`), `src/app/surface/plugin-manager-runtime.ts`
+(the `diagnostics()` read on the ONE controller), `src/tui/plugin-manager/workspace.ts`
+(the page/renderer and last-painted targets); sink: the Plugin Manager body,
+action row and App clipboard.
+
+Must-not: add a second controller/store/scanner, poll the ledger, fold package
+inventory or install logs into extension health, infer an owner association from
+a name/prefix, or let a Host `Stale`/error notice label the extension projection.
 
 ### Detail upgrade guidance
 

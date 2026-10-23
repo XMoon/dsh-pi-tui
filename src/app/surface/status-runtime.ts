@@ -239,7 +239,7 @@ export interface StatusRuntime {
   markContextDirty(): void
   /** Measure through the semantic reader and repaint cheaply. */
   refreshContextMeasurement(reason: ContextMeasureReason): void
-  /** The explicit /status force; returns the measured value. */
+  /** The explicit About/status force; returns the measured value. */
   forceContextMeasurement(): number | undefined
   /**
    * The C3 explicit force with its OBSERVATION: ONE coordinator measurement
@@ -1017,7 +1017,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     refreshStatusCheap()
   }
 
-  // The /status explicit force: a user asking for status expects the
+  // The About explicit force: a user asking for status expects the
   // FRESH context (plan §15.1 — explicit-status may force). Measures now
   // through the coordinator so the panel AND the cached footer value
   // agree (round-8 finding: a direct sessionReader read from the command

@@ -30,7 +30,7 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
+  'display', 'exit', 'focus', 'footer', 'settings', 'status', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
   // `/quit` is `/exit`'s canonical command alias (the runner registers
   // /exit → /quit); before a session exists both must exit WITHOUT creating
@@ -42,6 +42,9 @@ export const SESSIONLESS_COMMANDS = new Set([
   // other-agent muscle memory) — it rides the same ownership sets, so it
   // executes locally, never steers, and works before any session exists.
   'statusline',
+  // `/status` is the approved alias of `/settings` (same handler/focus): it
+  // is sessionless exactly like its primary, and stays in LOCAL_COMMANDS.
+  'status',
 ])
 
 /**
@@ -72,9 +75,9 @@ export const LOCAL_COMMANDS = new Set([
   'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
-  // `/statusline` — the approved alias of `/footer` (see its registration
-  // comment: the near-synonym rule stays, this pairing is an explicit
-  // alias, and `/status` keeps priority matching).
+  // `/statusline` — the approved alias of `/footer`; `/status` is the
+  // `/settings` alias (see the registration comments: both pairings are
+  // explicit aliases, and the near-synonym rule stays for NEW commands).
   'statusline',
 ])
 

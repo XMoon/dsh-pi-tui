@@ -233,7 +233,14 @@ the actual Host-reported version, restart requirement and errors are shown
 verbatim. The `dsh-pi-tui` bundle currently providing the surface is read-only
 and cannot be disabled or removed from its own screen. The first-level
 `Settings → Plugins` category opens the same page in place, and returning
-preserves the Settings category, scroll and selection.
+preserves the Settings category, scroll and selection. Press `d` inside the page
+for the read-only **Diagnostics** view: extension contribution health grouped by
+owner (`active/failed/shadowed` with the full `lastError`), live registry counts,
+the actual advertised capabilities, and contributions with no proven Loader-entry
+owner under `Unassociated extension contributions`. `c` copies the selected fact,
+`C` copies everything, `r` rereads and Esc returns. Diagnostics reads only the
+extension ledger; Host package state and install logs stay out of it. `copy`
+still proves emission only, never an OS-clipboard receipt.
 
 The 14 official rc.2 Experimental bundles carry a bounded, identity-exact
 Detail statement of their terminal surface and limits/risks (Web-only,
@@ -363,6 +370,7 @@ Common entry points:
 ```text
 /model
 /settings
+/status
 /login
 /permission
 /plan
@@ -391,8 +399,11 @@ readiness. `R`
 re-reads and `C` copies the selected row's exact source value. Browsing, choosing
 and copying alone never write configuration.
 
-The Settings categories are now `About / Models / Account / Appearance / Display / Tools / Plugins /
-Other settings`; `/settings` still lands on About. `Models` is an in-place page: it lists
+`/status` is a real alias of `/settings`: the same handler, the same initial
+About focus and the same reads; neither creates a session or reads statistics
+while sessionless. `/statusline` remains the `/footer` alias and never goes
+through Settings. The Settings categories are now `About / Models / Account / Appearance / Display / Tools / Plugins /
+Other settings`; `/settings` (and `/status`) land on About. `Models` is an in-place page: it lists
 the Host provider directory, whether an API key is configured (presence only, never a
 connection test) and the DeepSeek Account entry; it exposes provider facts, a masked API-key
 editor, the Add Provider draft wizard, and provider-native sign-in with a persistent notice,

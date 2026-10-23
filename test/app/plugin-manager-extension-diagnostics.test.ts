@@ -524,9 +524,12 @@ interface ProductionPage {
 
 /**
  * Mount the REAL service + a real TuiApp + the production Plugin Manager
- * runtime/page. The only fixture is the official inventory port; the
- * diagnostics read therefore goes through `createPluginManagerRuntime`'s
- * `panelDeps.diagnostics` closure, exactly as production does.
+ * runtime/page, so the diagnostics read goes through
+ * `createPluginManagerRuntime`'s `panelDeps.diagnostics` closure exactly as
+ * production does. The official inventory port, `runOwned`, `copySelection`
+ * and the renderer error/recovery sinks are test stand-ins (production
+ * `attachSeams` is not exercised); the service/ledger projection and page are
+ * real.
  */
 async function mountProductionPage(options: {
   readonly prepare?: (service: RealLedgerService) => void

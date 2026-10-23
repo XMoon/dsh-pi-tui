@@ -19427,7 +19427,7 @@ export class TuiApp {
    * updates merge. M1: these legacy fields still feed the extension
    * live-session snapshot (turns/steps/model/cwd/branch/permission), while the
    * SAME facts project into the unified status store the footer composes from.
-   * `/status` reads the authority-grouped `SessionStatsFacts` directly — not
+   * The About report reads the authority-grouped `SessionStatsFacts` directly — not
    * these legacy fields.
    * @param status - the new status values.
    */

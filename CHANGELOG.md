@@ -43,6 +43,14 @@
   `/oauth/callback`；浏览器授权、PKCE/state 校验、grant 持久化与后台撤销都由 Host 完成，
   TUI 不接收 token/grant，也不自建 HTTP 服务。`--help` 不会监听端口。
 
+- **`/status` 成为 `/settings` 的真实别名，About 与 Plugin Manager Diagnostics 接替旧状态面。**
+  两个命令打开完全相同的全屏 Settings/About（同一 handler、初始焦点与读取；无 Session 时
+  不创建会话、不读取统计），`/statusline` 仍是 `/footer` 的别名。About 支持按事实复制与精确
+  Copy All；扩展健康（failed/shadowed 加完整 `lastError`）、registry 计数、真实 capabilities
+  以及未关联 Loader entry 的贡献移到 Plugin Manager 的 `Diagnostics` 页（`/plugins` 或
+  `Settings → Plugins`，按 `d`），Host 包安装状态与安装日志保持独立。旧的独立 `/status`
+  页面已删除。
+
 ### 修复
 
 - **切到 Models 页面不再卡住整个 TUI。** provider 目录与凭据的读取改为在页面第一帧

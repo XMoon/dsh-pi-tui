@@ -1227,7 +1227,6 @@ test('TUI local commands stay reachable while the session RUNS and busy delivery
   const mainId = 'm3-4-pr5-reach-status'
   const llm = new StubStreamingLlmAdapter()
   const release = llm.hold()
-  life.defer(release)
   const fixture = await mountRunner(life, {
     resumeSessionId: mainId,
     llmAdapter: llm,
@@ -1241,20 +1240,39 @@ test('TUI local commands stay reachable while the session RUNS and busy delivery
       append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     },
   })
+  // Register the release AFTER mountRunner's disposers: `testLifecycle` runs
+  // deferred callbacks in reverse registration order, so a failing assertion
+  // must release the held stream BEFORE the fixture teardown waits on it.
+  life.defer(release)
+  // This fixture does not mount the Host subagentCatalog projection, so the
+  // UNRELATED Task Browser refresh would spin on its unavailable read while
+  // the turn is held. Stub that empty read (the command-reachability contract
+  // below does not consume the Task Browser) so the held turn stays stable.
+  const taskSource = fixture.aggregate.presentation.task as unknown as {
+    readDescendants: (parentSessionId: string, signal?: AbortSignal) => Promise<undefined>
+  }
+  taskSource.readDescendants = async () => undefined
   // Start a REAL running turn (the held stream keeps it open).
   submit(fixture, 'hold this turn open')
   await waitFor('the session is running', () =>
     fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
   // busyEnter defaults to queue ⇒ the ACCELERATED chord resolves to STEER
   // (the composer-policy opposite). /status must still reach its Client
-  // handler (the settings panel opens), never steer.
-  const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+  // handler (the Settings/About workspace opens), never steer.
+  const app = fixture.app() as unknown as {
+    setDraft(text: string): void
+    submitDraft(request?: string): void
+    openSettingsWorkspace: TuiApp['openSettingsWorkspace']
+  }
+  const originalOpen = app.openSettingsWorkspace
+  let opened = 0
+  app.openSettingsWorkspace = (...args: Parameters<TuiApp['openSettingsWorkspace']>) => {
+    opened += 1
+    return originalOpen.apply(app, args)
+  }
   app.setDraft('/status')
   app.submitDraft('accelerated')
-  await waitFor('the /status panel opened', () => {
-    const text = fixture.vt.getViewport().join('\n')
-    return text.includes('Session') && text.includes('Stats')
-  }, 15_000)
+  await waitFor('the /status Client handler opened Settings', () => opened === 1, 15_000)
   // The steer counterfactual: the literal line must NOT appear as agent
   // input (no inbox splice carries it), and no Host command/run row exists.
   const spliced = fixture.events(mainId).some(event =>

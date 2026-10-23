@@ -947,7 +947,7 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
   // nothing.
   const cases = [
     ['domain/status/foo.ts', '../../app/surface/runtime.ts', ['domain-imports-app']],
-    ['domain/status/foo.ts', '../../tui/commands/status.ts', ['domain-imports-tui']],
+    ['domain/status/foo.ts', '../../tui/commands/settings.ts', ['domain-imports-tui']],
     ['domain/status/foo.ts', '../../app/remote/runtime.ts', ['domain-imports-remote-composition']],
     ['domain/status/foo.ts', '../../runtime/remote/session-reader-remote.ts', ['domain-imports-remote-composition']],
     // TS8-A: the Client-local capability is the inner layer and the neutral
@@ -1230,7 +1230,7 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     // The two owners an enumeration-based rule missed: the whole-layer contract
     // must not depend on remembering every extracted mechanics directory.
     ['../keybindings/manager.ts', 'tui/keybindings/manager.ts'],
-    ['../commands/status.ts', 'tui/commands/status.ts'],
+    ['../commands/settings.ts', 'tui/commands/settings.ts'],
     ['../footer/x.ts', 'tui/footer/x.ts'],
     ['../notification/x.ts', 'tui/notification/x.ts'],
     ['../plugin-manager/x.ts', 'tui/plugin-manager/x.ts'],
@@ -1515,7 +1515,6 @@ test('the TUI layer must not import experimental Remote composition (TS1)', () =
     'tui/commands/skills.ts',
     'tui/commands/tasks.ts',
     'tui/commands/artifacts.ts',
-    'tui/commands/status.ts',
     'tui/commands/auth.ts',
     'tui/commands/utility.ts',
     // The transitional command-layer facade/coordinator stays in the TUI-layer
