@@ -35,6 +35,12 @@ async function open(
   return harness
 }
 
+/** Reason: the real Plugin Manager harness pumps its queued render/microtask
+ *  work; this is not a time-based product window. */
+async function settleHarness(harness: WorkspaceHarness): Promise<void> {
+  await harness.settle() // reason: harness pump, not a deadline
+}
+
 function view(entries: readonly TuiContributionDiagnostic[], unmapped: readonly TuiContributionDiagnostic[] = []): TuiExtensionDiagnostics {
   return {
     entries,
@@ -110,7 +116,7 @@ test('the frozen size matrix paints within the width and the last fact stays rea
     const harness = await open(() => diagnostics, columns, rows)
     try {
       harness.vt.sendInput('d')
-      await harness.settle()
+      await settleHarness(harness)
       assert.equal(harness.panel.currentView(), 'diagnostics', `${columns}x${rows}`)
       const frame = harness.viewport()
       for (const line of frame) {
@@ -119,14 +125,14 @@ test('the frozen size matrix paints within the width and the last fact stays rea
       assert.match(plain(frame), /Plugins · Diagnostics/)
       // End selects the LAST fact and reveals it even at 30x8.
       harness.vt.sendInput('\x1b[F')
-      await harness.settle()
+      await settleHarness(harness)
       assert.ok(
         plain(harness.viewport()).replace(/\s+/g, '').includes('last-renderer'),
         `${columns}x${rows} must reveal the last fact:\n${plain(harness.viewport())}`,
       )
       // C copies the whole snapshot (the keyboard route never depends on paint).
       harness.vt.sendInput('C')
-      await harness.settle()
+      await settleHarness(harness)
       assert.equal(harness.copied.at(-1), serializeTuiExtensionDiagnostics(diagnostics), `${columns}x${rows}`)
     } finally {
       started.delete(harness)
@@ -141,11 +147,11 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
   const harness = await open(() => diagnostics, 30, 8)
   try {
     harness.vt.sendInput('d')
-    await harness.settle()
+    await settleHarness(harness)
     // Select the contribution (Health -> Registries -> Capabilities -> entry).
     for (let step = 0; step < 3; step += 1) {
       harness.vt.sendInput('\x1b[B')
-      await harness.settle()
+      await settleHarness(harness)
     }
     // A fact taller than the 3-row body must reveal its FIRST line: the
     // cursor, extensionPoint:id and the state chip are all visible.
@@ -160,7 +166,7 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     let sawTail = false
     for (let page = 0; page < 12; page += 1) {
       harness.vt.sendInput('\x1b[6~') // PgDn
-      await harness.settle()
+      await settleHarness(harness)
       const frame = plain(harness.viewport())
       if (frame.includes('长鲸错')) sawCjk = true
       if (frame.includes('[END]')) sawTail = true
@@ -171,13 +177,13 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     // End is already on the last fact; it must still re-reveal the start
     // after the wheel/page scroll moved the offset.
     harness.vt.sendInput('\x1b[F') // End
-    await harness.settle()
+    await settleHarness(harness)
     const revealed = plain(harness.viewport())
     assert.match(revealed, />/)
     assert.match(revealed, /transcript\.tool\.renderer/)
     assert.match(revealed, /\[failed\]/)
     harness.vt.sendInput('c')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(entry({ lastError: errorText })))
     assert.match(harness.copied.at(-1) ?? '', /\[END\]/)
   } finally {
@@ -194,11 +200,11 @@ test('PgDn keeps a visible fact selected; Home re-reveals the first fact', async
   const harness = await open(() => diagnostics, 30, 8)
   try {
     harness.vt.sendInput('d')
-    await harness.settle()
+    await settleHarness(harness)
     // Select the first contribution (Health -> Registries -> Capabilities).
     for (let step = 0; step < 3; step += 1) {
       harness.vt.sendInput('\x1b[B')
-      await harness.settle()
+      await settleHarness(harness)
     }
     assert.match(plain(harness.viewport()), /^> .*fir/mu, 'the first fact starts selected')
     // Page down until the first fact leaves the body: the page-scroll model
@@ -206,7 +212,7 @@ test('PgDn keeps a visible fact selected; Home re-reveals the first fact', async
     let sawSecond = false
     for (let page = 0; page < 8; page += 1) {
       harness.vt.sendInput('\x1b[6~') // PgDn
-      await harness.settle()
+      await settleHarness(harness)
       if (/^> .*sec/mu.test(plain(harness.viewport()))) {
         sawSecond = true
         break
@@ -214,7 +220,7 @@ test('PgDn keeps a visible fact selected; Home re-reveals the first fact', async
     }
     assert.ok(sawSecond, 'PgDn selects a fact that is visible on the new page')
     harness.vt.sendInput('\x1b[H') // Home
-    await harness.settle()
+    await settleHarness(harness)
     assert.match(plain(harness.viewport()), /^> Health/mu, 'Home re-reveals the first fact (Health)')
   } finally {
     started.delete(harness)
@@ -227,33 +233,33 @@ test('mouse Copy / Copy All / Back act only on the last-painted whole affordance
   const harness = await open(() => diagnostics, 120, 40)
   try {
     harness.vt.sendInput('d')
-    await harness.settle()
+    await settleHarness(harness)
     const frame = harness.viewport()
     const copyRow = contributionCopyRow(frame, 'broken-renderer')
     const copyColumn = cellIndexOf(frame, copyRow, ' Copy [C]') + 3
     press(harness, copyRow, copyColumn)
-    await harness.settle()
+    await settleHarness(harness)
     assert.deepEqual(harness.copied, [], 'a press alone never copies')
     release(harness, copyRow, copyColumn)
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(entry()))
 
     const afterCopy = harness.viewport()
     const allRow = rowOf(afterCopy, 'Copy All [C]')
     const allColumn = cellIndexOf(afterCopy, allRow, 'Copy All [C]') + 3
     press(harness, allRow, allColumn)
-    await harness.settle()
+    await settleHarness(harness)
     release(harness, allRow, allColumn)
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), serializeTuiExtensionDiagnostics(diagnostics))
 
     const afterAll = harness.viewport()
     const backRow = rowOf(afterAll, 'Back')
     const backColumn = cellIndexOf(afterAll, backRow, 'Back') + 1
     press(harness, backRow, backColumn)
-    await harness.settle()
+    await settleHarness(harness)
     release(harness, backRow, backColumn)
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.panel.currentView(), 'list')
   } finally {
     started.delete(harness)
@@ -269,7 +275,7 @@ test('wrong-row, resize and reread stale releases never copy or navigate', async
   const harness = await open(() => diagnostics, 120, 40)
   try {
     harness.vt.sendInput('d')
-    await harness.settle()
+    await settleHarness(harness)
     const frame = harness.viewport()
     const firstRow = contributionCopyRow(frame, 'first-renderer')
     const firstColumn = cellIndexOf(frame, firstRow, ' Copy [C]') + 3
@@ -278,18 +284,18 @@ test('wrong-row, resize and reread stale releases never copy or navigate', async
 
     // Press on the first Copy, release on the second: no copy.
     press(harness, firstRow, firstColumn)
-    await harness.settle()
+    await settleHarness(harness)
     release(harness, secondRow, secondColumn)
-    await harness.settle()
+    await settleHarness(harness)
     assert.deepEqual(harness.copied, [])
 
     // Press on a fact, then resize before the release: the old geometry is dead.
     press(harness, firstRow, firstColumn)
-    await harness.settle()
+    await settleHarness(harness)
     harness.vt.resize(80, 24)
-    await harness.settle()
+    await settleHarness(harness)
     release(harness, firstRow, firstColumn)
-    await harness.settle()
+    await settleHarness(harness)
     assert.deepEqual(harness.copied, [])
 
     // Press on a fact, then reread the projection before the release.
@@ -297,11 +303,11 @@ test('wrong-row, resize and reread stale releases never copy or navigate', async
     const rereadRow = contributionCopyRow(current, 'first-renderer')
     const rereadColumn = cellIndexOf(current, rereadRow, ' Copy [C]') + 3
     press(harness, rereadRow, rereadColumn)
-    await harness.settle()
+    await settleHarness(harness)
     harness.vt.sendInput('r')
-    await harness.settle()
+    await settleHarness(harness)
     release(harness, rereadRow, rereadColumn)
-    await harness.settle()
+    await settleHarness(harness)
     assert.deepEqual(harness.copied, [])
     assert.equal(harness.panel.currentView(), 'diagnostics')
   } finally {
@@ -316,33 +322,33 @@ test('Details and Install keep their legacy c/C behavior; only Diagnostics uses 
   try {
     // Details: `c` and `C` still copy the same package identity.
     harness.vt.sendInput('\x1b[F')
-    await harness.settle()
+    await settleHarness(harness)
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.panel.currentView(), 'details')
     harness.vt.sendInput('c')
-    await harness.settle()
+    await settleHarness(harness)
     const identity = harness.copied.at(-1)
     harness.vt.sendInput('C')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), identity, 'C in Details keeps the legacy identity copy')
 
     // Install: finish an official install, then `C` must still copy the Host
     // install diagnostics (never the diagnostics-page report).
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.panel.currentView(), 'install')
     harness.vt.sendInput('\r') // inspect
-    await harness.settle()
+    await settleHarness(harness)
     harness.vt.sendInput('\r') // confirm install
-    await harness.settle()
+    await settleHarness(harness)
     harness.vt.sendInput('c')
-    await harness.settle()
+    await settleHarness(harness)
     const installCopy = harness.copied.at(-1)
     assert.ok(installCopy !== undefined && installCopy.length > 0, 'the install view copies its Host diagnostics')
     assert.doesNotMatch(installCopy, /dsh-pi-tui Plugin Diagnostics/)
     harness.vt.sendInput('C')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), installCopy, 'C in Install keeps the legacy diagnostics copy')
   } finally {
     started.delete(harness)

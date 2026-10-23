@@ -109,8 +109,14 @@ async function openDiagnosticsPage(
     diagnostics,
   })
   harness.vt.sendInput('d')
-  await harness.settle()
+  await settleHarness(harness)
   return harness
+}
+
+/** Reason: the real Plugin Manager harness pumps its queued render/microtask
+ *  work; this is not a time-based product window. */
+async function settleHarness(harness: WorkspaceHarness): Promise<void> {
+  await harness.settle() // reason: harness pump, not a deadline
 }
 
 function memoryPort(options: {
@@ -310,27 +316,27 @@ test('c copies the selected fact, C copies all, and r rereads without touching t
     // Health -> Registries -> Capabilities -> the first contribution.
     for (let step = 0; step < 3; step += 1) {
       harness.vt.sendInput('\x1b[B')
-      await harness.settle()
+      await settleHarness(harness)
     }
     harness.vt.sendInput('c')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(entry))
 
     harness.vt.sendInput('C')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), serializeTuiExtensionDiagnostics(first))
 
     current = recovered
     const readsBefore = reads
     harness.vt.sendInput('r')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(reads, readsBefore + 1, 'r rereads the diagnostics projection exactly once')
     assert.equal(harness.snapshotCalls(), snapshotCalls, 'r never refreshes the official package inventory')
     assert.match(harness.view(), /all active/)
     assert.doesNotMatch(harness.view(), /第一段错误/)
 
     harness.vt.sendInput('\x1b')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.panel.currentView(), 'list')
   } finally {
     harness.close()
@@ -361,10 +367,10 @@ test('the diagnostics page paints the unassociated group and copies a shadowed r
     // Health -> Registries -> Capabilities -> the unassociated record.
     for (let step = 0; step < 3; step += 1) {
       harness.vt.sendInput('\x1b[B')
-      await harness.settle()
+      await settleHarness(harness)
     }
     harness.vt.sendInput('c')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(orphan))
   } finally {
     harness.close()
@@ -376,7 +382,7 @@ test('an absent extension service paints Unavailable and copies nothing', async 
   const harness = await openWorkspace({ diagnostics: () => undefined })
   try {
     harness.vt.sendInput('d')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.panel.currentView(), 'diagnostics')
     assert.match(harness.view(), /Extension diagnostics unavailable/)
     assert.match(harness.view(), /r reread/)
@@ -386,10 +392,10 @@ test('an absent extension service paints Unavailable and copies nothing', async 
     assert.doesNotMatch(harness.view(), /Up\/Down/)
     harness.vt.sendInput('c')
     harness.vt.sendInput('C')
-    await harness.settle()
+    await settleHarness(harness)
     assert.deepEqual(harness.copied, [])
     harness.vt.sendInput('\x1b')
-    await harness.settle()
+    await settleHarness(harness)
     assert.equal(harness.panel.currentView(), 'list')
   } finally {
     harness.close()
