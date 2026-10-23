@@ -2356,6 +2356,9 @@ test('C3 Remote production lane: /settings → real About panel → [Copy All] c
     session.append('user/message', {
       id: 'u-p1', role: 'user', content: [{ type: 'text', text: 'prod probe' }], source: { kind: 'user' },
     }, { surfaceOp: 'append' })
+    // The Host performance fold needs a REAL positive wall-clock span between
+    // step/start and the assistant settlement; this time window IS the
+    // contract and no observable signal can stand in for it — Reason stated.
     await new Promise(resolve => setTimeout(resolve, 400))
     session.append('assistant/message', {
       turn: 1, step: 1,

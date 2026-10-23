@@ -19,6 +19,8 @@ import {
   type SettingsWorkspacePanelIntents,
   type SettingsWorkspaceSnapshot,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
+import type { AboutStatusController } from '../../src/app/command/about-status.ts'
+import type { AboutStatusView } from '../../src/domain/status/about.ts'
 
 const SNAPSHOT: SettingsWorkspaceSnapshot = {
   configReadiness: 'ready',
@@ -72,6 +74,10 @@ function setup(options: {
   readonly rows?: number
   /** Runs while the page factory builds the page (the reentrancy seam). */
   readonly duringBuild?: (harness: { readonly panel: SettingsWorkspacePanel; readonly built: FakePage[] }) => void
+  /** C3: the About owner the panel renders/subscribes to. */
+  readonly aboutStatusSource?: () => AboutStatusController
+  /** C3: the clipboard sink (records what the copy gestures emit). */
+  readonly onCopy?: (text: string) => void
 } = {}): Harness {
   const columns = options.columns ?? 120
   const rows = options.rows ?? 40
@@ -85,7 +91,8 @@ function setup(options: {
     notice: () => undefined,
     onClose: () => { closes += 1 },
     onOpenLegacy: () => {},
-    onCopy: () => {},
+    ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
+    onCopy: (text) => { options.onCopy?.(text) },
     createModelsPage: (initial, openAccount) => {
       const page = new FakePage(`models:${initial.view}`)
       built.push(page)
@@ -237,4 +244,65 @@ test('a narrow rail selection is mounted when the terminal grows and the content
   assert.match(plain(h, 120), /account:page page/u, 'the right column shows the real page')
   h.panel.render(120)
   assert.equal(h.built.length, 1, 'the page is not rebuilt on the next frame')
+})
+
+// ── C3: copy reads only the LAST PAINTED About view ───────────────────────
+//
+// One scoped read publishes Loading and then Ready under the SAME epoch. The
+// panel paints Loading, the Ready publication lands as a new immutable view,
+// and no frame has painted it yet: a copy gesture must be REFUSED (the panel's
+// own last-painted rule), never retargeted to the newer, unpainted snapshot.
+// The epoch alone cannot distinguish the two publications — object identity
+// can — so this case fails if the guard compares `view.epoch` again.
+test('C3 a same-epoch publication is not copyable until the frame paints it', () => {
+  const copied: string[] = []
+  const loading: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: { kind: 'loading', sessionId: 'sess-repaint' },
+    epoch: 7,
+  }
+  const ready: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: {
+      kind: 'ready',
+      sessionId: 'sess-repaint',
+      cwd: '/ws/repaint',
+      title: 'repaint proof',
+      stats: { lifetime: { turns: 1, steps: 1, llmMs: 1_000 } },
+      context: 'fresh',
+      contextUsed: 64_000,
+      contextWindow: 128_000,
+    },
+    epoch: 7,
+  }
+  let current: AboutStatusView = loading
+  const controller = {
+    snapshotView: () => current,
+    subscribe: () => () => {},
+    enter: () => {},
+    leave: () => {},
+    refresh: () => {},
+    dispose: () => {},
+  } as unknown as AboutStatusController
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    aboutStatusSource: () => controller,
+    onCopy: (text) => { copied.push(text) },
+  })
+  // The narrow entry focuses the About content and paints its Loading frame.
+  assert.match(plain(h, 44), /Loading…/u, 'the Loading frame is painted')
+  // The read settles: Ready is published under the SAME epoch, and the
+  // terminal has not painted it yet.
+  current = ready
+  h.panel.handleInput('c') // single fact
+  h.panel.handleInput('C') // Copy All
+  assert.equal(copied.length, 0, 'both copy gestures refuse an unpainted publication')
+  // The repaint binds the same gestures to the Ready view.
+  const frame = plain(h, 44)
+  assert.match(frame, /sess-repaint/u, 'the Ready frame paints its own session')
+  h.panel.handleInput('c')
+  h.panel.handleInput('C')
+  assert.equal(copied.length, 2, 'the painted Ready view copies through both gestures')
+  assert.match(copied[1]!, /Session ID: sess-repaint/u, 'Copy All serializes the PAINTED Ready view')
 })

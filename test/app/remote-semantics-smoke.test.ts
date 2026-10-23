@@ -476,6 +476,7 @@ async function mountSettingsWorkspace(
     readonly web: unknown
     readonly credentials: unknown
   },
+  backendKind: 'direct' | 'remote',
 ): Promise<{
   open(): Promise<void>
   key(data: string): Promise<void>
@@ -540,6 +541,18 @@ async function mountSettingsWorkspace(
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
     captureLiveSessionScope: () => undefined,
+    // C3 About seams: this fixture composes no StatusRuntime, so the
+    // sessionless capture is the only reachable state (no scoped read can
+    // start). The subscription STILL must return a real disposer: opening
+    // `/settings` builds the About controller, its close calls `dispose()`,
+    // and a non-function return would abort the TuiApp teardown and leak the
+    // process slot into every later test.
+    isSessionScopeCurrent: () => false,
+    currentSessionStats: async () => undefined,
+    sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    backendKind,
+    subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
     displayPreset: () => app.displayPreset(),
     focusEnabled: () => app.displayPreset() === 'focus',
@@ -1224,16 +1237,27 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
   const host = await createHostFixture(life, { configPlane: true, captureTuiRowConfig: true })
   await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
   const runtime = await composeRuntime(host)
-  const assembled = await createRemoteBackendRuntime({
-    runtime: runtime.client,
-    promptSerializer: stubSerializer(),
-    fetch: runtime.host.carrier.fetch,
-  })
-  const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
-  await reference.ready
-  const config = assembled.backend.config
-  const fixture = await mountSettingsWorkspace(host.anchorDir, config)
+  // Register every resource for teardown the moment it EXISTS: an exception
+  // after the Client runtime came up must still release the reference,
+  // dispose the adapters and stop the Client BEFORE the Host fixture goes
+  // away. A skipped cleanup leaves the Connection reconnecting against a
+  // dead Host and the test process never settles.
+  let disposeAssembled: (() => void) | undefined
+  let releaseReference: (() => void) | undefined
+  let disposeFixture: (() => void) | undefined
   try {
+    const assembled = await createRemoteBackendRuntime({
+      runtime: runtime.client,
+      promptSerializer: stubSerializer(),
+      fetch: runtime.host.carrier.fetch,
+    })
+    disposeAssembled = () => { assembled.dispose() }
+    const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+    releaseReference = () => { reference.release() }
+    await reference.ready
+    const config = assembled.backend.config
+    const fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
+    disposeFixture = () => { fixture.dispose() }
     assert.equal(config.configReadiness(), 'ready', 'the Remote mirror reached the Host settings plane')
     const tuiSettings = config.tuiSettings
     assert.ok(tuiSettings !== undefined, 'the settings section is served over the wire')
@@ -1390,9 +1414,21 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     assert.equal(tuiSettings.get().displayPreset, 'full', 'Remote refresh reads the Direct-committed value from the same Host')
     assert.equal(config.configReadiness(), 'ready', 'both adapters remain current after the paired writes')
   } finally {
-    fixture.dispose()
-    assembled.dispose()
-    await runtime.dispose()
+    // Each cleanup runs even when an earlier one throws: a broken UI teardown
+    // must never leave the Client adapters or the Client runtime alive.
+    try {
+      disposeFixture?.()
+    } finally {
+      try {
+        releaseReference?.()
+      } finally {
+        try {
+          disposeAssembled?.()
+        } finally {
+          await runtime.dispose()
+        }
+      }
+    }
   }
 })
 
@@ -1411,7 +1447,7 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
   assert.ok(forms !== undefined, 'the official Host settings service is mounted')
   const settings = new DirectTuiSettings(rowConfig as TuiConfigRefs, forms)
   const port = new DirectConfigPort(host.ctx as never, settings, () => undefined)
-  const fixture = await mountSettingsWorkspace(host.anchorDir, port)
+  const fixture = await mountSettingsWorkspace(host.anchorDir, port, 'direct')
   const hostDescriptor = (): { readonly ns: string; readonly value?: Record<string, unknown>; readonly user?: unknown } | undefined =>
     (host.ctx as unknown as {
       settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
