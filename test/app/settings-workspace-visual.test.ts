@@ -3678,6 +3678,161 @@ test('a resize cycle keeps the selected category, the content focus and the page
   h.dispose()
 })
 
+// ── Settings Tab / Shift+Tab region navigation (real frames) ─────────────
+
+test('Tab/Shift+Tab hand the keyboard to the About content and back at wide/medium sizes', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [90, 24]] as const) {
+    const h = setup({ columns, rows })
+    await h.openHome()
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u, `the rail advertises Tab focus at ${columns}x${rows}`)
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · About/u, `Tab focuses the About content at ${columns}x${rows}`)
+    if (columns >= 100) {
+      assert.match(h.view(), /Tab focus · Shift\+Tab back/u, 'the About bar advertises both region keys')
+    } else {
+      // At 90 the lowest-priority region hint is the first segment dropped;
+      // the remaining region hint and every semantic verb survive.
+      assert.match(h.view(), /Shift\+Tab back/u, 'the reverse region key stays advertised')
+      assert.match(h.view(), /c copy fact · C copy all · r refresh/u, 'the semantic verbs keep their hints')
+      assert.doesNotMatch(h.view(), /Tab focus/u, 'the forward region hint drops first')
+    }
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Tab returns to the rail')
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · About/u, 'Tab focuses the About content again')
+    await key(h, '\x1b[Z')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Shift+Tab returns to the rail')
+    assert.equal(h.replacements(), 0, 'region jumps never write')
+    assert.ok(!h.view().includes('←'), 'no header arrows appear')
+    h.dispose()
+  }
+})
+
+test('a narrow /settings keeps the About row Tab inert and its existing Esc path', async () => {
+  for (const [columns, rows] of [[72, 24], [44, 20]] as const) {
+    const h = setup({ columns, rows })
+    await h.openHome()
+    assert.match(h.rowsPlain()[0]!, /Settings · About/u, 'the narrow home is the About content')
+    const before = h.view()
+    for (const data of ['\t', '\x1b[Z']) await key(h, data)
+    assert.equal(h.view(), before, `the narrow root Tab is inert at ${columns}x${rows}`)
+    assert.doesNotMatch(before, /Tab focus/u, 'the narrow frame advertises no root Tab')
+    await key(h, '\x1b')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
+    h.dispose()
+  }
+})
+
+test('Tab/Shift+Tab cycle the legacy panes in a real frame without opening a choice', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40]] as const) {
+    const h = setup({ columns, rows, doc: { theme: 'dark' } })
+    await h.open()
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Esc close/u)
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /· Rows/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Shift\+Tab back · Esc back/u)
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Configured theme/u)
+    assert.ok(!h.view().includes('Choose value'), 'Tab focusing Detail never opens the choice')
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
+    await key(h, '\x1b[Z')
+    assert.match(h.rowsPlain()[0]!, /Configured theme/u)
+    assert.ok(!h.view().includes('Choose value'), 'the reverse jump never opens the choice')
+    assert.deepEqual(h.replaced(), [], 'no region jump wrote a document')
+    h.dispose()
+  }
+})
+
+test('the Models Add catalog reaches Custom provider… with one Tab in a real frame', async () => {
+  const providerOptions: CredentialProviderOption[] = Array.from({ length: 40 }, (_, index) => ({
+    route: `provider-${index}`,
+    label: index === 0 ? 'Anthropic' : `Provider ${String(index).padStart(2, '0')}`,
+    ref: `PROVIDER_${index}_API_KEY`,
+    configured: false,
+    declared: false,
+    namesCredential: false,
+    group: 'available' as const,
+    canProvisionProfile: true,
+  }))
+  const h = setup({ columns: 120, rows: 40, providerOptions })
+  await h.open('Models')
+  await waitForFrame(
+    h.view,
+    frame => /Models & Credentials/u.test(frame) && !/Loading provider configuration/u.test(frame),
+    () => h.vt.waitForRender(),
+    'the provider catalog must settle',
+  )
+  await key(h, '\t') // rail -> the Models content page
+  await key(h, '\u001b[B') // account row -> the Add Provider… action
+  await key(h, '\r')
+  assert.match(h.view(), /Available providers/u)
+  assert.match(h.view(), /> Anthropic/u)
+  await key(h, '\t')
+  assert.match(h.view(), /> Custom provider…/u, 'one Tab selects the first enabled action')
+  assert.match(h.view(), /Tab sections/u, 'the Models page advertises its region key')
+  await key(h, '\u001b[Z')
+  assert.match(h.view(), /> Anthropic/u, 'Shift+Tab returns to the first body row')
+  assert.deepEqual(h.replaced(), [], 'the region jump never writes')
+  h.dispose()
+})
+
+test('the 90-column Settings split keeps the Models refresh hint over the region key', async () => {
+  // At 90 columns the Settings content column is 66 cells: the Models page's
+  // own action bar must keep `r refresh` and drop `Tab sections` first.
+  const providerOptions: CredentialProviderOption[] = [{
+    route: 'provider-0',
+    label: 'Anthropic',
+    ref: 'ANTHROPIC_API_KEY',
+    configured: false,
+    declared: false,
+    namesCredential: false,
+    group: 'available',
+    canProvisionProfile: true,
+  }]
+  const h = setup({ columns: 90, rows: 24, providerOptions })
+  await h.open('Models')
+  await key(h, '\t') // rail -> the Models content page
+  const bar = h.rowsPlain().at(-1)!
+  assert.match(bar, /r refresh/u, 'the existing refresh hint survives the 66-cell content bar')
+  assert.doesNotMatch(bar, /Tab sections/u, 'the region hint is the first segment dropped')
+  assert.match(bar, /Esc back/u, 'Esc remains the last-row hint')
+  h.dispose()
+})
+
+test('the Tab hints drop as whole segments and the action bar keeps the last physical row', async () => {
+  // 80x10: the medium content column is too narrow for the rail's Tab focus
+  // segment; it is dropped WHOLE, never truncated, and Esc keeps the bar.
+  const narrow = setup({ columns: 80, rows: 10 })
+  await narrow.openHome()
+  const bar80 = narrow.rowsPlain().at(-1) ?? ''
+  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Esc close/u)
+  assert.doesNotMatch(bar80, /Tab focus/u)
+  assert.doesNotMatch(bar80, /…/u, 'the bar never truncates a segment mid-word')
+  assertNoHalfSegmentInBar(narrow.rowsPlain(), narrow.rowsPlain().length - 1, ' · ')
+  narrow.dispose()
+
+  // 90x24 keeps the whole segment visible at medium width.
+  const medium = setup({ columns: 90, rows: 24 })
+  await medium.openHome()
+  assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u)
+  assertNoHalfSegmentInBar(medium.rowsPlain(), medium.rowsPlain().length - 1, ' · ')
+  medium.dispose()
+
+  // Legacy 90x24: the region hints are dropped first, so the pre-existing
+  // Refresh hint survives instead of being crowded out of the bar.
+  const legacy = setup({ columns: 90, rows: 24, doc: { theme: 'dark' } })
+  await legacy.open() // Appearance, category rail focus
+  await key(legacy, '\t') // categories -> rows
+  const legacyBar = legacy.rowsPlain().at(-1) ?? ''
+  assert.match(legacyBar, /r refresh/u, 'the existing refresh hint survives at 90 columns')
+  assert.match(legacyBar, /Enter choose/u)
+  assert.doesNotMatch(legacyBar, /Tab panes/u, 'the region hint is the first segment dropped')
+  assertNoHalfSegmentInBar(legacy.rowsPlain(), legacy.rowsPlain().length - 1, ' · ')
+  legacy.dispose()
+})
+
 // ── C3 (Phase 3C): the About action row's real mouse targets ──────────────
 //
 // The action row paints Refresh AND Copy All side by side on a LIVE session;
@@ -3898,135 +4053,3 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
 function sendKey(vt: VirtualTerminal, data: string): void {
   vt.sendInput(data)
 }
-
-// ── Settings Tab / Shift+Tab region navigation (real frames) ─────────────
-
-test('Tab/Shift+Tab hand the keyboard to the About content and back at wide/medium sizes', async () => {
-  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [90, 24]] as const) {
-    const h = setup({ columns, rows })
-    await h.openHome()
-    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u, `the rail advertises Tab focus at ${columns}x${rows}`)
-    await key(h, '\t')
-    assert.match(h.rowsPlain()[0]!, /Settings · About/u, `Tab focuses the About content at ${columns}x${rows}`)
-    if (columns >= 100) {
-      assert.match(h.view(), /Tab focus · Shift\+Tab back/u, 'the About bar advertises both region keys')
-    } else {
-      // At 90 the lowest-priority region hint is the first segment dropped;
-      // the remaining region hint and every semantic verb survive.
-      assert.match(h.view(), /Shift\+Tab back/u, 'the reverse region key stays advertised')
-      assert.match(h.view(), /c copy fact · C copy all · r refresh/u, 'the semantic verbs keep their hints')
-      assert.doesNotMatch(h.view(), /Tab focus/u, 'the forward region hint drops first')
-    }
-    await key(h, '\t')
-    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Tab returns to the rail')
-    await key(h, '\t')
-    assert.match(h.rowsPlain()[0]!, /Settings · About/u, 'Tab focuses the About content again')
-    await key(h, '\x1b[Z')
-    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Shift+Tab returns to the rail')
-    assert.equal(h.replacements(), 0, 'region jumps never write')
-    assert.ok(!h.view().includes('←'), 'no header arrows appear')
-    h.dispose()
-  }
-})
-
-test('a narrow /settings keeps the About row Tab inert and its existing Esc path', async () => {
-  for (const [columns, rows] of [[72, 24], [44, 20]] as const) {
-    const h = setup({ columns, rows })
-    await h.openHome()
-    assert.match(h.rowsPlain()[0]!, /Settings · About/u, 'the narrow home is the About content')
-    const before = h.view()
-    for (const data of ['\t', '\x1b[Z']) await key(h, data)
-    assert.equal(h.view(), before, `the narrow root Tab is inert at ${columns}x${rows}`)
-    assert.doesNotMatch(before, /Tab focus/u, 'the narrow frame advertises no root Tab')
-    await key(h, '\x1b')
-    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
-    h.dispose()
-  }
-})
-
-test('Tab/Shift+Tab cycle the legacy panes in a real frame without opening a choice', async () => {
-  for (const [columns, rows] of [[200, 50], [120, 40]] as const) {
-    const h = setup({ columns, rows, doc: { theme: 'dark' } })
-    await h.open()
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Esc close/u)
-    await key(h, '\t')
-    assert.match(h.rowsPlain()[0]!, /· Rows/u)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Shift\+Tab back · Esc back/u)
-    await key(h, '\t')
-    assert.match(h.rowsPlain()[0]!, /Configured theme/u)
-    assert.ok(!h.view().includes('Choose value'), 'Tab focusing Detail never opens the choice')
-    await key(h, '\t')
-    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
-    await key(h, '\x1b[Z')
-    assert.match(h.rowsPlain()[0]!, /Configured theme/u)
-    assert.ok(!h.view().includes('Choose value'), 'the reverse jump never opens the choice')
-    assert.deepEqual(h.replaced(), [], 'no region jump wrote a document')
-    h.dispose()
-  }
-})
-
-test('the Models Add catalog reaches Custom provider… with one Tab in a real frame', async () => {
-  const providerOptions: CredentialProviderOption[] = Array.from({ length: 40 }, (_, index) => ({
-    route: `provider-${index}`,
-    label: index === 0 ? 'Anthropic' : `Provider ${String(index).padStart(2, '0')}`,
-    ref: `PROVIDER_${index}_API_KEY`,
-    configured: false,
-    declared: false,
-    namesCredential: false,
-    group: 'available' as const,
-    canProvisionProfile: true,
-  }))
-  const h = setup({ columns: 120, rows: 40, providerOptions })
-  await h.open('Models')
-  await waitForFrame(
-    h.view,
-    frame => /Models & Credentials/u.test(frame) && !/Loading provider configuration/u.test(frame),
-    () => h.vt.waitForRender(),
-    'the provider catalog must settle',
-  )
-  await key(h, '\t') // rail -> the Models content page
-  await key(h, '\u001b[B') // account row -> the Add Provider… action
-  await key(h, '\r')
-  assert.match(h.view(), /Available providers/u)
-  assert.match(h.view(), /> Anthropic/u)
-  await key(h, '\t')
-  assert.match(h.view(), /> Custom provider…/u, 'one Tab selects the first enabled action')
-  assert.match(h.view(), /Tab sections/u, 'the Models page advertises its region key')
-  await key(h, '\u001b[Z')
-  assert.match(h.view(), /> Anthropic/u, 'Shift+Tab returns to the first body row')
-  assert.deepEqual(h.replaced(), [], 'the region jump never writes')
-  h.dispose()
-})
-
-test('the Tab hints drop as whole segments and the action bar keeps the last physical row', async () => {
-  // 80x10: the medium content column is too narrow for the rail's Tab focus
-  // segment; it is dropped WHOLE, never truncated, and Esc keeps the bar.
-  const narrow = setup({ columns: 80, rows: 10 })
-  await narrow.openHome()
-  const bar80 = narrow.rowsPlain().at(-1) ?? ''
-  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Esc close/u)
-  assert.doesNotMatch(bar80, /Tab focus/u)
-  assert.doesNotMatch(bar80, /…/u, 'the bar never truncates a segment mid-word')
-  assertNoHalfSegmentInBar(narrow.rowsPlain(), narrow.rowsPlain().length - 1, ' · ')
-  narrow.dispose()
-
-  // 90x24 keeps the whole segment visible at medium width.
-  const medium = setup({ columns: 90, rows: 24 })
-  await medium.openHome()
-  assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u)
-  assertNoHalfSegmentInBar(medium.rowsPlain(), medium.rowsPlain().length - 1, ' · ')
-  medium.dispose()
-
-  // Legacy 90x24: the region hints are dropped first, so the pre-existing
-  // Refresh hint survives instead of being crowded out of the bar.
-  const legacy = setup({ columns: 90, rows: 24, doc: { theme: 'dark' } })
-  await legacy.open() // Appearance, category rail focus
-  await key(legacy, '\t') // categories -> rows
-  const legacyBar = legacy.rowsPlain().at(-1) ?? ''
-  assert.match(legacyBar, /r refresh/u, 'the existing refresh hint survives at 90 columns')
-  assert.match(legacyBar, /Enter choose/u)
-  assert.doesNotMatch(legacyBar, /Tab panes/u, 'the region hint is the first segment dropped')
-  assertNoHalfSegmentInBar(legacy.rowsPlain(), legacy.rowsPlain().length - 1, ' · ')
-  legacy.dispose()
-})

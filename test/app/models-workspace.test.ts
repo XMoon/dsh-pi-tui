@@ -2661,3 +2661,36 @@ test('Tab revokes a straddling Models row press and the action bar advertises it
   assert.doesNotMatch(narrow, /Tab sections/u)
   assert.match(narrow, /Esc back/u)
 })
+
+test('the Models region hint never crowds the HOME refresh or catalog filter hints', async () => {
+  // HOME: the existing refresh hint must survive the tight 60/66-cell bars.
+  const { source } = fakeSource()
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  for (const width of [60, 66] as const) {
+    const bar = viewText(page, width).split('\n').at(-1)!
+    assert.match(bar, /r refresh/u, `the HOME refresh hint stays visible at ${width}`)
+    assert.match(bar, /Up\/Down select/u, `the row navigation hint stays visible at ${width}`)
+    assert.doesNotMatch(bar, /Tab sections/u, `the region hint is the first segment dropped at ${width}`)
+    assert.match(bar, /Esc back/u, `Esc stays visible at ${width}`)
+  }
+
+  // Add catalog: `type to filter` outranks the region hint.
+  const catalogSource = fakeSource().source
+  catalogSource.readCatalog = async () => ({ kind: 'ready' as const, rows: largeCatalog(5) })
+  const catalog = openWith(catalogSource, { view: 'list' }, 24)
+  await flush()
+  viewText(catalog)
+  catalog.handleInput('\u001b[B') // account row -> Add Provider… action
+  catalog.handleInput('\r')
+  assert.match(viewText(catalog), /Available providers/u)
+  for (const width of [60, 66] as const) {
+    const bar = viewText(catalog, width).split('\n').at(-1)!
+    assert.match(bar, /type to filter/u, `the catalog filter hint stays visible at ${width}`)
+    assert.doesNotMatch(bar, /Tab sections/u, `the region hint is the first segment dropped at ${width}`)
+    assert.match(bar, /Esc back/u, `Esc stays visible at ${width}`)
+  }
+
+  // A roomy bar still advertises the region key.
+  assert.match(viewText(catalog, 100), /Tab sections/u)
+})
