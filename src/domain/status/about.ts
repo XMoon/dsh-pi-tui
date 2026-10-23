@@ -398,9 +398,7 @@ export function aboutFactRows(view: AboutStatusView): readonly AboutFact[] {
       copyValue: ABOUT_NO_ACTIVE_SESSION,
       available: true,
     })
-    return rows
-  }
-  if (session.kind === 'loading') {
+  } else if (session.kind === 'loading') {
     rows.push(
       { id: 'session.id', section: 'session', label: 'Session ID', displayValue: session.sessionId, copyValue: session.sessionId, available: true },
       {
@@ -412,46 +410,48 @@ export function aboutFactRows(view: AboutStatusView): readonly AboutFact[] {
         available: true,
       },
     )
-    return rows
+  } else {
+    rows.push(
+      { id: 'session.id', section: 'session', label: 'Session ID', displayValue: session.sessionId, copyValue: session.sessionId, available: true },
+      ...sessionIdentityFacts(session),
+      // The projection's own availability row: a missing/failed official
+      // projection is an explicit state word — distinguishable from
+      // `No active session` and never silently folded into a ready view.
+      // A FAILED read (`Projection: Failed`) is distinct from an ordinary
+      // absence (`Projection: Unavailable`).
+      ...(session.projectionUnavailable === true
+        ? [{
+            // A DISTINCT stable id: the Projection row and the final Status row
+            // can coexist in the degraded view, and a shared id would make both
+            // rows paint selected and `find()` copy the wrong one.
+            id: 'status.projection' as const,
+            section: 'session' as const,
+            label: 'Projection',
+            displayValue: session.projectionFailed === true ? 'Failed' : UNAVAILABLE,
+            copyValue: session.projectionFailed === true ? 'Failed' : UNAVAILABLE,
+            available: true,
+          }]
+        : []),
+      ...statisticsFacts(session),
+      ...performanceFacts(session),
+      ...contextFacts(session),
+    )
+    if (session.kind === 'unavailable') {
+      rows.push({
+        id: 'status.unavailable',
+        section: 'session',
+        label: 'Status',
+        displayValue: UNAVAILABLE,
+        copyValue: UNAVAILABLE,
+        available: true,
+      })
+    }
   }
-  rows.push(
-    { id: 'session.id', section: 'session', label: 'Session ID', displayValue: session.sessionId, copyValue: session.sessionId, available: true },
-    ...sessionIdentityFacts(session),
-    // The projection's own availability row: a missing/failed official
-    // projection is an explicit state word — distinguishable from
-    // `No active session` and never silently folded into a ready view.
-    // A FAILED read (`Projection: Failed`) is distinct from an ordinary
-    // absence (`Projection: Unavailable`).
-    ...(session.projectionUnavailable === true
-      ? [{
-          // A DISTINCT stable id: the Projection row and the final Status row
-          // can coexist in the degraded view, and a shared id would make both
-          // rows paint selected and `find()` copy the wrong one.
-          id: 'status.projection' as const,
-          section: 'session' as const,
-          label: 'Projection',
-          displayValue: session.projectionFailed === true ? 'Failed' : UNAVAILABLE,
-          copyValue: session.projectionFailed === true ? 'Failed' : UNAVAILABLE,
-          available: true,
-        }]
-      : []),
-    ...statisticsFacts(session),
-    ...performanceFacts(session),
-    ...contextFacts(session),
-  )
-  if (session.kind === 'unavailable') {
-    rows.push({
-      id: 'status.unavailable',
-      section: 'session',
-      label: 'Status',
-      displayValue: UNAVAILABLE,
-      copyValue: UNAVAILABLE,
-      available: true,
-    })
-  }
-  // The Copy All control guard applies at THIS single boundary: the captured
-  // session facts (an untrusted Host title, a cwd from a foreign machine)
-  // keep their bytes verbatim except terminal-active sequences.
+  // The copy control guard applies at THIS single boundary for EVERY branch:
+  // a sessionless runtime value and a loading Session ID are untrusted too,
+  // and the per-field copy must never bypass the guard the report already
+  // applies. The captured facts (Host title, foreign-machine cwd) keep their
+  // bytes verbatim except terminal-active sequences.
   return rows.map(row => ({ ...row, copyValue: row.copyValue === '' ? row.copyValue : copySafe(row.copyValue) }))
 }
 
@@ -493,6 +493,13 @@ export function serializeAboutStatus(view: AboutStatusView): string {
     const value = valueOf(id)
     return value === UNAVAILABLE ? value : `${value}${unit}`
   }
+  // TTFB is a duration: the report keeps the readable display AND the exact
+  // source ms (the same pair shape as LLM wall); the per-field copy alone is
+  // not the report. An absent authority stays the bare `Unavailable`.
+  const durationWithExactMs = (id: AboutFactId): string => {
+    const display = displayOf(id)
+    return display === UNAVAILABLE ? display : `${display} (${valueOf(id)} ms)`
+  }
   lines.push('', 'Session', `Session ID: ${safe(session.sessionId)}`)
   lines.push(
     `Title: ${valueOf('session.title')}`,
@@ -516,7 +523,7 @@ export function serializeAboutStatus(view: AboutStatusView): string {
     `Cache hit: ${exactWithUnit('tokens.cacheHitPct', '%')}`,
     '',
     'Performance',
-    `TTFB (recent): ${displayOf('performance.recentTTFB')}`,
+    `TTFB (recent): ${durationWithExactMs('performance.recentTTFB')}`,
     `R5 tokens/sec: ${exactWithUnit('performance.R5', ' tok/s')}`,
     `All tokens/sec: ${exactWithUnit('performance.All', ' tok/s')}`,
     '',

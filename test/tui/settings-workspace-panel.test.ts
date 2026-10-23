@@ -409,3 +409,25 @@ test('C3 End copies the final Status row of a degraded view, not the Projection 
   h.panel.handleInput('c')
   assert.equal(copied.at(-1), 'Unavailable', 'End targets the final Status row, not the Projection')
 })
+
+// ── C3: every About branch applies the per-field copy guard ───────────────
+test('C3 a loading hostile Session ID copies through the same control guard', () => {
+  const copied: string[] = []
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: { kind: 'loading', sessionId: 'sess\u001b]52;c;pw\u0007-id' },
+    epoch: 1,
+  }
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    aboutStatusSource: staticAboutSource(view),
+    onCopy: text => { copied.push(text) },
+  })
+  plain(h, 44)
+  // Facts: runtime trio, Session ID, Status. Select the Session ID (3 downs).
+  for (let step = 0; step < 3; step += 1) h.panel.handleInput('\x1b[B')
+  plain(h, 44)
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), 'sess-id', 'the loading Session ID single-field copy is control-safe')
+})

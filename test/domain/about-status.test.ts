@@ -173,6 +173,7 @@ test('non-terminating decimal sources keep their exact numeric copy while the di
   assert.ok(lines.includes(`R5 tokens/sec: ${100 / 3} tok/s`), 'the report keeps the exact rate and unit')
   assert.ok(lines.includes('All tokens/sec: 29.970029970029973 tok/s'))
   assert.ok(lines.includes(`Percent: ${(1 / 3) * 100}%`))
+  assert.ok(lines.includes('TTFB (recent): 0.8s (812.4 ms)'), 'the report keeps the exact TTFB ms')
 })
 
 test('an unavailable projection keeps the captured session id and words the state Unavailable', () => {
@@ -226,7 +227,7 @@ test('Copy All is the deterministic LF serialization: every defined id, sessionl
     'Turns: 12', 'Steps: 30', 'LLM wall: 27m58s (1678900 ms)',
     'Input tokens: 1234', 'Output tokens: 567', 'Cache read tokens: 890', 'Cache write tokens: 12',
     'Cache hit: 41.6%',
-    'TTFB (recent): 0.8s', 'R5 tokens/sec: 33.3 tok/s', 'All tokens/sec: 29.97 tok/s',
+    'TTFB (recent): 0.8s (812.4 ms)', 'R5 tokens/sec: 33.3 tok/s', 'All tokens/sec: 29.97 tok/s',
     'Used tokens: 45000', 'Window tokens: 128000', 'Percent: 35.15625%', 'Observation: Fresh',
   ]) {
     assert.ok(lines.some(line => line === key), `the report line ${key} is present verbatim`)
@@ -300,5 +301,23 @@ test('a hostile Session ID or version never emits terminal controls into Copy Al
   const rows = aboutFactRows(view)
   for (const row of rows) {
     assert.ok(!row.copyValue.includes('\u001b'), `${row.id} copy value is control-safe`)
+  }
+})
+
+test('the copy control guard applies to the sessionless and loading branches too', () => {
+  const loading: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: { kind: 'loading', sessionId: 'sess\u001b]52;c;pw\u0007-id' },
+    epoch: 1,
+  }
+  const loadingId = aboutFactRows(loading).find(row => row.id === 'session.id')!
+  assert.equal(loadingId.copyValue, 'sess-id', 'the loading Session ID copy is control-safe')
+  const sessionless: AboutStatusView = {
+    runtime: { tui: '1.0.0\u001b[31mred', dsh: '2.0\u001b]0;evil\u0007', backend: 'direct' },
+    session: { kind: 'none' },
+    epoch: 1,
+  }
+  for (const row of aboutFactRows(sessionless)) {
+    assert.ok(!row.copyValue.includes('\u001b'), `${row.id} sessionless copy value is control-safe`)
   }
 })
