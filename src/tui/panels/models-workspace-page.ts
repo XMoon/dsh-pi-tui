@@ -2525,10 +2525,13 @@ export class ModelsWorkspacePage implements Component {
     // regions: body rows and at least one enabled action under the pinned bar.
     // QuestionFlow/picker bars have their own dedicated lines and never reach
     // this helper.
+    // Priority 0 is the workspace's lowest drop priority: the region key
+    // always yields first, never crowding out `r refresh`, `type to filter`
+    // or another existing action hint on a tight bar.
     if (this.rowOrder.length > 0
       && actions.some(action => action.enabled)
       && Math.max(1, this.bodyHeight) - 1 - actions.length >= 1) {
-      segments.push({ text: 'Tab sections', priority: 3 })
+      segments.push({ text: 'Tab sections', priority: 0 })
     }
     segments.push({ text: 'Esc back', priority: 8 })
     const rendered = renderActionBarRow(segments, width)
