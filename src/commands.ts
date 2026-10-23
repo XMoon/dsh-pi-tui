@@ -619,6 +619,29 @@ export interface TuiCommandRunner {
    * Optional: stubs without the coordinator fall back to a direct
    * sessionReader read. */
   forceContextMeasurement?(): number | undefined
+  /**
+   * C3: the explicit force with its OBSERVATION — the SAME coordinator
+   * measurement as {@link forceContextMeasurement}, plus the attempt's own
+   * classification (`fresh` / `last-known` / `unavailable`). REQUIRED: the
+   * About projection must never relabel a cached value as a fresh read.
+   */
+  forceContextMeasurementResult(): import('./domain/status/context-measurement.ts').ContextMeasureResult
+  /**
+   * C3: the selected backend kind (the composition's `CommandSurfaceDeps
+   * .backend.kind`), as a read-only fact of the About/runtime projection.
+   * REQUIRED: the backend is the composition's explicit selection, never a
+   * guessed one from optional fields.
+   */
+  readonly backendKind: 'direct' | 'remote'
+  /**
+   * C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
+   * trigger — the SessionOwnershipCore's payload-less owner/generation
+   * notification, forwarded unchanged. It fires after every successful
+   * owner publication AND every generation bump, so a scope-identity change
+   * can never be silenced by the StatusStore's content-equality suppression.
+   * REQUIRED and narrow: no alternate observer and no polling.
+   */
+  subscribeSessionScopeInvalidation(listener: () => void): () => void
   /** Shared with prompt assembly; settings changes take effect on the next step. */
   readonly progressUpdatesState: ProgressUpdatesState
   /** Shared with prompt assembly; settings changes take effect on the next step. */

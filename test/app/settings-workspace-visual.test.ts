@@ -220,6 +220,14 @@ function setup(options: HarnessOptions = {}): Harness {
     // must see no live scope.
     currentSessionId: undefined,
     captureLiveSessionScope: () => undefined,
+    // C3 About seams (this suite's stub composes no StatusRuntime): the
+    // sessionless capture answers `unavailable` and no listener ever fires.
+    isSessionScopeCurrent: () => false,
+    currentSessionStats: async () => undefined,
+    sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    backendKind: 'direct' as const,
+    subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
     displayPreset: () => app.displayPreset(),
     focusEnabled: () => app.displayPreset() === 'focus',
@@ -3628,3 +3636,224 @@ test('a resize cycle keeps the selected category, the content focus and the page
   assert.ok(h.view().includes(modelsBody.split('\n')[4] ?? ''), 'the page projection survived the cycle')
   h.dispose()
 })
+
+// ── C3 (Phase 3C): the About action row's real mouse targets ──────────────
+//
+// The action row paints Refresh AND Copy All side by side on a LIVE session;
+// BOTH are independent last-painted targets (the retired `.find()` silently
+// dropped the second). This is the real-click regression: two separate SGR
+// press/release gestures on the SAME painted row, each hitting its own
+// button cells. (The sessionless default harness hides the Refresh button by
+// contract — the live-session source-sink harness owns the two-button case.)
+test('C3 the sessionless About action row: Copy All is clickable and blank cells are inert', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await h.openHome()
+  const rows = h.vt.getViewport().map(stripTerminalSequences)
+  const actionRowIndex = rows.findIndex(line => line.includes('Copy All ['))
+  assert.ok(actionRowIndex !== -1, `the action row is painted:\n${h.view()}`)
+  const actionRow = rows[actionRowIndex]!
+  const copyAllCol = actionRow.indexOf('Copy All [')
+  // The sessionless action row hides the Refresh button (plan §2.1).
+  assert.equal(actionRow.includes('Refresh context ['), false, 'the Session-only Refresh is hidden while sessionless')
+  // The affordance contract (design language §7.1 role 14): the painted
+  // actionable button is `Verb [Key]` in the `primary` token — assert BOTH
+  // the text and the token (the ANSI capture carries the real palette).
+  assert.match(actionRow, /Copy All \[C\]/u, `the Verb [Key] format paints: ${JSON.stringify(actionRow)}`)
+  // THE TOKEN (design language §7.1 role 14): the painted affordance rides
+  // the `primary` token — the button's FIRST cell carries the live primary
+  // RGB (the same per-cell assertion the A-15 chrome test uses), and it is
+  // NOT the muted token.
+  const buttonCol = copyAllCol
+  const buttonFg = h.vt.getCellFgRgb(actionRowIndex, buttonCol)
+  assert.equal(buttonFg, hexToRgb(currentPalette.primary), `the Copy All affordance paints the primary token (got ${buttonFg})`)
+  // Click: Copy All copies the report.
+  press(h, actionRowIndex, copyAllCol + 2)
+  release(h, actionRowIndex, copyAllCol + 2)
+  await settle(h)
+  assert.equal(h.copied.length, 1, 'the Copy All button copied')
+  assert.match(h.copied[0]!, /dsh-pi-tui Status/u, 'the Copy All payload is the report')
+  // Blank cells after the button never copy.
+  press(h, actionRowIndex, copyAllCol + 20)
+  release(h, actionRowIndex, copyAllCol + 20)
+  await settle(h)
+  assert.equal(h.copied.length, 1, 'a blank-cell click never copies')
+  h.dispose()
+})
+
+// ── C3 (Phase 3C): the narrow-screen hidden-entry gate ────────────────────
+//
+// The plan §3.3 narrow case: browsing to About on a NARROW rail must NOT
+// start the About reads (nothing About is painted), and the content-focus
+// Enter afterwards admits exactly ONE scoped read. The runner's About seams
+// are COUNTED in the same harness as the panel, so the assertion observes
+// the reads the GATING actually admitted (removing the paintsDirectContent
+// condition fails the first assertion).
+test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter reads exactly once', async () => {
+  // A minimal runner stub with COUNTED About seams + a LIVE scope.
+  const vt = new VirtualTerminal(44, 20)
+  const reads: string[] = []
+  let generation = 1
+  let scopeObject: { readonly sessionId: string; readonly generation: number } = { sessionId: 'sess-narrow', generation }
+  const capturedScope = scopeObject
+  // The owned-task settlements are COLLECTED: `settleOwned()` drains every
+  // pending task deterministically (no fixed timers — the About read chain
+  // settles through the same barrier the assertions then observe).
+  const pendingOwned: Array<() => void> = []
+  const owned: OwnedRunner = (_label, task, runOptions) => {
+    const run = (): void => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    }
+    pendingOwned.push(run)
+  }
+  /** Deterministically drain every owned task the reads queued (no timers). */
+  async function settleCounted(): Promise<void> {
+    while (pendingOwned.length > 0) {
+      const run = pendingOwned.shift()!
+      run()
+      // The read chain settles through microtasks; yield until the queue is
+      // empty (a chain may enqueue its own next stage).
+      for (let at = 0; at < 8; at += 1) await Promise.resolve()
+    }
+    // Drain any follow-up microtask stages the last chain queued.
+    for (let at = 0; at < 8; at += 1) await Promise.resolve()
+  }
+  const events: TuiAppEvents = { onSubmit: () => {}, onExit: () => {}, runOwned: owned }
+  const app = new TuiApp(vt, events, { copySelection: async () => true })
+  app.start()
+  startedApps.add(app)
+  const defs: { name: string; handler?: unknown }[] = []
+  const commands = {
+    register: (definition: { name: string; handler?: unknown }) => { defs.push(definition); return () => {} },
+    list: () => [],
+    find: () => undefined,
+    execute: async () => undefined,
+  }
+  const ctx = new Context()
+  ctx.provide('commands', commands as never)
+  ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
+  const base: Record<string, unknown> = {
+    ctx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    progressUpdatesState: { mode: 'milestones' },
+    responseStyleState: { style: 'default' },
+    gitAttributionState: { mode: 'off' },
+    signal: new AbortController().signal,
+    commandRegistry: commands,
+    clientCommands: createClientCommandRegistry(parseCommand),
+    recordExtensionError: () => {},
+    clearExtensionError: () => {},
+    captureExtensionHealthRef: () => () => {},
+    currentSessionId: 'sess-narrow',
+    captureLiveSessionScope: () => capturedScope,
+    isSessionScopeCurrent: () => true,
+    currentSessionStats: async () => {
+      reads.push('stats')
+      return { lifetime: { turns: 1, steps: 1, llmMs: 100 } }
+    },
+    sessionReader: {
+      measureContext: () => {
+        reads.push('context')
+        return 1_000
+      },
+      sessionStatus: (sessionId: string) => {
+        reads.push('projection')
+        return { sessionId, cwd: '/ws' }
+      },
+    },
+    forceContextMeasurementResult: () => {
+      reads.push('context')
+      return { value: 1_000, observation: 'fresh' as const }
+    },
+    backendKind: 'direct' as const,
+    subscribeSessionScopeInvalidation: () => () => {},
+    listScopedCommands: () => [],
+    displayPreset: () => app.displayPreset(),
+    focusEnabled: () => false,
+    setDisplayPreset: () => ({ kind: 'unchanged', preset: 'default' }),
+    refreshStatus: () => {},
+    copyToClipboard: async () => true,
+    tuiSettings: undefined,
+    extensions: undefined,
+    openPluginManager: () => {},
+    createPluginManagerPage: () => undefined,
+    config: {
+      configReadiness: () => 'ready',
+      footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
+      subagentModelSelection: { available: () => false },
+      web: { available: () => false },
+      credentials: { available: () => false, recordsSupported: () => false },
+      providers: { available: () => false },
+      authorization: { available: () => false },
+      account: { available: () => false },
+    },
+    catalog: { models: { available: () => false } },
+  }
+  const runner = new Proxy(base, {
+    get: (target, property) => property in target ? target[property as string] : () => undefined,
+  }) as unknown as TuiCommandRunner
+  registerTuiCommandsWithDirectSeams(runner)
+  const invoke = (name = 'settings'): unknown => {
+    const definition = defs.find(candidate => candidate.name === name)
+    assert.ok(definition?.handler !== undefined, `/${name} must be registered`)
+    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
+  }
+  try {
+    // Open the workspace on a NARROW terminal: the About home owns the
+    // single column (a plain open IS the entry — one read cycle admitted).
+    invoke('settings')
+    await vt.waitForRender()
+    await settleCounted()
+    assert.equal(reads.filter(kind => kind === 'stats').length, 1, 'the narrow About home admits exactly one stats read')
+    reads.length = 0
+
+    // Esc: the content hands the keyboard back to the rail (the narrow open
+    // landed on the content — the About page STAYS the selected category).
+    sendKey(vt, '\x1b')
+    await vt.waitForRender()
+    await settleCounted()
+    assert.equal(reads.length, 0, 'Esc to the rail never reads')
+    reads.length = 0
+
+    // Browse the rail to Account and BACK to About: on a narrow terminal the
+    // About content is NOT painted while the rail owns the focus — the
+    // back-selection must admit NO reads (the hidden-entry gate).
+    sendKey(vt, '\x1b[B') // down: About → Models (the category change fires the leave)
+    await vt.waitForRender()
+    sendKey(vt, '\x1b[B') // down: Models → Account
+    await vt.waitForRender()
+    sendKey(vt, '\x1b[A') // up: Account → Models
+    await vt.waitForRender()
+    sendKey(vt, '\x1b[A') // up: Models → About (content NOT painted on narrow)
+    await vt.waitForRender()
+    await settleCounted()
+    assert.equal(reads.length, 0, `the narrow rail-browse of About admits NO reads: ${JSON.stringify(reads)}`)
+
+    // Enter: the content takes the focus and IS painted now — exactly ONE
+    // new scoped read for this entry. (The narrow frame dumps on failure.)
+    sendKey(vt, '\r')
+    await vt.waitForRender()
+    await settleCounted()
+    if (reads.filter(kind => kind === 'stats').length !== 1) {
+      throw new Error(`NARROW FRAME after Enter (reads=${JSON.stringify(reads)}):\n${vt.getViewport().map(stripTerminalSequences).map((line, at) => `${String(at).padStart(2)}|${line}`).join('\n')}`)
+    }
+    assert.equal(reads.filter(kind => kind === 'stats').length, 1, `the content entry admits exactly one read: ${JSON.stringify(reads)}`)
+    const frame = vt.getViewport().map(stripTerminalSequences).join('\n')
+    assert.match(frame, /Session ID/, 'the About facts paint after the content entry')
+  } finally {
+    app.dispose()
+  }
+})
+
+/** Send one key to a bare VirtualTerminal (no harness wrapper). */
+function sendKey(vt: VirtualTerminal, data: string): void {
+  vt.sendInput(data)
+}

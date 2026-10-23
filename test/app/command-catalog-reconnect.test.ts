@@ -378,9 +378,11 @@ function fakeRunnerDeps(options: {
     },
     status: {
       forceContextMeasurement: () => undefined,
+      forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
       sessionCwd: () => '/ws',
       refresh: () => {},
       updateWelcomeCard: () => {},
+      subscribeSessionScopeInvalidation: () => () => {},
     },
     settings: {
       applyFooterSettings: () => {},

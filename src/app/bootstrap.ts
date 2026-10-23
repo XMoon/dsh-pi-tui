@@ -1732,9 +1732,17 @@ export function applyRunnerWithRuntime(
       },
       status: {
         forceContextMeasurement: () => status.forceContextMeasurement(),
+        forceContextMeasurementResult: () => status.forceContextMeasurementResult(),
         sessionCwd: () => status.sessionCwd(),
         refresh: () => status.refresh(),
         updateWelcomeCard: () => status.updateWelcomeCard(),
+        // C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
+        // trigger — the SessionOwnershipCore's payload-less owner/generation
+        // notification, forwarded strictly unchanged (no alternate observer,
+        // no polling). This REPLACES the StatusStore subscription: the
+        // store's content-equality suppression can never carry a scope-
+        // identity signal.
+        subscribeSessionScopeInvalidation: (listener) => ownership.subscribeScopeInvalidation(listener),
       },
       settings: {
         applyFooterSettings: (doc, saved) => settings.applyFooterSettings(doc, saved),

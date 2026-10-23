@@ -134,24 +134,26 @@ export class ContextMeasurementCoordinator {
   /**
    * The C3 sibling of {@link measure}: the SAME bind/dirty/measure path (one
    * coordinator, no second cache), returning the OBSERVATION of the attempt
-   * alongside the value. `fresh` requires this attempt's own reader to
-   * answer (a valid authoritative number INCLUDING zero); a failed/unavailable
-   * attempt keeps the existing bound value and reads `last-known`; no bound
-   * value reads `unavailable`. A refused (foreign/unbound) session never
-   * measures and reads `unavailable` — never a foreign value.
+   * alongside the value. `fresh` REQUIRES this attempt's own reader to
+   * answer (a valid authoritative number INCLUDING zero); a clean cache is
+   * NOT re-labelled fresh by this API — a caller that needs a classification
+   * forces through `markDirty()` first (exactly what the StatusRuntime force
+   * does), and a clean-cache read answers `last-known` for the surviving
+   * value (it was not measured by THIS attempt) or `unavailable` when no
+   * value is bound. A refused (foreign/unbound) session never measures and
+   * reads `unavailable` — never a foreign value.
    */
   measureResult(sessionId: string | undefined, reader: (sessionId: string) => number | undefined): ContextMeasureResult {
     if (sessionId === undefined || sessionId !== this.sessionId) {
       return { value: undefined, observation: 'unavailable' }
     }
     if (!this.dirty) {
-      // A clean cache: the bound value is this session's own last measured
-      // fact. Its observation rides the EXISTING cached classification —
-      // present ⇒ it was fresh when committed and nothing since marked it
-      // dirty, so it is still fresh; absent ⇒ unknown.
+      // A clean cache: no measurement ran in THIS attempt, so the retained
+      // value (this session's own last committed fact) is last-known, not
+      // fresh — "fresh" would claim a read that never happened.
       return this.value === undefined
         ? { value: undefined, observation: 'unavailable' }
-        : { value: this.value, observation: 'fresh' }
+        : { value: this.value, observation: 'last-known' }
     }
     let fresh: number | undefined
     try {

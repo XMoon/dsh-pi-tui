@@ -35,6 +35,7 @@ import { renderActionBarRow, type ActionBarSegment } from '../presentation/actio
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH } from '../components/welcome-whale.ts'
+import { aboutFactRows, serializeAboutStatus as serializeAboutStatusOf, type AboutFact } from '../../domain/status/about.ts'
 import type { ModelsInitialView, ModelsPageExit, ModelsWorkspacePage } from './models-workspace-page.ts'
 import type { AccountInitialView, AccountWorkspacePage } from './account-workspace-page.ts'
 
@@ -207,6 +208,18 @@ export interface SettingsWorkspacePanelIntents {
     readonly dsh: string | undefined
   }
   /**
+   * C3: the lazily built per-open About status owner. Present = the About
+   * page renders its snapshot (`aboutFactRows`) with the full fact
+   * navigation/copy keyboard; absent = the legacy two-version About. The
+   * controller is constructed by the command layer per workspace open; the
+   * panel only reads and subscribes.
+   */
+  readonly aboutStatusSource?: () => import('../../app/command/about-status.ts').AboutStatusController
+  /** C3: one semantic About entry (exactly one scoped snapshot refresh). */
+  readonly onAboutEnter?: () => void
+  /** C3: the About page left (pending About updates become no-ops). */
+  readonly onAboutLeave?: () => void
+  /**
    * The Plugins category is a DIRECT page entry, not an empty Rows level: the
    * app owner builds the ONE PluginManagerWorkspacePanel lazily and returns it.
    * `done` is the page's normal close path (it returns to Settings); an external
@@ -340,7 +353,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'plugin-launch' | 'copy' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel'
+  readonly kind: 'category' | 'row' | 'plugin-launch' | 'copy' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel' | 'about-action'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -591,6 +604,33 @@ export class SettingsWorkspacePanel implements Component {
   private aboutOffset = 0
   /** The About page's scrollable extent at the last paint. */
   private aboutScrollExtent = 0
+  /**
+   * C3: the About page's SELECTED SEMANTIC FACT (the row the `↑/↓`/`c`
+   * keyboard operates on), skipped past section headers and the whale. It is
+   * an id, never a physical row: a resize rewraps rows but keeps the fact.
+   */
+  private aboutSelectedFactId: string | undefined
+  /** The fact rows painted by the LAST About frame (the selection and copy
+   *  operate on THIS captured revision's ids). */
+  private paintedAboutFacts: readonly AboutFact[] = []
+  /** The whale+header physical rows painted above the first fact row in the
+   *  last frame (selection reveal subtracts them). */
+  private paintedAboutHeaderRows = 0
+  /** The C3 About controller subscription of THIS open (acquired lazily on
+   *  the first About paint; released in dispose). */
+  private aboutUnsubscribe: (() => void) | undefined
+  /** The About ACTION targets collected by the LAST content render, in
+   *  COLUMN rows (translated to panel rows by the direct-page painter):
+   *  `copy` (the selected fact's Copy button), `copy-all`, `refresh`. */
+  private paintedAboutTargets: readonly { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number; readonly factId?: string }[] = []
+  /** The view EPOCH the last painted About frame came from: a copy gesture is
+   *  refused unless the controller's CURRENT view is the SAME revision that
+   *  was painted (a publication between paint and copy revokes the targets). */
+  private paintedAboutViewEpoch = -1
+  /** The ids the LAST completed About frame really painted in-view (the
+   *  NON-consuming keyboard-activation record — `takePaintedAboutTargets`
+   *  empties the click-target list, never this). */
+  private paintedAboutActionIds: ReadonlySet<string> = new Set()
   /** The whale variant of THIS open's About page: picked once per open, like
    *  the Welcome card picks one per process. */
   private readonly aboutWhaleVariant = pickWelcomeWhaleVariant()
@@ -719,6 +759,17 @@ export class SettingsWorkspacePanel implements Component {
     // A deeplink owns the CONTENT focus: its page is the whole answer.
     if (options?.initialModelsView !== undefined || options?.initialAccountView !== undefined) {
       this.focus = 'content'
+    }
+    // C3: subscribe THIS panel to the per-open About owner. The subscription
+    // only schedules a repaint (the panel never reads during it); the
+    // semantic `enter()` is the command layer's explicit post-mount hook.
+    if (this.intents.aboutStatusSource !== undefined) {
+      const controller = this.intents.aboutStatusSource()
+      this.aboutUnsubscribe = controller.subscribe(() => {
+        if (this.disposed) return
+        this.bumpRevision()
+        this.intents.requestRender()
+      })
     }
   }
 
@@ -935,18 +986,36 @@ export class SettingsWorkspacePanel implements Component {
     const contentWidth = Math.max(1, plan.width - contentX)
     const contentRows = Math.max(1, plan.bodyRows + plan.actionRows)
     const contentColumn = this.renderContentColumn(contentWidth, contentRows)
+    // C3: the About page's own painted targets (field Copy / Copy All /
+    // Refresh rows), collected during the content render in COLUMN coordinates.
+    const aboutTargets = this.takePaintedAboutTargets()
     const visible = narrow ? [] : this.visibleCategories(contentRows)
     for (let index = 0; index < contentRows; index += 1) {
       const content = fit(contentColumn[index] ?? '', contentWidth)
       if (narrow) {
         lines.push(content)
-        continue
+      } else {
+        const id = visible[index]
+        const rail = fit(id === undefined ? '' : this.categoryLine(id), categoryWidth)
+        lines.push(`${rail}${' '.repeat(COLUMN_GAP)}${content}`)
+        if (id !== undefined) {
+          targets.push({ kind: 'category', id, row: bodyTop + index, startCol: 0, endCol: categoryWidth })
+        }
       }
-      const id = visible[index]
-      const rail = fit(id === undefined ? '' : this.categoryLine(id), categoryWidth)
-      lines.push(`${rail}${' '.repeat(COLUMN_GAP)}${content}`)
-      if (id !== undefined) {
-        targets.push({ kind: 'category', id, row: bodyTop + index, startCol: 0, endCol: categoryWidth })
+      // The About targets translate from COLUMN rows to panel rows. A PAINTED
+      // About button is clickable regardless of which pane owns the keyboard
+      // (plan §2.1: mouse targets are the last-painted cells, keyboard focus
+      // is a separate axis — the rail keeps its keys while the visible
+      // Copy All/Refresh stay clickable). EVERY target on the row registers
+      // (the action row paints Refresh AND Copy All side by side).
+      for (const columnTarget of aboutTargets.filter(target => target.columnRow === index)) {
+        targets.push({
+          kind: 'about-action',
+          id: columnTarget.id,
+          row: bodyTop + index,
+          startCol: contentX + columnTarget.startCol,
+          endCol: contentX + columnTarget.endCol,
+        })
       }
     }
     this.paintedContentBox = { x: contentX, top: bodyTop, width: contentWidth, rows: contentRows }
@@ -1016,25 +1085,179 @@ export class SettingsWorkspacePanel implements Component {
 
   /**
    * The About projection: the SHARED whale (the Welcome card's own pattern
-   * and brand gradient) plus the two package versions. It is a read-only
-   * projection: no row, no field, no write, and no session.
+   * and brand gradient) plus the C3 semantic fact rows when a per-open
+   * controller exists — otherwise the legacy two-version rows. The render is
+   * PURE: it reads the controller's CURRENT immutable snapshot and paints it;
+   * it never calls enter(), refresh(), a stats reader or the coordinator.
    */
   private renderAboutContent(width: number, rows: number): string[] {
     const facts = this.intents.aboutVersionFacts
     const lines: string[] = []
+    let headerRows: number
     if (rows >= 9 && width >= WELCOME_WHALE_WIDTH) {
       lines.push(...renderWelcomeWhaleLines(this.aboutWhaleVariant))
       lines.push('')
       lines.push(color.textStrong('dsh-pi-tui'))
+      headerRows = lines.length
     } else {
       lines.push(color.textStrong('🐋 dsh-pi-tui'))
+      headerRows = lines.length
     }
-    lines.push(...this.aboutFactRows('TUI  ', facts.tui, width))
-    lines.push(...this.aboutFactRows('DSH  ', facts.dsh ?? 'Unknown', width))
-    this.aboutScrollExtent = Math.max(0, lines.length - rows)
-    const offset = clampOffset(this.aboutOffset, lines.length, rows)
+    const controller = this.intents.aboutStatusSource?.()
+    if (controller === undefined) {
+      // Legacy two-version About (no per-open controller composed).
+      lines.push(...this.aboutFactRows('TUI  ', facts.tui, width))
+      lines.push(...this.aboutFactRows('DSH  ', facts.dsh ?? 'Unknown', width))
+      this.paintedAboutFacts = []
+      this.paintedAboutHeaderRows = 0
+      this.aboutScrollExtent = Math.max(0, lines.length - rows)
+      const offset = clampOffset(this.aboutOffset, lines.length, rows)
+      this.aboutOffset = offset
+      return lines.slice(offset, offset + rows)
+    }
+    // C3: the semantic fact rows of the CURRENT captured view. One captured
+    // revision supplies every displayed string; copy reads THE SAME captured
+    // view (bound below), never a re-read at copy time.
+    const capturedView = controller.snapshotView()
+    const viewEpoch = capturedView.epoch
+    const aboutFacts = aboutFactRows(capturedView)
+    const selectedId = this.rebaseAboutSelection(aboutFacts)
+    const bodyWidth = Math.max(1, width - 2)
+    const rowCounts = new Map<string, number>()
+    const copyTargets: { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number; readonly factId: string }[] = []
+    const body: string[] = []
+    for (const fact of aboutFacts) {
+      // One semantic fact = one wrapped physical row group. The label owns its
+      // column; the value wraps below it and is never truncated.
+      const head = color.textDim(`${fact.label}  `)
+      const selected = fact.id === selectedId
+      // Cursor glyph = role 6 (`primary`), the selected row's text = role 8
+      // (bold textStrong) — the same anchors the category rail uses.
+      const marker = selected ? color.primary('> ') : '  '
+      const bodyText = selected
+        ? color.textStrong(sanitizedPhysicalLine(fact.displayValue))
+        : color.text(sanitizedPhysicalLine(fact.displayValue))
+      const parts = wrapTextWithAnsi(bodyText, Math.max(1, bodyWidth - visibleWidth(marker) - visibleWidth(head)))
+      const wrapped = parts.length === 0 ? [''] : parts
+      rowCounts.set(fact.id, wrapped.length)
+      const factStartRow = headerRows + body.length
+      wrapped.forEach((part, index) => {
+        body.push(index === 0 ? `${marker}${head}${part}` : `${' '.repeat(visibleWidth(marker) + visibleWidth(head))}${part}`)
+      })
+      // The per-fact Copy button paints ON THE LAST WRAPPED ROW, and its
+      // hit target covers EXACTLY the painted button cells on THAT row (the
+      // plan's last-painted rule; value text and blank cells never copy).
+      // Only real data facts get the affordance; the state-word row is inert.
+      // Affordance contract (design language §7.1): `Verb [Key]` with the key
+      // badge UPPERCASE, painted `primary` (role 14) — the same device the
+      // legacy Detail buttons use.
+      if (fact.id !== 'status.unavailable') {
+        const label = ` Copy [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]`
+        const buttonRow = headerRows + body.length - 1
+        const startCol = visibleWidth(marker) + visibleWidth(head)
+          + visibleWidth(stripTerminalSequences(wrapped[wrapped.length - 1] ?? ''))
+        body[body.length - 1] += color.primary(label)
+        copyTargets.push({
+          columnRow: buttonRow,
+          id: `about:fact:${fact.id}`,
+          startCol,
+          endCol: startCol + visibleWidth(label),
+          factId: fact.id,
+        })
+      }
+    }
+    this.paintedAboutFacts = aboutFacts
+    this.paintedAboutFactRows = rowCounts
+    this.paintedAboutHeaderRows = headerRows
+    // The ACTION row: the fixed logical `Refresh context` + `Copy All`
+    // affordances, painted as REAL targets (clicks run the same intents as
+    // the keyboard). Per plan §2.1: the Session-only Refresh is HIDDEN while
+    // sessionless, and the row degrades as WHOLE SEGMENTS (the action-bar
+    // rule) — a target exists only for a segment that survived the width.
+    // The target's `columnRow` is the ABSOLUTE column row; the painter only
+    // registers it when that row landed inside the painted viewport.
+    const live = capturedView.session.kind !== 'none'
+    const actionSegments: { readonly id: string; readonly text: string }[] = [
+      ...(live ? [{ id: 'about:refresh', text: `Refresh context [${SETTINGS_LOCAL_KEYS.refresh.toUpperCase()}]` }] : []),
+      { id: 'about:copy-all', text: `Copy All [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]` },
+    ]
+    const actions: { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number }[] = []
+    const actionRow = this.aboutActionBarSegments(actionSegments, width, (id: string, startCol: number, endCol: number) => {
+      actions.push({ columnRow: headerRows + body.length, id, startCol, endCol })
+    })
+    body.push(actionRow)
+    // ONE physical column: the whale/header rows + the fact rows (+ actions).
+    // The offset scrolls THIS list; the header scrolls away with the facts.
+    const column = [...lines, ...body]
+    this.paintedAboutFacts = aboutFacts
+    this.aboutScrollExtent = Math.max(0, column.length - rows)
+    const offset = clampOffset(this.aboutOffset, column.length, rows)
     this.aboutOffset = offset
-    return lines.slice(offset, offset + rows)
+    // Drop targets whose absolute row the viewport slice cut off (they are
+    // NOT painted; a click there is blank space and must never copy). The
+    // consumed targets are VIEWPORT-relative and bound to THE VIEW EPOCH the
+    // paint came from: a publication that supersedes this view invalidates
+    // the whole target set at once (revoked by paintedViewEpoch check).
+    this.paintedAboutViewEpoch = viewEpoch
+    // The NON-consuming record of what the frame painted (the Enter/keyboard
+    // activation reads this AFTER the painter consumed the target list).
+    this.paintedAboutActionIds = new Set([...copyTargets, ...actions]
+      .filter(target => target.columnRow >= offset && target.columnRow < offset + rows)
+      .map(target => target.id))
+    this.paintedAboutTargets = [...copyTargets, ...actions]
+      .filter(target => target.columnRow >= offset && target.columnRow < offset + rows)
+      .map(target => ({ ...target, columnRow: target.columnRow - offset }))
+    return column.slice(offset, offset + rows)
+  }
+
+  /**
+   * Lay out the About ACTION row with WHOLE-SEGMENT degradation (the shared
+   * action-bar rule): segments are dropped from the END until the row fits;
+   * a surviving segment's painted cells are reported through `onPlaced` so
+   * its hit target covers exactly the painted cells. A single remaining
+   * segment that still cannot fit paints nothing clickable (the keyboard
+   * shortcuts stay reachable — the plan's narrow rule).
+   */
+  private aboutActionBarSegments(
+    segments: readonly { readonly id: string; readonly text: string }[],
+    width: number,
+    onPlaced: (id: string, startCol: number, endCol: number) => void,
+  ): string {
+    // PURE placement first (no side effects): drop whole segments from the
+    // END until the row fits; only the FINAL placement list is painted and
+    // reported — a dropped segment never leaves a ghost hitbox.
+    let kept = [...segments]
+    const measure = (list: readonly { readonly id: string; readonly text: string }[]): number =>
+      list.reduce((total, segment) => total + visibleWidth(segment.text) + 2, 0) - (list.length > 0 ? 2 : 0)
+    while (kept.length > 1 && measure(kept) > width) kept.pop()
+    if (measure(kept) > width) {
+      // One segment left and it cannot fit: paint it truncated WITHOUT any
+      // clickable identity (keyboard remains the affordance).
+      const single = kept[0]!
+      return truncateToWidth(color.textMuted(single.text), width, '…', true)
+    }
+    const parts: string[] = []
+    let col = 0
+    for (const segment of kept) {
+      const start = col
+      // The affordance token (design language §7.1 role 14): the painted
+      // actionable segments are `primary`, matching the legacy Detail
+      // buttons.
+      parts.push(color.primary(segment.text))
+      col += visibleWidth(segment.text)
+      onPlaced(segment.id, start, col)
+      parts.push('  ')
+      col += 2
+    }
+    return parts.join('').trimEnd()
+  }
+
+  /** The About targets the LAST content render painted (consumed by the
+   *  direct-page painter exactly once per frame). */
+  private takePaintedAboutTargets(): readonly { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    const targets = this.paintedAboutTargets
+    this.paintedAboutTargets = []
+    return targets
   }
 
   /**
@@ -1052,6 +1275,174 @@ export class SettingsWorkspacePanel implements Component {
       index === 0 ? head + part : ' '.repeat(visibleWidth(head)) + part)
   }
 
+  // ── C3: the About semantic-fact keyboard/copy group ──────────────────────
+
+  /** Whether the C3 About fact model is active (a controller + painted rows). */
+  private aboutSelected(): boolean {
+    return this.intents.aboutStatusSource !== undefined
+  }
+
+  /** The controller, or `undefined` (no About fact model composed). */
+  private aboutController(): import('../../app/command/about-status.ts').AboutStatusController | undefined {
+    return this.intents.aboutStatusSource?.()
+  }
+
+  /** Rebase the selected fact id onto the CURRENT painted rows: keep the id
+   *  while its row survives, otherwise select the first fact. Returns the
+   *  effective id (or `undefined` when no facts exist). */
+  private rebaseAboutSelection(facts: readonly AboutFact[]): string | undefined {
+    if (facts.length === 0) {
+      this.aboutSelectedFactId = undefined
+      return undefined
+    }
+    if (this.aboutSelectedFactId === undefined || !facts.some(fact => fact.id === this.aboutSelectedFactId)) {
+      this.aboutSelectedFactId = facts[0]!.id
+    }
+    return this.aboutSelectedFactId
+  }
+
+  /** Move the fact selection by one row (wrapping is a navigation choice:
+   *  the ends clamp, like every other Settings list). */
+  private moveAboutSelection(delta: number): void {
+    const facts = this.paintedAboutFacts
+    if (facts.length === 0) return
+    const index = facts.findIndex(fact => fact.id === this.aboutSelectedFactId)
+    const next = Math.min(Math.max(0, (index === -1 ? 0 : index) + delta), facts.length - 1)
+    this.selectAboutFact(facts[next]!.id)
+  }
+
+  /** PgUp/PgDn: scroll a screen AND move the selection by the same step. */
+  private pageAboutSelection(step: number): void {
+    const facts = this.paintedAboutFacts
+    if (facts.length === 0) return
+    const rows = Math.max(1, Math.floor(Math.abs(step)))
+    const direction = Math.sign(step)
+    // Scroll the PHYSICAL painted rows one screen, then select the NEAREST
+    // fact in the new viewport (plan §2.1): the fact whose first painted row
+    // is fully/partially inside the post-scroll viewport.
+    const nextOffset = Math.min(
+      Math.max(0, this.aboutOffset + direction * rows),
+      this.aboutScrollExtent,
+    )
+    if (nextOffset !== this.aboutOffset) {
+      this.aboutOffset = nextOffset
+    }
+    // The painted rows of the fact groups (absolute column rows) after the
+    // scroll: header + the wrapped spans BEFORE each fact.
+    let row = this.paintedAboutHeaderRows
+    let bestIndex = -1
+    let bestDistance = Number.MAX_SAFE_INTEGER
+    for (let index = 0; index < facts.length; index += 1) {
+      const span = this.lastAboutFactRowCount(facts[index]!.id)
+      const start = row
+      const end = row + span
+      row = end
+      const inViewport = end > this.aboutOffset && start < this.aboutOffset + this.aboutPageStep()
+      if (!inViewport) continue
+      const anchor = start >= this.aboutOffset ? start : this.aboutOffset
+      const distance = Math.abs(anchor - this.aboutOffset)
+      if (distance < bestDistance) {
+        bestDistance = distance
+        bestIndex = index
+      }
+    }
+    // THE RENDER GUARANTEE: the physical offset may have moved even when the
+    // nearest fact is still the selected one (a long wrapped fact spans the
+    // viewport) — the input dispatch never schedules a repaint itself, so a
+    // same-id selection must still bump + render whenever the offset moved.
+    const targetId = facts[bestIndex === -1 ? 0 : bestIndex]!.id
+    if (targetId === this.aboutSelectedFactId) {
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
+    this.selectAboutFact(targetId)
+  }
+  private selectAboutFactByIndex(index: number): void {
+    const facts = this.paintedAboutFacts
+    if (facts.length === 0) return
+    const clamped = Math.min(Math.max(0, index), facts.length - 1)
+    this.selectAboutFact(facts[clamped]!.id)
+  }
+
+  /** Commit one fact selection: reveal its physical row group. */
+  private selectAboutFact(id: string): void {
+    if (this.aboutSelectedFactId === id) return
+    this.aboutSelectedFactId = id
+    this.revealAboutFact(id)
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Scroll the painted offset so the selected fact's FIRST row is visible. */
+  private revealAboutFact(id: string): void {
+    const facts = this.paintedAboutFacts
+    const index = facts.findIndex(fact => fact.id === id)
+    if (index === -1) return
+    // The painted row of the fact's first physical line: header rows + the
+    // wrapped groups before it. The wrap counts come from the LAST paint.
+    let row = this.paintedAboutHeaderRows
+    for (let at = 0; at < index; at += 1) row += this.lastAboutFactRowCount(facts[at]!.id)
+    if (row < this.aboutOffset) this.aboutOffset = row
+    else if (row >= this.aboutOffset + this.aboutPageStep()) this.aboutOffset = row - this.aboutPageStep() + 1
+  }
+
+  /** The wrapped physical row count of one fact at the last paint (best
+   *  effort from the painted width: reveal only needs an approximation that
+   *  stays inside the same viewport). */
+  private lastAboutFactRowCount(id: string): number {
+    return this.paintedAboutFactRows.get(id) ?? 1
+  }
+
+  /** The per-fact physical row counts painted by the LAST frame. */
+  private paintedAboutFactRows = new Map<string, number>()
+
+  /** The controller view ONLY when it is still the revision this panel
+   *  painted: a publication between the paint and the gesture revokes the
+   *  painted facts/targets (the gesture is refused, never retargeted). */
+  private paintedAboutController(): import('../../app/command/about-status.ts').AboutStatusController | undefined {
+    const controller = this.aboutController()
+    if (controller === undefined) return undefined
+    if (controller.snapshotView().epoch !== this.paintedAboutViewEpoch) return undefined
+    return controller
+  }
+
+  /** `c`: copy the selected fact's RAW copy value from THE VIEW THIS PANEL
+   *  PAINTED (never the painted ANSI string, never a re-read, never a newer
+   *  revision that has not been painted yet). */
+  private copyAboutFact(factId = this.aboutSelectedFactId): void {
+    const controller = this.paintedAboutController()
+    const id = factId
+    if (controller === undefined || id === undefined) return
+    const fact = this.paintedAboutFacts.find(row => row.id === id)
+    if (fact === undefined) return
+    this.intents.onCopy(fact.copyValue)
+  }
+
+  /** `C` / Copy All: serialize THE VIEW THIS PANEL PAINTED (the stable Copy
+   *  All contract, all defined facts even when offscreen; a publication
+   *  between paint and gesture refuses the copy). */
+  private copyAboutAll(): void {
+    const controller = this.paintedAboutController()
+    if (controller === undefined) return
+    const view = controller.snapshotView()
+    this.intents.onCopy(serializeAboutStatusOf(view))
+  }
+
+  /** `r` / the Refresh action: ONE About-scoped refresh (never the Web
+   *  settings async read, never the coordinator directly). */
+  private aboutRefresh(): void {
+    this.aboutController()?.refresh()
+  }
+
+  /** Whether the painted `Refresh context` action is in the CURRENT viewport
+   *  (the Enter/activation target exists visually). Reads the NON-consuming
+   *  painted-id record — the click-target list is consumed per frame. */
+  private aboutRefreshActionInView(): boolean {
+    return this.paintedAboutActionIds.has('about:refresh')
+  }
+
+
   /**
    * The navigation action bar: the category rail owns the keyboard, so the
    * bar advertises the rail's own keys — never the content page's. Below the
@@ -1064,11 +1455,20 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** The About page's own action bar: it scrolls and it returns to the
-   *  category rail — it never closes the workspace. */
+   *  category rail — it never closes the workspace. With the C3 fact model
+   *  the bar ALSO advertises the semantic copy/refresh keys; below the body
+   *  floor every navigation target is invisible, so only Esc survives. */
   private renderAboutActionBar(width: number): string {
     if (this.bodyFloor() < 1) return color.textMuted('Esc back')
     return color.textMuted(renderActionBarRow([
       ...(this.aboutScrollExtent > 0 ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
+      ...(this.aboutSelected()
+        ? [
+            { text: `${SETTINGS_LOCAL_KEYS.copy} copy fact`, priority: 3 },
+            { text: `${SETTINGS_LOCAL_KEYS.copy.toUpperCase()} copy all`, priority: 2 },
+            { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 5 },
+          ]
+        : []),
       { text: 'Esc back', priority: 8 },
     ], width))
   }
@@ -2165,11 +2565,28 @@ export class SettingsWorkspacePanel implements Component {
     if (matchesKey(data, 'end')) return this.jump(1)
     if (matchesKey(data, 'enter')) return this.confirm()
     if (data === SETTINGS_LOCAL_KEYS.refresh || data === SETTINGS_LOCAL_KEYS.refresh.toUpperCase()) {
+      // `r` on the rail refreshes the ROW SOURCES of the selected category:
+      // while the About page is the selected content, `r` refreshes ABOUT
+      // (its own semantic refresh — never the legacy Web settings read).
+      if (this.categoryId === 'about' && this.intents.aboutStatusSource !== undefined) {
+        this.aboutRefresh()
+        return
+      }
       this.refresh()
       this.source.onRefresh?.()
       return
     }
-    if (copyKeyPressed) return this.copy()
+    if (copyKeyPressed) {
+      // Shift+C with About selected on the rail = the About Copy All (plan
+      // §2.1); lowercase `c` stays inert (ordinary Settings detail copy).
+      if (this.categoryId === 'about'
+        && matchesKey(data, Key.shift(SETTINGS_LOCAL_KEYS.copy))
+        && this.intents.aboutStatusSource !== undefined) {
+        this.copyAboutAll()
+        return
+      }
+      return this.copy()
+    }
     // Everything else is inert inside the workspace: no key leaks to the hidden
     // editor, transcript or a host composer action.
   }
@@ -2186,12 +2603,36 @@ export class SettingsWorkspacePanel implements Component {
         this.returnToNavigation()
         return
       }
-      if (matchesKey(data, 'up')) return this.scrollAbout(-1)
-      if (matchesKey(data, 'down')) return this.scrollAbout(1)
-      if (matchesKey(data, 'pageUp')) return this.scrollAbout(-this.aboutPageStep())
-      if (matchesKey(data, 'pageDown')) return this.scrollAbout(this.aboutPageStep())
-      if (matchesKey(data, 'home')) return this.setAboutOffset(0)
-      if (matchesKey(data, 'end')) return this.setAboutOffset(Number.MAX_SAFE_INTEGER)
+      if (matchesKey(data, 'up')) return this.aboutSelected() ? this.moveAboutSelection(-1) : this.scrollAbout(-1)
+      if (matchesKey(data, 'down')) return this.aboutSelected() ? this.moveAboutSelection(1) : this.scrollAbout(1)
+      if (matchesKey(data, 'pageUp')) {
+        return this.aboutSelected() ? this.pageAboutSelection(-this.aboutPageStep()) : this.scrollAbout(-this.aboutPageStep())
+      }
+      if (matchesKey(data, 'pageDown')) {
+        return this.aboutSelected() ? this.pageAboutSelection(this.aboutPageStep()) : this.scrollAbout(this.aboutPageStep())
+      }
+      if (matchesKey(data, 'home')) return this.aboutSelected() ? this.selectAboutFactByIndex(0) : this.setAboutOffset(0)
+      if (matchesKey(data, 'end')) return this.aboutSelected() ? this.selectAboutFactByIndex(Number.MAX_SAFE_INTEGER) : this.setAboutOffset(Number.MAX_SAFE_INTEGER)
+      if (matchesKey(data, SETTINGS_LOCAL_KEYS.copy)) {
+        // Lowercase `c` acts ONLY when a fact is selected (content focus):
+        // with the keyboard on the rail it is inert (the plan's rail rule).
+        if (this.aboutSelected()) this.copyAboutFact()
+        return
+      }
+      if (matchesKey(data, Key.shift(SETTINGS_LOCAL_KEYS.copy))) {
+        this.copyAboutAll()
+        return
+      }
+      if (matchesKey(data, SETTINGS_LOCAL_KEYS.refresh)) {
+        this.aboutRefresh()
+        return
+      }
+      // Enter is the ACTION key of the selected `Refresh context` action
+      // row only — an ordinary fact is inert (the plan's frozen keymap).
+      if (matchesKey(data, 'enter')) {
+        if (this.aboutRefreshActionInView()) this.aboutRefresh()
+        return
+      }
       // Everything else is inert: the About page is a read-only projection.
       return
     }
@@ -2271,12 +2712,23 @@ export class SettingsWorkspacePanel implements Component {
     if (this.authPageHasPendingMutation() && (changed || focus !== 'content')) return
     if (changed) {
       if (this.authPageCategory !== undefined && this.authPageCategory !== category) this.closeAuthPage()
+      // C3: an About→other-category change is one semantic About leave.
+      if (this.categoryId === 'about' && category !== 'about') this.intents.onAboutLeave?.()
       this.categoryId = category
       this.rowId = isDirectCategory(category) ? undefined : this.firstRowOf(category)
       this.rowOffset = 0
       this.detailOffset = 0
       this.resetChoice()
     }
+    // C3: selecting About on the rail (keyboard OR mouse) is a semantic About
+    // entry ONLY when the About content is actually painted NOW: on a wide/
+    // medium layout the right column starts painting About facts and its copy
+    // affordances at once, so the scoped snapshot refresh is admitted on the
+    // category change. On a NARROW terminal the category list is the only
+    // projection (paintsDirectContent() is false) — nothing About is visible,
+    // so the entry waits for the content to take the focus (enterContent /
+    // the content-focus click), whose own hook admits exactly one read.
+    if (category === 'about' && changed && this.paintsDirectContent()) this.intents.onAboutEnter?.()
     this.focus = focus
     // The direct page is mounted only when its content column is PAINTED: a
     // narrow terminal that still shows the category list has no right column,
@@ -2309,6 +2761,9 @@ export class SettingsWorkspacePanel implements Component {
     const category = this.categoryId
     if (category === 'models') this.mountModelsPage({ view: 'list' })
     else if (category === 'account') this.mountAccountPage({ view: 'page' })
+    // C3: re-entering About from another category (Enter/Right on the rail,
+    // or a click) is one semantic About entry — exactly one scoped refresh.
+    if (category === 'about') this.intents.onAboutEnter?.()
     this.focus = 'content'
     this.pressedGesture = undefined
     this.contentPressed = undefined
@@ -2799,6 +3254,20 @@ export class SettingsWorkspacePanel implements Component {
         this.takeColumnFocus('detail')
         this.copySelected()
         return
+      case 'about-action': {
+        // The painted About affordance IS the action, exactly like the
+        // keyboard: a stale release never reaches here (the revision/geometry
+        // gate above already refused it), and the copy verbs bind to THE
+        // VIEW THIS PANEL PAINTED (epoch-fenced inside the copy methods).
+        if (target.id === 'about:copy-all') this.copyAboutAll()
+        else if (target.id === 'about:refresh') this.aboutRefresh()
+        else if (target.id.startsWith('about:fact:')) {
+          const factId = target.id.slice('about:fact:'.length)
+          this.copyAboutFact(factId)
+          this.selectAboutFact(factId)
+        }
+        return
+      }
       case 'legacy': {
         this.takeColumnFocus('detail')
         // The Detail bar belongs to the SELECTED row: its own deeplink target
@@ -2932,6 +3401,10 @@ export class SettingsWorkspacePanel implements Component {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // The C3 About subscription dies with the panel: a publication that
+    // arrives after the teardown can never repaint a newer surface.
+    this.aboutUnsubscribe?.()
+    this.aboutUnsubscribe = undefined
     this.closeAuthPage()
     // An external Settings teardown releases the hosted Plugin page's owner
     // exactly once; its own normal close path never runs for this case.

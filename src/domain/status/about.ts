@@ -55,6 +55,18 @@ export interface AboutStatusView {
         readonly effort?: string
         readonly preset?: string
         readonly cwd?: string
+        /** TRUE when the official Session projection could not answer (an
+         *  absent or failed read): the identity facts are then UNKNOWN, and
+         *  the view words it with the explicit `Unavailable` state row —
+         *  distinguishable from `No active session` and from a present
+         *  projection whose individual facts are absent. */
+        readonly projectionUnavailable?: boolean
+        /** TRUE when the projection read FAILED (the port's
+         *  `sessionStatusFailed` bit — the authority threw): distinct from an
+         *  ordinary absence, which is a projection that answered "no value".
+         *  The report words the two differently (`Projection: Failed` vs
+         *  `Projection: Unavailable`). */
+        readonly projectionFailed?: boolean
         /** The whole-Session statistics groups; absent when the authority
          *  could not answer. */
         readonly stats?: SessionStatsFacts
@@ -396,6 +408,21 @@ export function aboutFactRows(view: AboutStatusView): readonly AboutFact[] {
   rows.push(
     { id: 'session.id', section: 'session', label: 'Session ID', displayValue: session.sessionId, copyValue: session.sessionId, available: true },
     ...sessionIdentityFacts(session),
+    // The projection's own availability row: a missing/failed official
+    // projection is an explicit state word — distinguishable from
+    // `No active session` and never silently folded into a ready view.
+    // A FAILED read (`Projection: Failed`) is distinct from an ordinary
+    // absence (`Projection: Unavailable`).
+    ...(session.projectionUnavailable === true
+      ? [{
+          id: 'status.unavailable' as const,
+          section: 'session' as const,
+          label: 'Projection',
+          displayValue: session.projectionFailed === true ? 'Failed' : UNAVAILABLE,
+          copyValue: session.projectionFailed === true ? 'Failed' : UNAVAILABLE,
+          available: true,
+        }]
+      : []),
     ...statisticsFacts(session),
     ...performanceFacts(session),
     ...contextFacts(session),
@@ -424,10 +451,14 @@ export function aboutFactRows(view: AboutStatusView): readonly AboutFact[] {
  * reads `No active session`. The whale is decoration and never serialized.
  */
 export function serializeAboutStatus(view: AboutStatusView): string {
+  // Every external/raw field passes the SAME control guard (the plan's
+  // "verbatim except dangerous terminal controls") — the runtime versions
+  // and the Session ID are untrusted inputs just like the title.
+  const safe = (value: string): string => copySafe(value)
   const lines: string[] = [
     'dsh-pi-tui Status',
-    `TUI: ${view.runtime.tui}`,
-    `DSH: ${view.runtime.dsh ?? 'Unknown'}`,
+    `TUI: ${safe(view.runtime.tui)}`,
+    `DSH: ${safe(view.runtime.dsh ?? 'Unknown')}`,
     `Backend: ${view.runtime.backend === 'direct' ? 'Direct' : 'Remote'}`,
   ]
   const session = view.session
@@ -436,43 +467,58 @@ export function serializeAboutStatus(view: AboutStatusView): string {
     return lines.join('\n')
   }
   // The ONE captured revision supplies every copied value (never a re-read).
+  // A LOADING live view serializes the SAME fixed report shape: every defined
+  // id in order, its pending/absent authority worded (never a dropped group).
   const rows = aboutFactRows(view)
   const valueOf = (id: AboutFactId, fallback = UNAVAILABLE): string =>
     rows.find(row => row.id === id)?.copyValue ?? fallback
-  lines.push('', 'Session', `Session ID: ${session.sessionId}`)
-  if (session.kind !== 'loading') {
-    lines.push(
-      `Title: ${valueOf('session.title')}`,
-      `Provider: ${valueOf('session.provider')}`,
-      `Model: ${valueOf('session.model')}`,
-      `Reasoning effort: ${valueOf('session.effort')}`,
-      `Preset: ${valueOf('session.preset')}`,
-      `CWD: ${valueOf('session.cwd')}`,
-      '',
-      'Statistics',
-      `Turns: ${valueOf('stats.turns')}`,
-      `Steps: ${valueOf('stats.steps')}`,
-      // The report keeps BOTH the readable duration and the exact raw ms —
-      // the row's display value already carries the pair; absent words
-      // Unavailable without a fabricated suffix.
-      `LLM wall: ${rows.find(row => row.id === 'stats.llmMs')?.displayValue ?? UNAVAILABLE}`,
-      `Input tokens: ${valueOf('tokens.input')}`,
-      `Output tokens: ${valueOf('tokens.output')}`,
-      `Cache read tokens: ${valueOf('tokens.cacheRead')}`,
-      `Cache write tokens: ${valueOf('tokens.cacheWrite')}`,
-      `Cache hit: ${valueOf('tokens.cacheHitPct')}`,
-      '',
-      'Performance',
-      `TTFB (recent): ${rows.find(row => row.id === 'performance.recentTTFB')?.displayValue ?? UNAVAILABLE}`,
-      `R5 tokens/sec: ${valueOf('performance.R5')}`,
-      `All tokens/sec: ${valueOf('performance.All')}`,
-      '',
-      'Context',
-      `Used tokens: ${valueOf('context.used')}`,
-      `Window tokens: ${valueOf('context.window')}`,
-      `Percent: ${valueOf('context.percent')}`,
-      `Observation: ${session.context === 'fresh' ? 'Fresh' : session.context === 'last-known' ? 'Last-known' : UNAVAILABLE}`,
-    )
+  const displayOf = (id: AboutFactId, fallback = UNAVAILABLE): string =>
+    rows.find(row => row.id === id)?.displayValue ?? fallback
+  lines.push('', 'Session', `Session ID: ${safe(session.sessionId)}`)
+  lines.push(
+    `Title: ${valueOf('session.title')}`,
+    `Provider: ${valueOf('session.provider')}`,
+    `Model: ${valueOf('session.model')}`,
+    `Reasoning effort: ${valueOf('session.effort')}`,
+    `Preset: ${valueOf('session.preset')}`,
+    `CWD: ${valueOf('session.cwd')}`,
+    '',
+    'Statistics',
+    `Turns: ${valueOf('stats.turns')}`,
+    `Steps: ${valueOf('stats.steps')}`,
+    // The report keeps BOTH the readable duration and the exact raw ms —
+    // the row's display value already carries the pair; absent words
+    // Unavailable without a fabricated suffix.
+    `LLM wall: ${displayOf('stats.llmMs')}`,
+    `Input tokens: ${valueOf('tokens.input')}`,
+    `Output tokens: ${valueOf('tokens.output')}`,
+    `Cache read tokens: ${valueOf('tokens.cacheRead')}`,
+    `Cache write tokens: ${valueOf('tokens.cacheWrite')}`,
+    `Cache hit: ${valueOf('tokens.cacheHitPct')}`,
+    '',
+    'Performance',
+    `TTFB (recent): ${displayOf('performance.recentTTFB')}`,
+    `R5 tokens/sec: ${valueOf('performance.R5')}`,
+    `All tokens/sec: ${valueOf('performance.All')}`,
+    '',
+    'Context',
+    `Used tokens: ${valueOf('context.used')}`,
+    `Window tokens: ${valueOf('context.window')}`,
+    `Percent: ${valueOf('context.percent')}`,
+    `Observation: ${session.kind === 'loading'
+      ? 'Loading…'
+      : session.context === 'fresh' ? 'Fresh' : session.context === 'last-known' ? 'Last-known' : UNAVAILABLE}`,
+  )
+  if (session.kind === 'loading') {
+    lines.push('Status: Loading…')
+  } else if (session.projectionUnavailable === true) {
+    // The failure bit words the projection state precisely (plan §3.2
+    // step 5): a thrown authority is `Failed`, an answered-absent one is
+    // `Unavailable` — never one shared word for two different states.
+    lines.push(session.projectionFailed === true ? 'Projection: Failed' : 'Projection: Unavailable')
+  }
+  if (session.kind === 'unavailable') {
+    lines.push('Status: Unavailable')
   }
   return lines.join('\n')
 }

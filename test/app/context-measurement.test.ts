@@ -522,3 +522,89 @@ test('structural gate: the status owner keeps measurement out of cheap refreshes
   const deferBlock = stripped.slice(deferStart, deferEnd)
   assert.ok(deferBlock.includes('.isDirty()'), 'the deferred initial measure must skip an already-measured session')
 })
+
+// ── C3: measureResult — the additive read-result sibling ──────────────────
+
+test('C3 measureResult: a fresh authoritative answer (including ZERO) reads fresh exactly once', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(0)
+  coordinator.bind('session-a')
+  const result = coordinator.measureResult('session-a', counting.reader)
+  assert.deepEqual(result, { value: 0, observation: 'fresh' }, 'a valid authoritative ZERO is FRESH, never unknown')
+  assert.equal(counting.measureCalls, 1)
+  // A CLEAN cache read does NOT run the reader and is NOT re-labelled
+  // fresh: no measurement ran in this attempt, so the retained value is
+  // last-known. A caller wanting a classification forces (markDirty) first.
+  const again = coordinator.measureResult('session-a', counting.reader)
+  assert.deepEqual(again, { value: 0, observation: 'last-known' }, 'a clean-cache read is last-known, never a fresh claim without a read')
+  assert.equal(counting.measureCalls, 1, 'the clean cache never re-runs the reader')
+  // The forced re-read classifies fresh again.
+  coordinator.markDirty()
+  const forced = coordinator.measureResult('session-a', counting.reader)
+  assert.deepEqual(forced, { value: 0, observation: 'fresh' })
+  assert.equal(counting.measureCalls, 2)
+})
+
+test('C3 measureResult: a failed attempt with a bound value reads last-known and stays dirty', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(50_000)
+  coordinator.bind('session-a')
+  coordinator.measureResult('session-a', counting.reader)
+  counting.value = undefined as unknown as number
+  coordinator.markDirty()
+  const failed = coordinator.measureResult('session-a', counting.reader)
+  assert.deepEqual(failed, { value: 50_000, observation: 'last-known' }, 'the failed attempt keeps the last-good value and labels it')
+  assert.equal(coordinator.isDirty(), true, 'a failed attempt stays dirty for the next lifecycle retry')
+  assert.equal(counting.measureCalls, 2)
+})
+
+test('C3 measureResult: a failed attempt with NO bound value reads unavailable, never 0', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const failing = (_sessionId: string): number | undefined => undefined
+  coordinator.bind('session-a')
+  const failed = coordinator.measureResult('session-a', failing)
+  assert.deepEqual(failed, { value: undefined, observation: 'unavailable' })
+  assert.equal(coordinator.isDirty(), true)
+  // A THROWING reader behaves identically (the best-effort policy).
+  const throwing = (_sessionId: string): number | undefined => { throw new Error('backend exploded') }
+  const thrown = coordinator.measureResult('session-a', throwing)
+  assert.deepEqual(thrown, { value: undefined, observation: 'unavailable' })
+})
+
+test('C3 measureResult: the A→B session switch clears the old value; B cannot inherit A', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(10_000)
+  coordinator.bind('session-a')
+  coordinator.measureResult('session-a', counting.reader)
+  coordinator.bind('session-b')
+  assert.equal(coordinator.valueFor('session-a'), undefined, 'the switch clears A from the cache')
+  // B measures FRESH through its own attempt — never as A's last-known.
+  const foreign = coordinator.measureResult('session-b', counting.reader)
+  assert.deepEqual(foreign, { value: 10_000, observation: 'fresh' })
+  assert.equal(counting.measureCalls, 2, 'B ran its OWN reader attempt')
+  // A refused (foreign) session id never measures at all.
+  coordinator.markDirty()
+  const refused = coordinator.measureResult('session-a', counting.reader)
+  assert.deepEqual(refused, { value: undefined, observation: 'unavailable' })
+  assert.equal(counting.measureCalls, 2, 'a foreign id never reaches the reader')
+})
+
+test('C3 measureResult: one force = one reader call; the legacy measure keeps its semantics', () => {
+  const coordinator = new ContextMeasurementCoordinator()
+  const counting = countingReader(70_000)
+  coordinator.bind('session-a')
+  // The legacy path is untouched: same value, same dirty discipline.
+  const legacy = measuredRefresh(coordinator, 'session-a', counting.reader)
+  assert.equal(legacy, 70_000)
+  assert.equal(coordinator.isDirty(), false)
+  counting.value = undefined as unknown as number
+  coordinator.markDirty()
+  // The force sibling: ONE reader call, last-known classification.
+  const forced = coordinator.measureResult('session-a', counting.reader)
+  assert.deepEqual(forced, { value: 70_000, observation: 'last-known' })
+  assert.equal(counting.measureCalls, 2, 'the force runs the reader exactly once')
+  // The dirty flag survives (the failed force must be retried by the next
+  // lifecycle event) and a subsequent legacy measure retries through the
+  // SAME path.
+  assert.equal(coordinator.isDirty(), true)
+})

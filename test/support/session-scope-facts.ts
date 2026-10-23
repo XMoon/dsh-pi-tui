@@ -64,6 +64,10 @@ export interface SessionScopeFacts {
   currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
   lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   refreshSessionCatalog(scope: SessionScope, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
+  /** C3 About seams (generic stub defaults; a suite overrides after the spread). */
+  forceContextMeasurementResult(): { readonly value: number | undefined; readonly observation: 'fresh' | 'last-known' | 'unavailable' }
+  backendKind: 'direct' | 'remote'
+  subscribeSessionScopeInvalidation(listener: () => void): () => void
   refreshStandingCatalog(presetId: string | undefined, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
   applyPermissionPreset(
     scope: LiveSessionScope,
@@ -218,5 +222,11 @@ export function sessionScopeFacts(
       agentForLiveScope(scope)
       return 'applied' as const
     },
+    // C3 About seams: the generic stub has no StatusRuntime coordinator (the
+    // explicit force reads `unavailable`) and a no-op invalidation trigger; a
+    // suite that asserts About behavior overrides these AFTER the spread.
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    backendKind: 'direct' as const,
+    subscribeSessionScopeInvalidation: () => () => {},
   }
 }
