@@ -165,23 +165,35 @@ export type ToolSvgState =
   /** The final content did not authorize a drawing (or admission refused it). */
   | { readonly state: 'invalid'; readonly reason: string }
 
-/** PR-D RFL-018: validate a Tern toggle against the CURRENT source scope and
- * derive the parent-scoped disclosure identity. A toggle from an older
- * `s0-`-scoped projection is ignored even if its `msg-N` matches the current
- * projection; the SDK node ids stay untouched. */
+function normalizeTopLevelDisclosure(segment: string, scopePrefix: string): string | undefined {
+  if (segment.startsWith(`${scopePrefix}msg-`)) return segment.slice(scopePrefix.length)
+  if (segment.startsWith('msg-')) return segment
+  return undefined
+}
+
+/** PR-D RFL-018/RFL-019: validate a Tern toggle against the CURRENT source
+ * scope and derive the parent-scoped disclosure identity. It handles Work
+ * cards (`...s1-work-msg-1.msg-2`), standalone cards (the key itself is
+ * `s1-msg-2`), and children whose `subCallId` may contain dots (the Folder
+ * does not restrict them): the SDK node key is a KNOWN suffix, so it is
+ * stripped instead of split. A late event from an older `s0-` projection is
+ * ignored before any disclosure state changes. SDK node keys stay untouched. */
 export function disclosureKeyForToggle(
   eventId: string,
   key: string | undefined,
   scopePrefix: string,
 ): string | undefined {
   if (scopePrefix === '' || !eventId.includes(`.${scopePrefix}`)) return undefined
-  const segments = eventId.split('.')
-  let toolStart = -1
-  for (let index = segments.length - 1; index >= 0; index -= 1) {
-    if (segments[index]!.startsWith('msg-')) { toolStart = index; break }
-  }
-  if (toolStart < 0) return undefined
-  return segments.slice(toolStart).join('/')
+  const nodeKey = key !== undefined && key !== '' ? key : eventId.slice(eventId.lastIndexOf('.') + 1)
+  if (nodeKey === '' || !eventId.endsWith(`.${nodeKey}`)) return undefined
+  const own = normalizeTopLevelDisclosure(nodeKey, scopePrefix)
+  if (own !== undefined) return own
+  const parentId = eventId.slice(0, eventId.length - nodeKey.length - 1)
+  const parentSegments = parentId.split('.')
+  const topIndex = parentSegments.findIndex(segment => normalizeTopLevelDisclosure(segment, scopePrefix) !== undefined)
+  if (topIndex < 0) return undefined
+  const top = normalizeTopLevelDisclosure(parentSegments[topIndex]!, scopePrefix)!
+  return [top, ...parentSegments.slice(topIndex + 1), nodeKey].join('/')
 }
 
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
@@ -653,11 +665,15 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
     ? options.toolSvgStates?.get(message)
     : undefined
   const collapsible = message.name === 'dsh_pi_tui_svg' && svgState?.state === 'ready'
-  // The top-level tool-card disclosure identity is its existing node key; the
-  // child path in `toolChildNodes` extends it for nested scopes.
+  // The top-level disclosure identity is the message key WITHOUT the outer
+  // source scope: a standalone card's SDK key is `s1-msg-N`, while a Work card
+  // is already `msg-N`. The SDK node key itself stays unchanged.
+  const disclosure = options.scopePrefix !== undefined && key.startsWith(options.scopePrefix)
+    ? key.slice(options.scopePrefix.length)
+    : key
   const collapsed = collapsible
     && options.expandedToolKeys !== undefined
-    && !options.expandedToolKeys.has(key)
+    && !options.expandedToolKeys.has(disclosure)
   const body = toolBodyParts(message, options, hasChildren, collapsed)
   if (isUnmatchedToolRow(message)) {
     const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
@@ -691,7 +707,7 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
       }),
     },
     ...body.args,
-    ...toolChildNodes(message, options, key),
+    ...toolChildNodes(message, options, disclosure),
     ...body.result,
   )
 }
