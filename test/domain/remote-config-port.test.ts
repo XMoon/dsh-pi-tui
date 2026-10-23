@@ -1493,9 +1493,9 @@ test('visualTools mirrors the Host section and writes the exact enabled path thr
   })
   assert.equal(port.visualTools.read(), undefined, 'a never-described mirror has no authority to report')
   await port.describe()
-  assert.deepEqual(port.visualTools.read(), { enabled: true, userOverridden: false, applied: undefined })
+  assert.deepEqual(port.visualTools.read(), { enabled: true, revision: 4, userOverridden: false, applied: undefined })
 
-  await port.visualTools.setEnabled(false)
+  await port.visualTools.setEnabled(false, 4)
   assert.equal(state.mutateCalls.length, 1)
   assert.equal(state.mutateCalls[0]!.ns, 'pi-tui-visual-tools')
   assert.deepEqual(state.mutateCalls[0]!.ops, [{ op: 'set', path: ['enabled'], value: false }])
@@ -1508,7 +1508,7 @@ test('visualTools reports a namespace the Host does not expose instead of fabric
   const { port } = createBackend()
   await port.describe()
   assert.equal(port.visualTools.read(), undefined)
-  await assert.rejects(port.visualTools.setEnabled(true), /not available in this deployment/u)
+  await assert.rejects(port.visualTools.setEnabled(true, 1), /not available in this deployment/u)
 })
 
 test('a stale visualTools read stays last-known and the write is refused by the currentness fence', async () => {
@@ -1522,10 +1522,35 @@ test('a stale visualTools read stays last-known and the write is refused by the 
   await port.describe()
   state.describeFailure = { code: 'gateway/disconnected', message: 'connection lost' }
   await assert.rejects(port.describe())
-  assert.deepEqual(port.visualTools.read(), { enabled: true, userOverridden: false, applied: undefined },
+  assert.deepEqual(port.visualTools.read(), { enabled: true, revision: 2, userOverridden: false, applied: undefined },
     'the last-known value remains READABLE but configReadiness reports it non-current')
   assert.equal(port.configReadiness(), 'stale')
   const callsBefore = state.mutateCalls.length
-  await assert.rejects(port.visualTools.setEnabled(false), /settings\.describe failed: connection lost/u)
+  await assert.rejects(port.visualTools.setEnabled(false, 2), /settings\.describe failed: connection lost/u)
   assert.equal(state.mutateCalls.length, callsBefore, 'a stale mirror never dispatches the switch')
+})
+
+
+test('a visualTools confirm submits the revision the decision was read at, never the refreshed one', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('pi-tui-visual-tools', {
+      ns: 'pi-tui-visual-tools',
+      value: { enabled: true },
+      revision: 5,
+    })
+  })
+  await port.describe()
+  const decision = port.visualTools.read()
+  assert.equal(decision?.revision, 5)
+
+  // An external writer commits Off between the UI read and the Confirm.
+  const entry = state.namespaces.get('pi-tui-visual-tools')!
+  entry.value.enabled = false
+  entry.revision = 6
+
+  await assert.rejects(port.visualTools.setEnabled(false, decision.revision), /revision 5 != 6/u,
+    'the stale decision is refused by the official revision fence')
+  assert.deepEqual(state.mutateCalls.at(-1)?.revision, 5,
+    'the ORIGINAL decision revision was submitted, not the refreshed mirror revision')
+  assert.equal(port.visualTools.read()?.enabled, false, 'the external value remains authoritative')
 })

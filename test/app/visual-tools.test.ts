@@ -217,3 +217,24 @@ test('a re-enable conflict leaves NO half-enabled pair and reports it as not app
   assert.equal(applied(), true)
   assert.deepEqual(ctx.tools.schemas().map(schema => schema.name).sort(), [CHART_TOOL_NAME, SVG_TOOL_NAME].sort())
 })
+
+test('a throwing tools/change listener never strands the second registration on Off', () => {
+  const { ctx, applied, setEnabled } = mountVisualTools()
+  // A Host listener that throws on every removal notification: the first
+  // disposer's synchronous `tools/change` emit propagates the failure.
+  const off = ctx.on('tools/change', () => { throw new Error('tools/change listener exploded') })
+  assert.throws(() => setEnabled(false), (error: unknown) => {
+    assert.ok(error instanceof AggregateError, `both release failures are surfaced together: ${String(error)}`)
+    assert.equal(error.errors.length, 2, 'BOTH disposers ran despite the first one throwing')
+    assert.match(String(error.errors[0]), /tools\/change listener exploded/u)
+    return true
+  })
+  assert.equal(ctx.tools.get(CHART_TOOL_NAME), undefined)
+  assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined, 'the second disposer was not skipped')
+  assert.equal(applied(), false, 'the pair status reflects the real registry')
+  // Once the broken Host listener is gone, the switch is applicable again.
+  off()
+  setEnabled(true)
+  assert.equal(applied(), true)
+  assert.deepEqual(ctx.tools.schemas().map(schema => schema.name).sort(), [CHART_TOOL_NAME, SVG_TOOL_NAME].sort())
+})

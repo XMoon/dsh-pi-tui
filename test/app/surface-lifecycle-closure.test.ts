@@ -1467,9 +1467,9 @@ test('a legacy handoff that loses the surface to a NEWER workspace never mounts 
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
   // Wide (80x24): the About home -> Other settings -> rows -> activate the row.
-  // The rail order is About, Models, Account, Appearance, Display, Plugins,
-  // Other settings: six Down presses reach the legacy launcher row.
-  for (let step = 0; step < 6; step += 1) {
+  // The rail order is About, Models, Account, Appearance, Display, Tools,
+  // Plugins, Other settings: seven Down presses reach the legacy launcher row.
+  for (let step = 0; step < 7; step += 1) {
     vt.sendInput('\x1b[B'); await vt.waitForRender()
   }
   vt.sendInput('\r'); await vt.waitForRender()
@@ -1594,9 +1594,9 @@ test('a legacy handoff never crosses a blocking owner started by its own close',
   })
   await vt.waitForRender()
   // Wide (80x24): the About home -> Other settings -> rows -> activate the row.
-  // The rail order is About, Models, Account, Appearance, Display, Plugins,
-  // Other settings: six Down presses reach the legacy launcher row.
-  for (let step = 0; step < 6; step += 1) {
+  // The rail order is About, Models, Account, Appearance, Display, Tools,
+  // Plugins, Other settings: seven Down presses reach the legacy launcher row.
+  for (let step = 0; step < 7; step += 1) {
     vt.sendInput('\x1b[B'); await vt.waitForRender()
   }
   vt.sendInput('\r'); await vt.waitForRender()

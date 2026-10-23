@@ -558,9 +558,10 @@ same screen are untouched.
 
 `/settings` opens a fullscreen Settings
 workspace with the same temporary physical-screen lease as the Job workspace, and
-the two leases are MUTUALLY EXCLUSIVE. The whole surface is a read
-projection; exactly two of its rows (`Configured theme`, `Transcript display`)
-have a write channel, and every other row is read-only.
+the two leases are MUTUALLY EXCLUSIVE. The whole surface is a read projection
+whose writable-row set and value contracts are owned by
+[surface-behavior.md](./surface-behavior.md) `Settings Workspace`; this section
+owns only the lease, focus and write-lifecycle mechanics.
 
 - **One lease latch for both workspaces.** `TuiApp.openSettingsWorkspace` mints a
   short-lived `TuiAltScreen` whose layout root and keyboard focus target is the
@@ -640,8 +641,8 @@ this ONE lease.** The Plugins category is a direct page entry,
   the only copy source (a plain click can never put a character on the clipboard).
   The Action Bar advertises only the keys the current level and row grant actually
   honour: below the body floor it shows the Esc/back semantics alone.
-- **The L2 edit phase is a transient phase of the SAME lease.** On the two
-  writable rows, `Right`/`Enter`/`[Change…]` opens an in-pane candidate choice
+- **The L2 edit phase is a transient phase of the SAME lease.** On a writable
+  row, `Right`/`Enter`/`[Change…]` opens an in-pane candidate choice
   directly from L1; `Left`/`Esc`/`Backspace`/`[Cancel]` cancels to L1 with zero
   writes. The choice is presentation state inside the panel, never a fourth
   navigation level, a second screen or a second focus owner. The shared Detail
@@ -664,9 +665,10 @@ this ONE lease.** The Plugins category is a direct page entry,
   the value and the real reason) — so the failure of a write dispatched before the
   close stays diagnosable even though no UI sink is live any more.
 - **Write currentness is explicit, never inferred from the UI.** A commit
-  only counts as `Verified` on a completed `ConfigPort.tuiSettings` mutation plus
-  an authoritative re-read that agrees with a `configReadiness() === 'ready'`
-  backend. A non-ready backend refuses the theme commit before it applies
+  only counts as `Verified` on a completed mutation of the row's own ConfigPort
+  authority (the TUI settings document for theme/display, the Host
+  `pi-tui-visual-tools` form section for Visual tools) plus an authoritative
+  re-read that agrees with a `configReadiness() === 'ready'` backend. A non-ready backend refuses the theme commit before it applies
   anything; a display commit may apply the Client-local runtime fact and then
   reports that it could not be stored. A REJECTED write is never attributed: the
   authority is re-read (the Remote adapter forces that read on a failed RPC, whose

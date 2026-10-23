@@ -199,7 +199,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
       visualTools: {
         read: () => undefined,
-        setEnabled: async () => {},
+        setEnabled: async (_enabled: boolean, _revision: number) => {},
       },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),

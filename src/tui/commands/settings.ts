@@ -1305,6 +1305,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return {
       field: 'visual-tools',
       primary: 'persisted',
+      ...(state === undefined ? {} : { revision: state.revision }),
       options: editable
         ? [
             { value: 'On', label: 'On', available: true, current: state.enabled },
@@ -1385,11 +1386,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   /** Commit the ONE profile-wide switch through the official revision-checked
    *  settings write, then re-read the authority (a resolved write is not a
-   *  read-back). */
-  const commitVisualTools = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+   *  read-back). `revision` is the revision the painted candidate was read at:
+   *  submitting it is what turns a concurrent external edit into a conflict
+   *  instead of a silent overwrite. */
+  const commitVisualTools = async (
+    value: string,
+    revision: number | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
     const enabled = visualToolsValueOf(value)
     if (enabled === undefined) {
       return { outcome: 'not-saved', reason: `"${value}" is not a visual tools candidate` }
+    }
+    if (revision === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
     }
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
@@ -1400,7 +1409,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return { outcome: 'not-saved', reason: 'the Host visual tools setting is unavailable; the switch was not changed' }
     }
     try {
-      await runner.config.visualTools.setEnabled(enabled)
+      await runner.config.visualTools.setEnabled(enabled, revision)
     } catch (error) {
       return classifyRejectedVisualTools(enabled, base.enabled, safeErrorMessage(error))
     }
@@ -1540,7 +1549,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // theme nor a display preset, so it must never reach those writers by
     // falling through a binary default.
     const outcome = request.field === 'visual-tools'
-      ? await commitVisualTools(request.value)
+      ? await commitVisualTools(request.value, request.revision)
       : request.field === 'display-preset'
         ? await commitDisplayPreset(request.value)
         : await commitTheme(request.value)
@@ -1679,9 +1688,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /**
    * Phase 3B / B2-A: the read projection of the Settings workspace. Every call
    * re-reads the LIVE authorities — the ConfigPort readiness and TUI settings
-   * document, the runtime display preset and the Client presentation preference —
-   * and assembles the five fixed pilot rows; the two writable rows additionally
-   * carry their candidate source and the runtime/persisted facts. It captures NO
+   * document, the Host visual-tools section, the runtime display preset and the
+   * Client presentation preference — and assembles the fixed rows; every
+   * writable row additionally carries its candidate source and its
+   * runtime/persisted facts. It captures NO
    * shadow store: a missing document is `unavailable` (never a persisted
    * default), a stale backend keeps the document as `last-known`, and a throwing
    * `get()` is the row's explicit `read-error`.

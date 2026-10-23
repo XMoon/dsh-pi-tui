@@ -1594,15 +1594,20 @@ class RemoteVisualToolsConfig implements VisualToolsConfig {
     const enabled = value?.enabled
     // A missing/non-boolean projection is unreadable, never the default.
     if (typeof enabled !== 'boolean') return undefined
+    const revision = view.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
     const user = plainRecord(view.user)
     return {
       enabled,
+      revision,
       userOverridden: user?.enabled !== undefined,
       applied: undefined,
     }
   }
 
-  async setEnabled(enabled: boolean): Promise<void> {
+  async setEnabled(enabled: boolean, expectedRevision: number): Promise<void> {
     const view = this.mirror.namespace(VISUAL_TOOLS_NS)
     if (view === undefined) {
       throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" is not available in this deployment`)
@@ -1610,12 +1615,15 @@ class RemoteVisualToolsConfig implements VisualToolsConfig {
     if (view.value === undefined) {
       throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" exposes no form projection`)
     }
+    // The decision's revision is the fence. The mirror may have refreshed its
+    // snapshot since the UI read; re-reading view.revision here would authorize
+    // a stale decision against a newer Host document.
     // `record`: a failed post-settlement refresh is a currentness uncertainty,
     // not proof of refusal — the consumer re-reads and classifies.
     await this.mirror.mutate(
       VISUAL_TOOLS_NS,
       [{ op: 'set', path: ['enabled'], value: enabled }],
-      view.revision,
+      expectedRevision,
       'record',
     )
   }

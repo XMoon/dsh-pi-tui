@@ -52,8 +52,8 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
   /** The shipped profile-wide visual-tools default: both tools registered and
    *  no USER override. The `/settings` snapshot reads it on every open. */
   visualTools: {
-    read: () => ({ enabled: true, userOverridden: false, applied: true }),
-    setEnabled: async () => {},
+    read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
+    setEnabled: async (_enabled: boolean, _revision: number) => {},
   },
 } as const
 

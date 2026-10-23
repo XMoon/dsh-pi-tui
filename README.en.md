@@ -391,7 +391,7 @@ readiness. `R`
 re-reads and `C` copies the selected row's exact source value. Browsing, choosing
 and copying alone never write configuration.
 
-The Settings categories are now `Models / Account / Appearance / Display / Tools / Plugins /
+The Settings categories are now `About / Models / Account / Appearance / Display / Tools / Plugins /
 Other settings`; `/settings` still lands on About. `Models` is an in-place page: it lists
 the Host provider directory, whether an API key is configured (presence only, never a
 connection test) and the DeepSeek Account entry; it exposes provider facts, a masked API-key
