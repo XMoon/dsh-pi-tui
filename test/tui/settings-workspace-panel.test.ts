@@ -497,3 +497,35 @@ test('C3 a newline/tab title cannot forge a Copy All report line', () => {
   )
   assert.ok(report.includes('Title: normal\\nBackend: Remote\\t- tail'), 'the title stays one escaped line')
 })
+
+test('C3 a generic ESC intermediate/final sequence is dropped whole in both copy paths', () => {
+  const copied: string[] = []
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: {
+      kind: 'ready',
+      sessionId: 'sess-esc',
+      title: 'pre\u001b(B-post',
+      cwd: '/ws',
+      context: 'fresh',
+    },
+    epoch: 1,
+  }
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    aboutStatusSource: staticAboutSource(view),
+    onCopy: text => { copied.push(text) },
+  })
+  plain(h, 44)
+  for (let step = 0; step < 4; step += 1) h.panel.handleInput('\x1b[B')
+  const frame = plain(h, 44)
+  assert.ok(
+    frame.split('\n').some(line => line.includes('Title') && line.includes('pre-post')),
+    `the painted Title is sanitized like the copy:\n${frame}`,
+  )
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), 'pre-post', 'the single-field copy drops the whole ESC sequence')
+  h.panel.handleInput('C')
+  assert.ok(copied.at(-1)!.includes('Title: pre-post'), 'Copy All drops the whole ESC sequence')
+})

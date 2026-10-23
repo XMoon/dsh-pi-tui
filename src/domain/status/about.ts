@@ -181,12 +181,25 @@ function copySafe(value: string): string {
     const code = value.charCodeAt(at)
     if (code === 0x1b) {
       // ESC introducer: CSI, OSC, DCS, SOS, PM or APC consumes its whole
-      // sequence; any other ESC pair is a two-byte escape and drops both.
+      // sequence. A generic ESC form is intermediate bytes (0x20–0x2F)* plus
+      // one final byte (0x30–0x7E) and drops whole; a bare/unknown ESC drops
+      // ONLY the ESC so the following ordinary Unicode character survives.
       const next = value.charCodeAt(at + 1)
-      at += 2
-      if (next === 0x5b) consumeCsi()
-      else if (next === 0x5d) consumeString(true)
-      else if (next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) consumeString(false)
+      if (next === 0x5b) { at += 2; consumeCsi(); continue }
+      if (next === 0x5d) { at += 2; consumeString(true); continue }
+      if (next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) {
+        at += 2
+        consumeString(false)
+        continue
+      }
+      if (next >= 0x20 && next <= 0x2f) {
+        at += 1
+        while (at < length && value.charCodeAt(at) >= 0x20 && value.charCodeAt(at) <= 0x2f) at += 1
+        if (at < length && value.charCodeAt(at) >= 0x30 && value.charCodeAt(at) <= 0x7e) at += 1
+        continue
+      }
+      if (next >= 0x30 && next <= 0x7e) { at += 2; continue }
+      at += 1
       continue
     }
     // The C1 introducers are the exact equivalents of the ESC forms above.
