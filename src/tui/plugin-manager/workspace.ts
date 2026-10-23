@@ -226,6 +226,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private diagnosticsSelection = 0
   private diagnosticsOffset = 0
   private diagnosticsReveal = false
+  /** Whether the CURRENT diagnostics content is taller than its body. */
+  private diagnosticsScrollable = false
   private readonly searchInput = new Input({ prompt: '' })
   private readonly specInput = new Input({ prompt: '' })
   private readonly registryInput = new Input({ prompt: '' })
@@ -547,11 +549,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'pageUp')) {
-      this.moveDiagnosticsSelection(-this.diagnosticsPageStep())
+      this.scrollDiagnostics(-1)
       return
     }
     if (matchesKey(data, 'pageDown')) {
-      this.moveDiagnosticsSelection(this.diagnosticsPageStep())
+      this.scrollDiagnostics(1)
       return
     }
     if (matchesKey(data, 'home')) {
@@ -1098,7 +1100,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private selectDiagnosticsFirst(): void {
-    if (this.diagnosticsSelection === 0) return
+    // Always re-reveal: Home must bring a wheel-scrolled selection back even
+    // when its index is already first.
     this.diagnosticsSelection = 0
     this.diagnosticsReveal = true
     this.bumpRevision()
@@ -1107,9 +1110,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private selectDiagnosticsLast(): void {
     const count = this.diagnosticsFacts().length
-    if (count === 0 || this.diagnosticsSelection === count - 1) return
+    if (count === 0) return
     this.diagnosticsSelection = count - 1
     this.diagnosticsReveal = true
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** PgUp/PgDn page the CONTENT (the selection stays where it is); the
+   *  render clamps the offset to the real content height. */
+  private scrollDiagnostics(direction: -1 | 1): void {
+    const step = this.diagnosticsPageStep()
+    this.diagnosticsOffset = Math.max(0, this.diagnosticsOffset + direction * step)
+    this.diagnosticsReveal = false
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -1311,10 +1324,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const built = this.buildDiagnosticsLayout(plan.width, selectedId)
     const viewport = plan.bodyRows
     const span = selectedId === undefined ? undefined : built.spans.get(selectedId)
+    this.diagnosticsScrollable = built.lines.length > viewport
     if (span !== undefined && this.diagnosticsReveal) {
-      if (span.start < this.diagnosticsOffset) this.diagnosticsOffset = span.start
+      // A fact taller than the viewport is revealed from its FIRST line, so
+      // the cursor, identity and state chip are always on screen; PgUp/PgDn
+      // then pages the remaining rows. A shorter fact aligns fully.
+      if (span.count > viewport) this.diagnosticsOffset = span.start
+      else if (span.start < this.diagnosticsOffset) this.diagnosticsOffset = span.start
       else if (span.start + span.count > this.diagnosticsOffset + viewport) {
-        this.diagnosticsOffset = Math.max(span.start, span.start + span.count - viewport)
+        this.diagnosticsOffset = span.start + span.count - viewport
       }
     }
     this.diagnosticsOffset = clampOffset(this.diagnosticsOffset, built.lines.length, viewport)
@@ -1793,10 +1811,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.ensureSelection()
     this.ensureDetailSelection()
     this.ensureDiagnosticsSelection(this.diagnosticsFacts().length)
-    const noticeLive = this.controller.notice() !== undefined
+    const hostNoticeLive = this.controller.notice() !== undefined
       || this.controller.status().state === 'error'
       || this.controller.model().exemptionWarnings.length > 0
-      || this.intents.notice?.() !== undefined
+    // Diagnostics paints extension health only: a Host inventory notice
+    // must not dominate a freshly read extension projection.
+    const noticeLive = this.view === 'diagnostics'
+      ? this.intents.notice?.() !== undefined
+      : hostNoticeLive || this.intents.notice?.() !== undefined
     const plan = planChrome(safeWidth, liveRows, noticeLive)
     this.paintedChrome = plan
     const lines: string[] = []
@@ -1818,6 +1840,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.paintedConfirmActionValues = []
       this.paintedConfirmScrollMax = 0
       this.installSelection = Number.MAX_SAFE_INTEGER
+      this.diagnosticsScrollable = false
     }
     if (plan.ruleRows >= 2) lines.push(color.border('─'.repeat(plan.width)))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
@@ -1911,9 +1934,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       : plan.wide
         ? `${model.cards.length} plugins · ${enabled} enabled`
         : `${enabled}/${model.cards.length} enabled`
-    // A failed refresh keeps the last good list visible but must not look
-    // current: the header carries the Stale word (the notice carries the error).
-    const stale = this.controller.status().state === 'error' ? `${color.warning('Stale')} · ` : ''
+    // A failed refresh keeps the last good HOST inventory visible but must not
+    // look current. Diagnostics is a different truth source: its counts were
+    // just read, so the Host inventory's Stale state never prefixes them.
+    const stale = this.view !== 'diagnostics' && this.controller.status().state === 'error'
+      ? `${color.warning('Stale')} · `
+      : ''
     return composeEdge(lead, `${stale}${color.textMuted(counts)}`, plan.width)
   }
 
@@ -1982,12 +2008,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const exemptionWarning = model.exemptionWarnings.length === 0
       ? undefined
       : `version exemptions: ${model.exemptionWarnings.join(' · ')}`
-    const message = this.controller.notice()
-      ?? (this.controller.status().state === 'error' ? this.controller.status().error : undefined)
-      ?? exemptionWarning
-      ?? appNotice?.text
+    const message = this.view === 'diagnostics'
+      // The Host inventory's transient error/exemption is not extension
+      // diagnostics; only the app-wide notice is shared chrome.
+      ? appNotice?.text
+      : this.controller.notice()
+        ?? (this.controller.status().state === 'error' ? this.controller.status().error : undefined)
+        ?? exemptionWarning
+        ?? appNotice?.text
     if (message === undefined) return fit('', plan.width)
-    const kind = this.controller.status().state === 'error'
+    const kind = (this.view !== 'diagnostics' && this.controller.status().state === 'error')
       || appNotice?.kind === 'error'
       || /failed|unknown|refused|cannot|error/i.test(message)
       ? 'error'
@@ -2068,8 +2098,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       ]
     }
     if (this.view === 'diagnostics') {
+      if (this.diagnosticsSnapshot === undefined) {
+        return [
+          { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
+          { text: 'Esc back', priority: 100 },
+        ]
+      }
       return [
         { text: 'Up/Down fact', priority: 40 },
+        ...(this.diagnosticsScrollable ? [{ text: 'PgUp/PgDn scroll', priority: 35 }] : []),
         { text: `${WORKSPACE_KEYS.copy} copy`, priority: 70 },
         { text: `${WORKSPACE_KEYS.copyAll} copy all`, priority: 65 },
         { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },

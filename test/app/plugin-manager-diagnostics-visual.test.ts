@@ -101,7 +101,7 @@ function contributionCopyRow(viewport: readonly string[], id: string): number {
   assert.fail(`no painted Copy button for ${id}:\n${plain(viewport)}`)
 }
 
-test('the frozen size matrix paints within the width and reaches every fact', async () => {
+test('the frozen size matrix paints within the width and the last fact stays reachable', async () => {
   const diagnostics = view([
     entry({ id: 'first-renderer' }),
     entry({ id: 'last-renderer', owner: 'uid:owner-b', entryId: 'entry-b', state: 'active', lastError: undefined }),
@@ -135,10 +135,10 @@ test('the frozen size matrix paints within the width and reaches every fact', as
   }
 })
 
-test('a long CJK Host error wraps without ellipsis and copies in full', async () => {
-  const errorText = `renderer callback failed: ${'长鲸错'.repeat(40)}`
+test('at 30x8 a long CJK Host error starts at its identity and is fully reachable by PgDn', async () => {
+  const errorText = `renderer callback failed: ${'长鲸错'.repeat(40)} [END]`
   const diagnostics = view([entry({ lastError: errorText })])
-  const harness = await open(() => diagnostics, 44, 20)
+  const harness = await open(() => diagnostics, 30, 8)
   try {
     harness.vt.sendInput('d')
     await harness.settle()
@@ -147,24 +147,39 @@ test('a long CJK Host error wraps without ellipsis and copies in full', async ()
       harness.vt.sendInput('\x1b[B')
       await harness.settle()
     }
-    let union = ''
-    for (let page = 0; page < 8; page += 1) {
-      union += plain(harness.viewport())
+    // A fact taller than the 3-row body must reveal its FIRST line: the
+    // cursor, extensionPoint:id and the state chip are all visible.
+    const start = plain(harness.viewport())
+    assert.match(start, />/)
+    assert.match(start, /transcript\.tool\.renderer/)
+    assert.match(start, /\[failed\]/)
+    // Page to the END of the block: the unique tail marker proves the last
+    // physical error row is reachable by keyboard (overlapping page frames
+    // make a naive concatenation non-contiguous).
+    let sawCjk = false
+    let sawTail = false
+    for (let page = 0; page < 12; page += 1) {
       harness.vt.sendInput('\x1b[6~') // PgDn
       await harness.settle()
+      const frame = plain(harness.viewport())
+      if (frame.includes('长鲸错')) sawCjk = true
+      if (frame.includes('[END]')) sawTail = true
     }
-    assert.ok(union.includes('长鲸错'), 'the CJK error text is painted')
-    // The error is WRAPPED across rows: the whole message survives, so no
-    // content cell was replaced by an ellipsis (the meta row's own chrome
-    // truncation is not the error).
-    assert.ok(
-      union.replace(/\s+/g, '').includes(errorText.replace(/\s+/g, '')),
-      'the whole Host error is reachable through scrolling',
-    )
+    assert.match(start, /renderer callback/, 'the error block starts on the selected fact\'s next row')
+    assert.ok(sawCjk, 'the CJK error text is painted while paging')
+    assert.ok(sawTail, 'the final error row is reachable by keyboard scrolling')
+    // End is already on the last fact; it must still re-reveal the start
+    // after the wheel/page scroll moved the offset.
+    harness.vt.sendInput('\x1b[F') // End
+    await harness.settle()
+    const revealed = plain(harness.viewport())
+    assert.match(revealed, />/)
+    assert.match(revealed, /transcript\.tool\.renderer/)
+    assert.match(revealed, /\[failed\]/)
     harness.vt.sendInput('c')
     await harness.settle()
     assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(entry({ lastError: errorText })))
-    assert.match(harness.copied.at(-1) ?? '', /长鲸错/)
+    assert.match(harness.copied.at(-1) ?? '', /\[END\]/)
   } finally {
     started.delete(harness)
     harness.app.dispose()
