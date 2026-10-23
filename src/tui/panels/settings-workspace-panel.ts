@@ -610,6 +610,10 @@ export class SettingsWorkspacePanel implements Component {
    * an id, never a physical row: a resize rewraps rows but keeps the fact.
    */
   private aboutSelectedFactId: string | undefined
+  /** Whether the keyboard selection is on the About `Refresh context` action
+   *  instead of a fact. Enter only fires the action while this is true AND the
+   *  action is in the painted viewport; an ordinary fact is inert. */
+  private aboutActionSelected = false
   /** The fact rows painted by the LAST About frame (the selection and copy
    *  operate on THIS captured revision's ids). */
   private paintedAboutFacts: readonly AboutFact[] = []
@@ -1113,6 +1117,7 @@ export class SettingsWorkspacePanel implements Component {
       lines.push(...this.aboutFactRows('DSH  ', facts.dsh ?? 'Unknown', width))
       this.paintedAboutFacts = []
       this.paintedAboutView = undefined
+      this.aboutActionSelected = false
       this.paintedAboutHeaderRows = 0
       this.aboutScrollExtent = Math.max(0, lines.length - rows)
       const offset = clampOffset(this.aboutOffset, lines.length, rows)
@@ -1125,6 +1130,19 @@ export class SettingsWorkspacePanel implements Component {
     const capturedView = controller.snapshotView()
     const aboutFacts = aboutFactRows(capturedView)
     const selectedId = this.rebaseAboutSelection(aboutFacts)
+    const live = capturedView.session.kind !== 'none'
+    // A sessionless view hides the Session-only Refresh action: the action
+    // cannot stay selected without a painted action to select.
+    if (!live) this.aboutActionSelected = false
+    // A selected Refresh action costs the 2-cell cursor; the action row drops
+    // whole segments from the END (Copy All first), so the selected action is
+    // valid only while the cursor + its whole label fit. Clear an invalid
+    // selection BEFORE the fact rows paint, so a boundary width never frames
+    // "no selection at all".
+    const refreshText = `Refresh context [${SETTINGS_LOCAL_KEYS.refresh.toUpperCase()}]`
+    if (this.aboutActionSelected && visibleWidth(refreshText) > Math.max(1, width - 2)) {
+      this.aboutActionSelected = false
+    }
     const bodyWidth = Math.max(1, width - 2)
     const rowCounts = new Map<string, number>()
     const copyTargets: { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number; readonly factId: string }[] = []
@@ -1133,7 +1151,7 @@ export class SettingsWorkspacePanel implements Component {
       // One semantic fact = one wrapped physical row group. The label owns its
       // column; the value wraps below it and is never truncated.
       const head = color.textDim(`${fact.label}  `)
-      const selected = fact.id === selectedId
+      const selected = !this.aboutActionSelected && fact.id === selectedId
       // Cursor glyph = role 6 (`primary`), the selected row's text = role 8
       // (bold textStrong) — the same anchors the category rail uses.
       const marker = selected ? color.primary('> ') : '  '
@@ -1159,14 +1177,21 @@ export class SettingsWorkspacePanel implements Component {
         const buttonRow = headerRows + body.length - 1
         const startCol = visibleWidth(marker) + visibleWidth(head)
           + visibleWidth(stripTerminalSequences(wrapped[wrapped.length - 1] ?? ''))
-        body[body.length - 1] += color.primary(label)
-        copyTargets.push({
-          columnRow: buttonRow,
-          id: `about:fact:${fact.id}`,
-          startCol,
-          endCol: startCol + visibleWidth(label),
-          factId: fact.id,
-        })
+        const endCol = startCol + visibleWidth(label)
+        // Whole-affordance fit test (design language §8): the button paints and
+        // registers a target ONLY when its complete `Verb [Key]` fits this
+        // content row. A clipped `Co…` must never leave a hit target; the
+        // keyboard `c` keeps the fact copyable without the painted button.
+        if (endCol <= width) {
+          body[body.length - 1] += color.primary(label)
+          copyTargets.push({
+            columnRow: buttonRow,
+            id: `about:fact:${fact.id}`,
+            startCol,
+            endCol,
+            factId: fact.id,
+          })
+        }
       }
     }
     this.paintedAboutFacts = aboutFacts
@@ -1179,15 +1204,26 @@ export class SettingsWorkspacePanel implements Component {
     // rule) — a target exists only for a segment that survived the width.
     // The target's `columnRow` is the ABSOLUTE column row; the painter only
     // registers it when that row landed inside the painted viewport.
-    const live = capturedView.session.kind !== 'none'
     const actionSegments: { readonly id: string; readonly text: string }[] = [
-      ...(live ? [{ id: 'about:refresh', text: `Refresh context [${SETTINGS_LOCAL_KEYS.refresh.toUpperCase()}]` }] : []),
+      ...(live ? [{ id: 'about:refresh', text: refreshText }] : []),
       { id: 'about:copy-all', text: `Copy All [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]` },
     ]
     const actions: { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number }[] = []
-    const actionRow = this.aboutActionBarSegments(actionSegments, width, (id: string, startCol: number, endCol: number) => {
-      actions.push({ columnRow: headerRows + body.length, id, startCol, endCol })
-    })
+    const placeActions = (available: number, shift: number): string =>
+      this.aboutActionBarSegments(actionSegments, available, (id: string, startCol: number, endCol: number) => {
+        actions.push({ columnRow: headerRows + body.length, id, startCol: startCol + shift, endCol: endCol + shift })
+      })
+    const actionSelected = this.aboutActionSelected && live
+    let actionRow = placeActions(actionSelected ? Math.max(1, width - 2) : width, actionSelected ? 2 : 0)
+    if (actionSelected && !actions.some(target => target.id === 'about:refresh')) {
+      // The selected Refresh segment did not survive the width: it cannot be
+      // the selected action. Fall back to the fact selection and rebuild the
+      // row WITHOUT a dangling cursor.
+      this.aboutActionSelected = false
+      actions.length = 0
+      actionRow = placeActions(width, 0)
+    }
+    if (this.aboutActionSelected) actionRow = color.primary('> ') + actionRow
     body.push(actionRow)
     // ONE physical column: the whale/header rows + the fact rows (+ actions).
     // The offset scrolls THIS list; the header scrolls away with the facts.
@@ -1298,21 +1334,40 @@ export class SettingsWorkspacePanel implements Component {
   private rebaseAboutSelection(facts: readonly AboutFact[]): string | undefined {
     if (facts.length === 0) {
       this.aboutSelectedFactId = undefined
+      this.aboutActionSelected = false
       return undefined
     }
     if (this.aboutSelectedFactId === undefined || !facts.some(fact => fact.id === this.aboutSelectedFactId)) {
       this.aboutSelectedFactId = facts[0]!.id
+      this.aboutActionSelected = false
     }
     return this.aboutSelectedFactId
   }
 
-  /** Move the fact selection by one row (wrapping is a navigation choice:
-   *  the ends clamp, like every other Settings list). */
+  /** Move the About selection by one row. The ends clamp like every other
+   *  Settings list; ↓ past the LAST fact enters the painted `Refresh context`
+   *  action (only while it is really in the viewport), and ↑ returns to the
+   *  last fact. Enter is only accepted on that explicitly selected action. */
   private moveAboutSelection(delta: number): void {
     const facts = this.paintedAboutFacts
     if (facts.length === 0) return
+    if (this.aboutActionSelected) {
+      if (delta < 0) {
+        this.aboutActionSelected = false
+        this.bumpRevision()
+        this.intents.requestRender()
+      }
+      return
+    }
     const index = facts.findIndex(fact => fact.id === this.aboutSelectedFactId)
-    const next = Math.min(Math.max(0, (index === -1 ? 0 : index) + delta), facts.length - 1)
+    const current = index === -1 ? 0 : index
+    if (delta > 0 && current === facts.length - 1 && this.aboutRefreshActionInView()) {
+      this.aboutActionSelected = true
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
+    const next = Math.min(Math.max(0, current + delta), facts.length - 1)
     this.selectAboutFact(facts[next]!.id)
   }
 
@@ -1320,6 +1375,9 @@ export class SettingsWorkspacePanel implements Component {
   private pageAboutSelection(step: number): void {
     const facts = this.paintedAboutFacts
     if (facts.length === 0) return
+    // Paging always lands on a FACT: drop an action selection before the
+    // nearest-fact computation.
+    this.aboutActionSelected = false
     const rows = Math.max(1, Math.floor(Math.abs(step)))
     const direction = Math.sign(step)
     // Scroll the PHYSICAL painted rows one screen, then select the NEAREST
@@ -1372,7 +1430,8 @@ export class SettingsWorkspacePanel implements Component {
 
   /** Commit one fact selection: reveal its physical row group. */
   private selectAboutFact(id: string): void {
-    if (this.aboutSelectedFactId === id) return
+    if (this.aboutSelectedFactId === id && !this.aboutActionSelected) return
+    this.aboutActionSelected = false
     this.aboutSelectedFactId = id
     this.revealAboutFact(id)
     this.bumpRevision()
@@ -1418,9 +1477,13 @@ export class SettingsWorkspacePanel implements Component {
   /** `c`: copy the selected fact's RAW copy value from THE VIEW THIS PANEL
    *  PAINTED (never the painted ANSI string, never a re-read, never a newer
    *  revision that has not been painted yet). */
-  private copyAboutFact(factId = this.aboutSelectedFactId): void {
+  private copyAboutFact(factId?: string): void {
+    // The keyboard `c` copies the SELECTED fact; with the Refresh action
+    // selected there is no selected fact, so `c` is inert. A painted field
+    // Copy click passes its fact id explicitly and still copies.
+    if (factId === undefined && this.aboutActionSelected) return
     const controller = this.paintedAboutController()
-    const id = factId
+    const id = factId ?? this.aboutSelectedFactId
     if (controller === undefined || id === undefined) return
     const fact = this.paintedAboutFacts.find(row => row.id === id)
     if (fact === undefined) return
@@ -1442,9 +1505,10 @@ export class SettingsWorkspacePanel implements Component {
     this.aboutController()?.refresh()
   }
 
-  /** Whether the painted `Refresh context` action is in the CURRENT viewport
-   *  (the Enter/activation target exists visually). Reads the NON-consuming
-   *  painted-id record — the click-target list is consumed per frame. */
+  /** Whether the painted `Refresh context` action is in the CURRENT viewport.
+   *  Both the ↓-past-the-last-fact selection and the Enter activation require
+   *  this; a painted-id record is NON-consuming (the click-target list is
+   *  consumed per frame). */
   private aboutRefreshActionInView(): boolean {
     return this.paintedAboutActionIds.has('about:refresh')
   }
@@ -2634,10 +2698,12 @@ export class SettingsWorkspacePanel implements Component {
         this.aboutRefresh()
         return
       }
-      // Enter is the ACTION key of the selected `Refresh context` action
-      // row only — an ordinary fact is inert (the plan's frozen keymap).
+      // Enter is the ACTION key of the SELECTED `Refresh context` action only
+      // — an ordinary fact is inert (the plan's frozen keymap). Selection is
+      // explicit (↓ past the last fact while the action is in view); mere
+      // viewport presence never authorizes a refresh.
       if (matchesKey(data, 'enter')) {
-        if (this.aboutRefreshActionInView()) this.aboutRefresh()
+        if (this.aboutActionSelected && this.aboutRefreshActionInView()) this.aboutRefresh()
         return
       }
       // Everything else is inert: the About page is a read-only projection.
