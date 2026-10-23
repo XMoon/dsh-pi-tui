@@ -1565,9 +1565,12 @@ export class SettingsWorkspacePanel implements Component {
     // The Plugin Manager's page owns its own Tab; the rail never advertises a
     // key this category ignores.
     if (this.categoryId === 'plugins') return []
+    // Priority 2 keeps the region hint BELOW the About copy/refresh action
+    // hints and EVERY existing navigation hint: on a tight content column the
+    // region key drops first instead of crowding out a semantic action.
     return [
-      { text: `${SETTINGS_REGION_LABELS.forward} ${forward === 'focus' ? 'focus' : 'panes'}`, priority: 3 },
-      ...(backward ? [{ text: `${SETTINGS_REGION_LABELS.backward} back`, priority: 3 }] : []),
+      { text: `${SETTINGS_REGION_LABELS.forward} ${forward === 'focus' ? 'focus' : 'panes'}`, priority: 2 },
+      ...(backward ? [{ text: `${SETTINGS_REGION_LABELS.backward} back`, priority: 2 }] : []),
     ]
   }
 
