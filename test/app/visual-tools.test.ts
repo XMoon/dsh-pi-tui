@@ -18,6 +18,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   apply as applyVisualTools,
   CHART_TOOL_NAME,
+  Config,
   SVG_TOOL_NAME,
 } from '../../src/app/host/visual-tools.ts'
 import {
@@ -297,4 +298,23 @@ test('a newer target queued during a THROWING release is still applied', () => {
   const status = ctx.get(VISUAL_TOOLS_STATUS_SERVICE) as VisualToolsRuntimeStatus
   assert.equal(status.applied(), true, 'the newest target survives the throwing transition')
   assert.deepEqual(ctx.tools.schemas().map(schema => schema.name).sort(), [CHART_TOOL_NAME, SVG_TOOL_NAME].sort())
+})
+
+test('disposing the owning fiber releases both registrations and the status service', async () => {
+  const ctx = mountRegistry()
+  const fiber = await ctx.plugin({
+    name: 'visual-tools-fiber-probe',
+    inject: ['tools'],
+    Config,
+    apply: applyVisualTools,
+  })
+  assert.notEqual(ctx.tools.get(CHART_TOOL_NAME), undefined)
+  assert.notEqual(ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.notEqual(ctx.get(VISUAL_TOOLS_STATUS_SERVICE), undefined)
+
+  await fiber.dispose()
+  assert.equal(ctx.tools.get(CHART_TOOL_NAME), undefined)
+  assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.equal(ctx.get(VISUAL_TOOLS_STATUS_SERVICE), undefined,
+    'the fiber-owned status service is released with the registrations')
 })
