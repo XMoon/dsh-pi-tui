@@ -27,7 +27,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
-import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-app-boot'
+import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
   SELF_BUNDLE,
@@ -46,6 +46,10 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { disposeContext } from '../support/runner-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
+/** The exact installed DSH runtime this checkout develops against. The Host
+ *  derives every install target and exemption grant from this same value, so
+ *  the fixture must never hardcode a released version of it. */
+const RUNTIME_VERSION = getDshRuntimeVersion()
 
 function seedProfile(workRoot: string): {
   profileContext: Record<string, unknown>
@@ -62,7 +66,7 @@ function seedProfile(workRoot: string): {
     private: true,
     // The installation ships the 12 Optional bundles; the two on-demand
     // subagent bundles are catalog-only.
-    dependencies: Object.fromEntries(OPTIONAL_BUNDLES.map(name => [name, '0.2.1-rc.2'])),
+    dependencies: Object.fromEntries(OPTIONAL_BUNDLES.map(name => [name, RUNTIME_VERSION])),
   }, null, 2))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 'rc2-catalog-fixture-profile',
@@ -76,7 +80,7 @@ function seedProfile(workRoot: string): {
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'package.json'), JSON.stringify({
       name,
-      version: '0.2.1-rc.2',
+      version: RUNTIME_VERSION,
       private: true,
       dsh: { bundle: { patch: [] } },
     }, null, 2))
@@ -178,8 +182,8 @@ test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand
     assert.equal(bundle.optional, false, 'on-demand catalog entries are not shipped Optional bundles')
     assert.equal(bundle.availability, 'missing')
     assert.equal(bundle.installed, false)
-    assert.equal(bundle.installTarget?.version, '0.2.1-rc.2')
-    assert.equal(bundle.installTarget?.spec, `${name}@0.2.1-rc.2`)
+    assert.equal(bundle.installTarget?.version, RUNTIME_VERSION)
+    assert.equal(bundle.installTarget?.spec, `${name}@${RUNTIME_VERSION}`)
   }
 
   // REAL Host records -> the SHARED mapping -> stable identity -> classifier.
@@ -221,8 +225,9 @@ test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand
       assert.equal(card.availability, 'missing')
       assert.equal(card.canInstall, true)
       assert.ok(detail.actions.some(action => action.value === 'action:official-install' && action.enabled))
-      assert.equal(card.installTarget?.spec, `${card.name}@0.2.1-rc.2`)
-      assert.match(upgrade!.value, new RegExp(`^Install: Use the official offered target ${card.name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}@0\\.2\\.1-rc\\.2 \\(version 0\\.2\\.1-rc\\.2\\); this is not an in-place update\\.$`))
+      assert.equal(card.installTarget?.spec, `${card.name}@${RUNTIME_VERSION}`)
+      assert.equal(upgrade!.value,
+        `Install: Use the official offered target ${card.name}@${RUNTIME_VERSION} (version ${RUNTIME_VERSION}); this is not an in-place update.`)
       assert.match(upgrade!.value, /this is not an in-place update/)
       assert.equal(facts.find(fact => fact.label === 'Current version')?.value, 'unavailable')
     } else {
@@ -513,7 +518,7 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
     dsh: { bundle: { patch: 'cordis.patch.yml' } },
   }, null, 2))
   writeFileSync(join(profileDir, 'compatibility.json'), JSON.stringify({
-    [`${seeded.bundleName}@1.0.0`]: ['0.2.1-rc.2'],
+    [`${seeded.bundleName}@1.0.0`]: [RUNTIME_VERSION],
   }, null, 2))
 
   const ctx = new Context()
@@ -536,7 +541,7 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
   assert.ok(row !== undefined)
   assert.equal(row.error, undefined, 'the Host accepted the exempted package without an incompatible error')
   assert.deepEqual(snapshot.exemptions, [
-    { packageVersion: `${seeded.bundleName}@1.0.0`, runtimeVersions: ['0.2.1-rc.2'] },
+    { packageVersion: `${seeded.bundleName}@1.0.0`, runtimeVersions: [RUNTIME_VERSION] },
   ])
 
   const inputs: PluginClassificationInput[] = snapshot.bundles.map(bundle => ({

@@ -4,14 +4,14 @@
  *
  * Three explicit modes, never a fake pass:
  *
- * - default (no flags): OFFLINE inspection of the provisioned official rc.2
+ * - default (no flags): OFFLINE inspection of the provisioned official
  *   installation used by `test/support/optional-bundle-fixture.ts`.
  *   A missing/wrong-version artifact is `BLOCKED`; npm/profile/restart and any
  *   external/native capability stay `EXTERNAL_UNVERIFIED` (this mode performs
  *   no public network call).
  * - `--network`: the REAL pinned-npm CLI profile loop: install
- *   `@deepseek-ai/dsh@0.2.1-rc.2` into an isolated harness, install one exact
- *   `@deepseek-ai/dsh-experimental-*@0.2.1-rc.2` bundle into an isolated
+ *   `@deepseek-ai/dsh@<exact target>` into an isolated harness, install one exact
+ *   `@deepseek-ai/dsh-experimental-*@<exact target>` bundle into an isolated
  *   profile, compose/restart the profile with `--dump-config`, then remove the
  *   dependency and dump again. Requires an explicit flag because it downloads
  *   public npm artifacts.
@@ -23,9 +23,10 @@
  * - `--gate`: operator/CI gate mode. Exit nonzero whenever the provisioned
  *   fixture is BLOCKED instead of silently treating the offline inspection as a
  *   pass.
- * - `--provision`: install the official rc.2 package set into the fixture's
- *   `temp/s4-d2-bundles` tree (a local test artifact, never a tracked
- *   dependency). This is the one-time setup the in-process fixture consumes.
+ * - `--provision`: install the official package set at this checkout's exact
+ *   target into the fixture's `temp/s4-d2-bundles` tree (a local test artifact,
+ *   never a tracked dependency). This is the one-time setup the in-process
+ *   fixture consumes.
  *
  * Usage:
  *   node scripts/dsh-s4-d2-bundles-smoke.mjs --provision
@@ -51,7 +52,9 @@ import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const TARGET_VERSION = '0.2.1-rc.2'
+/** The exact DSH family this checkout develops against. Provisioned artifacts
+ *  and the profile loop must match the same manifest the version bump edits. */
+const TARGET_VERSION = npmDshVersion()
 const PNPM_COMMAND = pnpmExecutable()
 const FIXTURE_CACHE = join(REPO_ROOT, 'temp', 's4-d2-bundles')
 const PROVISION_TIMEOUT_MS = 20 * 60_000
@@ -158,7 +161,7 @@ function inspectFixtureInstallation() {
   }
 }
 
-/** One-time local provisioning of the official rc.2 package set for the tests. */
+/** One-time local provisioning of the official target package set for the tests. */
 function provisionFixtureCache(options) {
   mkdirSync(FIXTURE_CACHE, { recursive: true })
   const repoManifest = readJson(join(REPO_ROOT, 'package.json'))
@@ -225,10 +228,6 @@ function dumpProfileTree(invocation, profile, harnessDir, env, phase) {
 
 /** The REAL pinned-npm profile loop (requires --network). */
 function runNetworkLoop(bundle, evidence) {
-  const targetDshVersion = npmDshVersion()
-  if (targetDshVersion !== TARGET_VERSION) {
-    fail('INFRA_VERSION', `checkout target DSH ${targetDshVersion} is not the frozen ${TARGET_VERSION}`)
-  }
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-s4-d2-smoke-'))
   const home = join(workDir, 'home')
   const dshHome = join(workDir, 'dsh-home')

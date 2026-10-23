@@ -4,7 +4,7 @@
  * ONE isolated, real composition per bundle:
  *
  * ```text
- * temp installation manifest (the 12 shipped Optional bundles @ exact rc.2)
+ * temp installation manifest (the 12 shipped Optional bundles @ exact target)
  *   └─ temp profile package.json (dsh.profile.bundles: base [+ target])
  *       └─ official loadProfileDirectory() reads the REAL bundle manifest and
  *          its REAL cordis.patch.yml files from the installation
@@ -14,12 +14,13 @@
  *               └─ real Host services / Agent / Session / ToolRuntime
  * ```
  *
- * `PRODUCTION PREREQUISITES REPRODUCED`: the published rc.2 `dsh-base` family
- * and the published rc.2 Optional bundle packages (exact version), the official
+ * `PRODUCTION PREREQUISITES REPRODUCED`: the published `dsh-base` family at the
+ * checkout's exact target and the published Optional bundle packages (same
+ * exact version), the official
  * profile manifest/patch reader, the official boot Loader, the four shipped
  * preset declarations, real Agent/Session/ToolRuntime/permission services.
  * `TEST STAND-INS`: a temporary profile/installation root whose `node_modules`
- * is one provisioned rc.2 installation tree (a linked layout, not a copied
+ * is one provisioned installation tree (a linked layout, not a copied
  * product graph), the TUI overlay's agent-plane rows without the TUI screen
  * rows, and a scripted LLM transport in the tests that own one.
  * `DELIBERATELY ABSENT`: the user's real `DSH_HOME`, network installs inside
@@ -36,17 +37,20 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { boot, loadOverlayPatches, loadProfileDirectory, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-app-boot'
+import { boot, getDshRuntimeVersion, loadOverlayPatches, loadProfileDirectory, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-app-boot'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { TestContext } from 'node:test'
 import { testLifecycle } from './temp-lifecycle.ts'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const TARGET_DSH_VERSION = '0.2.1-rc.2'
+/** The exact official DSH family these artifacts must belong to. The Host
+ *  derives its own install targets from this same runtime version, so the
+ *  fixture never carries a released-version literal that drifts on a bump. */
+const TARGET_DSH_VERSION = getDshRuntimeVersion()
 const BASE_BUNDLE = '@deepseek-ai/dsh-base'
 const BIN_NAME = 'dsh'
 
-/** The exact rc.2 Optional/on-demand bundle identities (B01–B14). */
+/** The exact target Optional/on-demand bundle identities (B01–B14). */
 export const S4_D2_BUNDLE_IDS = [
   '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
@@ -66,7 +70,7 @@ export const S4_D2_BUNDLE_IDS = [
 
 export type S4D2BundleId = typeof S4_D2_BUNDLE_IDS[number]
 
-/** The official rc.2 Optional + on-demand identity set (12 + 2). */
+/** The official target Optional + on-demand identity set (12 + 2). */
 const OFFICIAL_BUNDLE_IDS = [
   ...OPTIONAL_BUNDLES,
   ...OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName),
@@ -99,7 +103,7 @@ const GENERATED_PRESETS = ['standard', 'ptc', 'minimal', 'cordis'] as const
 type BootPatches = NonNullable<Parameters<typeof boot>[2]>
 
 export interface S4D2Installation {
-  /** Directory whose `node_modules` holds the provisioned rc.2 packages. */
+  /** Directory whose `node_modules` holds the provisioned target packages. */
   readonly root: string
   /** `node_modules` of the provisioned installation tree. */
   readonly nodeModules: string
@@ -133,7 +137,7 @@ export function skippedInstallationReason(required: readonly S4D2BundleId[] = S4
 }
 
 /**
- * Resolve the provisioned official rc.2 installation for the requested
+ * Resolve the provisioned official target installation for the requested
  * bundles. A missing or wrong-version package is a concrete BLOCKED fact, never
  * a local same-name substitute.
  */
@@ -325,7 +329,7 @@ function prepareRoot(
     symlinkSync(installation.nodeModules, join(installationDir, 'node_modules'), 'dir')
   }
   writeFileSync(join(installationDir, 'package.json'), JSON.stringify({
-    name: 's4-d2-rc2-installation',
+    name: 's4-d2-installation',
     private: true,
     dependencies: {
       [BASE_BUNDLE]: TARGET_DSH_VERSION,
@@ -334,7 +338,7 @@ function prepareRoot(
   }, null, 2))
   if (!existsSync(join(profileDir, 'node_modules'))) {
     // A real profile resolves its own installed dependencies here; the fixture
-    // links the ONE provisioned rc.2 tree instead of duplicating it.
+    // links the ONE provisioned tree instead of duplicating it.
     symlinkSync(installation.nodeModules, join(profileDir, 'node_modules'), 'dir')
   }
   writeProfile(profileDir, bundles, profileDependencies, installationBoot)
