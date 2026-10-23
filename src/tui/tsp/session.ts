@@ -65,11 +65,11 @@ import type { SessionBrowserPresentation } from '../../app/command/session-brows
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
-import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
+import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, visualRowId, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, type ToolSvgState } from './transcript-view.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -690,8 +690,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * never re-sends). A fatal blob failure aborts the projection exactly like
    * the PR-C image path.
    */
-  const prepareSvgStates = (): ReadonlyMap<string, ToolSvgState> | undefined => {
-    const states = new Map<string, ToolSvgState>()
+  const prepareSvgStates = (): ReadonlyMap<TranscriptToolMessage, ToolSvgState> | undefined => {
+    const states = new Map<TranscriptToolMessage, ToolSvgState>()
     const admit = (source: string): SvgAdmission => {
       const digest = svgDigest(source)
       const cached = svgAdmissions.get(digest)
@@ -704,13 +704,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const visit = (message: TranscriptMessage): boolean => {
       if (message.kind !== 'tool') return true
       if (message.name === 'dsh_pi_tui_svg') {
-        const rowId = visualRowId(message)
-        if (rowId !== undefined) {
+        // The exact row object is the key: the fold may reuse a bare
+        // call/sub-call id across turns/steps, and only THIS row's final
+        // content may authorize its drawing.
+        {
           // Success is a prerequisite for EVERY drawing sink: a block/error
           // result never sends a blob, even if its feedback copied the valid
           // machine line/credential from the original result.
           if (message.status !== 'ok') {
-            states.set(rowId, { state: 'invalid', reason: 'the tool result was not successful' })
+            states.set(message, { state: 'invalid', reason: 'the tool result was not successful' })
           } else {
             const blocks = message.resultBlocks ?? (() => {
               const parts = visualPartsFromText(message.result)
@@ -718,12 +720,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             })()
             const authorization = authorizeSvg(message.args, blocks, message.status, admit)
             if (authorization.state === 'text') {
-              states.set(rowId, { state: 'invalid', reason: authorization.reason })
+              states.set(message, { state: 'invalid', reason: authorization.reason })
             } else if (!nativeImagesSupported()) {
               // No native image/blob capability: still publish the admitted
               // source so a nested child can read it (the top-level card gets
               // it from the args code block).
-              states.set(rowId, { state: 'unsupported', fact: authorization.fact, source: authorization.source })
+              states.set(message, { state: 'unsupported', fact: authorization.fact, source: authorization.source })
             } else {
               let blobId = svgBlobIds.get(authorization.fact.digest)
               if (blobId === undefined) {
@@ -736,7 +738,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
                 }
                 svgBlobIds.set(authorization.fact.digest, blobId)
               }
-              states.set(rowId, { state: 'ready', blobId, fact: authorization.fact, source: authorization.source })
+              states.set(message, { state: 'ready', blobId, fact: authorization.fact, source: authorization.source })
             }
           }
         }

@@ -130,10 +130,12 @@ export interface TranscriptViewOptions {
   /**
    * PR-D: the per-row SVG authorization/blob state prepared by the TSP
    * session layer (the only owner of the admission gate and the blob sender).
-   * Keyed by {@link visualRowId}; absent means no native SVG state was
-   * prepared (the row keeps its readable text).
+   * Keyed by the ROW OBJECT, never by its bare call/sub-call id: the fold
+   * contract permits id reuse across turns/steps, and a string key would let
+   * one row's credential authorize another row. Absent means no native SVG
+   * state was prepared (the row keeps its readable text).
    */
-  readonly toolSvgStates?: ReadonlyMap<string, ToolSvgState>
+  readonly toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
 }
 
 /** PR-D: one SVG row's prepared display state. */
@@ -145,11 +147,6 @@ export type ToolSvgState =
   | { readonly state: 'unsupported'; readonly fact: SvgFact; readonly source: string }
   /** The final content did not authorize a drawing (or admission refused it). */
   | { readonly state: 'invalid'; readonly reason: string }
-
-/** PR-D: the row identity the SVG state map uses (durable call/sub-call id). */
-export function visualRowId(message: TranscriptToolMessage): string | undefined {
-  return message.subCallId ?? message.callId
-}
 
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
 function toolStatus(status: 'ok' | 'error' | 'running'): Status {
@@ -450,10 +447,11 @@ function svgResultNodes(
   const nodes: Node[] = detail === ''
     ? []
     : [ui.code({ key: 'result', text: sanitizeDisplayText(detail), ...(wrap ? { wrap: true } : {}) })]
-  const rowId = visualRowId(message)
   // A successful result is required even when a prepared state exists (the
   // session already refuses to send its blob, this mapper must not draw it).
-  const state = message.status === 'ok' && rowId !== undefined ? options.toolSvgStates?.get(rowId) : undefined
+  // The lookup is by this exact row object, so a reused call/sub-call id
+  // elsewhere in the transcript can never lend its credential to this card.
+  const state = message.status === 'ok' ? options.toolSvgStates?.get(message) : undefined
   if (state?.state === 'ready') {
     nodes.push(ui.image({ key: 'result-svg', blob: state.blobId, alt: sanitizedPhysicalLine(state.fact.title) }))
   } else if (state?.state === 'unsupported') {
@@ -546,8 +544,7 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
   // admitted source is added here so the child has the SAME readable-source
   // path as the top-level card instead of only claiming it is available.
   if (child.name === 'dsh_pi_tui_svg') {
-    const rowId = visualRowId(child)
-    const state = child.status === 'ok' && rowId !== undefined ? options.toolSvgStates?.get(rowId) : undefined
+    const state = child.status === 'ok' ? options.toolSvgStates?.get(child) : undefined
     if (state?.state === 'ready' || state?.state === 'unsupported') {
       body.push(ui.code({ key: 'source', text: sanitizeDisplayText(state.source), wrap: true }))
     }

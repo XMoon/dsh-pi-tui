@@ -176,9 +176,9 @@ test('the registered visual tools persist no presentation meta under every post-
             return svgFactFromArgs(args)
           })()
           : undefined
-        const ready: ReadonlyMap<string, ToolSvgState> | undefined = svgFact === undefined
+        const ready: ReadonlyMap<TranscriptToolMessage, ToolSvgState> | undefined = svgFact === undefined
           ? undefined
-          : new Map([[tool.callId ?? 'call-visual-1', {
+          : new Map([[tool, {
             state: 'ready', blobId: 'f'.repeat(64), fact: svgFact, source: CASES.svg.args.svg,
           }]])
         const view = transcriptView(projectTranscriptStructure([tool]), new TranscriptNodeKeys(), {
