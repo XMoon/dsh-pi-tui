@@ -36,6 +36,16 @@ export type ContextMeasureReason =
   | 'explicit-status'
   | 'session-switch'
 
+/** The ADDITIVE read-result of one measurement attempt (C3): `fresh` only
+ * when THIS attempt's reader returned an authoritative number (including a
+ * valid zero), `last-known` only when the attempt failed/unavailable but an
+ * existing bound value survives, `unavailable` otherwise. Never inferred
+ * from the returned number alone. */
+export interface ContextMeasureResult {
+  readonly value: number | undefined
+  readonly observation: 'fresh' | 'last-known' | 'unavailable'
+}
+
 /** The coordinator's observable state (test seam). */
 export interface ContextMeasurementSnapshot {
   readonly sessionId: string | undefined
@@ -119,6 +129,46 @@ export class ContextMeasurementCoordinator {
       this.dirty = false
     }
     return this.value
+  }
+
+  /**
+   * The C3 sibling of {@link measure}: the SAME bind/dirty/measure path (one
+   * coordinator, no second cache), returning the OBSERVATION of the attempt
+   * alongside the value. `fresh` requires this attempt's own reader to
+   * answer (a valid authoritative number INCLUDING zero); a failed/unavailable
+   * attempt keeps the existing bound value and reads `last-known`; no bound
+   * value reads `unavailable`. A refused (foreign/unbound) session never
+   * measures and reads `unavailable` — never a foreign value.
+   */
+  measureResult(sessionId: string | undefined, reader: (sessionId: string) => number | undefined): ContextMeasureResult {
+    if (sessionId === undefined || sessionId !== this.sessionId) {
+      return { value: undefined, observation: 'unavailable' }
+    }
+    if (!this.dirty) {
+      // A clean cache: the bound value is this session's own last measured
+      // fact. Its observation rides the EXISTING cached classification —
+      // present ⇒ it was fresh when committed and nothing since marked it
+      // dirty, so it is still fresh; absent ⇒ unknown.
+      return this.value === undefined
+        ? { value: undefined, observation: 'unavailable' }
+        : { value: this.value, observation: 'fresh' }
+    }
+    let fresh: number | undefined
+    try {
+      fresh = reader(sessionId)
+    } catch {
+      // Same best-effort policy as measure(): a throwing reader keeps the
+      // last-good value and the dirty flag for a retry.
+      fresh = undefined
+    }
+    if (fresh !== undefined) {
+      this.value = fresh
+      this.dirty = false
+      return { value: fresh, observation: 'fresh' }
+    }
+    return this.value === undefined
+      ? { value: undefined, observation: 'unavailable' }
+      : { value: this.value, observation: 'last-known' }
   }
 
   /** The full observable state (test seam). */
