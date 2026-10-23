@@ -238,3 +238,63 @@ test('a throwing tools/change listener never strands the second registration on 
   assert.equal(applied(), true)
   assert.deepEqual(ctx.tools.schemas().map(schema => schema.name).sort(), [CHART_TOOL_NAME, SVG_TOOL_NAME].sort())
 })
+
+test('a tools/change listener that re-enables mid-release settles on the newest target', () => {
+  const ctx = mountRegistry()
+  let enabled = true
+  applyVisualTools(ctx, { enabled: { get: () => enabled } } as never)
+  let reentered = false
+  // A Host listener re-enters the switch SYNCHRONOUSLY from the chart disposer:
+  // it commits On and emits the Loader event while Off is still releasing.
+  const off = ctx.on('tools/change', () => {
+    if (reentered || ctx.tools.get(CHART_TOOL_NAME) !== undefined) return
+    reentered = true
+    enabled = true
+    ctx.emit('loader/volatile-update', [['enabled']])
+  })
+
+  enabled = false
+  ctx.emit('loader/volatile-update', [['enabled']])
+  off()
+  assert.equal(reentered, true, 'the reentrant listener really fired during the release')
+  const status = ctx.get(VISUAL_TOOLS_STATUS_SERVICE) as VisualToolsRuntimeStatus
+  assert.equal(status.applied(), true, 'the newest target (On) owns a complete pair')
+  assert.deepEqual(ctx.tools.schemas().map(schema => schema.name).sort(), [CHART_TOOL_NAME, SVG_TOOL_NAME].sort(),
+    'the outer release never clobbered or disposed the re-registered pair')
+
+  // The serialized final state is reachable again: a later Off releases BOTH.
+  enabled = false
+  ctx.emit('loader/volatile-update', [['enabled']])
+  assert.equal(ctx.tools.get(CHART_TOOL_NAME), undefined)
+  assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.equal(status.applied(), false)
+})
+
+test('a newer target queued during a THROWING release is still applied', () => {
+  const ctx = mountRegistry()
+  let enabled = true
+  applyVisualTools(ctx, { enabled: { get: () => enabled } } as never)
+  let reentered = false
+  const off = ctx.on('tools/change', () => {
+    // Removal notifications throw; registration notifications do not. The
+    // first removal also commits On and emits the Loader event synchronously.
+    if (ctx.tools.get(CHART_TOOL_NAME) !== undefined) return
+    if (!reentered) {
+      reentered = true
+      enabled = true
+      ctx.emit('loader/volatile-update', [['enabled']])
+    }
+    throw new Error('tools/change removal exploded')
+  })
+
+  enabled = false
+  assert.throws(() => ctx.emit('loader/volatile-update', [['enabled']]), (error: unknown) => {
+    assert.ok(error instanceof AggregateError, `both removal failures are surfaced: ${String(error)}`)
+    return true
+  })
+  off()
+  assert.equal(reentered, true, 'the reentrant listener fired during the failing release')
+  const status = ctx.get(VISUAL_TOOLS_STATUS_SERVICE) as VisualToolsRuntimeStatus
+  assert.equal(status.applied(), true, 'the newest target survives the throwing transition')
+  assert.deepEqual(ctx.tools.schemas().map(schema => schema.name).sort(), [CHART_TOOL_NAME, SVG_TOOL_NAME].sort())
+})
