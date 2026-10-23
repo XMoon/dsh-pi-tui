@@ -2211,3 +2211,467 @@ test('a TRUE indeterminate Remote /title <name> is consumed by the outer settlem
   assert.ok(!sessionEvents().some(event => event.type === 'session/title'),
     'the indeterminate rename committed no durable title row')
 })
+
+// ── C3 (Phase 3C): the Remote About source→sink proof ─────────────────────
+//
+// The OFFICIAL Remote projections (the retained binding's sessionStatus +
+// sessionStats + tokenUsage + contextWindow, read through the production
+// session-facts composer) feed the REAL AboutStatusController ops — the
+// same bootstrap composition (sessionStatus direct, stats through
+// composeRemoteSessionStats over the transport fence) — and the settled
+// view serializes the OFFICIAL figures. This is the Remote half of the
+// plan §3.3 proof 2: absent projections stay absent, no bounded-window
+// fold ever stands in for a session total.
+test('C3 Remote proof: official projections → the About controller view → the exact report', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'c3-about-remote'
+  const hostPreset = 'c3-about-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  {
+    const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    }
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('user/message', {
+      id: 'u-c3', role: 'user', content: [{ type: 'text', text: 'about probe' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: 'a-c3', role: 'assistant',
+        content: [{ type: 'text', text: 'about answer' }],
+        source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+      },
+      stream: [], usage: { inputTokens: 10, outputTokens: 5 },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  try {
+    // The OFFICIAL projection face reads settle (the same wait the status
+    // test uses — the retained binding serves the projections).
+    await waitFor('official sessionStatus retained', () =>
+      fixture.override.presentation.sessionFacts.sessionStatus(mainId) !== undefined, 15_000)
+    const status = fixture.override.presentation.sessionFacts.sessionStatus(mainId)
+    assert.ok(status !== undefined)
+    assert.equal(status.usage?.uncachedInputTokens, 10, 'the official tokenUsage projection of the seeded turn')
+
+    // The controller ops are the BOOTSTRAP composition, reduced to the same
+    // official inputs (sessionStatus direct; stats through
+    // composeRemoteSessionStats over the transport fence).
+    const fenceOf = (sessionId: string): { isCurrent(): boolean } => {
+      const token = fixture.override.presentation.sessionFacts.captureTransportToken(sessionId)
+      return {
+        isCurrent: () => fixture.override.presentation.sessionFacts.isTransportTokenCurrent(sessionId, token),
+      }
+    }
+    const { composeRemoteSessionStats } = await import('../../src/app/remote/session-facts-compose.ts')
+    const { AboutStatusController } = await import('../../src/app/command/about-status.ts')
+    const { createDiag } = await import('../../src/runtime/process/diagnostics.ts')
+    const controller = new AboutStatusController({
+      backendKind: 'remote',
+      captureLiveSessionScope: () =>
+        ({ sessionId: mainId, subject: { owner: { id: mainId } }, generation: 1 }) as never,
+      isSessionScopeCurrent: (scope) => (scope as { readonly sessionId?: string }).sessionId === mainId,
+      currentSessionStats: async (scope) => {
+        const sessionId = (scope as { readonly sessionId: string }).sessionId
+        const statusNow = fixture.override.presentation.sessionFacts.sessionStatus(sessionId)
+        return composeRemoteSessionStats({
+          sessionId,
+          fence: fenceOf(sessionId),
+          facts: {
+            sessionStats: fixture.override.presentation.sessionFacts.sessionStatsProjection(sessionId),
+            usage: statusNow?.usage,
+            contextWindow: statusNow?.context?.contextWindow,
+            performance: statusNow?.performance,
+          },
+        })
+      },
+      readSessionStatus: (sessionId) => fixture.override.presentation.sessionFacts.sessionStatus(sessionId),
+      sessionStatusFailed: () => false,
+      forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' }),
+      versionFacts: { tui: 'test', dsh: undefined },
+      subscribeSessionScopeInvalidation: () => () => {},
+      diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    })
+    controller.enter()
+    for (let at = 0; at < 20 && controller.snapshotView().session.kind === 'loading'; at += 1) {
+      await new Promise<void>(resolve => setTimeout(resolve, 25))
+    }
+    const view = controller.snapshotView()
+    assert.equal(view.session.kind, 'ready', `the Remote view settles: ${JSON.stringify(view.session)}`)
+    if (view.session.kind !== 'ready') return
+    assert.equal(view.session.sessionId, mainId)
+    assert.equal(view.session.cwd, seedHost.anchorDir, 'the OFFICIAL list-row cwd of THIS session')
+    assert.ok(view.session.stats?.tokens !== undefined, 'the official tokenUsage group survives')
+    assert.equal(view.session.stats.tokens.input, 10, 'the uncached input total is the projection value')
+    assert.equal(view.session.stats.tokens.output, 5, 'the output total is the projection value')
+    // The serialization is the COPY All contract over OFFICIAL facts.
+    const { serializeAboutStatus } = await import('../../src/domain/status/about.ts')
+    const report = serializeAboutStatus(view)
+    assert.match(report, new RegExp(`Session ID: ${mainId}`, 'u'))
+    assert.match(report, new RegExp(`CWD: ${seedHost.anchorDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'u'))
+    assert.match(report, /Input tokens: 10/u)
+    assert.match(report, /Output tokens: 5/u)
+    assert.match(report, /Backend: Remote/u)
+    assert.ok(!report.includes('unmeasured'), 'no legacy unmeasured word rides the report')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+// ── C3 (Phase 3C): the PRODUCTION-RUNNER Remote source→sink proof ─────────
+//
+// The plan §3.3 Remote positive through the REAL production composition: the
+// real mounted runner (PiTui branch over the real rc.2 Host) serves /settings
+// through the REAL submit gesture (the Client command registry executes the
+// TUI built-in), the REAL SettingsWorkspacePanel paints the About rows from
+// the real command-runtime reads, and a REAL SGR click on the painted
+// [Copy All C] button drives the production clipboard policy — the OSC 52
+// sequence lands in the virtual terminal's captured stdout writes and its
+// base64 payload decodes to the exact report (official projection facts,
+// Backend: Remote). A second session seeded WITHOUT the performance/usage
+// projection rows is the absent-authority negative: the report words the
+// gap, never a fabricated figure.
+test('C3 Remote production lane: /settings → real About panel → [Copy All] click → OSC 52 payload', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'c3-prod-remote'
+  const hostPreset = 'c3-prod-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  {
+    const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    }
+    // The turn's wall time is REAL (the assistant settlement lands after the
+    // step start) and the streamed chunk carries its own timing, so the Host
+    // `piTuiPerformance` projection folds a REAL sample: a non-zero TTFB and
+    // non-zero rates — never a fabricated figure.
+    const anchor = Date.now()
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('user/message', {
+      id: 'u-p1', role: 'user', content: [{ type: 'text', text: 'prod probe' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    await new Promise(resolve => setTimeout(resolve, 400))
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: 'a-p1', role: 'assistant',
+        content: [{ type: 'text', text: 'prod answer' }],
+        source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+      },
+      usage: { inputTokens: 33, outputTokens: 7 },
+      stream: [
+        { type: 'chunk', time: anchor + 100, chunk: { type: 'text-delta', index: 0, text: 'a' } },
+      ],
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+  // The clipboard-isolation window opens BEFORE the runner mounts: the
+  // composition constructs `ClientActions` DURING `mountRemoteRunner` and
+  // captures `process.platform` by value at that moment, so the platform
+  // stub MUST be in place first (a post-mount overwrite arrives too late —
+  // the captured `copyEnv.platform` would still say darwin/win32 and the
+  // helper leg would spawn pbcopy/clip on those hosts). With the stub in
+  // place before the capture, `copyEnv.platform` reads a family with no
+  // helper chain; the tmux/desktop env facts are cleared for the live
+  // `process.env` references; and the stdout capture observes the production
+  // OSC 52 emission. The stubs restore the ORIGINAL descriptors in the
+  // finally below.
+  const oscWrites: string[] = []
+  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+  const originalWrite = Object.getOwnPropertyDescriptor(process.stdout, 'write')
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
+  const originalEnvTMUX = process.env.TMUX
+  const originalEnvDISPLAY = process.env.DISPLAY
+  const originalEnvWAYLAND = process.env.WAYLAND_DISPLAY
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+  Object.defineProperty(process.stdout, 'write', {
+    configurable: true,
+    value: (data: string | Uint8Array): boolean => {
+      if (typeof data === 'string' && data.includes('\x1b]52;c;')) oscWrites.push(data)
+      return true
+    },
+  })
+  Object.defineProperty(process, 'platform', { configurable: true, value: 'browser' })
+  delete process.env.TMUX
+  delete process.env.DISPLAY
+  delete process.env.WAYLAND_DISPLAY
+  // THE PROTECTED WINDOW covers setup, mount AND test body: even a mount
+  // failure cannot leak the stubbed globals past this test. The fixture slot
+  // is declared OUTSIDE the try so the finally can dispose a mounted fixture
+  // and skip cleanly when the mount itself failed.
+  let fixture: Awaited<ReturnType<typeof mountRemoteRunner>> | undefined
+  try {
+    fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+    assert.ok(fixture !== undefined, 'the runner mount must succeed for this lane')
+    const mountedFixture = fixture
+    await waitFor('official facts retained', () =>
+      mountedFixture.override.presentation.sessionFacts.sessionStatus(mainId) !== undefined, 15_000)
+
+    // ── THE REAL GESTURE: submit /settings through the mounted editor. ──
+    const execute = (line: string): void => {
+      const editorApp = mountedFixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+      editorApp.setDraft(line)
+      editorApp.submitDraft()
+    }
+    execute('/settings')
+    await waitFor('the Settings workspace leased the screen', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('dsh-pi-tui'), 15_000)
+
+    // The About home paints the semantic fact rows from the REAL command
+    // runtime's reads (the official Remote projections).
+    await waitFor('the About facts paint from the official projections', () => {
+      const frame = mountedFixture.vt.getViewport().map((line: string) => line).join('\n')
+      return frame.includes('Session ID') && frame.includes('Turns') && frame.includes('R5 tokens/sec')
+    }, 15_000)
+    const frameText = mountedFixture.vt.getViewport().map((line: string) => line).join('\n')
+    assert.ok(frameText.includes('c3-prod-remote'), 'the OFFICIAL session id paints')
+    assert.ok(frameText.includes('Backend') && frameText.includes('Remote'), 'the Remote backend fact paints')
+    // THE OFFICIAL CWD, verbatim: the projection's list-row cwd of THIS session.
+    assert.ok(frameText.includes(seedHost.anchorDir), `the official cwd paints: ${frameText.match(/CWD.*/)?.[0]}`)
+    // The official lifetime fold of the seeded turn.
+    assert.ok(/Turns\s+1\b/.test(frameText), `the lifetime turns paint: ${frameText.match(/Turns.*/)?.[0]}`)
+    assert.ok(/Steps\s+1\b/.test(frameText), 'the lifetime steps paint')
+    // The Host piTuiPerformance projection's MEASURED figures paint (the
+    // seeded real sample: a real TTFB in the 0.1s-0.4s class and real rates).
+    assert.ok(/TTFB \(recent\)\s+0\.[1-3]/.test(frameText), `the seeded TTFB paints: ${frameText.match(/TTFB.*/)?.[0]}`)
+    assert.ok(/R5 tokens\/sec\s+[1-9]/.test(frameText), 'the seeded R5 rate paints non-zero')
+    assert.ok(/All tokens\/sec\s+[1-9]/.test(frameText), 'the seeded All rate paints non-zero')
+
+    // ── THE REAL COPY: SGR press/release on the painted [Copy All C]. ──
+    // The action row paints BELOW the fold at 100×30: the About-local End
+    // key jumps the offset to the bottom (the same keyboard a user drives).
+    // Each step waits for the FRAME it causes (a state barrier, never a
+    // fixed delay): Enter hands the keyboard to the content — the action
+    // bar's hint text flips to the About verbs; PageDown scrolls the rows.
+    mountedFixture.vt.sendInput('\r') // Enter: the rail hands the keyboard to the content.
+    await waitFor('the content focus took the keyboard', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('c copy fact'), 15_000)
+    mountedFixture.vt.sendInput('\x1b[6~') // PageDown: scroll the painted rows to the bottom.
+    await waitFor('the scrolled frame settled', () => {
+      const view = mountedFixture.vt.getViewport().join('\n')
+      return view.includes('Copy All [') || view.includes('Refresh context [')
+    }, 15_000)
+    const rows = mountedFixture.vt.getViewport()
+    const actionRowIndex = rows.findIndex((line: string) => line.includes('Copy All ['))
+    if (actionRowIndex === -1) {
+      throw new Error(`POST-END FRAME:\n${rows.map((line: string, at: number) => `${String(at).padStart(2)}|${line}`).join('\n')}`)
+    }
+    void rows
+    const actionRow = rows[actionRowIndex]!
+    const copyAllCol = actionRow.indexOf('Copy All [')
+    mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}M`)
+    mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}m`)
+    await waitFor('the OSC 52 copy payload landed in the captured stdout', () => oscWrites.length > 0, 15_000)
+    // THE EXACT PAYLOAD: decode the production OSC 52 payload and compare it
+    // with the report the plan freezes — serialized from the SAME view the
+    // panel painted.
+    assert.ok(oscWrites.length > 0, 'the production copy policy emitted the OSC 52 leg')
+    const osc = oscWrites[0]!
+    const payload = /(?:\x1b\]52;c;)([^\x07]+)\x07/.exec(osc)?.[1]
+    assert.ok(payload !== undefined, `the OSC 52 payload is present: ${JSON.stringify(osc.slice(0, 80))}`)
+    const decoded = Buffer.from(payload!, 'base64').toString('utf8')
+    const lines = decoded.split('\n')
+    assert.equal(lines[0], 'dsh-pi-tui Status')
+    assert.ok(lines.includes(`Session ID: ${mainId}`), `the official session id rides the payload: ${lines.slice(0, 8)}`)
+    // THE EXACT official cwd (not just any line).
+    assert.ok(lines.includes(`CWD: ${seedHost.anchorDir}`), `the official cwd rides the payload: ${lines.filter(l => l.startsWith('CWD'))}`)
+    assert.match(decoded, /Backend: Remote/u)
+    // The official lifetime + token groups of the seeded turn.
+    assert.ok(lines.includes('Turns: 1'), `the lifetime rides the payload: ${lines.filter(l => /^(Turns|Steps|LLM)/.test(l))}`)
+    assert.ok(lines.includes('Steps: 1'))
+    assert.ok(lines.some(line => /^LLM wall: \d+(\.\d+)?s \(\d+ ms\)$/.test(line)), 'the LLM wall pair rides the payload')
+    assert.match(decoded, /Input tokens: 33/u, 'the official tokenUsage total rides the payload')
+    assert.match(decoded, /Output tokens: 7/u)
+    // The MEASURED performance group of the seeded real sample.
+    assert.match(decoded, /TTFB \(recent\): 0\.[1-3]s/u, `the seeded TTFB rides the payload: ${lines.filter(l => l.startsWith('TTFB'))}`)
+    assert.match(decoded, /R5 tokens\/sec: [1-9]/u, 'the seeded R5 rate rides the payload')
+    assert.match(decoded, /All tokens\/sec: [1-9]/u, 'the seeded All rate rides the payload')
+
+    // ── THE STRICT PAYLOAD EQUALITY (the owner's Q2 ruling): the ACTUAL
+    // clipboard output of a SECOND Copy All on the SAME captured view — this
+    // time through the keyboard `C` verb, a different gesture over the
+    // unchanged view — must be byte-for-byte the report the first (mouse)
+    // copy emitted. No re-serialization shortcut: both sides are the real
+    // clipboard payloads the policy wrote.
+    const oscWritesBeforeSecond = oscWrites.length
+    mountedFixture.vt.sendInput('C')
+    await waitFor('the keyboard Copy All payload landed', () => oscWrites.length > oscWritesBeforeSecond, 15_000)
+    const osc2 = oscWrites[oscWritesBeforeSecond]!
+    const payload2 = /(?:\x1b\]52;c;)([^\x07]+)\x07/.exec(osc2)?.[1]
+    assert.ok(payload2 !== undefined)
+    const decoded2 = Buffer.from(payload2!, 'base64').toString('utf8')
+    assert.equal(decoded2, decoded, 'the SAME view copies the byte-identical report through two gestures (mouse click + keyboard C)')
+  } finally {
+    // Restore the ORIGINAL descriptors/identity (never a bound copy).
+    if (originalWrite === undefined) {
+      delete (process.stdout as { write?: unknown }).write
+    } else {
+      Object.defineProperty(process.stdout, 'write', originalWrite)
+    }
+    if (originalIsTTY === undefined) {
+      delete (process.stdout as { isTTY?: unknown }).isTTY
+    } else {
+      Object.defineProperty(process.stdout, 'isTTY', originalIsTTY)
+    }
+    if (originalPlatform === undefined) {
+      delete (process as { platform?: unknown }).platform
+    } else {
+      Object.defineProperty(process, 'platform', originalPlatform)
+    }
+    if (originalEnvTMUX === undefined) delete process.env.TMUX
+    else process.env.TMUX = originalEnvTMUX
+    if (originalEnvDISPLAY === undefined) delete process.env.DISPLAY
+    else process.env.DISPLAY = originalEnvDISPLAY
+    if (originalEnvWAYLAND === undefined) delete process.env.WAYLAND_DISPLAY
+    else process.env.WAYLAND_DISPLAY = originalEnvWAYLAND
+    await fixture?.dispose()
+  }
+})
+
+// ── C3 (Phase 3C): the absent-authority negative through the SAME production
+// runner route. The production Remote host-runtime mounts the lifetime rows
+// unconditionally (that IS the reachable shape), so the ABSENT authority here
+// is the measured-performance group (plus the context-pressure face): this
+// session commits a completed turn with NO streamed settlement, so the Host
+// piTuiPerformance projection has NO eligible sample and its rate face
+// answers nothing, while the lifetime fold and the tokenUsage projection
+// still hold their own authoritative values (the tokenUsage face publishes
+// the AUTHORITATIVE ZERO for the usage-free log — an authoritative 0, never
+// an absence). The About route must word the sample-less groups Unavailable,
+// keep the authoritative ones (including the honest zero), and never fill a
+// gap from a bounded-window fold.
+test('C3 Remote negative: the sample-less performance/context groups word Unavailable through the production route (tokenUsage stays the authoritative zero)', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'c3-absent-remote'
+  const hostPreset = 'c3-absent-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  {
+    const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    }
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('user/message', {
+      id: 'u-absent', role: 'user', content: [{ type: 'text', text: 'absent probe' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+  // The SAME pre-mount clipboard-isolation window as the positive lane: the
+  // platform/env stubs MUST be in force before `mountRemoteRunner` captures
+  // `copyEnv.platform`, and the TTY fact + stdout capture must be live before
+  // the click (each test's finally restores the ORIGINAL descriptors — the
+  // two lanes are sequential, so each re-opens its own window).
+  const oscWrites: string[] = []
+  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+  const originalWrite = Object.getOwnPropertyDescriptor(process.stdout, 'write')
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
+  const originalEnvTMUX = process.env.TMUX
+  const originalEnvDISPLAY = process.env.DISPLAY
+  const originalEnvWAYLAND = process.env.WAYLAND_DISPLAY
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+  Object.defineProperty(process.stdout, 'write', {
+    configurable: true,
+    value: (data: string | Uint8Array): boolean => {
+      if (typeof data === 'string' && data.includes('\x1b]52;c;')) oscWrites.push(data)
+      return true
+    },
+  })
+  Object.defineProperty(process, 'platform', { configurable: true, value: 'browser' })
+  delete process.env.TMUX
+  delete process.env.DISPLAY
+  delete process.env.WAYLAND_DISPLAY
+  // THE PROTECTED WINDOW covers setup, mount AND test body: even a mount
+  // failure cannot leak the stubbed globals past this test. The fixture slot
+  // is declared OUTSIDE the try so the finally can dispose a mounted fixture
+  // and skip cleanly when the mount itself failed.
+  let fixture: Awaited<ReturnType<typeof mountRemoteRunner>> | undefined
+  try {
+    fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+    assert.ok(fixture !== undefined, 'the runner mount must succeed for this lane')
+    const mountedFixture = fixture
+    await waitFor('official facts retained', () =>
+      mountedFixture.override.presentation.sessionFacts.sessionStatus(mainId) !== undefined, 15_000)
+    const execute = (line: string): void => {
+      const editorApp = mountedFixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+      editorApp.setDraft(line)
+      editorApp.submitDraft()
+    }
+    execute('/settings')
+    await waitFor('the Settings workspace opened on the absent fixture', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('dsh-pi-tui'), 15_000)
+    await waitFor('the authoritative lifetime group paints', () => {
+      const frame = mountedFixture.vt.getViewport().join('\n')
+      return /Turns\s+1\b/.test(frame)
+    }, 15_000)
+    const rows = mountedFixture.vt.getViewport()
+    const actionRowIndex = rows.findIndex((line: string) => line.includes('Copy All ['))
+    assert.ok(actionRowIndex !== -1, `the action row paints:\n${rows.join('\n')}`)
+    const copyAllCol = rows[actionRowIndex]!.indexOf('Copy All [')
+    // The clipboard-isolation window opened BEFORE this fixture mounted (see
+    // the window above): the platform/env stubs are already in force and the
+    // OUTER stdout capture is live — this click needs no further patching
+    // (an inner re-patch would shadow the outer original descriptors and
+    // leak the stub past the test).
+    mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}M`)
+    mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}m`)
+    await waitFor('the absent-fixture OSC 52 payload landed', () => oscWrites.length > 0, 15_000)
+    const osc = oscWrites[0]!
+    const payload = /(?:\x1b]52;c;)([^\x07]+)\x07/.exec(osc)?.[1]
+    assert.ok(payload !== undefined)
+    const decoded = Buffer.from(payload!, 'base64').toString('utf8')
+    // THE AUTHORITATIVE LIFETIME fold survives (one completed turn → its
+    // own values), plus the identity/backend facts.
+    assert.ok(decoded.includes(`Session ID: ${mainId}`))
+    assert.ok(decoded.includes(`CWD: ${seedHost.anchorDir}`))
+    assert.match(decoded, /Backend: Remote/u)
+    assert.match(decoded, /Turns: 1/u, 'the authoritative lifetime fold rides the payload')
+    assert.match(decoded, /Steps: 1/u)
+    // THE ABSENT AUTHORITIES word the gap — never a fabricated figure.
+    // The tokenUsage projection PUBLISHED its all-zero total (the official
+    // face answers a usage-free durable log with the AUTHORITATIVE ZERO —
+    // an honest 0, explicitly NOT an absence and never a window fold); the
+    // measured performance group has NO eligible sample (no streamed
+    // settlement), so its three lines word Unavailable — never a
+    // fabricated rate.
+    assert.match(decoded, /Input tokens: 0/u, 'the tokenUsage face publishes the authoritative zero for the usage-free log')
+    assert.match(decoded, /Output tokens: 0/u)
+    assert.match(decoded, /TTFB \(recent\): Unavailable/u, 'the sample-less performance group words Unavailable')
+    assert.match(decoded, /R5 tokens\/sec: Unavailable/u)
+    assert.match(decoded, /All tokens\/sec: Unavailable/u)
+    assert.match(decoded, /Used tokens: Unavailable/u, 'the absent context pressure words Unavailable')
+  } finally {
+    // THE RESTORE covers the whole window — setup, mount AND test body — so
+    // even a mount failure cannot leak the stubbed globals past this test.
+    if (originalWrite === undefined) {
+      delete (process.stdout as { write?: unknown }).write
+    } else {
+      Object.defineProperty(process.stdout, 'write', originalWrite)
+    }
+    if (originalIsTTY === undefined) {
+      delete (process.stdout as { isTTY?: unknown }).isTTY
+    } else {
+      Object.defineProperty(process.stdout, 'isTTY', originalIsTTY)
+    }
+    if (originalPlatform === undefined) {
+      delete (process as { platform?: unknown }).platform
+    } else {
+      Object.defineProperty(process, 'platform', originalPlatform)
+    }
+    if (originalEnvTMUX === undefined) delete process.env.TMUX
+    else process.env.TMUX = originalEnvTMUX
+    if (originalEnvDISPLAY === undefined) delete process.env.DISPLAY
+    else process.env.DISPLAY = originalEnvDISPLAY
+    if (originalEnvWAYLAND === undefined) delete process.env.WAYLAND_DISPLAY
+    else process.env.WAYLAND_DISPLAY = originalEnvWAYLAND
+    await fixture?.dispose()
+  }
+})

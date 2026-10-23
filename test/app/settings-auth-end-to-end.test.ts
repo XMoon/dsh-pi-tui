@@ -126,6 +126,13 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
     captureLiveSessionScope: () => undefined,
+    // C3 About seams (no StatusRuntime in this stub; sessionless capture).
+    isSessionScopeCurrent: () => false,
+    currentSessionStats: async () => undefined,
+    sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    backendKind: 'direct' as const,
+    subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
     displayPreset: () => app.displayPreset(),
     focusEnabled: () => app.displayPreset() === 'focus',

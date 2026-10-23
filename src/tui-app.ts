@@ -1604,6 +1604,16 @@ export interface SettingsWorkspaceOpenOptions {
     readonly dsh: string | undefined
   }
   /**
+   * C3: the lazily built per-open About status owner (the command layer
+   * constructs it once per workspace open). The panel reads its immutable
+   * snapshot and subscribes for repaints; the app never inspects it.
+   */
+  readonly aboutStatusSource?: () => import('./app/command/about-status.ts').AboutStatusController
+  /** C3: one semantic About entry (exactly one scoped snapshot refresh). */
+  readonly onAboutEnter?: () => void
+  /** C3: the About page left (pending About updates become no-ops). */
+  readonly onAboutLeave?: () => void
+  /**
    * Invoked with the target row the opened legacy editor must focus (the
    * Settings workspace row's `legacyTargetId`), or without one when the
    * compatibility row opens the editor at its top. The target is presentation
@@ -21745,6 +21755,9 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       notice: () => this.currentNotice(),
       aboutVersionFacts: options.aboutVersionFacts,
+      ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
+      ...(options.onAboutEnter === undefined ? {} : { onAboutEnter: options.onAboutEnter }),
+      ...(options.onAboutLeave === undefined ? {} : { onAboutLeave: options.onAboutLeave }),
       onClose: () => record.close(),
       onOpenLegacy: (targetId?: string) => openLegacy(targetId),
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),

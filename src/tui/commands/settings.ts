@@ -53,6 +53,7 @@ import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
 import { AccountWorkflow } from '../../app/command/account-workflow.ts'
+import { AboutStatusController } from '../../app/command/about-status.ts'
 import { bundleVersion, dshVersion, packageVersion } from '../../client/launcher/version.ts'
 import { openExternalUrl } from '../../client/url/open.ts'
 import type {
@@ -77,6 +78,7 @@ import type {
 type SettingsCommandRunner = Pick<
   TuiCommandRunner,
   | 'applyFooterSettings'
+  | 'backendKind'
   | 'captureLiveSessionScope'
   | 'catalog'
   | 'clientCommands'
@@ -86,15 +88,19 @@ type SettingsCommandRunner = Pick<
   | 'currentPreset'
   | 'currentSessionId'
   | 'currentSessionRouting'
+  | 'currentSessionStats'
   | 'diag'
   | 'displayPreset'
   | 'extensions'
   | 'focusEnabled'
+  | 'forceContextMeasurementResult'
   | 'gitAttributionState'
+  | 'isSessionScopeCurrent'
   | 'progressUpdatesState'
   | 'refreshStatus'
   | 'responseStyleState'
   | 'sessionCwd'
+  | 'sessionReader'
   | 'setDisplayPreset'
   | 'setFocusMode'
   | 'setNotificationMethod'
@@ -102,6 +108,7 @@ type SettingsCommandRunner = Pick<
   | 'setTerminalProgressMode'
   | 'setSessionApprovalPolicy'
   | 'signal'
+  | 'subscribeSessionScopeInvalidation'
   | 'copyToClipboard'
   | 'tuiSettings'
 >
@@ -814,6 +821,27 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // The panel snapshots its source in its CONSTRUCTOR, so the pending state
     // must be in place before the lease is taken.
     if (webSettingsAvailable()) beginWebSettingsRead()
+    // C3: the ONE per-open About owner. Its subscription is acquired HERE
+    // (page open), its `enter()` runs only AFTER `openSettingsWorkspace`
+    // returned the live handle (no synchronous callback can target an
+    // unmounted page), and its dispose rides the workspace `onClose`.
+    let aboutController: AboutStatusController | undefined
+    const aboutStatusSource = (): AboutStatusController => {
+      aboutController ??= new AboutStatusController({
+        backendKind: runner.backendKind,
+        captureLiveSessionScope: () => runner.captureLiveSessionScope(),
+        isSessionScopeCurrent: (scope) => runner.isSessionScopeCurrent(scope),
+        currentSessionStats: (scope, signal) => runner.currentSessionStats(scope, signal),
+        readSessionStatus: (sessionId) => runner.sessionReader.sessionStatus(sessionId),
+        sessionStatusFailed: (sessionId) => runner.sessionReader.sessionStatusFailed?.(sessionId) === true,
+        forceContextMeasurementResult: () => runner.forceContextMeasurementResult(),
+        versionFacts: { tui: bundleVersion(), dsh: dshVersion() },
+        subscribeSessionScopeInvalidation: (listener) => runner.subscribeSessionScopeInvalidation(listener),
+        diag: runner.diag,
+        sessionIdForDiagnostics: () => runner.currentSessionId,
+      })
+      return aboutController
+    }
     let handle: import('../../tui-app.ts').SettingsWorkspaceHandle | undefined
     handle = app.openSettingsWorkspace(
       {
@@ -831,14 +859,35 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // installed Harness version — neither is derived from the other, and
         // an unreadable DSH version stays `Unknown`.
         aboutVersionFacts: { tui: bundleVersion(), dsh: dshVersion() },
+        // C3: the per-open About source (the panel renders its snapshot and
+        // the workspace token fences its repaints) + the explicit entry hooks.
+        aboutStatusSource,
+        onAboutEnter: () => { aboutStatusSource().enter() },
+        onAboutLeave: () => { aboutStatusSource().leave() },
         ...spec,
         onClose: () => {
           if (activeSettingsWorkspace?.token === token) activeSettingsWorkspace = undefined
+          // The controller dies with the workspace: the subscription and any
+          // in-flight read are released exactly once.
+          aboutController?.dispose()
+          aboutController = undefined
         },
       },
     )
     activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
     startWebSettingsRead(token)
+    // C3 (plan §3.2 step 6): the workspace's OWN home is About, so a plain
+    // open IS a semantic About entry — exactly ONE scoped snapshot refresh,
+    // started only now that `openSettingsWorkspace` returned its live handle
+    // (no synchronous callback can target an unmounted page). A deeplink
+    // that landed on another category (a /login Models/Account target, a Web
+    // row) is NOT an About entry: the page is not About, no read may start
+    // behind it, and the panel's own onAboutEnter hook owns the real entry
+    // when the user later navigates to About.
+    if (spec.initialCategory === undefined && spec.initialRowId === undefined
+      && spec.initialModelsView === undefined && spec.initialAccountView === undefined) {
+      aboutStatusSource().enter()
+    }
   }
 
   const openSettingsWorkspaceAt = (initialRowId?: SettingsWorkspaceRowId): void => {

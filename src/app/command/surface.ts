@@ -257,9 +257,16 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   /** The status owner seams the runner delegates to. */
   readonly status: {
     forceContextMeasurement(): number | undefined
+    forceContextMeasurementResult(): import('../../domain/status/context-measurement.ts').ContextMeasureResult
     sessionCwd(): string
     refresh(): void
     updateWelcomeCard(): void
+    /**
+     * C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
+     * trigger — the SessionOwnershipCore's payload-less owner/generation
+     * notification forwarded unchanged (no alternate observer, no polling).
+     */
+    subscribeSessionScopeInvalidation(listener: () => void): () => void
   }
   /** The settings owner seams the runner delegates to. */
   readonly settings: {
@@ -978,6 +985,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // against the coordinator's cache, no stale footer after an explicit
       // status (round-8 finding).
       forceContextMeasurement: () => deps.status.forceContextMeasurement(),
+      // C3: the SAME force with its observation (one coordinator measurement,
+      // no duplicated force) and the narrow status-invalidation trigger (the
+      // composition's StatusStore subscription, forwarded unchanged).
+      forceContextMeasurementResult: () => deps.status.forceContextMeasurementResult(),
+      backendKind: deps.backend.kind,
+      subscribeSessionScopeInvalidation: (listener) => deps.status.subscribeSessionScopeInvalidation(listener),
       // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
       // delivery, exact queue removal, cancel and title ops go through the port.
       sessionWriter: deps.backend.sessionWriter,

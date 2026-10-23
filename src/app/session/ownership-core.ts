@@ -29,6 +29,11 @@ export interface SessionOwnershipCoreDeps {
   resetForGeneration(): void
 }
 
+/** A session-scope invalidation listener (C3): payload-less — the listener
+ *  re-captures the live scope through its own authority and fences with
+ *  `isSessionScopeCurrent`. */
+export type ScopeInvalidationListener = () => void
+
 /** One atomic navigation identity capture (session id + navigation epoch).
  *  The surface `generation` is deliberately NOT part of it: navigation
  *  supersession and presentation-generation invalidation are independent
@@ -69,6 +74,19 @@ export interface SessionOwnershipCore {
   beginOwnerRelease(sessionId: string): () => void
   waitForOwnerRelease(sessionId: string): Promise<void>
   beginForkSourcePin(sessionId: string): ForkSourcePin
+
+  /**
+   * C3 (owner ruling on RFL-A-017): the ONE payload-less session-scope
+   * invalidation trigger. It fires after every successful `setCurrentOwner`
+   * publication AND after every generation-only `bumpGeneration` — the four
+   * publication shapes (create/resume/switch/fork) plus the generation-only
+   * invalidation — so a scope identity change can never be silenced by the
+   * StatusStore's content-equality suppression. The notification is deferred
+   * to a MICROTASK after the synchronous publication commit (coalesced), so
+   * a callback can never re-enter inside the owner-publication critical
+   * section.
+   */
+  subscribeScopeInvalidation(listener: ScopeInvalidationListener): () => void
 }
 
 export function createSessionOwnershipCore(deps: SessionOwnershipCoreDeps): SessionOwnershipCore {
@@ -125,12 +143,52 @@ export function createSessionOwnershipCore(deps: SessionOwnershipCoreDeps): Sess
   const subjectAuthority = createSessionSubjectAuthority(() =>
     currentOwner === undefined ? undefined : { owner: currentOwner, generation })
 
-  const bumpGeneration = (): number => runGenerationBump({
-    isSurfaceDisposed: deps.isSurfaceDisposed,
-    get: () => generation,
-    set: (next) => { generation = next },
-    reset: deps.resetForGeneration,
-  })
+  // C3 (RFL-A-017 ruling): the payload-less scope-invalidation fan-out. The
+  // notification is scheduled ONE microtask after the triggering mutation and
+  // coalesced — a synchronous publication block may call setCurrentOwner /
+  // bumpGeneration several times, and every listener must observe the FINAL
+  // identity exactly once, OUTSIDE the critical section. `queueMicrotask` is
+  // the platform scheduling primitive (no promise chain to discard).
+  const scopeListeners = new Set<ScopeInvalidationListener>()
+  let scopeNotificationScheduled = false
+  const scheduleScopeInvalidation = (): void => {
+    if (scopeNotificationScheduled) return
+    scopeNotificationScheduled = true
+    queueMicrotask(() => {
+      scopeNotificationScheduled = false
+      for (const listener of [...scopeListeners]) {
+        try {
+          listener()
+        } catch {
+          // A throwing listener must never break the core or the other
+          // listeners (the About controller's read admission is best-effort).
+        }
+      }
+    })
+  }
+
+  const bumpGeneration = (): number => {
+    // THE NOTIFICATION GUARANTEE: runGenerationBump mutates the generation
+    // BEFORE calling the reset seam, and a throwing reset does NOT roll the
+    // mutation back — the identity HAS changed the moment the set lands, so
+    // the invalidation must be scheduled even when the reset seam throws
+    // (the mutation is already observable to every fence).
+    let mutated = false
+    try {
+      const next = runGenerationBump({
+        isSurfaceDisposed: deps.isSurfaceDisposed,
+        get: () => generation,
+        set: (next) => {
+          mutated = true
+          generation = next
+        },
+        reset: deps.resetForGeneration,
+      })
+      return next
+    } finally {
+      if (mutated) scheduleScopeInvalidation()
+    }
+  }
 
   return {
     gate,
@@ -142,6 +200,10 @@ export function createSessionOwnershipCore(deps: SessionOwnershipCoreDeps): Sess
     setCurrentOwner: (owner, sessionId) => {
       currentOwner = owner
       currentSessionId = sessionId
+      // The publication commit point (create/resume/switch/fork): notify the
+      // scope subscribers AFTER the synchronous block (the coalesced
+      // microtask above), never re-entrant inside the publication.
+      scheduleScopeInvalidation()
     },
     navigationEpoch: () => navigationEpoch,
     bumpNavigationEpoch: () => (navigationEpoch += 1),
@@ -153,5 +215,11 @@ export function createSessionOwnershipCore(deps: SessionOwnershipCoreDeps): Sess
     beginOwnerRelease,
     waitForOwnerRelease,
     beginForkSourcePin,
+    subscribeScopeInvalidation: (listener) => {
+      scopeListeners.add(listener)
+      return () => {
+        scopeListeners.delete(listener)
+      }
+    },
   }
 }
