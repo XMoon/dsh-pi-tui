@@ -108,6 +108,47 @@ function appendTool(fixture: { readonly ctx: { sessions: { get(id: unknown): unk
   })
 }
 
+
+/**
+ * PR-D RFL-014: append one tool row at an EXPLICIT turn/step and close the
+ * turn. The fold's authoritative identity is `(turn, step, callId)`; a bare
+ * callId is not globally unique and must never key one row's visual state.
+ */
+async function appendToolAt(
+  fixture: { readonly ctx: { sessions: { get(id: unknown): unknown } } },
+  turn: number,
+  step: number,
+  callId: string,
+  name: string,
+  args: unknown,
+  blocks: readonly unknown[],
+  isError = false,
+): Promise<void> {
+  const session = await sessionOf(fixture)
+  session.append('turn/start', { turn })
+  session.append('step/start', { turn, step })
+  session.append('tool/call', {
+    turn,
+    step,
+    callId: ToolCallId(callId),
+    name,
+    arguments: JSON.stringify(args),
+  })
+  session.append('tool/result', {
+    turn,
+    step,
+    message: {
+      id: MessageId(`result-${callId}-${String(turn)}-${String(step)}`),
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: blocks,
+      isError,
+      source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, { surfaceOp: 'append' })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
 test('a chart result is painted as a native chart and exact text over the real wire', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -191,6 +232,81 @@ test('a blocked/error SVG result never sends a blob and keeps the readable text'
       'a blocked result must not paint a native image')
   } finally {
     // Bounded teardown window: the fixture disposes the app, pane and Host before the next case.
+    await fixture.settle()
+  }
+})
+
+
+const FIGURE_ONE_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+  + '<rect width="64" height="32" fill="#ef4444"/>'
+  + '<text x="4" y="20" font-size="12" fill="#ffffff">One</text></svg>'
+const FIGURE_TWO_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+  + '<rect width="64" height="32" fill="#3b82f6"/>'
+  + '<text x="4" y="20" font-size="12" fill="#ffffff">Two</text></svg>'
+
+function digestOf(source: string): string {
+  return createHash('sha256').update(Buffer.from(source, 'utf8')).digest('hex')
+}
+
+test('a reused callId across turns cannot lend a credential to another SVG row', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['PRD', '-SVG-REUSE-REDACTED'],
+    startup: { sessionId: SESSION_ID },
+    persistedBlankSessions: [{ id: SESSION_ID }],
+    nativeImages: true,
+  })
+  try {
+    const firstArgs = { title: 'Redacted Figure', description: 'redacted figure', svg: FIGURE_ONE_SOURCE }
+    const secondArgs = { title: 'Figure 2', description: 'second figure', svg: FIGURE_TWO_SOURCE }
+    const secondFact = svgFactFromArgs(secondArgs)
+    const firstBlob = digestOf(FIGURE_ONE_SOURCE)
+    const secondBlob = digestOf(FIGURE_TWO_SOURCE)
+    // The first row's final content is redacted (no machine credential); the
+    // second row is a different valid SVG. Both reuse the same bare callId.
+    await appendToolAt(fixture, 1, 0, 'reused-call', 'dsh_pi_tui_svg', firstArgs, [{ type: 'text', text: 'REDACTED BY POLICY' }])
+    await appendToolAt(fixture, 2, 0, 'reused-call', 'dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact))
+    await waitFor('the valid reused-call row paints its own image', () =>
+      imageCarriesBlob(fixture.pane.frames(), secondBlob), 30_000)
+    const nodes = wireNodes(fixture.pane.frames())
+    const images = nodes.filter(node => node.k === 'image')
+    assert.equal(images.length, 1, 'only the authorized row may paint an image')
+    assert.equal(images[0]?.p?.alt, 'Figure 2')
+    assert.equal(images[0]?.p?.blob, secondBlob)
+    const text = JSON.stringify(nodes.filter(node => node.k === 'code').map(node => node.p?.text))
+    assert.match(text, /REDACTED BY POLICY/u)
+    assert.equal(fixture.pane.blobIds().includes(firstBlob), false, 'the redacted row sends no blob')
+    assert.equal(fixture.pane.blobIds().includes(secondBlob), true)
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('two reused-callId SVG rows each paint their own digest blob', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['PRD', '-SVG-REUSE-TWO'],
+    startup: { sessionId: SESSION_ID },
+    persistedBlankSessions: [{ id: SESSION_ID }],
+    nativeImages: true,
+  })
+  try {
+    const firstArgs = { title: 'Figure 1', description: 'first figure', svg: FIGURE_ONE_SOURCE }
+    const secondArgs = { title: 'Figure 2', description: 'second figure', svg: FIGURE_TWO_SOURCE }
+    const firstFact = svgFactFromArgs(firstArgs)
+    const secondFact = svgFactFromArgs(secondArgs)
+    const firstBlob = digestOf(FIGURE_ONE_SOURCE)
+    const secondBlob = digestOf(FIGURE_TWO_SOURCE)
+    await appendToolAt(fixture, 1, 0, 'reused-call', 'dsh_pi_tui_svg', firstArgs, svgContentBlocks(firstFact))
+    await appendToolAt(fixture, 2, 0, 'reused-call', 'dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact))
+    await waitFor('both reused-call rows paint their own image', () =>
+      imageCarriesBlob(fixture.pane.frames(), firstBlob) && imageCarriesBlob(fixture.pane.frames(), secondBlob), 30_000)
+    const images = wireNodes(fixture.pane.frames()).filter(node => node.k === 'image')
+    assert.equal(images.length, 2)
+    const byAlt = new Map(images.map(image => [image.p?.alt, image.p?.blob]))
+    assert.equal(byAlt.get('Figure 1'), firstBlob, 'the first row keeps its own digest')
+    assert.equal(byAlt.get('Figure 2'), secondBlob, 'the second row keeps its own digest')
+  } finally {
     await fixture.settle()
   }
 })

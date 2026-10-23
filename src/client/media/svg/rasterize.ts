@@ -67,6 +67,23 @@ process.stdin.on('end', async () => {
     const Resvg = module.Resvg ?? (module.default && module.default.Resvg)
     if (typeof Resvg !== 'function') throw new Error('resvg module has no Resvg export')
     const renderer = new Resvg(input.svg, { fitTo: { mode: 'width', value: input.width } })
+    // Resvg's width/height getters are the intrinsic viewport (here 1x4), not
+    // the fitted canvas. fitTo: width scales the height by that aspect, so a
+    // 1x4 viewport with a 2048x64 viewBox targets 2048x8192. Compute the real
+    // canvas and check it BEFORE render() allocates the bitmap.
+    const canvasWidth = input.width
+    const canvasHeight = Math.ceil(input.width * (renderer.height / renderer.width))
+    if (!Number.isInteger(canvasWidth) || !Number.isInteger(canvasHeight)
+      || canvasWidth <= 0 || canvasHeight <= 0
+      || canvasWidth > ${SVG_MAX_RASTER_SIDE} || canvasHeight > ${SVG_MAX_RASTER_SIDE}
+      || canvasWidth * canvasHeight > ${SVG_MAX_RASTER_PIXELS}) {
+      process.stdout.write(JSON.stringify({
+        ok: false,
+        error: 'raster canvas ' + String(canvasWidth) + 'x' + String(canvasHeight)
+          + ' exceeds the ${SVG_MAX_RASTER_SIDE}px / ${SVG_MAX_RASTER_PIXELS}-pixel budget',
+      }))
+      return
+    }
     const png = renderer.render().asPng()
     process.stdout.write(JSON.stringify({ ok: true, png: Buffer.from(png).toString('base64') }))
   } catch (error) {

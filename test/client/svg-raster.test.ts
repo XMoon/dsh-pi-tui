@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { createSvgRasterizer, rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
+import { admitSvg } from '../../src/domain/visual/svg-admission.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
 
 const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
@@ -254,4 +255,27 @@ test('the live subscriber terminal state survives arbitrary cache-history churn'
   } finally {
     resetCapabilitiesCache()
   }
+})
+
+
+const ASPECT_MISMATCH_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="4" viewBox="0 0 2048 64">'
+  + '<rect width="64" height="32" fill="#ff0000"/></svg>'
+
+test('the native canvas budget is checked before render() allocates', { skip: nativeRasterSkip }, async () => {
+  const admission = admitSvg(ASPECT_MISMATCH_SVG)
+  assert.equal(admission.ok, true, 'the source itself is admitted')
+  if (admission.ok) {
+    assert.equal(admission.width, 2048)
+    assert.equal(admission.height, 64)
+  }
+  // The rendered viewport is 1:4, so targetWidth 2048 becomes 2048x8192: the
+  // worker must refuse the real canvas before render()/asPng allocation.
+  await assert.rejects(
+    rasterizeSvg(ASPECT_MISMATCH_SVG, { targetWidth: 2048, signal: new AbortController().signal }),
+    /raster canvas 2048x8192/u,
+  )
+  // A target that fits the same aspect still renders normally.
+  const small = await rasterizeSvg(ASPECT_MISMATCH_SVG, { targetWidth: 128, signal: new AbortController().signal })
+  assert.equal(small.widthPx, 128)
+  assert.equal(small.heightPx, 512)
 })
