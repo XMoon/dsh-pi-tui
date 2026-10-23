@@ -32,7 +32,7 @@ import { gitBranch } from '../../client/git/branch.ts'
 import type { ModelSelectionValue } from '../../domain/session/model-selection.ts'
 import { contextPressureOccupancy } from '../../runtime/session-reader-port.ts'
 import { StatsFolder } from '../../domain/status/stats.ts'
-import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from '../../domain/status/context-measurement.ts'
+import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason, type ContextMeasureResult } from '../../domain/status/context-measurement.ts'
 import { deriveAccessStatus, type AccessDeriveDeps } from '../../domain/status/derive-access.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { derivePlanStatus, deriveRemotePlanStatus, type PlanModeLike, type PlanProjectionLike } from '../../domain/status/derive-plan.ts'
@@ -241,6 +241,14 @@ export interface StatusRuntime {
   refreshContextMeasurement(reason: ContextMeasureReason): void
   /** The explicit /status force; returns the measured value. */
   forceContextMeasurement(): number | undefined
+  /**
+   * The C3 explicit force with its OBSERVATION: ONE coordinator measurement
+   * through the injected reader + exactly one cheap refresh; the returned
+   * classification distinguishes `fresh` (this attempt answered), `last-known`
+   * (this attempt failed, an earlier bound value survives) and `unavailable`.
+   * Never relabels a cached value as fresh.
+   */
+  forceContextMeasurementResult(): ContextMeasureResult
   /** Schedule the deferred initial/post-switch measurement for one session. */
   scheduleInitialMeasurement(sessionId: string): void
   /** Cancel a pending deferred measurement (disposal). */
@@ -1016,16 +1024,24 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   // surface bypassed the cache and could duplicate the deferred initial
   // measurement).
   
-  const forceContextMeasurement = (): number | undefined => {
+  /**
+   * The ONE shared force path (C3): mark dirty, measure through the
+   * coordinator ONCE, refresh cheaply exactly once, and return the attempt's
+   * observation. The legacy {@link forceContextMeasurement} delegates to this
+   * helper's `value` (no duplicated force, no semantic change).
+   */
+  const forceContextMeasurementShared = (): ContextMeasureResult => {
     const session = deps.liveAgent()?.session
     const sessionId = session?.id ?? (deps.remote !== undefined ? deps.currentSessionId() : undefined)
-    if (sessionId === undefined) return undefined
+    if (sessionId === undefined) return { value: undefined, observation: 'unavailable' }
     contextMeasurement.bind(sessionId)
     contextMeasurement.markDirty()
-    const value = contextMeasurement.measure(sessionId, (id) => deps.measureContext(id))
+    const result = contextMeasurement.measureResult(sessionId, (id) => deps.measureContext(id))
     refreshStatusCheap()
-    return value
+    return result
   }
+
+  const forceContextMeasurement = (): number | undefined => forceContextMeasurementShared().value
 
   // The initial/post-switch measurement is deferred one event-loop turn
   // past the first usable paint: cold resume must never block the first
@@ -1078,6 +1094,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     markContextDirty,
     refreshContextMeasurement,
     forceContextMeasurement,
+    forceContextMeasurementResult: forceContextMeasurementShared,
     scheduleInitialMeasurement: scheduleInitialContextMeasure,
     cancelDeferred,
     setGoal,
