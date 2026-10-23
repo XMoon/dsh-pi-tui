@@ -46,7 +46,6 @@ process.env.FORCE_COLOR = ''
 
 const DOWN = '\x1b[B'
 const ENTER = '\r'
-const TAB = '\t'
 const ESC = '\x1b'
 /** The frozen matrix (docs/architecture/design-language.md §11.2 / §8). */
 const SIZES = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
@@ -227,7 +226,7 @@ async function openOtherRows(h: Harness): Promise<void> {
   // The workspace opens on the About home: walk the rail to the legacy
   // launcher category, then enter its Rows level.
   await selectSettingsCategory(h.vt, 'Other settings')
-  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, ENTER] : [ENTER]) await key(h, pressed)
+  await key(h, ENTER)
 }
 
 /** Reach the legacy Web section through the real Workspace handoff. */

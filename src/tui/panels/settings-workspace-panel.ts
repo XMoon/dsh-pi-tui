@@ -31,6 +31,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
+import { formatKeyId } from '../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
@@ -448,6 +449,13 @@ const COLUMN_GAP = 2
  * the keybinding contract, and the hint would then switch to `componentKeymap`.
  */
 const SETTINGS_LOCAL_KEYS = { refresh: 'r', copy: 'c' } as const
+/** The Settings workspace's fixed region-key labels: this leased screen owns
+ *  them (they are not remappable Host actions), so the labels come from the
+ *  key-label authority instead of a hand-written chord spelling. */
+const SETTINGS_REGION_LABELS = {
+  forward: formatKeyId(Key.tab),
+  backward: formatKeyId(Key.shift(Key.tab)),
+} as const
 const CHOICE_CONFIRM_HINT: ActionBarSegment = { text: 'Enter confirm', priority: 7 }
 const CHOICE_BACK_HINT: ActionBarSegment = { text: 'Esc back', short: 'Esc', priority: 8 }
 
@@ -1558,19 +1566,24 @@ export class SettingsWorkspacePanel implements Component {
     // key this category ignores.
     if (this.categoryId === 'plugins') return []
     return [
-      { text: forward === 'focus' ? 'Tab focus' : 'Tab panes', priority: 3 },
-      ...(backward ? [{ text: 'Shift+Tab back', priority: 3 }] : []),
+      { text: `${SETTINGS_REGION_LABELS.forward} ${forward === 'focus' ? 'focus' : 'panes'}`, priority: 3 },
+      ...(backward ? [{ text: `${SETTINGS_REGION_LABELS.backward} back`, priority: 3 }] : []),
     ]
   }
 
   /** The category rail's own hints. A direct category hands the keyboard to
    *  its content page; a legacy category steps one level deeper. */
   private navigationActionBarSegments(): ActionBarSegment[] {
+    // The rail can be re-focused while a legacy write is still pending (the
+    // workspace deliberately allows browsing during a pending write), and the
+    // root's region key is a no-op in that phase. An active choice owns the
+    // keys too: neither may be advertised as usable.
+    const regionKeyUsable = this.choiceField() === undefined && this.editPhase.kind !== 'pending'
     if (isDirectCategory(this.categoryId)) {
       return [
         { text: 'Up/Down navigate', priority: 4 },
         { text: 'Enter/Right focus', priority: 6 },
-        ...this.regionActionBarHints('focus', false),
+        ...(regionKeyUsable ? this.regionActionBarHints('focus', false) : []),
         { text: 'Esc close', priority: 8 },
       ]
     }
@@ -1578,7 +1591,7 @@ export class SettingsWorkspacePanel implements Component {
       { text: 'Up/Down select', priority: 4 },
       { text: 'Right open', priority: 6 },
       { text: 'Enter open', priority: 5 },
-      ...(this.currentRows().length > 0 ? this.regionActionBarHints('panes', false) : []),
+      ...(regionKeyUsable && this.currentRows().length > 0 ? this.regionActionBarHints('panes', false) : []),
       { text: 'Esc close', priority: 8 },
     ]
   }
