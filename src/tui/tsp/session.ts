@@ -1197,7 +1197,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // blob. The node id's last segment is the `ui.tool` key (the same key the
       // mapper wrote), with the event's optional `key` taking precedence.
       if (input.event.ev === 'toggle' && input.event.sf === surface.id) {
-        const key = input.event.key ?? input.event.id.slice(input.event.id.lastIndexOf('.') + 1)
+        // The SDK node id still carries the B2 child key (`sub-...`); the
+        // disclosure identity is the parent-scoped path from the last tool-card
+        // key (`msg-N`) through that child key. The mapper builds exactly the
+        // same `msg-N/sub-...` path, so two parents with the same subCallId do
+        // not share expansion while node ids stay untouched.
+        const segments = input.event.id.split('.')
+        let toolStart = -1
+        for (let index = segments.length - 1; index >= 0; index -= 1) {
+          if (segments[index]!.startsWith('msg-')) { toolStart = index; break }
+        }
+        const key = toolStart >= 0
+          ? segments.slice(toolStart).join('/')
+          : input.event.key ?? input.event.id.slice(input.event.id.lastIndexOf('.') + 1)
         if (input.event.collapsed) expandedToolKeys.delete(key)
         else expandedToolKeys.add(key)
         if (rebuildLastMain()) render()

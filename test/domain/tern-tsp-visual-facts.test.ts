@@ -395,8 +395,9 @@ test('PTC child expansion identity is scoped to its parent card', () => {
   const nodes = renderMany([parentA, parentB], {
     toolSvgStates: states,
     // The parent card keys are msg-1 / msg-2; only the FIRST parent's child is
-    // expanded. A bare subCallId key would expand both.
-    expandedToolKeys: new Set([`sub-msg-1-${subCallId}`]),
+    // expanded. The disclosure path is parent-scoped; the SDK child key stays
+    // the existing sub-<subCallId> B2 identity.
+    expandedToolKeys: new Set([`msg-1/sub-${subCallId}`]),
   })
   const images = nodes.filter(node => node.kind === 'image')
   assert.equal(images.length, 1)
@@ -405,6 +406,8 @@ test('PTC child expansion identity is scoped to its parent card', () => {
   assert.equal(requestsB, 0, "the sibling parent's child must stay collapsed and blob-free")
   const childTools = nodes.filter(node => node.kind === 'tool' && typeof node.props.key === 'string' && String(node.props.key).startsWith('sub-'))
   assert.equal(childTools.length, 2)
-  assert.equal(childTools.find(node => node.props.key === `sub-msg-1-${subCallId}`)?.props.collapsed, false)
-  assert.equal(childTools.find(node => node.props.key === `sub-msg-2-${subCallId}`)?.props.collapsed, true)
+  assert.equal(childTools[0]?.props.key, `sub-${subCallId}`, 'the B2 SDK child node key is unchanged')
+  assert.equal(childTools[0]?.props.collapsed, false)
+  assert.equal(childTools[1]?.props.key, `sub-${subCallId}`)
+  assert.equal(childTools[1]?.props.collapsed, true)
 })
