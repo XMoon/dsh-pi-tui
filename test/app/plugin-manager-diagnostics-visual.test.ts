@@ -175,6 +175,17 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     assert.match(start, /renderer callback/, 'the error block starts on the selected fact\'s next row')
     assert.ok(sawCjk, 'the CJK error text is painted while paging')
     assert.ok(sawTail, 'the final error row is reachable by keyboard scrolling')
+    // Paging WITHIN one too-tall fact keeps its identity/state sticky at
+    // the top: the cursor is visible and `c` copies the same fact, never an
+    // unidentifiable offscreen block.
+    const paged = plain(harness.viewport())
+    assert.match(paged, />/)
+    assert.match(paged, /transcript\.tool\.renderer/)
+    assert.match(paged, /\[failed\]/)
+    harness.vt.sendInput('c')
+    await settleHarness(harness)
+    assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(entry({ lastError: errorText })),
+      'the sticky selected fact copies its full value')
     // End is already on the last fact; it must still re-reveal the start
     // after the wheel/page scroll moved the offset.
     harness.vt.sendInput('\x1b[F') // End

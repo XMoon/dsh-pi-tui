@@ -175,6 +175,8 @@ interface DiagnosticsFact {
 interface DiagnosticSpan {
   readonly start: number
   readonly count: number
+  /** The fact's leading identity/state rows (kept sticky while paging). */
+  readonly headRows: number
 }
 
 interface DiagnosticsLayout {
@@ -232,6 +234,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private diagnosticsSpans: ReadonlyMap<string, DiagnosticSpan> = new Map()
   private diagnosticsViewport = 0
   private diagnosticsLineCount = 0
+  /** Whether the selected fact's FIRST row is inside the painted body. */
+  private diagnosticsSelectionVisible = false
   private readonly searchInput = new Input({ prompt: '' })
   private readonly specInput = new Input({ prompt: '' })
   private readonly registryInput = new Input({ prompt: '' })
@@ -1154,8 +1158,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   /** `c`: copy the SELECTED fact's exact payload (a summary value or the
-   *  full contribution block, including the whole lastError). */
+   *  full contribution block, including the whole lastError). Copy is
+   *  admitted only when the selected fact's FIRST row is on screen: paging
+   *  inside a too-tall block must never copy an identity the user cannot
+   *  see. */
   private copyDiagnosticsSelection(): void {
+    if (!this.diagnosticsSelectionVisible) return
     const fact = this.diagnosticsFacts()[this.diagnosticsSelection]
     if (fact === undefined) return
     this.intents.onCopy(fact.copy)
@@ -1227,7 +1235,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         if (index === 0) lines.push(`${markerFor(selected)}${color.textDim(head)}${ink(part)}`)
         else lines.push(`${' '.repeat(markerWidth + headWidth)}${ink(part)}`)
       })
-      spans.set(fact.id, { start, count: lines.length - start })
+      spans.set(fact.id, { start, count: lines.length - start, headRows: 1 })
       appendCopyTarget(fact.id)
     }
     const pushContribution = (fact: DiagnosticsFact): void => {
@@ -1242,6 +1250,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         : entry.state === 'failed' || entry.state === 'shadowed' ? 'warning' : 'dim'
       const header = sanitizedPhysicalLine(`${entry.extensionPoint}:${entry.id}`)
       const start = lines.length
+      let headerRows = 1
       if (contentWidth < chipWidth + 2) {
         // An absurdly narrow frame cannot carry the whole chip beside the
         // label: keep BOTH, the chip on its own full line.
@@ -1250,6 +1259,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           lines.push(`${index === 0 ? marker : plainMarker}${ink(part)}`)
         })
         lines.push(`${plainMarker}${paintTone(chip, chipTone)}`)
+        headerRows = lines.length - start
       } else {
         // The identity (`extensionPoint:id`) wraps as ONE uninterrupted
         // string; the state chip follows on the LAST wrapped line (or its own
@@ -1270,6 +1280,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
             lines.push(`${lineMarker}${ink(part)}`)
           }
         })
+        headerRows = lines.length - start
       }
       if (entry.lastError !== undefined) {
         const errorHead = 'error  '
@@ -1283,7 +1294,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           else lines.push(`${' '.repeat(markerWidth + errorHeadWidth)}${color.error(part)}`)
         })
       }
-      spans.set(fact.id, { start, count: lines.length - start })
+      spans.set(fact.id, { start, count: lines.length - start, headRows: headerRows })
       appendCopyTarget(fact.id)
     }
     for (const fact of facts) {
@@ -1365,9 +1376,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }
     }
     this.diagnosticsOffset = clampOffset(this.diagnosticsOffset, built.lines.length, viewport)
+    const stickyRows = span !== undefined
+      && span.start < this.diagnosticsOffset
+      && span.start + span.count > this.diagnosticsOffset
+      ? Math.min(span.headRows, viewport)
+      : 0
+    this.diagnosticsSelectionVisible = span !== undefined
+      && (stickyRows > 0
+        || (span.start >= this.diagnosticsOffset && span.start < this.diagnosticsOffset + viewport))
     this.diagnosticsReveal = false
     for (const target of built.targets) {
-      const y = target.line - this.diagnosticsOffset
+      const y = target.line - this.diagnosticsOffset + (target.line >= this.diagnosticsOffset ? stickyRows : 0)
       if (y < 0 || y >= viewport) continue
       targets.push({
         kind: target.kind,
@@ -1377,7 +1396,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         endCol: target.endCol,
       })
     }
-    return padBody(built.lines.slice(this.diagnosticsOffset, this.diagnosticsOffset + viewport), viewport, plan.width)
+    const visible = stickyRows === 0
+      ? built.lines.slice(this.diagnosticsOffset, this.diagnosticsOffset + viewport)
+      : [
+          ...built.lines.slice(span!.start, span!.start + stickyRows),
+          ...built.lines.slice(this.diagnosticsOffset, this.diagnosticsOffset + viewport - stickyRows),
+        ]
+    return padBody(visible, viewport, plan.width)
   }
 
   // ── activation (keyboard and mouse share this one admission path) ────────
@@ -1870,6 +1895,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.paintedConfirmScrollMax = 0
       this.installSelection = Number.MAX_SAFE_INTEGER
       this.diagnosticsScrollable = false
+      this.diagnosticsSelectionVisible = false
     }
     if (plan.ruleRows >= 2) lines.push(color.border('─'.repeat(plan.width)))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
@@ -2145,7 +2171,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return [
         { text: 'Up/Down fact', priority: 40 },
         ...(this.diagnosticsScrollable ? [{ text: 'PgUp/PgDn scroll', priority: 35 }] : []),
-        { text: `${WORKSPACE_KEYS.copy} copy`, priority: 70 },
+        ...(this.diagnosticsSelectionVisible ? [{ text: `${WORKSPACE_KEYS.copy} copy`, priority: 70 }] : []),
         { text: `${WORKSPACE_KEYS.copyAll} copy all`, priority: 65 },
         { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
         { text: 'Esc back', priority: 100 },
