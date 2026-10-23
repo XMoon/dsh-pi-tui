@@ -1068,3 +1068,82 @@ test('subagentModelSelection enforces the official validation rules client-side'
   )
   assert.deepEqual(writes, [], 'a rejected write never reaches the settings service')
 })
+
+// ── the profile-wide visual tools switch ──────────────────────────────────
+
+test('visualTools reads the effective value, its USER provenance and the Host row status', () => {
+  const config = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-visual-tools',
+        value: { enabled: false },
+        user: {},
+        revision: 7,
+      }],
+      mutate: async () => {},
+    },
+    piTuiVisualToolsStatus: { applied: () => false },
+  }).visualTools
+  assert.deepEqual(config.read(), { enabled: false, userOverridden: false, applied: false })
+
+  const overridden = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-visual-tools',
+        value: { enabled: true },
+        user: { enabled: true },
+        revision: 3,
+      }],
+      mutate: async () => {},
+    },
+    piTuiVisualToolsStatus: { applied: () => true },
+  }).visualTools
+  assert.deepEqual(overridden.read(), { enabled: true, userOverridden: true, applied: true })
+})
+
+test('visualTools reports an unreadable section instead of the schema default', () => {
+  const missing = port({ settings: settings({}) }).visualTools
+  assert.equal(missing.read(), undefined, 'a missing namespace is unavailable, never On')
+  const malformed = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: 'yes' }, revision: 1 }],
+      mutate: async () => {},
+    },
+  }).visualTools
+  assert.equal(malformed.read(), undefined, 'a non-boolean effective value is unreadable')
+  const noService = port({}).visualTools
+  assert.equal(noService.read(), undefined, 'no settings service at all is unreadable')
+})
+
+test('visualTools keeps the runtime fact unobservable when the Host row status is absent', () => {
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 1 }],
+      mutate: async () => {},
+    },
+  }).visualTools
+  assert.deepEqual(config.read(), { enabled: true, userOverridden: false, applied: undefined })
+})
+
+test('visualTools.setEnabled writes the exact namespace path with the descriptor revision', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
+      mutate: async (ns: string, ops: unknown, revision?: number) => {
+        writes.push({ ns, ops, revision })
+      },
+    },
+  }).visualTools
+  await config.setEnabled(false)
+  assert.deepEqual(writes, [{
+    ns: 'pi-tui-visual-tools',
+    ops: [{ op: 'set', path: ['enabled'], value: false }],
+    revision: 11,
+  }])
+
+  const unavailable = port({ settings: settings({}) }).visualTools
+  await assert.rejects(unavailable.setEnabled(true), /not mounted/u, 'an absent section is an explicit refusal')
+  const noSettings = port({}).visualTools
+  await assert.rejects(noSettings.setEnabled(true), /settings service is unavailable/u)
+})

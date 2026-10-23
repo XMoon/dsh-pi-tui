@@ -17,8 +17,16 @@
   动画和超预算图形），并且只有最终结果仍带有与调用参数匹配的凭据时才绘制；策略替换结果后
   不会显示旧图。Direct/Remote 使用同一份 durable 结果。
 
+- **Settings 新增 Tools 分类与 Visual tools 总开关。** 开关默认开启，位于 `/settings → Tools`，
+  对应整个 DSH Host profile 的 `pi-tui-visual-tools.enabled` 配置。关闭后 `dsh_pi_tui_chart`
+  与 `dsh_pi_tui_svg` 会从 Host 全局工具注册表注销，之后的模型请求不再看到它们；重新开启恢复
+  原定义，无需重启。设置跨会话、跨 Agent、跨 TUI 后端生效；已经记录在 transcript 里的图表/SVG
+  结果仍可正常显示、复制、搜索与导出。写入走官方 revision 校验的设置路径，只有 Host 回读一致
+  （Direct 还会核对工具是否真的完成注册/注销）时才显示 Verified；读不到 Host 配置时该行显示
+  Unavailable 并拒绝写入，不会把默认值伪装成已读取的当前值。
+
 - **Settings 默认进入 About 主页，宽/中屏是真正的左右两栏。** 左侧是分类导航
-  （About、Models、Account、Appearance、Display、Plugins、Other settings），右侧是
+  （About、Models、Account、Appearance、Display、Tools、Plugins、Other settings），右侧是
   真实内容：选中 Models 或 Account 会立刻在右栏显示对应页面，无需再按一次
   Enter；此时键盘仍在左栏，Enter 或 → 才把键盘交给右栏页面，Esc/Backspace/←
   退回分类栏并保留页面状态。About 显示品牌图案与 TUI、DSH 两个版本号（DSH 版本

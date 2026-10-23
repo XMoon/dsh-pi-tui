@@ -252,6 +252,7 @@ function setupProof(options: ProofOptions): SinkHarness {
     createPluginManagerPage: () => undefined,
     config: {
       configReadiness: () => 'ready',
+      visualTools: { read: () => ({ enabled: true, userOverridden: false, applied: true }), setEnabled: async () => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },

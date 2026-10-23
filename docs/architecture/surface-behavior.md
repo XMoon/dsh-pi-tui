@@ -151,7 +151,7 @@ Command page.
 `/settings` opens one fullscreen lease with ONE navigation focus state. The
 category rail is the selection owner; the right column is the content. Width
 only projects panes (≥108 three, 76–107 two, <76 one). The category order is
-`About, Models, Account, Appearance, Display, Plugins, Other settings`;
+`About, Models, Account, Appearance, Display, Tools, Plugins, Other settings`;
 `/settings` lands on `About`.
 
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
@@ -194,12 +194,28 @@ only projects panes (≥108 three, 76–107 two, <76 one). The category order is
   A transient choice, a pending write and the in-place Plugin Manager keep their
   own keys; every region jump lands on the destination's first candidate and
   bumps the pointer-press revision, so a straddling click cannot activate it.
-- The four configuration categories keep their three-level browse (L0
-  categories, L1 rows, L2 detail) and their existing writers.
-- Exactly two configuration rows are writable: the configured theme and the
-  transcript display setting. Browse/copy never write.
+- The four configuration categories (`Appearance`, `Display`, `Tools`, `Other
+  settings`) keep their three-level browse (L0 categories, L1 rows, L2 detail)
+  and their existing writers.
+- Three configuration rows are writable: the configured theme, the transcript
+  display setting, and the profile-wide `Visual tools` switch. Browse/copy never
+  write.
+- `Tools` holds exactly one built-in row, `Visual tools`, backed by the Host
+  profile's `pi-tui-visual-tools.enabled` volatile Config (schema default On).
+  Its stated value is the effective Host form value; `[default]` marks a value
+  the USER layer does not declare. Confirm writes that ONE field through the
+  official revision-checked settings mutation and re-reads the Host. Off
+  releases both built-in registrations from the global Host tool registry and
+  On restores the original definitions; already-recorded results and their
+  rendering, copy, search and export are unaffected. A missing, unreadable or
+  non-current authority keeps the category and row visible but offers no
+  candidate and refuses the write (never a fabricated default). On a Direct
+  backend `Verified` also requires the Host row's live registration fact to
+  agree; Remote has no registry read and states the runtime half as
+  unobservable instead of claiming success.
 - An L2 choice is transient; only an explicit Confirm commits one field through
-  the serialized whole-document `ConfigPort` path and re-reads the authority.
+  its own authority path (the serialized TUI settings document, or the Host
+  `pi-tui-visual-tools` form section) and re-reads the authority.
 - `Verified` requires a ready read-back with a matching value. Rejected/unknown
   outcomes are attributed from a fresh read, never guessed. A refused write is
   reported as `Not saved`/unknown, never as success.
@@ -381,8 +397,10 @@ Account page sources), `src/app/command/credential-workflow.ts`,
 Must-not: add a second store/subscription/write path, fabricate defaults, commit
 after close/replacement, paint a non-ready save as verified, show a secret or
 token, infer credential presence from a route, offer an invisible confirm
-target, clear the Account grant as a generic record, or let an older page
-settlement repaint the current page.
+target, clear the Account grant as a generic record, let an older page
+settlement repaint the current page, drive the visual-tools switch from a TUI
+preference, or claim its Host registry registration took effect when the
+backend has no registry evidence.
 
 ## Task Quick
 

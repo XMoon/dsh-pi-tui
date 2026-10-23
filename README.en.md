@@ -391,8 +391,8 @@ readiness. `R`
 re-reads and `C` copies the selected row's exact source value. Browsing, choosing
 and copying alone never write configuration.
 
-The Settings categories are now `Models / Account / Appearance / Display / Plugins /
-Other settings`; `/settings` still lands on Appearance. `Models` is an in-place page: it lists
+The Settings categories are now `Models / Account / Appearance / Display / Tools / Plugins /
+Other settings`; `/settings` still lands on About. `Models` is an in-place page: it lists
 the Host provider directory, whether an API key is configured (presence only, never a
 connection test) and the DeepSeek Account entry; it exposes provider facts, a masked API-key
 editor, the Add Provider draft wizard, and provider-native sign-in with a persistent notice,
@@ -445,6 +445,16 @@ existing complete settings editor is still available: `Other settings` → `Open
 existing settings…` retires the workspace and restores the surface it paused
 before opening the original editor, so Theme, the Plugin Manager, keybindings,
 permissions and extension settings keep every existing write path.
+
+`/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
+Host's `pi-tui-visual-tools.enabled` configuration: turning it Off unregisters
+`dsh_pi_tui_chart` and `dsh_pi_tui_svg` from that Host's global tool registry, so later model
+requests no longer see them; turning it back On restores the original definitions. The setting
+belongs to the whole DSH Host profile (across sessions and agents, not just the current TUI).
+Off affects only future tool availability: chart/SVG results already recorded in a transcript
+still render, copy, search and export normally. The Direct backend shows `Verified` only after
+also confirming the Host registry state; Remote has no registry read and therefore reports the
+saved configuration without claiming the runtime registration took effect.
 
 `Other settings` in `/settings` now has a `Web Search / Fetch` row: it retires the workspace,
 opens the existing editor's Web section and focuses its first item. The section switches the search

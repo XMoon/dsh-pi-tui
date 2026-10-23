@@ -177,6 +177,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       setSendOriginalQuestion: async () => {},
       setSearchApiBaseURL: async () => {},
     },
+    visualTools: {
+      read: () => undefined,
+      setEnabled: async () => {},
+    },
   }
   const hostFile = {
     listReferences: async () => ({ kind: 'ok' as const, items: [] }),

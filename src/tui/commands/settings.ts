@@ -47,7 +47,7 @@ import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from '../pickers
 import { SubagentModelAllowlistPicker, allowlistSummary } from '../pickers/subagent-model-menu.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type WebProviderSettings } from '../../runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings } from '../../runtime/config-port.ts'
 import { WebCredentialPanel, WebEndpointPanel, WebWriteVerdictError, type WebCredentialAction } from '../panels/web-provider-panels.ts'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
@@ -64,7 +64,6 @@ import type {
   SettingsWorkspaceFreshness,
   SettingsWorkspaceRowId,
   SettingsWorkspaceSnapshot,
-  SettingsWorkspaceWritableField,
 } from '../panels/settings-workspace-panel.ts'
 import { displaySessionId } from './sessions.ts'
 import type {
@@ -291,7 +290,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const WEB_CREDENTIAL_REF = 'DEEPSEEK_API_KEY'
   const WEB_CREDENTIAL_ROW_ID = 'web-credential'
   /** The `Other`-category launcher row id (a NAVIGATION row: it never becomes a
-   *  Workspace editable field, so the `2 editable rows` count is unchanged). */
+   *  Workspace editable field, so the editable-row count is unchanged). */
   const WEB_LAUNCHER_ROW_ID = 'web-settings'
   /** The legacy row the launcher focuses AND the identity that makes Esc
    *  restore the Workspace instead of returning to the conversation. */
@@ -1271,15 +1270,151 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   })
 
   /**
-   * Phase 3B / B2-B: the authoritative re-read of ONE committed field. `expected`
-   * is the value the authority must return for the commit to count as verified; a
-   * non-`ready` backend, an unreadable document or a different value is EXPLICIT
-   * (never silently reported as saved). A theme value is compared after the
-   * canonical normalization (a legacy `custom:X` document still means `file:X`);
-   * a display preset is compared exactly.
+   * The profile-wide Visual tools switch (PR-D follow-up). The row's authority
+   * is the Host `pi-tui-visual-tools` Config section, never a TUI settings
+   * document field: `enabled` decides whether BOTH built-in tools are offered
+   * to every agent of this Host profile. Its candidates are literal `on` /
+   * `off` identities; the value never round-trips through a display string.
    */
+  const visualToolsSummaryOf = (state: VisualToolsState | undefined): string => {
+    if (state === undefined) return 'Unavailable'
+    // `[default]` marks a value the USER layer does not declare. The Host form
+    // exposes exactly that provenance; no schema default is re-derived here.
+    return `${state.enabled ? 'On' : 'Off'}${state.userOverridden ? '' : ' [default]'}`
+  }
+
+  /** The runtime half of the row: the owning Host row's registration fact.
+   *  A backend that cannot observe the Host registry says so instead of
+   *  presenting the committed configuration as a live registration. */
+  const visualToolsRuntimeOf = (state: VisualToolsState | undefined): string => {
+    if (state === undefined) return 'not read — the Host profile section is unavailable'
+    if (state.applied === undefined) return 'not observable on this backend (the Host registry has no wire read)'
+    return state.applied
+      ? 'both tools are registered in the Host tool registry'
+      : 'not applied — the Host tool registry does not carry both registrations'
+  }
+
+  const visualToolsEditOf = (
+    state: VisualToolsState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceEdit => {
+    // A non-ready backend or an unreadable section still shows the row (the
+    // Tools category exists) but offers NO candidate, so Confirm is impossible
+    // instead of writing against a value the Client cannot vouch for.
+    const editable = state !== undefined && readiness === 'ready'
+    return {
+      field: 'visual-tools',
+      primary: 'persisted',
+      options: editable
+        ? [
+            { value: 'On', label: 'On', available: true, current: state.enabled },
+            { value: 'Off', label: 'Off', available: true, current: !state.enabled },
+          ]
+        : [],
+      runtime: visualToolsRuntimeOf(state),
+      persisted: visualToolsSummaryOf(state),
+    }
+  }
+
+  /** The profile-wide switch's folder freshness: an unreadable section is
+   *  `unavailable` (never a fabricated default), and a stale backend keeps a
+   *  readable value only as `last-known`. */
+  const visualToolsFreshnessOf = (
+    state: VisualToolsState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceFreshness => state === undefined
+    ? 'unavailable'
+    : readiness === 'ready' ? 'ready' : 'last-known'
+
+  /** A candidate identity ('On'/'Off') as the Host boolean, or undefined for a
+   *  value this row never paints. */
+  const visualToolsValueOf = (value: string): boolean | undefined =>
+    value === 'On' ? true : value === 'Off' ? false : undefined
+
+  /** The authoritative re-read of the committed switch. `agrees` requires the
+   *  Host form to carry the requested value; when the backend also observes the
+   *  registry (Direct), the live registration must agree as well, otherwise the
+   *  commit is `unverified` — never a `Verified` the runtime does not back. */
+  const verifyCommittedVisualTools = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed value could not be re-read` }
+    }
+    const state = runner.config.visualTools.read()
+    if (state === undefined) {
+      return { outcome: 'unverified', reason: 'the committed Host visual tools setting could not be re-read' }
+    }
+    if (state.enabled !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative Host setting reads ${state.enabled ? 'On' : 'Off'}`,
+      }
+    }
+    if (state.applied !== undefined && state.applied !== expected) {
+      return {
+        outcome: 'unverified',
+        reason: expected
+          ? 'the Host profile now stores On, but the Host tool registry did not adopt both registrations'
+          : 'the Host profile now stores Off, but the Host tool registry still reports the tools registered',
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  /** Attribute a REJECTED switch write from a fresh authoritative read: only an
+   *  authority still carrying the request's base value REFUTES it; a third or
+   *  already-requested value (or an unreadable authority) cannot be attributed
+   *  to THIS request. */
+  const classifyRejectedVisualTools = (
+    expected: boolean,
+    base: boolean,
+    failureReason: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const state = runner.config.configReadiness() === 'ready'
+      ? runner.config.visualTools.read()
+      : undefined
+    if (state === undefined) {
+      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative Host setting could not be re-read` }
+    }
+    if (state.enabled === base) return { outcome: 'not-saved', reason: failureReason }
+    return {
+      outcome: 'indeterminate',
+      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
+    }
+  }
+
+  /** Commit the ONE profile-wide switch through the official revision-checked
+   *  settings write, then re-read the authority (a resolved write is not a
+   *  read-back). */
+  const commitVisualTools = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    const enabled = visualToolsValueOf(value)
+    if (enabled === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a visual tools candidate` }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the visual tools switch was not changed` }
+    }
+    const base = runner.config.visualTools.read()
+    if (base === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host visual tools setting is unavailable; the switch was not changed' }
+    }
+    try {
+      await runner.config.visualTools.setEnabled(enabled)
+    } catch (error) {
+      return classifyRejectedVisualTools(enabled, base.enabled, safeErrorMessage(error))
+    }
+    return verifyCommittedVisualTools(enabled)
+  }
+
+  /** The two TUI-settings-document writers. It is deliberately NARROWER than
+   *  {@link SettingsWorkspaceWritableField}: the Host visual-tools switch has
+   *  its own authority and its own read/write helpers, so it can never fall
+   *  into the theme/display default branch. */
+  type TuiSettingsField = 'theme' | 'display-preset'
+
   /** The persisted value of one writable field, or undefined when unreadable. */
-  const persistedValueOf = (field: SettingsWorkspaceWritableField): string | undefined => {
+  const persistedValueOf = (field: TuiSettingsField): string | undefined => {
     const settings = runner.tuiSettings
     if (settings === undefined) return undefined
     let doc: TuiSettingsDoc
@@ -1297,7 +1432,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     | { readonly kind: 'differs'; readonly actual: string | undefined }
     | { readonly kind: 'unavailable'; readonly reason: string }
 
-  const readCommittedField = (field: SettingsWorkspaceWritableField, expected: string): CommittedReadback => {
+  /**
+   * Phase 3B / B2-B: the authoritative re-read of ONE committed TUI-document
+   * field. `expected` is the value the authority must return for the commit to
+   * count as verified; a non-`ready` backend, an unreadable document or a
+   * different value is EXPLICIT (never silently reported as saved). A theme
+   * value is compared after the canonical normalization (a legacy `custom:X`
+   * document still means `file:X`); a display preset is compared exactly.
+   */
+  const readCommittedField = (field: TuiSettingsField, expected: string): CommittedReadback => {
     const settings = runner.tuiSettings
     if (settings === undefined) {
       return { kind: 'unavailable', reason: 'no authoritative TUI settings document is readable' }
@@ -1317,7 +1460,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   const verifyCommittedField = (
-    field: SettingsWorkspaceWritableField,
+    field: TuiSettingsField,
     expected: string,
   ): SettingsWorkspaceCommitOutcome => {
     const readback = readCommittedField(field, expected)
@@ -1354,7 +1497,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * Never a `Saved`, and never an acceptance/refusal claim the Client cannot support.
    */
   const classifyRejectedWrite = (
-    field: SettingsWorkspaceWritableField,
+    field: TuiSettingsField,
     expected: string,
     base: string | undefined,
     failureReason: string,
@@ -1393,14 +1536,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const commitSettingsWorkspaceField = async (
     request: SettingsWorkspaceCommitRequest,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
-    const outcome = request.field === 'display-preset'
-      ? await commitDisplayPreset(request.value)
-      : await commitTheme(request.value)
+    // Explicit three-way dispatch: the Host visual-tools switch is neither a
+    // theme nor a display preset, so it must never reach those writers by
+    // falling through a binary default.
+    const outcome = request.field === 'visual-tools'
+      ? await commitVisualTools(request.value)
+      : request.field === 'display-preset'
+        ? await commitDisplayPreset(request.value)
+        : await commitTheme(request.value)
     if (outcome.outcome !== 'verified') {
       // The write OWNER records the real failure/uncertainty: the workspace's
       // settlement is deliberately dropped once its screen lease is gone, and a
       // dispatched write must stay diagnosable either way (§3/§5.5 — never a
-      // silently lost failure). The value is a theme/display name, never a secret.
+      // silently lost failure). The value is a theme/display name or a switch
+      // candidate, never a secret.
       runner.diag.warn('settings write', {
         field: request.field,
         value: request.value,
@@ -1567,6 +1716,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       : readIssue !== undefined
         ? `Persisted preference unknown — the TUI settings document could not be read (${readIssue}).`
         : 'Persisted preference unknown — no authoritative TUI settings document is available.'
+    // The profile-wide switch has its OWN authority (the Host Config section),
+    // read on this same snapshot: an unavailable section is never presented as
+    // the shipped default.
+    const visualTools = runner.config.visualTools.read()
+    const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
     return {
       configReadiness,
       capturedAt: Date.now(),
@@ -1621,6 +1775,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           freshness: 'runtime',
           description: 'Whether reasoning blocks render expanded or collapsed. A Client runtime presentation preference, not a persisted Host value.',
           action: 'inspect',
+        },
+        {
+          // The ONE built-in Visual tools switch: a Host-profile setting, not a
+          // TUI preference. The row stays visible when the authority is
+          // unavailable (the category exists), but `edit.options` is empty in
+          // that case, so no Confirm can be painted or dispatched.
+          id: 'visual-tools',
+          category: 'tools',
+          label: 'Visual tools',
+          summary: visualToolsSummaryOf(visualTools),
+          scope: 'DSH Host profile · every agent on this Host',
+          freshness: visualToolsFreshness,
+          description: 'Enable the built-in Chart and SVG tools for this DSH profile. '
+            + 'Affects every agent using this Host profile, not just the TUI.',
+          action: 'inspect',
+          edit: visualToolsEditOf(visualTools, configReadiness),
         },
         {
           id: 'legacy-settings',

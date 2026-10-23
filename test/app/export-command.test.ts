@@ -197,6 +197,10 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         setSendOriginalQuestion: async () => {},
         setSearchApiBaseURL: async () => {},
       },
+      visualTools: {
+        read: () => undefined,
+        setEnabled: async () => {},
+      },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
     hostShellCompletion: true,

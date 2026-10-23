@@ -72,10 +72,16 @@ import type {
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
+  VisualToolsConfig,
+  VisualToolsState,
   WebProviderConfig,
   WebProviderSettings,
   ConfigReadiness,
 } from '../config-port.ts'
+import {
+  VISUAL_TOOLS_STATUS_SERVICE,
+  type VisualToolsRuntimeStatus,
+} from '../../domain/visual/tool-identity.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -150,6 +156,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
+  readonly visualTools: VisualToolsConfig
 
   constructor(
     ctx: HostContextLike,
@@ -167,6 +174,7 @@ export class DirectConfigPort implements ConfigPort {
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
     this.web = new DirectWebProviderConfig(ctx)
+    this.visualTools = new DirectVisualToolsConfig(ctx)
   }
 }
 
@@ -1779,5 +1787,63 @@ function assertSearchApiBaseURL(url: string): void {
   }
   if (/\/(?:search|fetch)$/u.test(parsed.pathname)) {
     throw new Error('the Search/Fetch API endpoint is the API base: drop the trailing /search or /fetch action')
+  }
+}
+
+/** The official profile entry id of the Host row that owns the built-in
+ *  visual tools (its Loader row id is also its Settings namespace). */
+const VISUAL_TOOLS_NS = 'pi-tui-visual-tools'
+
+/**
+ * The Direct visual-tools switch: the `pi-tui-visual-tools` form section's
+ * effective `enabled` value plus the owning Host row's live registration
+ * status. The write is a revision-checked path mutation of the exact
+ * `enabled` field — never a whole-section replace, so an unrelated or
+ * unknown field is never pinned into the USER layer.
+ *
+ * The status service is the row's own fact, not a second enable state: a
+ * Remote backend has no equivalent wire and reports `applied: undefined`
+ * instead of inferring success from the committed configuration.
+ */
+class DirectVisualToolsConfig implements VisualToolsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): VisualToolsState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, VISUAL_TOOLS_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const enabled = value?.enabled
+    // A missing or non-boolean effective value is NOT the schema default:
+    // report the section as unreadable instead of inventing `true`.
+    if (typeof enabled !== 'boolean') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    const status = this.ctx.get(VISUAL_TOOLS_STATUS_SERVICE) as VisualToolsRuntimeStatus | undefined
+    const applied = status === undefined || typeof status.applied !== 'function'
+      ? undefined
+      : status.applied()
+    return {
+      enabled,
+      userOverridden: userSection?.enabled !== undefined,
+      applied,
+    }
+  }
+
+  async setEnabled(enabled: boolean): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, VISUAL_TOOLS_NS) === undefined) {
+      throw new Error(`the "pi-tui-visual-tools" Host settings section is not mounted`)
+    }
+    await mutateSettings(settings, VISUAL_TOOLS_NS, [
+      { op: 'set', path: ['enabled'], value: enabled },
+    ])
   }
 }

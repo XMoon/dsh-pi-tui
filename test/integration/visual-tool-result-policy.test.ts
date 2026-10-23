@@ -90,7 +90,7 @@ async function runCase(t: Parameters<typeof testLifecycle>[0], key: keyof typeof
   life.defer(() => ctx.fiber.dispose())
   await mountAgentLoopTestDependencies(ctx, {})
   await mountAgentLoopTestHarness(ctx)
-  applyVisualTools(ctx)
+  applyVisualTools(ctx, { enabled: { get: () => true } } as never)
   const entry = CASES[key]
   const adapter = new VisualAdapter(entry.tool, entry.args)
   ctx.llm.registerAdapter(['visual-probe'], adapter)

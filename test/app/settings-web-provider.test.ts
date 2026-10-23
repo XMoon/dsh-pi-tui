@@ -292,8 +292,8 @@ async function openOtherRows(h: Harness): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
-  // The rail order is About, Models, Account, Appearance, Display, Plugins,
-  // Other settings: six Down presses reach the legacy launcher category.
+  // The rail order is About, Models, Account, Appearance, Display, Tools,
+  // Plugins, Other settings: seven Down presses reach the legacy launcher category.
   const downs = Array.from({ length: 6 }, () => DOWN)
   // The workspace opens on the About home: walk the rail to the legacy
   // launcher category, then enter its Rows level.
@@ -643,7 +643,7 @@ test('a workspace opened while the authority is pending paints Loading…, never
   // the pending state (without the pre-snapshot pending entry these frames
   // would carry the previous summary as current).
   await h.vt.waitForRender()
-  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the first frames of the reopened workspace are pending:\n${firstFrame}`)
   assert.doesNotMatch(firstFrame, /Search: Messages/u,
@@ -673,7 +673,7 @@ test('a new read clears the previous read ERROR: pending, not a stale Unavailabl
   t.after(release)
   h.invoke('settings')
   await h.vt.waitForRender()
-  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending again:\n${firstFrame}`)
   assert.doesNotMatch(firstFrame, /Unavailable/u, 'the previous error state does not survive into the new read')
@@ -770,7 +770,7 @@ test('an OLD read settling after a write never repaints the reopened Workspace (
   // Re-enter: the workspace open starts a read, which the gate holds.
   h.invoke('settings')
   await h.vt.waitForRender()
-  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
   await key(h, DOWN)
   await key(h, ENTER)
   for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {

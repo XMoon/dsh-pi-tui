@@ -2,10 +2,26 @@
  * The PR-D visual tools: `dsh_pi_tui_chart` and `dsh_pi_tui_svg`.
  *
  * This is the HOST-plane Loader row (`@xmoon76/dsh-pi-tui/visual-tools`), not a
- * TUI module: the two definitions live in the official `ctx.tools` registry for
- * the whole Host profile lifetime. They are NOT gated by Tern, a renderer, a
- * client capability, a session or a resize — a Direct and a Remote Host load
- * the same definitions, and a plain terminal still sees both tools.
+ * TUI module: the two definitions live in the official `ctx.tools` registry.
+ * They are NOT gated by Tern, a renderer, a client capability, a session or a
+ * resize — a Direct and a Remote Host load the same definitions, and a plain
+ * terminal still sees both tools.
+ *
+ * The row's `.volatile()` `enabled` field is the ONE profile-wide availability
+ * authority: it defaults to ON, the Settings service projects it as the
+ * `pi-tui-visual-tools` form section, and the Loader commits a live form write
+ * into the running reference and then dispatches `loader/volatile-update` to
+ * THIS fiber. The row reconciles the two registry registrations from that
+ * reference:
+ *
+ * - Off (or a restart with a persisted Off) releases both registrations, so
+ *   the next model request neither sees the tools nor pays their schema tokens;
+ * - On registers both definitions again under their original identity.
+ *
+ * Registration is atomic: a same-name conflict never leaves a half-enabled
+ * pair, and a failed re-enable keeps the row reporting `applied: false` through
+ * {@link VISUAL_TOOLS_STATUS_SERVICE} (the Direct adapter reads that fact; a
+ * Remote Client has no equivalent wire and must not claim runtime success).
  *
  * The result contract follows the revised PR-D D0 decision: no
  * `presentationMeta` at all. Each `output.render` produces the readable text
@@ -16,7 +32,9 @@
  * @module @xmoon76/dsh-pi-tui/app/host/visual-tools
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
+import z from '@deepseek-ai/schemastery'
 import { defineTool, type ToolRuntime } from '@deepseek-ai/dsh-tools'
 import {
   chartArgsProblem,
@@ -25,6 +43,12 @@ import {
   type ChartArgs,
 } from '../../domain/visual/chart.ts'
 import { svgArgsProblem, svgContentBlocks, svgFactFromArgs, type SvgArgs } from '../../domain/visual/svg.ts'
+import {
+  CHART_TOOL_NAME,
+  SVG_TOOL_NAME,
+  VISUAL_TOOLS_STATUS_SERVICE,
+  type VisualToolsRuntimeStatus,
+} from '../../domain/visual/tool-identity.ts'
 
 /** Stable Cordis plugin name (the Loader row id in `cordis.patch.yml`). */
 export const name = 'pi-tui-visual-tools'
@@ -32,9 +56,24 @@ export const name = 'pi-tui-visual-tools'
 /** The Host tool registry is this row's whole purpose. */
 export const inject = ['tools']
 
-/** The two stable, namespaced model tool names. */
-export const CHART_TOOL_NAME = 'dsh_pi_tui_chart'
-export const SVG_TOOL_NAME = 'dsh_pi_tui_svg'
+/** The two stable, namespaced model tool names (the domain owns their
+ *  identity; this entry keeps re-exporting them for its consumers). */
+export { CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tool-identity.ts'
+
+/**
+ * The row's profile-wide availability switch. `enabled` is a volatile field:
+ * the Settings service projects it into an editable form section, and a write
+ * is committed into this live reference without remounting the row. The
+ * default is ON, so an existing profile needs no migration.
+ */
+export interface Config {
+  readonly enabled: Volatile<boolean>
+}
+
+/** The Config schema the Loader resolves (default ON, live form field). */
+export const Config: z<Config> = z.object({
+  enabled: z.boolean().default(true).volatile(),
+}) as unknown as z<Config>
 
 const CHART_POINT_SCHEMA = {
   type: 'object',
@@ -155,20 +194,76 @@ function assertNameFree(tools: ToolRuntime, toolName: string): void {
   }
 }
 
+/** The two exact registration disposers THIS row owns (never enable state:
+ *  `applied` is derived from their presence and the value lives in the
+ *  Loader-committed Config reference). */
+interface VisualToolDisposers {
+  readonly chart: () => void
+  readonly svg: () => void
+}
+
+/** Register both definitions atomically: a second-name conflict rolls the
+ *  first registration back, so the registry never carries a half pair. */
+function registerBoth(tools: ToolRuntime): VisualToolDisposers {
+  assertNameFree(tools, CHART_TOOL_NAME)
+  assertNameFree(tools, SVG_TOOL_NAME)
+  const chart = tools.register(chartTool())
+  try {
+    const svg = tools.register(svgTool())
+    return { chart, svg }
+  } catch (error) {
+    chart()
+    throw error
+  }
+}
+
 /**
- * Register both resident tool definitions on the Host registry. The owning
- * fiber disposes them exactly once; nothing in the TUI mounts or unmounts them.
+ * Register this Host row: reconcile the two tool registrations with the
+ * `enabled` Config reference at mount and after every volatile commit.
  *
  * `ctx.reflect.get` is the documented permanent-Host-plane idiom
  * (`docs/architecture/host-client.md`): this module IS the Host plane, so the
  * registry read is not Client-side coupling and the client-boundary inventory
  * stays unchanged. The explicit `inject` above guarantees the service.
+ *
+ * The Loader commits every volatile value BEFORE it dispatches
+ * `loader/volatile-update`, so the listener must read the reference (never the
+ * event payload) and ignore unrelated paths. A throwing listener is contained
+ * by the Loader: the write stays committed, and the next read of
+ * {@link VISUAL_TOOLS_STATUS_SERVICE} proves the registration did not follow.
+ *
  * @param ctx - the Host context that owns this row's fiber.
+ * @param config - the resolved Config (the live `enabled` reference).
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config): void {
   const tools = ctx.reflect.get('tools') as ToolRuntime
-  assertNameFree(tools, CHART_TOOL_NAME)
-  assertNameFree(tools, SVG_TOOL_NAME)
-  tools.register(chartTool())
-  tools.register(svgTool())
+  let disposers: VisualToolDisposers | undefined
+  const status: VisualToolsRuntimeStatus = {
+    applied: () => disposers !== undefined,
+  }
+  // The status read is the row's OWN registration fact; the registry entry
+  // itself can also be probed, but only this row can say whether the live pair
+  // is the one it registered.
+  ctx.provide(VISUAL_TOOLS_STATUS_SERVICE, status)
+
+  const reconcile = (enabled: boolean): void => {
+    if (enabled) {
+      if (disposers !== undefined) return
+      disposers = registerBoth(tools)
+      return
+    }
+    const current = disposers
+    if (current === undefined) return
+    // Clear the handle BEFORE releasing: a re-entrant read observes the new
+    // state, and a disposer can never be called twice.
+    disposers = undefined
+    current.chart()
+    current.svg()
+  }
+
+  ctx.on('loader/volatile-update', (paths) => {
+    if (!paths.some(path => path.length === 1 && path[0] === 'enabled')) return
+    reconcile(config.enabled.get())
+  })
+  reconcile(config.enabled.get())
 }

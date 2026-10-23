@@ -553,7 +553,7 @@ test('a Tab focus change revokes a pointer press recorded on the previous pane',
 test('the in-place Plugin Manager keeps its own Tab and is never intercepted', () => {
   const h = setup({ columns: 120, pluginPage: true })
   plain(h)
-  for (let index = 0; index < 5; index += 1) h.panel.handleInput('\u001b[B') // About -> Plugins
+  for (let index = 0; index < 6; index += 1) h.panel.handleInput('\u001b[B') // About -> Plugins
   h.panel.handleInput('\r')
   assert.equal(h.pluginPages.length, 1, 'the Plugins entry opened the page once')
   h.panel.handleInput('\t')
