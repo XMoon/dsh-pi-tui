@@ -182,6 +182,18 @@ only projects panes (≥108 three, 76–107 two, <76 one). The category order is
   keyboard to the rail and keeps the page instance, its view, its draft and its
   watch; only a real category change or a real close disposes it. Narrow paints
   one page with an explicit `Esc`/Back path.
+- `Tab` (forward) and `Shift+Tab` (reverse) re-focus ONE logical region and
+  never activate, write or read the Host. At `≥76` columns a direct category
+  hands the keyboard from the rail to its content page, and About/Account
+  content hands it back to the rail (Account only while the page may safely
+  yield: its confirmation and pending operation keep the keyboard). At `≥76`
+  columns a legacy category cycles `categories → rows → detail` forward and in
+  reverse, only re-focusing that pane: focusing the Detail never opens its
+  choice, editor or writer. Below 76 columns the root Tab is inert, and the
+  existing `Enter`/`Right` (in) and `Esc`/`Left` (back) navigation is unchanged.
+  A transient choice, a pending write and the in-place Plugin Manager keep their
+  own keys; every region jump lands on the destination's first candidate and
+  bumps the pointer-press revision, so a straddling click cannot activate it.
 - The four configuration categories keep their three-level browse (L0
   categories, L1 rows, L2 detail) and their existing writers.
 - Exactly two configuration rows are writable: the configured theme and the
@@ -271,6 +283,16 @@ The page never infers a stored key from a route/profile.
   catalog. Browsing writes nothing; a catalog entry is activated only by an
   explicit Enter, and a route with no supported operation states why instead
   of claiming success.
+- `Tab` and `Shift+Tab` move the page's ONE cursor between its body rows and its
+  bottom action group (both directions toggle; the destination is the region's
+  first candidate, and the first ENABLED action). The jump only repaints the
+  selection and may reveal the destination row through the existing list
+  scroll: it never opens a form, starts a flow or writes, and `Enter` remains
+  the only activation key. A view with no body row (for example a zero-match
+  Add catalog filter), no enabled action, or no paintable body/action space
+  ignores the key instead of creating an invisible selection. An active
+  QuestionFlow, native picker or model picker keeps its own Tab meaning; the
+  page advertises `Tab sections` only while both regions are really paintable.
 - Provider detail shows route, profile presence, protocol, endpoint, models,
   auth kind and credential presence (presence only, not a connection test).
 - `Configure API Key` opens a page-local masked editor (the existing

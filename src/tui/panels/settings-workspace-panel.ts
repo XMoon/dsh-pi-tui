@@ -1540,8 +1540,27 @@ export class SettingsWorkspacePanel implements Component {
             { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 5 },
           ]
         : []),
+      ...this.regionActionBarHints('focus', true),
       { text: 'Esc back', priority: 8 },
     ], width))
+  }
+
+  /**
+   * The region-navigation hints of the root bars (plan §4.1.5). They are
+   * low-priority, whole-segment-droppable advertisements of the keys that
+   * really work in THIS focus and layout: a narrow frame has no second region,
+   * a Plugin category is owned by the Plugin Manager, and a choice/pending
+   * phase does not advertise a key it ignores.
+   */
+  private regionActionBarHints(forward: 'focus' | 'panes', backward: boolean): ActionBarSegment[] {
+    if (layoutForWidth(this.intents.columns()) === 'narrow') return []
+    // The Plugin Manager's page owns its own Tab; the rail never advertises a
+    // key this category ignores.
+    if (this.categoryId === 'plugins') return []
+    return [
+      { text: forward === 'focus' ? 'Tab focus' : 'Tab panes', priority: 3 },
+      ...(backward ? [{ text: 'Shift+Tab back', priority: 3 }] : []),
+    ]
   }
 
   /** The category rail's own hints. A direct category hands the keyboard to
@@ -1551,6 +1570,7 @@ export class SettingsWorkspacePanel implements Component {
       return [
         { text: 'Up/Down navigate', priority: 4 },
         { text: 'Enter/Right focus', priority: 6 },
+        ...this.regionActionBarHints('focus', false),
         { text: 'Esc close', priority: 8 },
       ]
     }
@@ -1558,6 +1578,7 @@ export class SettingsWorkspacePanel implements Component {
       { text: 'Up/Down select', priority: 4 },
       { text: 'Right open', priority: 6 },
       { text: 'Enter open', priority: 5 },
+      ...(this.currentRows().length > 0 ? this.regionActionBarHints('panes', false) : []),
       { text: 'Esc close', priority: 8 },
     ]
   }
@@ -2386,6 +2407,7 @@ export class SettingsWorkspacePanel implements Component {
         { text: `Right ${rowAction}`, priority: 6 },
         { text: `Enter ${rowAction}`, priority: 5 },
         { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
+        ...(this.currentRows().length > 0 ? this.regionActionBarHints('panes', true) : []),
         { text: back, priority: 8 },
       ]
     } else {
@@ -2398,6 +2420,7 @@ export class SettingsWorkspacePanel implements Component {
         { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
         ...(copyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy value`, priority: 1 }] : []),
         { text: 'Left back', priority: 7 },
+        ...(this.currentRows().length > 0 ? this.regionActionBarHints('panes', true) : []),
         { text: back, priority: 8 },
       ]
     }
@@ -2581,6 +2604,14 @@ export class SettingsWorkspacePanel implements Component {
     // lifecycle/back key remains available. Read the live geometry because input
     // may arrive before a resize-triggered frame has painted.
     if (this.bodyFloor() < 1) return
+    // Tab / Shift+Tab re-focus the ONE navigation owner (plan §2.2). The key is
+    // matched semantically, so legacy `\t` and every protocol's Tab byte agree.
+    const tabForward = matchesKey(data, 'tab')
+    const tabBackward = matchesKey(data, 'shift+tab')
+    if (tabForward || tabBackward) {
+      this.jumpRegion(tabForward)
+      return
+    }
     const copyKeyPressed = matchesKey(data, SETTINGS_LOCAL_KEYS.copy)
       || matchesKey(data, Key.shift(SETTINGS_LOCAL_KEYS.copy))
     if (matchesKey(data, 'left')) {
@@ -2663,12 +2694,65 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /**
+   * Tab / Shift+Tab re-focus ONE region without activating anything (frozen
+   * plan §2.2): a direct category only hands the keyboard to its already
+   * mounted content page, and a legacy category re-focuses one of its three
+   * panes. The workspace's ONE `focus` state remains the only owner; no page,
+   * row, action, writer or Host read is started here.
+   */
+  private jumpRegion(forward: boolean): void {
+    // A narrow terminal paints one region at a time: cross-region Tab would
+    // move the keyboard to an invisible pane, so the existing Enter/Right (in)
+    // and Esc/Left (back) navigation stays the only way in and out.
+    if (layoutForWidth(this.intents.columns()) === 'narrow') return
+    // The Plugin Manager owns its own Tab; the rail's Plugins entry only opens
+    // it, and the opened page is dispatched before this method is reached.
+    if (this.categoryId === 'plugins') return
+    // A transient choice or an in-flight write owns the keys it can complete:
+    // Tab must never become a way around either guard.
+    if (this.choiceField() !== undefined || this.editPhase.kind === 'pending') return
+    if (isDirectCategory(this.categoryId)) {
+      // A direct page has no second region to cycle to: forward Tab enters the
+      // content (the page is reused, never rebuilt) and the reverse key stays
+      // inert. The page then owns Tab locally.
+      if (forward) this.enterContent()
+      return
+    }
+    if (this.currentRows().length === 0) return
+    const next: SettingsWorkspaceFocus = this.focus === 'categories'
+      ? (forward ? 'rows' : 'detail')
+      : this.focus === 'rows'
+        ? (forward ? 'detail' : 'categories')
+        : (forward ? 'categories' : 'rows')
+    // The existing focus transaction bumps the press revision (a pointer press
+    // recorded under the previous focus can never activate a target under the
+    // new one). It never calls `enterDetail()`/`confirm()`: focusing the Detail
+    // pane must not open a choice.
+    this.leaveDetailTo(next)
+  }
+
+  /**
    * The CONTENT focus: the direct page owns the keyboard. The About page is
    * read-only (it scrolls and it goes back); a real page owns every other key
    * and reports its own exit.
    */
   private handleContentInput(data: string): void {
     const page = this.authPage
+    // Tab / Shift+Tab leave a READ-ONLY direct region on a wide/medium frame:
+    // About has no page key of its own, and a real page may only yield when its
+    // own confirmation/pending state allows it. A narrow terminal has no second
+    // region, so the existing Esc/Left path stays in charge there. Models is
+    // NOT intercepted: the page owns both region keys and switches its body and
+    // action sections itself.
+    if (layoutForWidth(this.intents.columns()) !== 'narrow'
+      && this.bodyFloor() >= 1
+      && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
+      if (this.categoryId === 'about') return this.returnToNavigation()
+      if (this.categoryId === 'account') {
+        if (page?.canYieldFocusToNavigation?.() === true) this.returnToNavigation()
+        return
+      }
+    }
     if (page === undefined) {
       if (matchesKey(data, 'escape') || matchesKey(data, 'backspace') || matchesKey(data, 'left')) {
         this.returnToNavigation()

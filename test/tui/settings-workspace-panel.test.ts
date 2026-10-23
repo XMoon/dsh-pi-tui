@@ -26,7 +26,37 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
   configReadiness: 'ready',
   capturedAt: 0,
   rows: [
-    { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette', action: 'inspect' },
+    {
+      id: 'theme',
+      category: 'appearance',
+      label: 'Configured theme',
+      summary: 'dark',
+      value: 'dark',
+      scope: 'TUI settings document',
+      freshness: 'ready',
+      description: 'palette',
+      action: 'inspect',
+      edit: {
+        field: 'theme',
+        primary: 'runtime',
+        runtime: 'dark',
+        persisted: 'dark',
+        options: [
+          { value: 'auto', label: 'auto', available: true, current: false },
+          { value: 'dark', label: 'dark', available: true, current: true },
+        ],
+      },
+    },
+    {
+      id: 'web-settings',
+      category: 'appearance',
+      label: 'Web settings',
+      summary: 'Host',
+      scope: 'Host settings document',
+      freshness: 'ready',
+      description: 'Host-owned Web settings',
+      action: 'open-legacy',
+    },
   ],
 }
 
@@ -38,6 +68,9 @@ class FakePage implements SettingsAuthPage {
   exitOn: string | undefined
   /** Whether the page owns an in-flight Host operation. */
   pending = false
+  /** Whether a bare Left may yield the page root (an Account confirmation
+   *  keeps it even while no mutation is in flight). */
+  yieldAllowed = true
 
   constructor(id: string) {
     this.id = id
@@ -58,15 +91,37 @@ class FakePage implements SettingsAuthPage {
   onCellClick(): 'handled' | 'exit' | 'open-account' { return 'handled' }
   cancelPointer(): void {}
   pendingMutation(): boolean { return this.pending }
-  canYieldFocusToNavigation(): boolean { return true }
+  canYieldFocusToNavigation(): boolean { return this.yieldAllowed }
+  dispose(): void { this.disposed = true }
+}
+
+/** The in-place Plugin Manager page: it owns its own Tab. */
+class FakePluginPage {
+  readonly inputs: string[] = []
+  disposed = false
+  focused = false
+  render(width: number): string[] {
+    return ['plugin page'.padEnd(Math.max(1, width))]
+  }
+  invalidate(): void {}
+  handleInput(data: string): void {
+    this.inputs.push(data)
+  }
   dispose(): void { this.disposed = true }
 }
 
 interface Harness {
   readonly panel: SettingsWorkspacePanel
   readonly built: FakePage[]
+  readonly pluginPages: readonly FakePluginPage[]
+  /** The live column budget the panel reads for its layout/input decisions. */
+  readonly columns: number
   /** How many times the workspace asked to close. */
   readonly closes: () => number
+  /** How many times a configuration write was dispatched. */
+  readonly commits: () => number
+  /** How many times the legacy editor handoff was requested. */
+  readonly legacyOpens: () => number
 }
 
 function setup(options: {
@@ -78,11 +133,16 @@ function setup(options: {
   readonly aboutStatusSource?: () => AboutStatusController
   /** C3: the clipboard sink (records what the copy gestures emit). */
   readonly onCopy?: (text: string) => void
+  /** Build an in-place Plugin Manager page the Plugins entry can open. */
+  readonly pluginPage?: boolean
 } = {}): Harness {
   const columns = options.columns ?? 120
   const rows = options.rows ?? 40
   const built: FakePage[] = []
+  const pluginPages: FakePluginPage[] = []
   let closes = 0
+  let commits = 0
+  let legacyOpens = 0
   const intents: SettingsWorkspacePanelIntents = {
     aboutVersionFacts: { tui: '0.5.3', dsh: '0.2.1-rc.2' },
     rows: () => rows,
@@ -90,9 +150,17 @@ function setup(options: {
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => { closes += 1 },
-    onOpenLegacy: () => {},
+    onOpenLegacy: () => { legacyOpens += 1 },
     ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
     onCopy: (text) => { options.onCopy?.(text) },
+    onCommit: () => { commits += 1 },
+    onOpenPlugins: options.pluginPage === true
+      ? () => {
+          const page = new FakePluginPage()
+          pluginPages.push(page)
+          return page
+        }
+      : undefined,
     createModelsPage: (initial, openAccount) => {
       const page = new FakePage(`models:${initial.view}`)
       built.push(page)
@@ -109,11 +177,21 @@ function setup(options: {
     },
   }
   const panel = new SettingsWorkspacePanel({ readSnapshot: () => SNAPSHOT }, intents)
-  return { panel, built, closes: () => closes }
+  return {
+    panel,
+    built,
+    pluginPages,
+    columns,
+    closes: () => closes,
+    commits: () => commits,
+    legacyOpens: () => legacyOpens,
+  }
 }
 
-const plain = (harness: Harness, width = 120): string =>
+const plain = (harness: Harness, width = harness.columns): string =>
   harness.panel.render(width).map(stripTerminalSequences).join('\n')
+
+const header = (harness: Harness): string => plain(harness).split('\n')[0] ?? ''
 
 test('the wide rail mounts the selected direct page exactly once', () => {
   const h = setup()
@@ -556,4 +634,233 @@ test('C3 invalid ESC/C1 CSI bytes keep the ordinary character in paint and copy'
     h.panel.handleInput('C')
     assert.ok(copied.at(-1)!.includes('Title: pre鲸-post'), 'Copy All keeps the ordinary character')
   }
+
+// ── Tab / Shift+Tab region navigation (settings-tab-section-navigation) ────
+
+test('Tab enters each direct content page and returns About/Account content to the rail', () => {
+  for (const columns of [120, 90] as const) {
+    const h = setup({ columns })
+    plain(h)
+    // About: rail -> content, then both directions return to the rail.
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · About/u, `Tab focuses the About content at ${columns}`)
+    assert.equal(h.commits(), 0, 'focusing About never writes')
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · Categories/u, `Tab returns from the About content at ${columns}`)
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · About/u, `Tab focuses the About content again at ${columns}`)
+    h.panel.handleInput('\u001b[Z')
+    assert.match(header(h), /Settings · Categories/u, `Shift+Tab returns from the About content at ${columns}`)
+
+    // Models: the rail Tab hands the keyboard over; inside the page both
+    // region keys are forwarded unchanged.
+    h.panel.handleInput('\u001b[B') // About -> Models
+    plain(h)
+    assert.equal(h.built.length, 1, 'the rail mounted the Models page once')
+    h.panel.handleInput('\t')
+    const models = h.built[0]!
+    assert.match(header(h), /Settings · Models/u, 'Tab focuses the Models content')
+    assert.deepEqual(models.inputs, [], 'the rail Tab is not forwarded to the page')
+    h.panel.handleInput('\t')
+    h.panel.handleInput('\u001b[Z')
+    assert.deepEqual(models.inputs, ['\t', '\u001b[Z'], 'the Models page owns both region keys')
+    assert.match(header(h), /Settings · Models/u, 'the page keeps the keyboard while it owns Tab')
+    // The existing Left (yieldable page root) and Esc paths stay intact.
+    h.panel.handleInput('\u001b[D')
+    assert.match(header(h), /Settings · Categories/u, 'Left still returns from the Models page')
+    h.panel.handleInput('\t')
+    models.exitOn = '\u001b'
+    h.panel.handleInput('\u001b')
+    assert.match(header(h), /Settings · Categories/u, 'Esc still returns through the page exit')
+    assert.equal(models.disposed, false, 'returning keeps the page instance')
+
+    // Account: the rail Tab enters, and the content Tab/Shift+Tab return
+    // without ever calling a page key (the Account page has no local Tab).
+    h.panel.handleInput('\u001b[B') // Models -> Account
+    plain(h)
+    const account = h.built[1]!
+    assert.equal(account.id, 'account:page')
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · Account/u, 'Tab focuses the Account content')
+    assert.deepEqual(account.inputs, [], 'entering Account ran no page action')
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · Categories/u, 'Tab returns from the safe Account content')
+    h.panel.handleInput('\t')
+    h.panel.handleInput('\u001b[Z')
+    assert.match(header(h), /Settings · Categories/u, 'Shift+Tab returns from the safe Account content')
+    assert.deepEqual(account.inputs, [], 'the root never forwarded the region key to Account')
+
+    // Re-entering reuses the mounted page: no second Host watch.
+    assert.equal(h.built.length, 2, 'no page was rebuilt by the focus jumps')
+    assert.equal(h.commits(), 0, 'region jumps never write')
+    assert.equal(h.legacyOpens(), 0, 'region jumps never open the legacy editor')
+  }
+})
+
+test('Tab cycles the legacy panes without opening the Detail choice, and Shift+Tab reverses', () => {
+  for (const columns of [120, 90] as const) {
+    const h = setup({ columns })
+    plain(h)
+    h.panel.handleInput('\u001b[B')
+    h.panel.handleInput('\u001b[B')
+    h.panel.handleInput('\u001b[B') // About -> Appearance
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · Appearance · Rows/u, `Tab focuses Rows at ${columns}`)
+    assert.ok(plain(h).includes('[Rows'), 'the focused pane header names the owner')
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · Appearance · Configured theme/u, `Tab focuses Detail at ${columns}`)
+    assert.doesNotMatch(plain(h), /Choose value/u, 'Tab focusing Detail never begins a choice')
+    assert.equal(h.commits(), 0, 'focusing Detail never writes')
+    assert.equal(h.legacyOpens(), 0, 'focusing Detail never opens the legacy editor')
+    h.panel.handleInput('\t')
+    assert.match(header(h), /Settings · Categories/u, `Tab wraps back to the rail at ${columns}`)
+    // Reverse: the same three panes in the opposite direction.
+    h.panel.handleInput('\u001b[Z')
+    assert.match(header(h), /Settings · Appearance · Configured theme/u, 'Shift+Tab wraps to Detail')
+    assert.doesNotMatch(plain(h), /Choose value/u, 'the reverse jump never begins a choice')
+    h.panel.handleInput('\u001b[Z')
+    assert.match(header(h), /Settings · Appearance · Rows/u, 'Shift+Tab returns to Rows')
+    h.panel.handleInput('\u001b[Z')
+    assert.match(header(h), /Settings · Categories/u, 'Shift+Tab returns to the rail')
+  }
+})
+
+test('Tab is inert while a choice or a pending write owns the Detail', () => {
+  const h = setup({ columns: 120, rows: 40 })
+  plain(h)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B') // About -> Appearance
+  h.panel.handleInput('\r') // categories -> rows
+  h.panel.handleInput('\r') // rows -> Detail choice
+  assert.match(plain(h), /Choose value/u)
+  const choosing = plain(h)
+  h.panel.handleInput('\t')
+  h.panel.handleInput('\u001b[Z')
+  assert.equal(plain(h), choosing, 'Tab/Shift+Tab never cancel or bypass a choice')
+
+  // The explicit Enter confirm dispatches the ONE write into its pending
+  // phase; the region keys must not become a way out of it either.
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 1, 'the explicit confirm dispatched the write')
+  const pending = plain(h)
+  assert.match(pending, /Saving…/u, 'the pending phase is painted')
+  h.panel.handleInput('\t')
+  h.panel.handleInput('\u001b[Z')
+  assert.equal(plain(h), pending, 'Tab never bypasses an in-flight write')
+  assert.match(header(h), /Configured theme/u, 'the pending Detail keeps the keyboard')
+})
+
+test('a narrow frame keeps the root Tab inert and its existing drill-down path', () => {
+  const h = setup({ columns: 72, rows: 24 })
+  // A narrow terminal opens on the About content: root Tab changes nothing.
+  assert.match(header(h), /Settings · About/u)
+  h.panel.handleInput('\t')
+  h.panel.handleInput('\u001b[Z')
+  assert.match(header(h), /Settings · About/u, 'the narrow root Tab is inert in the content')
+  h.panel.handleInput('\u001b')
+  assert.match(header(h), /Settings · Categories/u, 'Esc still returns to the narrow rail')
+
+  // Models: browsing the rail mounts nothing; Tab grants no hidden page key.
+  h.panel.handleInput('\u001b[B')
+  assert.equal(h.built.length, 0, 'the narrow rail selected Models without mounting it')
+  h.panel.handleInput('\t')
+  h.panel.handleInput('\u001b[Z')
+  assert.match(header(h), /Settings · Categories/u, 'the narrow root Tab is inert on the rail')
+  assert.equal(h.built.length, 0, 'the narrow Tab never mounts the hidden page')
+  // Right still enters the content and mounts the page once.
+  h.panel.handleInput('\u001b[C')
+  plain(h)
+  assert.match(header(h), /Settings · Models/u, 'Right still enters the narrow content')
+  assert.equal(h.built.length, 1, 'Right mounted the page once')
+  h.panel.handleInput('\u001b[D')
+  assert.match(header(h), /Settings · Categories/u, 'Left still returns from a safe narrow page')
+  h.panel.handleInput('\u001b')
+  assert.equal(h.closes(), 1, 'the second Esc still closes the workspace')
+
+  // Legacy narrow: Tab cannot change the single visible level.
+  const legacy = setup({ columns: 72, rows: 24 })
+  plain(legacy)
+  legacy.panel.handleInput('\u001b') // About content -> rail
+  legacy.panel.handleInput('\u001b[B')
+  legacy.panel.handleInput('\u001b[B')
+  legacy.panel.handleInput('\u001b[B') // Appearance
+  legacy.panel.handleInput('\t')
+  assert.match(header(legacy), /Settings · Categories/u, 'the narrow legacy Tab is inert on L0')
+  legacy.panel.handleInput('\u001b[C')
+  assert.match(header(legacy), /Settings · Appearance · Rows/u, 'Right still enters L1')
+  legacy.panel.handleInput('\t')
+  assert.match(header(legacy), /· Rows/u, 'the narrow legacy Tab is inert on L1')
+})
+
+test('Account content keeps the keyboard while a confirmation or an operation is live', () => {
+  const h = setup({ columns: 120 })
+  plain(h)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B') // About -> Account (via Models)
+  h.panel.handleInput('\t') // rail -> content
+  const account = h.built[1]!
+  assert.equal(account.id, 'account:page')
+
+  // The sign-out confirmation may not yield, even though no Host mutation is
+  // in flight: Tab must not move the keyboard to the rail.
+  account.yieldAllowed = false
+  const confirming = plain(h)
+  h.panel.handleInput('\t')
+  h.panel.handleInput('\u001b[Z')
+  assert.equal(plain(h), confirming, 'Tab cannot leave a confirmation')
+  assert.match(header(h), /Settings · Account/u)
+  assert.deepEqual(account.inputs, [], 'the Account page never receives the root Tab')
+  assert.equal(h.closes(), 0, 'Tab never closes the workspace')
+  assert.equal(account.disposed, false, 'the mounted page is kept')
+
+  // A pending Host operation keeps the keyboard after the confirmation is
+  // gone (the root's pending guard, not the page's local one).
+  account.yieldAllowed = true
+  account.pending = true
+  const pending = plain(h)
+  h.panel.handleInput('\t')
+  assert.equal(plain(h), pending, 'Tab cannot leave a pending Account operation')
+  assert.match(header(h), /Settings · Account/u)
+  h.panel.handleInput('\u001b[D')
+  assert.match(header(h), /Settings · Account/u, 'Left cannot leave it either')
+
+  // Once it settles, the normal Tab/Esc path is available again.
+  account.pending = false
+  h.panel.handleInput('\t')
+  assert.match(header(h), /Settings · Categories/u, 'the settled page yields to the rail')
+  h.panel.handleInput('\u001b')
+  assert.equal(h.closes(), 1, 'the workspace closes normally after the settle')
+})
+
+test('a Tab focus change revokes a pointer press recorded on the previous pane', () => {
+  const h = setup({ columns: 120 })
+  plain(h)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B') // Appearance
+  const frame = plain(h).split('\n')
+  const y = frame.findIndex(line => line.includes('Web settings'))
+  assert.ok(y >= 0, `the legacy row must be painted:\n${frame.join('\n')}`)
+  const x = frame[y]!.indexOf('Web settings')
+  // Press on the row while the RAIL owns the keyboard, Tab the focus into the
+  // Rows pane, then release on the same painted cells: the old target must not
+  // activate under the new focus.
+  h.panel.onCellPress(x, y)
+  h.panel.handleInput('\t')
+  h.panel.onCellClick(x, y)
+  assert.equal(h.legacyOpens(), 0, 'the straddling release must not open the legacy editor')
+  assert.match(header(h), /Settings · Appearance · Rows/u, 'the Tab focus is not overwritten by the old press')
+})
+
+test('the in-place Plugin Manager keeps its own Tab and is never intercepted', () => {
+  const h = setup({ columns: 120, pluginPage: true })
+  plain(h)
+  for (let index = 0; index < 5; index += 1) h.panel.handleInput('\u001b[B') // About -> Plugins
+  h.panel.handleInput('\r')
+  assert.equal(h.pluginPages.length, 1, 'the Plugins entry opened the page once')
+  h.panel.handleInput('\t')
+  h.panel.handleInput('\u001b[Z')
+  assert.deepEqual(h.pluginPages[0]!.inputs, ['\t', '\u001b[Z'], 'the Plugin Manager owned both Tab presses')
+  assert.equal(h.closes(), 0, 'the workspace stayed open')
 })
