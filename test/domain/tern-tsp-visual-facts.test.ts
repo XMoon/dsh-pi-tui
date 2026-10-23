@@ -19,6 +19,7 @@ import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.t
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import {
   TranscriptNodeKeys,
+  disclosureKeyForToggle,
   transcriptView,
   type ToolSvgState,
 } from '../../src/tui/tsp/transcript-view.ts'
@@ -410,4 +411,15 @@ test('PTC child expansion identity is scoped to its parent card', () => {
   assert.equal(childTools[0]?.props.collapsed, false)
   assert.equal(childTools[1]?.props.key, `sub-${subCallId}`)
   assert.equal(childTools[1]?.props.collapsed, true)
+})
+
+
+test('a stale toggle from an old projection scope is ignored', () => {
+  // Current s1 scope: the top-level card and its parent-scoped child path.
+  assert.equal(disclosureKeyForToggle('root.s1-block.msg-1', 'msg-1', 's1-'), 'msg-1')
+  assert.equal(disclosureKeyForToggle('root.s1-block.msg-1.sub-abc', 'sub-abc', 's1-'), 'msg-1/sub-abc')
+  // A late s0 event with the same msg-N must not expand the new projection.
+  assert.equal(disclosureKeyForToggle('root.s0-block.msg-1', 'msg-1', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('root.s0-block.msg-1.sub-abc', 'sub-abc', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('root.s0-block.msg-1', 'msg-1', ''), undefined)
 })

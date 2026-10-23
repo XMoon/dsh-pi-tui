@@ -165,6 +165,25 @@ export type ToolSvgState =
   /** The final content did not authorize a drawing (or admission refused it). */
   | { readonly state: 'invalid'; readonly reason: string }
 
+/** PR-D RFL-018: validate a Tern toggle against the CURRENT source scope and
+ * derive the parent-scoped disclosure identity. A toggle from an older
+ * `s0-`-scoped projection is ignored even if its `msg-N` matches the current
+ * projection; the SDK node ids stay untouched. */
+export function disclosureKeyForToggle(
+  eventId: string,
+  key: string | undefined,
+  scopePrefix: string,
+): string | undefined {
+  if (scopePrefix === '' || !eventId.includes(`.${scopePrefix}`)) return undefined
+  const segments = eventId.split('.')
+  let toolStart = -1
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index]!.startsWith('msg-')) { toolStart = index; break }
+  }
+  if (toolStart < 0) return undefined
+  return segments.slice(toolStart).join('/')
+}
+
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
 function toolStatus(status: 'ok' | 'error' | 'running'): Status {
   return status === 'ok' ? 'done' : status
