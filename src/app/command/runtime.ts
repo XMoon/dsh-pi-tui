@@ -201,7 +201,7 @@ export function bindCommandRuntime(deps: CommandRuntimeDeps): CommandRuntime {
     // PR5 (plan §3.7): the async whole-log stats read re-checks the ORIGINAL
     // scope after settle — the Remote transport fences answer binding
     // identity, not VISIBLE TUI ownership, so a session switch mid-read must
-    // never deliver the old subject's figures to the /status panel.
+    // never deliver the old subject's figures to the About panel.
     currentSessionStats: async (scope, signal) => {
       const sessionId = liveSessionId(scope)
       const stats = await deps.surface.sessionStats(sessionId, signal)

@@ -1762,22 +1762,23 @@ test('the built-in command decomposition preserves the exact primary set and reg
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
   registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: undefined }))
-  // The six existing aliases: an alias is another NAME of the same logical
-  // command, registered immediately after its primary.
-  const ALIASES = new Set(['quit', 'statusline', 'resume', 'subagents', 'image', 'rename'])
-  // The 27 built-in primaries, in their frozen registration order.
+  // The seven existing aliases: an alias is another NAME of the same logical
+  // command, registered immediately after its primary. `/status` is the
+  // `/settings` alias (C5).
+  const ALIASES = new Set(['quit', 'status', 'statusline', 'resume', 'subagents', 'image', 'rename'])
+  // The 26 built-in primaries, in their frozen registration order.
   assert.deepEqual(
     services.registered.filter(name => !ALIASES.has(name)),
     [
       'exit', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
       'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'export',
-      'transcript', 'fork', 'rewind', 'status', 'login', 'logout', 'help', 'keybindings',
+      'transcript', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
   )
   // The raw sequence: every alias registers immediately after its primary.
   assert.deepEqual(services.registered, [
     'exit', 'quit',
-    'settings',
+    'settings', 'status',
     'footer', 'statusline',
     'display', 'focus',
     'sessions', 'resume',
@@ -1791,10 +1792,17 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'title', 'rename',
     'copy', 'attach', 'image', 'export', 'transcript',
     'fork', 'rewind',
-    'status',
     'login', 'logout',
     'help',
     'keybindings',
   ])
+  // C5: `/status` is the real `/settings` alias, not a second handler.
+  const settings = services.defs.find(definition => definition.name === 'settings')
+  const status = services.defs.find(definition => definition.name === 'status')
+  assert.ok(settings?.handler !== undefined && status?.handler !== undefined)
+  assert.equal(status.handler, settings.handler, 'the alias and primary share ONE handler')
+  assert.match(status.description ?? '', /alias of \/settings/u)
+  assert.equal(LOCAL_COMMANDS.has('status'), true)
+  assert.equal(SESSIONLESS_COMMANDS.has('status'), true, 'the alias executes before a session exists')
   app.stop()
 })

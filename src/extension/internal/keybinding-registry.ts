@@ -366,7 +366,7 @@ export class KeybindingRegistry {
     return undefined
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): TuiKeybindingRegistrySnapshot {
     const bindings = [...this.records.values()]
       .filter(record => !record.disposed)
@@ -381,7 +381,7 @@ export class KeybindingRegistry {
     return { bindings, revision: this.revision }
   }
 
-  /** Whether any binding is live (health /status). */
+  /** Whether any binding is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.records.values()) {
       if (!record.disposed) return true

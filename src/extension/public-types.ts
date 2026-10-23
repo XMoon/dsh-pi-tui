@@ -162,7 +162,7 @@ export interface RegistrationSpec {
   readonly order?: number
   /** Winner selection for `single` slots: lowest `priority` wins. */
   readonly priority?: number
-  /** Human-readable description for diagnostics and future /status output. */
+  /** Human-readable description for diagnostics output. */
   readonly description?: string
 }
 
@@ -203,7 +203,7 @@ export interface ContributionRecord<T> {
   readonly value: T
 }
 
-/** Health state of one contribution (future /status extension listing). */
+/** Health state of one contribution (Plugin Manager diagnostics). */
 export type ContributionState = 'active' | 'shadowed' | 'failed' | 'disposed'
 
 /** Diagnostic health record for one contribution (M1: recorded, surfaced later). */
@@ -632,7 +632,7 @@ export interface TuiCommandBridgeView {
  * P2: a bare name shared the custom-FILE namespace, so a persisted value's
  * meaning depended on which source existed). */
 export interface TuiThemeRegistryView {
-  /** The display names (diagnostics / /status counts only). */
+  /** The display names (diagnostics counts only). */
   names(): string[]
   /** DEPRECATED (still functional for the current API version — removal
    * requires the next breaking API version): the palette behind a bare

@@ -373,68 +373,6 @@ test('a session switch never shows the OLD session context through the status ch
   }
 })
 
-test('/status forces ONE measurement through the coordinator, never a duplicate direct read', async () => {
-  // The real /status handler must route through the runner's
-  // forceContextMeasurement (mark dirty + semantic reader + cache + cheap
-  // repaint) — a direct sessionReader read from the command surface would
-  // bypass the coordinator cache and could duplicate the deferred initial
-  // measurement (round-8 finding).
-  const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const ctx = new Context()
-  const defs: Array<{ name: string; handler?: unknown }> = []
-  ctx.provide('commands', {
-    register: (def: { name: string; handler?: unknown }): (() => void) => { defs.push(def); return () => {} },
-    list: () => [],
-    find: () => undefined,
-    execute: async () => undefined,
-  } as never)
-  const agent = { session: { id: 'session-b', seq: 0, snapshotEvents: () => [], header: { cwd: '/ws' } } } as unknown as Agent
-  try {
-    // Run the handler under BOTH force outcomes: a measured value AND an
-    // undefined force (no live session / measurement failure). The direct
-    // reader must NEVER run while the coordinator is present — the old
-    // `??` fallback triggered a second, uncached measurement when the
-    // force returned undefined (round-9 finding).
-    for (const forceValue of [42_000, undefined]) {
-      defs.length = 0 // re-register per round so the fresh handler is found
-      let forceCalls = 0
-      let directReads = 0
-      const runner = {
-        ctx,
-        app,
-        cwd: '/ws',
-        signal: new AbortController().signal,
-        diag: { warn: () => {}, error: () => {}, info: () => {} },
-        commandRegistry: ctx.get('commands'),
-    clientCommands: createClientCommandRegistry(parseCommand),
-        recordExtensionError: () => {},
-        clearExtensionError: () => {},
-        captureExtensionHealthRef: () => {},
-        ensureSession: async () => {},
-        sessionCwd: () => '/ws',
-        ...sessionScopeFacts(() => agent, () => 0),
-        extensions: undefined,
-        forceContextMeasurement: () => { forceCalls += 1; return forceValue },
-        sessionReader: {
-          measureContext: () => { directReads += 1; return 99_000 },
-          list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map() ,
-        },
-      } as unknown as TuiCommandRunner
-      registerTuiCommandsWithDirectSeams(runner)
-      const statusDef = defs.find(entry => entry.name === 'status')
-      assert.ok(statusDef?.handler, 'the /status command is registered')
-      await (statusDef.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-      assert.equal(forceCalls, 1, 'the explicit status forces exactly one measurement through the coordinator')
-      assert.equal(directReads, 0, `the direct reader is never called while the coordinator is present (force returned ${String(forceValue)})`)
-    }
-  } finally {
-    app.stop()
-  }
-})
-
 test('the deferred initial measure binds the captured session FIRST, then skips only an already-measured one', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(50_000)

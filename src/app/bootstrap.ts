@@ -1806,7 +1806,7 @@ export function applyRunnerWithRuntime(
         },
         // TPS plan PR-2: the measured performance values come from the SAME
         // Session's own Host `piTuiPerformance` projection on BOTH branches —
-        // the /status subject is the session id this seam was asked about.
+        // the About subject is the session id this seam was asked about.
         sessionStats: (sessionId, signal) => remoteSources === undefined
           ? Promise.resolve(sessionStatsFactsOf(
               presentationBridge.directSessionStats(sessionId),

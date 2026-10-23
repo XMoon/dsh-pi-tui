@@ -198,7 +198,7 @@ export class AutocompleteRegistry {
     }
   }
 
-  /** Whether any provider is live (health /status). */
+  /** Whether any provider is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.records.values()) {
       if (!record.disposed) return true
@@ -206,7 +206,7 @@ export class AutocompleteRegistry {
     return false
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): { providers: readonly AutocompleteProviderContribution[]; revision: number } {
     const providers = [...this.records.values()]
       .filter(record => !record.disposed)

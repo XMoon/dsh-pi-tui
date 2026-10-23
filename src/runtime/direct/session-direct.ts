@@ -358,7 +358,7 @@ export class DirectSessionReader implements SessionReader {
       const snapshot = projections.snapshot(agent.session, ['contextPressure'])
       return contextPressureOccupancy(snapshot?.values?.contextPressure)
     } catch {
-      // The projection capability is best-effort here; the /status row falls
+      // The projection capability is best-effort here; the About context row falls
       // back to unmeasured.
       return undefined
     }

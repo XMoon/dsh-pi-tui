@@ -80,7 +80,6 @@ import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
 import { createSettingsCommands } from './tui/commands/settings.ts'
 import { createSessionCommands } from './tui/commands/sessions.ts'
-import { registerStatusCommand } from './tui/commands/status.ts'
 
 
 /**
@@ -186,9 +185,6 @@ export type NewSessionId = () => SessionId
  * re-exported here to keep the stable command-surface import path). */
 export { sessionPickerCategories, sessionSearchCategory } from './tui/commands/sessions.ts'
 
-/** The /status extension-health rows (moved to `src/tui/commands/status.ts`,
- * re-exported here to keep the stable command-surface import path). */
-export { extensionHealthRows } from './tui/commands/status.ts'
 /** The shipped-preset display copy (moved to `src/tui/pickers/preset-display.ts`,
  * re-exported here to keep the stable command-surface import path). */
 export { isBuiltInPresetRow, presetDisplayText } from './tui/pickers/preset-display.ts'
@@ -610,8 +606,8 @@ export interface TuiCommandRunner {
    *  is SYNCHRONOUS, so `superseded` always means "nothing ran". */
   setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
   refreshStatus(): void
-  /** PR D2: the /status explicit context force — measures NOW through the
-   * runner's context coordinator (mark dirty + semantic SessionReader),
+  /** PR D2: the explicit About/status context force — measures NOW through
+   * the runner's context coordinator (mark dirty + semantic SessionReader),
    * repaints the footer cheaply, and returns the fresh (or last-good)
    * value for the panel. Panel and footer share ONE cached measurement —
    * a caller SHOULD prefer this over a direct sessionReader read (which
@@ -2188,8 +2184,6 @@ export function registerTuiCommands(
   sessionCommands.registerFork()
 
   sessionCommands.registerRewind()
-
-  registerStatusCommand({ runner, registerOne })
 
   const authCommands = createAuthCommands({
     runner,

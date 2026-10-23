@@ -252,7 +252,7 @@ export class RendererRegistry {
     return undefined
   }
 
-  /** Whether any renderer is live (health /status). */
+  /** Whether any renderer is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.messageRenderers.values()) {
       if (!record.disposed) return true
@@ -270,7 +270,7 @@ export class RendererRegistry {
     return this.revision
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): TuiRendererRegistrySnapshot {
     const messageRenderers = [...this.messageRenderers.values()]
       .filter(record => !record.disposed)

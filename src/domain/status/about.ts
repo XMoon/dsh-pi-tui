@@ -235,7 +235,7 @@ function integerOr(value: number | undefined, fallback = UNAVAILABLE): string {
   return typeof value === 'number' && Number.isFinite(value) ? String(value) : fallback
 }
 
-/** Human-readable LLM wall: the same vocabulary as the legacy /status row. */
+/** Human-readable LLM wall: the About report vocabulary. */
 function formatLlmDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
   const seconds = totalSeconds % 60

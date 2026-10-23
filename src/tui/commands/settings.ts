@@ -2752,9 +2752,18 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * restored surface.
    */
   const registerSettings = (): void => {
-    registerOne({
+    // C5: `/status` is a REAL alias of `/settings` — the same handler, same
+    // workspace, same initial About focus. It is not a second command: the
+    // alias registers through the shared `registerTuiCommand` seam, so the
+    // Host compatibility mirror, completion catalog and busy gate all see
+    // both names while this registrar remains the ONLY registration site.
+    registerTuiCommand({
       name: 'settings',
       description: 'Open the TUI settings workspace',
+      aliases: ['status'],
+      aliasDescriptions: {
+        status: 'Show the Settings About and Session status (alias of /settings)',
+      },
       handler: () => {
         // The workspace paints immediately (its Web row starts at `Loading…`);
         // the Host Web read then refreshes THAT panel generation (§B3.4).
@@ -2776,14 +2785,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // `/statusline` is a deliberate alias (approved): other agents (and
     // users coming from tools that name this surface "statusline") reach
     // the SAME configurator through it. The name is a PREFIX-neighbor of
-    // the existing `/status` command — the AGENTS near-synonym rule usually
-    // forbids that, and it stays forbidden for NEW independent commands —
-    // but as an EXPLICIT alias of `/footer` the pairing is unambiguous:
-    // `/status` keeps priority matching (a bare `status` input always
-    // resolves to the session-status command), `/statusline` resolves to
-    // the footer configurator, and the completion catalog shows both with
-    // the alias marked "(alias of /footer)". The alias rides the same
-    // LOCAL/SESSIONLESS ownership sets, so it never steers while busy.
+    // `/status` — the AGENTS near-synonym rule usually forbids that, and it
+    // stays forbidden for NEW independent commands — but all three are
+    // EXPLICIT aliases: `/status` is the `/settings` alias (About/Session
+    // status) and `/statusline` is the `/footer` alias, so the pairing is
+    // unambiguous. The completion catalog marks both aliases. The alias
+    // rides the same LOCAL/SESSIONLESS ownership sets, so it never steers
+    // while busy.
   const registerFooter = (): void => {
     registerTuiCommand({
       name: 'footer',

@@ -265,8 +265,8 @@ right. The second row decomposes the pi-vocabulary stats line into real
 semantic placements: session cumulative usage and the cache-hit share, then
 model performance plus the turn/step counters, while the context pressure
 renders in its full `used/window (percent)` form. The session lifetime LLM
-wall time is still accumulated and remains visible on the `/status` detail
-line, but it is not part of the default Footer.
+wall time is still accumulated and remains visible on the Settings/About
+statistics rows, but it is not part of the default Footer.
 
 The Performance item owns five styles, all fed by the Host's own
 `piTuiPerformance` projection (so they are identical on the Direct and Remote

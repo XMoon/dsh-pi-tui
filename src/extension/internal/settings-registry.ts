@@ -181,7 +181,7 @@ export class SettingsRegistry {
     return 'accepted'
   }
 
-  /** Whether any row is live (health /status). */
+  /** Whether any row is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.records.values()) {
       if (!record.disposed) return true
@@ -189,7 +189,7 @@ export class SettingsRegistry {
     return false
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): TuiSettingsRegistrySnapshot {
     const rows = this.rows().map(record => ({
       id: record.id,

@@ -1768,9 +1768,9 @@ test('literal skill gesture over a mounted Remote surface: the Client delivers t
     'the injection rides the official skill-invocation source kind')
 })
 
-/* ───────── §7.4-7 mounted /status over a paged performance window (F8) ──── */
+/* ───────── §7.4-7 mounted /status alias over a paged performance window ──── */
 
-test('mounted /status: lifetime totals render from the projections; the RECENT figures come from the Session\'s own Host projection', async (t) => {
+test('mounted /status (the /settings alias): lifetime totals and the RECENT figures come from the official projections', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-status-paged'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1830,50 +1830,49 @@ test('mounted /status: lifetime totals render from the projections; the RECENT f
   const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
   editor.setDraft('/status')
   editor.submitDraft()
-  // The command executes through the mounted Client registry and opens the
-  // official status panel.
-  await waitFor('the mounted /status panel opened', () =>
-    fixture.vt.getViewport().join('').includes('Stats'), 30_000)
-  // LIFETIME totals: their source events include the oldest turns, so a
-  // bounded-window read could not produce them — the projections must.
-  await waitFor('the projection-backed lifetime totals rendered', () =>
-    /↑[0-9.]+k/u.test(fixture.vt.getViewport().join('')), 20_000)
+  // `/status` is the `/settings` alias: the mounted Client registry executes
+  // the ONE Settings handler and the real workspace paints About.
+  await waitFor('the mounted /status alias opened Settings About', () =>
+    fixture.vt.getViewport().join('\n').includes('About'), 30_000)
+  // Wait for the About controller's scoped read to paint the Session facts
+  // (the same barrier the C3 production lane uses) before driving the page.
+  await waitFor('the About session facts painted', () => {
+    const frame = fixture.vt.getViewport().join('\n')
+    return frame.includes('Session ID') || frame.includes('Turns') || frame.includes('R5 tokens/sec')
+  }, 30_000)
+  // The About content is taller than this frame, so hand the keyboard to the
+  // content and page through it — the same keys a user drives. The rows carry
+  // the official lifetime stats and the Session's own `piTuiPerformance`
+  // projection; the exact integer token totals prove a bounded-window read
+  // could not be the source.
+  fixture.vt.sendInput('\r')
+  await waitFor('the About content took the keyboard', () =>
+    fixture.vt.getViewport().join('\n').includes('c copy fact'), 15_000)
+  let panelView = ''
+  for (let page = 0; page < 6; page += 1) {
+    panelView += `\n${fixture.vt.getViewport().join('\n')}`
+    if (/Input tokens\s+5035/u.test(panelView)
+      && /TTFB \(recent\)\s+0\.[1-9]\d*s/u.test(panelView)) break
+    fixture.vt.sendInput('\x1b[6~') // PageDown: scroll the painted About rows.
+    await new Promise(resolve => setTimeout(resolve, 200))
+  }
+  assert.match(panelView, /Input tokens\s+5035/u,
+    `the About lifetime input total is the projection value:\n${panelView}`)
+  assert.match(panelView, /Output tokens\s+1035/u,
+    `the About lifetime output total is the projection value:\n${panelView}`)
   // RECENT evidence (TPS plan PR-2): the measured performance values come
   // from the SESSION's own Host `piTuiPerformance` projection, which folds
   // the SAME committed turns regardless of how much history the Client's
   // bounded window happens to hold — no `loadOlder()` and no window fold can
-  // influence them. The seeded turns are REAL committed events, so the Host
-  // projection carries their samples.
-  await waitFor('the projection-backed lifetime totals rendered', () =>
-    /↑[0-9.]+k/u.test(fixture.vt.getViewport().join('')), 20_000)
-  // ROUND-5 hardening — REQUIRED MATCHES on the RENDERED row (assert.match
-  // throws when the pattern does not match; the round-4 `exec() !== undefined`
-  // guards were vacuously true — exec returns null). The seeded first chunk
-  // lands ~100ms after `step/start` → a `0.1s`-class TTFB rendering (a broken
-  // wiring that renders 0 fails: `0.0s`/`0s` does not match); the rate is
-  // 200 tokens over the ~400ms request wall → a non-zero tok/s figure. The
-  // upper bound keeps the match honest against the seeded arithmetic.
-  await waitFor('the panel rendered the exact lifetime totals', () =>
-    fixture.vt.getViewport().join('').includes('↑5.0k ↓1.0k'), 20_000)
-  // The RENDERED status surface of this fixture is the footer row: the
-  // /status panel keeps its formatted facts in each row's DESCRIPTION, which
-  // the overlay does not paint for an unfocused row (observed with a probe —
-  // the Stats row renders label-only while its description carries the
-  // figures). The footer and the panel read the SAME status facts, so this
-  // assertion still proves the Host-projection figures reach a rendered
-  // surface; the panel row's own formatting is covered by
-  // `test/domain/footer-items.test.ts` / `test/domain/status-semantics.test.ts`.
-  const panelView = fixture.vt.getViewport().join('')
-  assert.match(panelView, /TTFB 0\.[1-9]\d*s/u,
-    `the rendered status must show the seeded non-zero TTFB:\n${panelView}`)
-  // `displayRate` renders ONE decimal below 100 tok/s and an integer at or
-  // above it, so a rate is asserted as a NON-ZERO bounded number, never as an
-  // integer: the seeded model wall is real elapsed time, and a loaded machine
-  // can legitimately push either scope below the decimal threshold.
-  assert.match(panelView, /[1-9]\d{0,3}(?:\.\d)? tok\/s/u,
-    `the rendered status must show a seeded non-zero rate:\n${panelView}`)
-  // FOOTER consistency: the footer reads the SAME status facts, so it shows
-  // the same Host-projection figures — never the no-sample zeros.
+  // influence them. REQUIRED MATCHES: the seeded first chunk lands ~100ms
+  // after `step/start` → a `0.1s`-class TTFB; the rate is 200 tokens over the
+  // ~400ms request wall → a non-zero tok/s figure.
+  assert.match(panelView, /TTFB \(recent\)\s+0\.[1-9]\d*s/u,
+    `the About report must show the seeded non-zero TTFB:\n${panelView}`)
+  assert.match(panelView, /R5 tokens\/sec\s+[1-9]\d*(?:\.\d)? tok\/s/u,
+    `the About report must show the seeded non-zero R5 rate:\n${panelView}`)
+  // FOOTER consistency: the footer reads the SAME status facts as About, so
+  // it shows the same Host-projection figures — never the no-sample zeros.
   const footerRows = (fixture.runnerApp() as unknown as {
     footerRenderRowsForTest(): readonly string[]
   }).footerRenderRowsForTest()

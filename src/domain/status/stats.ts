@@ -12,7 +12,7 @@
  * - turns/steps count at `step/end` (unique turns), like the official
  *   projection;
  * - `llmMs` is the session LIFETIME model wall (`step/start` →
- *   `assistant/message`), kept for `/status` and analysis;
+ *   `assistant/message`), kept for the About report and analysis;
  * - usage is counted ONCE per attempt by the shared {@link StepUsageAccumulator}
  *   (an `assistant/message`/`assistant/attempt` replaces the provisional
  *   streaming value; `llm/retry-started` opens a new same-step attempt);
@@ -26,9 +26,9 @@
  * duplicate authoritative message never adds a second wall-time.
  *
  * TS8-D moved this semantic/fact authority out of the legacy root
- * `src/stats.ts`. Presentation formatting lives elsewhere: the `/status` Stats
- * row formatter is `src/tui/commands/status.ts` and the compact token-count
- * formatter is `src/tui/token-format.ts`.
+ * `src/stats.ts`. Presentation formatting lives elsewhere: the About statistics/
+ * performance rows are projected by `domain/status/about.ts` and the compact
+ * token-count formatter is `src/tui/token-format.ts`.
  * @module @xmoon76/dsh-pi-tui/domain/status/stats
  */
 

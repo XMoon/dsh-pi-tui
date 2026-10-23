@@ -158,6 +158,27 @@ consume an advertised miss as a plain model message; let a stale displayed row
 execute a different command; hand the Host a placeholder with no payload; or
 re-derive the declaration from the advertised union.
 
+## Aliases and local ownership
+
+The Settings registrar is the ONLY registration site for both names: it
+registers `settings` plus the `status` alias with the SAME handler, input shape
+and initial About focus. `/status` is not a second command or a duplicate
+handler, and both names are in `LOCAL_COMMANDS` and `SESSIONLESS_COMMANDS`;
+`/statusline` remains the independent `/footer` alias. Completion shows the
+alias with its `(alias of /settings)` description, while the Host-origin claim
+and line-level `classifyCommandLine` precedence still decide argued/Host lines
+before the Client route — ownership is never inferred from a name-only union.
+The alias registers through the shared `registerTuiCommand` seam, so its Host
+compatibility mirror, busy gate and disposal ride the primary's lifecycle.
+
+Authority: `src/tui/commands/settings.ts` (`registerSettings`),
+`src/commands.ts` (`registerTuiCommand`), `src/domain/command/policy.ts`
+(`LOCAL_COMMANDS`, `SESSIONLESS_COMMANDS`, `classifyCommandLine`).
+
+Must-not: register a second `/status` handler, branch on the command name, drop
+`status` from either ownership set, or let the alias steal a genuine Host claim
+or argued line.
+
 ## Credential targets (`/login` / `/logout`)
 
 `/login` and `/logout` are **navigation** into the Settings `Models` page (or

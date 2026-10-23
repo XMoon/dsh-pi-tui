@@ -3767,6 +3767,24 @@ test('the About page is the default Settings home: the whale, both versions and 
   h.dispose()
 })
 
+test('/status is a real /settings alias: it opens the same sessionless About home and reads once', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  h.invoke('status')
+  await h.vt.waitForRender()
+  const rows = h.rowsPlain()
+  assert.match(rows[0]!, /Settings · Categories/, 'the alias paints the same workspace chrome')
+  assert.match(h.view(), /^> About/mu, 'the alias lands on the same About rail entry')
+  assert.ok(
+    WHALE_FIRST_LINES.some(line => h.view().includes(line)),
+    `the alias paints the same About home:\n${h.view()}`,
+  )
+  assert.match(h.view(), /TUI\s+\d+\.\d+\.\d+/u)
+  assert.match(h.view(), /DSH\s+(?:Unknown|\d+\.\d+\.\d+)/u)
+  assert.equal(h.replacements(), 0, 'the alias never writes configuration')
+  assert.equal(h.reads(), 1, 'the alias performs the same ONE settings-document read')
+  h.dispose()
+})
+
 test('a narrow terminal opens on the About content: Esc returns to the categories, Esc closes the workspace', async () => {
   const h = setup({ columns: 44, rows: 20 })
   await h.openHome()

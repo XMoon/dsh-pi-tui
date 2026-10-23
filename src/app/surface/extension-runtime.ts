@@ -173,7 +173,7 @@ export function createExtensionRuntime(options: ExtensionRuntimeOptions): Extens
       if (host === undefined || service === undefined) return
       const live = mounted()
       // M7 (round-1 finding 3): renderer failures land in the extension health
-      // ledger — observable via /status diagnostics, never swallowed. Safe
+      // ledger — observable via Plugin Manager diagnostics, never swallowed. Safe
       // single-line message (no stack traces, hostile toString handled).
       live.setRendererErrorSink(({ id, error, slot, owner }) => {
         const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)

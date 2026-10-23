@@ -1,7 +1,7 @@
 /**
  * Contribution health records (M1): per-registration lifecycle state and the
  * first error of each failure generation. Records are diagnostic-only — the
- * /status extension listing (M11) will surface them; nothing in M1–M3
+ * Plugin Manager diagnostics (M11) will surface them; nothing in M1–M3
  * renders them.
  *
  * Error policy (plan §18): the FIRST error of a failure generation records

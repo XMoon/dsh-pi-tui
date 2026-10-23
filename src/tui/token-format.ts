@@ -1,7 +1,7 @@
 /**
  * Compact terminal token-count FORMATTING (TS8-D): the pi.s footer
  * abbreviation vocabulary shared by the footer stats line, the Focus per-turn
- * token segment and the /status Stats row. This is presentation-only — the
+ * token segment and the About token rows. This is presentation-only — the
  * token semantic/accounting authority is
  * `src/domain/transcript/usage.ts`.
  * @module @xmoon76/dsh-pi-tui/tui/token-format

@@ -57,6 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grant persistence and background revocation stay on the Host; the TUI never receives a
   token/grant and never starts its own HTTP server. `--help` opens no listener.
 
+- **`/status` is now a real alias of `/settings`; About and Plugin Manager Diagnostics replace the old status surface.**
+  Both commands open exactly the same fullscreen Settings/About workspace (same
+  handler, initial focus and reads; a sessionless open creates no session and
+  reads no statistics), while `/statusline` remains the `/footer` alias. About
+  supports per-fact copy and exact Copy All; extension health (failed/shadowed
+  plus the full `lastError`), registry counts, the actual capabilities, and
+  contributions without a proven Loader-entry owner now live in the Plugin
+  Manager's `Diagnostics` page (`/plugins` or `Settings → Plugins`, press `d`),
+  with Host package state and install logs kept separate. The old dedicated
+  `/status` page is removed.
+
 ### Fixed
 
 - **Switching to the Models page no longer freezes the whole TUI.** The provider

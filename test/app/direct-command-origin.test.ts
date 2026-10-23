@@ -247,8 +247,8 @@ test('a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /
     await settle(400)
 
     const frame = vt.getViewport().join('\n')
-    assert.ok(frame.includes('Stats'),
-      'the /status settings panel OPENED — the Client handler executed under running+steer')
+    assert.ok(frame.includes('About'),
+      'the /status Settings/About workspace OPENED — the Client handler executed under running+steer')
     assert.deepEqual(
       [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
         .map(value => JSON.stringify(value)).filter(value => value.includes('status')),
@@ -341,7 +341,7 @@ test('a genuine Agent-SCOPED Host shadow over our global mirror stays HOST autho
     // classification. The scoped genuine handler is disposed, the catalog
     // refreshes, and the mirrored name is once again THIS surface's own
     // compatibility mirror — so the line goes back to the TUI's Client
-    // handler (the real /status opens the settings panel) and the scoped
+    // handler (the real /status opens the Settings/About workspace) and the scoped
     // handler never runs again.
     const before = scopedHostRuns
     disposeScoped()
@@ -352,8 +352,8 @@ test('a genuine Agent-SCOPED Host shadow over our global mirror stays HOST autho
     await settle(400)
     assert.equal(scopedHostRuns, before,
       'the disposed scoped Host shadow no longer owns the name')
-    assert.ok(vt.getViewport().join('\n').includes('Stats'),
-      'the mirror classification is RESTORED: the TUI /status handler runs again (its settings panel opens)')
+    assert.ok(vt.getViewport().join('\n').includes('About'),
+      'the mirror classification is RESTORED: the TUI /status handler runs again (its Settings/About workspace opens)')
   } finally {
     TuiApp.prototype.start = originalStart
     restoreTerminal()

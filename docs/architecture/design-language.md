@@ -441,8 +441,9 @@ Rules:
   cannot resume a style** — so **every span that must keep an ink of its own is
   pre-painted too** (measured in the real `/model` frame: the selected row's badge
   kept ` · effort ‹high›` in the default colour until that token was painted its own
-  role-4 ink). That is the pattern in `src/tui/commands/status.ts:110`, and **the
-  vendored fork is never modified for the chip's ink**. The two contracts the slot
+  role-4 ink). That is the pattern in `src/tui/plugin-manager/workspace.ts` (the state chip is
+  pre-painted at the call site), and **the vendored fork is never modified for
+  the chip's ink**. The two contracts the slot
   itself cannot express — the whole-unit state layout (fork divergence X061) and
   the row's search basis (fork divergence X062) — are the sole exception, recorded
   as the Owner amendment `D16` in §1.3; nothing else here changes the fork.

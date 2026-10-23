@@ -191,7 +191,7 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前活动项，`TRACKED` 显示当前跟踪源（Job Registry / Subagent catalog）仍列出的全部项；`TRACKED` 不是 Session 执行历史。DSH `0.1.7` 会在普通前台 `bash` / `pwsh` 执行期间临时注册 Job，使其可以在 Task Center 中观察和停止；如果命令在前台等待内完成，DSH 会移除该临时记录，最终结果仍保留在 Transcript 的 tool card 中。显式 `run_in_background: true` 或被提升为后台的 Job 在完成后，只要 Job Registry 继续保留其记录，就仍可在 `TRACKED` 中查看。
 
-`/plugins` 打开当前 profile 的全屏 Plugin Manager：目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），窄屏单栏、宽屏双栏，可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 的顶级 `Plugins` 分类原地打开同一页面，返回时保留 Settings 的分类、滚动与选择。
+`/plugins` 打开当前 profile 的全屏 Plugin Manager：目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），窄屏单栏、宽屏双栏，可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 的顶级 `Plugins` 分类原地打开同一页面，返回时保留 Settings 的分类、滚动与选择。页面内按 `d` 打开只读的 **Diagnostics**：按 owner 分组显示 extension 贡献的 `active/failed/shadowed` 状态与完整 `lastError`、各 registry 计数、实际 capabilities，以及无法证明 Loader entry 归属的贡献（单列 `Unassociated extension contributions`）；`c` 复制所选事实、`C` 复制全部、`r` 重新读取、Esc 返回。Diagnostics 只读 extension ledger，不把 Host 包安装状态或安装日志混入其中；`copy` 仍只证明已发送，不证明操作系统剪贴板已收到。
 
 Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界等），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
 
@@ -302,6 +302,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 ```text
 /model
 /settings
+/status
 /login
 /permission
 /plan
@@ -324,8 +325,10 @@ Icon style、Transcript display 的运行时当前值与持久偏好、Thinking 
 态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
 原始值；浏览、选择与复制本身都不写入配置。
 
+`/status` 是 `/settings` 的真实别名：同一 handler、同一初始 About 焦点与同一套读取；无 Session
+时两者都不创建会话、不读统计。`/statusline` 仍是 `/footer` 的别名，不经过 Settings。
 Settings 的一级分类现在是 `About / Models / Account / Appearance / Display / Tools / Plugins / Other settings`；`/settings`
-仍默认落在 About。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
+（以及 `/status`）默认落在 About。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
 不是连通性测试）与 DeepSeek Account 入口；可查看 provider 事实、在遮蔽输入中写入/清除 API key、
 完成 Add Provider 草稿向导，以及发起 provider-native 登录（页面内持续显示 URL、提示与取消）。
 `Account` 是独立的 DeepSeek Account 页：显示 Host 的登录状态、浏览器授权 URL 与 SSH 隧道提示、
