@@ -2226,7 +2226,10 @@ test('B-05b the profile-wide Visual tools switch confirms through its Host port,
   assert.deepEqual(h.visualWrites(), [false], 'the Host port receives exactly one Off write')
   assert.equal(h.visualState()?.enabled, false, 'the Host-facing state really changed')
   assert.match(h.view(), /Status\s+Verified/)
-  assert.match(h.view(), /both tools are registered|not applied/, 'the runtime fact stays visible after the write')
+  // A SUCCESSFUL Off is "disabled", never "not applied": the runtime line
+  // interprets the live registration fact against the desired configuration.
+  assert.match(h.view(), /Runtime\s+Both tools disabled/)
+  assert.doesNotMatch(h.view(), /not applied/iu, 'a verified Off is not described as unapplied')
 
   // Restore On through the SAME row and port.
   await key(h, '\r')
@@ -2236,6 +2239,8 @@ test('B-05b the profile-wide Visual tools switch confirms through its Host port,
   assert.deepEqual(h.visualWrites(), [false, true])
   assert.equal(h.visualState()?.enabled, true)
   assert.match(h.view(), /Status\s+Verified/)
+  assert.match(h.view(), /Runtime\s+Both tools registered/)
+  assert.doesNotMatch(h.view(), /not applied/iu)
   h.dispose()
 })
 
@@ -2262,6 +2267,7 @@ test('B-05d a stale backend keeps the last-known Visual tools value but refuses 
   })
   await h.open('Tools')
   assert.match(h.view(), /Off/, 'the last-known value stays readable')
+  assert.match(h.view(), /Runtime\s+Both tools disabled/, 'a disabled last-known pair is described as disabled')
   assert.match(h.view(), /Last-known value · reconnecting/)
   await key(h, '\r')
   await key(h, '\r')
@@ -2285,8 +2291,28 @@ test('B-05e a switch the Host registry did not adopt is reported as unverified, 
   await settle(h)
   assert.deepEqual(h.visualWrites(), [true])
   assert.match(h.view(), /Commit accepted · verification unavailable/)
+  assert.match(h.view(), /Runtime\s+Not applied — registration failed/u, 'a configured On that did not register is named as a failure')
   assert.match(h.view(), /did not adopt/u, 'the real registry fact is stated')
   assert.ok(!h.view().includes('Verified'), 'a persisted value the runtime did not adopt is never Verified')
+  h.dispose()
+})
+
+test('B-05e2 a verified Off whose registrations remain is named as a runtime mismatch', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    visualToolsAppliedAfterWrite: true,
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // On -> Off
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.visualWrites(), [false])
+  assert.match(h.view(), /Status\s+Commit accepted · verification unavailable/)
+  assert.match(h.view(), /Runtime\s+Not applied — tools remain registered/u)
+  assert.doesNotMatch(h.view(), /Status\s+Verified/u)
   h.dispose()
 })
 
