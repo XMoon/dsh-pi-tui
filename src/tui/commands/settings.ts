@@ -1283,15 +1283,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return `${state.enabled ? 'On' : 'Off'}${state.userOverridden ? '' : ' [default]'}`
   }
 
-  /** The runtime half of the row: the owning Host row's registration fact.
-   *  A backend that cannot observe the Host registry says so instead of
-   *  presenting the committed configuration as a live registration. */
+  /** The runtime half of the row: the owning Host row's live registration
+   *  fact INTERPRETED against the desired configuration. "Not applied" is a
+   *  mismatch between the two facts, never the normal Off state; a backend that
+   *  cannot observe the Host registry says so instead of presenting the
+   *  committed configuration as a live registration. */
   const visualToolsRuntimeOf = (state: VisualToolsState | undefined): string => {
     if (state === undefined) return 'not read — the Host profile section is unavailable'
-    if (state.applied === undefined) return 'not observable on this backend (the Host registry has no wire read)'
+    if (state.applied === undefined) return 'Runtime status unobservable — the Host registry has no wire read'
+    if (state.enabled) {
+      return state.applied
+        ? 'Both tools registered'
+        : 'Not applied — registration failed'
+    }
     return state.applied
-      ? 'both tools are registered in the Host tool registry'
-      : 'not applied — the Host tool registry does not carry both registrations'
+      ? 'Not applied — tools remain registered'
+      : 'Both tools disabled'
   }
 
   const visualToolsEditOf = (
