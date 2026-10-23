@@ -367,6 +367,24 @@ test('generic ESC sequences drop whole while a bare ESC keeps ordinary Unicode',
   }
 })
 
+test('invalid CSI bytes stop the sequence without consuming the ordinary character', () => {
+  const cases: readonly [string, string][] = [
+    ['pre\u001b[鲸-post', 'pre鲸-post'],
+    ['pre\u009b鲸-post', 'pre鲸-post'],
+    ['pre\u001b[😀-post', 'pre😀-post'],
+    ['pre\u009b😀-post', 'pre😀-post'],
+    ['pre\u001b[31鲸-post', 'pre鲸-post'],
+    ['pre\u001b[31m-post', 'pre-post'],
+    ['pre\u009b31m-post', 'pre-post'],
+  ]
+  for (const [title, expected] of cases) {
+    const row = aboutFactRows(readyView({ title })).find(candidate => candidate.id === 'session.title')!
+    assert.equal(row.copyValue, expected, `copy sanitizes ${JSON.stringify(title)}`)
+    const reportTitle = serializeAboutStatus(readyView({ title })).split('\n').find(line => line.startsWith('Title:'))!
+    assert.equal(reportTitle, `Title: ${expected}`, `Copy All sanitizes ${JSON.stringify(title)}`)
+  }
+})
+
 test('CR/LF/TAB are escaped so a field can never forge a fixed report line', () => {
   const view = readyView({ title: 'normal\nBackend: Remote\r\n\tTabbed' })
   const row = aboutFactRows(view).find(candidate => candidate.id === 'session.title')!
