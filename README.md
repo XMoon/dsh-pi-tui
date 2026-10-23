@@ -324,8 +324,8 @@ Icon style、Transcript display 的运行时当前值与持久偏好、Thinking 
 态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
 原始值；浏览、选择与复制本身都不写入配置。
 
-Settings 的一级分类现在是 `Models / Account / Appearance / Display / Plugins / Other settings`；`/settings`
-仍默认落在 Appearance。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
+Settings 的一级分类现在是 `Models / Account / Appearance / Display / Tools / Plugins / Other settings`；`/settings`
+仍默认落在 About。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
 不是连通性测试）与 DeepSeek Account 入口；可查看 provider 事实、在遮蔽输入中写入/清除 API key、
 完成 Add Provider 草稿向导，以及发起 provider-native 登录（页面内持续显示 URL、提示与取消）。
 `Account` 是独立的 DeepSeek Account 页：显示 Host 的登录状态、浏览器授权 URL 与 SSH 隧道提示、
@@ -353,7 +353,16 @@ L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选
 "verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本机生效，
 此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按 source-qualified 身份解析，
 已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成同名文件主题。Icon style 与
-Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：`Other settings` → `Open existing settings…`
+Thinking detail 仍是只读行。
+
+`/settings → Tools` 提供一个 profile 级 **Visual tools** 总开关（默认 On）：它对应 Host 的
+`pi-tui-visual-tools.enabled` 配置，关闭后 `dsh_pi_tui_chart` 与 `dsh_pi_tui_svg` 会从该 Host
+的全局工具注册表注销，之后新的模型请求不会再看到它们；重新打开会恢复原定义。设置属于整个 DSH
+Host profile（跨会话、跨 Agent，不只是当前 TUI）；关闭只影响未来的工具可用性，已经记录在
+transcript 里的图表/SVG 结果仍可正常显示、复制、搜索与导出。Direct 后端会同时核对 Host 注册表
+状态后才显示 `Verified`；Remote 没有注册表读取通道，只如实显示配置已保存，不宣称运行态已生效。
+
+旧的完整设置编辑器仍然可用：`Other settings` → `Open existing settings…`
 会先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
 
 `/settings` 的 `Other settings` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器

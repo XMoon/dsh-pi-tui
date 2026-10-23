@@ -21,7 +21,7 @@ export interface SettingsRailTerminal {
 
 /** The painted category order of the Settings rail. */
 export const SETTINGS_CATEGORY_ORDER = [
-  'About', 'Models', 'Account', 'Appearance', 'Display', 'Plugins', 'Other settings',
+  'About', 'Models', 'Account', 'Appearance', 'Display', 'Tools', 'Plugins', 'Other settings',
 ] as const
 
 /** Whether the painted frame shows the Settings category rail. A narrow
@@ -29,7 +29,7 @@ export const SETTINGS_CATEGORY_ORDER = [
  *  the rail's own labels are the witness. */
 export function settingsRailVisible(vt: SettingsRailTerminal): boolean {
   return vt.getViewport().map(stripTerminalSequences)
-    .some(line => /^(?:> | {2})(?:About|Models|Account|Appearance|Display|Plugins|Other settings)(?: {2,}|\s*$)/u.test(line))
+    .some(line => /^(?:> | {2})(?:About|Models|Account|Appearance|Display|Tools|Plugins|Other settings)(?: {2,}|\s*$)/u.test(line))
 }
 
 /**

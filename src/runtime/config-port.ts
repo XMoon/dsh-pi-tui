@@ -617,6 +617,45 @@ export interface WebProviderConfig {
   setSearchApiBaseURL(url: string): Promise<void>
 }
 
+/** The effective state of the Host `pi-tui-visual-tools` row — the ONE
+ *  profile-wide switch that decides whether the built-in `dsh_pi_tui_chart`
+ *  and `dsh_pi_tui_svg` tools are registered for every Agent of this Host.
+ *
+ *  This is a Host CONFIGURATION fact, not a TUI preference and not a Session
+ *  property: the persistent authority is the `pi-tui-visual-tools` profile
+ *  entry's `enabled` volatile field, and the runtime sink is the official
+ *  `ToolRuntime` registry. */
+export interface VisualToolsState {
+  /** The effective `enabled` value the Host will apply. */
+  readonly enabled: boolean
+  /** Whether the USER profile layer declares the value. `false` means the
+   *  effective value is inherited/default — the only provenance the Host form
+   *  exposes — so the UI may mark it `[default]` instead of claiming a user
+   *  choice; the schema default itself is never re-derived here. */
+  readonly userOverridden: boolean
+  /** Whether BOTH tool registrations are live, as the owning Host row reports
+   *  them. `undefined` when this backend cannot observe the Host registry
+   *  (Remote has no such wire), in which case neither success nor failure may
+   *  be claimed. */
+  readonly applied: boolean | undefined
+}
+
+/**
+ * The profile-wide visual-tools switch. The write is the official
+ * revision-checked settings mutation of the `pi-tui-visual-tools` entry; the
+ * Loader then commits `enabled` into the row's live reference and reconciles
+ * the registry. A resolved write is NOT a read-back: the caller must
+ * {@link VisualToolsConfig.read} again and only that read earns `Verified`.
+ */
+export interface VisualToolsConfig {
+  /** The current Host state, or `undefined` when the profile section cannot be
+   *  read at all (missing namespace/service). Never a fabricated default. */
+  read(): VisualToolsState | undefined
+  /** Persist `enabled` through the official settings write. A stale revision is
+   *  a refusal (the official conflict), never a silent overwrite. */
+  setEnabled(enabled: boolean): Promise<void>
+}
+
 /**
  * How current this backend's config reads are (M3-3B, plan §9.1).
  *
@@ -764,4 +803,6 @@ export interface ConfigPort {
   readonly subagentModelSelection: SubagentModelSelectionConfig
   /** The official Web provider selection + Search/Fetch API options. */
   readonly web: WebProviderConfig
+  /** The profile-wide built-in visual tools (Chart + SVG) availability switch. */
+  readonly visualTools: VisualToolsConfig
 }

@@ -21,9 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while the final result still carries a credential matching the call arguments; a policy
   replacement never shows a stale drawing. Direct and Remote read the same durable result.
 
+- **Settings gains a `Tools` category with one profile-wide `Visual tools` switch.** The switch is
+  on by default and maps to the Host profile's `pi-tui-visual-tools.enabled` configuration.
+  Turning it off unregisters `dsh_pi_tui_chart` and `dsh_pi_tui_svg` from the Host's global tool
+  registry, so later model requests no longer see them; turning it back on restores the original
+  definitions without a restart. The setting applies across sessions, agents and TUI backends.
+  Chart/SVG results already recorded in a transcript still render, copy, search and export.
+  The write goes through the official revision-checked settings path; `Verified` appears only
+  after the Host read-back agrees (on Direct, after the actual registration state is also
+  confirmed). An unreadable Host configuration shows `Unavailable` and refuses the write instead
+  of presenting the default as a current value.
+
 - **Settings now opens on an About home and uses a real two-column layout on wide and
   medium terminals.** The left column is the category rail (About, Models, Account,
-  Appearance, Display, Plugins, Other settings) and the right column is the real content:
+  Appearance, Display, Tools, Plugins, Other settings) and the right column is the real content:
   selecting Models or Account paints its page at once, with no second Enter to open it, and
   the keyboard stays on the rail until Enter or Right hands it to that page. Esc, Backspace
   and Left return the keyboard to the rail and keep the page state. About shows the brand

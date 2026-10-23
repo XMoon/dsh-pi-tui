@@ -1480,3 +1480,52 @@ test('credential READS still supersede a describe from a replaced Connection gen
   await same.port.credentials.setReference('ACME_KEY', 'secret')
   assert.equal((await same.port.credentials.describeReference('ACME_KEY')).configured, true)
 })
+
+// ── the profile-wide visual tools switch ──────────────────────────────────
+
+test('visualTools mirrors the Host section and writes the exact enabled path through the generated remote', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('pi-tui-visual-tools', {
+      ns: 'pi-tui-visual-tools',
+      value: { enabled: true },
+      revision: 4,
+    })
+  })
+  assert.equal(port.visualTools.read(), undefined, 'a never-described mirror has no authority to report')
+  await port.describe()
+  assert.deepEqual(port.visualTools.read(), { enabled: true, userOverridden: false, applied: undefined })
+
+  await port.visualTools.setEnabled(false)
+  assert.equal(state.mutateCalls.length, 1)
+  assert.equal(state.mutateCalls[0]!.ns, 'pi-tui-visual-tools')
+  assert.deepEqual(state.mutateCalls[0]!.ops, [{ op: 'set', path: ['enabled'], value: false }])
+  assert.equal(state.mutateCalls[0]!.revision, 4, 'the write carries the revision the UI decision was read at')
+  assert.equal(port.visualTools.read()?.enabled, false, 'the post-settlement mirror refresh is the new authority')
+  assert.equal(port.visualTools.read()?.applied, undefined, 'the wire exposes no registry fact, so none is claimed')
+})
+
+test('visualTools reports a namespace the Host does not expose instead of fabricating a value', async () => {
+  const { port } = createBackend()
+  await port.describe()
+  assert.equal(port.visualTools.read(), undefined)
+  await assert.rejects(port.visualTools.setEnabled(true), /not available in this deployment/u)
+})
+
+test('a stale visualTools read stays last-known and the write is refused by the currentness fence', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('pi-tui-visual-tools', {
+      ns: 'pi-tui-visual-tools',
+      value: { enabled: true },
+      revision: 2,
+    })
+  })
+  await port.describe()
+  state.describeFailure = { code: 'gateway/disconnected', message: 'connection lost' }
+  await assert.rejects(port.describe())
+  assert.deepEqual(port.visualTools.read(), { enabled: true, userOverridden: false, applied: undefined },
+    'the last-known value remains READABLE but configReadiness reports it non-current')
+  assert.equal(port.configReadiness(), 'stale')
+  const callsBefore = state.mutateCalls.length
+  await assert.rejects(port.visualTools.setEnabled(false), /settings\.describe failed: connection lost/u)
+  assert.equal(state.mutateCalls.length, callsBefore, 'a stale mirror never dispatches the switch')
+})

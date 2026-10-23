@@ -14,9 +14,10 @@
  *
  * The panel owns NO configuration authority: its rows are a detached read
  * projection assembled by the `/settings` command from the existing ConfigPort /
- * DisplayState / presentation-preference readers. Theme and Display commits are
- * requests through the existing `onCommit` intent; all other settings retain
- * their existing read, copy and legacy-editor handoff behavior.
+ * DisplayState / presentation-preference readers. Theme, Display and the
+ * profile-wide Visual tools switch are requests through the existing
+ * `onCommit` intent; all other settings retain their existing read, copy and
+ * legacy-editor handoff behavior.
  * @module @xmoon76/dsh-pi-tui/tui/panels/settings-workspace-panel
  */
 
@@ -42,10 +43,10 @@ import type { AccountInitialView, AccountWorkspacePage } from './account-workspa
 
 /** The frozen Settings categories, in the visible order. `About` is the
  * default home of the workspace; `Models` and `Account` are direct content
- * pages (like Plugins); the four configuration categories keep their existing
+ * pages (like Plugins); the configuration categories keep their existing
  * behavior. */
 export type SettingsWorkspaceCategoryId =
-  | 'about' | 'models' | 'account' | 'appearance' | 'display' | 'plugins' | 'other'
+  | 'about' | 'models' | 'account' | 'appearance' | 'display' | 'tools' | 'plugins' | 'other'
 
 /** The navigation level of the LEGACY configuration categories: `categories`
  *  (L0) → `rows` (L1) → `detail` (L2).
@@ -68,6 +69,7 @@ export type SettingsWorkspaceRowId =
   | 'icon-style'
   | 'display-preset'
   | 'thinking'
+  | 'visual-tools'
   | 'legacy-settings'
   | 'web-settings'
 
@@ -75,11 +77,13 @@ export type SettingsWorkspaceRowId =
 export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'unavailable' | 'read-error'
 
 /**
- * The two pilot rows Phase 3B / B2-B makes truly editable. Nothing else in the
- * workspace is writable: `icon-style` and `thinking` stay readable rows and the
- * complete editor stays behind `legacy-settings`.
+ * The rows Phase 3B / B2-B and the PR-D follow-up make truly editable. `theme`
+ * and `display-preset` write the TUI settings document; `visual-tools` is the
+ * profile-wide Host switch. Nothing else in the workspace is writable:
+ * `icon-style` and `thinking` stay readable rows and the complete editor stays
+ * behind `legacy-settings`.
  */
-export type SettingsWorkspaceWritableField = 'theme' | 'display-preset'
+export type SettingsWorkspaceWritableField = 'theme' | 'display-preset' | 'visual-tools'
 
 /** One selectable candidate of a writable row. `value` is the EXACT identity
  *  that gets applied and persisted (a source-qualified theme id, a display
@@ -395,7 +399,7 @@ interface DetailProjection {
 }
 
 const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = [
-  'about', 'models', 'account', 'appearance', 'display', 'plugins', 'other',
+  'about', 'models', 'account', 'appearance', 'display', 'tools', 'plugins', 'other',
 ]
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
@@ -404,6 +408,7 @@ const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   account: 'Account',
   appearance: 'Appearance',
   display: 'Display',
+  tools: 'Tools',
   plugins: 'Plugins',
   other: 'Other settings',
 }
@@ -429,6 +434,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'icon-style'
     || id === 'display-preset'
     || id === 'thinking'
+    || id === 'visual-tools'
     || id === 'legacy-settings'
     || id === 'web-settings'
 }

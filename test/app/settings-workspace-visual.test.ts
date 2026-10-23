@@ -31,7 +31,7 @@ import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
-import type { CredentialProviderOption, TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import {
@@ -106,6 +106,16 @@ interface HarnessOptions {
    * affordance can never dispatch the entry.
    */
   pluginPage?: boolean
+  /** The profile-wide Visual tools state the ConfigPort reads. The default is
+   *  the shipped state: enabled from the schema default, both tools registered. */
+  visualTools?: VisualToolsState
+  /** The visual-tools section is absent/unreadable (`read()` answers undefined). */
+  visualToolsUnavailable?: boolean
+  /** Make `setEnabled` reject with this reason (a refused Host write). */
+  visualToolsWriteFailure?: string
+  /** After a successful switch write, keep this `applied` fact: a Host registry
+   *  that could not adopt the change (e.g. a same-name conflict). */
+  visualToolsAppliedAfterWrite?: boolean
 }
 
 interface Harness {
@@ -133,6 +143,10 @@ interface Harness {
   readonly calls: () => readonly string[]
   /** Every `diag.warn` the commands recorded (the write-owner failure trail). */
   readonly warnings: () => readonly { readonly message: string; readonly fields?: Record<string, unknown> }[]
+  /** Every `visualTools.setEnabled` value the UI dispatched, in order. */
+  readonly visualWrites: () => readonly boolean[]
+  /** The current fake Host state the ConfigPort reads. */
+  readonly visualState: () => VisualToolsState | undefined
   /** Every byte the app wrote to the terminal (the raw write sink). */
   readonly writes: () => readonly string[]
   /** Run every owned task the harness is holding (`holdOwned`). */
@@ -143,14 +157,14 @@ interface Harness {
 }
 
 /** The painted category order of the Settings rail (the harness walks it). */
-const CATEGORY_ORDER = ['About', 'Models', 'Account', 'Appearance', 'Display', 'Plugins', 'Other settings']
+const CATEGORY_ORDER = ['About', 'Models', 'Account', 'Appearance', 'Display', 'Tools', 'Plugins', 'Other settings']
 
 /** Whether the painted frame shows the Settings category rail. A narrow
  *  terminal paints the single-column category list OR the About content, so
  *  the rail's own labels are the witness. */
 const railVisible = (vt: VirtualTerminal): boolean =>
   vt.getViewport().map(stripTerminalSequences)
-    .some(line => /^(?:> | {2})(?:About|Models|Account|Appearance|Display|Plugins|Other settings)(?: {2,}|\s*$)/u.test(line))
+    .some(line => /^(?:> | {2})(?:About|Models|Account|Appearance|Display|Tools|Plugins|Other settings)(?: {2,}|\s*$)/u.test(line))
 
 function setup(options: HarnessOptions = {}): Harness {
   const columns = options.columns ?? 120
@@ -165,6 +179,10 @@ function setup(options: HarnessOptions = {}): Harness {
   let reads = 0
   let replacements = 0
   let pluginPages = 0
+  const visualWrites: boolean[] = []
+  let visualState: VisualToolsState | undefined = options.visualToolsUnavailable === true
+    ? undefined
+    : options.visualTools ?? { enabled: true, userOverridden: false, applied: true }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
@@ -271,6 +289,21 @@ function setup(options: HarnessOptions = {}): Harness {
     },
     config: {
       configReadiness: () => options.readiness ?? 'ready',
+      visualTools: {
+        read: () => visualState,
+        setEnabled: async (enabled: boolean) => {
+          visualWrites.push(enabled)
+          if (options.visualToolsWriteFailure !== undefined) throw new Error(options.visualToolsWriteFailure)
+          if (visualState !== undefined) {
+            visualState = {
+              ...visualState,
+              enabled,
+              userOverridden: true,
+              applied: options.visualToolsAppliedAfterWrite ?? enabled,
+            }
+          }
+        },
+      },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
@@ -379,6 +412,8 @@ function setup(options: HarnessOptions = {}): Harness {
     replaced: () => replaced,
     calls: () => calls,
     warnings: () => warnings,
+    visualWrites: () => visualWrites,
+    visualState: () => visualState,
     writes: () => writes,
     pluginPages: () => pluginPages,
     releaseOwned: () => {
@@ -473,7 +508,7 @@ test('A-02 200x60 and 160x40 paint the three-column projection with the real val
   for (const [columns, rows] of [[200, 60], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    const paneRow = rowOf(h, 'Categories (7)')
+    const paneRow = rowOf(h, 'Categories (8)')
     const paneLine = h.rowsPlain()[paneRow]!
     assert.match(paneLine, /Rows \(2\)/, 'the middle column is the current category rows')
     assert.match(paneLine, /Details/, 'the third column is the detail pane')
@@ -489,7 +524,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   // L0 paints categories + rows only; the retired header arrows never paint.
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'L0 owns the categories level')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'L0 owns the categories level')
   assert.ok(h.rowsPlain().some(line => line.includes('Rows (2)')), `the rows column exists:\n${h.view()}`)
   assert.ok(!h.view().includes('Details'), 'L0 does not paint the Detail column')
   assert.ok(!h.view().includes('←'), 'no medium header category arrows')
@@ -501,7 +536,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   // Enter advances to L1: rows + detail, no categories column.
   await key(h, '\r')
   assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'L1 paints the Detail column')
-  assert.ok(!h.view().includes('Categories (7)'), 'L1 hides the categories column')
+  assert.ok(!h.view().includes('Categories (8)'), 'L1 hides the categories column')
   // Right enters L2's inline choice directly from L1 on the same projection.
   await key(h, '\x1b[C')
   assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
@@ -954,7 +989,8 @@ test('A-11 Other settings opens the existing complete editor after retiring the 
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\x1b[B') // Appearance -> Display
-  await key(h, '\x1b[B') // Display -> Plugins
+  await key(h, '\x1b[B') // Display -> Tools
+  await key(h, '\x1b[B') // Tools -> Plugins
   await key(h, '\x1b[B') // Plugins -> Other settings
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Other settings')), `the other category is selected:\n${h.view()}`)
   await key(h, '\r') // L0 -> L1 (the Other settings rows level)
@@ -1003,8 +1039,8 @@ test('A-15 the workspace chrome paints the live palette tokens (dark → light)'
   // The active device and the cursor share `primary`; the identity word above
   // does NOT (it is weight-only). This is the exact split the vocabulary fixes:
   // ordinary focus is never the amber `borderFocus` (which equals `warning`).
-  const paneHeadRow = rowOf(h, '[Categories (7)]')
-  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (7)]')
+  const paneHeadRow = rowOf(h, '[Categories (8)]')
+  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (8)]')
   assert.equal(h.vt.getCellFgRgb(paneHeadRow, paneHeadCol), hexToRgb(currentPalette.primary),
     'the focused pane label wears the bracketed bold primary active device')
   const cursorRow = rowOf(h, '> Appearance')
@@ -1073,7 +1109,7 @@ test('the painted Copy button copies while the row list owns the keyboard focus'
 test('a click anywhere in a visible column takes that column focus', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'the categories level owns focus at open')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'the categories level owns focus at open')
   // Clicking a row selects it and takes the rows level's focus (and therefore
   // the rows + detail composition).
   const iconRow = rowOf(h, 'Icon style')
@@ -1098,7 +1134,7 @@ test('100x3 paints real content in its only body row, not pane headers', async (
   const painted = h.rowsPlain()
   assert.equal(painted.length, 3)
   assert.ok(painted.some(line => line.includes('Configured theme')), `the only body row is real content:\n${h.view()}`)
-  assert.ok(!painted.some(line => line.includes('Categories (7)')), 'the pane header yields to the content row')
+  assert.ok(!painted.some(line => line.includes('Categories (8)')), 'the pane header yields to the content row')
   h.dispose()
 })
 
@@ -1173,6 +1209,7 @@ test('the wheel scrolls the pane under the pointer without pulling the selection
   await key(h, '\x1b[B')
   await key(h, '\x1b[B')
   await key(h, '\x1b[B')
+  await key(h, '\x1b[B')
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Other settings')), 'a selection change still rebases to the selected row')
   h.dispose()
 })
@@ -1220,8 +1257,8 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   const long = `file:${'x'.repeat(300)}`
   const h = setup({ columns: 200, rows: 60, doc: { theme: long } })
   await h.open()
-  const paneRow = rowOf(h, 'Categories (7)')
-  assert.equal(cellIndexOf(h, paneRow, '[Categories (7)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
+  const paneRow = rowOf(h, 'Categories (8)')
+  assert.equal(cellIndexOf(h, paneRow, '[Categories (8)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
   assert.equal(cellIndexOf(h, paneRow, 'Rows (2)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
   assert.equal(cellIndexOf(h, paneRow, 'Details'), 22 + 2 + 42 + 2, 'the detail column starts after the 42-cell row column and a 2-cell gap')
   for (const [index, line] of h.vt.getViewport().entries()) {
@@ -1299,15 +1336,15 @@ test('A-15c an unhandled printable key is inert inside the workspace', async () 
 test('a real category/row item click takes that level and selects the item', async () => {
   const wide = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await wide.open()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'the categories level owns focus at open')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'the categories level owns focus at open')
   const displayRow = rowOf(wide, 'Display')
   press(wide, displayRow, 2)
   release(wide, displayRow, 2)
   await wide.vt.waitForRender()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (7)')]!, /\[Categories \(7\)\]/, 'the clicked category keeps the categories level')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'the clicked category keeps the categories level')
   assert.ok(wide.rowsPlain().some(line => line.startsWith('> Display')), 'and selects the clicked category')
   await key(wide, '\x1b[B')
-  assert.ok(wide.rowsPlain().some(line => line.startsWith('> Plugins')), 'Down now moves the CATEGORY, not the row')
+  assert.ok(wide.rowsPlain().some(line => line.startsWith('> Tools')), 'Down now moves the CATEGORY, not the row')
   wide.dispose()
 
   const medium = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
@@ -1683,20 +1720,20 @@ test('the medium projection is a pure function of focus: L0 categories+rows, L1/
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (7)')), `L0 categories at ${columns}:\n${h.view()}`)
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (8)')), `L0 categories at ${columns}:\n${h.view()}`)
     assert.ok(!h.view().includes('Details'), 'L0 paints no Detail pane')
     assert.ok(!h.view().includes('Copy value [C]'), 'L0 publishes no Detail button')
     await key(h, '\r')
     assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'L1 paints rows+detail')
-    assert.ok(!h.view().includes('Categories (7)'), 'L1 drops the categories column')
+    assert.ok(!h.view().includes('Categories (8)'), 'L1 drops the categories column')
     await key(h, '\r')
     assert.ok(h.view().includes('Choose value'), 'L2 enters an inline choice without a second browse Enter')
     assert.ok(h.view().includes('Solarized'), 'the selected source identity remains visible')
-    assert.ok(!h.view().includes('Categories (7)'), 'L2 keeps the rows+detail projection')
+    assert.ok(!h.view().includes('Categories (8)'), 'L2 keeps the rows+detail projection')
     await key(h, '\x1b')
     assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc cancels L2 directly back to L1')
     await key(h, '\x1b')
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (7)')), 'Esc from L1 returns to categories+rows')
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (8)')), 'Esc from L1 returns to categories+rows')
     assert.ok(!h.view().includes('Details'), 'and hides the detail again')
     h.dispose()
   }
@@ -1952,7 +1989,7 @@ test('the projection table is frozen: below 76 columns one pane, 76..107 two, 10
     await h.open()
     await key(h, '\r') // L0 -> L1: the rows pane always, plus the detail when the width grants it
     const painted = h.rowsPlain()
-    assert.equal(painted.some(line => line.includes('Categories (7)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
+    assert.equal(painted.some(line => line.includes('Categories (8)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
     assert.equal(painted.some(line => line.includes('Details')), panes >= 2, `the detail pane at ${columns} columns:\n${h.view()}`)
     assertRowWidths(h, columns)
     h.dispose()
@@ -2149,6 +2186,108 @@ test('B-05 the Display preset applies through the shared runtime owner, persists
   assert.deepEqual(h.calls().filter(call => call.startsWith('setDisplayPreset')), [], 'the runner setter (a SECOND detached write) is never used')
   assert.ok(h.calls().includes('refreshStatus'), 'the footer status is refreshed for the live transition')
   assert.match(h.view(), /Verified · the authoritative read agrees/)
+  h.dispose()
+})
+
+test('B-05b the profile-wide Visual tools switch confirms through its Host port, verifies and restores', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await h.open('Tools')
+  assert.match(h.view(), /Visual tools/, 'the Tools category carries the built-in switch row')
+  assert.match(h.view(), /On \[default\]/, 'the schema default is marked as not user-overridden')
+  await key(h, '\r') // L0 -> L1
+  assert.match(h.rowsPlain()[0]!, /Settings · Tools · Rows/)
+  await key(h, '\r') // writable L1 -> L2 inline choice
+  assert.match(h.view(), /Choose value/)
+  assert.match(h.view(), /> On/, 'the current candidate carries the highlight')
+  await key(h, '\x1b[B') // On -> Off
+  assert.match(h.view(), /> Off/)
+  assert.equal(h.visualWrites().length, 0, 'choosing a candidate never writes')
+
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.visualWrites(), [false], 'the Host port receives exactly one Off write')
+  assert.equal(h.visualState()?.enabled, false, 'the Host-facing state really changed')
+  assert.match(h.view(), /Status\s+Verified/)
+  assert.match(h.view(), /both tools are registered|not applied/, 'the runtime fact stays visible after the write')
+
+  // Restore On through the SAME row and port.
+  await key(h, '\r')
+  await key(h, '\x1b[A') // Off -> On
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.visualWrites(), [false, true])
+  assert.equal(h.visualState()?.enabled, true)
+  assert.match(h.view(), /Status\s+Verified/)
+  h.dispose()
+})
+
+test('B-05c an unavailable Visual tools section stays visible and offers neither choice nor write', async () => {
+  const h = setup({ columns: 200, rows: 40, visualToolsUnavailable: true })
+  await h.open('Tools')
+  assert.match(h.view(), /Visual tools/, 'the category still names its built-in row')
+  assert.match(h.view(), /Unavailable/, 'the unreadable section is explicit, never the default')
+  await key(h, '\r') // L0 -> L1
+  assert.match(h.view(), /No candidate is available for this setting right now/)
+  assert.ok(!h.view().includes('Change…'), 'an unreadable section paints no edit verb')
+  await key(h, '\r') // entering the Detail must not start a choice
+  assert.ok(!h.view().includes('Choose value'), 'no confirm affordance can be reached')
+  assert.deepEqual(h.visualWrites(), [], 'no Host write was dispatched')
+  h.dispose()
+})
+
+test('B-05d a stale backend keeps the last-known Visual tools value but refuses the write', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    readiness: 'stale',
+    visualTools: { enabled: false, userOverridden: true, applied: false },
+  })
+  await h.open('Tools')
+  assert.match(h.view(), /Off/, 'the last-known value stays readable')
+  assert.match(h.view(), /Last-known value · reconnecting/)
+  await key(h, '\r')
+  await key(h, '\r')
+  assert.ok(!h.view().includes('Choose value'))
+  assert.deepEqual(h.visualWrites(), [], 'a non-ready backend never dispatches the switch')
+  h.dispose()
+})
+
+test('B-05e a switch the Host registry did not adopt is reported as unverified, never Verified', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    visualTools: { enabled: false, userOverridden: true, applied: false },
+    visualToolsAppliedAfterWrite: false,
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[A') // Off -> On
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.visualWrites(), [true])
+  assert.match(h.view(), /Commit accepted · verification unavailable/)
+  assert.match(h.view(), /did not adopt/u, 'the real registry fact is stated')
+  assert.ok(!h.view().includes('Verified'), 'a persisted value the runtime did not adopt is never Verified')
+  h.dispose()
+})
+
+test('B-05f a refused Visual tools write is reported as Not saved and never Verified', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    visualTools: { enabled: false, userOverridden: true, applied: false },
+    visualToolsWriteFailure: 'settings namespace "pi-tui-visual-tools" changed since it was read',
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[A') // Off -> On
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.visualWrites(), [true])
+  assert.match(h.view(), /Not saved · settings namespace "pi-tui-visual-tools" changed since it was read/)
+  assert.ok(!h.view().includes('Verified'))
   h.dispose()
 })
 
@@ -3404,7 +3543,7 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
 
       // §11.3.2/§4.5: exactly ONE chrome active device, and it is the focused pane
       // label. Wide/medium L0 put the pane header on the body's first row, so the
-      // focused `[Categories (7)]` is the ONE primary label. The narrow projection
+      // focused `[Categories (8)]` is the ONE primary label. The narrow projection
       // paints NO pane header at all (settings-workspace-panel.ts:739-803): the
       // MEASURED 72x24/44x20 frames put the plain list cursor on that row
       // (`3|> Appearance`), so the returned device list is EMPTY there.
@@ -3448,8 +3587,9 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
 
 // ── D2-0: the UI-only Plugins direct entry in the Rows pane ───────────────
 
-/** Move the L0 selection from Appearance to Plugins (two categories down). */
+/** Move the L0 selection from Appearance to Plugins (three categories down). */
 const toPlugins = async (h: Harness): Promise<void> => {
+  await key(h, '\x1b[B')
   await key(h, '\x1b[B')
   await key(h, '\x1b[B')
 }
@@ -3479,7 +3619,7 @@ test('120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column
       'the Enter / Right hint uses textMuted')
     assert.notEqual(h.vt.getCellFgRgb(entryRow, 26), hexToRgb(currentPalette.primary),
       'the entry is not the primary cursor')
-    assert.ok(h.view().includes('[Categories (7)]'), 'L0 keeps its ONE active pane device')
+    assert.ok(h.view().includes('[Categories (8)]'), 'L0 keeps its ONE active pane device')
     assert.ok(!h.view().includes('[Rows'), 'the rows column is not a second focus owner')
     assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
     h.dispose()
@@ -3982,6 +4122,7 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
     createPluginManagerPage: () => undefined,
     config: {
       configReadiness: () => 'ready',
+      visualTools: { read: () => undefined, setEnabled: async () => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },

@@ -36,14 +36,17 @@
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
 
-    # PR-D visual tools: two RESIDENT Host tool definitions
-    # (`dsh_pi_tui_chart` and `dsh_pi_tui_svg`) on the official `ctx.tools`
-    # registry. The row is deliberately NOT gated on `tuiStartup`, a renderer,
-    # a Tern hello, a client capability or a session: the same Host profile
-    # (and the in-process Remote Host built on it) exposes both tools for the
-    # whole profile lifetime. The plugin's own `inject: ['tools']` waits for
-    # the registry. The result contract carries no `presentationMeta` — the
-    # final durable content is the drawing's admission source.
+    # PR-D visual tools: two Host tool definitions (`dsh_pi_tui_chart` and
+    # `dsh_pi_tui_svg`) on the official `ctx.tools` registry. The row owns the
+    # profile-wide `enabled` volatile Config (default On) and keeps the pair
+    # registered only while it is on: `/settings → Tools → Visual tools` writes
+    # that value, and the Loader commits it live (no restart / row remount).
+    # The row itself is deliberately NOT gated on `tuiStartup`, a renderer, a
+    # Tern hello, a client capability or a session: the same Host profile (and
+    # the in-process Remote Host built on it) serves every Client, and the
+    # plugin's own `inject: ['tools']` waits for the registry. The result
+    # contract carries no `presentationMeta` — the final durable content is the
+    # drawing's admission source.
     - id: pi-tui-visual-tools
       name: '@xmoon76/dsh-pi-tui/visual-tools'
       inject: [tools]

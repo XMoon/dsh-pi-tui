@@ -578,7 +578,11 @@ test('the launcher and Web rows explain opt-in billing, defaults and ori_questio
   await key(h, DOWN)
   const compact = (): string => h.plain().join(' ').replace(/[\u2500-\u257f]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(compact(), /Host Web settings for the base profile, .*?not an Optional Bundle/u)
-  assert.match(compact(), /other bundles never change them and the defaults call no billed API/u)
+  // The wide projection paints the category rail beside the detail column, so
+  // a detail line that wraps gets the rail's own cells between the two lines.
+  // Assert the contiguous semantic halves instead of a cross-column sentence.
+  assert.match(compact(), /Messages search · HTTP fetch/u)
+  assert.match(compact(), /never change them and the defaults call no billed API/u)
   assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /Share Original Question is on by default/u)
   assert.match(compact(), /up to 128 characters of the human question/u)

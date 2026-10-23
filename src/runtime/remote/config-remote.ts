@@ -78,6 +78,8 @@ import type {
   TuiSettingsConfig,
   TuiSettingsDoc,
   ConfigReadiness,
+  VisualToolsConfig,
+  VisualToolsState,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
 import type { RemoteCommandsSource } from './host-command-remote.ts'
@@ -211,6 +213,7 @@ const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 const PERMISSION_SETTINGS_NS = 'permission'
 const PRESET_REGISTRY_NS = 'agent-preset-registry'
 const SUBAGENT_SETTINGS_NS = 'subagent-model-selection-settings'
+const VISUAL_TOOLS_NS = 'pi-tui-visual-tools'
 
 /** The provider route grammar the adapter-owned profile-slot rule enforces
  *  (same rule the Direct adapter applies). */
@@ -1567,6 +1570,57 @@ function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute
   }
 }
 
+/**
+ * The Remote visual-tools switch: the mirrored `pi-tui-visual-tools` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is
+ * the only new authority — the mutate reply is never trusted as the new value.
+ *
+ * The Host registry itself is not observable on the wire, so `applied` stays
+ * `undefined`: the UI may present the committed configuration but must not
+ * claim the runtime registration took effect.
+ */
+class RemoteVisualToolsConfig implements VisualToolsConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): VisualToolsState | undefined {
+    const view = this.mirror.namespace(VISUAL_TOOLS_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const enabled = value?.enabled
+    // A missing/non-boolean projection is unreadable, never the default.
+    if (typeof enabled !== 'boolean') return undefined
+    const user = plainRecord(view.user)
+    return {
+      enabled,
+      userOverridden: user?.enabled !== undefined,
+      applied: undefined,
+    }
+  }
+
+  async setEnabled(enabled: boolean): Promise<void> {
+    const view = this.mirror.namespace(VISUAL_TOOLS_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" exposes no form projection`)
+    }
+    // `record`: a failed post-settlement refresh is a currentness uncertainty,
+    // not proof of refusal — the consumer re-reads and classifies.
+    await this.mirror.mutate(
+      VISUAL_TOOLS_NS,
+      [{ op: 'set', path: ['enabled'], value: enabled }],
+      view.revision,
+      'record',
+    )
+  }
+}
+
 /* ------------------------------------------------------------------------- *
  * The port.
  * ------------------------------------------------------------------------- */
@@ -1592,6 +1646,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
+  readonly visualTools: VisualToolsConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -1629,6 +1684,7 @@ export class RemoteConfigPort implements ConfigPort {
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
+    this.visualTools = new RemoteVisualToolsConfig(this.mirror)
     // S2/PR-B §3.2: the Host web-provider setting stays DIRECT-only. The wire
     // publishes no provider-selection read or write, so this backend reports a
     // static unavailable and refuses every write — it never names a Host

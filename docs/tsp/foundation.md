@@ -261,6 +261,17 @@ inside the same existing tool card. Their durable result carries NO
 `presentationMeta`: the FINAL `tool/result` content is the only admission source
 for a drawing.
 
+Their availability is the DSH Host profile's `pi-tui-visual-tools.enabled`
+volatile Config (schema default On), never a Session, renderer or Client
+capability. Off releases BOTH registrations from the global Host tool registry,
+so a later model request neither sees the names nor carries their schemas; On
+restores the original definitions. The switch lives in the Settings `Tools`
+category and applies to every Agent on that Host. It governs only future model
+tool availability: already-recorded chart/SVG results remain readable,
+copyable, searchable and exportable, and a renderer never re-filters historical
+content by the current switch value.
+
+
 - A chart result carries one versioned machine line in its own text block
   (`visual-v1:{"type":"chart",…}`) plus the readable value rows. The TSP mapper
   emits `ui.chart` only when the pane negotiated the `chart` kind; every other
