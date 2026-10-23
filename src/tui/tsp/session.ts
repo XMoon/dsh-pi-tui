@@ -69,7 +69,7 @@ import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, disclosureKeyForToggle, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, type ToolSvgState } from './transcript-view.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -509,6 +509,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * changes release the id cache.
    */
   const expandedToolKeys = new Set<string>()
+  /** PR-D RFL-019: the CURRENT projection's actual node key PATH → disclosure.
+   *  The path comes from the real tool-node ancestor chain (never by splitting
+   *  ids on dots), so dotted subCallIds and an absent ToggleEvent.key are both
+   *  unambiguous. A toggle whose id does not end with a current path is
+   *  stale/foreign and is ignored. */
+  const toolDisclosureByPath = new Map<string, string>()
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -818,6 +824,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       expandedToolKeys,
       toolImageStates: imageStates,
     })
+    // Record the CURRENT projection's actual tool-node id → disclosure path.
+    // The walk uses the real parent/child key chain, so a dotted subCallId is
+    // never split and an absent ToggleEvent.key never needs a fallback.
+    toolDisclosureByPath.clear()
+    const recordDisclosures = (node: Node, path: string, parentTool: string | undefined): void => {
+      const nodeKey = (node.props as { key?: string }).key
+      let tool = parentTool
+      if (node.kind === 'tool' && nodeKey !== undefined) {
+        const own = nodeKey.startsWith(`${scopePrefix}msg-`)
+          ? nodeKey.slice(scopePrefix.length)
+          : nodeKey.startsWith('msg-') ? nodeKey : undefined
+        tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
+        if (tool !== undefined) toolDisclosureByPath.set(path, tool)
+      }
+      for (const [index, child] of node.children.entries()) {
+        const childKey = (child.props as { key?: string }).key
+        recordDisclosures(child, path === '' ? (childKey ?? String(index)) : `${path}.${childKey ?? String(index)}`, tool)
+      }
+    }
+    recordDisclosures(lastMain, '', undefined)
     if (visualProjectionAborted) return false
     return true
   }
@@ -1202,7 +1228,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // key (`msg-N`) through that child key. The mapper builds exactly the
         // same `msg-N/sub-...` path, so two parents with the same subCallId do
         // not share expansion while node ids stay untouched.
-        const disclosure = disclosureKeyForToggle(input.event.id, input.event.key, scopePrefix)
+        let disclosure: string | undefined
+        let matched = -1
+        for (const [path, value] of toolDisclosureByPath) {
+          if (path.length > matched && (input.event.id === path || input.event.id.endsWith(`.${path}`))) {
+            disclosure = value
+            matched = path.length
+          }
+        }
         if (disclosure === undefined) return false
         if (input.event.collapsed) expandedToolKeys.delete(disclosure)
         else expandedToolKeys.add(disclosure)
