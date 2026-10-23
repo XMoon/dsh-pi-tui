@@ -80,8 +80,6 @@ export interface WorkspaceHarnessOptions {
   readonly observations?: readonly TuiExtensionObservation[]
   /** The diagnostics read the page consumes (default: no extension service). */
   readonly diagnostics?: () => TuiExtensionDiagnostics | undefined
-  /** When set, the official inventory snapshot rejects with this message. */
-  readonly snapshotFailure?: string
   /** The exact-version exemption reader warnings the fixture reports. */
   readonly exemptionWarnings?: readonly string[]
   /** Replaces the fixture install behavior when provided. */
@@ -156,11 +154,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   const setPlugin: Array<{ entryId: string; enabled: boolean }> = []
   const removeBundle: string[] = []
   const fixturePort: PluginManagerPort = {
-    snapshot: async () => {
-      snapshotCalls += 1
-      if (options.snapshotFailure !== undefined) throw new Error(options.snapshotFailure)
-      return snapshot
-    },
+    snapshot: async () => { snapshotCalls += 1; return snapshot },
     inspect: options.inspectImpl ?? (async (spec: string) => ({
       status: 'accepted',
       kind: 'registry',

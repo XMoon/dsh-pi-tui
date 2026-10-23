@@ -5,9 +5,12 @@
  * snapshots where the contract is about authenticity, and the real page for
  * the reachability/copy contract.
  *
- * Evidence levels: the projection/copy cases are headless; the final cases
- * mount the real extension service, a real TuiApp and the production Plugin
- * Manager runtime, with the official inventory port as the only fixture.
+ * Evidence levels: the projection/copy cases are headless. The final cases
+ * mount the REAL extension service and ledger, a real TuiApp and the
+ * production Plugin Manager runtime/page/projection. The official inventory
+ * port and the test-provided `runOwned`, `copySelection` and renderer
+ * error/recovery sinks stand in for their host wiring; production
+ * `attachSeams` is NOT exercised here.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-extension-diagnostics.test
  */
 
@@ -605,10 +608,14 @@ test('a failing Host inventory does not contaminate the real extension diagnosti
     assert.equal(page.panel.currentView(), 'diagnostics')
     const frame = plain(page.vt.getViewport())
     const expected = expectedDiagnostics(page.service)
+    assert.equal(expected.healthSummary, 'all active')
+    assert.equal(expected.contributionTotals.failed, 0)
+    assert.equal(expected.contributionTotals.shadowed, 0)
     assert.match(frame, /Health\s+/)
     assert.ok(frame.includes(expected.healthSummary), `the diagnostics health is ${expected.healthSummary}:\n${frame}`)
     assert.doesNotMatch(frame, /Stale/)
     assert.doesNotMatch(frame, /Host inventory failed/)
+    assert.doesNotMatch(frame, /\[failed\]|\[shadowed\]/)
   } finally {
     await page.dispose()
   }
@@ -642,18 +649,24 @@ test('a Host package install failure stays out of the real extension diagnostics
     assert.equal(panel.currentView(), 'diagnostics')
     const frame = plain(vt.getViewport())
     const expected = expectedDiagnostics(page.service)
+    assert.equal(expected.healthSummary, 'all active')
+    assert.equal(expected.contributionTotals.failed, 0)
+    assert.equal(expected.contributionTotals.shadowed, 0)
     assert.ok(frame.includes(expected.healthSummary), `the diagnostics health is ${expected.healthSummary}:\n${frame}`)
     assert.doesNotMatch(frame, /Host package install failed/)
     assert.doesNotMatch(frame, /Stale/)
+    assert.doesNotMatch(frame, /\[failed\]|\[shadowed\]/)
   } finally {
     await page.dispose()
   }
 })
 
 test('a real renderer failure reaches the Plugin Manager diagnostics and recovers', async () => {
-  // Evidence level: real SurfaceExtensionService + real TuiApp + the
-  // production createPluginManagerRuntime/page/clipboard path. Only the
-  // official inventory port and the renderer's own throw are fixtures.
+  // Evidence level: real SurfaceExtensionService/ledger + real TuiApp + the
+  // production createPluginManagerRuntime/page/projection path. The official
+  // inventory port, `runOwned`, `copySelection` and the renderer error/
+  // recovery sinks stand in for host wiring; production `attachSeams` is not
+  // exercised here.
   const message = `renderer failed: ${'鲸'.repeat(40)}`
   let broken = true
   const page = await mountProductionPage({
