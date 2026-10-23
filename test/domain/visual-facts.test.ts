@@ -224,6 +224,17 @@ test('svg admission: percentages and theme-paint keywords are value-bounded', ()
     + '</defs><rect width="64" height="32" fill="url(#g)"/></svg>'
   assert.equal(admitSvg(gradient).ok, true)
   assert.equal(admitSvg(base('<rect width="8" height="8" fill="#3b82f6"/>')).ok, true)
+  // The exact fractional CSS viewport is preserved for the raster budget; the
+  // display target stays the user-coordinate (viewBox) size.
+  const fractionalViewport = '<svg xmlns="http://www.w3.org/2000/svg" width="0.5" height="1" viewBox="0 0 2000 1"><rect width="20" height="1" fill="#ff0000"/></svg>'
+  const fractional = admitSvg(fractionalViewport)
+  assert.equal(fractional.ok, true)
+  if (fractional.ok) {
+    assert.equal(fractional.width, 2000)
+    assert.equal(fractional.height, 1)
+    assert.equal(fractional.viewportWidth, 0.5)
+    assert.equal(fractional.viewportHeight, 1)
+  }
   // Absolute units stay in the subset (and are converted to their px bound).
   assert.equal(admitSvg(base('<rect width="100px" height="8"/>')).ok, true)
   assert.equal(admitSvg(base('<rect width="10mm" height="8"/>')).ok, true)
