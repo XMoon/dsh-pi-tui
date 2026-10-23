@@ -1,15 +1,15 @@
 /**
- * rc.2 real-Host catalog qualification (S4-D1 / D1-A02):
+ * real-Host catalog qualification (S4-D1 / D1-A02):
  *
  * The official `PluginManager.listBundles()` Host service is instantiated over
  * a REAL managed profile directory + installation anchor fixture that
- * reproduces the rc.2 catalog shape: the 12 project-maintained Optional
+ * reproduces the official catalog shape: the 12 project-maintained Optional
  * bundles are shipped by the installation (available, not selected) and the 2
  * on-demand subagent bundles are discoverable as `missing` with a real
  * `installTarget`. The real Host output then travels through the shared
  * mapping -> stable identity/origin/section classifier -> model.
  *
- * `PRODUCTION PREREQUISITES REPRODUCED`: the real rc.2 `@deepseek-ai/dsh-plugin-manager`
+ * `PRODUCTION PREREQUISITES REPRODUCED`: the real `@deepseek-ai/dsh-plugin-manager`
  * Host service, its real profile/patch/installation records, the real
  * `pnpm`-backed profile package operations (local fixture package only), the
  * shared Direct adapter/mapping and the real controller/page below.
@@ -62,14 +62,14 @@ function seedProfile(workRoot: string): {
   mkdirSync(profileDir, { recursive: true })
   mkdirSync(installationDir, { recursive: true })
   writeFileSync(installAnchor, JSON.stringify({
-    name: 'rc2-catalog-fixture-installation',
+    name: 'catalog-fixture-installation',
     private: true,
     // The installation ships the 12 Optional bundles; the two on-demand
     // subagent bundles are catalog-only.
     dependencies: Object.fromEntries(OPTIONAL_BUNDLES.map(name => [name, RUNTIME_VERSION])),
   }, null, 2))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
-    name: 'rc2-catalog-fixture-profile',
+    name: 'catalog-fixture-profile',
     private: true,
     dependencies: {},
     dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
@@ -88,7 +88,7 @@ function seedProfile(workRoot: string): {
   return {
     installationAnchor: installAnchor,
     profileContext: {
-      name: 'rc2-catalog-fixture',
+      name: 'catalog-fixture',
       dir: profileDir,
       patchPath: profilePatchPath,
       installAnchor,
@@ -116,9 +116,9 @@ function seedInstallProfile(workRoot: string): {
   mkdirSync(profileDir, { recursive: true })
   mkdirSync(installationDir, { recursive: true })
   mkdirSync(bundleDir, { recursive: true })
-  writeFileSync(installAnchor, JSON.stringify({ name: 'rc2-install-fixture-installation', private: true, dependencies: {} }, null, 2))
+  writeFileSync(installAnchor, JSON.stringify({ name: 'install-fixture-installation', private: true, dependencies: {} }, null, 2))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
-    name: 'rc2-install-fixture-profile',
+    name: 'install-fixture-profile',
     private: true,
     dependencies: {},
     dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
@@ -137,7 +137,7 @@ function seedInstallProfile(workRoot: string): {
     bundleDir,
     bundleName: 'dsh-s4d1-local-fixture-bundle',
     profileContext: {
-      name: 'rc2-install-fixture',
+      name: 'install-fixture',
       dir: profileDir,
       patchPath: profilePatchPath,
       installAnchor,
@@ -150,9 +150,9 @@ function seedInstallProfile(workRoot: string): {
   }
 }
 
-test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand bundles', async (t) => {
+test('the REAL Host listBundles discovers 14/14 official optional/on-demand bundles', async (t) => {
   const life = testLifecycle(t)
-  const workRoot = life.tempDir('rc2-catalog-')
+  const workRoot = life.tempDir('catalog-')
   const seeded = seedProfile(workRoot)
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
@@ -215,7 +215,7 @@ test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand
     const detail = buildPluginDetailView(card)
     const facts = detail.groups.flatMap(group => group.facts)
     const surface = facts.find(fact => fact.label === 'TUI surface')
-    assert.ok(surface !== undefined, `${card.name} carries the bounded rc.2 TUI surface fact`)
+    assert.ok(surface !== undefined, `${card.name} carries the bounded TUI surface fact`)
     assert.equal(surface!.tone, 'normal')
     assert.ok(!facts.some(fact => fact.value.includes('Host capability not yet qualified for TUI')),
       `${card.name} never shows the stale generic capability warning`)
@@ -251,7 +251,7 @@ test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand
 
 test('the TUI self package is the only Current-TUI card when the real Host lists it', async (t) => {
   const life = testLifecycle(t)
-  const workRoot = life.tempDir('rc2-self-catalog-')
+  const workRoot = life.tempDir('self-catalog-')
   const seeded = seedProfile(workRoot)
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
@@ -269,7 +269,7 @@ test('the TUI self package is the only Current-TUI card when the real Host lists
     dsh: { bundle: { patch: [] } },
   }, null, 2))
   writeFileSync(join(workRoot, 'profile', 'package.json'), JSON.stringify({
-    name: 'rc2-catalog-fixture-profile',
+    name: 'catalog-fixture-profile',
     private: true,
     dependencies: { [SELF_BUNDLE]: 'file:./node_modules/@xmoon76/dsh-pi-tui' },
     dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
@@ -307,9 +307,9 @@ test('the TUI self package is the only Current-TUI card when the real Host lists
 })
 
 
-test('the REAL rc.2 Host install/toggle/remove lifecycle flows through the ONE Direct port', async (t) => {
+test('the REAL Host install/toggle/remove lifecycle flows through the ONE Direct port', async (t) => {
   const life = testLifecycle(t)
-  const workRoot = life.tempDir('rc2-install-')
+  const workRoot = life.tempDir('install-')
   const seeded = seedInstallProfile(workRoot)
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
@@ -327,7 +327,7 @@ test('the REAL rc.2 Host install/toggle/remove lifecycle flows through the ONE D
   assert.equal(inspection.version, '1.0.0')
 
   const installed = await port.startInstall({
-    requestId: 'rc2-local-install',
+    requestId: 'local-install',
     spec: seeded.bundleDir,
     registry: null,
     enabled: true,
@@ -370,7 +370,7 @@ test('the REAL rc.2 Host install/toggle/remove lifecycle flows through the ONE D
 
 test('the REAL Host -> Direct port -> controller -> workspace page install chain reaches the UI', async (t) => {
   const life = testLifecycle(t)
-  const workRoot = life.tempDir('rc2-ui-install-')
+  const workRoot = life.tempDir('ui-install-')
   const seeded = seedInstallProfile(workRoot)
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
@@ -503,7 +503,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
 
 test('an APPLIED real-Host version exemption reaches the card Detail without an incompatible error', async (t) => {
   const life = testLifecycle(t)
-  const workRoot = life.tempDir('rc2-exempt-')
+  const workRoot = life.tempDir('exempt-')
   const seeded = seedInstallProfile(workRoot)
   const profileDir = seeded.profileContext.dir as string
   // This package requires an impossible engines.dsh; the profile's exact
@@ -530,7 +530,7 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
   const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
 
   const installed = await port.startInstall({
-    requestId: 'rc2-exempt-install',
+    requestId: 'exempt-install',
     spec: seeded.bundleDir,
     registry: null,
     enabled: true,
