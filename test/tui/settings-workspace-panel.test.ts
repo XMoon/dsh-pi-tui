@@ -431,3 +431,34 @@ test('C3 a loading hostile Session ID copies through the same control guard', ()
   h.panel.handleInput('c')
   assert.equal(copied.at(-1), 'sess-id', 'the loading Session ID single-field copy is control-safe')
 })
+
+test('C3 C1 controls in a title never reach either About copy path', () => {
+  const copied: string[] = []
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: {
+      kind: 'ready',
+      sessionId: 'sess-c1',
+      title: 'title\u0084\u0085\u0088\u008d-tail',
+      cwd: '/ws',
+      context: 'fresh',
+    },
+    epoch: 1,
+  }
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    aboutStatusSource: staticAboutSource(view),
+    onCopy: text => { copied.push(text) },
+  })
+  plain(h, 44)
+  // Facts: runtime trio, Session ID, Title. Select Title (4 downs).
+  for (let step = 0; step < 4; step += 1) h.panel.handleInput('\x1b[B')
+  plain(h, 44)
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), 'title-tail', 'the single-field copy drops the C1 controls')
+  h.panel.handleInput('C')
+  const report = copied.at(-1)!
+  assert.ok(!/[\u0080-\u009f]/u.test(report), 'Copy All carries no C1 control')
+  assert.ok(report.includes('Title: title-tail'), 'Copy All keeps the ordinary suffix')
+})
