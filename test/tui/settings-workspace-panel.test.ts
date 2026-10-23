@@ -904,3 +904,62 @@ test('a pending legacy write never advertises the direct rail Tab until it settl
   h.panel.handleInput('\t')
   assert.match(header(h), /Settings · About/u, 'the settled Tab enters the About content')
 })
+
+test('the region hints never crowd the About copy/refresh verbs out of a tight bar', () => {
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: { kind: 'ready', sessionId: 'sess-bar', title: 'bar proof', cwd: '/ws', context: 'fresh' },
+    epoch: 9,
+  }
+  // 90 columns leave the content column too tight for every hint: the
+  // lowest-priority region hint is the FIRST segment dropped and every
+  // semantic About verb stays visible.
+  const tight = setup({ columns: 90, rows: 30, aboutStatusSource: staticAboutSource(view) })
+  plain(tight, 90) // paint the About content/rail
+  tight.panel.handleInput('\r') // rail -> About content
+  const tightBar = plain(tight, 90).split('\n').at(-1)!
+  assert.match(tightBar, /c copy fact/u, 'the field copy stays visible at 90')
+  assert.match(tightBar, /C copy all/u, 'the full-report copy stays visible at 90')
+  assert.match(tightBar, /r refresh/u, 'the refresh stays visible at 90')
+  assert.match(tightBar, /Esc back/u)
+  assert.doesNotMatch(tightBar, /Tab focus/u, 'the region key is dropped before any semantic verb')
+  assert.match(tightBar, /Shift\+Tab back/u, 'the remaining region hint only survives because the verbs fit')
+
+  // 100 columns fit the complete row (76 cells): no semantic verb is lost.
+  const roomy = setup({ columns: 100, rows: 30, aboutStatusSource: staticAboutSource(view) })
+  plain(roomy, 100)
+  roomy.panel.handleInput('\r')
+  const roomyBar = plain(roomy, 100).split('\n').at(-1)!
+  assert.match(roomyBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Esc back/u,
+    `every hint fits at 100:\n${roomyBar}`)
+
+  // There is room at 120 columns: the same verbs survive WITH the region keys.
+  const wide = setup({ columns: 120, rows: 40, aboutStatusSource: staticAboutSource(view) })
+  plain(wide, 120)
+  wide.panel.handleInput('\r')
+  const wideBar = plain(wide, 120).split('\n').at(-1)!
+  assert.match(wideBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Esc back/u,
+    `every hint fits at 120:\n${wideBar}`)
+})
+
+test('the legacy 90-column bars keep refresh when the region hints drop', () => {
+  const h = setup({ columns: 90, rows: 24 })
+  plain(h, 90)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B') // About -> Appearance
+  h.panel.handleInput('\t') // categories -> rows
+  const rowsBar = plain(h, 90).split('\n').at(-1)!
+  assert.match(rowsBar, /Enter choose/u, 'the row action stays visible')
+  assert.match(rowsBar, /r refresh/u, 'the refresh stays visible')
+  assert.match(rowsBar, /Esc back/u)
+  assert.doesNotMatch(rowsBar, /Tab panes|Shift\+Tab back/u, 'the region hints drop first')
+
+  h.panel.handleInput('\t') // rows -> Detail browsing (no choice)
+  assert.doesNotMatch(plain(h, 90), /Choose value/u, 'Tab never opens the detail choice')
+  const detailBar = plain(h, 90).split('\n').at(-1)!
+  assert.match(detailBar, /r refresh/u, 'the Detail refresh stays visible')
+  assert.match(detailBar, /c copy value/u, 'the Detail copy hint stays visible')
+  assert.match(detailBar, /Left back/u)
+  assert.doesNotMatch(detailBar, /Tab panes/u, 'the region key is dropped before any semantic verb')
+})
