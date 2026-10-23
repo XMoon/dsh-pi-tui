@@ -85,10 +85,14 @@ const TRANSFORM_PATTERN = /^[a-zA-Z]+\([^)]*\)(?:\s*,?\s*[a-zA-Z]+\([^)]*\))*$/
 const PAINT_URL_PATTERN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]*))\s*\)/g
 const NUMBER_TOKEN_PATTERN = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g
 
+// The safe subset admits only ABSOLUTE length units (or a unitless user
+// value). Relative units depend on a font/viewport the gate does not model;
+// fixed conversion constants would let 100em of a 1000-unit font bypass the
+// pixel budget.
 const UNIT_PX: Readonly<Record<string, number>> = {
   px: 1, pt: 4 / 3, pc: 16, in: 96, mm: 96 / 25.4, cm: 960 / 25.4,
-  em: 16, ex: 8, ch: 8, rem: 16, vw: 1, vh: 1, '%': 1,
 }
+const RELATIVE_UNITS: ReadonlySet<string> = new Set(['em', 'ex', 'ch', 'rem', 'vw', 'vh', '%'])
 
 /** Internal rejection; converted to a verdict at the boundary. */
 class SvgReject extends Error {}
@@ -114,11 +118,15 @@ function checkLength(value: string, what: string, limit: number): number {
   if (!Number.isFinite(raw)) reject(`${what}: ${clip(value)} is not finite`)
   if (raw < 0) reject(`${what}: a negative length ${clip(value)}`)
   const unit = match[2]
-  // A length percentage resolves against a viewport this gate deliberately
-  // does not model; the product's safe subset refuses it outright. (A gradient
-  // stop `offset` is the one fractional percentage the gate accepts, validated
-  // as 0–100% in attributeProblem.)
-  if (unit === '%') reject(`${what}: percentage lengths are outside the bounded static subset`)
+  // Relative units resolve against a font/viewport this gate deliberately does
+  // not model; converting them with fixed constants (the old 16/8/1 table)
+  // let `font-size=1000; width=100em` pass as 1600px while resvg rendered
+  // 100000px. The static subset therefore admits absolute units only. (A
+  // gradient stop `offset` is the one fractional percentage the gate accepts,
+  // validated as 0–100% in attributeProblem.)
+  if (unit !== undefined && RELATIVE_UNITS.has(unit)) {
+    reject(`${what}: relative units (${clip(unit)}) are outside the bounded static subset`)
+  }
   const px = raw * (unit === undefined ? 1 : UNIT_PX[unit] as number)
   if (px > limit) reject(`${what}: ${clip(value)} is ${Math.round(px)}px > ${limit}px`)
   return px

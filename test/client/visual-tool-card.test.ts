@@ -373,3 +373,108 @@ test('a PTC SVG child gets the same raster path with a fixed image budget', asyn
   assert.ok(view.includes('Gateway -> App -> Database'), 'the child description remains')
   app.stop()
 })
+
+
+function svgSource(index: number): string {
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+    + `<rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12">S${index}</text></svg>`
+}
+
+function svgRow(index: number): { args: { title: string; description: string; svg: string }; blocks: readonly ContentBlock[] } {
+  const args = { title: `SVG ${index}`, description: `figure ${index}`, svg: svgSource(index) }
+  return { args, blocks: svgContentBlocks(svgFactFromArgs(args)) }
+}
+
+test('a real top-level transcript with 77 SVG rows repaints without restarting a source', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const calls = new Map<string, number>()
+    const loader = new SvgRasterLoader(async (source) => {
+      calls.set(source, (calls.get(source) ?? 0) + 1)
+      return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 }
+    })
+    const { vt, app } = mountApp({ svgRasterLoader: loader })
+    await vt.waitForRender()
+    const folder = new TranscriptFolder()
+    const events: unknown[] = []
+    for (let index = 0; index < 77; index += 1) {
+      const { args, blocks } = svgRow(index)
+      const generated = toolEvents('dsh_pi_tui_svg', args, blocks) as unknown as Array<Record<string, unknown>>
+      for (const [offset, event] of generated.entries()) {
+        events.push({ ...event, seq: index * 2 + offset + 1 })
+      }
+    }
+    folder.apply(events as never)
+    app.setTranscript(folder.messages())
+    await vt.waitForRender()
+    for (let frame = 0; frame < 4; frame += 1) await vt.waitForRender()
+    const before = new Map(calls)
+    app.requestRender(true)
+    await vt.waitForRender()
+    assert.deepEqual([...calls.entries()].sort(), [...before.entries()].sort(), 'a repaint must not restart a live source')
+    assert.ok([...calls.values()].every(count => count === 1), `each source starts at most once: ${JSON.stringify([...calls])}`)
+    app.stop()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a real PTC card with 77 SVG children converges without retrying a live source', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const calls = new Map<string, number>()
+    const loader = new SvgRasterLoader(async (source) => {
+      calls.set(source, (calls.get(source) ?? 0) + 1)
+      return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 }
+    })
+    const { vt, app } = mountApp({ svgRasterLoader: loader })
+    await vt.waitForRender()
+    const children = Array.from({ length: 77 }, (_, index) => {
+      const { args, blocks } = svgRow(index)
+      return {
+        kind: 'tool' as const,
+        turn: 1,
+        name: 'dsh_pi_tui_svg',
+        args: JSON.stringify(args),
+        result: blocks.map(block => block.type === 'text' ? block.text : '').join('\n'),
+        status: 'ok' as const,
+        resultBlocks: blocks,
+        subCallId: `parent:ptc:${index}`,
+      }
+    })
+    const parent = {
+      kind: 'tool' as const,
+      turn: 1,
+      name: 'run_code',
+      args: '{}',
+      result: 'parent',
+      status: 'ok' as const,
+      callId: 'parent',
+      resultBlocks: [{ type: 'text' as const, text: 'parent' }],
+      subCalls: children,
+    }
+    app.setTranscript([parent as never])
+    await vt.waitForRender()
+    // Let the app's own repaint loop drain the bounded raster lane; stop as
+    // soon as the frame no longer starts a new source (a bounded observation,
+    // not a fixed sleep).
+    for (let frame = 0; frame < 200; frame += 1) {
+      const started = calls.size
+      await vt.waitForRender()
+      if (calls.size === started) break
+    }
+    const before = new Map(calls)
+    app.requestRender(true)
+    await vt.waitForRender()
+    assert.deepEqual([...calls.entries()].sort(), [...before.entries()].sort(), 'a PTC repaint must not restart a live source')
+    // The real app builds/paints only its current visible child set (13 here);
+    // the >history-cap proof is the direct 77-thumbnail loader test above.
+    assert.ok(calls.size > 12, `the visible child set must exceed the raster cache: ${JSON.stringify([...calls])}`)
+    assert.ok([...calls.values()].every(count => count === 1), `each nested source starts at most once: ${JSON.stringify([...calls])}`)
+    app.stop()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})

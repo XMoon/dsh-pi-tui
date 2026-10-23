@@ -34,8 +34,6 @@ interface Queued {
 
 /** Keep at most this many entries (oldest evicted first). */
 const MAX_ENTRIES = 12
-/** Keep the terminal eviction explanation bounded as the session grows. */
-const MAX_EVICTED = 64
 
 /** The async raster cache with one global worker lane and an epoch fence. */
 export class SvgRasterLoader {
@@ -43,8 +41,14 @@ export class SvgRasterLoader {
   private readonly entries = new Map<string, Entry>()
   private readonly listeners = new Map<string, Set<() => void>>()
   private readonly queue: Queued[] = []
-  /** Digests whose live entries were evicted: a terminal, non-retrying state. */
-  private readonly evicted = new Set<string>()
+  /**
+   * Digests whose live subscribers saw their entry evicted: a terminal,
+   * non-retrying state. This is NOT a cache-history list: an entry is added
+   * only while a component is still subscribed, and the last unsubscribe
+   * forgets it. Its size is therefore bounded by the live transcript demand,
+   * not by an arbitrary capacity constant or the whole session history.
+   */
+  private readonly terminalEvictions = new Set<string>()
   private active: Queued | undefined
   private epoch = 0
 
@@ -54,7 +58,7 @@ export class SvgRasterLoader {
 
   /** The current display state; a render call never awaits. */
   get(digest: string): SvgRasterState {
-    if (this.evicted.has(digest)) {
+    if (this.terminalEvictions.has(digest)) {
       return { state: 'error', error: new Error('the SVG image was evicted from the display cache') }
     }
     return this.entries.get(digest)?.state ?? { state: 'idle' }
@@ -72,7 +76,12 @@ export class SvgRasterLoader {
       const listeners = this.listeners.get(digest)
       if (listeners === undefined) return
       listeners.delete(listener)
-      if (listeners.size === 0) this.listeners.delete(digest)
+      if (listeners.size === 0) {
+        this.listeners.delete(digest)
+        // No live demand remains for this digest: its terminal eviction state
+        // is cache history now, not a user-visible obligation.
+        this.terminalEvictions.delete(digest)
+      }
     }
   }
 
@@ -84,9 +93,11 @@ export class SvgRasterLoader {
    * @param targetWidth - the requested raster width in pixels.
    */
   load(digest: string, source: string, targetWidth: number): void {
-    // An evicted digest is terminal for this epoch; re-requesting it would
-    // immediately evict another visible image and thrash the cache.
-    if (this.evicted.has(digest) || this.entries.has(digest)) return
+    // A live demand that saw its entry evicted is terminal for this epoch;
+    // re-requesting it would immediately evict another visible image and
+    // thrash the cache. Once its last subscriber leaves, the terminal state is
+    // forgotten and a fresh demand may load again.
+    if (this.terminalEvictions.has(digest) || this.entries.has(digest)) return
     const entry: Entry = { controller: new AbortController(), state: { state: 'loading' } }
     this.entries.set(digest, entry)
     this.queue.push({ digest, source, targetWidth, entry })
@@ -104,7 +115,7 @@ export class SvgRasterLoader {
     for (const item of this.queue) item.entry.controller.abort()
     this.queue.length = 0
     this.entries.clear()
-    this.evicted.clear()
+    this.terminalEvictions.clear()
   }
 
   /** Release every subscription and in-flight child (renderer retirement). */
@@ -158,17 +169,16 @@ export class SvgRasterLoader {
       if (oldest === undefined) return
       const entry = this.entries.get(oldest)
       this.entries.delete(oldest)
-      // The component subscribed to this digest must leave the loading line:
-      // publish a terminal eviction state and notify exactly once. A ready
-      // thumbnail keeps its own last image (SvgThumbnail.lastReady), so this
-      // notification cannot trigger a re-request storm.
-      this.evicted.add(oldest)
-      if (this.evicted.size > MAX_EVICTED) {
-        const first = this.evicted.values().next().value
-        if (first !== undefined) this.evicted.delete(first)
-      }
+      // A live subscriber must leave the loading line: publish a terminal
+      // eviction state and notify exactly once. This state belongs to the
+      // live demand, not to a bounded history: it persists until the last
+      // subscriber unsubscribes. A ready thumbnail keeps its own last image
+      // (SvgThumbnail.lastReady), so the notification cannot trigger a
+      // re-request storm.
+      const hasLiveDemand = (this.listeners.get(oldest)?.size ?? 0) > 0
+      if (hasLiveDemand) this.terminalEvictions.add(oldest)
       entry?.controller.abort()
-      this.notify(oldest)
+      if (hasLiveDemand) this.notify(oldest)
       if (this.active?.digest === oldest) {
         // The active settle sees the entry-identity mismatch and drops it;
         // pump() starts the next queued request after that abort settles.

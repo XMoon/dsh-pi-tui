@@ -104,6 +104,9 @@ test('the loader runs ONE global raster at a time and an evicted digest reaches 
       options.signal.addEventListener('abort', () => settle(() => reject(new Error('cancelled'))), { once: true })
     })
   })
+  // A LIVE demand is what turns an eviction into a terminal state; a digest
+  // without subscribers is forgettable cache history (see the thumbnail tests).
+  loader.subscribe('digest-0', () => {})
   for (let index = 0; index < 13; index += 1) loader.load(`digest-${index}`, `source-${index}`, 128)
   assert.equal(maxActive, 1, 'different digests must never spawn concurrent native rasterizations')
   // The 13th load evicts the ACTIVE oldest entry. It must not be resurrected
@@ -208,4 +211,47 @@ test('a cancellation settles only after the REAL child process closed', { skip: 
   assert.equal(spawned, 1)
   assert.equal(maxOpen, 1)
   assert.equal(open, 0, 'the promise must settle only after the real child close')
+})
+
+
+test('the live subscriber terminal state survives arbitrary cache-history churn', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const calls = new Map<string, number>()
+    const releases: Array<() => void> = []
+    const loader = new SvgRasterLoader(async (source, options) => {
+      calls.set(source, (calls.get(source) ?? 0) + 1)
+      return await new Promise((resolve, reject) => {
+        let settled = false
+        const finish = (fn: () => void): void => { if (settled) return; settled = true; fn() }
+        releases.push(() => finish(() => resolve({ png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 })))
+        options.signal.addEventListener('abort', () => finish(() => reject(new Error('cancelled'))), { once: true })
+      })
+    })
+    let firstNotifications = 0
+    loader.subscribe('digest-0', () => { firstNotifications += 1 })
+    // 12 cache entries + 64 more + one: the old bounded-history design forgot
+    // the first live terminal after 64 evictions and restarted it.
+    const thumbnails = Array.from({ length: 77 }, (_, index) => new SvgThumbnail(
+      `digest-${index}`,
+      `source-${index}`,
+      128,
+      loader,
+      { fallbackColor: (text: string) => text },
+      () => {},
+    ))
+    for (const thumbnail of thumbnails) thumbnail.render(100)
+    for (let frame = 0; frame < 4; frame += 1) {
+      const paint = thumbnails[0]!.render(100).join('\n')
+      assert.ok(!paint.includes('Rendering SVG image'), `frame ${frame}: the evicted live demand must stay terminal:\n${paint}`)
+      assert.ok(paint.includes('SVG image unavailable'), paint)
+    }
+    assert.equal(firstNotifications, 1)
+    assert.equal(calls.get('source-0'), 1, 'the live terminal state is not a retry loop')
+    assert.equal(loader.get('digest-0').state, 'error')
+    for (const thumbnail of thumbnails) thumbnail.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
 })
