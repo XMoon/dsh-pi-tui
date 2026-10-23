@@ -44,7 +44,7 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
-import { CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../src/domain/visual/tool-identity.ts'
+import { CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../src/app/host/visual-tools.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
