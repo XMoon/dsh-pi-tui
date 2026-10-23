@@ -278,8 +278,11 @@ for a drawing.
   parser: static shapes, paths, text, gradients, masks and local fragment
   references are admitted; scripts, `foreignObject`, CSS/`<style>`,
   animation, DOCTYPE/entities, external or file references, theme-dependent
-  paint and out-of-budget geometry are refused. The product source budget is
-  128 KiB, below the client's own ~256 KiB native-SVG gate.
+  paint and out-of-budget geometry are refused. Length percentages are outside
+  the bounded static subset because they resolve against a viewport the gate
+  does not model (a gradient stop offset may be a bounded 0–100% fraction). The
+  product source budget is 128 KiB, below the client's own ~256 KiB native-SVG
+  gate.
 - The FINAL fact title (not only the original call summary) is part of the
   readable projection: a value replacement can change the committed title, so
   the body/header must show the new title. The call summary remains a separate

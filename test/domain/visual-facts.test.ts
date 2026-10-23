@@ -191,6 +191,8 @@ test('svg admission: percentages and theme-paint keywords are value-bounded', ()
     '<circle r="1e300%" cx="10" cy="10"/>',
     '<rect width="1e300%" height="1e300%"/>',
     '<rect x="1e300%" width="8" height="8"/>',
+    '<rect width="2048%" height="2048%"/>',
+    '<circle r="2048%" cx="10" cy="10"/>',
     '<rect fill="currentcolor" width="8" height="8"/>',
     '<rect fill="CurrentColor" width="8" height="8"/>',
     '<rect fill="VAR(--fg)" width="8" height="8"/>',
@@ -198,8 +200,18 @@ test('svg admission: percentages and theme-paint keywords are value-bounded', ()
     const verdict = admitSvg(base(body))
     assert.equal(verdict.ok, false, `${body} must be refused: ${JSON.stringify(verdict)}`)
   }
-  // A bounded percentage and an explicit fixed colour stay in the subset.
-  assert.equal(admitSvg(base('<circle r="50%" cx="10" cy="10"/>')).ok, true)
+  const bigViewport = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 1024"><rect width="2048%" height="2048%"/></svg>'
+  assert.equal(admitSvg(bigViewport).ok, false)
+  const bigRadius = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 1024"><circle r="2048%" cx="10" cy="10"/></svg>'
+  assert.equal(admitSvg(bigRadius).ok, false)
+  // Length percentages are outside the bounded subset at every magnitude;
+  // only a gradient stop offset may be a bounded 0–100% fraction.
+  assert.equal(admitSvg(base('<circle r="50%" cx="10" cy="10"/>')).ok, false)
+  assert.equal(admitSvg(base('<rect width="100%" height="100%"/>')).ok, false)
+  const gradient = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><defs>'
+    + '<linearGradient id="g"><stop offset="0%" stop-color="#000"/><stop offset="100%" stop-color="#fff"/></linearGradient>'
+    + '</defs><rect width="64" height="32" fill="url(#g)"/></svg>'
+  assert.equal(admitSvg(gradient).ok, true)
   assert.equal(admitSvg(base('<rect width="8" height="8" fill="#3b82f6"/>')).ok, true)
 })
 

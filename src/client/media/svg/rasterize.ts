@@ -111,98 +111,123 @@ function pngDimensions(bytes: Uint8Array): { width: number; height: number } | u
  * @param options - the requested pixel width and the caller's abort signal.
  * @returns the validated PNG and its dimensions.
  */
-export const rasterizeSvg: SvgRasterize = async (source, options) => {
-  if (!isolatedSvgRasterSupported()) {
-    throw new Error('SVG rasterization requires a verifiable native memory bound; this platform uses the text/source fallback')
-  }
-  const modulePath = resvgModulePath()
-  const width = Math.max(1, Math.min(SVG_MAX_RASTER_SIDE, Math.floor(options.targetWidth)))
-  // `|| exit 97` is the fail-closed gate: if the shell cannot install the
-  // virtual-memory cap, the native rasterizer must never run. The parent
-  // reports the exit and the card keeps its description/source text.
-  const command = '/bin/sh'
-  const args = ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} || exit 97; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE]
-  return await new Promise<SvgRasterResult>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-    let timedOut = false
-    let timer: NodeJS.Timeout | undefined
-    const onAbort = (): void => {
-      child.kill('SIGKILL')
-      finish(new Error('SVG rasterization was cancelled'))
+/** The injectable child-spawn seam (the production default is `node:child_process.spawn`). */
+export type SpawnProcess = typeof spawn
+
+/**
+ * Build one rasterizer over an injectable child launcher. The seam exists so a
+ * test can instrument the REAL child lifecycle (spawn/close) and prove that a
+ * cancellation or overflow settles only after the child is gone; production
+ * always uses {@link rasterizeSvg}.
+ */
+export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRasterize {
+  return async (source, options) => {
+    if (!isolatedSvgRasterSupported()) {
+      throw new Error('SVG rasterization requires a verifiable native memory bound; this platform uses the text/source fallback')
     }
-    const finish = (error: Error | undefined, result?: SvgRasterResult): void => {
-      if (settled) return
-      settled = true
-      if (timer !== undefined) clearTimeout(timer)
-      options.signal.removeEventListener('abort', onAbort)
-      if (error !== undefined) reject(error)
-      else resolve(result as SvgRasterResult)
-    }
-    timer = setTimeout(() => {
-      timedOut = true
-      child.kill('SIGKILL')
-    }, SVG_RASTER_TIMEOUT_MS)
-    if (options.signal.aborted) {
-      child.kill('SIGKILL')
-      finish(new Error('SVG rasterization was cancelled'))
-      return
-    }
-    options.signal.addEventListener('abort', onAbort, { once: true })
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => {
-      stdout += chunk
-      if (Buffer.byteLength(stdout, 'utf8') > MAX_STDOUT_BYTES) {
+    const modulePath = resvgModulePath()
+    const width = Math.max(1, Math.min(SVG_MAX_RASTER_SIDE, Math.floor(options.targetWidth)))
+    // `|| exit 97` is the fail-closed gate: if the shell cannot install the
+    // virtual-memory cap, the native rasterizer must never run. The parent
+    // reports the exit and the card keeps its description/source text.
+    const command = '/bin/sh'
+    const args = ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} || exit 97; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE]
+    return await new Promise<SvgRasterResult>((resolve, reject) => {
+      const child = spawnProcess(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      let stdout = ''
+      let stderr = ''
+      let settled = false
+      let timedOut = false
+      let cancelled = false
+      let overflow = false
+      let timer: NodeJS.Timeout | undefined
+      const finish = (error: Error | undefined, result?: SvgRasterResult): void => {
+        if (settled) return
+        settled = true
+        if (timer !== undefined) clearTimeout(timer)
+        options.signal.removeEventListener('abort', onAbort)
+        if (error !== undefined) reject(error)
+        else resolve(result as SvgRasterResult)
+      }
+      // A termination only kills the child. The promise settles on the child's
+      // `close` event, so the loader's single worker lane cannot start the NEXT
+      // native process while this one still exists (SIGSTOP, a slow teardown and
+      // an overflow all wait for the real close).
+      const terminate = (reason: 'cancelled' | 'timeout' | 'overflow'): void => {
+        if (settled) return
+        if (reason === 'cancelled') cancelled = true
+        else if (reason === 'timeout') timedOut = true
+        else overflow = true
         child.kill('SIGKILL')
-        finish(new Error('SVG rasterizer produced too much output'))
+      }
+      const onAbort = (): void => terminate('cancelled')
+      timer = setTimeout(() => terminate('timeout'), SVG_RASTER_TIMEOUT_MS)
+      child.stdout.setEncoding('utf8')
+      child.stderr.setEncoding('utf8')
+      child.stdout.on('data', (chunk: string) => {
+        stdout += chunk
+        if (Buffer.byteLength(stdout, 'utf8') > MAX_STDOUT_BYTES) terminate('overflow')
+      })
+      child.stderr.on('data', (chunk: string) => {
+        if (stderr.length < MAX_STDERR_BYTES) stderr += chunk
+      })
+      child.on('error', (error: Error) => finish(new Error(`SVG rasterizer failed to start: ${error.message}`)))
+      child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+        if (timedOut) {
+          finish(new Error(`SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms`))
+          return
+        }
+        if (cancelled) {
+          finish(new Error('SVG rasterization was cancelled'))
+          return
+        }
+        if (overflow) {
+          finish(new Error('SVG rasterizer produced too much output'))
+          return
+        }
+        if (code !== 0) {
+          finish(new Error(`SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${stderr.trim().slice(0, 200)}`))
+          return
+        }
+        let message: unknown
+        try {
+          message = JSON.parse(stdout)
+        } catch {
+          finish(new Error('SVG rasterizer returned an unreadable answer'))
+          return
+        }
+        const answer = message as { ok?: unknown; png?: unknown; error?: unknown }
+        if (answer.ok !== true || typeof answer.png !== 'string') {
+          finish(new Error(typeof answer.error === 'string' ? `SVG rasterizer rejected the document: ${answer.error}` : 'SVG rasterizer rejected the document'))
+          return
+        }
+        const png = Buffer.from(answer.png, 'base64')
+        if (png.length === 0 || png.length > SVG_MAX_PNG_BYTES) {
+          finish(new Error(`SVG rasterizer produced an out-of-budget PNG (${png.length} bytes)`))
+          return
+        }
+        const dimensions = pngDimensions(png)
+        if (dimensions === undefined) {
+          finish(new Error('SVG rasterizer produced an invalid PNG'))
+          return
+        }
+        if (dimensions.width > SVG_MAX_RASTER_SIDE || dimensions.height > SVG_MAX_RASTER_SIDE
+          || dimensions.width * dimensions.height > SVG_MAX_RASTER_PIXELS) {
+          finish(new Error(`SVG raster exceeded the pixel budget (${dimensions.width}×${dimensions.height})`))
+          return
+        }
+        finish(undefined, { png, base64: answer.png, widthPx: dimensions.width, heightPx: dimensions.height })
+      })
+      child.stdin.on('error', () => { /* the child may exit before reading; close handles it */ })
+      if (options.signal.aborted) {
+        terminate('cancelled')
+      } else {
+        options.signal.addEventListener('abort', onAbort, { once: true })
+        child.stdin.end(JSON.stringify({ modulePath, svg: source, width }))
       }
     })
-    child.stderr.on('data', (chunk: string) => {
-      if (stderr.length < MAX_STDERR_BYTES) stderr += chunk
-    })
-    child.on('error', (error: Error) => finish(new Error(`SVG rasterizer failed to start: ${error.message}`)))
-    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
-      if (timedOut) {
-        finish(new Error(`SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms`))
-        return
-      }
-      if (code !== 0) {
-        finish(new Error(`SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${stderr.trim().slice(0, 200)}`))
-        return
-      }
-      let message: unknown
-      try {
-        message = JSON.parse(stdout)
-      } catch {
-        finish(new Error('SVG rasterizer returned an unreadable answer'))
-        return
-      }
-      const answer = message as { ok?: unknown; png?: unknown; error?: unknown }
-      if (answer.ok !== true || typeof answer.png !== 'string') {
-        finish(new Error(typeof answer.error === 'string' ? `SVG rasterizer rejected the document: ${answer.error}` : 'SVG rasterizer rejected the document'))
-        return
-      }
-      const png = Buffer.from(answer.png, 'base64')
-      if (png.length === 0 || png.length > SVG_MAX_PNG_BYTES) {
-        finish(new Error(`SVG rasterizer produced an out-of-budget PNG (${png.length} bytes)`))
-        return
-      }
-      const dimensions = pngDimensions(png)
-      if (dimensions === undefined) {
-        finish(new Error('SVG rasterizer produced an invalid PNG'))
-        return
-      }
-      if (dimensions.width > SVG_MAX_RASTER_SIDE || dimensions.height > SVG_MAX_RASTER_SIDE
-        || dimensions.width * dimensions.height > SVG_MAX_RASTER_PIXELS) {
-        finish(new Error(`SVG raster exceeded the pixel budget (${dimensions.width}×${dimensions.height})`))
-        return
-      }
-      finish(undefined, { png, base64: answer.png, widthPx: dimensions.width, heightPx: dimensions.height })
-    })
-    child.stdin.on('error', () => { /* the child may exit before reading; close handles it */ })
-    child.stdin.end(JSON.stringify({ modulePath, svg: source, width }))
-  })
+  }
 }
+
+/** The production rasterizer (Linux-only, verified native memory bound). */
+export const rasterizeSvg: SvgRasterize = createSvgRasterizer()
