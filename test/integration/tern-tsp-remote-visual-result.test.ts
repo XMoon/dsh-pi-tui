@@ -66,6 +66,27 @@ function imageCarriesBlob(frames: readonly TspWireFrame[], blobId: string): bool
   return images.has(`blob:${blobId}`)
 }
 
+/**
+ * PR-D RFL-016: expand the projected tool cards through the Tern `toggle`
+ * event; a ready SVG card stays collapsed (and blob-free) until this demand.
+ */
+function expandToolCards(fixture: { readonly pane: { event(value: unknown): void; frames(): readonly TspWireFrame[] } }): void {
+  const frames = fixture.pane.frames()
+  const sf = frames[frames.length - 1]?.sf
+  if (sf === undefined) throw new Error('the Remote pane has no surface frame to address the toggle event')
+  for (const node of wireNodes(frames)) {
+    if (node.k !== 'tool' || typeof node.id !== 'string') continue
+    fixture.pane.event({
+      ev: 'toggle',
+      sf,
+      id: node.id,
+      collapsed: false,
+      key: node.id.slice(node.id.lastIndexOf('.') + 1),
+      raw: {},
+    })
+  }
+}
+
 interface HostSession { append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void }
 
 async function sessionOf(host: { readonly ctx: { sessions: { get(id: unknown): unknown } } }): Promise<HostSession> {
@@ -135,6 +156,10 @@ test('a Remote SVG result authorizes the same source digest and paints one blob'
     const args = { title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }
     const expectedBlobId = createHash('sha256').update(Buffer.from(SVG_SOURCE, 'utf8')).digest('hex')
     appendTool(await sessionOf(host), 'remote-svg-1', 'dsh_pi_tui_svg', args, svgContentBlocks(svgFactFromArgs(args)))
+    await waitFor('the Remote SVG tool card is projected', () =>
+      wireNodes(pane.frames()).some(node => node.k === 'tool'), 30_000)
+    assert.deepEqual(pane.blobIds(), [], 'a collapsed Remote SVG card sends no blob')
+    expandToolCards({ pane })
     await waitFor('the Remote pane received the admitted SVG blob', () => pane.blobIds().includes(expectedBlobId), 30_000)
     await waitFor('the Remote pane painted the image node', () => imageCarriesBlob(pane.frames(), expectedBlobId), 30_000)
     const nodes = wireNodes(pane.frames())

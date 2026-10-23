@@ -59,6 +59,7 @@ function toolRow(name: string, args: unknown, blocks: readonly ContentBlock[], o
 function render(message: TranscriptToolMessage, options: {
   chartKindsSupported?: boolean
   toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
+  expandedToolKeys?: ReadonlySet<string>
 } = {}): NodeLike[] {
   const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), options)
   return collect(view as unknown as { children: readonly unknown[] })
@@ -330,4 +331,25 @@ test('the TSP SVG image requests its blob only when the image node is projected'
     request: () => { throw new Error('the blocked row must not request its blob') },
   }]])
   render(blocked, { toolSvgStates: blockedStates })
+})
+
+
+test('a ready SVG card starts collapsed and requests its blob only when expanded', () => {
+  const message = svgMessage()
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '9'.repeat(64) },
+  }]])
+  const collapsed = render(message, { toolSvgStates: states, expandedToolKeys: new Set() })
+  assert.equal(collapsed.some(node => node.kind === 'image'), false)
+  assert.equal(requests, 0, 'a collapsed card must not request the blob')
+  assert.equal(collapsed.find(node => node.kind === 'tool')?.props.collapsed, true)
+  const expanded = render(message, { toolSvgStates: states, expandedToolKeys: new Set(['msg-1']) })
+  assert.equal(requests, 1)
+  const image = expanded.find(node => node.kind === 'image')
+  assert.equal(image?.props.blob, '9'.repeat(64))
+  assert.equal(expanded.find(node => node.kind === 'tool')?.props.collapsed, false)
 })

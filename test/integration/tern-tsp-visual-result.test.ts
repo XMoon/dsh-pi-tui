@@ -71,6 +71,27 @@ function imageCarriesBlob(frames: readonly TspWireFrame[], blobId: string): bool
   return imageIds.has(`blob:${blobId}`)
 }
 
+/**
+ * PR-D RFL-016: the ready SVG cards start collapsed; expand every projected
+ * tool card through the Tern `toggle` event (the actual user display demand).
+ */
+function expandToolCards(fixture: { readonly pane: { event(value: unknown): void; frames(): readonly TspWireFrame[] } }): void {
+  const frames = fixture.pane.frames()
+  const sf = frames[frames.length - 1]?.sf
+  if (sf === undefined) throw new Error('the pane has no surface frame to address the toggle event')
+  for (const node of wireNodes(frames)) {
+    if (node.k !== 'tool' || typeof node.id !== 'string') continue
+    fixture.pane.event({
+      ev: 'toggle',
+      sf,
+      id: node.id,
+      collapsed: false,
+      key: node.id.slice(node.id.lastIndexOf('.') + 1),
+      raw: {},
+    })
+  }
+}
+
 async function sessionOf(fixture: { readonly ctx: { sessions: { get(id: unknown): unknown } } }): Promise<{
   append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
 }> {
@@ -196,6 +217,10 @@ test('an SVG result is sent as the ONE native blob and painted with its descript
     const fact = svgFactFromArgs(args)
     const expectedBlobId = createHash('sha256').update(Buffer.from(SVG_SOURCE, 'utf8')).digest('hex')
     await appendTool(fixture, 'call-svg-1', 'dsh_pi_tui_svg', args, svgContentBlocks(fact))
+    await waitFor('the SVG tool card is projected', () =>
+      wireNodes(fixture.pane.frames()).some(node => node.k === 'tool'), 30_000)
+    assert.deepEqual(fixture.pane.blobIds(), [], 'a collapsed SVG card sends no blob')
+    expandToolCards(fixture)
     await waitFor('the pane received the admitted SVG blob', () =>
       fixture.pane.blobIds().includes(expectedBlobId), 30_000)
     await waitFor('the pane painted the image node with the admitted blob', () =>
@@ -266,6 +291,9 @@ test('a reused callId across turns cannot lend a credential to another SVG row',
     // second row is a different valid SVG. Both reuse the same bare callId.
     await appendToolAt(fixture, 1, 0, 'reused-call', 'dsh_pi_tui_svg', firstArgs, [{ type: 'text', text: 'REDACTED BY POLICY' }])
     await appendToolAt(fixture, 2, 0, 'reused-call', 'dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact))
+    await waitFor('both reused-call SVG cards are projected', () =>
+      wireNodes(fixture.pane.frames()).filter(node => node.k === 'tool').length >= 2, 30_000)
+    expandToolCards(fixture)
     await waitFor('the valid reused-call row paints its own image', () =>
       // observation deadline: the painted image node is the completion signal
       imageCarriesBlob(fixture.pane.frames(), secondBlob), 30_000)
@@ -301,6 +329,9 @@ test('two reused-callId SVG rows each paint their own digest blob', async (t) =>
     const secondBlob = digestOf(FIGURE_TWO_SOURCE)
     await appendToolAt(fixture, 1, 0, 'reused-call', 'dsh_pi_tui_svg', firstArgs, svgContentBlocks(firstFact))
     await appendToolAt(fixture, 2, 0, 'reused-call', 'dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact))
+    await waitFor('both reused-call SVG cards are projected', () =>
+      wireNodes(fixture.pane.frames()).filter(node => node.k === 'tool').length >= 2, 30_000)
+    expandToolCards(fixture)
     await waitFor('both reused-call rows paint their own image', () =>
       // observation deadline: both painted image nodes are the completion signal
       imageCarriesBlob(fixture.pane.frames(), firstBlob) && imageCarriesBlob(fixture.pane.frames(), secondBlob), 30_000)
