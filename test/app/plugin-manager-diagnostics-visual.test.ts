@@ -159,6 +159,7 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     assert.match(start, />/)
     assert.match(start, /transcript\.tool\.renderer/)
     assert.match(start, /\[failed\]/)
+    assert.match(start, /PgUp\/PgDn scroll/, 'the narrow paging cue is discoverable')
     // Page to the END of the block: the unique tail marker proves the last
     // physical error row is reachable by keyboard (overlapping page frames
     // make a naive concatenation non-contiguous).

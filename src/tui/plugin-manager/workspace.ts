@@ -1974,10 +1974,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private renderMeta(plan: ChromePlan, metaRow: number, targets: HitTarget[]): string[] {
     if (this.view === 'diagnostics') {
+      // The narrow Action Bar drops the paging hint before the required copy
+      // keys; carry a compact paging cue in the diagnostic row at those widths
+      // so the only way to reveal a long error is still discoverable.
+      const facts = this.diagnosticsFacts()
+      const selectedId = facts[this.diagnosticsSelection]?.id
+      const narrowScrollable = plan.width < 80
+        && this.diagnosticsSnapshot !== undefined
+        && this.buildDiagnosticsLayout(plan.width, selectedId).lines.length > plan.bodyRows
+      const hint = narrowScrollable ? 'PgUp/PgDn scroll · ' : ''
       return [fit(color.textDim(
-        this.diagnosticsSnapshot === undefined
+        hint + (this.diagnosticsSnapshot === undefined
           ? 'Live extension diagnostics are unavailable until the extension service is attached'
-          : 'Live TUI extension contributions — read-only; the Host package state is unchanged',
+          : 'Live TUI extension contributions — read-only; the Host package state is unchanged'),
       ), plan.width)]
     }
     if (this.view !== 'list' && this.view !== 'details') {
