@@ -126,7 +126,7 @@ function svgTool() {
     description: 'Render one static, self-contained SVG figure. Use only when a diagram communicates better than text. '
       + 'The document must have an explicit viewBox or absolute width/height and use only static shapes, paths, text, gradients, masks and local references. '
       + 'Scripts, foreignObject, CSS/style elements, animation, DOCTYPE, external files or URLs are rejected. '
-      + 'Use absolute coordinates and dimensions: length percentages are rejected (a gradient stop offset may be a 0-100% fraction). '
+      + 'Use absolute units (px/pt/pc/mm/cm/in or unitless); relative units (percentages, em/ex/ch/rem/vw/vh) are rejected (a gradient stop offset may be a 0-100% fraction). '
       + 'Always provide a short readable description; the result keeps the description and a short source credential, '
       + 'while the SVG source itself stays in the tool call.',
     parameters: {
