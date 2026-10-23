@@ -140,8 +140,17 @@ export interface TranscriptViewOptions {
 
 /** PR-D: one SVG row's prepared display state. */
 export type ToolSvgState =
-  /** The pane carries `image` + `blobs` and the source was admitted. */
-  | { readonly state: 'ready'; readonly blobId: string; readonly fact: SvgFact; readonly source: string }
+  /** The pane carries `image` + `blobs` and the source was admitted. The
+   *  blob is sent lazily by the actual projection (`request`), not by the
+   *  pre-projection authorization pass; `blobId` is an optional already-sent
+   *  fast path used by tests. */
+  | {
+    readonly state: 'ready'
+    readonly fact: SvgFact
+    readonly source: string
+    readonly blobId?: string
+    readonly request: () => string | undefined
+  }
   /** The pane negotiated no native image/blob capability; the admitted
    *  source is still available for the readable top-level/child card. */
   | { readonly state: 'unsupported'; readonly fact: SvgFact; readonly source: string }
@@ -453,7 +462,14 @@ function svgResultNodes(
   // elsewhere in the transcript can never lend its credential to this card.
   const state = message.status === 'ok' ? options.toolSvgStates?.get(message) : undefined
   if (state?.state === 'ready') {
-    nodes.push(ui.image({ key: 'result-svg', blob: state.blobId, alt: sanitizedPhysicalLine(state.fact.title) }))
+    // The blob sender runs HERE, when the image node is actually projected;
+    // authorization alone no longer sends bytes before the Tool Card body.
+    const blobId = state.blobId ?? state.request()
+    if (blobId !== undefined) {
+      nodes.push(ui.image({ key: 'result-svg', blob: blobId, alt: sanitizedPhysicalLine(state.fact.title) }))
+    } else {
+      nodes.push(ui.text({ key: 'result-svg-status', text: 'Native SVG display unavailable in this Tern pane' }))
+    }
   } else if (state?.state === 'unsupported') {
     nodes.push(ui.text({ key: 'result-svg-status', text: 'Native SVG display unavailable in this Tern pane' }))
   } else if (state?.state === 'invalid') {

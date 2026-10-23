@@ -478,3 +478,33 @@ test('a real PTC card with 77 SVG children converges without retrying a live sou
     resetCapabilitiesCache()
   }
 })
+
+
+test('a legal visual-v1: title/description still draws in the PiTui cards', async () => {
+  const { vt, app } = mountApp({ width: 100 })
+  await vt.waitForRender()
+  const chartArgs = {
+    kind: 'bars' as const,
+    title: 'visual-v1: CPU usage',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const chartFact = chartFactFromArgs(chartArgs)
+  const svgArgs = { title: 'visual-v1: topology', description: 'visual-v1: Gateway -> App', svg: SVG_SOURCE }
+  const svgFact = svgFactFromArgs(svgArgs)
+  assert.ok(chartFact !== undefined && svgFact !== undefined)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ...toolEvents('dsh_pi_tui_chart', chartArgs, chartContentBlocks(chartFact)),
+    ...toolEvents('dsh_pi_tui_svg', svgArgs, svgContentBlocks(svgFact)),
+  ] as never)
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.match(view, /visual-v1: CPU usage/u)
+  assert.match(view, /42 ms/u)
+  assert.match(view, /visual-v1: topology/u)
+  assert.match(view, /visual-v1: Gateway -> App/u)
+  assert.doesNotMatch(view, /visual-v1:\{"type"/u)
+  app.stop()
+})

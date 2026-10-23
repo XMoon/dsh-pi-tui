@@ -174,22 +174,21 @@ export function authorizeSvg(
   return { state: 'ready', source: args.svg, fact, admission }
 }
 
-/** The valid SVG credential among the final content blocks (if exactly one). */
+/**
+ * The valid SVG credential: the LAST text block is the machine slot. Earlier
+ * blocks (including a human title/description beginning with the same prefix)
+ * are never credential candidates.
+ */
 function resultFact(blocks: readonly ContentBlock[] | undefined): SvgFact | undefined {
   if (blocks === undefined) return undefined
-  let fact: SvgFact | undefined
-  let seen = false
-  for (const block of blocks) {
-    if (block.type !== 'text' || !block.text.startsWith(VISUAL_FACT_PREFIX)) continue
-    if (seen) return undefined
-    seen = true
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(block.text.slice(VISUAL_FACT_PREFIX.length))
-    } catch {
-      return undefined
-    }
-    fact = parseSvgFact(parsed)
+  let lastText: Extract<ContentBlock, { type: 'text' }> | undefined
+  for (const block of blocks) if (block.type === 'text') lastText = block
+  if (lastText === undefined || !lastText.text.startsWith(VISUAL_FACT_PREFIX)) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(lastText.text.slice(VISUAL_FACT_PREFIX.length))
+  } catch {
+    return undefined
   }
-  return fact
+  return parseSvgFact(parsed)
 }

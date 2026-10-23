@@ -333,9 +333,16 @@ function closeTag(state: GateState): void {
 }
 
 function viewportGeometry(state: GateState): { width: number; height: number } {
-  // SVG's initial CSS viewport when the root does not declare a size; resvg
-  // uses the same 300x150 default. The values stay fractional.
-  return { width: state.rootWidth ?? 300, height: state.rootHeight ?? 150 }
+  // A missing root side takes the corresponding VIEWBOX dimension when one is
+  // present (resvg's intrinsic behavior), not the 300x150 initial viewport:
+  // width=1000 + viewBox 1900x2048 has the native intrinsic 1000x2048. The
+  // 300x150 default only applies when neither a root size nor a viewBox exists
+  // (and the admission rejects that source when a side is still missing).
+  // Fractional root values are preserved.
+  return {
+    width: state.rootWidth ?? state.viewBoxWidth ?? 300,
+    height: state.rootHeight ?? state.viewBoxHeight ?? 150,
+  }
 }
 
 function finalGeometry(state: GateState): { width: number; height: number } {

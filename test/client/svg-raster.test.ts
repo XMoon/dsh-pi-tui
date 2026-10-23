@@ -309,3 +309,31 @@ test('a fractional CSS viewport is refused before the native child spawns', { sk
   assert.equal(small.widthPx, 128)
   assert.equal(small.heightPx, 256)
 })
+
+
+const WIDTH_ONLY_VIEWBOX_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1000" viewBox="0 0 1900 2048">'
+  + '<rect width="64" height="32" fill="#ff0000"/></svg>'
+
+test('the missing-side viewBox intrinsic is used before the native child spawns', { skip: nativeRasterSkip }, async () => {
+  const admission = admitSvg(WIDTH_ONLY_VIEWBOX_SVG)
+  assert.equal(admission.ok, true)
+  if (admission.ok) {
+    assert.equal(admission.viewportWidth, 1000)
+    assert.equal(admission.viewportHeight, 2048)
+  }
+  let spawned = 0
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    spawned += 1
+    return spawn(...args)
+  }) as typeof spawn
+  const rasterize = createSvgRasterizer(spawnProcess)
+  // The native intrinsic is 1000x2048; target 1900 is really 1900x3891/3892.
+  await assert.rejects(
+    rasterize(WIDTH_ONLY_VIEWBOX_SVG, { targetWidth: 1900, signal: new AbortController().signal }),
+    /raster canvas 1900x3892/u,
+  )
+  assert.equal(spawned, 0, 'the missing-side intrinsic must be refused before spawning')
+  const small = await rasterize(WIDTH_ONLY_VIEWBOX_SVG, { targetWidth: 128, signal: new AbortController().signal })
+  assert.equal(small.widthPx, 128)
+  assert.ok(small.heightPx === 262 || small.heightPx === 263, `safe target height ${small.heightPx}`)
+})
