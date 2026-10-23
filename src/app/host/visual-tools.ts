@@ -44,11 +44,9 @@ import {
 } from '../../domain/visual/chart.ts'
 import { svgArgsProblem, svgContentBlocks, svgFactFromArgs, type SvgArgs } from '../../domain/visual/svg.ts'
 import {
-  CHART_TOOL_NAME,
-  SVG_TOOL_NAME,
   VISUAL_TOOLS_STATUS_SERVICE,
   type VisualToolsRuntimeStatus,
-} from '../../domain/visual/tool-identity.ts'
+} from '../../domain/visual/runtime-status.ts'
 
 /** Stable Cordis plugin name (the Loader row id in `cordis.patch.yml`). */
 export const name = 'pi-tui-visual-tools'
@@ -56,9 +54,9 @@ export const name = 'pi-tui-visual-tools'
 /** The Host tool registry is this row's whole purpose. */
 export const inject = ['tools']
 
-/** The two stable, namespaced model tool names (the domain owns their
- *  identity; this entry keeps re-exporting them for its consumers). */
-export { CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tool-identity.ts'
+/** The two stable, namespaced model tool names. */
+export const CHART_TOOL_NAME = 'dsh_pi_tui_chart'
+export const SVG_TOOL_NAME = 'dsh_pi_tui_svg'
 
 /**
  * The row's profile-wide availability switch. `enabled` is a volatile field:

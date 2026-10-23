@@ -32,8 +32,8 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import {
   CHART_TOOL_NAME,
   SVG_TOOL_NAME,
-  VISUAL_TOOLS_STATUS_SERVICE,
-} from '../../src/domain/visual/tool-identity.ts'
+} from '../../src/app/host/visual-tools.ts'
+import { VISUAL_TOOLS_STATUS_SERVICE } from '../../src/domain/visual/runtime-status.ts'
 import {
   mountVisualToolsSettingsPlane,
   VISUAL_TOOLS_ROW_ID as ROW_ID,

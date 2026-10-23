@@ -24,7 +24,7 @@ import {
 import {
   VISUAL_TOOLS_STATUS_SERVICE,
   type VisualToolsRuntimeStatus,
-} from '../../src/domain/visual/tool-identity.ts'
+} from '../../src/domain/visual/runtime-status.ts'
 import { svgDigest } from '../../src/domain/visual/svg.ts'
 
 const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'

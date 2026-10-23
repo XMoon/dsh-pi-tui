@@ -81,7 +81,7 @@ import type {
 import {
   VISUAL_TOOLS_STATUS_SERVICE,
   type VisualToolsRuntimeStatus,
-} from '../../domain/visual/tool-identity.ts'
+} from '../../domain/visual/runtime-status.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
