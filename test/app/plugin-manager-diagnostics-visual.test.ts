@@ -165,7 +165,7 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     // make a naive concatenation non-contiguous).
     let sawCjk = false
     let sawTail = false
-    for (let page = 0; page < 12; page += 1) {
+    for (let page = 0; page < 20; page += 1) {
       harness.vt.sendInput('\x1b[6~') // PgDn
       await settleHarness(harness)
       const frame = plain(harness.viewport())
@@ -198,6 +198,41 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     await settleHarness(harness)
     assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(entry({ lastError: errorText })))
     assert.match(harness.copied.at(-1) ?? '', /\[END\]/)
+  } finally {
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})
+
+test('30x8 PgDn covers every error row with sticky identity heads', async () => {
+  const tokens = Array.from({ length: 40 }, (_, index) => `A${String(index + 1).padStart(2, '0')}`)
+  const errorText = tokens.join(' ')
+  // A long id makes the identity wrap to three rows — equal to the body
+  // height — so the sticky head must reserve one continuation row.
+  const longId = `broken-renderer-${'x'.repeat(60)}`
+  const diagnostics = view([entry({ id: longId, lastError: errorText })])
+  const harness = await open(() => diagnostics, 30, 8)
+  try {
+    harness.vt.sendInput('d')
+    await settleHarness(harness)
+    for (let step = 0; step < 3; step += 1) {
+      harness.vt.sendInput('\x1b[B')
+      await settleHarness(harness)
+    }
+    let union = ''
+    for (let page = 0; page < 24; page += 1) {
+      union += plain(harness.viewport())
+      if (tokens.every(token => union.includes(token))) break
+      harness.vt.sendInput('\x1b[6~') // PgDn
+      await settleHarness(harness)
+    }
+    const missing = tokens.filter(token => !union.includes(token))
+    assert.deepEqual(missing, [], 'every error token row must be reachable through PgDn')
+    harness.vt.sendInput('\x1b[F') // End: reveal the selected fact start.
+    await settleHarness(harness)
+    harness.vt.sendInput('c')
+    await settleHarness(harness)
+    assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(entry({ id: longId, lastError: errorText })))
   } finally {
     started.delete(harness)
     harness.app.dispose()
