@@ -140,22 +140,39 @@ function fakeSource(options: FakeSourceOptions = {}) {
  * path that mounts it), so a harness that wants the rows must paint once
  * and let the read settle.
  */
-function openWith(source: ModelsWorkspaceSource, initial: ModelsInitialView, height: number): ModelsWorkspacePage {
-  const page = new ModelsWorkspacePage(source, () => {}, initial, () => {})
+/**
+ * Construct the page with a `requestRender` that behaves like the host's:
+ * the requested frame is painted (the page-level tests have no TuiApp). Reads
+ * the page queues behind a paint therefore run after that render's write,
+ * exactly like the app; a test that only awaits timers must let that frame
+ * happen instead of assuming a no-op requestRender.
+ */
+function openPage(
+  source: ModelsWorkspaceSource,
+  initial: ModelsInitialView,
+  height: number,
+  onOpenAccount: () => void = () => {},
+): ModelsWorkspacePage {
+  let page: ModelsWorkspacePage | undefined
+  page = new ModelsWorkspacePage(source, () => { page?.render(100) }, initial, onOpenAccount)
   page.setBodyHeight(height)
   page.render(100)
   return page
 }
 
+/**
+ * Construct the page and paint its FIRST frame. The catalog read starts
+ * after that frame (the page never reads a provider directory in the input
+ * path that mounts it), so a harness that wants the rows must paint once
+ * and let the read settle.
+ */
+function openWith(source: ModelsWorkspaceSource, initial: ModelsInitialView, height: number): ModelsWorkspacePage {
+  return openPage(source, initial, height)
+}
+
 function open(initial: ModelsInitialView = { view: 'list' }): { page: ModelsWorkspacePage; calls: string[]; accountOpened: () => boolean } {
   const { source, calls } = fakeSource()
-  const page = new ModelsWorkspacePage(source, () => {}, initial, () => { calls.push('open-account') })
-  page.setBodyHeight(24)
-  page.render(100)
-  // The catalog read starts AFTER the first painted frame (the page never
-  // reads a provider directory in the input path): the harness paints one
-  // frame here, and the read settles in the next macrotask.
-  page.render(100)
+  const page = openPage(source, initial, 24, () => { calls.push('open-account') })
   return { page, calls, accountOpened: () => calls.includes('open-account') }
 }
 
@@ -2203,12 +2220,10 @@ test('an explicit refresh does not swallow the deferred deep-link read', async (
   const { source } = fakeSource()
   let recordsReads = 0
   source.storedCredentials = async () => { recordsReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
-  const page = new ModelsWorkspacePage(source, () => {}, {
+  const page = openPage(source, {
     view: 'logout',
     target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
-  }, () => {})
-  page.setBodyHeight(24)
-  page.render(100)
+  }, 24)
   // The refresh starts the catalog read before the deferred read's timer runs:
   // the deferred read must still happen exactly once.
   page.handleInput('r')
@@ -2222,12 +2237,10 @@ test('the deferred reads run once, are consumed by a manual refresh, and stop wh
   const referenceReads: string[] = []
   const referenceSource = fakeSource()
   referenceSource.source.describeReference = async ref => { referenceReads.push(ref); return { configured: true } }
-  const referencePage = new ModelsWorkspacePage(referenceSource.source, () => {}, {
+  const referencePage = openPage(referenceSource.source, {
     view: 'logout',
     target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
-  }, () => {})
-  referencePage.setBodyHeight(24)
-  referencePage.render(100)
+  }, 24)
   await flush()
   assert.deepEqual(referenceReads, ['ACME_API_KEY'], 'the target is read exactly once')
 
@@ -2235,9 +2248,7 @@ test('the deferred reads run once, are consumed by a manual refresh, and stop wh
   let recordsReads = 0
   const listSource = fakeSource()
   listSource.source.storedCredentials = async () => { recordsReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
-  const listPage = new ModelsWorkspacePage(listSource.source, () => {}, { view: 'logout-list' }, () => {})
-  listPage.setBodyHeight(24)
-  listPage.render(100)
+  const listPage = openPage(listSource.source, { view: 'logout-list' }, 24)
   listPage.handleInput('r')
   await flush()
   assert.equal(recordsReads, 1, 'the manual refresh consumes the deferred read instead of racing it')
@@ -2246,9 +2257,7 @@ test('the deferred reads run once, are consumed by a manual refresh, and stop wh
   let leftReads = 0
   const leftSource = fakeSource()
   leftSource.source.storedCredentials = async () => { leftReads += 1; return { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] } }
-  const leftPage = new ModelsWorkspacePage(leftSource.source, () => {}, { view: 'logout-list' }, () => {})
-  leftPage.setBodyHeight(24)
-  leftPage.render(100)
+  const leftPage = openPage(leftSource.source, { view: 'logout-list' }, 24)
   leftPage.handleInput('\u001b') // Esc leaves the list
   await flush()
   assert.equal(leftReads, 0, 'a view the user left must not run the stored-credential scan')

@@ -196,6 +196,14 @@ The page never infers a stored key from a route/profile.
   the catalog succeeds. The catalog read runs AFTER the first painted frame of
   the page: the constructor performs no Host read, so selecting `Models` on the
   rail paints the Loading state instead of blocking the input path.
+- The page's reads are armed BEHIND the frame that paints their
+  Loading/Reading state, not behind a timer. The renderer writes a frame
+  synchronously after the component tree renders, and the page starts a read
+  only after that write. A `setTimeout(0)` is not this boundary: frames are
+  throttled (up to the render interval), so a timer can run the synchronous
+  Host scan before the state frame reaches the terminal. The rule covers the
+  first catalog read, the catalog R refresh, the stored-credential list
+  (opening it and R) and the record-clear confirmation.
 - The read state is explicit: `Loading` (no authoritative rows yet), `Ready`,
   `Refreshing` (a read in flight over a live snapshot), `Stale` (the last
   snapshot is not the current authority — a failed refresh over the last good
