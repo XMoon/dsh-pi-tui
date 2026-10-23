@@ -3909,7 +3909,15 @@ test('Tab/Shift+Tab hand the keyboard to the About content and back at wide/medi
     assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u, `the rail advertises Tab focus at ${columns}x${rows}`)
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /Settings · About/u, `Tab focuses the About content at ${columns}x${rows}`)
-    assert.match(h.view(), /Tab focus · Shift\+Tab back/u, 'the About bar advertises both region keys')
+    if (columns >= 100) {
+      assert.match(h.view(), /Tab focus · Shift\+Tab back/u, 'the About bar advertises both region keys')
+    } else {
+      // At 90 the lowest-priority region hint is the first segment dropped;
+      // the remaining region hint and every semantic verb survive.
+      assert.match(h.view(), /Shift\+Tab back/u, 'the reverse region key stays advertised')
+      assert.match(h.view(), /c copy fact · C copy all · r refresh/u, 'the semantic verbs keep their hints')
+      assert.doesNotMatch(h.view(), /Tab focus/u, 'the forward region hint drops first')
+    }
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Tab returns to the rail')
     await key(h, '\t')
@@ -4009,4 +4017,16 @@ test('the Tab hints drop as whole segments and the action bar keeps the last phy
   assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u)
   assertNoHalfSegmentInBar(medium.rowsPlain(), medium.rowsPlain().length - 1, ' · ')
   medium.dispose()
+
+  // Legacy 90x24: the region hints are dropped first, so the pre-existing
+  // Refresh hint survives instead of being crowded out of the bar.
+  const legacy = setup({ columns: 90, rows: 24, doc: { theme: 'dark' } })
+  await legacy.open() // Appearance, category rail focus
+  await key(legacy, '\t') // categories -> rows
+  const legacyBar = legacy.rowsPlain().at(-1) ?? ''
+  assert.match(legacyBar, /r refresh/u, 'the existing refresh hint survives at 90 columns')
+  assert.match(legacyBar, /Enter choose/u)
+  assert.doesNotMatch(legacyBar, /Tab panes/u, 'the region hint is the first segment dropped')
+  assertNoHalfSegmentInBar(legacy.rowsPlain(), legacy.rowsPlain().length - 1, ' · ')
+  legacy.dispose()
 })
