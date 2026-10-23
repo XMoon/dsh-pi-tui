@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, waitFor } from '../support/direct-tsp-fixture.ts'
+import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
 import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
@@ -344,4 +345,39 @@ test('two reused-callId SVG rows each paint their own digest blob', async (t) =>
     // bounded teardown window: dispose the app, pane and Host before the next case
     await fixture.settle()
   }
+})
+
+
+
+test('a conflicting PTC subCallId is rejected by the real fold before disclosure state can collide', () => {
+  const firstArgs = { title: 'Figure 1', description: 'first', svg: FIGURE_ONE_SOURCE }
+  const secondArgs = { title: 'Figure 2', description: 'second', svg: FIGURE_TWO_SOURCE }
+  const firstFact = svgFactFromArgs(firstArgs)
+  assert.ok(firstFact !== undefined)
+  const folder = new TranscriptFolder()
+  assert.throws(() => folder.apply([
+    { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 2, time: 1, data: { turn: 1, step: 0 } },
+    { type: 'tool/call', seq: 3, time: 1, data: { turn: 1, step: 0, callId: ToolCallId('reused-parent'), name: 'run_code', arguments: JSON.stringify({ code: '', description: 'PTC parent' }) } },
+    { type: 'tool/ptc-dispatch-start', seq: 4, time: 1, data: {
+      rootCallId: 'reused-parent', parentCallId: 'reused-parent', subCallId: 'reused-parent:code:1',
+      name: 'dsh_pi_tui_svg', arguments: firstArgs,
+    } },
+    { type: 'tool/ptc-dispatch', seq: 5, time: 1, data: {
+      rootCallId: 'reused-parent', parentCallId: 'reused-parent', subCallId: 'reused-parent:code:1',
+      name: 'dsh_pi_tui_svg', arguments: firstArgs, isError: false, content: svgContentBlocks(firstFact),
+    } },
+    { type: 'tool/result', seq: 6, time: 1, data: {
+      turn: 1, step: 0,
+      message: { id: MessageId('ptc-parent-1'), role: 'tool', toolCallId: ToolCallId('reused-parent'), content: [{ type: 'text', text: '(no output)' }], source: { kind: 'tool', callId: ToolCallId('reused-parent') } },
+    } },
+    { type: 'turn/end', seq: 7, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    { type: 'turn/start', seq: 8, time: 1, data: { turn: 2 } },
+    { type: 'step/start', seq: 9, time: 1, data: { turn: 2, step: 0 } },
+    { type: 'tool/call', seq: 10, time: 1, data: { turn: 2, step: 0, callId: ToolCallId('reused-parent'), name: 'run_code', arguments: JSON.stringify({ code: '', description: 'PTC parent' }) } },
+    { type: 'tool/ptc-dispatch-start', seq: 11, time: 1, data: {
+      rootCallId: 'reused-parent', parentCallId: 'reused-parent', subCallId: 'reused-parent:code:1',
+      name: 'dsh_pi_tui_svg', arguments: secondArgs,
+    } },
+  ] as never), /conflicting PTC sub-call identity/u)
 })
