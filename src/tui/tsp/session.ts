@@ -69,7 +69,7 @@ import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, disclosureKeyForToggle, type ToolSvgState } from './transcript-view.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -1202,16 +1202,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // key (`msg-N`) through that child key. The mapper builds exactly the
         // same `msg-N/sub-...` path, so two parents with the same subCallId do
         // not share expansion while node ids stay untouched.
-        const segments = input.event.id.split('.')
-        let toolStart = -1
-        for (let index = segments.length - 1; index >= 0; index -= 1) {
-          if (segments[index]!.startsWith('msg-')) { toolStart = index; break }
-        }
-        const key = toolStart >= 0
-          ? segments.slice(toolStart).join('/')
-          : input.event.key ?? input.event.id.slice(input.event.id.lastIndexOf('.') + 1)
-        if (input.event.collapsed) expandedToolKeys.delete(key)
-        else expandedToolKeys.add(key)
+        const disclosure = disclosureKeyForToggle(input.event.id, input.event.key, scopePrefix)
+        if (disclosure === undefined) return false
+        if (input.event.collapsed) expandedToolKeys.delete(disclosure)
+        else expandedToolKeys.add(disclosure)
         if (rebuildLastMain()) render()
         return false
       }
