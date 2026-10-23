@@ -16,8 +16,11 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { apply as applyVisualTools, CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../src/app/host/visual-tools.ts'
-import { svgDigest } from '../../src/domain/visual/svg.ts'
+import { svgDigest, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
+import type { TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { TranscriptNodeKeys, transcriptView, type ToolSvgState } from '../../src/tui/tsp/transcript-view.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
@@ -94,9 +97,12 @@ async function runCase(t: Parameters<typeof testLifecycle>[0], key: keyof typeof
   let callbackCount = 0
   const installPolicy = (agentCtx: Context): void => {
     if (policy === 'none') return
-    agentCtx.on('tools/post-execute', async (_exec, _result, next) => {
+    agentCtx.on('tools/post-execute', async (_exec, result, next) => {
       callbackCount += 1
-      if (policy === 'block') return { kind: 'block', feedback: [{ type: 'text', text: 'policy refused this visual' }] }
+      // The hostile-but-official shape: a block whose feedback IS the original
+      // visual content (including its valid machine line/credential). The
+      // renderer must still refuse every drawing based on the result status.
+      if (policy === 'block') return { kind: 'block', feedback: result.content }
       await next()
       if (policy === 'content') return { kind: 'accept', content: [{ type: 'text', text: 'REPLACED: the visual result was redacted by policy' }] }
       return { kind: 'accept', value: entry.replacement }
@@ -128,6 +134,7 @@ async function runCase(t: Parameters<typeof testLifecycle>[0], key: keyof typeof
     isError: (result?.data as { message?: { isError?: boolean } } | undefined)?.message?.isError ?? null,
     text: ((result?.data as { message?: { content?: Array<{ text?: string }> } } | undefined)?.message?.content ?? []).map(block => block.text ?? null),
     foldedHasMeta: row !== undefined && (row as { meta?: unknown }).meta !== undefined,
+    tool: row as TranscriptToolMessage | undefined,
   }
 }
 
@@ -158,7 +165,34 @@ test('the registered visual tools persist no presentation meta under every post-
       if (policy === 'block') {
         assert.equal(row.callbackCount, 1)
         assert.equal(row.isError, true)
-        assert.match(JSON.stringify(row.text), /refused/u)
+        // The block feedback is the ORIGINAL visual content; it must remain
+        // readable but must never become a drawing.
+        assert.match(JSON.stringify(row.text), key === 'chart' ? /Request latency/u : /Service topology/u)
+        const tool = row.tool
+        assert.ok(tool !== undefined)
+        const svgFact = key === 'svg'
+          ? (() => {
+            const args = CASES.svg.args as { title: string; description: string; svg: string }
+            return svgFactFromArgs(args)
+          })()
+          : undefined
+        const ready: ReadonlyMap<string, ToolSvgState> | undefined = svgFact === undefined
+          ? undefined
+          : new Map([[tool.callId ?? 'call-visual-1', {
+            state: 'ready', blobId: 'f'.repeat(64), fact: svgFact, source: CASES.svg.args.svg,
+          }]])
+        const view = transcriptView(projectTranscriptStructure([tool]), new TranscriptNodeKeys(), {
+          chartKindsSupported: true,
+          ...(ready === undefined ? {} : { toolSvgStates: ready }),
+        })
+        const kinds: string[] = []
+        const walk = (node: { kind: string; children: readonly unknown[] }): void => {
+          kinds.push(node.kind)
+          for (const child of node.children) walk(child as { kind: string; children: readonly unknown[] })
+        }
+        for (const child of (view as unknown as { children: readonly unknown[] }).children) walk(child as { kind: string; children: readonly unknown[] })
+        assert.equal(kinds.includes('chart'), false, `${key}: a blocked result must not emit a chart node`)
+        assert.equal(kinds.includes('image'), false, `${key}: a blocked result must not emit an image node`)
       }
     }
   }

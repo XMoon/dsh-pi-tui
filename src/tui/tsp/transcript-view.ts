@@ -39,7 +39,7 @@ import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
-import { chartProjection, chartValueRows, type ChartFact } from '../../domain/visual/chart.ts'
+import { chartHumanText, chartProjection, chartValueRows, type ChartFact } from '../../domain/visual/chart.ts'
 import { svgDetailRows, type SvgFact } from '../../domain/visual/svg.ts'
 import { visualParts, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
 
@@ -139,9 +139,10 @@ export interface TranscriptViewOptions {
 /** PR-D: one SVG row's prepared display state. */
 export type ToolSvgState =
   /** The pane carries `image` + `blobs` and the source was admitted. */
-  | { readonly state: 'ready'; readonly blobId: string; readonly fact: SvgFact }
-  /** The pane negotiated no native image/blob capability. */
-  | { readonly state: 'unsupported' }
+  | { readonly state: 'ready'; readonly blobId: string; readonly fact: SvgFact; readonly source: string }
+  /** The pane negotiated no native image/blob capability; the admitted
+   *  source is still available for the readable top-level/child card. */
+  | { readonly state: 'unsupported'; readonly fact: SvgFact; readonly source: string }
   /** The final content did not authorize a drawing (or admission refused it). */
   | { readonly state: 'invalid'; readonly reason: string }
 
@@ -403,10 +404,11 @@ function chartResultNodes(
   wrap: boolean,
   flatText: string,
 ): Node[] {
-  const parts = message.resultBlocks === undefined ? visualPartsFromText(flatText) : visualParts(message.resultBlocks)
+  const base = message.resultBlocks === undefined ? visualPartsFromText(flatText) : visualParts(message.resultBlocks)
+  const parts = message.status === 'ok' ? base : { ...base, fact: undefined }
   const fact: ChartFact | undefined = parts.fact?.type === 'chart' ? parts.fact : undefined
   if (fact === undefined) {
-    const text = parts.humanText === '' ? flatText : parts.humanText
+    const text = parts.humanText === '' ? base.humanText === '' ? flatText : base.humanText : parts.humanText
     return text === '' ? [] : [ui.code({ key: 'result', text: sanitizeDisplayText(text), ...(wrap ? { wrap: true } : {}) })]
   }
   const nodes: Node[] = []
@@ -418,8 +420,12 @@ function chartResultNodes(
       summary: sanitizeDisplayText(projection.summary),
       series: projection.series,
     }))
+    nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(chartValueRows(fact).join('\n')), ...(wrap ? { wrap: true } : {}) }))
+  } else {
+    // No native chart node: the readable body must carry the FINAL fact title
+    // as well as the values; the header only knows the original call args.
+    nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(chartHumanText(fact)), ...(wrap ? { wrap: true } : {}) }))
   }
-  nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(chartValueRows(fact).join('\n')), ...(wrap ? { wrap: true } : {}) }))
   return nodes
 }
 
@@ -435,16 +441,19 @@ function svgResultNodes(
   wrap: boolean,
   flatText: string,
 ): Node[] {
-  const parts = message.resultBlocks === undefined ? visualPartsFromText(flatText) : visualParts(message.resultBlocks)
+  const base = message.resultBlocks === undefined ? visualPartsFromText(flatText) : visualParts(message.resultBlocks)
+  const parts = message.status === 'ok' ? base : { ...base, fact: undefined }
   const fact: SvgFact | undefined = parts.fact?.type === 'svg' ? parts.fact : undefined
   const detail = fact === undefined
-    ? (parts.humanText === '' ? flatText : parts.humanText)
+    ? (parts.humanText === '' ? base.humanText === '' ? flatText : base.humanText : parts.humanText)
     : svgDetailRows(fact).join('\n')
   const nodes: Node[] = detail === ''
     ? []
     : [ui.code({ key: 'result', text: sanitizeDisplayText(detail), ...(wrap ? { wrap: true } : {}) })]
   const rowId = visualRowId(message)
-  const state = rowId === undefined ? undefined : options.toolSvgStates?.get(rowId)
+  // A successful result is required even when a prepared state exists (the
+  // session already refuses to send its blob, this mapper must not draw it).
+  const state = message.status === 'ok' && rowId !== undefined ? options.toolSvgStates?.get(rowId) : undefined
   if (state?.state === 'ready') {
     nodes.push(ui.image({ key: 'result-svg', blob: state.blobId, alt: sanitizedPhysicalLine(state.fact.title) }))
   } else if (state?.state === 'unsupported') {
@@ -531,6 +540,17 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
   const body: Node[] = []
   if (header.summary === '' && child.args !== '') {
     body.push(ui.code({ key: 'args', text: sanitizeDisplayText(child.args), wrap: true }))
+  }
+  // A nested SVG's source lives in its call args, which this child card does
+  // not otherwise display (the visual tools always have a title summary). The
+  // admitted source is added here so the child has the SAME readable-source
+  // path as the top-level card instead of only claiming it is available.
+  if (child.name === 'dsh_pi_tui_svg') {
+    const rowId = visualRowId(child)
+    const state = child.status === 'ok' && rowId !== undefined ? options.toolSvgStates?.get(rowId) : undefined
+    if (state?.state === 'ready' || state?.state === 'unsupported') {
+      body.push(ui.code({ key: 'source', text: sanitizeDisplayText(state.source), wrap: true }))
+    }
   }
   body.push(...toolChildNodes(child, options))
   // PR-C: the child projects ITS OWN result blocks (recursively, with the

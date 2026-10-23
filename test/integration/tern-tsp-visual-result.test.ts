@@ -82,7 +82,7 @@ async function sessionOf(fixture: { readonly ctx: { sessions: { get(id: unknown)
   return session!
 }
 
-function appendTool(fixture: { readonly ctx: { sessions: { get(id: unknown): unknown } } }, callId: string, name: string, args: unknown, blocks: readonly unknown[]): Promise<void> {
+function appendTool(fixture: { readonly ctx: { sessions: { get(id: unknown): unknown } } }, callId: string, name: string, args: unknown, blocks: readonly unknown[], isError = false): Promise<void> {
   return sessionOf(fixture).then((session) => {
     session.append('turn/start', { turn: 1 })
     session.append('step/start', { turn: 1, step: 0 })
@@ -101,6 +101,7 @@ function appendTool(fixture: { readonly ctx: { sessions: { get(id: unknown): unk
         role: 'tool',
         toolCallId: ToolCallId(callId),
         content: blocks,
+        isError,
         source: { kind: 'tool', callId: ToolCallId(callId) },
       },
     }, { surfaceOp: 'append' })
@@ -164,6 +165,30 @@ test('an SVG result is sent as the ONE native blob and painted with its descript
     assert.match(text, /Gateway -> App -> Database/u)
     assert.match(text, /SVG source available/u)
     assert.doesNotMatch(JSON.stringify(nodes), /visual-v1:/u)
+  } finally {
+    // Bounded teardown window: the fixture disposes the app, pane and Host before the next case.
+    await fixture.settle()
+  }
+})
+
+
+test('a blocked/error SVG result never sends a blob and keeps the readable text', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['PRD', '-SVG-BLOCKED'],
+    startup: { sessionId: SESSION_ID },
+    persistedBlankSessions: [{ id: SESSION_ID }],
+    nativeImages: true,
+  })
+  try {
+    const args = { title: 'Blocked topology', description: 'Blocked description', svg: SVG_SOURCE }
+    const blocks = svgContentBlocks(svgFactFromArgs(args))
+    await appendTool(fixture, 'call-svg-blocked', 'dsh_pi_tui_svg', args, blocks, true)
+    await waitFor('the pane rendered the blocked description text', () =>
+      fixture.pane.output.text().includes('Blocked description'), 30_000)
+    assert.deepEqual(fixture.pane.blobIds(), [], 'a blocked result must not send the SVG blob')
+    assert.equal(wireNodes(fixture.pane.frames()).some(node => node.k === 'image'), false,
+      'a blocked result must not paint a native image')
   } finally {
     // Bounded teardown window: the fixture disposes the app, pane and Host before the next case.
     await fixture.settle()

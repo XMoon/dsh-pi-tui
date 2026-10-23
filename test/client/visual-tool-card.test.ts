@@ -129,6 +129,9 @@ test('a policy-replaced chart content shows the replacement and no chart fact', 
 })
 
 test('the SVG card always shows the description; a matching credential adds the raster path', async () => {
+  // This case proves the IMAGE-PROTOCOL branch. Never inherit the developer
+  // terminal's detected capability: a no-TTY/CI parent must still pass.
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const requests: string[] = []
   const loader = new SvgRasterLoader(async (source) => {
     requests.push(source)
@@ -238,5 +241,127 @@ test('a PTC child chart keeps its own card body and never leaks the machine line
   assert.ok(view.includes('Child latency'), `the child summary is visible:\n${view}`)
   assert.ok(view.includes('42 ms'), `the child exact value is visible:\n${view}`)
   assert.ok(!view.includes('visual-v1:'), `the child machine line is hidden:\n${view}`)
+  app.stop()
+})
+
+
+test('a chart label/unit with OSC/CSI/C1 bytes never reaches the tty', async () => {
+  const tui = mountApp({ width: 100 })
+  const { vt, app } = tui
+  await vt.waitForRender()
+  const hostile = '\u001b]52;c;YXR0YWNr\u0007p50\u001b[2J\u0001'
+  const args = {
+    kind: 'bars' as const,
+    title: 'Hostile',
+    unit: `ms${hostile}`,
+    series: [{ label: hostile, value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const folder = new TranscriptFolder()
+  folder.apply(toolEvents('dsh_pi_tui_chart', args, chartContentBlocks(chartFactFromArgs(args))))
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\u001b]52'), `OSC must not reach the frame: ${view}`)
+  assert.ok(!view.includes('\u0007'), 'BEL must not reach the frame')
+  assert.ok(!view.includes('\u001b[2J'), 'CSI must not reach the frame')
+  assert.ok(view.includes('p50'), 'the readable label survives sanitization')
+  app.stop()
+})
+
+test('a PTC SVG child with an OSC description never reaches the tty', async () => {
+  const tui = mountApp({ width: 100 })
+  const { vt, app } = tui
+  await vt.waitForRender()
+  const hostile = 'Gateway\u001b]52;c;YXR0YWNr\u0007 -> App'
+  const args = { title: 'Child topology', description: hostile, svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  const child = {
+    kind: 'tool' as const, turn: 1, name: 'dsh_pi_tui_svg', args: JSON.stringify(args),
+    result: svgContentBlocks(fact).map(block => block.type === 'text' ? block.text : '').join('\n'),
+    status: 'ok' as const, resultBlocks: svgContentBlocks(fact), subCallId: 'parent:ptc:svg',
+  }
+  const parent = {
+    kind: 'tool' as const, turn: 1, name: 'run_code', args: '{}', result: 'parent', status: 'ok' as const,
+    callId: 'parent', resultBlocks: [{ type: 'text' as const, text: 'parent' }], subCalls: [child],
+  }
+  app.setTranscript([parent as never])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\u001b]52'), `child OSC must not reach the frame: ${view}`)
+  assert.ok(view.includes('Gateway'), 'the readable description survives')
+  app.stop()
+})
+
+test('the final fact title is visible after a value replacement', async () => {
+  const { vt, app } = mountApp({ width: 100 })
+  await vt.waitForRender()
+  const args = {
+    kind: 'bars' as const, title: 'ORIGINAL_CALL_TITLE', unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const replacement = {
+    version: 1 as const, type: 'chart' as const, kind: 'bars' as const, title: 'FINAL_APPROVED_TITLE', unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const folder = new TranscriptFolder()
+  folder.apply(toolEvents('dsh_pi_tui_chart', args, chartContentBlocks(replacement)))
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('FINAL_APPROVED_TITLE'), `the final fact title must be visible:\n${view}`)
+  app.stop()
+})
+
+test('a blocked chart/SVG result with copied visual content never draws', async () => {
+  const { vt, app } = mountApp({ width: 100 })
+  await vt.waitForRender()
+  const chartArgs = {
+    kind: 'bars' as const, title: 'Blocked chart', unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const svgArgs = { title: 'Blocked svg', description: 'Blocked description', svg: SVG_SOURCE }
+  const folder = new TranscriptFolder()
+  const chartBlocks = chartContentBlocks(chartFactFromArgs(chartArgs))
+  const svgBlocks = svgContentBlocks(svgFactFromArgs(svgArgs))
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-c', name: 'dsh_pi_tui_chart', arguments: JSON.stringify(chartArgs) } } as never,
+    { type: 'tool/result', seq: 2, time: 1, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('call-c'), content: chartBlocks, isError: true }) } } as never,
+    { type: 'tool/call', seq: 3, time: 1, data: { turn: 0, step: 0, callId: 'call-s', name: 'dsh_pi_tui_svg', arguments: JSON.stringify(svgArgs) } } as never,
+    { type: 'tool/result', seq: 4, time: 1, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('call-s'), content: svgBlocks, isError: true }) } } as never,
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Blocked description'), 'the blocked SVG keeps its readable description')
+  assert.ok(!view.includes('#'), 'no chart bars are drawn for a blocked result')
+  app.stop()
+})
+
+test('a PTC SVG child gets the same raster path with a fixed image budget', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const requests: string[] = []
+  const loader = new SvgRasterLoader(async (source) => {
+    requests.push(source)
+    return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 }
+  })
+  const { vt, app } = mountApp({ svgRasterLoader: loader })
+  await vt.waitForRender()
+  const args = { title: 'Child topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  const blocks = svgContentBlocks(fact)
+  const child = {
+    kind: 'tool' as const, turn: 1, name: 'dsh_pi_tui_svg', args: JSON.stringify(args),
+    result: blocks.map(block => block.type === 'text' ? block.text : '').join('\n'),
+    status: 'ok' as const, resultBlocks: blocks, subCallId: 'parent:ptc:svg',
+  }
+  const parent = {
+    kind: 'tool' as const, turn: 1, name: 'run_code', args: '{}', result: 'parent', status: 'ok' as const,
+    callId: 'parent', resultBlocks: [{ type: 'text' as const, text: 'parent' }], subCalls: [child],
+  }
+  app.setTranscript([parent as never])
+  await vt.waitForRender()
+  assert.deepEqual(requests, [SVG_SOURCE], 'the child admits and rasterizes its own source')
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Gateway -> App -> Database'), 'the child description remains')
   app.stop()
 })

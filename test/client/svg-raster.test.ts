@@ -60,7 +60,11 @@ test('clear() aborts an in-flight child and drops its late result', async () => 
   loader.dispose()
 })
 
-test('the real isolated rasterizer produces a bounded PNG for an admitted source', async () => {
+const nativeRasterSkip = process.platform === 'linux'
+  ? false
+  : 'the native memory cap is verified on Linux only; other platforms use the text/source fallback'
+
+test('the real isolated rasterizer produces a bounded PNG for an admitted source', { skip: nativeRasterSkip }, async () => {
   const result = await rasterizeSvg(SVG_SOURCE, { targetWidth: 128, signal: new AbortController().signal })
   assert.equal(result.widthPx, 128)
   assert.equal(result.heightPx, 64)
@@ -69,8 +73,71 @@ test('the real isolated rasterizer produces a bounded PNG for an admitted source
   assert.equal(Buffer.from(result.base64, 'base64').length, result.png.length)
 })
 
-test('an already-aborted raster request is refused before work starts', async () => {
+test('an already-aborted raster request is refused before work starts', { skip: nativeRasterSkip }, async () => {
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(rasterizeSvg(SVG_SOURCE, { targetWidth: 128, signal: controller.signal }), /cancelled/u)
+})
+
+
+test('the loader runs ONE global raster at a time across different digests', async () => {
+  let active = 0
+  let maxActive = 0
+  const releases: Array<() => void> = []
+  const loader = new SvgRasterLoader(async (_source, options) => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    return await new Promise((resolve, reject) => {
+      let settled = false
+      const settle = (finish: () => void): void => {
+        if (settled) return
+        settled = true
+        active -= 1
+        finish()
+      }
+      releases.push(() => settle(() => resolve({ png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 })))
+      options.signal.addEventListener('abort', () => settle(() => reject(new Error('cancelled'))), { once: true })
+    })
+  })
+  for (let index = 0; index < 13; index += 1) loader.load(`digest-${index}`, `source-${index}`, 128)
+  assert.equal(maxActive, 1, 'different digests must never spawn concurrent native rasterizations')
+  // The 13th load evicts the ACTIVE oldest entry; its aborted rejection must
+  // not resurrect the evicted digest as an error entry.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(loader.get('digest-0'), { state: 'idle' }, 'an evicted settlement must not commit')
+  while (releases.length > 0) {
+    releases.shift()?.()
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(maxActive, 1, 'the single lane stays bounded while the queue drains')
+  loader.dispose()
+})
+
+test('an evicted digest can be reloaded and its old settlement cannot overwrite the new one', async () => {
+  const releases: Array<() => void> = []
+  const loader = new SvgRasterLoader(async (_source, options) => {
+    return await new Promise((resolve, reject) => {
+      let settled = false
+      const settle = (finish: () => void): void => {
+        if (settled) return
+        settled = true
+        finish()
+      }
+      releases.push(() => settle(() => resolve({ png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 })))
+      options.signal.addEventListener('abort', () => settle(() => reject(new Error('cancelled'))), { once: true })
+    })
+  })
+  for (let index = 0; index < 13; index += 1) loader.load(`digest-${index}`, `source-${index}`, 128)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(loader.get('digest-0'), { state: 'idle' })
+  // Reload the evicted digest while the old (aborted) request is still in
+  // flight; the old rejection must not overwrite the new loading/ready entry.
+  loader.load('digest-0', 'source-0', 128)
+  assert.equal(loader.get('digest-0').state, 'loading')
+  while (releases.length > 0) {
+    releases.shift()?.()
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.notEqual(loader.get('digest-0').state, 'error', 'the old settlement must never win over the reload')
+  loader.dispose()
 })

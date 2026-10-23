@@ -2,10 +2,12 @@
  * The short-lived, Client-local SVG raster cache.
  *
  * One entry per admitted source digest: the PNG is a DISPLAY derivative, never
- * a durable fact. The loader dedupes concurrent requests, drops settled results
- * after a `clear()` (session swap / renderer retirement), and notifies the
- * mounted component so a repaint can replace the placeholder. A failed raster
- * keeps the text path; it never retries the same digest in the same epoch.
+ * a durable fact. The loader owns a SINGLE global worker lane — different
+ * digests never spawn native children concurrently — and dedupes a repeated
+ * digest. A settlement commits only for the exact entry/epoch that produced it,
+ * so an evicted or replaced request can never resurrect a cache entry or
+ * overwrite a newer request. A failed raster keeps the text path; it is not
+ * retried in the same epoch.
  * @module @xmoon76/dsh-pi-tui/client/media/svg/raster-loader
  */
 
@@ -19,18 +21,27 @@ export type SvgRasterState =
   | { readonly state: 'error'; readonly error: Error }
 
 interface Entry {
-  state: SvgRasterState
-  controller?: AbortController
+  readonly controller: AbortController
+  readonly state: SvgRasterState
 }
 
-/** Keep at most this many ready/error entries (oldest evicted first). */
+interface Queued {
+  readonly digest: string
+  readonly source: string
+  readonly targetWidth: number
+  readonly entry: Entry
+}
+
+/** Keep at most this many entries (oldest evicted first). */
 const MAX_ENTRIES = 12
 
-/** The async raster cache with per-source dedupe and a global epoch fence. */
+/** The async raster cache with one global worker lane and an epoch fence. */
 export class SvgRasterLoader {
   private readonly rasterize: SvgRasterize
   private readonly entries = new Map<string, Entry>()
   private readonly listeners = new Map<string, Set<() => void>>()
+  private readonly queue: Queued[] = []
+  private active: Queued | undefined
   private epoch = 0
 
   constructor(rasterize: SvgRasterize) {
@@ -59,7 +70,7 @@ export class SvgRasterLoader {
   }
 
   /**
-   * Fire one raster request for a digest that has no state yet. The caller
+   * Queue one raster request for a digest that has no state yet. The caller
    * (the component) owns the source; the loader only stores the derivative.
    * @param digest - the admitted source digest (the cache identity).
    * @param source - the admitted SVG text.
@@ -67,29 +78,20 @@ export class SvgRasterLoader {
    */
   load(digest: string, source: string, targetWidth: number): void {
     if (this.entries.has(digest)) return
-    const controller = new AbortController()
-    const epoch = this.epoch
-    this.entries.set(digest, { state: { state: 'loading' }, controller })
+    const entry: Entry = { controller: new AbortController(), state: { state: 'loading' } }
+    this.entries.set(digest, entry)
+    this.queue.push({ digest, source, targetWidth, entry })
     this.evict()
-    this.rasterize(source, { targetWidth, signal: controller.signal }).then(result => {
-      if (epoch !== this.epoch) return
-      this.entries.set(digest, {
-        state: { state: 'ready', base64: result.base64, widthPx: result.widthPx, heightPx: result.heightPx },
-      })
-      this.notify(digest)
-    }, (error: unknown) => {
-      if (epoch !== this.epoch) return
-      this.entries.set(digest, {
-        state: { state: 'error', error: error instanceof Error ? error : new Error(String(error)) },
-      })
-      this.notify(digest)
-    })
+    this.pump()
   }
 
-  /** Drop every entry and abort in-flight children (session/theme epoch swap). */
+  /** Drop every entry and abort the active/queued children (session epoch swap). */
   clear(): void {
     this.epoch += 1
-    for (const entry of this.entries.values()) entry.controller?.abort()
+    this.active?.entry.controller.abort()
+    this.active = undefined
+    for (const item of this.queue) item.entry.controller.abort()
+    this.queue.length = 0
     this.entries.clear()
   }
 
@@ -97,6 +99,41 @@ export class SvgRasterLoader {
   dispose(): void {
     this.clear()
     this.listeners.clear()
+  }
+
+  /** Start the next queued request; the loader never runs two at once. */
+  private pump(): void {
+    if (this.active !== undefined) return
+    while (this.queue.length > 0) {
+      const next = this.queue.shift() as Queued
+      // A queued entry may have been evicted or cleared while waiting.
+      if (this.entries.get(next.digest) !== next.entry) {
+        next.entry.controller.abort()
+        continue
+      }
+      this.active = next
+      const epoch = this.epoch
+      this.rasterize(next.source, { targetWidth: next.targetWidth, signal: next.entry.controller.signal }).then((result) => {
+        this.settle(next, epoch, {
+          state: 'ready', base64: result.base64, widthPx: result.widthPx, heightPx: result.heightPx,
+        })
+      }, (error: unknown) => {
+        this.settle(next, epoch, {
+          state: 'error', error: error instanceof Error ? error : new Error(String(error)),
+        })
+      })
+      return
+    }
+  }
+
+  /** Commit only the exact request that produced this result. */
+  private settle(request: Queued, epoch: number, state: SvgRasterState): void {
+    if (this.active === request) this.active = undefined
+    if (epoch === this.epoch && this.entries.get(request.digest) === request.entry) {
+      this.entries.set(request.digest, { controller: request.entry.controller, state })
+      this.notify(request.digest)
+    }
+    this.pump()
   }
 
   private notify(digest: string): void {
@@ -108,8 +145,15 @@ export class SvgRasterLoader {
       const oldest = this.entries.keys().next().value
       if (oldest === undefined) return
       const entry = this.entries.get(oldest)
-      entry?.controller?.abort()
       this.entries.delete(oldest)
+      entry?.controller.abort()
+      if (this.active?.digest === oldest) {
+        // The active settle sees the entry-identity mismatch and drops it;
+        // pump() starts the next queued request after that abort settles.
+        continue
+      }
+      const index = this.queue.findIndex(item => item.digest === oldest)
+      if (index >= 0) this.queue.splice(index, 1)
     }
   }
 }

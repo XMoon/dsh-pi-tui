@@ -706,28 +706,38 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (message.name === 'dsh_pi_tui_svg') {
         const rowId = visualRowId(message)
         if (rowId !== undefined) {
-          const blocks = message.resultBlocks ?? (() => {
-            const parts = visualPartsFromText(message.result)
-            return parts.fact === undefined ? [] : [{ type: 'text' as const, text: visualFactLine(parts.fact) }]
-          })()
-          const authorization = authorizeSvg(message.args, blocks, admit)
-          if (authorization.state === 'text') {
-            states.set(rowId, { state: 'invalid', reason: authorization.reason })
-          } else if (!nativeImagesSupported()) {
-            states.set(rowId, { state: 'unsupported' })
+          // Success is a prerequisite for EVERY drawing sink: a block/error
+          // result never sends a blob, even if its feedback copied the valid
+          // machine line/credential from the original result.
+          if (message.status !== 'ok') {
+            states.set(rowId, { state: 'invalid', reason: 'the tool result was not successful' })
           } else {
-            let blobId = svgBlobIds.get(authorization.fact.digest)
-            if (blobId === undefined) {
-              try {
-                blobId = session.blob(Buffer.from(authorization.source, 'utf8'), 'image/svg+xml')
-              } catch (error) {
-                routeFatal(error)
-                visualProjectionAborted = true
-                return false
+            const blocks = message.resultBlocks ?? (() => {
+              const parts = visualPartsFromText(message.result)
+              return parts.fact === undefined ? [] : [{ type: 'text' as const, text: visualFactLine(parts.fact) }]
+            })()
+            const authorization = authorizeSvg(message.args, blocks, message.status, admit)
+            if (authorization.state === 'text') {
+              states.set(rowId, { state: 'invalid', reason: authorization.reason })
+            } else if (!nativeImagesSupported()) {
+              // No native image/blob capability: still publish the admitted
+              // source so a nested child can read it (the top-level card gets
+              // it from the args code block).
+              states.set(rowId, { state: 'unsupported', fact: authorization.fact, source: authorization.source })
+            } else {
+              let blobId = svgBlobIds.get(authorization.fact.digest)
+              if (blobId === undefined) {
+                try {
+                  blobId = session.blob(Buffer.from(authorization.source, 'utf8'), 'image/svg+xml')
+                } catch (error) {
+                  routeFatal(error)
+                  visualProjectionAborted = true
+                  return false
+                }
+                svgBlobIds.set(authorization.fact.digest, blobId)
               }
-              svgBlobIds.set(authorization.fact.digest, blobId)
+              states.set(rowId, { state: 'ready', blobId, fact: authorization.fact, source: authorization.source })
             }
-            states.set(rowId, { state: 'ready', blobId, fact: authorization.fact })
           }
         }
       }
