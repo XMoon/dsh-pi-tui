@@ -45,21 +45,26 @@ export interface VisualParts {
   readonly humanText: string
 }
 
-/** Split one final result's blocks into human blocks and the machine fact. */
+/**
+ * Split one final result's blocks into human blocks and the machine fact.
+ *
+ * The machine line lives in the LAST text block; every earlier block is human
+ * even when its text starts with the same prefix. This is what keeps a legal
+ * title such as `visual-v1: CPU usage` (the first human block) from being
+ * mistaken for a second machine line and invalidating the real credential.
+ */
 export function visualParts(blocks: readonly ContentBlock[]): VisualParts {
   const human: ContentBlock[] = []
   let fact: VisualFact | undefined
-  let machineSeen = false
-  for (const block of blocks) {
-    if (block.type === 'text' && block.text.startsWith(VISUAL_FACT_PREFIX)) {
-      if (machineSeen) {
-        // More than one machine line is not a fact its producer could emit;
-        // refuse to pick one rather than draw a stale/ambiguous graphic.
-        machineSeen = true
-        fact = undefined
-        continue
-      }
-      machineSeen = true
+  let lastText = -1
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (blocks[index]!.type === 'text') {
+      lastText = index
+      break
+    }
+  }
+  for (const [index, block] of blocks.entries()) {
+    if (index === lastText && block.type === 'text' && block.text.startsWith(VISUAL_FACT_PREFIX)) {
       fact = parseVisualFactLine(block.text)
       continue
     }
@@ -96,21 +101,22 @@ export function visualPartsForStatus(
  * @returns the same parts shape as {@link visualParts}.
  */
 export function visualPartsFromText(result: string): VisualParts {
+  const lines = result.split('\n')
+  let lastNonEmpty = -1
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (lines[index] !== '') {
+      lastNonEmpty = index
+      break
+    }
+  }
   let fact: VisualFact | undefined
-  let machineSeen = false
   const humanLines: string[] = []
-  for (const line of result.split('\n')) {
-    if (!line.startsWith(VISUAL_FACT_PREFIX)) {
-      humanLines.push(line)
+  for (const [index, line] of lines.entries()) {
+    if (index === lastNonEmpty && line.startsWith(VISUAL_FACT_PREFIX)) {
+      fact = parseVisualFactLine(line)
       continue
     }
-    if (machineSeen) {
-      machineSeen = true
-      fact = undefined
-      continue
-    }
-    machineSeen = true
-    fact = parseVisualFactLine(line)
+    humanLines.push(line)
   }
   const humanText = humanLines.join('\n').replace(/\n+$/u, '')
   return {

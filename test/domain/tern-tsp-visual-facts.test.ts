@@ -110,6 +110,7 @@ test('a ready SVG state emits the native image with the title alt and the descri
   const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
     state: 'ready',
     blobId: 'a'.repeat(64),
+    request: () => 'a'.repeat(64),
     fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
     source: SVG_SOURCE,
   }]])
@@ -159,7 +160,7 @@ test('a blocked/error SVG result never emits an image node even with a ready sta
   const message = svgMessage()
   const blocked: TranscriptToolMessage = { ...message, status: 'error' }
   const states = new Map<TranscriptToolMessage, ToolSvgState>([[blocked, {
-    state: 'ready', blobId: 'b'.repeat(64),
+    state: 'ready', blobId: 'b'.repeat(64), request: () => 'b'.repeat(64),
     fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
     source: SVG_SOURCE,
   }]])
@@ -176,7 +177,7 @@ test('a PTC SVG child exposes its admitted source node (not only a promise)', ()
     callId: 'call-parent', resultBlocks: [{ type: 'text', text: 'parent' }], subCalls: [child],
   }
   const states = new Map<TranscriptToolMessage, ToolSvgState>([[child, {
-    state: 'ready', blobId: 'c'.repeat(64),
+    state: 'ready', blobId: 'c'.repeat(64), request: () => 'c'.repeat(64),
     fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
     source: SVG_SOURCE,
   }]])
@@ -229,7 +230,7 @@ test('a real durable PTC dispatch folds and projects the nested SVG source/image
   assert.equal(parent.subCalls?.[0]?.name, 'dsh_pi_tui_svg')
   const child = parent.subCalls![0]!
   const states = new Map<TranscriptToolMessage, ToolSvgState>([[child, {
-    state: 'ready', blobId: 'd'.repeat(64), fact, source: SVG_SOURCE,
+    state: 'ready', blobId: 'd'.repeat(64), request: () => 'd'.repeat(64), fact, source: SVG_SOURCE,
   }]])
   const nodes = render(parent, { toolSvgStates: states })
   assert.equal(nodes.some(node => node.kind === 'image'), true)
@@ -264,4 +265,69 @@ test('a no-image PTC SVG child still exposes the admitted source text', () => {
   assert.equal(nodes.some(node => node.kind === 'image'), false)
   assert.match(JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text)), /<svg/u)
   assert.match(JSON.stringify(nodes), /Native SVG display unavailable/u)
+})
+
+
+test('a legal visual-v1: title keeps the chart credential in the TSP projection', () => {
+  const args = {
+    kind: 'bars' as const,
+    title: 'visual-v1: CPU usage',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const fact = chartFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const nodes = render(toolRow('dsh_pi_tui_chart', args, chartContentBlocks(fact)), { chartKindsSupported: true })
+  const chart = nodes.find(node => node.kind === 'chart')
+  assert.ok(chart !== undefined)
+  assert.equal(chart.props.summary, 'visual-v1: CPU usage (ms)')
+  const text = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(text, /42 ms/u)
+  assert.doesNotMatch(JSON.stringify(nodes), /visual-v1:\{"type"/u)
+})
+
+test('a legal visual-v1: title/description keeps the SVG credential in the TSP projection', () => {
+  const args = { title: 'visual-v1: topology', description: 'visual-v1: Gateway', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const message = toolRow('dsh_pi_tui_svg', args, svgContentBlocks(fact))
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    blobId: 'e'.repeat(64),
+    request: () => 'e'.repeat(64),
+    fact,
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render(message, { toolSvgStates: states })
+  const image = nodes.find(node => node.kind === 'image')
+  assert.ok(image !== undefined)
+  assert.equal(image.props.alt, 'visual-v1: topology')
+  const text = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(text, /visual-v1: Gateway/u)
+})
+
+
+test('the TSP SVG image requests its blob only when the image node is projected', () => {
+  const message = svgMessage()
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '9'.repeat(64) },
+  }]])
+  assert.equal(requests, 0, 'authorization alone must not send the blob')
+  const nodes = render(message, { toolSvgStates: states })
+  assert.equal(requests, 1)
+  const image = nodes.find(node => node.kind === 'image')
+  assert.ok(image !== undefined)
+  assert.equal(image.props.blob, '9'.repeat(64))
+  const blocked: TranscriptToolMessage = { ...message, status: 'error' }
+  const blockedStates = new Map<TranscriptToolMessage, ToolSvgState>([[blocked, {
+    state: 'ready',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+    request: () => { throw new Error('the blocked row must not request its blob') },
+  }]])
+  render(blocked, { toolSvgStates: blockedStates })
 })

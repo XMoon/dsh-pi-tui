@@ -235,6 +235,33 @@ test('svg admission: percentages and theme-paint keywords are value-bounded', ()
     assert.equal(fractional.viewportWidth, 0.5)
     assert.equal(fractional.viewportHeight, 1)
   }
+  // The missing-side intrinsic rule: a present viewBox supplies the missing
+  // root side; only a source with neither a viewBox nor a side is refused.
+  const widthOnly = '<svg xmlns="http://www.w3.org/2000/svg" width="1000" viewBox="0 0 1900 2048"><rect width="64" height="32" fill="#ff0000"/></svg>'
+  const w = admitSvg(widthOnly)
+  assert.equal(w.ok, true)
+  if (w.ok) {
+    assert.equal(w.width, 1900)
+    assert.equal(w.height, 2048)
+    assert.equal(w.viewportWidth, 1000)
+    assert.equal(w.viewportHeight, 2048)
+  }
+  const heightOnly = '<svg xmlns="http://www.w3.org/2000/svg" height="1000" viewBox="0 0 1900 2048"><rect width="64" height="32" fill="#ff0000"/></svg>'
+  const h = admitSvg(heightOnly)
+  assert.equal(h.ok, true)
+  if (h.ok) {
+    assert.equal(h.viewportWidth, 1900)
+    assert.equal(h.viewportHeight, 1000)
+  }
+  const viewBoxOnly = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1900 2048"><rect width="64" height="32" fill="#ff0000"/></svg>'
+  const vo = admitSvg(viewBoxOnly)
+  assert.equal(vo.ok, true)
+  if (vo.ok) {
+    assert.equal(vo.viewportWidth, 1900)
+    assert.equal(vo.viewportHeight, 2048)
+  }
+  const missingWithoutViewBox = '<svg xmlns="http://www.w3.org/2000/svg" width="1000"><rect width="64" height="32" fill="#ff0000"/></svg>'
+  assert.equal(admitSvg(missingWithoutViewBox).ok, false)
   // Absolute units stay in the subset (and are converted to their px bound).
   assert.equal(admitSvg(base('<rect width="100px" height="8"/>')).ok, true)
   assert.equal(admitSvg(base('<rect width="10mm" height="8"/>')).ok, true)
@@ -262,4 +289,34 @@ test('a non-successful result never authorizes an SVG drawing', () => {
     assert.equal(verdict.state, 'text')
     assert.match(verdict.state === 'text' ? verdict.reason : '', /not successful/u)
   }
+})
+
+
+test('chart: a legal title beginning with the machine prefix stays human and keeps the credential', () => {
+  const args = { ...chartArgs(), title: 'visual-v1: CPU usage' }
+  const fact = chartFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const blocks = chartContentBlocks(fact)
+  const parts = visualParts(blocks)
+  assert.equal(parts.fact?.type, 'chart')
+  assert.match(parts.humanText, /visual-v1: CPU usage/u)
+  assert.match(parts.humanText, /42 ms/u)
+  const flat = visualPartsFromText(blocks.map(block => block.type === 'text' ? block.text : '').join('\n'))
+  assert.equal(flat.fact?.type, 'chart')
+  assert.match(flat.humanText, /visual-v1: CPU usage/u)
+})
+
+test('svg: a legal title/description beginning with the prefix does not hide the credential', () => {
+  const args = { title: 'visual-v1: topology', description: 'visual-v1: Gateway', svg: SAFE_SVG }
+  const fact = svgFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const blocks = svgContentBlocks(fact)
+  const parts = visualParts(blocks)
+  assert.equal(parts.fact?.type, 'svg')
+  assert.match(parts.humanText, /visual-v1: topology/u)
+  const authorization = authorizeSvg(JSON.stringify(args), blocks, 'ok')
+  assert.equal(authorization.state, 'ready')
+  const flat = visualPartsFromText(blocks.map(block => block.type === 'text' ? block.text : '').join('\n'))
+  assert.equal(flat.fact?.type, 'svg')
+  assert.match(flat.humanText, /visual-v1: topology/u)
 })

@@ -179,7 +179,7 @@ test('the registered visual tools persist no presentation meta under every post-
         const ready: ReadonlyMap<TranscriptToolMessage, ToolSvgState> | undefined = svgFact === undefined
           ? undefined
           : new Map([[tool, {
-            state: 'ready', blobId: 'f'.repeat(64), fact: svgFact, source: CASES.svg.args.svg,
+            state: 'ready', blobId: 'f'.repeat(64), request: () => 'f'.repeat(64), fact: svgFact, source: CASES.svg.args.svg,
           }]])
         const view = transcriptView(projectTranscriptStructure([tool]), new TranscriptNodeKeys(), {
           chartKindsSupported: true,

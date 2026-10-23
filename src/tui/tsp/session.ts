@@ -690,6 +690,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * never re-sends). A fatal blob failure aborts the projection exactly like
    * the PR-C image path.
    */
+  /**
+   * PR-D display demand: send one admitted SVG through the ONE blob sender
+   * only when the projection actually needs its image node. The map is
+   * content-addressed and pruned to the current window (and cleared on a
+   * subject/scope change), so collapse/paging/backscroll/reconnect do not
+   * accumulate sends or blob ids.
+   */
+  const sendSvgBlob = (source: string, digest: string): string | undefined => {
+    if (visualProjectionAborted) return undefined
+    const known = svgBlobIds.get(digest)
+    if (known !== undefined) return known
+    try {
+      const blobId = session.blob(Buffer.from(source, 'utf8'), 'image/svg+xml')
+      svgBlobIds.set(digest, blobId)
+      return blobId
+    } catch (error) {
+      routeFatal(error)
+      visualProjectionAborted = true
+      return undefined
+    }
+  }
+
   const prepareSvgStates = (): ReadonlyMap<TranscriptToolMessage, ToolSvgState> | undefined => {
     const states = new Map<TranscriptToolMessage, ToolSvgState>()
     const admit = (source: string): SvgAdmission => {
@@ -727,18 +749,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
               // it from the args code block).
               states.set(message, { state: 'unsupported', fact: authorization.fact, source: authorization.source })
             } else {
-              let blobId = svgBlobIds.get(authorization.fact.digest)
-              if (blobId === undefined) {
-                try {
-                  blobId = session.blob(Buffer.from(authorization.source, 'utf8'), 'image/svg+xml')
-                } catch (error) {
-                  routeFatal(error)
-                  visualProjectionAborted = true
-                  return false
-                }
-                svgBlobIds.set(authorization.fact.digest, blobId)
-              }
-              states.set(message, { state: 'ready', blobId, fact: authorization.fact, source: authorization.source })
+              // Authorization only. The blob bytes are sent by the mapper's
+              // `request` when the image node is projected (display demand).
+              states.set(message, {
+                state: 'ready',
+                fact: authorization.fact,
+                source: authorization.source,
+                request: () => sendSvgBlob(authorization.source, authorization.fact.digest),
+              })
             }
           }
         }
@@ -750,6 +768,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     for (const message of lastMessages) {
       if (!visit(message)) return undefined
+    }
+    // Release blob ids whose rows left the current window; the lazy request
+    // re-sends only if such a row returns. This bounds the Send cache by the
+    // live tool-card demand, not the session lifetime.
+    const live = new Set<string>()
+    for (const state of states.values()) if (state.state === 'ready') live.add(state.fact.digest)
+    for (const digest of [...svgBlobIds.keys()]) {
+      if (!live.has(digest)) svgBlobIds.delete(digest)
     }
     return states
   }
@@ -784,6 +810,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
       toolImageStates: imageStates,
     })
+    if (visualProjectionAborted) return false
     return true
   }
 
@@ -865,6 +892,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // NEW subject gets its OWN immutable scope - sampled ONCE here, never
       // re-resolved when a read settles.
       releaseImageSubscriptions()
+      svgBlobIds.clear()
       activeImageScope = imageBinding?.imageScope()
     }
     // PR3-B B3 (§3.9): remember the projection so a settled-answer lookup can
