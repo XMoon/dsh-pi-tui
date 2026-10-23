@@ -121,6 +121,8 @@ import type { QuestionAttentionRow } from './question-controller.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { ImageLoader } from '../../client/media/image/loader.ts'
+import { SvgRasterLoader } from '../../client/media/svg/raster-loader.ts'
+import { rasterizeSvg } from '../../client/media/svg/rasterize.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
 import type { StatusPatch } from '../../domain/status/types.ts'
@@ -784,6 +786,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const status = new StatusStore(initialStatusSnapshot(options.tuiVersion))
   const openingJournal = createOpeningJournal<Event>()
   let app: TuiApp | undefined
+  /** PR-D: the PiTui branch's Client-local SVG raster cache (created in `start()`). */
+  let svgRasterLoader: SvgRasterLoader | undefined
   /**
    * PR3-A: the renderer-facing display seam. On the PiTui path this is the
    * pitui adapter over the mounted app (assigned in `start()`); a non-PiTui
@@ -1678,7 +1682,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     resetSearchPresentation({ rebuild: false })
   }
 
-  const buildOptions = (deps: SurfaceMountDeps, imageLoader: ImageLoader): TuiAppOptions => ({
+  const buildOptions = (deps: SurfaceMountDeps, imageLoader: ImageLoader, svgRasterLoader: SvgRasterLoader): TuiAppOptions => ({
     // Ctrl+R input-history search: the runner owns the IO (the file-backed
     // source + the known-cwd identity map), the surface owns the panel
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
@@ -1693,6 +1697,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // mount (constructed in `start()`), so the PiTui branch and the renderer
     // branch share one cache and one read authority.
     imageLoader,
+    svgRasterLoader,
     imageScope: deps.imageScope,
     imageTheme: { fallbackColor: deps.imageFallbackColor },
     present: deps.present,
@@ -1938,6 +1943,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // binding, so there is never a second loader, a second cache or a
       // second read authority in the application process.
       const imageLoader = new ImageLoader((ref, context) => deps.readImage(ref, context))
+      // PR-D: the Client-local SVG raster cache of THIS mount. It is created
+      // at the same single acquire point; TSP has its own native-SVG blob
+      // path and never uses this PiTui-only derivative.
+      const rasterLoader = new SvgRasterLoader(rasterizeSvg)
+      svgRasterLoader = rasterLoader
       // PR3-A: the composition root already connected a non-PiTui renderer
       // (the experimental TSP mount). Mount it at the SAME position; no
       // TuiApp exists on this branch, so every PiTui-only owner below simply
@@ -2004,7 +2014,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // acquisition already asserts the final state, instead of writing idle
       // and being corrected one write later (an idle -> working flash).
       app = startProcessTui(events, {
-        ...buildOptions(deps, imageLoader),
+        ...buildOptions(deps, imageLoader, rasterLoader),
         initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
@@ -2082,6 +2092,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // user cancellation.
         () => interaction.dispose(),
         () => app?.dispose(),
+        // PR-D: abort in-flight SVG raster children and drop the display
+        // derivative cache after the app has stopped painting.
+        () => svgRasterLoader?.dispose(),
         // PR3-B B3 (§3.3.3): the renderer/SDK release STARTS here — after the
         // interaction owner's synchronous logical cancellation (every queued and
         // active modal promise is settled) and after the PiTui app's own

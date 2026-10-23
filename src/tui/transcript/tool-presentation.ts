@@ -84,6 +84,10 @@ const TOOL_TITLES: Record<string, string> = {
   // The skill loader's human title (its presentCall says `Load skill
   // <name>`; the fallback must say the same — plan §7.3/§9.2).
   skill: 'Load skill',
+  // PR-D's resident visual tools: the header names the shape, the title
+  // argument is the row's summary (never the chart kind or the raw JSON).
+  dsh_pi_tui_chart: 'Chart',
+  dsh_pi_tui_svg: 'SVG',
 }
 
 /**
@@ -745,6 +749,13 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     // reads `Load skill · <name>` — plan §7.3).
     const skillName = args.name
     return typeof skillName === 'string' && skillName !== '' ? firstLine(skillName) : undefined
+  }
+  if (name === 'dsh_pi_tui_chart' || name === 'dsh_pi_tui_svg') {
+    // PR-D: the supplied figure title is the row's identity. Falling through
+    // to the generic first-string rule would show the chart `kind` (or an
+    // arbitrary JSON key order) instead.
+    const title = args.title
+    return typeof title === 'string' && title !== '' ? firstLine(title) : undefined
   }
   if (name !== 'todo_write') return undefined
   const todos = args.todos

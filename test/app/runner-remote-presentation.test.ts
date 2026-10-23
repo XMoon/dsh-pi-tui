@@ -231,6 +231,8 @@ export async function mountRemoteRunner(
     renderer?: 'pi-tui' | 'tsp'
     /** Advertise native image + blobs when the TSP renderer is selected. */
     nativeImages?: boolean
+    /** Advertise the native chart kind when the TSP renderer is selected. */
+    nativeChart?: boolean
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -257,7 +259,7 @@ export async function mountRemoteRunner(
   const vt = new VirtualTerminal(100, 30)
   let pane: TspPane | undefined
   if (options.renderer === 'tsp') {
-    pane = installTspPane({ nativeImages: options.nativeImages })
+    pane = installTspPane({ nativeImages: options.nativeImages, nativeChart: options.nativeChart })
     life.defer(() => pane?.restore())
     process.env.DSH_PI_TUI_RENDERER = 'tsp'
   } else {

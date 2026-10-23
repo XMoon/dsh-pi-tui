@@ -70,6 +70,7 @@ teardown → seat.dispose → retire presentational panels
 | Durable DSH events, model/preset business writes, submission | Existing DSH/Host/Client commands and application submission controller | TSP UI state, selected row, preview, cached catalog |
 | Transcript grouping, fold/window/currentness | Existing `TranscriptFolder`, `TranscriptWindowController`, `SurfaceRuntime` projection | A second TSP transcript state machine |
 | Tool-result image content and bytes | The result's own structured content blocks, plus the existing attachment read port under the existing immutable display-subject scope | The flat result text, the tool name, the args, a path, a URL, or a second attachment cache |
+| Visual tool result (chart/SVG) | The FINAL `tool/result` content (versioned machine line/credential) plus the durable `tool/call.arguments` for an SVG source; TSP blobs and PiTui PNGs are Client-local derivatives | `presentationMeta`, a renderer-created fact, a cached blob, or reconstructing an unadmitted source |
 | TSP connection and terminal input lifecycle | Composition bootstrap + mounted renderer + pinned SDK | A second direct stdin reader or ad-hoc wire pump |
 | Surface regions and emitted node projection | `src/tui/tsp/session.ts` (one `surface.render`) | Independently mounted competing renderers |
 | Modal seat/keyboard precedence | `src/tui/tsp/session.ts` + `interaction.ts` and its application owner | `modal:true` as an automatic JavaScript keyboard handler |
@@ -252,6 +253,43 @@ oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect. See
 [the real-pane harness guide](../guides/tern-pane-testing.md) and
 [the real-GUI guide](../guides/tern-gui-testing.md) for the run preconditions
 and the evidence rules.
+
+### Visual tool results (chart and SVG)
+
+Two resident Host tools, `dsh_pi_tui_chart` and `dsh_pi_tui_svg`, project
+inside the same existing tool card. Their durable result carries NO
+`presentationMeta`: the FINAL `tool/result` content is the only admission source
+for a drawing.
+
+- A chart result carries one versioned machine line in its own text block
+  (`visual-v1:{"type":"chart",…}`) plus the readable value rows. The TSP mapper
+  emits `ui.chart` only when the pane negotiated the `chart` kind; every other
+  pane receives the same exact values as text. The bar glyphs are width-aware
+  decoration; the label and exact value are never truncated away.
+- An SVG result carries a short credential line (title, description, source
+  digest and byte count). The SVG source itself remains the model-authored
+  `tool/call.arguments`; no SVG bytes are copied into the result. A renderer
+  draws the source only when the final content still carries a well-formed
+  credential whose digest and byte count match those durable arguments AND the
+  bounded admission gate accepts the source. A content-only policy replacement
+  removes the credential and therefore the drawing; a value replacement whose
+  credential no longer matches degrades to text.
+- The admission gate is a strict, value-level whitelist over a streaming XML
+  parser: static shapes, paths, text, gradients, masks and local fragment
+  references are admitted; scripts, `foreignObject`, CSS/`<style>`,
+  animation, DOCTYPE/entities, external or file references, theme-dependent
+  paint and out-of-budget geometry are refused. The product source budget is
+  128 KiB, below the client's own ~256 KiB native-SVG gate.
+- TSP native SVG uses the same `session.blob()` sender as the image path, with
+  `image/svg+xml`; PiTui derives a short-lived PNG in an isolated child process
+  and mounts the existing image component/budget. Neither derivative is a
+  durable fact: cold replay, search and Markdown export read the final result
+  content and the durable call arguments, never a blob id, a PNG or a cache.
+- The two tool definitions are Host-plane registrations (explicit `inject` +
+  `ctx.reflect.get`) independent of the renderer, Tern hello, client capability,
+  session or resize. Direct and Remote consume the same durable facts; a
+  missing `chart`/`image`/`blobs` capability changes only the presentation, not
+  the tool catalogue or the result.
 
 ## 6. Evidence tiers and qualification
 

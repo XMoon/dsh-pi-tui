@@ -27,6 +27,10 @@ export default defineConfig({
     './src/extension/advanced.ts',
     './src/extension/unstable.ts',
     { 'performance-host': './src/app/host/performance-host.ts' },
+    // PR-D: the Host-plane visual tool row. Nested source module + flat dist
+    // entry, exactly the performance-host precedent; the root ledger stays
+    // closed at seven stable entries.
+    { 'visual-tools': './src/app/host/visual-tools.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',

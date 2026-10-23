@@ -39,6 +39,9 @@ import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import { toolTargetFactsOf, toolTargetKind } from '../transcript/tool-target-semantics.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { chartProjection, chartValueRows, type ChartFact } from '../../domain/visual/chart.ts'
+import { svgDetailRows, type SvgFact } from '../../domain/visual/svg.ts'
+import { visualParts, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
 
 /**
  * One replay-local allocator of presentation keys, scoped to a single
@@ -117,6 +120,34 @@ export interface TranscriptViewOptions {
    * image block renders its identity line and no native image.
    */
   readonly toolImageStates?: ReadonlyMap<string, ToolImageState>
+  /**
+   * PR-D: whether the current pane actually negotiated the native `chart`
+   * kind. The Host tool is registered regardless; this flag is the CLIENT
+   * renderer's admission decision. Without it the chart renders its exact
+   * text rows only (never a native chart node).
+   */
+  readonly chartKindsSupported?: boolean
+  /**
+   * PR-D: the per-row SVG authorization/blob state prepared by the TSP
+   * session layer (the only owner of the admission gate and the blob sender).
+   * Keyed by {@link visualRowId}; absent means no native SVG state was
+   * prepared (the row keeps its readable text).
+   */
+  readonly toolSvgStates?: ReadonlyMap<string, ToolSvgState>
+}
+
+/** PR-D: one SVG row's prepared display state. */
+export type ToolSvgState =
+  /** The pane carries `image` + `blobs` and the source was admitted. */
+  | { readonly state: 'ready'; readonly blobId: string; readonly fact: SvgFact }
+  /** The pane negotiated no native image/blob capability. */
+  | { readonly state: 'unsupported' }
+  /** The final content did not authorize a drawing (or admission refused it). */
+  | { readonly state: 'invalid'; readonly reason: string }
+
+/** PR-D: the row identity the SVG state map uses (durable call/sub-call id). */
+export function visualRowId(message: TranscriptToolMessage): string | undefined {
+  return message.subCallId ?? message.callId
 }
 
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
@@ -360,6 +391,71 @@ function imageResultNodes(
 }
 
 /**
+ * PR-D: the chart row's result segment. The FINAL durable content is the
+ * admission source: a valid chart machine line draws as a native chart only
+ * when the pane negotiated the `chart` kind, and the exact values stay a
+ * `ui.code` row in every renderer. A malformed/missing line falls back to the
+ * human blocks (the machine line is never displayed).
+ */
+function chartResultNodes(
+  message: TranscriptToolMessage,
+  options: TranscriptViewOptions,
+  wrap: boolean,
+  flatText: string,
+): Node[] {
+  const parts = message.resultBlocks === undefined ? visualPartsFromText(flatText) : visualParts(message.resultBlocks)
+  const fact: ChartFact | undefined = parts.fact?.type === 'chart' ? parts.fact : undefined
+  if (fact === undefined) {
+    const text = parts.humanText === '' ? flatText : parts.humanText
+    return text === '' ? [] : [ui.code({ key: 'result', text: sanitizeDisplayText(text), ...(wrap ? { wrap: true } : {}) })]
+  }
+  const nodes: Node[] = []
+  if (options.chartKindsSupported === true) {
+    const projection = chartProjection(fact)
+    nodes.push(ui.chart({
+      key: 'result-chart',
+      kind: projection.kind,
+      summary: sanitizeDisplayText(projection.summary),
+      series: projection.series,
+    }))
+  }
+  nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(chartValueRows(fact).join('\n')), ...(wrap ? { wrap: true } : {}) }))
+  return nodes
+}
+
+/**
+ * PR-D: the SVG row's result segment. The readable description is ALWAYS
+ * drawn; the native image node appears only for a prepared `ready` state
+ * (credential matches the durable call args, admission accepted, `image` +
+ * `blobs` negotiated). The SVG source itself is the card's args row.
+ */
+function svgResultNodes(
+  message: TranscriptToolMessage,
+  options: TranscriptViewOptions,
+  wrap: boolean,
+  flatText: string,
+): Node[] {
+  const parts = message.resultBlocks === undefined ? visualPartsFromText(flatText) : visualParts(message.resultBlocks)
+  const fact: SvgFact | undefined = parts.fact?.type === 'svg' ? parts.fact : undefined
+  const detail = fact === undefined
+    ? (parts.humanText === '' ? flatText : parts.humanText)
+    : svgDetailRows(fact).join('\n')
+  const nodes: Node[] = detail === ''
+    ? []
+    : [ui.code({ key: 'result', text: sanitizeDisplayText(detail), ...(wrap ? { wrap: true } : {}) })]
+  const rowId = visualRowId(message)
+  const state = rowId === undefined ? undefined : options.toolSvgStates?.get(rowId)
+  if (state?.state === 'ready') {
+    nodes.push(ui.image({ key: 'result-svg', blob: state.blobId, alt: sanitizedPhysicalLine(state.fact.title) }))
+  } else if (state?.state === 'unsupported') {
+    nodes.push(ui.text({ key: 'result-svg-status', text: 'Native SVG display unavailable in this Tern pane' }))
+  } else if (state?.state === 'invalid') {
+    nodes.push(ui.text({ key: 'result-svg-status', text: sanitizeDisplayText(`Drawing unavailable — ${state.reason}`) }))
+  }
+  return nodes
+}
+
+/**
  * PR-C: the result segment of one tool row.
  *
  * A row WITHOUT an image block keeps its EXACT previous shape: ONE `ui.code`
@@ -378,6 +474,8 @@ function toolResultNodes(
   wrap: boolean,
   flatText: string,
 ): Node[] {
+  if (message.name === 'dsh_pi_tui_chart') return chartResultNodes(message, options, wrap, flatText)
+  if (message.name === 'dsh_pi_tui_svg') return svgResultNodes(message, options, wrap, flatText)
   if (toolRowProjectsImages(message)) {
     return imageResultNodes(message.resultBlocks ?? [], options, wrap)
   }

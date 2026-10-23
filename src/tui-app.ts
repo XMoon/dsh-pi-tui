@@ -222,6 +222,12 @@ import {
 } from './tui/transcript/tool-presentation.ts'
 import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
+import { ChartBody } from './tui/components/transcript/chart-body.ts'
+import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
+import { visualParts } from './domain/visual/visual-facts.ts'
+import { chartTextRows } from './domain/visual/chart.ts'
+import { authorizeSvg, svgDetailRows } from './domain/visual/svg.ts'
+import type { SvgRasterLoader } from './client/media/svg/raster-loader.ts'
 import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
 import { HistoryPanel } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
@@ -1828,6 +1834,12 @@ export interface TuiAppOptions {
   draftImageStoreForTest?: import('./client/media/image/draft-store.ts').DraftImageStore
   imageTheme?: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme
   /**
+   * PR-D: the Client-local SVG raster cache. Wired by the mount composition
+   * (the same place the durable image loader is created); absent, an admitted
+   * SVG still shows its description and source path, with no inline raster.
+   */
+  svgRasterLoader?: SvgRasterLoader
+  /**
    * The presentation scope the transcript being built belongs to (M3-5 PR2
    * review, P1). The SURFACE supplies it; the renderer samples it ONCE per
    * `ImageThumbnail` construction and the component keeps that value for its whole
@@ -3401,6 +3413,8 @@ export class TuiApp {
   private readonly editorSeatHolder: EditorSeatHolder
   /** The durable-image loader (plan M8): optional, wired by the runner. */
   private readonly imageLoader: import('./client/media/image/loader.ts').ImageLoader | undefined
+  /** PR-D: the Client-local SVG raster cache (optional; text fallback without it). */
+  private readonly svgRasterLoader: SvgRasterLoader | undefined
   /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
   readonly draftImageStoreForTest: import('./client/media/image/draft-store.ts').DraftImageStore | undefined
   /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
@@ -4204,6 +4218,7 @@ export class TuiApp {
     this.imageScope = options.imageScope
     this.draftImageStoreForTest = options.draftImageStoreForTest
     this.imageTheme = options.imageTheme
+    this.svgRasterLoader = options.svgRasterLoader
     this.historySearchSource = options.historySearchSource
     // Keep the GETTER: the cwd must be resolved at panel-open time (a
     // session switch changes `sessionCwd()` — see the field doc).
@@ -17576,7 +17591,12 @@ export class TuiApp {
         card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizedPhysicalLine(command))}`, width, '…'), 0, 0))
         rows += 1
       }
-      if (child.result !== '') {
+      if (child.name === 'dsh_pi_tui_chart' || child.name === 'dsh_pi_tui_svg') {
+        const resultStart = row + rows
+        const rendered = this.renderVisualChildBody(card, child, width, indent, bodyExpanded)
+        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + rendered, enumerable: false })
+        rows += rendered
+      } else if (child.result !== '') {
         const resultStart = row + rows
         // A captured terminal sub-call stdout keeps whitelisted SGR; every
         // other external result is plain. The projected line count is the
@@ -17933,6 +17953,112 @@ export class TuiApp {
   }
 
   /**
+   * Render one PR-D visual tool's expanded body from the FINAL durable
+   * content. The machine line is never shown: the chart body is the numeric
+   * projection, while the SVG body always keeps the readable description and —
+   * only when the credential matches the call source and the admission gate
+   * accepts it — adds the inline raster. An explicit expansion also shows the
+   * admitted source (the ordinary long-source reading path; no new modal).
+   * @param card - the card container to fill.
+   * @param message - the visual tool row.
+   * @param explicitlyExpanded - whether the user expanded this card by hand.
+   */
+  private renderVisualToolBody(
+    card: Container,
+    message: Extract<TranscriptMessage, { kind: 'tool' }>,
+    explicitlyExpanded: boolean,
+  ): void {
+    const blocks = message.resultBlocks ?? [{ type: 'text' as const, text: message.result }]
+    const parts = visualParts(blocks)
+    const paint = message.status === 'error' ? color.error : color.textDim
+    if (message.name === 'dsh_pi_tui_chart') {
+      if (parts.fact?.type === 'chart') {
+        card.addChild(new ChartBody(parts.fact, paint))
+        return
+      }
+      const text = parts.humanText === '' ? message.result : parts.humanText
+      if (text !== '') {
+        for (const line of text.split('\n')) card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
+      }
+      return
+    }
+    // SVG: the readable description is ALWAYS visible; the drawing is an
+    // enhancement authorized by the final content and the durable call source.
+    const authorization = authorizeSvg(message.args, blocks)
+    const detailRows = authorization.state === 'ready'
+      ? svgDetailRows(authorization.fact)
+      : parts.humanText === '' ? message.result.split('\n') : parts.humanText.split('\n')
+    for (const line of detailRows) {
+      if (line !== '') card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
+    }
+    if (authorization.state === 'text') {
+      card.addChild(new Text(color.textMuted(sanitizeDisplayText(`  Drawing unavailable — ${authorization.reason}`)), 0, 0))
+      return
+    }
+    if (this.svgRasterLoader !== undefined && this.imageTheme !== undefined) {
+      card.addChild(new SvgThumbnail(
+        authorization.fact.digest,
+        authorization.source,
+        authorization.admission.width,
+        this.svgRasterLoader,
+        this.imageTheme,
+        () => this.settleThumbnailRender(),
+      ))
+    }
+    if (explicitlyExpanded) {
+      card.addChild(new Text(color.textMuted('  SVG source'), 0, 0))
+      card.addChild(new CompactTextPreview(sanitizeDisplayText(authorization.source), 4000, '  ', true))
+    }
+  }
+
+  /**
+   * Render one PTC child's visual body as width-aware text rows. The child
+   * card keeps its own nested identity; it never borrows the parent's result.
+   * A chart child shows the same exact values/bars; an SVG child shows the
+   * description and, when expanded, the admitted source. The rows returned
+   * are the component's own wrapped row count, so the search geometry stays
+   * aligned with the painted card.
+   */
+  private renderVisualChildBody(
+    card: Container,
+    child: Extract<TranscriptMessage, { kind: 'tool' }>,
+    width: number,
+    indent: number,
+    expanded: boolean,
+  ): number {
+    const blocks = child.resultBlocks ?? [{ type: 'text' as const, text: child.result }]
+    const parts = visualParts(blocks)
+    const lines: string[] = []
+    if (child.name === 'dsh_pi_tui_chart') {
+      if (parts.fact?.type === 'chart') {
+        lines.push(...chartTextRows(parts.fact, Math.max(1, width - indent - 2)))
+      } else {
+        lines.push(...(parts.humanText === '' ? child.result : parts.humanText).split('\n'))
+      }
+    } else {
+      const authorization = authorizeSvg(child.args, blocks)
+      if (authorization.state === 'ready') {
+        lines.push(...svgDetailRows(authorization.fact))
+        if (expanded) lines.push('SVG source', ...authorization.source.split('\n'))
+      } else {
+        lines.push(...(parts.humanText === '' ? child.result : parts.humanText).split('\n'))
+        lines.push(`Drawing unavailable — ${authorization.reason}`)
+      }
+    }
+    const text = lines.filter(line => line !== '').join('\n')
+    if (text === '') return 0
+    const preview = new CompactTextPreview({
+      text,
+      maxVisualRows: Number.MAX_SAFE_INTEGER,
+      indent: ' '.repeat(indent + 2),
+      preserveBlankLines: true,
+    })
+    const rendered = preview.render(width).length
+    card.addChild(preview)
+    return rendered
+  }
+
+  /**
    * Render one expanded tool card's body. When the runner wired a presenter,
    * the body follows the tool's own render intent (presentResult): a read
    * card shows numbered lines plus the relativized path and total line
@@ -18267,6 +18393,13 @@ export class TuiApp {
       }
     }
     if (emptyResult) return
+    // PR-D visual tools: the FINAL durable content is the admission source.
+    // The chart draws from its machine line; the SVG draws only when the
+    // credential matches the call source and the source passes admission.
+    if (message.name === 'dsh_pi_tui_chart' || message.name === 'dsh_pi_tui_svg') {
+      this.renderVisualToolBody(card, message, explicitlyExpanded)
+      return
+    }
     // Generic fallback: the raw result text dimmed (diffs keep their own
     // + / − colors, which already distinguish them from assistant output).
     // A read card without a presenter still renders its envelope as numbered
