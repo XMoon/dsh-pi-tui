@@ -145,31 +145,59 @@ export const ABOUT_NO_ACTIVE_SESSION = 'No active session'
  * the remaining C0/C1 controls; ordinary Unicode passes through untouched.
  */
 function copySafe(value: string): string {
-  if (!/[\u001b\u009b\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0090-\u009f]/.test(value)) return value
+  // Fast path: any C0 control except the intentionally preserved TAB/LF/CR,
+  // DEL, or ANY C1 control (0x80–0x9F) needs the scanner.
+  if (!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) return value
   let out = ''
   let at = 0
-  while (at < value.length) {
-    const code = value.charCodeAt(at)
-    if (code === 0x1b || code === 0x9b) {
+  const length = value.length
+
+  /** Drop one CSI sequence whose parameter/final bytes start at `at`. */
+  const consumeCsi = (): void => {
+    while (at < length) {
+      const code = value.charCodeAt(at)
       at += 1
-      // Drop the whole introduced sequence: CSI (… final-byte) or a string
-      // sequence terminated by BEL/ST; an unterminated tail drops to the end.
-      const char = value[at]
-      if (char === '[') {
-        at += 1
-        while (at < value.length && !(value.charCodeAt(at) >= 0x40 && value.charCodeAt(at) <= 0x7e)) at += 1
-        at += 1
-      } else if (char === ']' || char === 'P' || char === 'X' || char === '^' || char === '_') {
-        at += 1
-        while (at < value.length) {
-          if (value.charCodeAt(at) === 0x07) { at += 1; break }
-          if (value.charCodeAt(at) === 0x1b && value[at + 1] === '\\') { at += 2; break }
-          at += 1
-        }
-      }
+      // Final byte of a CSI sequence.
+      if (code >= 0x40 && code <= 0x7e) return
+    }
+  }
+
+  /** Drop one OSC/DCS/SOS/PM/APC string sequence whose content starts at `at`.
+   *  ST is ESC `\` or the C1 ST (0x9C); OSC additionally ends on BEL. An
+   *  unterminated sequence drops to the end. */
+  const consumeString = (allowBel: boolean): void => {
+    while (at < length) {
+      const code = value.charCodeAt(at)
+      if (allowBel && code === 0x07) { at += 1; return }
+      if (code === 0x9c) { at += 1; return }
+      if (code === 0x1b && value.charCodeAt(at + 1) === 0x5c) { at += 2; return }
+      at += 1
+    }
+  }
+
+  while (at < length) {
+    const code = value.charCodeAt(at)
+    if (code === 0x1b) {
+      // ESC introducer: CSI, OSC, DCS, SOS, PM or APC consumes its whole
+      // sequence; any other ESC pair is a two-byte escape and drops both.
+      const next = value.charCodeAt(at + 1)
+      at += 2
+      if (next === 0x5b) consumeCsi()
+      else if (next === 0x5d) consumeString(true)
+      else if (next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) consumeString(false)
       continue
     }
-    if ((code <= 0x08) || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || code === 0x7f || (code >= 0x90 && code <= 0x9f)) {
+    // The C1 introducers are the exact equivalents of the ESC forms above.
+    if (code === 0x9b) { at += 1; consumeCsi(); continue }
+    if (code === 0x9d) { at += 1; consumeString(true); continue }
+    if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+      at += 1
+      consumeString(false)
+      continue
+    }
+    // Remaining C0/C1 controls (including the standalone 0x80–0x8F range and
+    // the C1 ST) are dropped; TAB/LF/CR and ordinary Unicode pass through.
+    if ((code <= 0x08) || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
       at += 1
       continue
     }

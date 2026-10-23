@@ -321,3 +321,31 @@ test('the copy control guard applies to the sessionless and loading branches too
     assert.ok(!row.copyValue.includes('\u001b'), `${row.id} sessionless copy value is control-safe`)
   }
 })
+
+test('C1 controls and C1-introduced sequences are dropped whole while ordinary suffixes survive', () => {
+  const cases: readonly [string, string][] = [
+    ['title\u0084\u0085\u0088\u008d', 'title'],
+    ['pre\u009d52;c;secret\u0007-post', 'pre-post'],
+    ['pre\u009b31m-post', 'pre-post'],
+    ['pre\u001b]0;secret\u009c-post', 'pre-post'],
+    ['pre\u0090secret\u009c-post', 'pre-post'],
+    ['pre\u0098sos\u009c-post', 'pre-post'],
+    ['pre\u009epm\u009c-post', 'pre-post'],
+    ['pre\u009fapc\u009c-post', 'pre-post'],
+    ['pre\u009b31m', 'pre'],
+    ['pre\u009d0;x', 'pre'],
+  ]
+  for (const [title, expected] of cases) {
+    const view = readyView({ title })
+    const row = aboutFactRows(view).find(candidate => candidate.id === 'session.title')!
+    assert.equal(row.copyValue, expected, `single-field copy sanitizes ${JSON.stringify(title)}`)
+    const reportTitle = serializeAboutStatus(view).split('\n').find(line => line.startsWith('Title:'))!
+    assert.equal(reportTitle, `Title: ${expected}`, `Copy All sanitizes ${JSON.stringify(title)}`)
+  }
+  // The whole standalone 0x80–0x8F C1 range (IND/NEL/HTS/RI and peers) drops.
+  let c1 = ''
+  for (let code = 0x80; code <= 0x8f; code += 1) c1 += String.fromCharCode(code)
+  const standalone = aboutFactRows(readyView({ title: `pre${c1}-post` }))
+    .find(candidate => candidate.id === 'session.title')!
+  assert.equal(standalone.copyValue, 'pre-post', 'the 0x80–0x8F C1 range is dropped')
+})
