@@ -31,7 +31,7 @@ import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
-import type { TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+import type { CredentialProviderOption, TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import {
@@ -81,6 +81,9 @@ interface HarnessOptions {
   themes?: ThemeRegistry
   /** The live clipboard strategy; a promise lets a case hold the settlement. */
   copySelection?: (text: string) => Promise<boolean>
+  /** Real provider options the Models page reads. Supplying them enables the
+   *  direct page (an unavailable Host paints no provider catalog). */
+  providerOptions?: readonly CredentialProviderOption[]
   /**
    * The real persistence behavior of the document. The default is the Direct
    * Host round-trip (the effective document really becomes the replacement);
@@ -276,15 +279,15 @@ function setup(options: HarnessOptions = {}): Harness {
       web: { available: () => false },
       // The credential STORE is not mounted either: the Web section's key row
       // reports unavailable instead of claiming "not configured".
-      credentials: { available: () => false, recordsSupported: () => false },
+      credentials: { available: () => options.providerOptions !== undefined, recordsSupported: () => false },
       // The Models/Account direct pages are REAL pages: the category rail
       // mounts the selected one (Phase 3C / C2-A), so these Host seams must
       // answer the calls a page makes while it is on screen. They report an
       // empty, unavailable Host — no provider, no record, no account.
       providers: {
-        available: () => false,
-        listCredentialOptions: () => [],
-        readCatalog: () => ({ options: [], profiles: [] }),
+        available: () => options.providerOptions !== undefined,
+        listCredentialOptions: () => options.providerOptions ?? [],
+        readCatalog: () => ({ options: options.providerOptions ?? [], profiles: [] }),
         readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] }),
         configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
         writeProfile: async () => {},
@@ -459,7 +462,7 @@ test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome ow
   assert.ok(rows[0]?.startsWith('Settings'), `the Settings header owns row 0:\n${h.view()}`)
   assert.match(rows[0]!, /Settings · Categories/, 'every width opens on the L0 categories level')
   assert.ok(!h.view().includes('❯'), `no editor/transcript row may render behind the workspace:\n${h.view()}`)
-  assert.match(rows.at(-1) ?? '', /Right open · Enter open · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
+  assert.match(rows.at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
   assert.match(h.view(), /Rows \(2\)/, 'the row list column is part of the workspace body')
   h.dispose()
 })
@@ -1224,7 +1227,7 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 200, `row ${index} must fit the terminal`)
   }
-  assert.match(h.rowsPlain().at(-1) ?? '', /Right open · Enter open · Esc close/, 'the Action Bar stays the last physical row')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Action Bar stays the last physical row')
   await key(h, '\r') // L0 -> L1 (the row list owns the keyboard)
   await key(h, '\r') // L1 -> inline choice
   assert.ok(h.view().includes('Full value'), 'the complete long value starts in the facts region')
@@ -1411,21 +1414,48 @@ test('a viewport shrink reveals the selected row instead of hiding it', async ()
 
 // ── F1 sibling: the retired Tab cycle and header arrows ───────────────────
 
-test('Left/Right navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
+test('Left/Right select levels while Tab/Shift+Tab only re-focus the panes', async () => {
   for (const columns of [200, 100, 72] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' } })
     await h.open()
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/, `the category level opens at ${columns}`)
     assert.ok(!h.view().includes('←'), 'the header paints no category arrows')
-    const l0 = h.view()
-    for (const data of ['\t', '\x1b[Z']) await key(h, data)
-    assert.equal(h.view(), l0, 'Tab/Shift+Tab remain inert on L0')
+    if (columns < 76) {
+      const l0 = h.view()
+      for (const data of ['\t', '\x1b[Z']) await key(h, data)
+      assert.equal(h.view(), l0, 'Tab/Shift+Tab are inert on the narrow L0')
+    } else {
+      // Forward Tab focuses Rows; Shift+Tab from the rail wraps to the Detail
+      // pane. Neither jump opens the writable choice.
+      await key(h, '\t')
+      assert.match(h.rowsPlain()[0]!, /· Rows/, `Tab focuses Rows at ${columns}`)
+      await key(h, '\t')
+      assert.match(h.rowsPlain()[0]!, /Configured theme/, `Tab focuses Detail at ${columns}`)
+      assert.ok(!h.view().includes('Choose value'), 'focusing Detail never opens a choice')
+      await key(h, '\t')
+      assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'Tab wraps back to the rail')
+      await key(h, '\x1b[Z')
+      assert.match(h.rowsPlain()[0]!, /Configured theme/, 'Shift+Tab wraps to Detail')
+      assert.ok(!h.view().includes('Choose value'), 'the reverse jump never opens a choice')
+      await key(h, '\x1b[Z')
+      assert.match(h.rowsPlain()[0]!, /· Rows/, 'Shift+Tab returns to Rows')
+      await key(h, '\x1b[Z')
+      assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'Shift+Tab returns to the rail')
+    }
 
     await key(h, '\x1b[C') // Right: L0 -> L1
     assert.match(h.rowsPlain()[0]!, /· Rows/, `Right enters the row level at ${columns}`)
-    const l1 = h.view()
-    for (const data of ['\t', '\x1b[Z']) await key(h, data)
-    assert.equal(h.view(), l1, 'Tab/Shift+Tab remain inert on L1')
+    if (columns < 76) {
+      const l1 = h.view()
+      for (const data of ['\t', '\x1b[Z']) await key(h, data)
+      assert.equal(h.view(), l1, 'Tab/Shift+Tab are inert on the narrow L1')
+    } else {
+      await key(h, '\t')
+      assert.match(h.rowsPlain()[0]!, /Configured theme/, 'Tab re-focuses the Detail pane on L1')
+      assert.ok(!h.view().includes('Choose value'), 'Tab never opens the L1 choice')
+      await key(h, '\x1b[Z') // Detail -> Rows
+      assert.match(h.rowsPlain()[0]!, /· Rows/, 'Shift+Tab returns to the Rows pane')
+    }
 
     await key(h, '\x1b[C') // Right: L1 -> inline L2 choice
     assert.match(h.view(), /Choose value/, `Right enters the one-step inline choice at ${columns}`)
@@ -1558,10 +1588,11 @@ test('narrow Left/Right enter exactly one level and never skip directly from Cat
 
   const medium = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
   await medium.open()
-  const mediumBefore = medium.view()
-  for (const data of ['\t', '\x1b[Z']) await key(medium, data)
-  assert.equal(medium.view(), mediumBefore, 'Tab/Shift+Tab do not cycle a focus owner in medium')
   assert.ok(!medium.view().includes('←'), 'the medium header paints no category arrows')
+  await key(medium, '\t')
+  assert.match(medium.rowsPlain()[0]!, /· Rows/, 'Tab focuses the Rows pane in medium')
+  await key(medium, '\x1b[Z')
+  assert.match(medium.rowsPlain()[0]!, /Settings · Categories/, 'Shift+Tab returns to the rail')
   await key(medium, '\x1b[C')
   assert.match(medium.rowsPlain()[0]!, /· Rows/, 'Right enters L1 without changing the category')
   medium.dispose()
@@ -1845,9 +1876,10 @@ test('the arrow hierarchy never leaks keys into the hidden editor', async () => 
   await h.vt.waitForRender()
   for (const ch of 'draft') await key(h, ch)
   await h.open()
-  const before = h.view()
-  for (const data of ['\t', '\x1b[Z']) await key(h, data)
-  assert.equal(h.view(), before, 'Tab/Shift+Tab remain inert inside the workspace')
+  await key(h, '\t') // categories -> rows
+  assert.match(h.rowsPlain()[0]!, /· Rows/)
+  await key(h, '\x1b[Z') // rows -> categories
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
   await key(h, '\x1b[C') // Right: L0 -> L1
   assert.match(h.rowsPlain()[0]!, /· Rows/)
   await key(h, '\x1b[D') // Left: L1 -> L0
@@ -3360,7 +3392,9 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
       // regression that blanks the body while leaving the chrome in place fails.
       const categoryBar = columns < 60
         ? 'Right open · Enter open · Esc close'
-        : 'Up/Down select · Right open · Enter open · Esc close'
+        : columns < 76
+          ? 'Up/Down select · Right open · Enter open · Esc close'
+          : 'Up/Down select · Right open · Enter open · Tab panes · Esc close'
       assertBarIsLastRow(painted, frame.readColor, categoryBar)
       const bodyTop = 1 + ladder.metaRows + (ladder.ruleRows >= 1 ? 1 : 0)
       const bodyIndexes = Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index)
@@ -3558,7 +3592,14 @@ test('the direct pages paint exactly the category rail and the content column', 
     assert.ok(!h.view().includes('Details'), `the direct layout paints NO Details pane at ${columns}x${rows}:\n${h.view()}`)
     // The single physical action bar is the last row and states the rail's
     // keys. The two-column frame paints it in the CONTENT column.
-    assertBarIsLastRow(painted, (row, col) => h.vt.getCellFgRgb(row, col), 'Up/Down navigate · Enter/Right focus · Esc close', 24)
+    assertBarIsLastRow(
+      painted,
+      (row, col) => h.vt.getCellFgRgb(row, col),
+      columns >= 100
+        ? 'Up/Down navigate · Enter/Right focus · Tab focus · Esc close'
+        : 'Up/Down navigate · Enter/Right focus · Esc close',
+      24,
+    )
     h.dispose()
   }
 })
@@ -3857,3 +3898,115 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
 function sendKey(vt: VirtualTerminal, data: string): void {
   vt.sendInput(data)
 }
+
+// ── Settings Tab / Shift+Tab region navigation (real frames) ─────────────
+
+test('Tab/Shift+Tab hand the keyboard to the About content and back at wide/medium sizes', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [90, 24]] as const) {
+    const h = setup({ columns, rows })
+    await h.openHome()
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u, `the rail advertises Tab focus at ${columns}x${rows}`)
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · About/u, `Tab focuses the About content at ${columns}x${rows}`)
+    assert.match(h.view(), /Tab focus · Shift\+Tab back/u, 'the About bar advertises both region keys')
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Tab returns to the rail')
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · About/u, 'Tab focuses the About content again')
+    await key(h, '\x1b[Z')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Shift+Tab returns to the rail')
+    assert.equal(h.replacements(), 0, 'region jumps never write')
+    assert.ok(!h.view().includes('←'), 'no header arrows appear')
+    h.dispose()
+  }
+})
+
+test('a narrow /settings keeps the About row Tab inert and its existing Esc path', async () => {
+  for (const [columns, rows] of [[72, 24], [44, 20]] as const) {
+    const h = setup({ columns, rows })
+    await h.openHome()
+    assert.match(h.rowsPlain()[0]!, /Settings · About/u, 'the narrow home is the About content')
+    const before = h.view()
+    for (const data of ['\t', '\x1b[Z']) await key(h, data)
+    assert.equal(h.view(), before, `the narrow root Tab is inert at ${columns}x${rows}`)
+    assert.doesNotMatch(before, /Tab focus/u, 'the narrow frame advertises no root Tab')
+    await key(h, '\x1b')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
+    h.dispose()
+  }
+})
+
+test('Tab/Shift+Tab cycle the legacy panes in a real frame without opening a choice', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40]] as const) {
+    const h = setup({ columns, rows, doc: { theme: 'dark' } })
+    await h.open()
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Esc close/u)
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /· Rows/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Shift\+Tab back · Esc back/u)
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Configured theme/u)
+    assert.ok(!h.view().includes('Choose value'), 'Tab focusing Detail never opens the choice')
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
+    await key(h, '\x1b[Z')
+    assert.match(h.rowsPlain()[0]!, /Configured theme/u)
+    assert.ok(!h.view().includes('Choose value'), 'the reverse jump never opens the choice')
+    assert.deepEqual(h.replaced(), [], 'no region jump wrote a document')
+    h.dispose()
+  }
+})
+
+test('the Models Add catalog reaches Custom provider… with one Tab in a real frame', async () => {
+  const providerOptions: CredentialProviderOption[] = Array.from({ length: 40 }, (_, index) => ({
+    route: `provider-${index}`,
+    label: index === 0 ? 'Anthropic' : `Provider ${String(index).padStart(2, '0')}`,
+    ref: `PROVIDER_${index}_API_KEY`,
+    configured: false,
+    declared: false,
+    namesCredential: false,
+    group: 'available' as const,
+    canProvisionProfile: true,
+  }))
+  const h = setup({ columns: 120, rows: 40, providerOptions })
+  await h.open('Models')
+  await waitForFrame(
+    h.view,
+    frame => /Models & Credentials/u.test(frame) && !/Loading provider configuration/u.test(frame),
+    () => h.vt.waitForRender(),
+    'the provider catalog must settle',
+  )
+  await key(h, '\t') // rail -> the Models content page
+  await key(h, '\u001b[B') // account row -> the Add Provider… action
+  await key(h, '\r')
+  assert.match(h.view(), /Available providers/u)
+  assert.match(h.view(), /> Anthropic/u)
+  await key(h, '\t')
+  assert.match(h.view(), /> Custom provider…/u, 'one Tab selects the first enabled action')
+  assert.match(h.view(), /Tab sections/u, 'the Models page advertises its region key')
+  await key(h, '\u001b[Z')
+  assert.match(h.view(), /> Anthropic/u, 'Shift+Tab returns to the first body row')
+  assert.deepEqual(h.replaced(), [], 'the region jump never writes')
+  h.dispose()
+})
+
+test('the Tab hints drop as whole segments and the action bar keeps the last physical row', async () => {
+  // 80x10: the medium content column is too narrow for the rail's Tab focus
+  // segment; it is dropped WHOLE, never truncated, and Esc keeps the bar.
+  const narrow = setup({ columns: 80, rows: 10 })
+  await narrow.openHome()
+  const bar80 = narrow.rowsPlain().at(-1) ?? ''
+  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Esc close/u)
+  assert.doesNotMatch(bar80, /Tab focus/u)
+  assert.doesNotMatch(bar80, /…/u, 'the bar never truncates a segment mid-word')
+  assertNoHalfSegmentInBar(narrow.rowsPlain(), narrow.rowsPlain().length - 1, ' · ')
+  narrow.dispose()
+
+  // 90x24 keeps the whole segment visible at medium width.
+  const medium = setup({ columns: 90, rows: 24 })
+  await medium.openHome()
+  assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u)
+  assertNoHalfSegmentInBar(medium.rowsPlain(), medium.rowsPlain().length - 1, ' · ')
+  medium.dispose()
+})

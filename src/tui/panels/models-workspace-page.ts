@@ -2521,6 +2521,15 @@ export class ModelsWorkspacePage implements Component {
     if (this.view.kind === 'add-catalog') {
       segments.unshift({ text: 'type to filter', priority: 3 })
     }
+    // The region key is advertised only when the CURRENT frame really has both
+    // regions: body rows and at least one enabled action under the pinned bar.
+    // QuestionFlow/picker bars have their own dedicated lines and never reach
+    // this helper.
+    if (this.rowOrder.length > 0
+      && actions.some(action => action.enabled)
+      && Math.max(1, this.bodyHeight) - 1 - actions.length >= 1) {
+      segments.push({ text: 'Tab sections', priority: 3 })
+    }
     segments.push({ text: 'Esc back', priority: 8 })
     const rendered = renderActionBarRow(segments, width)
     this.paintedCopy = rendered.includes('c copy')
@@ -2558,6 +2567,14 @@ export class ModelsWorkspacePage implements Component {
     }
     if (this.picker !== undefined) {
       this.handlePickerInput(data)
+      return 'handled'
+    }
+    // Tab / Shift+Tab re-focus the page's other logical region (the body rows
+    // or the bottom action group). They move the ONE cursor only; activation
+    // still belongs to Enter. An active QuestionFlow, picker or model picker
+    // above owns its own Tab meaning and is never intercepted here.
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      this.jumpSection()
       return 'handled'
     }
     // The Add catalog filters by typed text: the keys that are not
@@ -2758,6 +2775,34 @@ export class ModelsWorkspacePage implements Component {
   private interactiveCount(): number {
     const projection = this.project(this.lastWidth)
     return this.rowOrder.length + projection.actions.length
+  }
+
+  /**
+   * Tab / Shift+Tab move the ONE cursor between the page's two logical
+   * regions: the body rows and the bottom action group. Both directions
+   * toggle (there are exactly two regions) and land on the destination
+   * region's FIRST candidate. The jump changes presentation state only: it
+   * never activates a row/action, never touches the filter, draft, scroll
+   * authority or a Host read. A region the current frame cannot paint gets no
+   * invisible keyboard focus, so the jump is a no-op then.
+   */
+  private jumpSection(): void {
+    const projection = this.project(this.lastWidth)
+    const rowCount = this.rowOrder.length
+    const height = Math.max(1, this.bodyHeight)
+    if (rowCount === 0) return
+    const firstEnabled = projection.actions.findIndex(action => action.enabled)
+    if (firstEnabled < 0) return
+    // The page's own resize floor: no body row, or an action group that does
+    // not fit under the pinned action bar, grants no jump.
+    if (projection.actions.length >= height) return
+    if (height - 1 - projection.actions.length < 1) return
+    this.cursor = this.cursor < rowCount ? rowCount + firstEnabled : 0
+    // Reveal the destination body row through the existing list scroll owner;
+    // a jump to the action group never scrolls the body by itself.
+    this.followCursor = this.cursor < rowCount
+    this.revision += 1
+    this.requestRender()
   }
 
   private move(delta: number): ModelsPageExit {

@@ -2365,3 +2365,291 @@ test('a pending API-key write keeps the Left inside the Models page', async () =
   assert.equal(calls.some(call => call.startsWith('setReference')), false,
     'the Left never wrote anything')
 })
+
+// ── Tab / Shift+Tab region navigation (settings-tab-section-navigation) ────
+
+/** One unconfigured directory route: an Add-catalog body row, never a HOME row. */
+function catalogRow(route: string, label: string): ModelsProviderRow {
+  return {
+    kind: 'reference', identity: `route:${route}`, route, label, ref: `${route.toUpperCase()}_API_KEY`,
+    configured: false, declared: false, namesCredential: false, canProvisionProfile: true, group: 'available',
+    methods: [], inFlight: false,
+    profile: { route, configured: false, displayName: label, models: [] },
+  }
+}
+
+/** A large real Add catalog: forty unconfigured directory routes. */
+function largeCatalog(count: number): ModelsProviderRow[] {
+  return Array.from(
+    { length: count },
+    (_, index) => catalogRow(`provider-${index}`, index === 0 ? 'Anthropic' : `Provider ${String(index).padStart(2, '0')}`),
+  )
+}
+
+/** Drive the real HOME -> Add Provider… action -> catalog path. */
+async function openAddCatalog(page: ModelsWorkspacePage): Promise<void> {
+  await flush()
+  viewText(page)
+  page.handleInput('\u001b[B') // the account row -> the Add Provider… action
+  page.handleInput('\r')
+}
+
+test('Tab jumps a 40+ provider Add catalog to Custom provider… and Shift+Tab returns to the first row', async () => {
+  const { source, calls } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows: largeCatalog(40) })
+  const page = openWith(source, { view: 'list' }, 24)
+  await openAddCatalog(page)
+  const catalog = viewText(page)
+  assert.match(catalog, /Available providers/u)
+  assert.match(catalog, /^> Anthropic/m, 'the first provider row owns the cursor')
+  assert.doesNotMatch(catalog, /Draft only/u, 'the catalog itself is not the draft form')
+  assert.deepEqual(calls, [], 'browsing the catalog writes nothing')
+
+  page.handleInput('\t')
+  const jumped = viewText(page)
+  assert.match(jumped, /^> Custom provider…/m, 'one Tab selects the first enabled action')
+  assert.doesNotMatch(jumped, /Draft only/u, 'Tab never opens the draft')
+  assert.deepEqual(calls, [], 'the jump performed no business action')
+
+  page.handleInput('\u001b[Z')
+  assert.match(viewText(page), /^> Anthropic/m, 'Shift+Tab returns to the first body row')
+
+  page.handleInput('\t')
+  page.handleInput('\r')
+  assert.match(viewText(page), /Draft only — nothing is persisted/u, 'Enter (not Tab) opens the draft')
+  assert.deepEqual(calls, [], 'opening the empty draft performed no write')
+})
+
+test('Tab keeps the Add catalog filter and scroll reveal; a zero-match filter ignores it', async () => {
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({ kind: 'ready' as const, rows: largeCatalog(40) })
+  const page = openWith(source, { view: 'list' }, 24)
+  await openAddCatalog(page)
+  // A filter that narrows the catalog to one row: the visible query and the
+  // single match must survive the region jumps.
+  page.handleInput('a')
+  page.handleInput('n')
+  page.handleInput('t')
+  page.handleInput('h')
+  page.handleInput('r')
+  page.handleInput('o')
+  const filtered = viewText(page)
+  assert.match(filtered, /Filter: anthro · 1 match/u)
+  assert.match(filtered, /^> Anthropic/m)
+  assert.doesNotMatch(filtered, /Provider 01/u, 'the filter really narrowed the body')
+  page.handleInput('\t')
+  assert.match(viewText(page), /^> Custom provider…/m)
+  page.handleInput('\u001b[Z')
+  const back = viewText(page)
+  assert.match(back, /Filter: anthro/u, 'the filter survives the region jump')
+  assert.match(back, /^> Anthropic/m, 'the first filtered body row is selected again')
+  page.handleInput('\u001b[B')
+  assert.match(viewText(page), /^> Custom provider…/m, 'Up/Down still walks the filtered catalog into its actions')
+
+  // End selects the last action; Shift+Tab reveals the first body row through
+  // the page's existing follow-cursor scroll (the filter is cleared first so
+  // the body is long enough to have scrolled).
+  page.handleInput('\u001b') // clears the filter
+  assert.match(viewText(page), /^> Anthropic/m)
+  page.handleInput('\u001b[F')
+  page.handleInput('\u001b[Z')
+  assert.match(viewText(page), /^> Anthropic/m, 'the destination row is revealed in the next frame')
+
+  // Zero matches: the catalog has no body region, so Tab/Shift+Tab are no-ops.
+  page.handleInput('z')
+  page.handleInput('z')
+  page.handleInput('z')
+  const zero = viewText(page)
+  assert.match(zero, /No provider matches/u)
+  page.handleInput('\t')
+  page.handleInput('\u001b[Z')
+  assert.equal(viewText(page), zero, 'a zero-match catalog never fakes a body region')
+})
+
+test('Tab moves the cursor between body rows and actions on the HOME and stored-record pages', async () => {
+  const { source, calls } = fakeSource()
+  const page = openWith(source, { view: 'list' }, 24)
+  await flush()
+  viewText(page)
+  page.handleInput('\t')
+  assert.match(viewText(page), /^> Add Provider…/m, 'the HOME cursor moves to the first enabled action')
+  assert.deepEqual(calls, [], 'the jump ran no action')
+  page.handleInput('\u001b[Z')
+  assert.match(viewText(page), /^> DeepSeek Account/m, 'Shift+Tab returns to the first body row')
+
+  // A facts-only provider detail has no body row: the key is inert.
+  const detail = openWith(source, { view: 'provider', route: 'acme' }, 24)
+  await flush()
+  const detailFrame = viewText(detail)
+  detail.handleInput('\t')
+  detail.handleInput('\u001b[Z')
+  assert.equal(viewText(detail), detailFrame, 'a facts-only detail has no second region')
+
+  // The stored-credential list has real rows plus a pinned Back action.
+  const recordsSource = fakeSource({ records: [{ key: 'llm-pi-ai/acme', kind: 'grant' }] }).source
+  const records = openWith(recordsSource, { view: 'records' }, 24)
+  await flush()
+  assert.match(viewText(records), /Stored credentials/u)
+  records.handleInput('\t')
+  assert.match(viewText(records), /^> ← Back/m, 'Tab selects the pinned Back action')
+  records.handleInput('\u001b[Z')
+  const firstRow = viewText(records).split('\n').find(line => line.includes('llm-pi-ai/acme'))
+  assert.ok(firstRow?.startsWith('> '), 'Shift+Tab returns to the first stored row')
+})
+
+test('Tab lands on the first ENABLED action when an earlier action is disabled', async () => {
+  let release: (() => void) | undefined
+  const { source } = fakeSource()
+  source.discoverModels = async () => {
+    await new Promise<void>(resolve => { release = resolve })
+    return [{ id: 'm1' }]
+  }
+  const page = openWith(source, { view: 'add-provider', route: 'race-route' }, 30)
+  await flush()
+  viewText(page)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B') // Base URL
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  for (const character of 'https://race.example/v1') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B') // Models
+  page.handleInput('\r')
+  await flush()
+  for (let index = 0; index < 50; index += 1) {
+    if (/Probing the endpoint/u.test(viewText(page))) break
+    await new Promise<void>(resolve => setImmediate(resolve))
+    page.render(100)
+  }
+  assert.match(viewText(page), /Probing the endpoint/u)
+  // The first action (Review & create) is disabled while discovery is in
+  // flight, so the jump must land on the second, enabled action.
+  page.handleInput('\t')
+  const jumped = viewText(page)
+  assert.match(jumped, /^> Cancel/m, 'Tab selects the first ENABLED action')
+  assert.doesNotMatch(jumped, /^> Review & create/m, 'the disabled action never gains the cursor')
+  release?.()
+  await flush()
+})
+
+test('Tab works exactly when the body and action regions fit, on every Tab encoding', async () => {
+  const { source } = fakeSource()
+  const page = openWith(source, { view: 'list' }, 5)
+  await flush()
+  assert.match(viewText(page), /Tab sections/u, 'the hint is painted when both regions fit')
+  page.handleInput('\t')
+  assert.match(viewText(page), /^> Add Provider…/m)
+  page.handleInput('\u001b[9;2u') // Kitty shift+tab
+  assert.match(viewText(page), /^> DeepSeek Account/m, 'the Kitty shift+tab encoding toggles back')
+  page.handleInput('\u001b[27;2;9~') // modifyOtherKeys shift+tab
+  assert.match(viewText(page), /^> Add Provider…/m)
+  page.handleInput('\u001b[9u') // Kitty plain tab
+  assert.match(viewText(page), /^> DeepSeek Account/m)
+
+  // No body row: the page's own resize floor drops the body region.
+  page.setBodyHeight(4)
+  const noBody = viewText(page)
+  assert.doesNotMatch(noBody, /Tab sections/u, 'the hint needs a visible body region')
+  page.handleInput('\t')
+  assert.equal(viewText(page), noBody, 'no jump without a body row')
+  page.setBodyHeight(5)
+  page.handleInput('\t')
+  assert.match(viewText(page), /^> Add Provider…/m, 'the restored layout jumps again')
+
+  // The action group no longer fits at all: the page paints its resize
+  // warning and must not grant an invisible cursor.
+  page.setBodyHeight(3)
+  const warning = viewText(page)
+  assert.match(warning, /Resize the terminal to show the page actions/u)
+  page.handleInput('\t')
+  assert.equal(viewText(page), warning, 'the resize warning never grants an invisible selection')
+})
+
+test('an active picker, QuestionFlow or model picker keeps its own Tab', async () => {
+  const { source } = fakeSource()
+  const page = openWith(source, { view: 'add-provider', route: 'pick-route' }, 30)
+  await flush()
+  viewText(page)
+  // The native wire-protocol picker.
+  page.handleInput('\u001b[B') // API protocol
+  page.handleInput('\r')
+  const picker = viewText(page)
+  assert.match(picker, /Wire protocol/u)
+  page.handleInput('\t')
+  assert.equal(viewText(page), picker, 'Tab does not move the page cursor under a picker')
+  assert.match(picker, /Esc cancel/u, 'the picker keeps its own action bar')
+  page.handleInput('\u001b')
+  assert.doesNotMatch(viewText(page), /Esc cancel/u, 'Esc closes the picker')
+  assert.match(viewText(page), /Tab sections/u, 'the form action bar is back')
+
+  // The embedded QuestionFlow (Route field).
+  page.handleInput('\u001b[A')
+  page.handleInput('\r')
+  assert.match(viewText(page), /Add provider · Route/u)
+  page.handleInput('\t')
+  assert.match(viewText(page), /Add provider · Route/u, 'Tab stays inside the QuestionFlow')
+  page.handleInput('\u001b')
+  page.handleInput('\u001b')
+  assert.match(viewText(page), /Draft only/u, 'Esc cancels the field back to the draft form')
+
+  // The model multi-select picker: discovery answers with models.
+  const discovery = fakeSource()
+  discovery.source.discoverModels = async () => [{ id: 'm1' }, { id: 'm2' }]
+  const pickerPage = openWith(discovery.source, { view: 'add-provider', route: 'model-route' }, 30)
+  await flush()
+  viewText(pickerPage)
+  pickerPage.handleInput('\u001b[B')
+  pickerPage.handleInput('\u001b[B') // Base URL
+  pickerPage.handleInput('\r')
+  await flush()
+  pickerPage.render(100)
+  for (const character of 'https://models.example/v1') pickerPage.handleInput(character)
+  pickerPage.handleInput('\r')
+  pickerPage.handleInput('\r')
+  await flush()
+  pickerPage.render(100)
+  pickerPage.handleInput('\u001b[B')
+  pickerPage.handleInput('\u001b[B')
+  pickerPage.handleInput('\u001b[B') // Models
+  pickerPage.handleInput('\r')
+  await flush()
+  for (let index = 0; index < 50; index += 1) {
+    if (/Models advertised by the endpoint/u.test(viewText(pickerPage))) break
+    await new Promise<void>(resolve => setImmediate(resolve))
+    pickerPage.render(100)
+  }
+  const modelPicker = viewText(pickerPage)
+  assert.match(modelPicker, /Models advertised by the endpoint/u)
+  pickerPage.handleInput('\t')
+  assert.equal(viewText(pickerPage), modelPicker, 'Tab never leaks into the model picker')
+  pickerPage.handleInput('\u001b')
+  assert.doesNotMatch(viewText(pickerPage), /Models advertised by the endpoint/u)
+})
+
+test('Tab revokes a straddling Models row press and the action bar advertises it only while droppable', async () => {
+  const { source, calls } = fakeSource()
+  let accountOpened = 0
+  const page = openPage(source, { view: 'list' }, 24, () => { accountOpened += 1 })
+  await flush()
+  const lines = viewText(page).split('\n')
+  const y = lines.findIndex(line => line.includes('DeepSeek Account'))
+  assert.ok(y >= 0, `the account row must be painted:\n${lines.join('\n')}`)
+  page.onCellPress(0, y)
+  page.handleInput('\t')
+  page.onCellClick(0, y)
+  assert.equal(accountOpened, 0, 'the straddling release never runs the old row action')
+  assert.deepEqual(calls, [])
+
+  // The hint is a whole, droppable segment: visible with room, gone at a
+  // narrow width while Esc keeps the last physical row.
+  assert.match(viewText(page), /Tab sections/u)
+  const narrow = viewText(page, 40)
+  assert.doesNotMatch(narrow, /Tab sections/u)
+  assert.match(narrow, /Esc back/u)
+})
