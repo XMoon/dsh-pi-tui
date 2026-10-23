@@ -14,6 +14,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
 import { textOf } from '../../src/domain/transcript/folder.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
+import { isPostTurnReplayEvidence, markPostTurnReplayEvidence } from '../../src/domain/transcript/semantics.ts'
 import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
@@ -70,6 +71,7 @@ function render(message: TranscriptToolMessage, options: {
   chartKindsSupported?: boolean
   toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
   expandedToolKeys?: ReadonlySet<string>
+  scopePrefix?: string
 } = {}): NodeLike[] {
   const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), options)
   return collect(view as unknown as { children: readonly unknown[] })
@@ -422,4 +424,106 @@ test('a stale toggle from an old projection scope is ignored', () => {
   assert.equal(disclosureKeyForToggle('root.s0-block.msg-1', 'msg-1', 's1-'), undefined)
   assert.equal(disclosureKeyForToggle('root.s0-block.msg-1.sub-abc', 'sub-abc', 's1-'), undefined)
   assert.equal(disclosureKeyForToggle('root.s0-block.msg-1', 'msg-1', ''), undefined)
+})
+
+test('disclosure identity handles Work, standalone and dotted PTC keys', () => {
+  assert.equal(disclosureKeyForToggle('main.s1-work-msg-1.msg-2', 'msg-2', 's1-'), 'msg-2')
+  assert.equal(disclosureKeyForToggle('main.s1-msg-2', 's1-msg-2', 's1-'), 'msg-2')
+  assert.equal(
+    disclosureKeyForToggle('main.s1-work-msg-1.msg-2.sub-call.foo:code:1', 'sub-call.foo:code:1', 's1-'),
+    'msg-2/sub-call.foo:code:1',
+  )
+  assert.equal(
+    disclosureKeyForToggle('main.s1-msg-2.sub-call.foo:code:1', 'sub-call.foo:code:1', 's1-'),
+    'msg-2/sub-call.foo:code:1',
+  )
+  assert.equal(disclosureKeyForToggle('main.s1-work-msg-1.msg-2.sub-a.sub-b', 'sub-b', 's1-'), 'msg-2/sub-a/sub-b')
+  assert.equal(disclosureKeyForToggle('main.s0-work-msg-1.msg-2', 'msg-2', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('main.s0-msg-2', 's0-msg-2', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('main.s1-msg-2', 's1-msg-2', ''), undefined)
+})
+
+test('a standalone SVG card is disclosed by its scoped msg key', () => {
+  const message = svgMessage()
+  markPostTurnReplayEvidence(message)
+  const fact = svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE })
+  assert.ok(fact !== undefined)
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact,
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '7'.repeat(64) },
+  }]])
+  const expanded = render(message, {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(['msg-1']),
+  })
+  assert.equal(requests, 1)
+  const image = expanded.find(node => node.kind === 'image')
+  assert.equal(image?.props.blob, '7'.repeat(64))
+  const tool = expanded.find(node => node.kind === 'tool')
+  assert.equal(tool?.props.key, 's1-msg-1', 'the standalone SDK key keeps the scope prefix')
+  assert.equal(tool?.props.collapsed, false)
+  const collapsed = render(message, {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(),
+  })
+  assert.equal(collapsed.some(node => node.kind === 'image'), false)
+  assert.equal(collapsed.find(node => node.kind === 'tool')?.props.collapsed, true)
+  assert.equal(requests, 1, 'the collapsed standalone card does not request the blob')
+})
+
+
+test('a real post-turn standalone SVG card resolves its scoped disclosure', () => {
+  const args = { title: 'Standalone', description: 'late figure', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 2, time: 1, data: { turn: 1, step: 0 } },
+    { type: 'turn/end', seq: 3, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    { type: 'tool/call', seq: 4, time: 1, data: { turn: 1, step: 0, callId: 'late-svg', name: 'dsh_pi_tui_svg', arguments: JSON.stringify(args) } },
+    { type: 'tool/result', seq: 5, time: 1, data: {
+      turn: 1, step: 0,
+      message: {
+        id: 'late-svg-result', role: 'tool', toolCallId: 'late-svg',
+        content: svgContentBlocks(fact), source: { kind: 'tool', callId: 'late-svg' },
+      },
+    } },
+  ] as never)
+  const messages = folder.messages()
+  const message = messages[0]
+  assert.ok(message !== undefined && message.kind === 'tool')
+  assert.equal(isPostTurnReplayEvidence(message), true)
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact,
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '8'.repeat(64) },
+  }]])
+  const view = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(['msg-1']),
+  })
+  const nodes = collect(view as unknown as { children: readonly unknown[] })
+  const tool = nodes.find(node => node.kind === 'tool')
+  assert.equal(tool?.props.key, 's1-msg-1', 'the standalone SDK key stays scoped')
+  assert.equal(tool?.props.collapsed, false)
+  assert.equal(nodes.some(node => node.kind === 'image'), true)
+  assert.equal(requests, 1)
+  const collapsedView = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(),
+  })
+  const collapsed = collect(collapsedView as unknown as { children: readonly unknown[] })
+  assert.equal(collapsed.some(node => node.kind === 'image'), false)
+  assert.equal(collapsed.find(node => node.kind === 'tool')?.props.collapsed, true)
+  assert.equal(requests, 1, 'the collapsed standalone card does not request the blob')
 })
