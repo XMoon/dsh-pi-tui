@@ -56,6 +56,15 @@ function toolRow(name: string, args: unknown, blocks: readonly ContentBlock[], o
   }
 }
 
+function renderMany(messages: readonly TranscriptToolMessage[], options: {
+  chartKindsSupported?: boolean
+  toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
+  expandedToolKeys?: ReadonlySet<string>
+} = {}): NodeLike[] {
+  const view = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), options)
+  return collect(view as unknown as { children: readonly unknown[] })
+}
+
 function render(message: TranscriptToolMessage, options: {
   chartKindsSupported?: boolean
   toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
@@ -352,4 +361,50 @@ test('a ready SVG card starts collapsed and requests its blob only when expanded
   const image = expanded.find(node => node.kind === 'image')
   assert.equal(image?.props.blob, '9'.repeat(64))
   assert.equal(expanded.find(node => node.kind === 'tool')?.props.collapsed, false)
+})
+
+
+test('PTC child expansion identity is scoped to its parent card', () => {
+  const subCallId = 'reused-parent:code:1'
+  const firstArgs = { title: 'Figure 1', description: 'figure one', svg: SVG_SOURCE }
+  const secondArgs = { title: 'Figure 2', description: 'figure two', svg: SVG_SOURCE.replace('#3b82f6', '#ef4444') }
+  const firstFact = svgFactFromArgs(firstArgs)
+  const secondFact = svgFactFromArgs(secondArgs)
+  assert.ok(firstFact !== undefined && secondFact !== undefined)
+  const childA = toolRow('dsh_pi_tui_svg', firstArgs, svgContentBlocks(firstFact), { subCallId })
+  const childB = toolRow('dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact), { subCallId, turn: 2 })
+  const parent = (turn: number, child: TranscriptToolMessage): TranscriptToolMessage => ({
+    kind: 'tool',
+    turn,
+    name: 'run_code',
+    args: '{}',
+    result: 'parent',
+    status: 'ok',
+    callId: 'reused-parent',
+    resultBlocks: [{ type: 'text', text: 'parent' }],
+    subCalls: [child],
+  })
+  const parentA = parent(1, childA)
+  const parentB = parent(2, childB)
+  let requestsA = 0
+  let requestsB = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([
+    [childA, { state: 'ready', fact: firstFact, source: firstArgs.svg, request: () => { requestsA += 1; return 'a'.repeat(64) } }],
+    [childB, { state: 'ready', fact: secondFact, source: secondArgs.svg, request: () => { requestsB += 1; return 'b'.repeat(64) } }],
+  ])
+  const nodes = renderMany([parentA, parentB], {
+    toolSvgStates: states,
+    // The parent card keys are msg-1 / msg-2; only the FIRST parent's child is
+    // expanded. A bare subCallId key would expand both.
+    expandedToolKeys: new Set([`sub-msg-1-${subCallId}`]),
+  })
+  const images = nodes.filter(node => node.kind === 'image')
+  assert.equal(images.length, 1)
+  assert.equal(images[0]?.props.alt, 'Figure 1')
+  assert.equal(requestsA, 1)
+  assert.equal(requestsB, 0, "the sibling parent's child must stay collapsed and blob-free")
+  const childTools = nodes.filter(node => node.kind === 'tool' && typeof node.props.key === 'string' && String(node.props.key).startsWith('sub-'))
+  assert.equal(childTools.length, 2)
+  assert.equal(childTools.find(node => node.props.key === `sub-msg-1-${subCallId}`)?.props.collapsed, false)
+  assert.equal(childTools.find(node => node.props.key === `sub-msg-2-${subCallId}`)?.props.collapsed, true)
 })

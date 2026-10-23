@@ -560,7 +560,7 @@ function shownToolResult(message: Extract<TranscriptMessage, { kind: 'tool' }>, 
  * the complete child output, wrapped; a child with no header summary shows its
  * raw args instead of a headless empty card.
  */
-function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOptions): Node {
+function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOptions, parentKey: string): Node {
   const header = toolCardHeader(child.name, child.args, options.cwd)
   const body: Node[] = []
   if (header.summary === '' && child.args !== '') {
@@ -570,7 +570,11 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
   // not otherwise display (the visual tools always have a title summary). The
   // admitted source is added here so the child has the SAME readable-source
   // path as the top-level card instead of only claiming it is available.
-  const childKey = `sub-${child.subCallId!}`
+  // The Tern disclosure key is PARENT-SCOPED, not a global identity: two PTC
+  // parents may reuse a bare subCallId across turns. The composite carries the
+  // parent card key so expanding one child can never expand a sibling under a
+  // different parent.
+  const childKey = `sub-${parentKey}-${child.subCallId!}`
   const svgState = child.name === 'dsh_pi_tui_svg' && child.status === 'ok'
     ? options.toolSvgStates?.get(child)
     : undefined
@@ -581,7 +585,7 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
   if (svgState?.state === 'ready' || svgState?.state === 'unsupported') {
     body.push(ui.code({ key: 'source', text: sanitizeDisplayText(svgState.source), wrap: true }))
   }
-  body.push(...toolChildNodes(child, options))
+  body.push(...toolChildNodes(child, options, childKey))
   // PR-C: the child projects ITS OWN result blocks (recursively, with the
   // same rule as a top-level row) — the parent's result never leaks into it.
   body.push(...toolResultNodes(child, options, true, child.result, collapsed))
@@ -610,12 +614,12 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
  * count is the DIRECT children of this card; a child with grandchildren runs
  * this same rule one level down (never a Work-level lookup).
  */
-function toolChildNodes(parent: TranscriptToolMessage, options: TranscriptViewOptions): Node[] {
+function toolChildNodes(parent: TranscriptToolMessage, options: TranscriptViewOptions, parentKey: string): Node[] {
   const subCalls = parent.subCalls
   if (subCalls === undefined || subCalls.length === 0) return []
   return [
     ui.text({ key: 'child-head', text: `Child calls · ${subCalls.length}` }),
-    ...subCalls.map(child => childToolNode(child, options)),
+    ...subCalls.map(child => childToolNode(child, options, parentKey)),
   ]
 }
 
@@ -666,7 +670,7 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
       }),
     },
     ...body.args,
-    ...toolChildNodes(message, options),
+    ...toolChildNodes(message, options, key),
     ...body.result,
   )
 }
