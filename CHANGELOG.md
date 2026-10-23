@@ -9,6 +9,14 @@
 
 ### 新增
 
+- **模型现在可以在回答里画图：新增 `dsh_pi_tui_chart` 与 `dsh_pi_tui_svg` 两个常驻工具。**
+  图表支持 bars/spark（2–12 个带标签的数值与可选单位），SVG 支持自包含的静态图形；结果仍
+  显示在原来的 Tool Card 里，不新增页面、命令或弹窗。Tern 支持时显示原生图表/SVG，普通终端
+  显示完整数值或描述，并在终端支持时显示受限栅格 PNG；精确数值、单位、标题和描述始终是文本，
+  复制、搜索和 Markdown 导出都能读到。SVG 只接受受限的安全子集（拒绝脚本、外部引用、CSS、
+  动画和超预算图形），并且只有最终结果仍带有与调用参数匹配的凭据时才绘制；策略替换结果后
+  不会显示旧图。Direct/Remote 使用同一份 durable 结果。
+
 - **Settings 默认进入 About 主页，宽/中屏是真正的左右两栏。** 左侧是分类导航
   （About、Models、Account、Appearance、Display、Plugins、Other settings），右侧是
   真实内容：选中 Models 或 Account 会立刻在右栏显示对应页面，无需再按一次

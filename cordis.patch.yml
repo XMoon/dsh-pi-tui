@@ -36,6 +36,18 @@
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
 
+    # PR-D visual tools: two RESIDENT Host tool definitions
+    # (`dsh_pi_tui_chart` and `dsh_pi_tui_svg`) on the official `ctx.tools`
+    # registry. The row is deliberately NOT gated on `tuiStartup`, a renderer,
+    # a Tern hello, a client capability or a session: the same Host profile
+    # (and the in-process Remote Host built on it) exposes both tools for the
+    # whole profile lifetime. The plugin's own `inject: ['tools']` waits for
+    # the registry. The result contract carries no `presentationMeta` — the
+    # final durable content is the drawing's admission source.
+    - id: pi-tui-visual-tools
+      name: '@xmoon76/dsh-pi-tui/visual-tools'
+      inject: [tools]
+
     # The OFFICIAL Host browser-callback listener for DeepSeek Account sign-in.
     # The account provider registers `/oauth/callback` on this instance while an
     # attempt is waiting for the browser; it is mounted here because the dsh-base

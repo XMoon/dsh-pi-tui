@@ -50,6 +50,7 @@ function candidateFiles() {
     // mirror the REAL published entry set (the tarball smoke imports every
     // public subpath), including the plugin name the row is loaded by.
     'dist/performance-host.mjs': "export const name = 'pi-tui-performance-host'\n",
+    'dist/visual-tools.mjs': "export const name = 'pi-tui-visual-tools'\n",
     'dist/index.d.mts': 'export declare const SOURCE_PROBE: boolean\n',
     'dist/startup.d.mts': 'export declare const STARTUP_PROBE: boolean\n',
     'dist/extensions.d.mts': 'export declare const EXTENSIONS_PROBE: boolean\n',
@@ -57,6 +58,7 @@ function candidateFiles() {
     'dist/extension/advanced.d.mts': 'export declare const ADVANCED_API_LEVEL: 1\n',
     'dist/extension/unstable.d.mts': 'export declare const UNSTABLE_API_LEVEL: 1\n',
     'dist/performance-host.d.mts': 'export declare const name: string\n',
+    'dist/visual-tools.d.mts': 'export declare const name: string\n',
     'cordis.patch.yml': 'patch: []\n',
     'README.md': '# source probe\n',
     'README.en.md': '# source probe\n',
@@ -113,6 +115,7 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './extensions/unstable': './dist/extension/unstable.mjs',
       './builtins': './dist/builtins.mjs',
       './performance-host': './dist/performance-host.mjs',
+      './visual-tools': './dist/visual-tools.mjs',
     },
     peerDependencies: candidatePeers,
     // The smoke asserts the packed manifest restates the repo matrix floor, so

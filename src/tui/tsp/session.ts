@@ -69,7 +69,10 @@ import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/ty
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, visualRowId, type ToolSvgState } from './transcript-view.ts'
+import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
+import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
+import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
 import type { ToolImageState } from './transcript-view.ts'
 
 /**
@@ -489,6 +492,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * fatal lifecycle owns the exit.
    */
   let imageProjectionAborted = false
+  /**
+   * PR-D: the SVG blob preparation was ABORTED by a fatal blob failure (the
+   * tty owner is gone). The same fatal lifecycle owns the exit; the last
+   * committed frame stands and no further blob may be sent.
+   */
+  let visualProjectionAborted = false
+  /** PR-D: admitted SVG digests → admission verdicts (bounded replay cache). */
+  const svgAdmissions = new Map<string, SvgAdmission>()
+  /** PR-D: admitted SVG digests → the ONE sender's blob id (content-addressed). */
+  const svgBlobIds = new Map<string, string>()
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -667,6 +680,68 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
   }
 
+  /**
+   * PR-D: prepare the per-row SVG display states BEFORE the pure projection.
+   *
+   * The admission gate runs on the DURABLE call args, and a row is authorized
+   * only when its FINAL result blocks still carry a credential whose digest
+   * matches those args. A ready row sends the SAME admitted bytes through the
+   * ONE `session.blob()` sender (content-addressed, so a repeated projection
+   * never re-sends). A fatal blob failure aborts the projection exactly like
+   * the PR-C image path.
+   */
+  const prepareSvgStates = (): ReadonlyMap<string, ToolSvgState> | undefined => {
+    const states = new Map<string, ToolSvgState>()
+    const admit = (source: string): SvgAdmission => {
+      const digest = svgDigest(source)
+      const cached = svgAdmissions.get(digest)
+      if (cached !== undefined) return cached
+      const verdict = admitSvg(source)
+      if (svgAdmissions.size >= 32) svgAdmissions.clear()
+      svgAdmissions.set(digest, verdict)
+      return verdict
+    }
+    const visit = (message: TranscriptMessage): boolean => {
+      if (message.kind !== 'tool') return true
+      if (message.name === 'dsh_pi_tui_svg') {
+        const rowId = visualRowId(message)
+        if (rowId !== undefined) {
+          const blocks = message.resultBlocks ?? (() => {
+            const parts = visualPartsFromText(message.result)
+            return parts.fact === undefined ? [] : [{ type: 'text' as const, text: visualFactLine(parts.fact) }]
+          })()
+          const authorization = authorizeSvg(message.args, blocks, admit)
+          if (authorization.state === 'text') {
+            states.set(rowId, { state: 'invalid', reason: authorization.reason })
+          } else if (!nativeImagesSupported()) {
+            states.set(rowId, { state: 'unsupported' })
+          } else {
+            let blobId = svgBlobIds.get(authorization.fact.digest)
+            if (blobId === undefined) {
+              try {
+                blobId = session.blob(Buffer.from(authorization.source, 'utf8'), 'image/svg+xml')
+              } catch (error) {
+                routeFatal(error)
+                visualProjectionAborted = true
+                return false
+              }
+              svgBlobIds.set(authorization.fact.digest, blobId)
+            }
+            states.set(rowId, { state: 'ready', blobId, fact: authorization.fact })
+          }
+        }
+      }
+      for (const child of message.subCalls ?? []) {
+        if (!visit(child)) return false
+      }
+      return true
+    }
+    for (const message of lastMessages) {
+      if (!visit(message)) return undefined
+    }
+    return states
+  }
+
   /** Rebuild the canonical transcript from the last projection (same scope and
    *  source identity: a settled-answer repaint is NOT a new subject).
    *
@@ -679,17 +754,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (disposed || hydrating) return true
     // PR-C: an aborted projection STAYS aborted. The fatal already took the
     // renderer down, so no further blob may even be ATTEMPTED.
-    if (imageProjectionAborted) return false
+    if (imageProjectionAborted || visualProjectionAborted) return false
     const imageStates = prepareImageStates()
     // PR-C: a fatal blob failure ABORTED this projection: the last committed
     // frame stands and the caller must not render a new one.
     if (imageProjectionAborted) return false
+    const svgStates = prepareSvgStates()
+    // PR-D: the same fatal fence for the native SVG blob sender.
+    if (visualProjectionAborted) return false
     lastMain = transcriptView(projectTranscriptStructure(lastMessages), scopeKeys, {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       scopePrefix,
       ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
       ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
       preparingPreviews: lastStreamingToolPreviews,
+      chartKindsSupported: session.caps.kinds.includes('chart'),
+      ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
       toolImageStates: imageStates,
     })
     return true

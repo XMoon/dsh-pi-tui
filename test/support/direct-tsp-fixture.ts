@@ -262,6 +262,8 @@ export interface DirectTspFixtureOptions {
    * a pane that does.
    */
   readonly nativeImages?: boolean
+  /** Advertise the NATIVE CHART kind on the scripted pane (PR-D). */
+  readonly nativeChart?: boolean
   /** Reuse isolated persisted session files across a clean runner remount. */
   readonly workRoot?: string
   /** Replace the historical default stand-in with the official isolated
@@ -370,6 +372,7 @@ export async function createDirectTspFixture(
         presetPicker: options.presetPicker,
         sessionBrowser: options.sessionBrowser,
         nativeImages: options.nativeImages,
+        nativeChart: options.nativeChart,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
   // and clears five env vars; external-Tern and PiTui modes must leave the

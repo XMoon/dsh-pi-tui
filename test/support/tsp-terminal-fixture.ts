@@ -146,6 +146,8 @@ export function installTspPane(options: {
    * real client).
    */
   readonly nativeImages?: boolean
+  /** Advertise the NATIVE CHART kind (the PR-D chart projection). */
+  readonly nativeChart?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -174,6 +176,7 @@ export function installTspPane(options: {
     ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text'] : []),
     ...(options.nativeImages === true ? ['image'] : []),
+    ...(options.nativeChart === true ? ['chart'] : []),
   ]))
   const nativeFeatures = [
     ...(options.presetPicker === true || options.sessionBrowser === true ? ['scroll'] : []),

@@ -1,0 +1,165 @@
+/**
+ * PR-D revised D0: the real AgentLoop + official `tools/post-execute`
+ * waterfall against the two registered visual tools.
+ *
+ * The revised contract declares NO `presentationMeta`; this test proves the
+ * F8R shape is absent on every path: no policy, content-only replacement,
+ * value replacement and block all persist a `tool/result` WITHOUT an own
+ * `meta` property. The content remains the single admission source.
+ * @module @xmoon76/dsh-pi-tui/visual-tool-result-policy.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { apply as applyVisualTools, CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../src/app/host/visual-tools.ts'
+import { svgDigest } from '../../src/domain/visual/svg.ts'
+import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+
+const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+  + '<rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12">Gateway</text></svg>'
+
+type Policy = 'none' | 'content' | 'value' | 'block'
+
+const CASES = {
+  chart: {
+    tool: CHART_TOOL_NAME,
+    args: { kind: 'bars', title: 'Request latency', unit: 'ms', series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }] },
+    replacement: {
+      version: 1, type: 'chart', kind: 'spark', title: 'Replaced chart', unit: 'ms',
+      series: [{ label: 'a', value: 1 }, { label: 'b', value: 2 }],
+    },
+  },
+  svg: {
+    tool: SVG_TOOL_NAME,
+    args: { title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE },
+    replacement: {
+      version: 1, type: 'svg', title: 'Replaced figure', description: 'replaced description',
+      digest: svgDigest(`${SVG_SOURCE}<!-- replaced -->`), bytes: Buffer.byteLength(`${SVG_SOURCE}<!-- replaced -->`, 'utf8'),
+    },
+  },
+}
+
+class VisualAdapter extends LlmAdapter {
+  calls = 0
+  readonly requests: string[][] = []
+  private readonly toolName: string
+  private readonly args: string
+
+  constructor(toolName: string, args: unknown) {
+    super()
+    this.toolName = toolName
+    this.args = JSON.stringify(args)
+  }
+
+  override providerInfo(provider: string): { id: string; name: string } { return { id: provider, name: provider } }
+  override listModels(provider: string): Promise<readonly { provider: string; id: string; name: string }[]> {
+    return Promise.resolve([{ provider, id: 'm', name: 'M' }])
+  }
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls += 1
+    this.requests.push(((options as unknown as { tools?: readonly { name: string }[] }).tools ?? []).map(tool => tool.name))
+    if (this.calls === 1) {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id: ToolCallId('call-visual-1'), name: this.toolName, argumentsDelta: this.args }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('call-visual-1'), name: this.toolName, arguments: this.args } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'done' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'done' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+async function runCase(t: Parameters<typeof testLifecycle>[0], key: keyof typeof CASES, policy: Policy) {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, {})
+  await mountAgentLoopTestHarness(ctx)
+  applyVisualTools(ctx)
+  const entry = CASES[key]
+  const adapter = new VisualAdapter(entry.tool, entry.args)
+  ctx.llm.registerAdapter(['visual-probe'], adapter)
+  let callbackCount = 0
+  const installPolicy = (agentCtx: Context): void => {
+    if (policy === 'none') return
+    agentCtx.on('tools/post-execute', async (_exec, _result, next) => {
+      callbackCount += 1
+      if (policy === 'block') return { kind: 'block', feedback: [{ type: 'text', text: 'policy refused this visual' }] }
+      await next()
+      if (policy === 'content') return { kind: 'accept', content: [{ type: 'text', text: 'REPLACED: the visual result was redacted by policy' }] }
+      return { kind: 'accept', value: entry.replacement }
+    })
+  }
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(`visual-policy-${key}-${policy}`) as never,
+    agentOptions: { provider: 'visual-probe', model: 'm' },
+    setup: installPolicy,
+  })
+  const agent = handle.agent as unknown as {
+    followup(message: unknown): void
+    whenIdle(): Promise<void>
+    session: { snapshotEvents(): Array<{ type: string; data: Record<string, unknown> }> }
+  }
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+  await agent.whenIdle()
+  const events = agent.session.snapshotEvents()
+  const header = events.find(event => event.type === 'request/header')
+  const result = events.find(event => event.type === 'tool/result')
+  const folder = new TranscriptFolder()
+  folder.apply(events as never)
+  const row = folder.messages().find(message => message.kind === 'tool' && message.name === entry.tool)
+  return {
+    modelTools: adapter.requests[0] ?? [],
+    requestTools: ((header?.data as { header?: { tools?: Array<{ name?: string }> } } | undefined)?.header?.tools ?? []).map(tool => tool.name ?? null),
+    callbackCount,
+    hasMeta: result !== undefined && Object.hasOwn(result.data, 'meta'),
+    isError: (result?.data as { message?: { isError?: boolean } } | undefined)?.message?.isError ?? null,
+    text: ((result?.data as { message?: { content?: Array<{ text?: string }> } } | undefined)?.message?.content ?? []).map(block => block.text ?? null),
+    foldedHasMeta: row !== undefined && (row as { meta?: unknown }).meta !== undefined,
+  }
+}
+
+test('the registered visual tools persist no presentation meta under every post-execute decision', async (t) => {
+  for (const key of ['chart', 'svg'] as const) {
+    for (const policy of ['none', 'content', 'value', 'block'] as const) {
+      const row = await runCase(t, key, policy)
+      assert.ok(row.modelTools.includes(CASES[key].tool), `${key}/${policy}: the model must see the tool`)
+      assert.ok(row.requestTools.includes(CASES[key].tool), `${key}/${policy}: the first request header must carry the tool`)
+      assert.equal(row.hasMeta, false, `${key}/${policy}: durable tool/result must not have an own meta property`)
+      assert.equal(row.foldedHasMeta, false, `${key}/${policy}: the fold must not invent meta`)
+      if (policy === 'none') {
+        assert.equal(row.callbackCount, 0)
+        assert.equal(row.isError, false)
+        assert.match(JSON.stringify(row.text), key === 'chart' ? /Request latency/u : /Service topology/u)
+      }
+      if (policy === 'content') {
+        assert.equal(row.callbackCount, 1)
+        assert.equal(row.isError, false)
+        assert.match(JSON.stringify(row.text), /REPLACED/u)
+        assert.doesNotMatch(JSON.stringify(row.text), /visual-v1:/u)
+      }
+      if (policy === 'value') {
+        assert.equal(row.callbackCount, 1)
+        assert.equal(row.isError, false)
+        assert.match(JSON.stringify(row.text), /Replaced/u)
+      }
+      if (policy === 'block') {
+        assert.equal(row.callbackCount, 1)
+        assert.equal(row.isError, true)
+        assert.match(JSON.stringify(row.text), /refused/u)
+      }
+    }
+  }
+})
