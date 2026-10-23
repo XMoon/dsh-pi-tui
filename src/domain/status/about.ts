@@ -154,13 +154,16 @@ function copySafe(value: string): string {
   let at = 0
   const length = value.length
 
-  /** Drop one CSI sequence whose parameter/final bytes start at `at`. */
+  /** Drop one CSI sequence whose parameter/intermediate/final bytes start at
+   *  `at`. Mirrors the terminal-text lexer: 0x20–0x3F continues, 0x40–0x7E is
+   *  the final, and any other byte stops WITHOUT consuming it — that ordinary
+   *  Unicode/control byte then flows through the normal path. */
   const consumeCsi = (): void => {
     while (at < length) {
       const code = value.charCodeAt(at)
-      at += 1
-      // Final byte of a CSI sequence.
-      if (code >= 0x40 && code <= 0x7e) return
+      if (code >= 0x20 && code <= 0x3f) { at += 1; continue }
+      if (code >= 0x40 && code <= 0x7e) { at += 1; return }
+      return
     }
   }
 

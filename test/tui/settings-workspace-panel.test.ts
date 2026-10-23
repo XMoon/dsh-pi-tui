@@ -529,3 +529,31 @@ test('C3 a generic ESC intermediate/final sequence is dropped whole in both copy
   h.panel.handleInput('C')
   assert.ok(copied.at(-1)!.includes('Title: pre-post'), 'Copy All drops the whole ESC sequence')
 })
+
+test('C3 invalid ESC/C1 CSI bytes keep the ordinary character in paint and copy', () => {
+  for (const title of ['pre\u001b[鲸-post', 'pre\u009b鲸-post']) {
+    const copied: string[] = []
+    const view: AboutStatusView = {
+      runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+      session: { kind: 'ready', sessionId: 'sess-csi', title, cwd: '/ws', context: 'fresh' },
+      epoch: 1,
+    }
+    const h = setup({
+      columns: 44,
+      rows: 20,
+      aboutStatusSource: staticAboutSource(view),
+      onCopy: text => { copied.push(text) },
+    })
+    plain(h, 44)
+    for (let step = 0; step < 4; step += 1) h.panel.handleInput('\x1b[B')
+    const frame = plain(h, 44)
+    assert.ok(
+      frame.split('\n').some(line => line.includes('Title') && line.includes('pre鲸-post')),
+      `the painted Title keeps the ordinary character:\n${frame}`,
+    )
+    h.panel.handleInput('c')
+    assert.equal(copied.at(-1), 'pre鲸-post', 'the single-field copy keeps the ordinary character')
+    h.panel.handleInput('C')
+    assert.ok(copied.at(-1)!.includes('Title: pre鲸-post'), 'Copy All keeps the ordinary character')
+  }
+})
