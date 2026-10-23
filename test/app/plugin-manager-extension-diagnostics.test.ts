@@ -4,6 +4,10 @@
  * unassociated-owner group). These tests drive the REAL ledger / registry
  * snapshots where the contract is about authenticity, and the real page for
  * the reachability/copy contract.
+ *
+ * Evidence levels: the projection/copy cases are headless; the final cases
+ * mount the real extension service, a real TuiApp and the production Plugin
+ * Manager runtime, with the official inventory port as the only fixture.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-extension-diagnostics.test
  */
 
@@ -15,10 +19,13 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { safeErrorMessage } from '../../src/runtime/process/errors.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { openWorkspace, plain, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
+import { bundle, openWorkspace, plain, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 import { mountRealService } from '../support/extension-lifecycle-helpers.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
-import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
+import {
+  PluginManagerWorkspacePanel,
+  createPluginManagerWorkspacePanel,
+} from '../../src/tui/plugin-manager/workspace.ts'
 import { createPluginManagerRuntime } from '../../src/app/surface/plugin-manager-runtime.ts'
 import type { SurfaceExtensionService } from '../../src/app/surface/extension-runtime.ts'
 import {
@@ -103,20 +110,53 @@ async function openDiagnosticsPage(
   return harness
 }
 
-function memoryPort(): PluginManagerPort {
+function memoryPort(options: {
+  readonly snapshotFailure?: string
+  readonly installFailure?: string
+} = {}): PluginManagerPort {
   return {
-    snapshot: async () => ({
-      bundles: [],
-      plugins: [],
-      registries: { registry: null, fallbackRegistries: [], resolved: null },
-      exemptions: [],
-      exemptionWarnings: [],
+    snapshot: async () => {
+      if (options.snapshotFailure !== undefined) throw new Error(options.snapshotFailure)
+      return {
+        bundles: options.installFailure === undefined
+          ? []
+          : [bundle({
+              name: '@deepseek-ai/dsh-subagent-claude-code',
+              official: true,
+              availability: 'missing',
+              installed: false,
+              optional: true,
+              removable: false,
+              source: undefined,
+              installTarget: { spec: '@deepseek-ai/dsh-subagent-claude-code@0.0.0', version: '0.0.0' },
+            })],
+        plugins: [],
+        registries: { registry: null, fallbackRegistries: [], resolved: null },
+        exemptions: [],
+        exemptionWarnings: [],
+      }
+    },
+    inspect: async (spec: string) => ({
+      status: 'accepted',
+      kind: 'registry',
+      name: spec.split('@')[0] ?? spec,
+      version: '0.0.0',
+      bundle: true,
+      registry: null,
     }),
-    inspect: async () => ({ status: 'refused', problem: 'not inspected', reason: 'not inspected' }),
     setBundleEnabled: async () => ({ changed: false }),
     setPluginEnabled: async () => ({ changed: false }),
     removeBundle: async () => ({ changed: false }),
-    startInstall: async () => ({ changed: false }),
+    startInstall: async (request: { readonly spec: string }) => options.installFailure === undefined
+      ? { changed: false, application: 'failed', stage: 'install', target: request.spec }
+      : {
+          changed: false,
+          application: 'failed',
+          stage: 'install',
+          target: request.spec,
+          error: { code: 'host-install-failed', diagnostic: options.installFailure },
+          failedAt: 'registry',
+        },
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
@@ -131,23 +171,25 @@ test('diagnostics keep associated and unassociated owners apart, sorted by (owne
       { id: 'beta', owner: 'owner-a', extensionPoint: 'slot.a', state: 'active' },
       { id: 'alpha', owner: 'owner-a', extensionPoint: 'slot.a', state: 'failed', lastError: 'boom 鲸' },
       { id: 'gamma', owner: '@vendor/not-an-entry', extensionPoint: 'slot.c', state: 'active' },
+      { id: 'aaa', owner: 'owner-b', extensionPoint: 'slot.a', state: 'active' },
     ],
-    ownerEntryIds: () => new Map([['owner-a', 'entry-a']]),
+    ownerEntryIds: () => new Map([['owner-a', 'entry-a'], ['owner-b', 'entry-b']]),
   }
   const view = describeTuiExtensionDiagnostics(
     source,
     registrySource({ commands: 1, themes: 2, renderers: 3 }),
     new Set(['slot.input.widget', 'surface.snapshot']),
   )
-  assert.deepEqual(view.entries.map(entry => entry.id), ['alpha', 'beta'])
-  assert.deepEqual(view.unmappedEntries.map(entry => entry.id), ['gamma', 'zeta'])
+  // Owner-first sort: an id-first sort would put `aaa` before alpha/beta.
+  assert.deepEqual(view.entries.map(entry => entry.id), ['alpha', 'beta', 'aaa', 'zeta'])
+  assert.deepEqual(view.entries.map(entry => entry.owner), ['owner-a', 'owner-a', 'owner-b', 'owner-b'])
+  assert.deepEqual(view.unmappedEntries.map(entry => entry.id), ['gamma'])
   assert.equal(view.healthSummary, '1 failed · 1 shadowed')
-  assert.deepEqual(view.contributionTotals, { total: 4, active: 2, failed: 1, shadowed: 1, other: 0 })
+  assert.deepEqual(view.contributionTotals, { total: 5, active: 3, failed: 1, shadowed: 1, other: 0 })
   assert.deepEqual(view.registryCounts, { ...emptyCounts(), commands: 1, themes: 2, renderers: 3 })
   assert.deepEqual(view.capabilities, ['slot.input.widget', 'surface.snapshot'])
   assert.equal(view.entries[0]?.entryId, 'entry-a')
-  assert.equal(view.unmappedEntries[0]?.entryId, undefined, 'no entry id is inferred from a name/prefix')
-  assert.equal(view.unmappedEntries[1]?.entryId, undefined, 'no entry id is inferred from a package-looking owner')
+  assert.equal(view.unmappedEntries[0]?.entryId, undefined, 'no entry id is inferred from a package-looking owner')
 })
 
 test('diagnostics exact copy carries the full owner/entry/contribution/state/error block', () => {
@@ -293,6 +335,40 @@ test('c copies the selected fact, C copies all, and r rereads without touching t
   }
 })
 
+test('the diagnostics page paints the unassociated group and copies a shadowed record', async () => {
+  const orphan: TuiContributionDiagnostic = {
+    owner: 'uid:unmapped',
+    extensionPoint: 'slot.input.widget',
+    id: 'orphan',
+    state: 'shadowed',
+    lastError: 'conflict 鲸',
+  }
+  const view = diagnosticsView({
+    unmappedEntries: [orphan],
+    contributionTotals: { total: 1, active: 0, failed: 0, shadowed: 1, other: 0 },
+    healthSummary: '0 failed · 1 shadowed',
+  })
+  const harness = await openDiagnosticsPage(() => view)
+  try {
+    const frame = harness.view()
+    assert.match(frame, /Unassociated extension contributions/)
+    assert.match(frame, /Owner: uid:unmapped/)
+    assert.match(frame, /slot\.input\.widget:orphan\s+\[shadowed\]/)
+    assert.match(frame, /conflict 鲸/)
+    // Health -> Registries -> Capabilities -> the unassociated record.
+    for (let step = 0; step < 3; step += 1) {
+      harness.vt.sendInput('\x1b[B')
+      await harness.settle()
+    }
+    harness.vt.sendInput('c')
+    await harness.settle()
+    assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(orphan))
+  } finally {
+    harness.close()
+    harness.app.dispose()
+  }
+})
+
 test('an absent extension service paints Unavailable and copies nothing', async () => {
   const harness = await openWorkspace({ diagnostics: () => undefined })
   try {
@@ -300,6 +376,11 @@ test('an absent extension service paints Unavailable and copies nothing', async 
     await harness.settle()
     assert.equal(harness.panel.currentView(), 'diagnostics')
     assert.match(harness.view(), /Extension diagnostics unavailable/)
+    assert.match(harness.view(), /r reread/)
+    assert.match(harness.view(), /Esc back/)
+    assert.doesNotMatch(harness.view(), /c copy/)
+    assert.doesNotMatch(harness.view(), /C copy all/)
+    assert.doesNotMatch(harness.view(), /Up\/Down/)
     harness.vt.sendInput('c')
     harness.vt.sendInput('C')
     await harness.settle()
@@ -387,162 +468,267 @@ test('both Plugin Manager entries share the same controller and reach the same D
   }
 })
 
-test('a Host package install failure never contaminates the extension diagnostics', async () => {
-  // Negative control: the official package inventory and the TUI extension
-  // ledger are SEPARATE truth sources. A failed Host package operation is
-  // visible in the Install page; Diagnostics stays `all active`.
-  const healthy = diagnosticsView()
-  const harness = await openWorkspace({
-    columns: 120,
-    rows: 40,
-    diagnostics: () => healthy,
-    installImpl: async (request) => ({
-      changed: false,
-      application: 'failed',
-      stage: 'install',
-      target: request.spec,
-      error: { code: 'host-install-failed', diagnostic: 'Host package install failed: 包' },
-      failedAt: 'registry',
-    }),
-  })
-  try {
-    harness.vt.sendInput('\x1b[F')
-    await harness.settle()
-    harness.vt.sendInput('\r') // details
-    await harness.settle()
-    harness.vt.sendInput('\r') // open the official install editor
-    await harness.settle()
-    harness.vt.sendInput('\r') // inspect
-    await harness.settle()
-    harness.vt.sendInput('\r') // confirm -> the Host throws
-    await harness.settle()
-    assert.equal(harness.panel.currentView(), 'install')
-    assert.match(harness.view(), /install failed/)
-    assert.match(harness.view(), /Host package install failed/)
+interface RealLedgerService {
+  registerToolRenderer(contribution: { id: string; toolName: string; render: () => ExtensionView }): unknown
+  renderers: RendererRegistry
+  editors: EditorRegistry
+  _ledger(): {
+    healthSnapshot(): readonly { id: string; owner: string; extensionPoint: string; state: string; lastError?: string }[]
+    recordError(slot: string, id: string, owner: string, message: string): void
+    clearError(slot: string, id: string, owner: string): void
+  }
+  api(): { capabilities: ReadonlySet<string> }
+  _ownerEntryIds(): ReadonlyMap<string, string>
+  commands: TuiExtensionRegistrySource['commands']
+  themes: TuiExtensionRegistrySource['themes']
+  settings: TuiExtensionRegistrySource['settings']
+  autocomplete: TuiExtensionRegistrySource['autocomplete']
+  keybindings: TuiExtensionRegistrySource['keybindings']
+}
 
-    harness.vt.sendInput('\x1b') // leave the install view, keep the result
-    await harness.settle()
-    harness.vt.sendInput('d')
-    await harness.settle()
-    assert.equal(harness.panel.currentView(), 'diagnostics')
-    assert.match(harness.view(), /all active/)
-    assert.doesNotMatch(harness.view(), /Host package install failed/)
+async function settlePage(vt: VirtualTerminal, rounds = 8): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+  await vt.waitForRender()
+}
+
+function expectedDiagnostics(service: RealLedgerService): TuiExtensionDiagnostics {
+  return describeTuiExtensionDiagnostics(
+    {
+      healthSnapshot: () => service._ledger().healthSnapshot(),
+      ownerEntryIds: () => service._ownerEntryIds(),
+    },
+    {
+      commands: service.commands,
+      themes: service.themes,
+      settings: service.settings,
+      autocomplete: service.autocomplete,
+      keybindings: service.keybindings,
+      renderers: service.renderers,
+      editors: service.editors,
+    },
+    service.api().capabilities,
+  )
+}
+
+interface ProductionPage {
+  readonly service: RealLedgerService
+  readonly app: TuiApp
+  readonly vt: VirtualTerminal
+  readonly panel: PluginManagerWorkspacePanel
+  readonly copied: readonly string[]
+  dispose(): Promise<void>
+}
+
+/**
+ * Mount the REAL service + a real TuiApp + the production Plugin Manager
+ * runtime/page. The only fixture is the official inventory port; the
+ * diagnostics read therefore goes through `createPluginManagerRuntime`'s
+ * `panelDeps.diagnostics` closure, exactly as production does.
+ */
+async function mountProductionPage(options: {
+  readonly prepare?: (service: RealLedgerService) => void
+  readonly configure?: (app: TuiApp, service: RealLedgerService) => void
+  readonly snapshotFailure?: string
+  readonly installFailure?: string
+} = {}): Promise<ProductionPage> {
+  const { service: mountedService, dispose: disposeService } = await mountRealService()
+  const service = mountedService as unknown as RealLedgerService
+  options.prepare?.(service)
+  const copied: string[] = []
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The production clipboard route requires the owned-task entry; the copy
+    // policy itself is the real `copySelection` capability below.
+    runOwned: (_label, task, resultOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(result => resultOptions.onResult?.(result), error => resultOptions.onError?.(error))
+    },
+  }, {
+    renderers: service.renderers,
+    editorRegistry: service.editors,
+    copySelection: async (text) => { copied.push(text); return true },
+  })
+  startedApps.add(app)
+  options.configure?.(app, service)
+  app.start()
+  await settlePage(vt)
+  const panels: PluginManagerWorkspacePanel[] = []
+  const runtime = createPluginManagerRuntime({
+    mounted: () => app,
+    service: () => service as unknown as SurfaceExtensionService,
+    createPanel: (controller, deps) => {
+      const panel = createPluginManagerWorkspacePanel(controller, deps)
+      panels.push(panel)
+      return panel
+    },
+  })
+  const owner = runtime.attach({
+    port: memoryPort({
+      ...(options.snapshotFailure === undefined ? {} : { snapshotFailure: options.snapshotFailure }),
+      ...(options.installFailure === undefined ? {} : { installFailure: options.installFailure }),
+    }),
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  })
+  owner.open()
+  await settlePage(vt)
+  const panel = panels[0]
+  assert.ok(panel !== undefined, 'the production runtime must build the Plugin Manager page')
+  return {
+    service,
+    app,
+    vt,
+    panel,
+    copied,
+    async dispose() {
+      runtime.dispose()
+      startedApps.delete(app)
+      if (!app.isDisposed()) app.dispose()
+      await disposeService()
+    },
+  }
+}
+
+test('a failing Host inventory does not contaminate the real extension diagnostics', async () => {
+  // Negative control for RFL-003: a Host inventory failure paints Stale/error
+  // on the list, but the extension diagnostics read is a separate truth
+  // source and must stay freshly healthy without that Host status.
+  const page = await mountProductionPage({ snapshotFailure: 'Host inventory failed: 包' })
+  try {
+    const list = plain(page.vt.getViewport())
+    assert.match(list, /Stale/)
+    assert.match(list, /Host inventory failed/)
+    page.vt.sendInput('d')
+    await settlePage(page.vt)
+    assert.equal(page.panel.currentView(), 'diagnostics')
+    const frame = plain(page.vt.getViewport())
+    const expected = expectedDiagnostics(page.service)
+    assert.match(frame, /Health\s+/)
+    assert.ok(frame.includes(expected.healthSummary), `the diagnostics health is ${expected.healthSummary}:\n${frame}`)
+    assert.doesNotMatch(frame, /Stale/)
+    assert.doesNotMatch(frame, /Host inventory failed/)
   } finally {
-    harness.close()
-    harness.app.dispose()
+    await page.dispose()
   }
 })
 
-test('L6: a real renderer failure, ledger error, diagnostics paint/copy and recovery', async () => {
-  const { service, dispose } = await mountRealService()
-  const ledgerService = service as unknown as {
-    registerToolRenderer(contribution: { id: string; toolName: string; render: () => ExtensionView }): unknown
-    renderers: RendererRegistry
-    editors: EditorRegistry
-    _ledger(): {
-      healthSnapshot(): readonly { id: string; owner: string; extensionPoint: string; state: string; lastError?: string }[]
-      recordError(slot: string, id: string, owner: string, message: string): void
-      clearError(slot: string, id: string, owner: string): void
-    }
-    api(): { capabilities: ReadonlySet<string> }
-    _ownerEntryIds(): ReadonlyMap<string, string>
-    commands: TuiExtensionRegistrySource['commands']
-    themes: TuiExtensionRegistrySource['themes']
-    settings: TuiExtensionRegistrySource['settings']
-    autocomplete: TuiExtensionRegistrySource['autocomplete']
-    keybindings: TuiExtensionRegistrySource['keybindings']
+test('a Host package install failure stays out of the real extension diagnostics', async () => {
+  // Negative control for RFL-002: the real production page/ledger stays
+  // healthy through a settled Host install failure; the Host failure is only
+  // visible in the Install page.
+  const page = await mountProductionPage({ installFailure: 'Host package install failed: 包' })
+  try {
+    const { vt, panel } = page
+    vt.sendInput('\x1b[F')
+    await settlePage(vt)
+    vt.sendInput('\r')
+    await settlePage(vt)
+    vt.sendInput('\r')
+    await settlePage(vt)
+    vt.sendInput('\r')
+    await settlePage(vt)
+    vt.sendInput('\r')
+    await settlePage(vt)
+    assert.equal(panel.currentView(), 'install')
+    const installFrame = plain(vt.getViewport())
+    assert.match(installFrame, /install failed/)
+    assert.match(installFrame, /Host package install failed/)
+    vt.sendInput('\x1b')
+    await settlePage(vt)
+    vt.sendInput('d')
+    await settlePage(vt)
+    assert.equal(panel.currentView(), 'diagnostics')
+    const frame = plain(vt.getViewport())
+    const expected = expectedDiagnostics(page.service)
+    assert.ok(frame.includes(expected.healthSummary), `the diagnostics health is ${expected.healthSummary}:\n${frame}`)
+    assert.doesNotMatch(frame, /Host package install failed/)
+    assert.doesNotMatch(frame, /Stale/)
+  } finally {
+    await page.dispose()
   }
+})
+
+test('a real renderer failure reaches the Plugin Manager diagnostics and recovers', async () => {
+  // Evidence level: real SurfaceExtensionService + real TuiApp + the
+  // production createPluginManagerRuntime/page/clipboard path. Only the
+  // official inventory port and the renderer's own throw are fixtures.
   const message = `renderer failed: ${'鲸'.repeat(40)}`
   let broken = true
-  ledgerService.registerToolRenderer({
-    id: 'c4-broken-renderer',
-    toolName: 'bash',
-    render: () => {
-      if (broken) throw new Error(message)
-      return { kind: 'text', spans: [{ text: 'recovered' }] }
+  const page = await mountProductionPage({
+    prepare: (service) => {
+      service.registerToolRenderer({
+        id: 'c4-broken-renderer',
+        toolName: 'bash',
+        render: () => {
+          if (broken) throw new Error(message)
+          return { kind: 'text', spans: [{ text: 'recovered' }] }
+        },
+      })
+    },
+    configure: (app, service) => {
+      app.setRendererErrorSink(({ id, error, slot, owner }) => {
+        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
+        service._ledger().recordError(healthSlot, id, owner, safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200))
+      })
+      app.setRendererRecoveredSink(({ id, slot, owner }) => {
+        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
+        service._ledger().clearError(healthSlot, id, owner)
+      })
     },
   })
-  const vt = new VirtualTerminal(120, 40)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
-    renderers: ledgerService.renderers,
-    editorRegistry: ledgerService.editors,
-  })
-  startedApps.add(app)
-  app.setRendererErrorSink(({ id, error, slot, owner }) => {
-    const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
-    ledgerService._ledger().recordError(healthSlot, id, owner, safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200))
-  })
-  app.setRendererRecoveredSink(({ id, slot, owner }) => {
-    const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
-    ledgerService._ledger().clearError(healthSlot, id, owner)
-  })
-  app.start()
-  await vt.waitForRender()
-  const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }
-  const failed = app.messageCacheEntryForTest?.(tool, 0)
-  assert.equal(failed?.rendererId, undefined, 'a throwing renderer abdicates to the host card')
-  const health = ledgerService._ledger().healthSnapshot().find(record => record.id === 'c4-broken-renderer')
-  assert.equal(health?.state, 'failed')
-  assert.equal(health?.lastError, message.slice(0, 200))
+  try {
+    const { app, vt, panel, service, copied } = page
+    const tool = { kind: 'tool' as const, turn: 0, name: 'bash', args: '{}', result: 'out', status: 'ok' as const }
+    const failed = app.messageCacheEntryForTest?.(tool, 0)
+    assert.equal(failed?.rendererId, undefined, 'a throwing renderer abdicates to the host card')
+    const health = service._ledger().healthSnapshot().find(record => record.id === 'c4-broken-renderer')
+    assert.equal(health?.state, 'failed')
+    assert.equal(health?.lastError, message.slice(0, 200))
 
-  const readDiagnostics = (): TuiExtensionDiagnostics => describeTuiExtensionDiagnostics(
-    {
-      healthSnapshot: () => ledgerService._ledger().healthSnapshot(),
-      ownerEntryIds: () => ledgerService._ownerEntryIds(),
-    },
-    {
-      commands: ledgerService.commands,
-      themes: ledgerService.themes,
-      settings: ledgerService.settings,
-      autocomplete: ledgerService.autocomplete,
-      keybindings: ledgerService.keybindings,
-      renderers: ledgerService.renderers,
-      editors: ledgerService.editors,
-    },
-    ledgerService.api().capabilities,
-  )
-  const view = readDiagnostics()
-  assert.equal(view.healthSummary, '1 failed · 0 shadowed')
-  const contribution = [...view.entries, ...view.unmappedEntries].find(entry => entry.id === 'c4-broken-renderer')
-  assert.ok(contribution !== undefined)
-  assert.equal(contribution.lastError, message.slice(0, 200))
+    vt.sendInput('d')
+    await settlePage(vt)
+    assert.equal(panel.currentView(), 'diagnostics')
+    const expected = expectedDiagnostics(service)
+    const contribution = [...expected.entries, ...expected.unmappedEntries]
+      .find(entry => entry.id === 'c4-broken-renderer')
+    assert.ok(contribution !== undefined)
+    assert.equal(contribution.lastError, message.slice(0, 200))
+    const frame = plain(vt.getViewport())
+    assert.match(frame, /c4-broken-renderer/)
+    assert.match(frame, /\[failed\]/)
+    assert.match(frame, /renderer failed: 鲸/)
 
-  const controller = new PluginManagerController(memoryPort(), {
-    requestRender: () => {},
-    requestClose: () => {},
-    notify: () => {},
-    isOpen: () => true,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-  })
-  const copied: string[] = []
-  const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 40,
-    columns: () => 120,
-    requestRender: () => {},
-    notice: () => undefined,
-    onCopy: text => { copied.push(text) },
-    diagnostics: () => readDiagnostics(),
-  })
-  panel.render(120)
-  panel.handleInput('d')
-  const painted = plain(panel.render(120))
-  assert.match(painted, /transcript\.tool\.renderer:c4-broken-renderer\s+\[failed\]/)
-  assert.match(painted, /renderer failed: 鲸/)
-  for (let step = 0; step < 3; step += 1) panel.handleInput('\x1b[B')
-  panel.handleInput('c')
-  assert.equal(copied.at(-1), formatTuiContributionDiagnostic(contribution))
-  panel.handleInput('C')
-  assert.equal(copied.at(-1), serializeTuiExtensionDiagnostics(readDiagnostics()))
+    vt.sendInput('C')
+    await settlePage(vt)
+    assert.equal(copied.at(-1), serializeTuiExtensionDiagnostics(expected), 'Copy All uses the production projection')
 
-  broken = false
-  const recovered = app.messageCacheEntryForTest?.({ ...tool, turn: 1 }, 0)
-  assert.equal(recovered?.rendererId, 'c4-broken-renderer', 'the recovered renderer claims the new card')
-  assert.equal(ledgerService._ledger().healthSnapshot().find(record => record.id === 'c4-broken-renderer')?.state, 'active')
-  // The NEXT successful render derives the recovered ledger (no `r` needed:
-  // a repaint is the explicit read the plan authorizes; `r` remains the
-  // manual reread covered by the page test above).
-  const after = plain(panel.render(120))
-  assert.match(after, /all active/)
-  assert.doesNotMatch(after, /renderer failed:/)
-  await dispose()
+    const facts = [...expected.entries, ...expected.unmappedEntries]
+    const down = 3 + facts.findIndex(entry => entry.id === 'c4-broken-renderer')
+    for (let step = 0; step < down; step += 1) vt.sendInput('\x1b[B')
+    await settlePage(vt)
+    vt.sendInput('c')
+    await settlePage(vt)
+    assert.equal(copied.at(-1), formatTuiContributionDiagnostic(contribution), 'per-fact copy uses the production projection')
+
+    broken = false
+    const recovered = app.messageCacheEntryForTest?.({ ...tool, turn: 1 }, 0)
+    assert.equal(recovered?.rendererId, 'c4-broken-renderer', 'the recovered renderer claims the new card')
+    assert.equal(service._ledger().healthSnapshot().find(record => record.id === 'c4-broken-renderer')?.state, 'active')
+    app.requestRender()
+    await settlePage(vt)
+    const recoveredExpected = expectedDiagnostics(service)
+    const recoveredFrame = plain(vt.getViewport())
+    assert.ok(
+      recoveredFrame.includes(recoveredExpected.healthSummary),
+      `the recovered diagnostics health is ${recoveredExpected.healthSummary}:\n${recoveredFrame}`,
+    )
+    assert.doesNotMatch(recoveredFrame, /renderer failed:/)
+    vt.sendInput('C')
+    await settlePage(vt)
+    assert.equal(copied.at(-1), serializeTuiExtensionDiagnostics(recoveredExpected), 'Copy All reflects recovery')
+  } finally {
+    await page.dispose()
+  }
 })
