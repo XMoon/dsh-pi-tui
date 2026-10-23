@@ -136,6 +136,14 @@ export interface TranscriptViewOptions {
    * state was prepared (the row keeps its readable text).
    */
   readonly toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
+  /**
+   * PR-D RFL-016: the tool-card keys the user has EXPANDED. Present (even as
+   * an empty set) means the Tern disclosure contract is active: a ready SVG
+   * card starts collapsed, and its blob/image is only requested after the
+   * user's `toggle` expansion. Absent keeps the mapper's former expanded
+   * default for pure projections/tests.
+   */
+  readonly expandedToolKeys?: ReadonlySet<string>
 }
 
 /** PR-D: one SVG row's prepared display state. */
@@ -446,6 +454,7 @@ function svgResultNodes(
   options: TranscriptViewOptions,
   wrap: boolean,
   flatText: string,
+  collapsed: boolean,
 ): Node[] {
   const base = message.resultBlocks === undefined ? visualPartsFromText(flatText) : visualParts(message.resultBlocks)
   const parts = message.status === 'ok' ? base : { ...base, fact: undefined }
@@ -461,7 +470,7 @@ function svgResultNodes(
   // The lookup is by this exact row object, so a reused call/sub-call id
   // elsewhere in the transcript can never lend its credential to this card.
   const state = message.status === 'ok' ? options.toolSvgStates?.get(message) : undefined
-  if (state?.state === 'ready') {
+  if (state?.state === 'ready' && !collapsed) {
     // The blob sender runs HERE, when the image node is actually projected;
     // authorization alone no longer sends bytes before the Tool Card body.
     const blobId = state.blobId ?? state.request()
@@ -496,9 +505,10 @@ function toolResultNodes(
   options: TranscriptViewOptions,
   wrap: boolean,
   flatText: string,
+  collapsed = false,
 ): Node[] {
   if (message.name === 'dsh_pi_tui_chart') return chartResultNodes(message, options, wrap, flatText)
-  if (message.name === 'dsh_pi_tui_svg') return svgResultNodes(message, options, wrap, flatText)
+  if (message.name === 'dsh_pi_tui_svg') return svgResultNodes(message, options, wrap, flatText, collapsed)
   if (toolRowProjectsImages(message)) {
     return imageResultNodes(message.resultBlocks ?? [], options, wrap)
   }
@@ -516,6 +526,7 @@ function toolBodyParts(
   message: Extract<TranscriptMessage, { kind: 'tool' }>,
   options: TranscriptViewOptions,
   wrap = false,
+  collapsed = false,
 ): ToolBodyParts {
   const args: Node[] = []
   if (message.args !== '') args.push(ui.code({ key: 'args', text: sanitizeDisplayText(message.args), ...(wrap ? { wrap: true } : {}) }))
@@ -524,7 +535,7 @@ function toolBodyParts(
   // the official projection already settled it, and the settled batch is still
   // the authority. An absent lookup answers `''` and omits the body exactly as
   // before, so an ordinary tool row is unchanged.
-  return { args, result: toolResultNodes(message, options, wrap, shownToolResult(message, options)) }
+  return { args, result: toolResultNodes(message, options, wrap, shownToolResult(message, options), collapsed) }
 }
 
 /**
@@ -559,23 +570,29 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
   // not otherwise display (the visual tools always have a title summary). The
   // admitted source is added here so the child has the SAME readable-source
   // path as the top-level card instead of only claiming it is available.
-  if (child.name === 'dsh_pi_tui_svg') {
-    const state = child.status === 'ok' ? options.toolSvgStates?.get(child) : undefined
-    if (state?.state === 'ready' || state?.state === 'unsupported') {
-      body.push(ui.code({ key: 'source', text: sanitizeDisplayText(state.source), wrap: true }))
-    }
+  const childKey = `sub-${child.subCallId!}`
+  const svgState = child.name === 'dsh_pi_tui_svg' && child.status === 'ok'
+    ? options.toolSvgStates?.get(child)
+    : undefined
+  const collapsible = child.name === 'dsh_pi_tui_svg' && svgState?.state === 'ready'
+  const collapsed = collapsible
+    && options.expandedToolKeys !== undefined
+    && !options.expandedToolKeys.has(childKey)
+  if (svgState?.state === 'ready' || svgState?.state === 'unsupported') {
+    body.push(ui.code({ key: 'source', text: sanitizeDisplayText(svgState.source), wrap: true }))
   }
   body.push(...toolChildNodes(child, options))
   // PR-C: the child projects ITS OWN result blocks (recursively, with the
   // same rule as a top-level row) — the parent's result never leaks into it.
-  body.push(...toolResultNodes(child, options, true, child.result))
+  body.push(...toolResultNodes(child, options, true, child.result, collapsed))
   return ui.tool(
     {
-      key: `sub-${child.subCallId!}`,
+      key: childKey,
       frame: 'inline',
       name: sanitizedPhysicalLine(child.name),
       title: sanitizedPhysicalLine(header.title),
       status: toolStatus(subCallDisplayStatus(child)),
+      ...(collapsible ? { collapsible: true, collapsed } : {}),
       ...(header.summary === '' ? {} : {
         target: sanitizedPhysicalLine(header.summary),
         // A child target is presentation text only: no registered-tool
@@ -609,7 +626,14 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
   // shape and SDK props byte-identically. The order is fixed:
   // parent args -> child block -> parent result.
   const hasChildren = (message.subCalls?.length ?? 0) > 0
-  const body = toolBodyParts(message, options, hasChildren)
+  const svgState = message.name === 'dsh_pi_tui_svg' && message.status === 'ok'
+    ? options.toolSvgStates?.get(message)
+    : undefined
+  const collapsible = message.name === 'dsh_pi_tui_svg' && svgState?.state === 'ready'
+  const collapsed = collapsible
+    && options.expandedToolKeys !== undefined
+    && !options.expandedToolKeys.has(key)
+  const body = toolBodyParts(message, options, hasChildren, collapsed)
   if (isUnmatchedToolRow(message)) {
     const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
     // PR-C: an unmatched row shows ITS OWN image blocks inside the existing
@@ -631,6 +655,7 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
       // string, the body, the key and the status are byte-identical to the
       // plain row; a row whose target is not PROVEN by the registered tool's
       // own presentation view keeps the plain `text` kind.
+      ...(collapsible ? { collapsible: true, collapsed } : {}),
       ...(header.summary === '' ? {} : {
         target: sanitizedPhysicalLine(header.summary),
         targetKind: toolTargetKind(

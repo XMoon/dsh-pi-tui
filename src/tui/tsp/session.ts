@@ -502,6 +502,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const svgAdmissions = new Map<string, SvgAdmission>()
   /** PR-D: admitted SVG digests → the ONE sender's blob id (content-addressed). */
   const svgBlobIds = new Map<string, string>()
+  /**
+   * PR-D RFL-016: the tool-card keys the user EXPANDED via the Tern `toggle`
+   * event. A ready SVG card starts collapsed; only the user's expansion
+   * requests its blob (the actual display demand), and collapsing/window/scope
+   * changes release the id cache.
+   */
+  const expandedToolKeys = new Set<string>()
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -808,6 +815,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       preparingPreviews: lastStreamingToolPreviews,
       chartKindsSupported: session.caps.kinds.includes('chart'),
       ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
+      expandedToolKeys,
       toolImageStates: imageStates,
     })
     if (visualProjectionAborted) return false
@@ -893,6 +901,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // re-resolved when a read settles.
       releaseImageSubscriptions()
       svgBlobIds.clear()
+      expandedToolKeys.clear()
       activeImageScope = imageBinding?.imageScope()
     }
     // PR3-B B3 (§3.9): remember the projection so a settled-answer lookup can
@@ -1183,6 +1192,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // underlying composer. A terminal focus claim must not move the caret
       // away from an open form, so the seat's own focus is re-asserted; every
       // other event keeps its existing (unhandled) course.
+      // PR-D RFL-016: the Tern disclosure event. A ready SVG card starts
+      // collapsed; expanding it is the real display demand that sends the
+      // blob. The node id's last segment is the `ui.tool` key (the same key the
+      // mapper wrote), with the event's optional `key` taking precedence.
+      if (input.event.ev === 'toggle' && input.event.sf === surface.id) {
+        const key = input.event.key ?? input.event.id.slice(input.event.id.lastIndexOf('.') + 1)
+        if (input.event.collapsed) expandedToolKeys.delete(key)
+        else expandedToolKeys.add(key)
+        if (rebuildLastMain()) render()
+        return false
+      }
       if (input.event.ev === 'resize' && input.event.sf === surface.id && typeof input.event.cols === 'number') {
         // The SDK has already folded this event into `caps` (cols AND the cell
         // size), so the presenter's layout rule reads the live geometry.
