@@ -376,9 +376,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const inBody = event.y >= bodyTop && event.y < bodyTop + plan.bodyRows
     if (!inBody) return undefined
     if (this.view === 'diagnostics') {
-      this.diagnosticsOffset = Math.max(0, this.diagnosticsOffset + delta)
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.scrollDiagnostics(delta > 0 ? 1 : -1, Math.abs(delta))
       return { handled: true }
     }
     if (this.view === 'details' || this.view === 'confirm' || this.view === 'install') {
@@ -1080,10 +1078,6 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
   }
 
-  private diagnosticsPageStep(): number {
-    return Math.max(1, (this.paintedChrome?.bodyRows ?? 5) - 1)
-  }
-
   private ensureDiagnosticsSelection(count: number): void {
     if (this.view !== 'diagnostics') return
     if (count === 0) {
@@ -1125,10 +1119,31 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.intents.requestRender()
   }
 
-  /** PgUp/PgDn page the CONTENT (the selection stays where it is); the
-   *  render clamps the offset to the real content height. */
-  private scrollDiagnostics(direction: -1 | 1): void {
-    const step = this.diagnosticsPageStep()
+  /**
+   * The number of CONTINUATION rows the next page can carry. The sticky
+   * identity/state rows consume part of the body, so the offset step must
+   * shrink by the same amount: otherwise PgDn would skip the rows that are
+   * not painted (the 30x8 case has body 3, sticky 2, capacity 1).
+   */
+  private diagnosticsScrollCapacity(): number {
+    const viewport = this.diagnosticsViewport
+    if (viewport <= 0) return 1
+    const base = Math.max(1, viewport - 1)
+    const fact = this.diagnosticsFacts()[this.diagnosticsSelection]
+    const span = fact === undefined ? undefined : this.diagnosticsSpans.get(fact.id)
+    const sticky = span !== undefined
+      && span.start < this.diagnosticsOffset + base
+      && span.start + span.count > this.diagnosticsOffset
+    const stickyRows = sticky ? Math.min(span!.headRows, Math.max(0, viewport - 1)) : 0
+    return Math.max(1, viewport - stickyRows)
+  }
+
+  /** PgUp/PgDn (or a wheel click) move the content by at most the visible
+   *  continuation capacity. A wheel may request fewer lines; it is clamped
+   *  to the same capacity so it cannot skip a row. */
+  private scrollDiagnostics(direction: -1 | 1, requestedLines?: number): void {
+    const capacity = this.diagnosticsScrollCapacity()
+    const step = Math.min(Math.max(1, requestedLines ?? capacity), capacity)
     const viewport = this.diagnosticsViewport
     const max = Math.max(0, this.diagnosticsLineCount - viewport)
     const next = Math.min(Math.max(0, this.diagnosticsOffset + direction * step), max)
@@ -1379,7 +1394,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const stickyRows = span !== undefined
       && span.start < this.diagnosticsOffset
       && span.start + span.count > this.diagnosticsOffset
-      ? Math.min(span.headRows, viewport)
+      ? Math.min(span.headRows, Math.max(0, viewport - 1))
       : 0
     this.diagnosticsSelectionVisible = span !== undefined
       && (stickyRows > 0
