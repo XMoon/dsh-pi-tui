@@ -35,7 +35,7 @@
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import z from '@deepseek-ai/schemastery'
-import { defineTool, type ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition, type ToolRuntime } from '@deepseek-ai/dsh-tools'
 import {
   chartArgsProblem,
   chartContentBlocks,
@@ -194,27 +194,36 @@ function assertNameFree(tools: ToolRuntime, toolName: string): void {
   }
 }
 
-/** The two exact registration disposers THIS row owns (never enable state:
- *  `applied` is derived from their presence and the value lives in the
- *  Loader-committed Config reference). */
-interface VisualToolDisposers {
-  readonly chart: () => void
-  readonly svg: () => void
+/** One live registration THIS row owns: the exact definition (the registry
+ *  identity is the authoritative visibility fact) and its exact disposer. */
+interface RegisteredVisualTool {
+  readonly definition: ToolDefinition
+  readonly dispose: () => void
 }
 
-/** Register both definitions atomically: a second-name conflict rolls the
- *  first registration back, so the registry never carries a half pair. */
-function registerBoth(tools: ToolRuntime): VisualToolDisposers {
-  assertNameFree(tools, CHART_TOOL_NAME)
-  assertNameFree(tools, SVG_TOOL_NAME)
-  const chart = tools.register(chartTool())
+/**
+ * Release one registration and answer the handle the row should keep.
+ *
+ * A dsh-tools disposer removes the registry entry BEFORE it emits
+ * `tools/change`, and that synchronous emit propagates listener exceptions.
+ * The handle may therefore be dropped even when `dispose()` throws (the tool is
+ * already gone); it is kept only while the registry still returns THIS
+ * definition, so a later reconciliation can attempt the release again.
+ */
+function releaseRegistered(
+  tools: ToolRuntime,
+  name: string,
+  registered: RegisteredVisualTool | undefined,
+  errors: unknown[],
+): RegisteredVisualTool | undefined {
+  if (registered === undefined) return undefined
   try {
-    const svg = tools.register(svgTool())
-    return { chart, svg }
+    registered.dispose()
   } catch (error) {
-    chart()
-    throw error
+    errors.push(error)
+    if (tools.get(name) === registered.definition) return registered
   }
+  return undefined
 }
 
 /**
@@ -237,28 +246,66 @@ function registerBoth(tools: ToolRuntime): VisualToolDisposers {
  */
 export function apply(ctx: Context, config: Config): void {
   const tools = ctx.reflect.get('tools') as ToolRuntime
-  let disposers: VisualToolDisposers | undefined
-  const status: VisualToolsRuntimeStatus = {
-    applied: () => disposers !== undefined,
+  let chart: RegisteredVisualTool | undefined
+  let svg: RegisteredVisualTool | undefined
+  /** The LIVE PAIR fact, read from the official registry (never a second
+   *  enable value): both definitions this row registered are currently the
+   *  ones the registry returns. A partially released pair answers false. */
+  const applied = (): boolean =>
+    chart !== undefined && svg !== undefined
+    && tools.get(CHART_TOOL_NAME) === chart.definition
+    && tools.get(SVG_TOOL_NAME) === svg.definition
+  ctx.provide(VISUAL_TOOLS_STATUS_SERVICE, { applied } satisfies VisualToolsRuntimeStatus)
+
+  /** Attempt BOTH releases even when the first one throws, then surface the
+   *  collected failure: one broken `tools/change` listener must never strand
+   *  the other registration. */
+  const release = (): void => {
+    const errors: unknown[] = []
+    chart = releaseRegistered(tools, CHART_TOOL_NAME, chart, errors)
+    svg = releaseRegistered(tools, SVG_TOOL_NAME, svg, errors)
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) {
+      throw new AggregateError(errors, 'visual tools: releasing both registrations failed')
+    }
   }
-  // The status read is the row's OWN registration fact; the registry entry
-  // itself can also be probed, but only this row can say whether the live pair
-  // is the one it registered.
-  ctx.provide(VISUAL_TOOLS_STATUS_SERVICE, status)
+
+  /** Register both definitions atomically: a second-name conflict (or a second
+   *  registration failure) rolls the first registration back, so the registry
+   *  never carries a half pair. */
+  const register = (): void => {
+    assertNameFree(tools, CHART_TOOL_NAME)
+    assertNameFree(tools, SVG_TOOL_NAME)
+    const chartDefinition = chartTool()
+    chart = { definition: chartDefinition, dispose: tools.register(chartDefinition) }
+    try {
+      const svgDefinition = svgTool()
+      svg = { definition: svgDefinition, dispose: tools.register(svgDefinition) }
+    } catch (error) {
+      const rollback = chart
+      chart = undefined
+      try {
+        rollback?.dispose()
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          'visual tools: the second registration failed and the first could not be rolled back',
+        )
+      }
+      throw error
+    }
+  }
 
   const reconcile = (enabled: boolean): void => {
     if (enabled) {
-      if (disposers !== undefined) return
-      disposers = registerBoth(tools)
+      if (applied()) return
+      // A partial pair (an earlier release threw after removing one entry, or a
+      // registration failed after its rollback) is fully cleared first.
+      release()
+      register()
       return
     }
-    const current = disposers
-    if (current === undefined) return
-    // Clear the handle BEFORE releasing: a re-entrant read observes the new
-    // state, and a disposer can never be called twice.
-    disposers = undefined
-    current.chart()
-    current.svg()
+    release()
   }
 
   ctx.on('loader/volatile-update', (paths) => {

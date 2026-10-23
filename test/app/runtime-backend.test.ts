@@ -179,7 +179,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
     visualTools: {
       read: () => undefined,
-      setEnabled: async () => {},
+      setEnabled: async (_enabled: boolean, _revision: number) => {},
     },
   }
   const hostFile = {

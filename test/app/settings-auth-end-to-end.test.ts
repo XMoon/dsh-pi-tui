@@ -152,7 +152,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     createPluginManagerPage: () => undefined,
     config: {
       configReadiness: () => 'ready',
-      visualTools: { read: () => ({ enabled: true, userOverridden: false, applied: true }), setEnabled: async () => {} },
+      visualTools: {
+        read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
+        setEnabled: async (_enabled: boolean, _revision: number) => {},
+      },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },

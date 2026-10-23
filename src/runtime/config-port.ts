@@ -628,6 +628,10 @@ export interface WebProviderConfig {
 export interface VisualToolsState {
   /** The effective `enabled` value the Host will apply. */
   readonly enabled: boolean
+  /** The namespace revision this state was read at. A Confirm submits it back
+   *  as the official `expectedRevision`, so an external write between the read
+   *  and the Confirm is a conflict instead of a silent last-write-wins. */
+  readonly revision: number
   /** Whether the USER profile layer declares the value. `false` means the
    *  effective value is inherited/default — the only provenance the Host form
    *  exposes — so the UI may mark it `[default]` instead of claiming a user
@@ -651,9 +655,10 @@ export interface VisualToolsConfig {
   /** The current Host state, or `undefined` when the profile section cannot be
    *  read at all (missing namespace/service). Never a fabricated default. */
   read(): VisualToolsState | undefined
-  /** Persist `enabled` through the official settings write. A stale revision is
-   *  a refusal (the official conflict), never a silent overwrite. */
-  setEnabled(enabled: boolean): Promise<void>
+  /** Persist `enabled` through the official settings write at the revision the
+   *  user's decision was read at. A stale revision is a refusal (the official
+   *  conflict), never a silent overwrite. */
+  setEnabled(enabled: boolean, expectedRevision: number): Promise<void>
 }
 
 /**

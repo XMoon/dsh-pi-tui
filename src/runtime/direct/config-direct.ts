@@ -1821,6 +1821,10 @@ class DirectVisualToolsConfig implements VisualToolsConfig {
     // A missing or non-boolean effective value is NOT the schema default:
     // report the section as unreadable instead of inventing `true`.
     if (typeof enabled !== 'boolean') return undefined
+    const revision = descriptor.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
     const user = descriptor.user
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>
@@ -1831,19 +1835,23 @@ class DirectVisualToolsConfig implements VisualToolsConfig {
       : status.applied()
     return {
       enabled,
+      revision,
       userOverridden: userSection?.enabled !== undefined,
       applied,
     }
   }
 
-  async setEnabled(enabled: boolean): Promise<void> {
+  async setEnabled(enabled: boolean, expectedRevision: number): Promise<void> {
     const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
     if (settings === undefined) throw new Error('the Host settings service is unavailable')
     if (readSettingsDescriptor(settings, VISUAL_TOOLS_NS) === undefined) {
       throw new Error(`the "pi-tui-visual-tools" Host settings section is not mounted`)
     }
+    // Submit the revision the USER's decision was read at — never a revision
+    // observed at write time, which would turn an external edit into a silent
+    // overwrite.
     await mutateSettings(settings, VISUAL_TOOLS_NS, [
       { op: 'set', path: ['enabled'], value: enabled },
-    ])
+    ], expectedRevision)
   }
 }

@@ -1084,7 +1084,7 @@ test('visualTools reads the effective value, its USER provenance and the Host ro
     },
     piTuiVisualToolsStatus: { applied: () => false },
   }).visualTools
-  assert.deepEqual(config.read(), { enabled: false, userOverridden: false, applied: false })
+  assert.deepEqual(config.read(), { enabled: false, revision: 7, userOverridden: false, applied: false })
 
   const overridden = port({
     settings: {
@@ -1098,7 +1098,7 @@ test('visualTools reads the effective value, its USER provenance and the Host ro
     },
     piTuiVisualToolsStatus: { applied: () => true },
   }).visualTools
-  assert.deepEqual(overridden.read(), { enabled: true, userOverridden: true, applied: true })
+  assert.deepEqual(overridden.read(), { enabled: true, revision: 3, userOverridden: true, applied: true })
 })
 
 test('visualTools reports an unreadable section instead of the schema default', () => {
@@ -1122,7 +1122,7 @@ test('visualTools keeps the runtime fact unobservable when the Host row status i
       mutate: async () => {},
     },
   }).visualTools
-  assert.deepEqual(config.read(), { enabled: true, userOverridden: false, applied: undefined })
+  assert.deepEqual(config.read(), { enabled: true, revision: 1, userOverridden: false, applied: undefined })
 })
 
 test('visualTools.setEnabled writes the exact namespace path with the descriptor revision', async () => {
@@ -1135,7 +1135,7 @@ test('visualTools.setEnabled writes the exact namespace path with the descriptor
       },
     },
   }).visualTools
-  await config.setEnabled(false)
+  await config.setEnabled(false, 11)
   assert.deepEqual(writes, [{
     ns: 'pi-tui-visual-tools',
     ops: [{ op: 'set', path: ['enabled'], value: false }],
@@ -1143,7 +1143,34 @@ test('visualTools.setEnabled writes the exact namespace path with the descriptor
   }])
 
   const unavailable = port({ settings: settings({}) }).visualTools
-  await assert.rejects(unavailable.setEnabled(true), /not mounted/u, 'an absent section is an explicit refusal')
+  await assert.rejects(unavailable.setEnabled(true, 1), /not mounted/u, 'an absent section is an explicit refusal')
   const noSettings = port({}).visualTools
-  await assert.rejects(noSettings.setEnabled(true), /settings service is unavailable/u)
+  await assert.rejects(noSettings.setEnabled(true, 1), /settings service is unavailable/u)
+})
+
+test('visualTools.setEnabled submits the decision revision, so an external edit is a conflict', async () => {
+  let revision = 21
+  const writes: Array<{ revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision }],
+      mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
+        writes.push({ revision: expectedRevision })
+        if (expectedRevision !== revision) {
+          throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
+            code: 'SETTINGS_CONFLICT',
+          })
+        }
+        revision += 1
+      },
+    },
+  }).visualTools
+  const decision = config.read()
+  assert.equal(decision?.revision, 21)
+  // An external writer lands between the UI read and the Confirm.
+  revision = 22
+  await assert.rejects(config.setEnabled(false, decision.revision), /expected revision 21, actual 22/u,
+    'the stale decision is refused instead of overwriting the external edit')
+  assert.deepEqual(writes, [{ revision: 21 }], 'the ORIGINAL read revision is the fence')
+  assert.equal(config.read()?.revision, 22, 'the authoritative read re-establishes the newer revision')
 })

@@ -324,7 +324,7 @@ Icon style、Transcript display 的运行时当前值与持久偏好、Thinking 
 态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
 原始值；浏览、选择与复制本身都不写入配置。
 
-Settings 的一级分类现在是 `Models / Account / Appearance / Display / Tools / Plugins / Other settings`；`/settings`
+Settings 的一级分类现在是 `About / Models / Account / Appearance / Display / Tools / Plugins / Other settings`；`/settings`
 仍默认落在 About。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
 不是连通性测试）与 DeepSeek Account 入口；可查看 provider 事实、在遮蔽输入中写入/清除 API key、
 完成 Add Provider 草稿向导，以及发起 provider-native 登录（页面内持续显示 URL、提示与取消）。

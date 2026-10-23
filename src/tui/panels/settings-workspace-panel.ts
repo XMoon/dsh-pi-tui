@@ -118,6 +118,12 @@ export interface SettingsWorkspaceEdit {
    *  `unknown — …` when there was no document to read. The panel never guesses
    *  which of those it is. */
   readonly persisted: string
+  /** The authority revision this candidate source was read at, when the row's
+   *  write is revision-checked (the Host visual-tools switch). The commit
+   *  request carries it back as the conflict fence, so an external edit between
+   *  the read and the Confirm can never be silently overwritten. Rows whose
+   *  writer is not revision-addressed omit it. */
+  readonly revision?: number
 }
 
 /**
@@ -156,6 +162,9 @@ export interface SettingsWorkspaceRowFacts {
 export interface SettingsWorkspaceCommitRequest {
   readonly field: SettingsWorkspaceWritableField
   readonly value: string
+  /** The revision the confirmed candidate was read at (revision-checked rows
+   *  only): the writer submits it as its expected revision. */
+  readonly revision?: number
 }
 
 /**
@@ -3176,7 +3185,7 @@ export class SettingsWorkspacePanel implements Component {
       this.settle(phase.field, phase.candidate, { outcome: 'not-saved', reason: 'the selected source is no longer available' })
       return
     }
-    this.dispatch(phase.field, phase.candidate)
+    this.dispatch(phase.field, phase.candidate, edit.revision)
   }
 
   /** `[Retry save]`: re-dispatch the FAILED attempt's value, re-proving that its
@@ -3191,12 +3200,14 @@ export class SettingsWorkspacePanel implements Component {
       this.settle(phase.field, value, { outcome: 'not-saved', reason: 'the selected source is no longer available' })
       return
     }
-    this.dispatch(phase.field, value)
+    this.dispatch(phase.field, value, edit.revision)
   }
 
   /** The ONE dispatch: commit the pending phase, then hand the request to the
-   *  app-owned write channel with THIS open's request identity. */
-  private dispatch(field: SettingsWorkspaceWritableField, value: string): void {
+   *  app-owned write channel with THIS open's request identity. `revision` is
+   *  the revision-checked row's decision fence (absent for the TUI-document
+   *  writers, whose own serialization/diff path owns its concurrency rule). */
+  private dispatch(field: SettingsWorkspaceWritableField, value: string, revision?: number): void {
     const onCommit = this.intents.onCommit
     const requestId = this.editRequestId + 1
     this.editRequestId = requestId
@@ -3208,7 +3219,10 @@ export class SettingsWorkspacePanel implements Component {
     this.choiceOffset = 0
     this.bumpRevision()
     this.intents.requestRender()
-    onCommit({ field, value }, outcome => this.settlePending(requestId, outcome))
+    onCommit(
+      { field, value, ...revision === undefined ? {} : { revision } },
+      outcome => this.settlePending(requestId, outcome),
+    )
   }
 
   /** The settlement of the LIVE pending commit. A settlement that does not

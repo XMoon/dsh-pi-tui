@@ -256,7 +256,7 @@ and the evidence rules.
 
 ### Visual tool results (chart and SVG)
 
-Two resident Host tools, `dsh_pi_tui_chart` and `dsh_pi_tui_svg`, project
+Two Host-owned tools, `dsh_pi_tui_chart` and `dsh_pi_tui_svg`, project
 inside the same existing tool card. Their durable result carries NO
 `presentationMeta`: the FINAL `tool/result` content is the only admission source
 for a drawing.

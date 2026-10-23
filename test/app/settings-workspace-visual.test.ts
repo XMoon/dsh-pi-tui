@@ -116,6 +116,9 @@ interface HarnessOptions {
   /** After a successful switch write, keep this `applied` fact: a Host registry
    *  that could not adopt the change (e.g. a same-name conflict). */
   visualToolsAppliedAfterWrite?: boolean
+  /** An external writer commits this enabled value (and bumps the revision)
+   *  just before the next switch write: the decision is then stale. */
+  visualToolsExternalChange?: boolean
 }
 
 interface Harness {
@@ -180,9 +183,10 @@ function setup(options: HarnessOptions = {}): Harness {
   let replacements = 0
   let pluginPages = 0
   const visualWrites: boolean[] = []
+  let externalVisualChange = options.visualToolsExternalChange
   let visualState: VisualToolsState | undefined = options.visualToolsUnavailable === true
     ? undefined
-    : options.visualTools ?? { enabled: true, userOverridden: false, applied: true }
+    : options.visualTools ?? { enabled: true, revision: 1, userOverridden: false, applied: true }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
@@ -291,15 +295,29 @@ function setup(options: HarnessOptions = {}): Harness {
       configReadiness: () => options.readiness ?? 'ready',
       visualTools: {
         read: () => visualState,
-        setEnabled: async (enabled: boolean) => {
+        setEnabled: async (enabled: boolean, revision: number) => {
           visualWrites.push(enabled)
+          if (externalVisualChange !== undefined && visualState !== undefined) {
+            visualState = {
+              ...visualState,
+              enabled: externalVisualChange,
+              userOverridden: true,
+              applied: externalVisualChange,
+              revision: visualState.revision + 1,
+            }
+            externalVisualChange = undefined
+          }
           if (options.visualToolsWriteFailure !== undefined) throw new Error(options.visualToolsWriteFailure)
+          if (visualState !== undefined && visualState.revision !== revision) {
+            throw new Error(`settings namespace "pi-tui-visual-tools" changed since it was read (expected revision ${revision}, now ${visualState.revision})`)
+          }
           if (visualState !== undefined) {
             visualState = {
               ...visualState,
               enabled,
               userOverridden: true,
               applied: options.visualToolsAppliedAfterWrite ?? enabled,
+              revision: visualState.revision + 1,
             }
           }
         },
@@ -2240,7 +2258,7 @@ test('B-05d a stale backend keeps the last-known Visual tools value but refuses 
     columns: 200,
     rows: 40,
     readiness: 'stale',
-    visualTools: { enabled: false, userOverridden: true, applied: false },
+    visualTools: { enabled: false, revision: 1, userOverridden: true, applied: false },
   })
   await h.open('Tools')
   assert.match(h.view(), /Off/, 'the last-known value stays readable')
@@ -2256,7 +2274,7 @@ test('B-05e a switch the Host registry did not adopt is reported as unverified, 
   const h = setup({
     columns: 200,
     rows: 40,
-    visualTools: { enabled: false, userOverridden: true, applied: false },
+    visualTools: { enabled: false, revision: 1, userOverridden: true, applied: false },
     visualToolsAppliedAfterWrite: false,
   })
   await h.open('Tools')
@@ -2276,7 +2294,7 @@ test('B-05f a refused Visual tools write is reported as Not saved and never Veri
   const h = setup({
     columns: 200,
     rows: 40,
-    visualTools: { enabled: false, userOverridden: true, applied: false },
+    visualTools: { enabled: false, revision: 1, userOverridden: true, applied: false },
     visualToolsWriteFailure: 'settings namespace "pi-tui-visual-tools" changed since it was read',
   })
   await h.open('Tools')
@@ -2288,6 +2306,21 @@ test('B-05f a refused Visual tools write is reported as Not saved and never Veri
   assert.deepEqual(h.visualWrites(), [true])
   assert.match(h.view(), /Not saved · settings namespace "pi-tui-visual-tools" changed since it was read/)
   assert.ok(!h.view().includes('Verified'))
+  h.dispose()
+})
+
+test('B-05g an external edit before Confirm is a conflict, never a silent overwrite', async () => {
+  const h = setup({ columns: 200, rows: 40, visualToolsExternalChange: false })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // On -> Off
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.visualWrites(), [false], 'the confirm reached the Host once')
+  assert.match(h.view(), /Outcome unknown/, 'the stale decision is not attributed as a save or a refusal')
+  assert.ok(!h.view().includes('Verified'), 'a stale decision is never Verified')
+  assert.equal(h.visualState()?.enabled, false, 'the external edit stays authoritative')
   h.dispose()
 })
 
@@ -4122,7 +4155,7 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
     createPluginManagerPage: () => undefined,
     config: {
       configReadiness: () => 'ready',
-      visualTools: { read: () => undefined, setEnabled: async () => {} },
+      visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
