@@ -267,6 +267,7 @@ test('a reused callId across turns cannot lend a credential to another SVG row',
     await appendToolAt(fixture, 1, 0, 'reused-call', 'dsh_pi_tui_svg', firstArgs, [{ type: 'text', text: 'REDACTED BY POLICY' }])
     await appendToolAt(fixture, 2, 0, 'reused-call', 'dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact))
     await waitFor('the valid reused-call row paints its own image', () =>
+      // observation deadline: the painted image node is the completion signal
       imageCarriesBlob(fixture.pane.frames(), secondBlob), 30_000)
     const nodes = wireNodes(fixture.pane.frames())
     const images = nodes.filter(node => node.k === 'image')
@@ -278,6 +279,7 @@ test('a reused callId across turns cannot lend a credential to another SVG row',
     assert.equal(fixture.pane.blobIds().includes(firstBlob), false, 'the redacted row sends no blob')
     assert.equal(fixture.pane.blobIds().includes(secondBlob), true)
   } finally {
+    // bounded teardown window: dispose the app, pane and Host before the next case
     await fixture.settle()
   }
 })
@@ -300,6 +302,7 @@ test('two reused-callId SVG rows each paint their own digest blob', async (t) =>
     await appendToolAt(fixture, 1, 0, 'reused-call', 'dsh_pi_tui_svg', firstArgs, svgContentBlocks(firstFact))
     await appendToolAt(fixture, 2, 0, 'reused-call', 'dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact))
     await waitFor('both reused-call rows paint their own image', () =>
+      // observation deadline: both painted image nodes are the completion signal
       imageCarriesBlob(fixture.pane.frames(), firstBlob) && imageCarriesBlob(fixture.pane.frames(), secondBlob), 30_000)
     const images = wireNodes(fixture.pane.frames()).filter(node => node.k === 'image')
     assert.equal(images.length, 2)
@@ -307,6 +310,7 @@ test('two reused-callId SVG rows each paint their own digest blob', async (t) =>
     assert.equal(byAlt.get('Figure 1'), firstBlob, 'the first row keeps its own digest')
     assert.equal(byAlt.get('Figure 2'), secondBlob, 'the second row keeps its own digest')
   } finally {
+    // bounded teardown window: dispose the app, pane and Host before the next case
     await fixture.settle()
   }
 })
