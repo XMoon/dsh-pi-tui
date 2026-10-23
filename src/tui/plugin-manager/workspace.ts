@@ -35,6 +35,14 @@ import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import type { PluginInstallView, PluginManagerController } from '../../app/plugin-manager/controller.ts'
 import {
+  formatTuiContributionDiagnostic,
+  formatTuiExtensionCapabilities,
+  formatTuiExtensionRegistryCounts,
+  serializeTuiExtensionDiagnostics,
+  type TuiContributionDiagnostic,
+  type TuiExtensionDiagnostics,
+} from '../../app/plugin-manager/extension-inventory.ts'
+import {
   AUTO_REVIEW_BUNDLE,
   AUTO_REVIEW_DISABLE_WARNING,
   PLUGIN_ACTION,
@@ -70,12 +78,14 @@ const FILTER_LABELS: Record<PluginListFilter, string> = {
   available: 'Available',
 }
 
-/** Surface-local keys (the handler and the Action Bar read the same table). */
+/** Surface-local keys (the handler the Action Bar names). */
 const WORKSPACE_KEYS = {
   search: '/',
   install: 'i',
   refresh: 'r',
   copy: 'c',
+  copyAll: 'C',
+  diagnostics: 'd',
   logs: 'l',
   stop: 's',
 } as const
@@ -98,12 +108,17 @@ const CONFIRM_ACTION = {
   cancel: 'confirm:cancel',
 } as const
 
+const DIAGNOSTICS_ACTION = {
+  copyAll: 'diagnostics:copy-all',
+  back: 'diagnostics:back',
+} as const
+
 /** Which page-local view is showing. */
-type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm'
+type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm' | 'diagnostics'
 
 /** One painted hit target of the LAST frame (never a screen-index authority). */
 interface HitTarget {
-  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search'
+  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action'
   readonly value: string
   readonly row: number
   readonly startCol: number
@@ -148,6 +163,39 @@ interface PaintedActionLine {
   readonly line: number
 }
 
+/** One selectable diagnostics fact (a summary fact or one contribution). */
+interface DiagnosticsFact {
+  readonly id: string
+  readonly copy: string
+  readonly label?: string
+  readonly contribution?: TuiContributionDiagnostic
+}
+
+/** One line span of one painted diagnostics fact (viewport source rows). */
+interface DiagnosticSpan {
+  readonly start: number
+  readonly count: number
+}
+
+interface DiagnosticsLayout {
+  readonly lines: string[]
+  readonly spans: ReadonlyMap<string, DiagnosticSpan>
+  readonly targets: readonly {
+    readonly kind: 'diagnostic-fact' | 'diagnostic-action'
+    readonly value: string
+    readonly line: number
+    readonly startCol: number
+    readonly endCol: number
+  }[]
+}
+
+function diagnosticsFactId(
+  group: 'associated' | 'unassociated',
+  entry: TuiContributionDiagnostic,
+): string {
+  return `diagnostics:${group}:${entry.owner}:${entry.extensionPoint}:${entry.id}`
+}
+
 /** The pure renderer/input owner of the Plugin Manager page. */
 export class PluginManagerWorkspacePanel implements Component, Focusable {
   private readonly controller: PluginManagerController
@@ -169,6 +217,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private confirmOffset = 0
   private paintedConfirmScrollMax = 0
   private installSelection = 0
+  /** The diagnostics page's own immutable read (captured on entry/refresh)
+   *  and its fact selection/scroll state. */
+  private diagnosticsSnapshot: TuiExtensionDiagnostics | undefined
+  /** The last painted diagnostics CONTENT key (a same-content reread keeps
+   *  the painted revision stable). */
+  private lastDiagnosticsKey: string | undefined
+  private diagnosticsSelection = 0
+  private diagnosticsOffset = 0
+  private diagnosticsReveal = false
   private readonly searchInput = new Input({ prompt: '' })
   private readonly specInput = new Input({ prompt: '' })
   private readonly registryInput = new Input({ prompt: '' })
@@ -281,6 +338,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.handleConfirmInput(data)
       return
     }
+    if (this.view === 'diagnostics') {
+      this.handleDiagnosticsInput(data)
+      return
+    }
     if (this.view === 'details') {
       this.handleDetailsInput(data)
       return
@@ -304,6 +365,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const bodyTop = this.bodyTop(plan)
     const inBody = event.y >= bodyTop && event.y < bodyTop + plan.bodyRows
     if (!inBody) return undefined
+    if (this.view === 'diagnostics') {
+      this.diagnosticsOffset = Math.max(0, this.diagnosticsOffset + delta)
+      this.bumpRevision()
+      this.intents.requestRender()
+      return { handled: true }
+    }
     if (this.view === 'details' || this.view === 'confirm' || this.view === 'install') {
       if (this.view === 'install') {
         this.scrollInstall(delta, plan)
@@ -429,9 +496,82 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.openInstallView()
       return
     }
+    if (data === WORKSPACE_KEYS.diagnostics) {
+      this.openDiagnostics()
+      return
+    }
     if (data === WORKSPACE_KEYS.refresh || data === WORKSPACE_KEYS.refresh.toUpperCase()) {
       this.controller.refresh()
       this.intents.requestRender()
+    }
+  }
+
+  /** `d`: open the read-only extension diagnostics page over the same
+   *  controller/lease. One explicit read per entry; `r` rereads there. */
+  private openDiagnostics(): void {
+    if (!this.frameIsCurrent()) return
+    this.diagnosticsSelection = 0
+    this.diagnosticsOffset = 0
+    this.diagnosticsReveal = false
+    this.view = 'diagnostics'
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private leaveDiagnostics(): void {
+    this.view = 'list'
+    this.focus = 'list'
+    this.diagnosticsReveal = false
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Reread the live extension diagnostics on explicit request. The official
+   *  package inventory is NOT refreshed by this key. */
+  private reloadDiagnostics(): void {
+    // The next paint performs exactly ONE new read (see syncFrameState).
+    const count = this.diagnosticsFacts().length
+    this.diagnosticsSelection = Math.min(this.diagnosticsSelection, Math.max(0, count - 1))
+    this.diagnosticsReveal = true
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private handleDiagnosticsInput(data: string): void {
+    if (matchesKey(data, 'up') || matchesKey(data, 'ctrl+p')) {
+      this.moveDiagnosticsSelection(-1)
+      return
+    }
+    if (matchesKey(data, 'down') || matchesKey(data, 'ctrl+n')) {
+      this.moveDiagnosticsSelection(1)
+      return
+    }
+    if (matchesKey(data, 'pageUp')) {
+      this.moveDiagnosticsSelection(-this.diagnosticsPageStep())
+      return
+    }
+    if (matchesKey(data, 'pageDown')) {
+      this.moveDiagnosticsSelection(this.diagnosticsPageStep())
+      return
+    }
+    if (matchesKey(data, 'home')) {
+      this.selectDiagnosticsFirst()
+      return
+    }
+    if (matchesKey(data, 'end')) {
+      this.selectDiagnosticsLast()
+      return
+    }
+    if (data === WORKSPACE_KEYS.copy) {
+      this.copyDiagnosticsSelection()
+      return
+    }
+    if (data === WORKSPACE_KEYS.copyAll) {
+      this.copyAllDiagnostics()
+      return
+    }
+    if (data === WORKSPACE_KEYS.refresh || data === WORKSPACE_KEYS.refresh.toUpperCase()) {
+      this.reloadDiagnostics()
     }
   }
 
@@ -755,6 +895,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.closeConfirmation()
       return
     }
+    if (this.view === 'diagnostics') {
+      this.leaveDiagnostics()
+      return
+    }
     if (this.view === 'details') {
       this.leaveDetails()
       return
@@ -900,6 +1044,295 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.intents.requestRender()
   }
 
+  // ── diagnostics page ─────────────────────────────────────────────────────
+
+  /** The selectable facts of the CURRENT diagnostics snapshot: the three
+   *  summary facts followed by every contribution (associated, then the
+   *  unassociated group). Headings are never selectable. */
+  private diagnosticsFacts(): readonly DiagnosticsFact[] {
+    const view = this.diagnosticsSnapshot
+    if (view === undefined) return []
+    const facts: DiagnosticsFact[] = [
+      { id: 'diagnostics:health', label: 'Health', copy: view.healthSummary },
+      { id: 'diagnostics:registries', label: 'Registries', copy: formatTuiExtensionRegistryCounts(view.registryCounts) },
+      { id: 'diagnostics:capabilities', label: 'Capabilities', copy: formatTuiExtensionCapabilities(view.capabilities) },
+    ]
+    for (const entry of view.entries) facts.push(this.diagnosticsEntryFact(entry, 'associated'))
+    for (const entry of view.unmappedEntries) facts.push(this.diagnosticsEntryFact(entry, 'unassociated'))
+    return facts
+  }
+
+  private diagnosticsEntryFact(entry: TuiContributionDiagnostic, group: 'associated' | 'unassociated'): DiagnosticsFact {
+    return {
+      id: diagnosticsFactId(group, entry),
+      copy: formatTuiContributionDiagnostic(entry),
+      contribution: entry,
+    }
+  }
+
+  private diagnosticsPageStep(): number {
+    return Math.max(1, (this.paintedChrome?.bodyRows ?? 5) - 1)
+  }
+
+  private ensureDiagnosticsSelection(count: number): void {
+    if (this.view !== 'diagnostics') return
+    if (count === 0) {
+      this.diagnosticsSelection = 0
+      return
+    }
+    if (this.diagnosticsSelection >= count) {
+      this.diagnosticsSelection = count - 1
+      this.bumpRevision()
+    }
+  }
+
+  private moveDiagnosticsSelection(delta: number): void {
+    const count = this.diagnosticsFacts().length
+    if (count === 0) return
+    const next = Math.min(Math.max(0, this.diagnosticsSelection + delta), count - 1)
+    if (next === this.diagnosticsSelection) return
+    this.diagnosticsSelection = next
+    this.diagnosticsReveal = true
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private selectDiagnosticsFirst(): void {
+    if (this.diagnosticsSelection === 0) return
+    this.diagnosticsSelection = 0
+    this.diagnosticsReveal = true
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private selectDiagnosticsLast(): void {
+    const count = this.diagnosticsFacts().length
+    if (count === 0 || this.diagnosticsSelection === count - 1) return
+    this.diagnosticsSelection = count - 1
+    this.diagnosticsReveal = true
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** `c`: copy the SELECTED fact's exact payload (a summary value or the
+   *  full contribution block, including the whole lastError). */
+  private copyDiagnosticsSelection(): void {
+    const fact = this.diagnosticsFacts()[this.diagnosticsSelection]
+    if (fact === undefined) return
+    this.intents.onCopy(fact.copy)
+  }
+
+  /** `C`: Copy All of the SAME immutable snapshot the page painted. */
+  private copyAllDiagnostics(): void {
+    const view = this.diagnosticsSnapshot
+    if (view === undefined) return
+    this.intents.onCopy(serializeTuiExtensionDiagnostics(view))
+  }
+
+  /** Build the diagnostics body from ONE captured snapshot. Every displayed
+   *  value, the header counts and every copy payload come from this snapshot;
+   *  facts are wrapped (never ellipsized) and the per-fact Copy/action
+   *  targets are derived from the REAL painted cells. */
+  private buildDiagnosticsLayout(width: number, selectedId: string | undefined): DiagnosticsLayout {
+    const view = this.diagnosticsSnapshot
+    if (view === undefined) {
+      return {
+        lines: [
+          color.warning('Extension diagnostics unavailable — the extension service is not attached.'),
+        ],
+        spans: new Map(),
+        targets: [],
+      }
+    }
+    const lines: string[] = []
+    const spans = new Map<string, DiagnosticSpan>()
+    const targets: {
+      kind: 'diagnostic-fact' | 'diagnostic-action'
+      value: string
+      line: number
+      startCol: number
+      endCol: number
+    }[] = []
+    const markerWidth = 2
+    const contentWidth = Math.max(1, width - markerWidth)
+    const copyLabel = ` Copy [${WORKSPACE_KEYS.copy.toUpperCase()}]`
+    const copyWidth = visibleWidth(copyLabel)
+    const facts = this.diagnosticsFacts()
+    const factById = new Map(facts.map(fact => [fact.id, fact]))
+    const plainMarker = '  '
+    const selectedMarker = color.primary('> ')
+    const markerFor = (selected: boolean): string => selected ? selectedMarker : plainMarker
+    const appendCopyTarget = (factId: string): void => {
+      const last = lines.length - 1
+      if (last < 0) return
+      const startCol = visibleWidth(stripAnsi(lines[last]!))
+      const endCol = startCol + copyWidth
+      if (endCol > width) return
+      lines[last] += color.primary(copyLabel)
+      targets.push({ kind: 'diagnostic-fact', value: factId, line: last, startCol, endCol })
+    }
+    const pushHeading = (text: string): void => {
+      lines.push(color.textDim(truncateToWidth(sanitizedPhysicalLine(text), width, '…')))
+    }
+    const pushSummary = (fact: DiagnosticsFact): void => {
+      const label = fact.label ?? ''
+      const head = `${label}  `
+      const headWidth = visibleWidth(head)
+      const valueWidth = Math.max(1, contentWidth - headWidth)
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(fact.copy), valueWidth)
+      const parts = wrapped.length === 0 ? [''] : wrapped
+      const selected = fact.id === selectedId
+      const ink = selected ? color.textStrong : color.text
+      const start = lines.length
+      parts.forEach((part, index) => {
+        if (index === 0) lines.push(`${markerFor(selected)}${color.textDim(head)}${ink(part)}`)
+        else lines.push(`${' '.repeat(markerWidth + headWidth)}${ink(part)}`)
+      })
+      spans.set(fact.id, { start, count: lines.length - start })
+      appendCopyTarget(fact.id)
+    }
+    const pushContribution = (fact: DiagnosticsFact): void => {
+      const entry = fact.contribution!
+      const selected = fact.id === selectedId
+      const marker = markerFor(selected)
+      const ink = selected ? color.textStrong : color.text
+      const chip = `[${entry.state}]`
+      const chipWidth = visibleWidth(chip)
+      const chipTone = entry.state === 'active'
+        ? 'muted'
+        : entry.state === 'failed' || entry.state === 'shadowed' ? 'warning' : 'dim'
+      const header = sanitizedPhysicalLine(`${entry.extensionPoint}:${entry.id}`)
+      const start = lines.length
+      if (contentWidth < chipWidth + 2) {
+        // An absurdly narrow frame cannot carry the whole chip beside the
+        // label: keep BOTH, the chip on its own full line.
+        const parts = wrapTextWithAnsi(header, contentWidth)
+        ;(parts.length === 0 ? [''] : parts).forEach((part, index) => {
+          lines.push(`${index === 0 ? marker : plainMarker}${ink(part)}`)
+        })
+        lines.push(`${plainMarker}${paintTone(chip, chipTone)}`)
+      } else {
+        // The identity (`extensionPoint:id`) wraps as ONE uninterrupted
+        // string; the state chip follows on the LAST wrapped line (or its own
+        // line when it cannot fit there) so it never splits the identity.
+        const parts = wrapTextWithAnsi(header, contentWidth)
+        const normalized = parts.length === 0 ? [''] : parts
+        normalized.forEach((part, index) => {
+          const lineMarker = index === 0 ? marker : plainMarker
+          if (index === normalized.length - 1) {
+            const gap = contentWidth - visibleWidth(part) - chipWidth
+            if (gap >= 1) {
+              lines.push(`${lineMarker}${ink(part)}${' '.repeat(gap)}${paintTone(chip, chipTone)}`)
+            } else {
+              lines.push(`${lineMarker}${ink(part)}`)
+              lines.push(`${plainMarker}${paintTone(chip, chipTone)}`)
+            }
+          } else {
+            lines.push(`${lineMarker}${ink(part)}`)
+          }
+        })
+      }
+      if (entry.lastError !== undefined) {
+        const errorHead = 'error  '
+        const errorHeadWidth = visibleWidth(errorHead)
+        const errorWidth = Math.max(1, contentWidth - errorHeadWidth)
+        const parts = wrapTextWithAnsi(sanitizedPhysicalLine(entry.lastError), errorWidth)
+        ;(parts.length === 0 ? [''] : parts).forEach((part, index) => {
+          // The selection cursor belongs to the fact's FIRST line only; the
+          // error block is a continuation, never a second selected row.
+          if (index === 0) lines.push(`${plainMarker}${color.textDim(errorHead)}${color.error(part)}`)
+          else lines.push(`${' '.repeat(markerWidth + errorHeadWidth)}${color.error(part)}`)
+        })
+      }
+      spans.set(fact.id, { start, count: lines.length - start })
+      appendCopyTarget(fact.id)
+    }
+    for (const fact of facts) {
+      if (fact.label !== undefined) pushSummary(fact)
+    }
+    if (view.entries.length > 0) {
+      if (lines.length > 0) lines.push('')
+      pushHeading('Contributions')
+      let owner: string | undefined
+      for (const entry of view.entries) {
+        if (entry.owner !== owner) {
+          owner = entry.owner
+          pushHeading(`Owner: ${entry.owner}${entry.entryId === undefined ? '' : ` (entry: ${entry.entryId})`}`)
+        }
+        const fact = factById.get(diagnosticsFactId('associated', entry))
+        if (fact !== undefined) pushContribution(fact)
+      }
+    }
+    if (view.unmappedEntries.length > 0) {
+      if (lines.length > 0) lines.push('')
+      pushHeading('Unassociated extension contributions')
+      let owner: string | undefined
+      for (const entry of view.unmappedEntries) {
+        if (entry.owner !== owner) {
+          owner = entry.owner
+          pushHeading(`Owner: ${entry.owner}`)
+        }
+        const fact = factById.get(diagnosticsFactId('unassociated', entry))
+        if (fact !== undefined) pushContribution(fact)
+      }
+    }
+    if (lines.length > 0) lines.push('')
+    const actionLine = lines.length
+    let column = 0
+    let painted = ''
+    // Whole-segment degradation: Copy All first, then Back. At the narrow
+    // floor both fit; a segment never paints a partial affordance.
+    for (const segment of [
+      { id: DIAGNOSTICS_ACTION.copyAll, text: `Copy All [${WORKSPACE_KEYS.copy.toUpperCase()}]` },
+      { id: DIAGNOSTICS_ACTION.back, text: 'Back' },
+    ]) {
+      const separator = painted === '' ? '' : '   '
+      const segmentWidth = visibleWidth(segment.text)
+      if (column + visibleWidth(separator) + segmentWidth > width) break
+      painted += `${separator}${color.primary(segment.text)}`
+      const startCol = column + visibleWidth(separator)
+      targets.push({
+        kind: 'diagnostic-action',
+        value: segment.id,
+        line: actionLine,
+        startCol,
+        endCol: startCol + segmentWidth,
+      })
+      column = startCol + segmentWidth
+    }
+    lines.push(painted)
+    return { lines, spans, targets }
+  }
+
+  private renderDiagnosticsBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
+    const facts = this.diagnosticsFacts()
+    this.ensureDiagnosticsSelection(facts.length)
+    const selectedId = facts[this.diagnosticsSelection]?.id
+    const built = this.buildDiagnosticsLayout(plan.width, selectedId)
+    const viewport = plan.bodyRows
+    const span = selectedId === undefined ? undefined : built.spans.get(selectedId)
+    if (span !== undefined && this.diagnosticsReveal) {
+      if (span.start < this.diagnosticsOffset) this.diagnosticsOffset = span.start
+      else if (span.start + span.count > this.diagnosticsOffset + viewport) {
+        this.diagnosticsOffset = Math.max(span.start, span.start + span.count - viewport)
+      }
+    }
+    this.diagnosticsOffset = clampOffset(this.diagnosticsOffset, built.lines.length, viewport)
+    this.diagnosticsReveal = false
+    for (const target of built.targets) {
+      const y = target.line - this.diagnosticsOffset
+      if (y < 0 || y >= viewport) continue
+      targets.push({
+        kind: target.kind,
+        value: target.value,
+        row: bodyTop + y,
+        startCol: target.startCol,
+        endCol: target.endCol,
+      })
+    }
+    return padBody(built.lines.slice(this.diagnosticsOffset, this.diagnosticsOffset + viewport), viewport, plan.width)
+  }
+
   // ── activation (keyboard and mouse share this one admission path) ────────
 
   private activateTarget(target: HitTarget): void {
@@ -938,6 +1371,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         return
       case 'action':
         this.dispatchAction(target.value)
+        return
+      case 'diagnostic-fact': {
+        const fact = this.diagnosticsFacts().find(candidate => candidate.id === target.value)
+        if (fact === undefined) return
+        this.intents.onCopy(fact.copy)
+        return
+      }
+      case 'diagnostic-action':
+        if (target.value === DIAGNOSTICS_ACTION.copyAll) this.copyAllDiagnostics()
+        else if (target.value === DIAGNOSTICS_ACTION.back) this.leaveDiagnostics()
     }
   }
 
@@ -1349,6 +1792,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.syncFrameState(safeWidth, liveRows)
     this.ensureSelection()
     this.ensureDetailSelection()
+    this.ensureDiagnosticsSelection(this.diagnosticsFacts().length)
     const noticeLive = this.controller.notice() !== undefined
       || this.controller.status().state === 'error'
       || this.controller.model().exemptionWarnings.length > 0
@@ -1414,6 +1858,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.lastFocus !== this.focus) { this.lastFocus = this.focus; changed = true }
     if (this.lastFilter !== this.filter) { this.lastFilter = this.filter; changed = true }
     if (this.lastQuery !== this.query) { this.lastQuery = this.query; changed = true }
+    if (this.view === 'diagnostics') {
+      // ONE immutable read per diagnostics paint: host invalidation (a
+      // ledger failure/recovery) repaints and therefore derives current
+      // facts, while copy still uses exactly the painted snapshot.
+      const next = this.intents.diagnostics?.()
+      const key = next === undefined ? 'unavailable' : serializeTuiExtensionDiagnostics(next)
+      this.diagnosticsSnapshot = next
+      if (this.lastDiagnosticsKey !== key) { this.lastDiagnosticsKey = key; changed = true }
+    }
     if (changed) this.bumpRevision()
   }
 
@@ -1444,13 +1897,20 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         ? (card?.title ?? card?.name ?? 'Details')
         : this.view === 'install'
           ? 'Install'
-          : this.controller.confirmationKind() === 'remove' ? 'Remove' : 'Auto Review'
+          : this.view === 'diagnostics'
+            ? 'Diagnostics'
+            : this.controller.confirmationKind() === 'remove' ? 'Remove' : 'Auto Review'
     const lead = `${color.textStrong('Plugins')}${color.textDim(` · ${sanitizedPhysicalLine(trail)}`)}`
     const model = this.controller.model()
     const enabled = model.cards.filter(entry => entry.enabled).length
-    const counts = plan.wide
-      ? `${model.cards.length} plugins · ${enabled} enabled`
-      : `${enabled}/${model.cards.length} enabled`
+    const diagnostics = this.diagnosticsSnapshot
+    const counts = this.view === 'diagnostics'
+      ? diagnostics === undefined
+        ? 'Unavailable'
+        : `${diagnostics.contributionTotals.total} contributions · ${diagnostics.contributionTotals.failed} failed · ${diagnostics.contributionTotals.shadowed} shadowed`
+      : plan.wide
+        ? `${model.cards.length} plugins · ${enabled} enabled`
+        : `${enabled}/${model.cards.length} enabled`
     // A failed refresh keeps the last good list visible but must not look
     // current: the header carries the Stale word (the notice carries the error).
     const stale = this.controller.status().state === 'error' ? `${color.warning('Stale')} · ` : ''
@@ -1458,6 +1918,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private renderMeta(plan: ChromePlan, metaRow: number, targets: HitTarget[]): string[] {
+    if (this.view === 'diagnostics') {
+      return [fit(color.textDim(
+        this.diagnosticsSnapshot === undefined
+          ? 'Live extension diagnostics are unavailable until the extension service is attached'
+          : 'Live TUI extension contributions — read-only; the Host package state is unchanged',
+      ), plan.width)]
+    }
     if (this.view !== 'list' && this.view !== 'details') {
       const context = this.view === 'install'
         ? 'Official install — inspect, confirm, then observe the Host result'
@@ -1600,6 +2067,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         { text: 'Esc cancel', priority: 100 },
       ]
     }
+    if (this.view === 'diagnostics') {
+      return [
+        { text: 'Up/Down fact', priority: 40 },
+        { text: `${WORKSPACE_KEYS.copy} copy`, priority: 70 },
+        { text: `${WORKSPACE_KEYS.copyAll} copy all`, priority: 65 },
+        { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
+        { text: 'Esc back', priority: 100 },
+      ]
+    }
     // `i` never replaces a terminal attempt; name what it will actually open.
     const installHint = this.controller.installView() === undefined ? 'i install' : 'i install result'
     if (this.view === 'details') {
@@ -1617,6 +2093,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       { text: '/ search', priority: 70 },
       { text: installHint, priority: 60 },
       { text: 'Tab filter', priority: 50 },
+      { text: `${WORKSPACE_KEYS.diagnostics} diagnostics`, priority: 45 },
       { text: 'r refresh', priority: 40 },
       { text: back, priority: 100 },
     ]
@@ -1625,6 +2102,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private renderBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
     if (this.view === 'install') return this.renderInstallBody(plan, bodyTop, targets)
     if (this.view === 'confirm') return this.renderConfirmBody(plan, bodyTop, targets)
+    if (this.view === 'diagnostics') return this.renderDiagnosticsBody(plan, bodyTop, targets)
     if (!plan.wide) {
       if (this.view === 'details') {
         const card = this.selectedCard()
@@ -2155,6 +2633,9 @@ export interface PluginManagerWorkspacePanelIntents {
   readonly notice?: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
   /** Copy exact text through the app's Client-local clipboard owner. */
   readonly onCopy: (text: string) => void
+  /** The current extension diagnostics read. Absent = no extension service
+   *  (the page states Unavailable and never paints an empty healthy report). */
+  readonly diagnostics?: () => TuiExtensionDiagnostics | undefined
 }
 
 /**
