@@ -2446,14 +2446,22 @@ test('Tab keeps the Add catalog filter and scroll reveal; a zero-match filter ig
   page.handleInput('\u001b[B')
   assert.match(viewText(page), /^> Custom provider…/m, 'Up/Down still walks the filtered catalog into its actions')
 
-  // End selects the last action; Shift+Tab reveals the first body row through
-  // the page's existing follow-cursor scroll (the filter is cleared first so
-  // the body is long enough to have scrolled).
+  // Clear the filter, then shrink the viewport and scroll the BODY away from
+  // the first provider with the page's real PageDown path. This makes the
+  // follow-cursor reveal discriminating: a jump back to the body that forgot
+  // `followCursor` leaves the page scrolled and Anthropic invisible.
   page.handleInput('\u001b') // clears the filter
-  assert.match(viewText(page), /^> Anthropic/m)
-  page.handleInput('\u001b[F')
+  page.setBodyHeight(10)
+  viewText(page)
+  page.handleInput('\u001b[6~') // PageDown scrolls the body, not the cursor
+  const scrolled = viewText(page)
+  assert.doesNotMatch(scrolled, /Anthropic/u, 'the first provider left the body viewport')
+  page.handleInput('\t') // body -> actions
+  const actions = viewText(page)
+  assert.match(actions, /^> Custom provider…/m)
+  assert.doesNotMatch(actions, /Anthropic/u, 'jumping to the actions does not scroll the body')
   page.handleInput('\u001b[Z')
-  assert.match(viewText(page), /^> Anthropic/m, 'the destination row is revealed in the next frame')
+  assert.match(viewText(page), /^> Anthropic/m, 'returning to the body reveals the first row again')
 
   // Zero matches: the catalog has no body region, so Tab/Shift+Tab are no-ops.
   page.handleInput('z')

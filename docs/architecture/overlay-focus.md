@@ -601,9 +601,12 @@ this ONE lease.** The Plugins category is a direct page entry,
   transitions, except that a writable L1 row enters its inline choice in the
   same L2 transition. `Esc`/`Backspace` step back (and close at L0) — wide,
   medium and narrow behave identically, and a new open starts on the About
-  home. `Tab`/`Shift+Tab` remain inert. Leaving the workspace is therefore
-  always one reachable key (the Action Bar is pinned to the physical last row
-  at every height, down to a one-row terminal).
+  home. The `Tab`/`Shift+Tab` region-key contract is owned by
+  [surface-behavior.md](./surface-behavior.md#settings-workspace); those keys
+  only re-focus an existing region and never activate a page, row or write.
+  Leaving the workspace is therefore always one reachable key (the Action Bar
+  is pinned to the physical last row at every height, down to a one-row
+  terminal).
 - **Width only projects panes.** Wide paints all three columns; medium derives its
   two columns purely from the current level (`categories + rows` at L0,
   `rows + details` otherwise); narrow paints the current level alone. A direct

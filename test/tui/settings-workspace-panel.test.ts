@@ -16,6 +16,7 @@ import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import {
   SettingsWorkspacePanel,
   type SettingsAuthPage,
+  type SettingsWorkspaceCommitOutcome,
   type SettingsWorkspacePanelIntents,
   type SettingsWorkspaceSnapshot,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
@@ -122,6 +123,8 @@ interface Harness {
   readonly commits: () => number
   /** How many times the legacy editor handoff was requested. */
   readonly legacyOpens: () => number
+  /** The settle callbacks of the dispatched writes, in order. */
+  readonly settlements: readonly ((outcome: SettingsWorkspaceCommitOutcome) => void)[]
 }
 
 function setup(options: {
@@ -140,6 +143,7 @@ function setup(options: {
   const rows = options.rows ?? 40
   const built: FakePage[] = []
   const pluginPages: FakePluginPage[] = []
+  const settlements: ((outcome: SettingsWorkspaceCommitOutcome) => void)[] = []
   let closes = 0
   let commits = 0
   let legacyOpens = 0
@@ -153,7 +157,10 @@ function setup(options: {
     onOpenLegacy: () => { legacyOpens += 1 },
     ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
     onCopy: (text) => { options.onCopy?.(text) },
-    onCommit: () => { commits += 1 },
+    onCommit: (_request, settle) => {
+      commits += 1
+      settlements.push(settle)
+    },
     onOpenPlugins: options.pluginPage === true
       ? () => {
           const page = new FakePluginPage()
@@ -185,6 +192,7 @@ function setup(options: {
     closes: () => closes,
     commits: () => commits,
     legacyOpens: () => legacyOpens,
+    settlements,
   }
 }
 
@@ -863,4 +871,36 @@ test('the in-place Plugin Manager keeps its own Tab and is never intercepted', (
   h.panel.handleInput('\u001b[Z')
   assert.deepEqual(h.pluginPages[0]!.inputs, ['\t', '\u001b[Z'], 'the Plugin Manager owned both Tab presses')
   assert.equal(h.closes(), 0, 'the workspace stayed open')
+})
+
+test('a pending legacy write never advertises the direct rail Tab until it settles', () => {
+  const h = setup({ columns: 120, rows: 40 })
+  plain(h)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B') // About -> Appearance
+  h.panel.handleInput('\r') // categories -> rows
+  h.panel.handleInput('\r') // rows -> Detail choice
+  plain(h)
+  h.panel.handleInput('\r') // explicit confirm -> pending
+  assert.equal(h.commits(), 1, 'the explicit confirm dispatched the write')
+  assert.match(plain(h), /Saving…/u)
+
+  // The workspace allows browsing during a pending write: return to the rail
+  // and select a DIRECT category (About) while the write is still in flight.
+  h.panel.handleInput('\u001b') // detail -> rows
+  h.panel.handleInput('\u001b') // rows -> categories
+  h.panel.handleInput('\u001b[H') // Home -> About
+  const pendingRail = plain(h)
+  assert.match(header(h), /Settings · Categories/u)
+  assert.match(pendingRail, /> About/u)
+  assert.doesNotMatch(pendingRail, /Tab focus/u, 'a pending write never advertises a no-op region key')
+  h.panel.handleInput('\t')
+  assert.match(header(h), /Settings · Categories/u, 'Tab is a no-op while the write is pending')
+
+  // Once it settles, the same rail advertises the key again and Tab works.
+  h.settlements[0]!({ outcome: 'verified' })
+  assert.match(plain(h), /Tab focus/u, 'the settled rail advertises the region key again')
+  h.panel.handleInput('\t')
+  assert.match(header(h), /Settings · About/u, 'the settled Tab enters the About content')
 })
