@@ -23,8 +23,17 @@ import {
 export interface SvgAdmissionOk {
   readonly ok: true
   readonly bytes: number
+  /** The user-coordinate size used for the display target (viewBox preferred). */
   readonly width: number
   readonly height: number
+  /**
+   * The exact intrinsic CSS-pixel viewport the native renderer scales with
+   * `fitTo: width`. Unlike the native `Resvg.width/height` getters this keeps
+   * fractional declarations such as `width="0.5"`: the getters round them to
+   * integers and would under-estimate the real canvas height.
+   */
+  readonly viewportWidth: number
+  readonly viewportHeight: number
 }
 
 /** A refused source: the reason is user/model-readable and bounded. */
@@ -323,6 +332,12 @@ function closeTag(state: GateState): void {
   state.depth -= 1
 }
 
+function viewportGeometry(state: GateState): { width: number; height: number } {
+  // SVG's initial CSS viewport when the root does not declare a size; resvg
+  // uses the same 300x150 default. The values stay fractional.
+  return { width: state.rootWidth ?? 300, height: state.rootHeight ?? 150 }
+}
+
 function finalGeometry(state: GateState): { width: number; height: number } {
   if (state.viewBoxWidth !== undefined && state.viewBoxHeight !== undefined) {
     return { width: state.viewBoxWidth, height: state.viewBoxHeight }
@@ -363,7 +378,18 @@ export function admitSvg(source: string): SvgAdmission {
     if (dimensions.width * dimensions.height > SVG_MAX_RASTER_PIXELS) {
       reject(`raster pixels ${Math.round(dimensions.width * dimensions.height)} > ${SVG_MAX_RASTER_PIXELS}`)
     }
-    return { ok: true, bytes, width: dimensions.width, height: dimensions.height }
+    const viewport = viewportGeometry(state)
+    if (!(viewport.width > 0) || !(viewport.height > 0)) {
+      reject('the SVG viewport must have a positive width and height')
+    }
+    return {
+      ok: true,
+      bytes,
+      width: dimensions.width,
+      height: dimensions.height,
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+    }
   } catch (error) {
     if (error instanceof SvgReject) return { ok: false, reason: error.message }
     return { ok: false, reason: `XML: ${error instanceof Error ? error.message : String(error)}` }

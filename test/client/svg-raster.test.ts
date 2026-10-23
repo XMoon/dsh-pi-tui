@@ -279,3 +279,33 @@ test('the native canvas budget is checked before render() allocates', { skip: na
   assert.equal(small.widthPx, 128)
   assert.equal(small.heightPx, 512)
 })
+
+
+const FRACTIONAL_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="0.5" height="1" viewBox="0 0 2000 1">'
+  + '<rect width="20" height="1" fill="#ff0000"/></svg>'
+const TALL_FRACTIONAL_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="0.5" height="2048" viewBox="0 0 1 64">'
+  + '<rect width="1" height="64" fill="#ff0000"/></svg>'
+
+test('a fractional CSS viewport is refused before the native child spawns', { skip: nativeRasterSkip }, async () => {
+  let spawned = 0
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    spawned += 1
+    return spawn(...args)
+  }) as typeof spawn
+  const rasterize = createSvgRasterizer(spawnProcess)
+  // 0.5x1 viewport at target 2000 is a real 2000x4000 canvas; the integer
+  // Resvg getters report 1x1 and used to let render() allocate it.
+  await assert.rejects(
+    rasterize(FRACTIONAL_SVG, { targetWidth: 2000, signal: new AbortController().signal }),
+    /raster canvas 2000x4000/u,
+  )
+  assert.equal(spawned, 0, 'the over-budget canvas must be refused before spawning the native child')
+  await assert.rejects(
+    rasterize(TALL_FRACTIONAL_SVG, { targetWidth: 1, signal: new AbortController().signal }),
+    /raster canvas 1x4096/u,
+  )
+  assert.equal(spawned, 0)
+  const small = await rasterize(FRACTIONAL_SVG, { targetWidth: 128, signal: new AbortController().signal })
+  assert.equal(small.widthPx, 128)
+  assert.equal(small.heightPx, 256)
+})

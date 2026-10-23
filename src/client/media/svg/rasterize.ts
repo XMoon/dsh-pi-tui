@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { admitSvg } from '../../../domain/visual/svg-admission.ts'
 import { createRequire } from 'node:module'
 import {
   SVG_MAX_PNG_BYTES,
@@ -66,13 +67,13 @@ process.stdin.on('end', async () => {
     const module = await import(pathToFileURL(input.modulePath).href)
     const Resvg = module.Resvg ?? (module.default && module.default.Resvg)
     if (typeof Resvg !== 'function') throw new Error('resvg module has no Resvg export')
-    const renderer = new Resvg(input.svg, { fitTo: { mode: 'width', value: input.width } })
-    // Resvg's width/height getters are the intrinsic viewport (here 1x4), not
-    // the fitted canvas. fitTo: width scales the height by that aspect, so a
-    // 1x4 viewport with a 2048x64 viewBox targets 2048x8192. Compute the real
-    // canvas and check it BEFORE render() allocates the bitmap.
+    // The parent sends the EXACT declared CSS viewport; never derive it from
+    // Resvg.width/height, which round fractional viewports (0.5 becomes 1) and
+    // would under-estimate the fitted canvas. Compute the real canvas and
+    // check it BEFORE render() allocates the bitmap.
     const canvasWidth = input.width
-    const canvasHeight = Math.ceil(input.width * (renderer.height / renderer.width))
+    const canvasHeight = Math.ceil(input.width * (input.viewportHeight / input.viewportWidth))
+    const renderer = new Resvg(input.svg, { fitTo: { mode: 'width', value: input.width } })
     if (!Number.isInteger(canvasWidth) || !Number.isInteger(canvasHeight)
       || canvasWidth <= 0 || canvasHeight <= 0
       || canvasWidth > ${SVG_MAX_RASTER_SIDE} || canvasHeight > ${SVG_MAX_RASTER_SIDE}
@@ -142,8 +143,21 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
     if (!isolatedSvgRasterSupported()) {
       throw new Error('SVG rasterization requires a verifiable native memory bound; this platform uses the text/source fallback')
     }
-    const modulePath = resvgModulePath()
+    // Re-run the bounded admission to obtain the EXACT source-declared
+    // viewport, then refuse an over-budget canvas BEFORE spawning the native
+    // child (the post-render IHDR check remains the last line of defense).
+    const admission = admitSvg(source)
+    if (!admission.ok) {
+      throw new Error(`SVG rasterizer rejected the document: ${admission.reason}`)
+    }
     const width = Math.max(1, Math.min(SVG_MAX_RASTER_SIDE, Math.floor(options.targetWidth)))
+    const canvasWidth = width
+    const canvasHeight = Math.ceil(width * (admission.viewportHeight / admission.viewportWidth))
+    if (canvasWidth > SVG_MAX_RASTER_SIDE || canvasHeight > SVG_MAX_RASTER_SIDE
+      || canvasWidth * canvasHeight > SVG_MAX_RASTER_PIXELS) {
+      throw new Error(`SVG raster canvas ${canvasWidth}x${canvasHeight} exceeds the ${SVG_MAX_RASTER_SIDE}px / ${SVG_MAX_RASTER_PIXELS}-pixel budget`)
+    }
+    const modulePath = resvgModulePath()
     // `|| exit 97` is the fail-closed gate: if the shell cannot install the
     // virtual-memory cap, the native rasterizer must never run. The parent
     // reports the exit and the card keeps its description/source text.
@@ -240,7 +254,13 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         terminate('cancelled')
       } else {
         options.signal.addEventListener('abort', onAbort, { once: true })
-        child.stdin.end(JSON.stringify({ modulePath, svg: source, width }))
+        child.stdin.end(JSON.stringify({
+        modulePath,
+        svg: source,
+        width,
+        viewportWidth: admission.viewportWidth,
+        viewportHeight: admission.viewportHeight,
+      }))
       }
     })
   }
