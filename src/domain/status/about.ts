@@ -143,11 +143,13 @@ export const ABOUT_NO_ACTIVE_SESSION = 'No active session'
  * clipboard-write payload or a CSI rewrite inside a "title" must never ride a
  * clipboard copy). A linear scan drops whole ESC/C1-introduced sequences and
  * the remaining C0/C1 controls; ordinary Unicode passes through untouched.
+ * TAB/LF/CR are represented by their visible `\\t`/`\\n`/`\\r` escapes so a
+ * raw Session field can never forge a line in the fixed Copy All report.
  */
 function copySafe(value: string): string {
-  // Fast path: any C0 control except the intentionally preserved TAB/LF/CR,
-  // DEL, or ANY C1 control (0x80–0x9F) needs the scanner.
-  if (!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) return value
+  // Fast path: ANY C0 control (including TAB/LF/CR, which are escaped), DEL,
+  // or ANY C1 control (0x80–0x9F) needs the scanner.
+  if (!/[\u0000-\u001f\u007f-\u009f]/u.test(value)) return value
   let out = ''
   let at = 0
   const length = value.length
@@ -195,8 +197,13 @@ function copySafe(value: string): string {
       consumeString(false)
       continue
     }
+    // Preserve the whitespace INFORMATION without letting a raw control break
+    // the line-oriented report: escape TAB/LF/CR visibly.
+    if (code === 0x09) { out += '\\t'; at += 1; continue }
+    if (code === 0x0a) { out += '\\n'; at += 1; continue }
+    if (code === 0x0d) { out += '\\r'; at += 1; continue }
     // Remaining C0/C1 controls (including the standalone 0x80–0x8F range and
-    // the C1 ST) are dropped; TAB/LF/CR and ordinary Unicode pass through.
+    // the C1 ST) are dropped; ordinary Unicode passes through.
     if ((code <= 0x08) || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
       at += 1
       continue

@@ -462,3 +462,38 @@ test('C3 C1 controls in a title never reach either About copy path', () => {
   assert.ok(!/[\u0080-\u009f]/u.test(report), 'Copy All carries no C1 control')
   assert.ok(report.includes('Title: title-tail'), 'Copy All keeps the ordinary suffix')
 })
+
+test('C3 a newline/tab title cannot forge a Copy All report line', () => {
+  const copied: string[] = []
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: {
+      kind: 'ready',
+      sessionId: 'sess-lines',
+      title: 'normal\nBackend: Remote\t- tail',
+      cwd: '/ws',
+      context: 'fresh',
+    },
+    epoch: 1,
+  }
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    aboutStatusSource: staticAboutSource(view),
+    onCopy: text => { copied.push(text) },
+  })
+  plain(h, 44)
+  // Select Title (4 downs) for the single-field sink.
+  for (let step = 0; step < 4; step += 1) h.panel.handleInput('\x1b[B')
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), 'normal\\nBackend: Remote\\t- tail', 'the single-field copy escapes the controls')
+  h.panel.handleInput('C')
+  const report = copied.at(-1)!
+  assert.ok(!report.includes('\r'), 'Copy All has no raw CR')
+  assert.equal(
+    report.split('\n').filter(line => line.startsWith('Backend:')).length,
+    1,
+    'the title cannot inject a Backend line',
+  )
+  assert.ok(report.includes('Title: normal\\nBackend: Remote\\t- tail'), 'the title stays one escaped line')
+})

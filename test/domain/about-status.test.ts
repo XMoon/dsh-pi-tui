@@ -349,3 +349,21 @@ test('C1 controls and C1-introduced sequences are dropped whole while ordinary s
     .find(candidate => candidate.id === 'session.title')!
   assert.equal(standalone.copyValue, 'pre-post', 'the 0x80–0x8F C1 range is dropped')
 })
+
+test('CR/LF/TAB are escaped so a field can never forge a fixed report line', () => {
+  const view = readyView({ title: 'normal\nBackend: Remote\r\n\tTabbed' })
+  const row = aboutFactRows(view).find(candidate => candidate.id === 'session.title')!
+  assert.equal(row.copyValue, 'normal\\nBackend: Remote\\r\\n\\tTabbed')
+  const report = serializeAboutStatus(view)
+  assert.ok(!report.includes('\r'), 'no raw CR survives')
+  assert.equal(
+    report.split('\n').filter(line => line.startsWith('Backend:')).length,
+    1,
+    'the title cannot inject a Backend report line',
+  )
+  assert.equal(
+    report.split('\n').find(line => line.startsWith('Title:')),
+    'Title: normal\\nBackend: Remote\\r\\n\\tTabbed',
+    'the title stays one escaped line',
+  )
+})
