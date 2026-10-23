@@ -27,7 +27,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool, renderToolsSdk } from '@deepseek-ai/dsh-tools'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import {
   CHART_TOOL_NAME,
@@ -39,6 +39,23 @@ import {
   VISUAL_TOOLS_ROW_ID as ROW_ID,
 } from '../support/visual-tools-plane.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+
+/** The PTC SDK rendering of the CURRENT Host registry: the same definitions a
+ *  PTC-mode request presents to the model. */
+function ptcSdkOf(ctx: Context): string {
+  const schemas = ctx.tools.schemas().flatMap((schema) => {
+    const definition = ctx.tools.get(schema.name)
+    return definition === undefined
+      ? []
+      : [{
+          name: definition.name,
+          description: definition.description,
+          parameters: definition.parameters,
+          output: definition.output.schema,
+        }]
+  })
+  return renderToolsSdk(schemas)
+}
 
 interface Plane {
   readonly ctx: Context
@@ -102,6 +119,15 @@ test('a default profile exposes both visual tools and a live Off write unregiste
   const life = testLifecycle(t)
   const plane = await bootPlane(life, life.tempDir('visual-tools-plane-'))
   const { ctx, port } = plane
+  // An UNRELATED resident tool: the switch must never disturb the rest of the
+  // global registry, and the PTC SDK proves the full list, not only names.
+  ctx.tools.register(defineTool({
+    name: 'probe_unrelated_tool',
+    description: 'an unrelated Host tool',
+    parameters: {},
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    execute: async () => 'unrelated',
+  }))
 
   // Default On comes from the Host Config schema, not from a USER document.
   expectVisualState(port, { enabled: true, userOverridden: false, applied: true })
@@ -110,7 +136,11 @@ test('a default profile exposes both visual tools and a live Off write unregiste
   assert.equal(descriptor?.user?.enabled, undefined, 'no USER override was required for the default')
   assert.equal(ctx.tools.get(CHART_TOOL_NAME)?.description.includes('Render a small static chart'), true)
   assert.equal(ctx.tools.get(SVG_TOOL_NAME)?.description.includes('Render one static, self-contained SVG'), true)
-  const schemasWhileOn = ctx.tools.schemas()
+  const sdkWhileOn = ptcSdkOf(ctx)
+  assert.match(sdkWhileOn, /dsh_pi_tui_chart/u, 'the PTC SDK lists the chart tool')
+  assert.match(sdkWhileOn, /dsh_pi_tui_svg/u, 'the PTC SDK lists the SVG tool')
+  assert.match(sdkWhileOn, /probe_unrelated_tool/u, 'the PTC SDK lists unrelated resident tools too')
+  const schemasWhileOn = ctx.tools.schemas().filter(schema => schema.name !== 'probe_unrelated_tool')
 
   // Off: the official revision-checked write, the Loader volatile commit and
   // the row's disposers must all land on the same Host.
@@ -119,16 +149,29 @@ test('a default profile exposes both visual tools and a live Off write unregiste
   assert.equal(settingsDescriptor(plane)?.user?.enabled, false, 'the USER layer owns the persisted Off')
   assert.equal(ctx.tools.get(CHART_TOOL_NAME), undefined)
   assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined)
-  assert.deepEqual(ctx.tools.schemas(), [], 'the next model request sees neither schema')
+  assert.deepEqual(
+    ctx.tools.schemas().map(schema => schema.name),
+    ['probe_unrelated_tool'],
+    'the next request catalog loses both visual schemas and keeps the unrelated tool',
+  )
+  const sdkWhileOff = ptcSdkOf(ctx)
+  assert.doesNotMatch(sdkWhileOff, /dsh_pi_tui_chart/u)
+  assert.doesNotMatch(sdkWhileOff, /dsh_pi_tui_svg/u)
+  assert.match(sdkWhileOff, /probe_unrelated_tool/u, 'the unrelated tool stays visible to PTC')
   assert.notEqual(ctx.get(VISUAL_TOOLS_STATUS_SERVICE), undefined, 'the Host row itself stays loaded')
 
   // On again on the SAME Host: the original definitions are restored exactly
   // once, with their original schema text.
   await submitVisualTools(port, true)
   expectVisualState(port, { enabled: true, userOverridden: true, applied: true })
-  assert.deepEqual(ctx.tools.schemas(), schemasWhileOn, 'the re-registered definitions are byte-identical')
-  assert.equal(ctx.tools.schemas().filter(schema => schema.name === CHART_TOOL_NAME).length, 1)
-  assert.equal(ctx.tools.schemas().filter(schema => schema.name === SVG_TOOL_NAME).length, 1)
+  const visualSchemasBack = ctx.tools.schemas().filter(schema => schema.name !== 'probe_unrelated_tool')
+  assert.deepEqual(visualSchemasBack, schemasWhileOn, 'the re-registered definitions are byte-identical')
+  assert.equal(visualSchemasBack.filter(schema => schema.name === CHART_TOOL_NAME).length, 1)
+  assert.equal(visualSchemasBack.filter(schema => schema.name === SVG_TOOL_NAME).length, 1)
+  const sdkBackOn = ptcSdkOf(ctx)
+  assert.match(sdkBackOn, /dsh_pi_tui_chart/u)
+  assert.match(sdkBackOn, /dsh_pi_tui_svg/u)
+  assert.match(sdkBackOn, /probe_unrelated_tool/u)
 })
 
 test('a persisted Off survives a Host restart with no tools registered and no other profile pollution', async t => {

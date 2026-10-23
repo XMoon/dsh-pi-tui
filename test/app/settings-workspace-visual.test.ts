@@ -4227,3 +4227,52 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
 function sendKey(vt: VirtualTerminal, data: string): void {
   vt.sendInput(data)
 }
+
+test('B-05h the Visual tools row keeps its focus/choice/confirm contract at medium and narrow widths', async () => {
+  // Medium (76–107): the row's keyboard/Tab focus, mouse Change confirm and Esc
+  // paths are the same workspace behaviors as the other writable rows.
+  const medium = setup({ columns: 100, rows: 30 })
+  await medium.open('Tools')
+  assert.match(medium.view(), /Visual tools/)
+  await key(medium, '\t') // categories -> rows
+  assert.match(medium.rowsPlain()[0]!, /Settings · Tools · Rows/)
+  await key(medium, '\x1b[Z') // Shift+Tab: rows -> categories
+  assert.match(medium.rowsPlain()[0]!, /Settings · Categories/)
+  await key(medium, '\t') // categories -> rows again
+  const changeRow = rowOf(medium, 'Change…')
+  press(medium, changeRow, cellIndexOf(medium, changeRow, 'Change…'))
+  release(medium, changeRow, cellIndexOf(medium, changeRow, 'Change…'))
+  await settle(medium)
+  assert.match(medium.view(), /Choose value/)
+  await key(medium, '\x1b[B') // On -> Off
+  const confirmRow = rowOf(medium, 'Confirm')
+  press(medium, confirmRow, cellIndexOf(medium, confirmRow, 'Confirm'))
+  release(medium, confirmRow, cellIndexOf(medium, confirmRow, 'Confirm'))
+  await settle(medium)
+  assert.deepEqual(medium.visualWrites(), [false], 'the mouse Confirm dispatched exactly one Host write')
+  assert.match(medium.view(), /Status\s+Verified/)
+  await key(medium, '\x1b') // retire the settled choice view -> rows
+  await key(medium, '\x1b') // rows -> categories
+  assert.match(medium.rowsPlain()[0]!, /Settings · Categories/)
+  medium.dispose()
+
+  // Narrow (<76): one column, the same Enter/choice/Confirm path and Esc back.
+  const narrow = setup({ columns: 44, rows: 30 })
+  await narrow.open('Tools')
+  assert.ok(narrow.rowsPlain().some(line => line.includes('> Tools')), `the narrow rail selects Tools:\n${narrow.view()}`)
+  await key(narrow, '\t') // narrow Tab stays inert
+  assert.ok(narrow.rowsPlain().some(line => line.includes('> Tools')), 'the narrow root Tab is inert')
+  await key(narrow, '\r') // L0 -> L1 rows
+  assert.match(narrow.view(), /Visual tools/)
+  await key(narrow, '\r') // writable L1 -> L2 inline choice
+  assert.match(narrow.view(), /Choose value/)
+  await key(narrow, '\x1b[B') // On -> Off
+  await key(narrow, '\r') // explicit confirm
+  await settle(narrow)
+  assert.deepEqual(narrow.visualWrites(), [false], 'the narrow explicit confirm dispatches one Host write')
+  assert.match(narrow.view(), /Status\s+Verified/)
+  await key(narrow, '\x1b') // detail -> rows
+  await key(narrow, '\x1b') // rows -> categories
+  assert.ok(narrow.rowsPlain().some(line => line.includes('> Tools')), 'Esc returns to the narrow rail with Tools selected')
+  narrow.dispose()
+})

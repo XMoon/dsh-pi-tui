@@ -197,3 +197,86 @@ test('the registered visual tools persist no presentation meta under every post-
     }
   }
 })
+
+/** The visual node kinds a folded tool row produces through the real TSP
+ *  projection (chart for charts; image for an adopted native SVG). */
+function renderedVisualKinds(tool: TranscriptToolMessage, key: 'chart' | 'svg'): string[] {
+  const view = key === 'svg'
+    ? (() => {
+        const fact = svgFactFromArgs(CASES.svg.args)
+        const ready: ReadonlyMap<TranscriptToolMessage, ToolSvgState> = new Map([[tool, {
+          state: 'ready',
+          blobId: 'f'.repeat(64),
+          request: () => 'f'.repeat(64),
+          fact,
+          source: CASES.svg.args.svg,
+        }]])
+        return transcriptView(projectTranscriptStructure([tool]), new TranscriptNodeKeys(), {
+          chartKindsSupported: true,
+          toolSvgStates: ready,
+        })
+      })()
+    : transcriptView(projectTranscriptStructure([tool]), new TranscriptNodeKeys(), { chartKindsSupported: true })
+  const kinds: string[] = []
+  const walk = (node: { kind: string; children: readonly unknown[] }): void => {
+    kinds.push(node.kind)
+    for (const child of node.children) walk(child as { kind: string; children: readonly unknown[] })
+  }
+  for (const child of (view as unknown as { children: readonly unknown[] }).children) {
+    walk(child as { kind: string; children: readonly unknown[] })
+  }
+  return kinds
+}
+
+test('turning the switch Off leaves an already-recorded chart/SVG result fully renderable', async (t) => {
+  for (const key of ['chart', 'svg'] as const) {
+    const life = testLifecycle(t)
+    const ctx = new Context()
+    life.defer(() => ctx.fiber.dispose())
+    await mountAgentLoopTestDependencies(ctx, {})
+    await mountAgentLoopTestHarness(ctx)
+    let enabled = true
+    applyVisualTools(ctx, { enabled: { get: () => enabled } } as never)
+    const entry = CASES[key]
+    const adapter = new VisualAdapter(entry.tool, entry.args)
+    ctx.llm.registerAdapter(['visual-off-history'], adapter)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId(`visual-off-history-${key}`) as never,
+      agentOptions: { provider: 'visual-off-history', model: 'm' },
+    })
+    const agent = handle.agent as unknown as {
+      followup(message: unknown): void
+      whenIdle(): Promise<void>
+      session: { snapshotEvents(): Array<{ type: string; data: Record<string, unknown> }> }
+    }
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    const events = agent.session.snapshotEvents()
+    const original = new TranscriptFolder()
+    original.apply(events as never)
+    const recorded = original.messages().find(message => message.kind === 'tool' && message.name === entry.tool) as TranscriptToolMessage | undefined
+    assert.ok(recorded !== undefined, `${key}: the durable tool row must exist before the switch changes`)
+    assert.match(recorded.result, key === 'chart' ? /p50 {2}42/u : /Service topology/u)
+    assert.ok(renderedVisualKinds(recorded, key).includes(key === 'chart' ? 'chart' : 'image'),
+      `${key}: the recorded result renders while the tools are registered`)
+
+    // THE SWITCH TURNS OFF ONLY NOW: the durable result already exists.
+    enabled = false
+    ctx.emit('loader/volatile-update', [['enabled']])
+    assert.equal(ctx.tools.get(entry.tool), undefined, `${key}: the switch really unregistered the tool`)
+    assert.equal(ctx.tools.get(key === 'chart' ? SVG_TOOL_NAME : CHART_TOOL_NAME), undefined)
+
+    // Reopening the session folds the SAME durable events again. No consumer
+    // may re-filter a recorded drawing by the live switch value.
+    const replayed = new TranscriptFolder()
+    replayed.apply(events as never)
+    const replay = replayed.messages().find(message => message.kind === 'tool' && message.name === entry.tool) as TranscriptToolMessage | undefined
+    assert.ok(replay !== undefined, `${key}: the durable row survives a fresh fold after Off`)
+    assert.equal(replay.result, recorded.result, `${key}: the durable result is byte-identical after Off`)
+    const kinds = renderedVisualKinds(replay, key)
+    assert.ok(kinds.includes(key === 'chart' ? 'chart' : 'image'),
+      `${key}: the recorded drawing still renders after the switch is Off (kinds: ${kinds.join(', ')})`)
+    assert.match(replay.result, key === 'chart' ? /p99 {2}70/u : /SVG source available/u,
+      `${key}: the readable values/source credential remain exportable`)
+  }
+})
