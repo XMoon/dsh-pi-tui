@@ -41,7 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first frame, and one read asks the Host for a single directory snapshot:
   before, every provider re-read the directory and the whole settings section,
   so a large directory blocked the keyboard path for a long time. Opening the
-  credential list and its R refresh now paint a frame before reading as well.
+  credential list and its R refresh now paint a frame before reading as well,
+  and every read is queued behind the renderer's actual frame write — never a
+  0 ms timer guess — so a throttled frame cannot let the synchronous scan run
+  first.
 - **Credential writes wait for the authoritative read.** The `/login <REF>`
   API-key write waits for the credential store's own read of that reference, and
   a clear confirmation drops back to reading when it is refreshed instead of

@@ -405,6 +405,11 @@ export class ModelsWorkspacePage implements Component {
    *  mounts this page), and a Host read there would freeze the whole TUI. */
   private readArmed = false
   private readStarted = false
+  /** Work that must start only after the NEXT painted frame. render() drains
+   *  this queue; the renderer writes the frame synchronously after the
+   *  component tree renders, so the drained microtask observes a completed
+   *  paint — never a `setTimeout(0)` guess at the renderer's 16 ms throttle. */
+  private afterPaintTasks: Array<() => void> = []
   /** The route a deeplink asked for, resolved against the catalog once it
    *  arrives (never against an empty list). */
   private pendingProviderRoute: string | undefined
@@ -490,22 +495,58 @@ export class ModelsWorkspacePage implements Component {
   // ── data refresh ─────────────────────────────────────────────────────────
 
   /**
+   * Queue a read start for AFTER the next painted frame. The caller has
+   * already mutated the view/read state and requested a render (the page's
+   * `requestRender`), so the frame that carries the Loading/Reading state is
+   * the next one the renderer produces.
+   */
+  private runAfterPaint(task: () => void): void {
+    this.afterPaintTasks.push(task)
+    this.requestRender()
+  }
+
+  /** Queue a read start from INSIDE render(): the frame being built is the
+   *  one that displays the state, so no extra frame is requested. */
+  private armAfterPaint(task: () => void): void {
+    this.afterPaintTasks.push(task)
+  }
+
+  /**
+   * Drain the post-paint queue.
+   *
+   * `TuiBase.doRender()` renders the component tree and then writes the frame
+   * to the terminal SYNCHRONOUSLY, before the current task returns. A
+   * microtask queued here therefore runs strictly after that terminal write.
+   * This is the proven post-paint boundary: a `setTimeout(0)` would race the
+   * renderer's 16 ms frame throttle and could run the synchronous Host scan
+   * before the Loading/Reading frame ever reached the terminal.
+   */
+  private flushAfterPaint(): void {
+    if (this.afterPaintTasks.length === 0) return
+    const tasks = this.afterPaintTasks
+    this.afterPaintTasks = []
+    queueMicrotask(() => {
+      if (this.disposed) return
+      for (const task of tasks) task()
+    })
+  }
+
+  /**
    * Arm the catalog read for the first painted frame that shows this page.
    *
-   * The read is scheduled as a MACROTASK from the page's own render: the
-   * terminal write of the current frame happens synchronously inside the
-   * layout pass, so the scheduled task runs AFTER the user has seen the
-   * Loading frame. A read that ran in the constructor (or in the input path
-   * that mounts the page) would block the whole TUI for the length of the
-   * provider-directory read.
+   * The read is queued from the page's own render(): the renderer writes this
+   * frame synchronously after the component tree renders, so the queue drains
+   * after the Loading frame is on the terminal. The constructor runs in the
+   * INPUT path (the rail selection that mounts this page), so a Host read
+   * there would freeze every keypress until it finished.
    */
   private armCatalogRead(): void {
     if (this.disposed || this.readArmed) return
     this.readArmed = true
-    setTimeout(() => {
+    this.armAfterPaint(() => {
       if (this.disposed) return
       this.startCatalogRead()
-    }, 0)
+    })
   }
 
   /**
@@ -516,7 +557,9 @@ export class ModelsWorkspacePage implements Component {
    */
   private startCatalogRead(): void {
     if (this.disposed) return
-    if (!this.readStarted) this.refresh()
+    // Called from the post-paint microtask: the Loading frame has already
+    // been written, so this generation's read starts immediately.
+    if (!this.readStarted) this.refresh(true)
     this.startPendingReads()
   }
 
@@ -525,6 +568,7 @@ export class ModelsWorkspacePage implements Component {
    * list and a clear target). They are INDEPENDENT of the catalog read's
    * de-duplication: an explicit refresh that already started the catalog read
    * must not swallow them (the page would stay in `Reading…` forever).
+   * Called from the post-paint microtask, so the deferred reads start now.
    */
   private startPendingReads(): void {
     if (this.disposed) return
@@ -532,7 +576,7 @@ export class ModelsWorkspacePage implements Component {
       this.pendingRecordsRead = false
       // Only while the page still shows that view: a user who already left
       // must not pay the full stored-credential scan.
-      if (this.view.kind === 'records' || this.view.kind === 'logout-list') this.refreshRecords()
+      if (this.view.kind === 'records' || this.view.kind === 'logout-list') this.refreshRecords(true)
     }
     // The clear target's authority was already re-read by the catalog refresh
     // (the refresh re-reads the current view's authority): the intent is
@@ -557,9 +601,16 @@ export class ModelsWorkspacePage implements Component {
     this.refresh()
   }
 
-  /** Re-read every page-owned authority. All reads are intents that settle on
-   * this page only; a late settlement after dispose is ignored by `settle`. */
-  private refresh(): void {
+  /**
+   * Re-read every page-owned authority. All reads are intents that settle on
+   * this page only; a late settlement after dispose is ignored by `settle`.
+   *
+   * @param painted - the caller is the post-paint microtask: the frame that
+   *   shows this generation's Loading/Refreshing state is already on the
+   *   terminal, so the catalog read starts immediately instead of waiting for
+   *   another frame.
+   */
+  private refresh(painted = false): void {
     if (this.disposed) return
     // A refresh IS a read start: the armed first read must not start a
     // SECOND read after an explicit R already started one.
@@ -570,10 +621,11 @@ export class ModelsWorkspacePage implements Component {
     this.readState = this.providerRows.length === 0 ? 'loading' : 'refreshing'
     this.readFailure = undefined
     // The Host read is SYNCHRONOUS, and this refresh can start in the INPUT
-    // path (the R key). The read therefore runs in a MACROTASK: the keypress
-    // is acknowledged before the provider directory is read, and a slow read
-    // never sits inside the input handler.
-    setTimeout(() => {
+    // path (the R key). It starts only after the frame carrying the
+    // Loading/Refreshing state has been written: the page's post-paint queue
+    // runs it from a microtask after that terminal write (never a
+    // `setTimeout(0)` guess at the renderer's frame throttle).
+    const startCatalogRead = (): void => {
       if (this.disposed) return
       // A newer generation superseded this one BEFORE the read started: the
       // Host scan must not run at all (it is synchronous, so a queue of stale
@@ -606,7 +658,9 @@ export class ModelsWorkspacePage implements Component {
         this.readRecordPresence()
       })
       })
-    }, 0)
+    }
+    if (painted) startCatalogRead()
+    else this.runAfterPaint(startCatalogRead)
     this.source.run('models account read', async () => {
       let summary: ModelsAccountSummary
       try {
@@ -627,7 +681,7 @@ export class ModelsWorkspacePage implements Component {
       // The write owns the clear state; the catalog refresh continues.
     } else if (this.view.kind === 'reference') this.readReferenceState()
     else if (this.view.kind === 'logout') {
-      if (this.view.target.kind === 'record') this.readClearRecord()
+      if (this.view.target.kind === 'record') this.readClearRecord(painted)
       else this.readReferenceState()
     }
     this.requestRender()
@@ -703,22 +757,28 @@ export class ModelsWorkspacePage implements Component {
     this.view = { kind: 'provider', identity: this.identityOfRoute(route) }
   }
 
-  private refreshRecords(): void {
+  /**
+   * The stored-credential list read.
+   *
+   * @param painted - the caller is the post-paint microtask: the frame that
+   *   shows `Reading the credential store…` is already on the terminal, so
+   *   the read starts immediately.
+   */
+  private refreshRecords(painted = false): void {
     const serial = ++this.recordsSerial
     // A read in flight has no current record presence: do not keep painting
     // the previous snapshot as if it were the Host's current fact.
     this.records = undefined
     this.recordsError = undefined
     // The stored-credential read scans the provider configuration
-    // SYNCHRONOUSLY before its first await, and this refresh starts in the
-    // INPUT path (the records view or the R key). The read therefore runs in
-    // a MACROTASK: the keypress is acknowledged before the scan, and a
-    // superseded generation never runs it at all.
-    setTimeout(() => {
+    // SYNCHRONOUSLY before its first await. It starts only after the frame
+    // that paints the Reading state has been written (the post-paint queue
+    // runs from a microtask after that terminal write).
+    const startRecordsRead = (): void => {
       if (this.disposed || serial !== this.recordsSerial) return
-      // Leaving the view cancels the deferred scan: the timer can fire after
-      // the navigation that left it (the same stdin batch), and the scan must
-      // never run for a view the user no longer sees.
+      // Leaving the view cancels the deferred scan: the queued task can run
+      // after the navigation that left it (the same stdin batch), and the
+      // scan must never run for a view the user no longer sees.
       if (this.view.kind !== 'records' && this.view.kind !== 'logout-list') return
       this.source.run('models records read', async () => {
         try {
@@ -738,7 +798,9 @@ export class ModelsWorkspacePage implements Component {
           })
         }
       })
-    }, 0)
+    }
+    if (painted) startRecordsRead()
+    else this.runAfterPaint(startRecordsRead)
   }
 
   private invalidateCredentialRead(ref: string): void {
@@ -945,7 +1007,14 @@ export class ModelsWorkspacePage implements Component {
     this.requestRender()
   }
 
-  private readClearRecord(): void {
+  /**
+   * Read the exact record target's presence for the clear confirmation.
+   *
+   * @param painted - the caller is the post-paint microtask: the frame that
+   *   shows `Reading the credential store…` is already on the terminal, so
+   *   the read starts immediately.
+   */
+  private readClearRecord(painted = false): void {
     if (this.view.kind !== 'logout' || this.view.target.kind !== 'record') return
     // A delete that is still in flight owns the clear state: a re-read must
     // not reset its phase (the user must not be able to leave the
@@ -957,15 +1026,14 @@ export class ModelsWorkspacePage implements Component {
     const readSerial = ++this.clearReadSerial
     this.clear = { phase: 'reading', configured: false }
     // The stored-credential read scans the provider configuration
-    // SYNCHRONOUSLY before its first await, and this read starts in the
-    // INPUT path (opening or refreshing the confirmation). The read
-    // therefore runs in a MACROTASK: the keypress is acknowledged before the
-    // scan, and a superseded read never runs it at all.
-    setTimeout(() => {
+    // SYNCHRONOUSLY before its first await. It starts only after the frame
+    // that paints the Reading state has been written (the post-paint queue
+    // runs from a microtask after that terminal write).
+    const startClearRead = (): void => {
       if (this.disposed || readSerial !== this.clearReadSerial || serial !== this.clearSerial) return
       // Leaving the confirmation (or switching to another target) cancels the
-      // deferred scan: the timer can fire after the navigation that left it
-      // (the same stdin batch), and the scan must never run for a view the
+      // deferred scan: the queued task can run after the navigation that left
+      // it (the same stdin batch), and the scan must never run for a view the
       // user no longer sees.
       if (this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
       this.source.run('models clear target read', async () => {
@@ -983,7 +1051,9 @@ export class ModelsWorkspacePage implements Component {
           })
         }
       })
-    }, 0)
+    }
+    if (painted) startClearRead()
+    else this.runAfterPaint(startClearRead)
   }
 
   private confirmClear(): void {
@@ -1636,8 +1706,18 @@ export class ModelsWorkspacePage implements Component {
 
   render(width: number): string[] {
     if (this.disposed) return []
-    // The first frame that shows this page arms the catalog read. The read
-    // runs as a MACROTASK, i.e. after the terminal write of this frame: the
+    try {
+      return this.renderFrame(width)
+    } finally {
+      // The renderer writes this frame synchronously after render() returns;
+      // every read armed during this frame starts only after that write.
+      this.flushAfterPaint()
+    }
+  }
+
+  private renderFrame(width: number): string[] {
+    // The first frame that shows this page arms the catalog read. The read is
+    // queued behind THIS frame's terminal write (see flushAfterPaint): the
     // user sees the Loading state before the provider directory is read.
     this.armCatalogRead()
     this.lastWidth = width

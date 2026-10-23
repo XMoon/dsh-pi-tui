@@ -61,6 +61,13 @@ interface Harness {
   readonly setAccountView: (view: AccountView) => void
   /** Hold the NEXT Account sign-in open, like a Host that has not answered. */
   readonly holdNextStartSignIn: () => () => void
+  /** The terminal-write count when each catalog read started. */
+  readonly catalogReadWrites: number[]
+  /** The terminal-write count when each provider-option read started (the
+   *  synchronous provider scan inside the stored-credential read). */
+  readonly credentialListWrites: number[]
+  /** Replace the stored-record rows the fake credentials report. */
+  readonly setRecordRows: (rows: readonly { key: string; label: string; kind: 'grant' }[]) => void
   readonly view: () => string
   readonly rows: () => string[]
   readonly close: () => void
@@ -97,6 +104,11 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   let releaseSetReference: (() => void) | undefined
   let signInGate: Promise<void> | undefined
   let releaseSignIn: (() => void) | undefined
+  /** The terminal-write count when each Host read starts: the paint-order
+   *  tests assert that the frame carrying the read's Loading/Reading state
+   *  was already written (never a setTimeout guess at the frame throttle). */
+  const catalogReadWrites: number[] = []
+  const credentialListWrites: number[] = []
   const base: Record<string, unknown> = {
     ctx,
     app,
@@ -139,13 +151,19 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       web: { available: () => false },
       providers: {
         available: () => true,
-        listCredentialOptions: () => OPTIONS,
-        readCatalog: () => ({
-          options: OPTIONS,
-          profiles: OPTIONS.map(option => (option.route === 'acme'
-            ? { route: option.route, configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] }
-            : { route: option.route, configured: true, displayName: option.route, models: [] })),
-        }),
+        listCredentialOptions: () => {
+          credentialListWrites.push(vt.writes.length)
+          return OPTIONS
+        },
+        readCatalog: () => {
+          catalogReadWrites.push(vt.writes.length)
+          return {
+            options: OPTIONS,
+            profiles: OPTIONS.map(option => (option.route === 'acme'
+              ? { route: option.route, configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] }
+              : { route: option.route, configured: true, displayName: option.route, models: [] })),
+          }
+        },
         readProfile: (route: string) => route === 'acme'
           ? { route, configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] }
           : { route, configured: true, displayName: route, models: [] },
@@ -217,7 +235,12 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     vt,
     app,
     calls,
+    catalogReadWrites,
+    credentialListWrites,
     setAccountView: (view: AccountView) => { accountState.view = view },
+    setRecordRows: (next: readonly { key: string; label: string; kind: 'grant' }[]) => {
+      recordRows = next.map(record => ({ ...record }))
+    },
     holdNextStartSignIn: () => {
       signInGate = new Promise<void>(resolve => { releaseSignIn = resolve })
       return () => { releaseSignIn?.() }
@@ -905,5 +928,81 @@ test('the Models page is mounted the same way when the terminal grows', async ()
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
   assert.match(h.view(), /Models & Credentials/u, 'the widened frame shows the real Models page')
+  h.close()
+})
+
+/** Every terminal-bound byte written before `limit` writes. */
+const writtenBefore = (h: Harness, limit: number): string => h.vt.writes.slice(0, limit).join('')
+
+/** Paint one frame BEFORE the measured input, leaving the renderer inside its
+ *  16 ms throttle window: the next frame is delayed, so a `setTimeout(0)` read
+ *  would run first. */
+const paintFrameNow = async (h: Harness): Promise<void> => {
+  const before = h.vt.writes.length
+  h.app.requestRender(true)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(h.vt.writes.length > before, 'the forced frame must be written before the measured input')
+}
+
+/**
+ * The paint → read order. The forced frame leaves the renderer inside its
+ * 16 ms throttle window, so the next frame is delayed — the exact window
+ * where a `setTimeout(0)` read would run before the Loading/Reading frame
+ * ever reached the terminal. The read's recorded write count must already
+ * include that frame.
+ */
+test('paint order: the catalog R refresh starts only after the Refreshing frame is written', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login')
+  await waitForFrame(h.view, frame => /Models & Credentials/u.test(frame) && /Acme Gateway/u.test(frame), () => h.vt.waitForRender(), 'the Models list must settle first')
+  h.catalogReadWrites.length = 0
+  // Only the measured window's bytes count: an earlier frame may legitimately
+  // contain the same status text (e.g. the initial Loading/Reading frame).
+  h.vt.writes.length = 0
+  await paintFrameNow(h)
+  h.vt.sendInput('r')
+  await h.vt.waitForRender()
+  assert.equal(h.catalogReadWrites.length, 1, 'the R refresh starts exactly one catalog read')
+  assert.match(writtenBefore(h, h.catalogReadWrites[0]!), /Refreshing…/u,
+    'the catalog read must start only after the frame carrying the Refreshing state was written')
+  h.close()
+})
+
+test('paint order: the records R refresh starts only after the Reading frame is written', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/logout')
+  await waitForFrame(h.view, frame => /Stored credentials/u.test(frame) && /plugin\/mykey/u.test(frame), () => h.vt.waitForRender(), 'the stored-credential list must settle first')
+  h.credentialListWrites.length = 0
+  // Only the measured window's bytes count: an earlier frame may legitimately
+  // contain the same status text (e.g. the initial Loading/Reading frame).
+  h.vt.writes.length = 0
+  await paintFrameNow(h)
+  h.vt.sendInput('r')
+  await h.vt.waitForRender()
+  assert.equal(h.credentialListWrites.length, 1, 'the R refresh starts exactly one stored-credential read')
+  assert.match(writtenBefore(h, h.credentialListWrites[0]!), /Reading the credential store…/u,
+    'the stored-credential read must start only after the Reading frame was written')
+  h.close()
+})
+
+test('paint order: opening the record clear confirmation starts its read only after the Reading frame is written', async () => {
+  const h = open()
+  h.setRecordRows([{ key: 'llm-pi-ai/anthropic', label: 'Anthropic', kind: 'grant' }])
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login anthropic')
+  await waitForFrame(h.view, frame => /Provider · Anthropic/u.test(frame) && /Signed in/u.test(frame), () => h.vt.waitForRender(), 'the Anthropic detail must settle with its stored record')
+  h.credentialListWrites.length = 0
+  // Only the measured window's bytes count: an earlier frame may legitimately
+  // contain the same status text (e.g. the initial Loading/Reading frame).
+  h.vt.writes.length = 0
+  await paintFrameNow(h)
+  h.vt.sendInput('\u001b[B') // Sign in (provider) -> Clear stored credential
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(h.credentialListWrites.length, 1, 'the clear target read starts exactly once')
+  assert.match(writtenBefore(h, h.credentialListWrites[0]!), /Reading the credential store…/u,
+    'the record-clear read must start only after the Reading frame was written')
   h.close()
 })
