@@ -2493,7 +2493,11 @@ test('C3 Remote production lane: /settings → real About panel → [Copy All] c
     assert.match(decoded, /Input tokens: 33/u, 'the official tokenUsage total rides the payload')
     assert.match(decoded, /Output tokens: 7/u)
     // The MEASURED performance group of the seeded real sample.
-    assert.match(decoded, /TTFB \(recent\): 0\.[1-3]s/u, `the seeded TTFB rides the payload: ${lines.filter(l => l.startsWith('TTFB'))}`)
+    assert.match(
+      decoded,
+      /TTFB \(recent\): 0\.[1-3]s \(\d+(?:\.\d+)? ms\)/u,
+      `the seeded TTFB display AND exact ms ride the payload: ${lines.filter(l => l.startsWith('TTFB'))}`,
+    )
     assert.match(decoded, /R5 tokens\/sec: [1-9]/u, 'the seeded R5 rate rides the payload')
     assert.match(decoded, /All tokens\/sec: [1-9]/u, 'the seeded All rate rides the payload')
 
