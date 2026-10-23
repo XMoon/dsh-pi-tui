@@ -10,7 +10,10 @@ import { PluginManagerController } from '../../src/app/plugin-manager/controller
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
-import type { TuiExtensionObservation } from '../../src/app/plugin-manager/extension-inventory.ts'
+import type {
+  TuiExtensionDiagnostics,
+  TuiExtensionObservation,
+} from '../../src/app/plugin-manager/extension-inventory.ts'
 import type {
   PluginBundleFact,
   PluginChangeFact,
@@ -75,6 +78,8 @@ export interface WorkspaceHarnessOptions {
   readonly bundles?: readonly PluginBundleFact[]
   readonly plugins?: readonly PluginRowFact[]
   readonly observations?: readonly TuiExtensionObservation[]
+  /** The diagnostics read the page consumes (default: no extension service). */
+  readonly diagnostics?: () => TuiExtensionDiagnostics | undefined
   /** The exact-version exemption reader warnings the fixture reports. */
   readonly exemptionWarnings?: readonly string[]
   /** Replaces the fixture install behavior when provided. */
@@ -95,6 +100,8 @@ export interface WorkspaceHarness {
   readonly controller: PluginManagerController
   readonly panel: PluginManagerWorkspacePanel
   readonly copied: string[]
+  /** How many official inventory snapshots the controller requested. */
+  readonly snapshotCalls: () => number
   readonly installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }>
   readonly setBundle: Array<{ name: string; enabled: boolean }>
   readonly setPlugin: Array<{ entryId: string; enabled: boolean }>
@@ -142,11 +149,12 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   const installListeners = new Set<(event: PluginInstallEvent) => void>()
   const invalidateListeners = new Set<() => void>()
   const installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }> = []
+  let snapshotCalls = 0
   const setBundle: Array<{ name: string; enabled: boolean }> = []
   const setPlugin: Array<{ entryId: string; enabled: boolean }> = []
   const removeBundle: string[] = []
   const fixturePort: PluginManagerPort = {
-    snapshot: async () => snapshot,
+    snapshot: async () => { snapshotCalls += 1; return snapshot },
     inspect: options.inspectImpl ?? (async (spec: string) => ({
       status: 'accepted',
       kind: 'registry',
@@ -195,6 +203,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     requestRender: () => app.requestRender(),
     notice: () => undefined,
     onCopy: (text) => { copied.push(text) },
+    ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
   }, { onDispose: () => {} })
   closeSurface = app.openPluginManagerWorkspace(panel, () => {})
   controller.open(options.entryHost ?? 'direct-command')
@@ -210,6 +219,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     controller,
     panel,
     copied,
+    snapshotCalls: () => snapshotCalls,
     installCalls,
     setBundle,
     setPlugin,

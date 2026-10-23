@@ -30,7 +30,11 @@ import type { TuiApp } from '../../tui-app.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import { PluginManagerController } from '../plugin-manager/controller.ts'
 import { PluginManagerHostRegistry, type PluginManagerHostClaim } from '../plugin-manager/host-registry.ts'
-import { observeTuiExtensions } from '../plugin-manager/extension-inventory.ts'
+import {
+  describeTuiExtensionDiagnostics,
+  observeTuiExtensions,
+  type TuiExtensionDiagnostics,
+} from '../plugin-manager/extension-inventory.ts'
 import type { SurfaceExtensionService } from './extension-runtime.ts'
 
 /** The presentation capabilities the composition zone injects. */
@@ -45,6 +49,10 @@ export interface PluginManagerWorkspacePanelDeps {
   readonly notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
   /** Copy exact text through the Client-local clipboard owner. */
   readonly onCopy: (text: string) => void
+  /** Read the CURRENT extension diagnostics on an explicit page read/refresh.
+   *  `undefined` means the extension service is not attached (render
+   *  Unavailable, never an empty healthy report). */
+  readonly diagnostics: () => TuiExtensionDiagnostics | undefined
   /** Release the owner on an EXTERNAL teardown (never a normal close). */
   readonly onDispose?: () => void
 }
@@ -130,6 +138,18 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
         requestRender: () => options.mounted().requestRender(),
         notice: () => options.mounted().workspaceNotice(),
         onCopy: text => options.mounted().copyWorkspaceText(text),
+        diagnostics: () => {
+          const extensionService = options.service()
+          if (extensionService === undefined) return undefined
+          return describeTuiExtensionDiagnostics(
+            {
+              healthSnapshot: () => extensionService._ledger().healthSnapshot(),
+              ownerEntryIds: () => extensionService._ownerEntryIds(),
+            },
+            extensionService,
+            extensionService.api().capabilities,
+          )
+        },
         onDispose,
       })
       const open = (): void => {
