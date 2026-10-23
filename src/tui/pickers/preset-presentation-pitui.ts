@@ -73,7 +73,7 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
               // value slot — the SAME position the /settings theme picker uses
               // — never a word inside the description (which is also painted
               // only while the row is selected). The chip is PRE-PAINTED
-              // `textMuted` (the `status.ts:110` precedent) because
+              // `textMuted` (the pre-painted-chip pattern in `src/tui/plugin-manager/workspace.ts`) because
               // `settingsListTheme().value` paints `selected ? primary :
               // textDim`; each part is its own span, so nothing after a nested
               // reset can lose its ink.

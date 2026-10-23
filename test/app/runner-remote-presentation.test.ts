@@ -1854,7 +1854,7 @@ test('mounted /status (the /settings alias): lifetime totals and the RECENT figu
     if (/Input tokens\s+5035/u.test(panelView)
       && /TTFB \(recent\)\s+0\.[1-9]\d*s/u.test(panelView)) break
     fixture.vt.sendInput('\x1b[6~') // PageDown: scroll the painted About rows.
-    await new Promise(resolve => setTimeout(resolve, 200))
+    await fixture.vt.waitForRender()
   }
   assert.match(panelView, /Input tokens\s+5035/u,
     `the About lifetime input total is the projection value:\n${panelView}`)

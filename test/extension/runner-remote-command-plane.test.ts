@@ -354,6 +354,26 @@ test('TUI built-in: the Client handler runs and the Host executor is NEVER enter
     'a TUI built-in must never reach the Host command executor (zero command/run rows)')
 })
 
+test('sessionless /status is the real /settings alias and creates no session', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRunner(life)
+  const before = fixture.host.ctx.sessions.list().length
+  const app = fixture.app() as unknown as {
+    setDraft(text: string): void
+    submitDraft(request?: string): void
+  }
+  app.setDraft('/status')
+  app.submitDraft()
+  await waitFor('the sessionless /status alias opened Settings About', () => {
+    const view = fixture.vt.getViewport().join('\n')
+    return view.includes('Settings · Categories') && view.includes('> About')
+  }, 15_000)
+  assert.equal(fixture.host.ctx.sessions.list().length, before,
+    'sessionless /status creates no session')
+  assert.match(fixture.vt.getViewport().join('\n'), /No active session/u,
+    'the shared About home states the sessionless fact')
+})
+
 /**
  * F1 (PR4-B2-A review): a TUI-owned command executing through the card-less
  * Client command registry must still publish its returned error text. The Direct
@@ -1267,8 +1287,9 @@ test('TUI local commands stay reachable while the session RUNS and busy delivery
   const originalOpen = app.openSettingsWorkspace
   let opened = 0
   app.openSettingsWorkspace = (...args: Parameters<TuiApp['openSettingsWorkspace']>) => {
+    const result = originalOpen.apply(app, args)
     opened += 1
-    return originalOpen.apply(app, args)
+    return result
   }
   app.setDraft('/status')
   app.submitDraft('accelerated')

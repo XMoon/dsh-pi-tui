@@ -17,6 +17,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../src/index.ts'
+import { classifyCommandLine } from '../../src/domain/command/policy.ts'
 import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
 import type { WriteOutcome } from '../../src/runtime/session-writer-port.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../../src/app/session/operation-barrier.ts'
@@ -1761,7 +1762,8 @@ test('the built-in command decomposition preserves the exact primary set and reg
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: undefined }))
+  const runner = stubRunner(ctx, app, { agent: undefined })
+  registerTuiCommandsWithDirectSeams(runner)
   // The seven existing aliases: an alias is another NAME of the same logical
   // command, registered immediately after its primary. `/status` is the
   // `/settings` alias (C5).
@@ -1804,5 +1806,22 @@ test('the built-in command decomposition preserves the exact primary set and reg
   assert.match(status.description ?? '', /alias of \/settings/u)
   assert.equal(LOCAL_COMMANDS.has('status'), true)
   assert.equal(SESSIONLESS_COMMANDS.has('status'), true, 'the alias executes before a session exists')
+  // The alias definition has no `input` descriptor, so it claims the BARE
+  // token only; an argued `/status x` is an ordinary submission and the
+  // production classifier must not route it to the alias handler.
+  assert.equal(runner.clientCommands.claimsLine({ name: 'status', rawInput: '' }), true)
+  assert.equal(runner.clientCommands.claimsLine({ name: 'status', rawInput: 'x' }), false)
+  assert.equal(classifyCommandLine({
+    hostOriginClaim: undefined,
+    tuiCommand: false,
+    extensionCommand: false,
+    skillInvocation: false,
+  }).kind, 'ordinary-submission', 'argued /status x is not a Client invocation')
+  assert.equal(classifyCommandLine({
+    hostOriginClaim: { claimed: true, attachments: false },
+    tuiCommand: false,
+    extensionCommand: false,
+    skillInvocation: false,
+  }).kind, 'host-command', 'a genuine Host claim still owns an argued /status line')
   app.stop()
 })

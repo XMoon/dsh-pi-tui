@@ -30,7 +30,7 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'display', 'exit', 'focus', 'footer', 'settings', 'status', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
+  'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
   // `/quit` is `/exit`'s canonical command alias (the runner registers
   // /exit → /quit); before a session exists both must exit WITHOUT creating
