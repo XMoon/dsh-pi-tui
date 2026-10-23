@@ -280,11 +280,19 @@ for a drawing.
   animation, DOCTYPE/entities, external or file references, theme-dependent
   paint and out-of-budget geometry are refused. The product source budget is
   128 KiB, below the client's own ~256 KiB native-SVG gate.
+- The FINAL fact title (not only the original call summary) is part of the
+  readable projection: a value replacement can change the committed title, so
+  the body/header must show the new title. The call summary remains a separate
+  call fact.
 - TSP native SVG uses the same `session.blob()` sender as the image path, with
-  `image/svg+xml`; PiTui derives a short-lived PNG in an isolated child process
-  and mounts the existing image component/budget. Neither derivative is a
-  durable fact: cold replay, search and Markdown export read the final result
-  content and the durable call arguments, never a blob id, a PNG or a cache.
+  `image/svg+xml`; a nested PTC SVG child carries the admitted source node in
+  its own card. PiTui derives a short-lived PNG in an isolated child process on
+  a platform with a verified native memory bound (Linux today) and mounts the
+  existing image component/budget; macOS/Windows keep the description + source
+  text fallback, and a failed memory-cap installation never reaches the native
+  rasterizer. Neither derivative is a durable fact: cold replay, search and
+  Markdown export read the final result content and the durable call arguments,
+  never a blob id, a PNG or a cache.
 - The two tool definitions are Host-plane registrations (explicit `inject` +
   `ctx.reflect.get`) independent of the renderer, Tern hello, client capability,
   session or resize. Direct and Remote consume the same durable facts; a

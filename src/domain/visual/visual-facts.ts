@@ -73,6 +73,22 @@ export function visualParts(blocks: readonly ContentBlock[]): VisualParts {
 }
 
 /**
+ * The status-gated view of one result: a failed/blocked/running row keeps its
+ * human blocks but never exposes a visual fact. Every renderer/blob sender
+ * uses this so a policy block cannot draw a stale figure.
+ * @param status - the durable tool-result status.
+ * @param blocks - the final result content blocks.
+ * @returns the same shape as {@link visualParts}, with `fact` only for `ok`.
+ */
+export function visualPartsForStatus(
+  status: 'ok' | 'error' | 'running',
+  blocks: readonly ContentBlock[],
+): VisualParts {
+  const parts = visualParts(blocks)
+  return status === 'ok' ? parts : { ...parts, fact: undefined }
+}
+
+/**
  * The flat-text fallback: older/synthetic rows may carry the joined result
  * string instead of `resultBlocks`. Split the machine line(s) out line-wise so
  * a malformed fact can never leak its JSON into the card body.

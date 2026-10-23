@@ -126,9 +126,13 @@ export function svgHumanText(fact: SvgFact): string {
   return [fact.title, fact.description, 'SVG source available in the expanded tool call'].join('\n')
 }
 
-/** The card-body detail rows (the card header already shows the title). */
+/**
+ * The card-body detail rows. The FINAL fact title is always shown: the card
+ * header may describe the original call arguments, while a value replacement
+ * changes the committed title.
+ */
 export function svgDetailRows(fact: SvgFact): string[] {
-  return [fact.description, 'SVG source available in the expanded tool call']
+  return [fact.title, fact.description, 'SVG source available in the expanded tool call']
 }
 
 /** The durable content blocks: readable text plus the credential line. */
@@ -154,8 +158,10 @@ export type SvgAuthorization =
 export function authorizeSvg(
   argsRaw: string,
   resultBlocks: readonly ContentBlock[] | undefined,
+  status: 'ok' | 'error' | 'running',
   admit: (source: string) => SvgAdmission = admitSvg,
 ): SvgAuthorization {
+  if (status !== 'ok') return { state: 'text', reason: 'the tool result was not successful' }
   const args = parseSvgArgs(argsRaw)
   if (args === undefined) return { state: 'text', reason: 'SVG call arguments are not readable' }
   const fact = resultFact(resultBlocks)

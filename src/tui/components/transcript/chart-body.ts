@@ -10,7 +10,8 @@
  */
 
 import { truncateToWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
-import { chartTextRows, type ChartFact } from '../../../domain/visual/chart.ts'
+import { chartDisplayTitle, chartTextRows, type ChartFact } from '../../../domain/visual/chart.ts'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 
 /** Paint function for the dimmed body rows (the tool-card body convention). */
 export type ChartBodyPaint = (text: string) => string
@@ -37,12 +38,19 @@ export class ChartBody implements Component {
     if (cached !== undefined) return cached
     const bodyWidth = Math.max(1, safeWidth - 2)
     const rows: string[] = []
-    for (const row of chartTextRows(this.fact, bodyWidth)) {
+    // External label/title/unit bytes are display material. The durable fact
+    // and the copy/export authorities stay raw; this projection sanitizes
+    // BEFORE the wrap/paint so an OSC/CSI/C1 sequence can never reach the tty.
+    const pushRow = (row: string): void => {
       // A long label wraps instead of clipping the exact value at its tail.
-      for (const wrapped of wrapTextWithAnsi(row, bodyWidth)) {
+      for (const wrapped of wrapTextWithAnsi(sanitizeDisplayText(row), bodyWidth)) {
         rows.push(truncateToWidth(this.paint(`  ${wrapped}`), safeWidth, ''))
       }
     }
+    // The FINAL fact title, not the original call summary: a value replacement
+    // may legitimately change the committed title.
+    pushRow(chartDisplayTitle(this.fact))
+    for (const row of chartTextRows(this.fact, bodyWidth)) pushRow(row)
     this.cached.set(safeWidth, rows)
     return rows
   }

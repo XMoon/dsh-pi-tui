@@ -28,6 +28,8 @@ export class SvgThumbnail implements Component {
   private readonly loader: SvgRasterLoader
   private readonly theme: SvgThumbnailTheme
   private readonly requestRender: () => void
+  /** When set, the component always occupies exactly this many rows. */
+  private readonly fixedRows: number | undefined
   private unsubscribe: (() => void) | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
@@ -40,6 +42,7 @@ export class SvgThumbnail implements Component {
     loader: SvgRasterLoader,
     theme: SvgThumbnailTheme,
     requestRender: () => void,
+    fixedRows?: number,
   ) {
     this.digest = digest
     this.source = source
@@ -47,6 +50,7 @@ export class SvgThumbnail implements Component {
     this.loader = loader
     this.theme = theme
     this.requestRender = requestRender
+    this.fixedRows = fixedRows
     this.unsubscribe = loader.subscribe(digest, () => {
       this.invalidate()
       this.requestRender()
@@ -70,7 +74,14 @@ export class SvgThumbnail implements Component {
     const capabilities = getCapabilities().images ?? 'none'
     const key = `${width}:${capabilities}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
-    const lines = this.renderLines(width)
+    const rendered = this.renderLines(width)
+    // A nested card reserves a FIXED image row budget: a loading placeholder
+    // and the settled image must not move later child headers/search rows.
+    let lines = rendered
+    if (this.fixedRows !== undefined && rendered.length > 0) {
+      lines = rendered.slice(0, this.fixedRows)
+      while (lines.length < this.fixedRows) lines.push('')
+    }
     this.cachedLines = lines
     this.cachedKey = key
     return lines

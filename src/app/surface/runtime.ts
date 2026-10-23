@@ -122,7 +122,7 @@ import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { ImageLoader } from '../../client/media/image/loader.ts'
 import { SvgRasterLoader } from '../../client/media/svg/raster-loader.ts'
-import { rasterizeSvg } from '../../client/media/svg/rasterize.ts'
+import { isolatedSvgRasterSupported, rasterizeSvg } from '../../client/media/svg/rasterize.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
 import type { StatusPatch } from '../../domain/status/types.ts'
@@ -1682,7 +1682,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     resetSearchPresentation({ rebuild: false })
   }
 
-  const buildOptions = (deps: SurfaceMountDeps, imageLoader: ImageLoader, svgRasterLoader: SvgRasterLoader): TuiAppOptions => ({
+  const buildOptions = (deps: SurfaceMountDeps, imageLoader: ImageLoader, svgRasterLoader: SvgRasterLoader | undefined): TuiAppOptions => ({
     // Ctrl+R input-history search: the runner owns the IO (the file-backed
     // source + the known-cwd identity map), the surface owns the panel
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
@@ -1697,7 +1697,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // mount (constructed in `start()`), so the PiTui branch and the renderer
     // branch share one cache and one read authority.
     imageLoader,
-    svgRasterLoader,
+    ...(svgRasterLoader === undefined ? {} : { svgRasterLoader }),
     imageScope: deps.imageScope,
     imageTheme: { fallbackColor: deps.imageFallbackColor },
     present: deps.present,
@@ -1946,7 +1946,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // PR-D: the Client-local SVG raster cache of THIS mount. It is created
       // at the same single acquire point; TSP has its own native-SVG blob
       // path and never uses this PiTui-only derivative.
-      const rasterLoader = new SvgRasterLoader(rasterizeSvg)
+      const rasterLoader = isolatedSvgRasterSupported() ? new SvgRasterLoader(rasterizeSvg) : undefined
       svgRasterLoader = rasterLoader
       // PR3-A: the composition root already connected a non-PiTui renderer
       // (the experimental TSP mount). Mount it at the SAME position; no

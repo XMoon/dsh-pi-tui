@@ -114,10 +114,15 @@ function checkLength(value: string, what: string, limit: number): number | undef
   if (!Number.isFinite(raw)) reject(`${what}: ${clip(value)} is not finite`)
   if (raw < 0) reject(`${what}: a negative length ${clip(value)}`)
   const unit = match[2]
-  // A percentage is relative to a viewport this gate does not know. The root
-  // dimension path treats it as absent and falls back to the viewBox; every
-  // other percentage is bounded as if it were a pixel value.
-  if (unit === '%') return undefined
+  // A percentage is relative to a viewport this gate does not know; the root
+  // dimension path treats it as absent and falls back to the viewBox. Its
+  // NUMERIC magnitude is still bounded here: a 1e300% radius/width is never a
+  // legitimate static figure, and silently admitting it would defeat the
+  // geometry budget before either renderer expands it.
+  if (unit === '%') {
+    if (raw > limit) reject(`${what}: ${clip(value)} is ${Math.round(raw)}% > ${limit}%`)
+    return undefined
+  }
   const px = raw * (unit === undefined ? 1 : UNIT_PX[unit] as number)
   if (px > limit) reject(`${what}: ${clip(value)} is ${Math.round(px)}px > ${limit}px`)
   return px
@@ -126,7 +131,11 @@ function checkLength(value: string, what: string, limit: number): number | undef
 function checkPaint(value: string, what: string): void {
   const text = value.trim()
   if (text === '' || text === 'none' || text === 'inherit') return
-  if (text.includes('var(') || text === 'currentColor') {
+  // SVG/CSS values are case-insensitive for these keywords. Rejecting only
+  // the canonical spelling let `currentcolor` / `VAR(--fg)` through the
+  // fixed-colour subset and back to the renderer's black theme fallback.
+  const lower = text.toLowerCase()
+  if (lower.includes('var(') || lower.includes('currentcolor')) {
     reject(`${what}: theme-dependent paint is outside the v1 fixed-colour subset`)
   }
   for (const match of text.matchAll(PAINT_URL_PATTERN)) {

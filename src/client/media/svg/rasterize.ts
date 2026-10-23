@@ -8,7 +8,11 @@
  * `SIGABRT`); the admission gate in `domain/visual/svg-admission.ts` already
  * refuses the known crash inputs, and process isolation contains the residual
  * native risk. A POSIX virtual-memory cap and a hard timeout bound the child;
- * the Windows lane has no `ulimit` equivalent and is documented as such.
+ * The production composition only enables this rasterizer on Linux, where the
+ * `ulimit` boundary is verified. Platforms without a verifiable native memory
+ * bound (macOS, Windows) use the description + source text fallback; a DIRECT
+ * call also refuses there. A `ulimit` installation failure exits the child
+ * with code 97 BEFORE the native rasterizer runs — it never silently continues.
  * @module @xmoon76/dsh-pi-tui/client/media/svg/rasterize
  */
 
@@ -71,6 +75,15 @@ process.stdin.on('end', async () => {
 })
 `
 
+/**
+ * Whether this deployment has a verified native memory boundary for the
+ * raster child. Only Linux is qualified today (`ulimit -v` was measured); every
+ * other platform converges to the description/source text mode.
+ */
+export function isolatedSvgRasterSupported(): boolean {
+  return process.platform === 'linux'
+}
+
 /** Resolve the platform binary package once per call (fail with a clear message). */
 function resvgModulePath(): string {
   try {
@@ -99,13 +112,16 @@ function pngDimensions(bytes: Uint8Array): { width: number; height: number } | u
  * @returns the validated PNG and its dimensions.
  */
 export const rasterizeSvg: SvgRasterize = async (source, options) => {
+  if (!isolatedSvgRasterSupported()) {
+    throw new Error('SVG rasterization requires a verifiable native memory bound; this platform uses the text/source fallback')
+  }
   const modulePath = resvgModulePath()
-  const width = Math.max(32, Math.min(SVG_MAX_RASTER_SIDE, Math.floor(options.targetWidth)))
-  const posix = process.platform !== 'win32'
-  const command = posix ? '/bin/sh' : process.execPath
-  const args = posix
-    ? ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} 2>/dev/null; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE]
-    : ['--max-old-space-size=256', '--input-type=module', '-e', WORKER_SOURCE]
+  const width = Math.max(1, Math.min(SVG_MAX_RASTER_SIDE, Math.floor(options.targetWidth)))
+  // `|| exit 97` is the fail-closed gate: if the shell cannot install the
+  // virtual-memory cap, the native rasterizer must never run. The parent
+  // reports the exit and the card keeps its description/source text.
+  const command = '/bin/sh'
+  const args = ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} || exit 97; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE]
   return await new Promise<SvgRasterResult>((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     let stdout = ''

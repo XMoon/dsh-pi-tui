@@ -224,8 +224,9 @@ import { TranscriptSearchComponent } from './tui/interaction/transcript-search.t
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
 import { ChartBody } from './tui/components/transcript/chart-body.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
-import { visualParts } from './domain/visual/visual-facts.ts'
-import { chartTextRows } from './domain/visual/chart.ts'
+import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
+import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
+import { chartDisplayTitle, chartTextRows } from './domain/visual/chart.ts'
 import { authorizeSvg, svgDetailRows } from './domain/visual/svg.ts'
 import type { SvgRasterLoader } from './client/media/svg/raster-loader.ts'
 import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
@@ -17959,7 +17960,7 @@ export class TuiApp {
     explicitlyExpanded: boolean,
   ): void {
     const blocks = message.resultBlocks ?? [{ type: 'text' as const, text: message.result }]
-    const parts = visualParts(blocks)
+    const parts = visualPartsForStatus(message.status, blocks)
     const paint = message.status === 'error' ? color.error : color.textDim
     if (message.name === 'dsh_pi_tui_chart') {
       if (parts.fact?.type === 'chart') {
@@ -17973,8 +17974,9 @@ export class TuiApp {
       return
     }
     // SVG: the readable description is ALWAYS visible; the drawing is an
-    // enhancement authorized by the final content and the durable call source.
-    const authorization = authorizeSvg(message.args, blocks)
+    // enhancement authorized by the final content, the durable call source AND
+    // a successful result. A block/error result keeps its feedback text only.
+    const authorization = authorizeSvg(message.args, blocks, message.status)
     const detailRows = authorization.state === 'ready'
       ? svgDetailRows(authorization.fact)
       : parts.humanText === '' ? message.result.split('\n') : parts.humanText.split('\n')
@@ -17982,7 +17984,12 @@ export class TuiApp {
       if (line !== '') card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
     }
     if (authorization.state === 'text') {
-      card.addChild(new Text(color.textMuted(sanitizeDisplayText(`  Drawing unavailable — ${authorization.reason}`)), 0, 0))
+      // A successful result whose credential/admission failed gets an explicit
+      // reason; an error/block already carries the policy/tool reason and must
+      // not be relabelled as a drawing failure.
+      if (message.status === 'ok') {
+        card.addChild(new Text(color.textMuted(sanitizeDisplayText(`  Drawing unavailable — ${authorization.reason}`)), 0, 0))
+      }
       return
     }
     if (this.svgRasterLoader !== undefined && this.imageTheme !== undefined) {
@@ -18017,34 +18024,54 @@ export class TuiApp {
     expanded: boolean,
   ): number {
     const blocks = child.resultBlocks ?? [{ type: 'text' as const, text: child.result }]
-    const parts = visualParts(blocks)
+    const parts = visualPartsForStatus(child.status, blocks)
     const lines: string[] = []
+    let thumbnail: SvgThumbnail | undefined
+    let thumbnailRows = 0
     if (child.name === 'dsh_pi_tui_chart') {
       if (parts.fact?.type === 'chart') {
-        lines.push(...chartTextRows(parts.fact, Math.max(1, width - indent - 2)))
+        lines.push(chartDisplayTitle(parts.fact), ...chartTextRows(parts.fact, Math.max(1, width - indent - 2)))
       } else {
         lines.push(...(parts.humanText === '' ? child.result : parts.humanText).split('\n'))
       }
     } else {
-      const authorization = authorizeSvg(child.args, blocks)
+      const authorization = authorizeSvg(child.args, blocks, child.status)
       if (authorization.state === 'ready') {
         lines.push(...svgDetailRows(authorization.fact))
         if (expanded) lines.push('SVG source', ...authorization.source.split('\n'))
+        // The nested card gets the SAME image enhancement as the top-level
+        // card, with a FIXED row budget: the async settle must not move the
+        // following child headers or the search geometry.
+        if (this.svgRasterLoader !== undefined && this.imageTheme !== undefined) {
+          thumbnail = new SvgThumbnail(
+            authorization.fact.digest,
+            authorization.source,
+            authorization.admission.width,
+            this.svgRasterLoader,
+            this.imageTheme,
+            () => this.settleThumbnailRender(),
+            MAX_IMAGE_ROWS + 1,
+          )
+          thumbnailRows = thumbnail.render(width).length
+        }
       } else {
         lines.push(...(parts.humanText === '' ? child.result : parts.humanText).split('\n'))
-        lines.push(`Drawing unavailable — ${authorization.reason}`)
+        if (child.status === 'ok') lines.push(`Drawing unavailable — ${authorization.reason}`)
       }
     }
     const text = lines.filter(line => line !== '').join('\n')
-    if (text === '') return 0
-    const preview = new CompactTextPreview({
-      text,
-      maxVisualRows: Number.MAX_SAFE_INTEGER,
-      indent: ' '.repeat(indent + 2),
-      preserveBlankLines: true,
-    })
-    const rendered = preview.render(width).length
-    card.addChild(preview)
+    let rendered = thumbnailRows
+    if (text !== '') {
+      const preview = new CompactTextPreview({
+        text: sanitizeDisplayText(text),
+        maxVisualRows: Number.MAX_SAFE_INTEGER,
+        indent: ' '.repeat(indent + 2),
+        preserveBlankLines: true,
+      })
+      rendered += preview.render(width).length
+      card.addChild(preview)
+    }
+    if (thumbnail !== undefined) card.addChild(thumbnail)
     return rendered
   }
 

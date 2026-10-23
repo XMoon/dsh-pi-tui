@@ -13,9 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Charts support bars/spark (2–12 labelled values with an optional unit); SVG supports
   self-contained static figures. Results stay inside the existing Tool Card — no new page,
   command or popup. Tern-capable panes show a native chart/SVG, while ordinary terminals keep
-  the exact values or the description, plus a bounded raster PNG when the terminal supports
-  inline images. The exact values, unit, title and description are always text, so copy,
-  search and Markdown export keep reading them. SVG accepts only a bounded safe subset (no
+  the exact values or the description, plus a bounded raster PNG on platforms with a verified
+  native memory bound and inline-image support; macOS/Windows keep the text/source fallback.
+  The exact values, unit, title and description are always text, so copy, search and Markdown
+  export keep reading them. SVG accepts only a bounded safe subset (no
   scripts, external references, CSS, animation or over-budget geometry), and is drawn only
   while the final result still carries a credential matching the call arguments; a policy
   replacement never shows a stale drawing. Direct and Remote read the same durable result.

@@ -179,14 +179,18 @@ export function chartValueRows(fact: ChartFact): string[] {
   ]
 }
 
+/** The final fact's display title (title + unit), the committed label. */
+export function chartDisplayTitle(fact: ChartFact): string {
+  return fact.unit === undefined ? fact.title : `${fact.title} (${fact.unit})`
+}
+
 /**
  * The durable, self-contained human text. It repeats the title because this
  * text is also what search, copy and Markdown export read without a card
  * header; the graphical card bodies use {@link chartValueRows} instead.
  */
 export function chartHumanText(fact: ChartFact): string {
-  const title = fact.unit === undefined ? fact.title : `${fact.title} (${fact.unit})`
-  return [title, ...chartValueRows(fact)].join('\n')
+  return [chartDisplayTitle(fact), ...chartValueRows(fact)].join('\n')
 }
 
 /** The durable content blocks: readable text plus the versioned fact line. */
@@ -199,10 +203,9 @@ export function chartContentBlocks(fact: ChartFact): ContentBlock[] {
 
 /** The TSP native chart projection (one summary, the same ordered series). */
 export function chartProjection(fact: ChartFact): ChartProjection {
-  const unit = fact.unit === undefined ? '' : ` (${fact.unit})`
   return {
     kind: fact.kind,
-    summary: `${fact.title}${unit}`,
+    summary: chartDisplayTitle(fact),
     series: fact.series.map(point => ({ label: point.label, value: point.value })),
   }
 }

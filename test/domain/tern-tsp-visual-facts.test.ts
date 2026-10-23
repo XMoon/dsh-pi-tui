@@ -13,6 +13,7 @@ import test from 'node:test'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
 import { textOf } from '../../src/domain/transcript/folder.ts'
+import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
@@ -110,6 +111,7 @@ test('a ready SVG state emits the native image with the title alt and the descri
     state: 'ready',
     blobId: 'a'.repeat(64),
     fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
   }]])
   const nodes = render(message, { toolSvgStates: states })
   const image = nodes.find(node => node.kind === 'image')
@@ -129,10 +131,56 @@ test('an unauthorized SVG row keeps the text and explains the absence', () => {
 })
 
 test('a pane without native image/blob capability emits no image node', () => {
-  const states = new Map<string, ToolSvgState>([['call-1', { state: 'unsupported' }]])
+  const states = new Map<string, ToolSvgState>([['call-1', {
+    state: 'unsupported',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+  }]])
   const nodes = render(svgMessage(), { toolSvgStates: states })
   assert.equal(nodes.some(node => node.kind === 'image'), false)
   assert.match(JSON.stringify(nodes), /Native SVG display unavailable/u)
+})
+
+test('the no-chart text path carries the FINAL fact title', () => {
+  const nodes = render(chartMessage(), { chartKindsSupported: false })
+  assert.match(JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text)), /Request latency \(ms\)/u)
+})
+
+test('a blocked/error chart result never emits a chart node', () => {
+  const message = chartMessage()
+  const nodes = render({ ...message, status: 'error' }, { chartKindsSupported: true })
+  assert.equal(nodes.some(node => node.kind === 'chart'), false)
+  assert.match(JSON.stringify(nodes), /Request latency/u)
+})
+
+test('a blocked/error SVG result never emits an image node even with a ready state', () => {
+  const message = svgMessage()
+  const states = new Map<string, ToolSvgState>([['call-1', {
+    state: 'ready', blobId: 'b'.repeat(64),
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render({ ...message, status: 'error' }, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), false)
+  assert.match(JSON.stringify(nodes), /Gateway -> App -> Database/u)
+})
+
+test('a PTC SVG child exposes its admitted source node (not only a promise)', () => {
+  const child = svgMessage()
+  child.subCallId = 'call-1:ptc:2'
+  const parent: TranscriptToolMessage = {
+    kind: 'tool', turn: 1, name: 'run_code', args: '{}', result: 'parent', status: 'ok',
+    callId: 'call-parent', resultBlocks: [{ type: 'text', text: 'parent' }], subCalls: [child],
+  }
+  const states = new Map<string, ToolSvgState>([['call-1:ptc:2', {
+    state: 'ready', blobId: 'c'.repeat(64),
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render(parent, { toolSvgStates: states })
+  const codeText = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(codeText, /<svg/u, `the child source node is present: ${codeText}`)
+  assert.equal(nodes.some(node => node.kind === 'image'), true)
 })
 
 test('a PTC child carries its own chart node and never the parent result', () => {
@@ -152,4 +200,63 @@ test('a PTC child carries its own chart node and never the parent result', () =>
   const nodes = render(parent, { chartKindsSupported: true })
   assert.equal(nodes.filter(node => node.kind === 'chart').length, 1, 'exactly one child chart node')
   assert.match(JSON.stringify(nodes), /p50 {2}42 ms/u)
+})
+
+
+test('a real durable PTC dispatch folds and projects the nested SVG source/image', () => {
+  const args = { title: 'PTC topology', description: 'Nested gateway', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'code-1', name: 'run_code', arguments: '{}' } },
+    { type: 'tool/ptc-dispatch-start', seq: 2, time: 1, data: {
+      rootCallId: 'code-1', parentCallId: 'code-1', subCallId: 'code-1:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args,
+    } },
+    { type: 'tool/ptc-dispatch', seq: 3, time: 1, data: {
+      rootCallId: 'code-1', parentCallId: 'code-1', subCallId: 'code-1:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args, isError: false, content: svgContentBlocks(fact),
+    } },
+    { type: 'tool/result', seq: 4, time: 1, data: {
+      turn: 0, step: 0,
+      message: { id: 'msg-1', role: 'tool', toolCallId: 'code-1', content: [{ type: 'text', text: '(no output)' }], source: { kind: 'tool', callId: 'code-1' } },
+    } },
+  ] as never)
+  const parent = folder.messages()[0] as TranscriptToolMessage
+  assert.equal(parent.subCalls?.[0]?.name, 'dsh_pi_tui_svg')
+  const states = new Map<string, ToolSvgState>([['code-1:code:1', {
+    state: 'ready', blobId: 'd'.repeat(64), fact, source: SVG_SOURCE,
+  }]])
+  const nodes = render(parent, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), true)
+  assert.match(JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text)), /<svg/u)
+  assert.match(JSON.stringify(nodes), /Nested gateway/u)
+})
+
+
+test('a no-image PTC SVG child still exposes the admitted source text', () => {
+  const args = { title: 'PTC topology', description: 'Nested gateway', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'code-2', name: 'run_code', arguments: '{}' } },
+    { type: 'tool/ptc-dispatch-start', seq: 2, time: 1, data: {
+      rootCallId: 'code-2', parentCallId: 'code-2', subCallId: 'code-2:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args,
+    } },
+    { type: 'tool/ptc-dispatch', seq: 3, time: 1, data: {
+      rootCallId: 'code-2', parentCallId: 'code-2', subCallId: 'code-2:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args, isError: false, content: svgContentBlocks(fact),
+    } },
+    { type: 'tool/result', seq: 4, time: 1, data: {
+      turn: 0, step: 0,
+      message: { id: 'msg-2', role: 'tool', toolCallId: 'code-2', content: [{ type: 'text', text: '(no output)' }], source: { kind: 'tool', callId: 'code-2' } },
+    } },
+  ] as never)
+  const parent = folder.messages()[0] as TranscriptToolMessage
+  const states = new Map<string, ToolSvgState>([['code-2:code:1', { state: 'unsupported', fact, source: SVG_SOURCE }]])
+  const nodes = render(parent, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), false)
+  assert.match(JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text)), /<svg/u)
+  assert.match(JSON.stringify(nodes), /Native SVG display unavailable/u)
 })

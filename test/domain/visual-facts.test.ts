@@ -23,6 +23,7 @@ import {
 import {
   authorizeSvg,
   parseSvgArgs,
+  svgDetailRows,
   parseSvgFact,
   svgContentBlocks,
   svgDigest,
@@ -162,23 +163,65 @@ test('svg: the credential digest matches the durable call source', () => {
   assert.equal(fact.digest, svgDigest(SAFE_SVG))
   assert.equal(parseSvgFact(JSON.parse(JSON.stringify(fact)))?.digest, fact.digest)
   assert.deepEqual(parseSvgArgs(JSON.stringify(args)), args)
-  const auth = authorizeSvg(JSON.stringify(args), svgContentBlocks(fact))
+  const auth = authorizeSvg(JSON.stringify(args), svgContentBlocks(fact), 'ok')
   assert.equal(auth.state, 'ready', JSON.stringify(auth))
 })
 
 test('svg: a replaced content / mismatching value / unsafe source degrades to text', () => {
   const args = { title: 'Topology', description: 'Gateway -> App -> Database', svg: SAFE_SVG }
   const fact = svgFactFromArgs(args)
-  const replaced = authorizeSvg(JSON.stringify(args), [{ type: 'text', text: 'REPLACED by policy' }])
+  const replaced = authorizeSvg(JSON.stringify(args), [{ type: 'text', text: 'REPLACED by policy' }], 'ok')
   assert.equal(replaced.state, 'text')
   assert.match(replaced.state === 'text' ? replaced.reason : '', /credential is missing/u)
   const other = svgFactFromArgs({ title: 'Other', description: 'other', svg: `${SAFE_SVG}<!-- other -->` })
-  const mismatch = authorizeSvg(JSON.stringify(args), svgContentBlocks(other))
+  const mismatch = authorizeSvg(JSON.stringify(args), svgContentBlocks(other), 'ok')
   assert.equal(mismatch.state, 'text')
   assert.match(mismatch.state === 'text' ? mismatch.reason : '', /does not match/u)
   const unsafe = { title: 'Bad', description: 'bad', svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><script>x</script></svg>' }
   const unsafeFact = { version: 1 as const, type: 'svg' as const, title: 'Bad', description: 'bad', digest: svgDigest(unsafe.svg), bytes: Buffer.byteLength(unsafe.svg) }
-  const refused = authorizeSvg(JSON.stringify(unsafe), svgContentBlocks(unsafeFact))
+  const refused = authorizeSvg(JSON.stringify(unsafe), svgContentBlocks(unsafeFact), 'ok')
   assert.equal(refused.state, 'text')
   assert.match(refused.state === 'text' ? refused.reason : '', /not admissible/u)
+})
+
+
+test('svg admission: percentages and theme-paint keywords are value-bounded', () => {
+  const base = (body: string): string => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">${body}</svg>`
+  for (const body of [
+    '<circle r="1e300%" cx="10" cy="10"/>',
+    '<rect width="1e300%" height="1e300%"/>',
+    '<rect x="1e300%" width="8" height="8"/>',
+    '<rect fill="currentcolor" width="8" height="8"/>',
+    '<rect fill="CurrentColor" width="8" height="8"/>',
+    '<rect fill="VAR(--fg)" width="8" height="8"/>',
+  ]) {
+    const verdict = admitSvg(base(body))
+    assert.equal(verdict.ok, false, `${body} must be refused: ${JSON.stringify(verdict)}`)
+  }
+  // A bounded percentage and an explicit fixed colour stay in the subset.
+  assert.equal(admitSvg(base('<circle r="50%" cx="10" cy="10"/>')).ok, true)
+  assert.equal(admitSvg(base('<rect width="8" height="8" fill="#3b82f6"/>')).ok, true)
+})
+
+test('the final fact title is carried by the display projections, not just the call args', () => {
+  const chart = chartFactFromArgs({
+    kind: 'bars',
+    title: 'FINAL_APPROVED_TITLE',
+    unit: 'ms',
+    series: [{ label: 'a', value: 1 }, { label: 'b', value: 2 }],
+  })
+  assert.match(chartHumanText(chart), /FINAL_APPROVED_TITLE \(ms\)/u)
+  assert.equal(chartProjection(chart).summary, 'FINAL_APPROVED_TITLE (ms)')
+  const svg = svgFactFromArgs({ title: 'FINAL_SVG_TITLE', description: 'desc', svg: SAFE_SVG })
+  assert.equal(svgDetailRows(svg)[0], 'FINAL_SVG_TITLE')
+})
+
+test('a non-successful result never authorizes an SVG drawing', () => {
+  const args = { title: 'Topology', description: 'desc', svg: SAFE_SVG }
+  const fact = svgFactFromArgs(args)
+  for (const status of ['error', 'running'] as const) {
+    const verdict = authorizeSvg(JSON.stringify(args), svgContentBlocks(fact), status)
+    assert.equal(verdict.state, 'text')
+    assert.match(verdict.state === 'text' ? verdict.reason : '', /not successful/u)
+  }
 })
