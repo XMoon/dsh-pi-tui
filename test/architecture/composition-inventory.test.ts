@@ -408,6 +408,7 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['agent/disposed', 'src/runtime/direct/assistant-stream-direct.ts'],
   ['skills/change', 'src/runtime/direct/skill-catalog.ts'],
   ['commands/change', 'src/commands.ts'],
+  ['loader/volatile-update', 'src/app/host/visual-tools.ts'],
 ]
 
 /**
