@@ -31,6 +31,9 @@ export class SvgThumbnail implements Component {
   /** When set, the component always occupies exactly this many rows. */
   private readonly fixedRows: number | undefined
   private unsubscribe: (() => void) | undefined
+  /** The last successfully decoded derivative for this digest. A loader-cache
+   *  eviction must not erase an image the component already painted. */
+  private lastReady: { readonly base64: string; readonly widthPx: number; readonly heightPx: number } | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
@@ -61,6 +64,7 @@ export class SvgThumbnail implements Component {
   dispose(): void {
     this.unsubscribe?.()
     this.unsubscribe = undefined
+    this.lastReady = undefined
     this.invalidate()
   }
 
@@ -91,25 +95,38 @@ export class SvgThumbnail implements Component {
     if (width < NARROW_WIDTH_THRESHOLD) return []
     if (getCapabilities().images === null) return []
     const state = this.loader.get(this.digest)
+    if (state.state === 'ready') this.lastReady = state
+    // The loader cache is bounded; an eviction (or a clear) must not turn an
+    // already painted component back into a retrying placeholder. Use the
+    // component's own last derivative, or a terminal error line for a digest
+    // that never produced one.
+    const effective = state.state === 'ready'
+      ? state
+      : this.lastReady
+    if (effective !== undefined) {
+      if (this.instance === undefined) {
+        this.instance = new Image(
+          effective.base64,
+          'image/png',
+          { fallbackColor: this.theme.fallbackColor },
+          {
+            maxHeightCells: MAX_IMAGE_ROWS,
+            maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+            filename: 'svg',
+          },
+          { widthPx: effective.widthPx, heightPx: effective.heightPx },
+        )
+      }
+      return ['', ...this.instance.render(width)]
+    }
     if (state.state === 'idle') {
       this.loader.load(this.digest, this.source, this.targetWidth)
       return [this.theme.fallbackColor('  Rendering SVG image…')]
     }
     if (state.state === 'loading') return [this.theme.fallbackColor('  Rendering SVG image…')]
-    if (state.state === 'error') return [this.theme.fallbackColor('  SVG image rendering failed')]
-    if (this.instance === undefined) {
-      this.instance = new Image(
-        state.base64,
-        'image/png',
-        { fallbackColor: this.theme.fallbackColor },
-        {
-          maxHeightCells: MAX_IMAGE_ROWS,
-          maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
-          filename: 'svg',
-        },
-        { widthPx: state.widthPx, heightPx: state.heightPx },
-      )
-    }
-    return ['', ...this.instance.render(width)]
+    // A terminal loader state (a real failure or an evicted never-painted
+    // digest): never re-request from this component; the card body keeps the
+    // description and the admitted source path.
+    return [this.theme.fallbackColor('  SVG image unavailable')]
   }
 }

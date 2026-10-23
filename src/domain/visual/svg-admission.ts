@@ -70,7 +70,7 @@ const URI_ATTRIBUTES: ReadonlySet<string> = new Set(['href', 'src'])
 const PAINT_ATTRIBUTES: ReadonlySet<string> = new Set(['fill', 'stroke', 'stop-color', 'clip-path', 'mask'])
 const NUMBER_OR_LENGTH_ATTRIBUTES: ReadonlySet<string> = new Set([
   'x', 'y', 'cx', 'cy', 'r', 'rx', 'ry', 'x1', 'y1', 'x2', 'y2',
-  'dx', 'dy', 'stroke-width', 'offset', 'stop-opacity',
+  'dx', 'dy', 'stroke-width', 'stop-opacity',
   'opacity', 'fill-opacity', 'stroke-opacity', 'font-size', 'letter-spacing',
 ])
 const SHORT_NAME_ATTRIBUTES: ReadonlySet<string> = new Set([
@@ -106,7 +106,7 @@ function checkNumber(value: string, what: string): number {
   return number
 }
 
-function checkLength(value: string, what: string, limit: number): number | undefined {
+function checkLength(value: string, what: string, limit: number): number {
   const text = value.trim()
   const match = LENGTH_PATTERN.exec(text)
   if (match === null) reject(`${what}: ${clip(value)} is not a bounded length`)
@@ -114,15 +114,11 @@ function checkLength(value: string, what: string, limit: number): number | undef
   if (!Number.isFinite(raw)) reject(`${what}: ${clip(value)} is not finite`)
   if (raw < 0) reject(`${what}: a negative length ${clip(value)}`)
   const unit = match[2]
-  // A percentage is relative to a viewport this gate does not know; the root
-  // dimension path treats it as absent and falls back to the viewBox. Its
-  // NUMERIC magnitude is still bounded here: a 1e300% radius/width is never a
-  // legitimate static figure, and silently admitting it would defeat the
-  // geometry budget before either renderer expands it.
-  if (unit === '%') {
-    if (raw > limit) reject(`${what}: ${clip(value)} is ${Math.round(raw)}% > ${limit}%`)
-    return undefined
-  }
+  // A length percentage resolves against a viewport this gate deliberately
+  // does not model; the product's safe subset refuses it outright. (A gradient
+  // stop `offset` is the one fractional percentage the gate accepts, validated
+  // as 0–100% in attributeProblem.)
+  if (unit === '%') reject(`${what}: percentage lengths are outside the bounded static subset`)
   const px = raw * (unit === undefined ? 1 : UNIT_PX[unit] as number)
   if (px > limit) reject(`${what}: ${clip(value)} is ${Math.round(px)}px > ${limit}px`)
   return px
@@ -186,8 +182,6 @@ interface GateState {
   viewBoxHeight?: number
   rootWidth?: number
   rootHeight?: number
-  rootWidthPercent: boolean
-  rootHeightPercent: boolean
 }
 
 interface SaxesAttributeLike {
@@ -225,6 +219,19 @@ function attributeProblem(attribute: SaxesAttributeLike): void {
   if (!ALLOWED_ATTRIBUTES.has(local) && !local.startsWith('data-')) reject(`${what} is not in the safe subset`)
   if (local === 'width' || local === 'height') {
     checkLength(value, what, LIMITS.maxDim)
+    return
+  }
+  if (local === 'offset') {
+    // A gradient stop offset is a FRACTION, not a viewport-relative length:
+    // allow 0–1 or a bounded 0–100%.
+    const text = value.trim()
+    if (text.endsWith('%')) {
+      const percent = Number(text.slice(0, -1))
+      if (!Number.isFinite(percent) || percent < 0 || percent > 100) reject(`${what}: a stop offset must be a 0–100% fraction`)
+    } else {
+      const fraction = checkNumber(text, what)
+      if (fraction < 0 || fraction > 1) reject(`${what}: a stop offset must be between 0 and 1`)
+    }
     return
   }
   if (local === 'd') {
@@ -272,16 +279,8 @@ function rootGeometryProblem(state: GateState, attributes: ReadonlyMap<string, S
   }
   const width = attributes.get('width')
   const height = attributes.get('height')
-  if (width !== undefined) {
-    const px = checkLength(width.value, 'attribute width', LIMITS.maxDim)
-    state.rootWidthPercent = px === undefined
-    if (px !== undefined) state.rootWidth = px
-  }
-  if (height !== undefined) {
-    const px = checkLength(height.value, 'attribute height', LIMITS.maxDim)
-    state.rootHeightPercent = px === undefined
-    if (px !== undefined) state.rootHeight = px
-  }
+  if (width !== undefined) state.rootWidth = checkLength(width.value, 'attribute width', LIMITS.maxDim)
+  if (height !== undefined) state.rootHeight = checkLength(height.value, 'attribute height', LIMITS.maxDim)
 }
 
 function openTag(state: GateState, node: SaxesTagLike): void {
@@ -320,7 +319,7 @@ function finalGeometry(state: GateState): { width: number; height: number } {
   if (state.viewBoxWidth !== undefined && state.viewBoxHeight !== undefined) {
     return { width: state.viewBoxWidth, height: state.viewBoxHeight }
   }
-  if (state.rootWidth !== undefined && !state.rootWidthPercent && state.rootHeight !== undefined && !state.rootHeightPercent) {
+  if (state.rootWidth !== undefined && state.rootHeight !== undefined) {
     return { width: state.rootWidth, height: state.rootHeight }
   }
   return reject('the SVG needs a bounded viewBox or explicit width/height')
@@ -343,8 +342,6 @@ export function admitSvg(source: string): SvgAdmission {
     depth: 0,
     maxDepth: 0,
     rootSeen: false,
-    rootWidthPercent: false,
-    rootHeightPercent: false,
   }
   try {
     parser.on('error', error => reject(`XML: ${error.message}`))

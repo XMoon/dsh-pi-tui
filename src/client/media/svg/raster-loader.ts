@@ -34,6 +34,8 @@ interface Queued {
 
 /** Keep at most this many entries (oldest evicted first). */
 const MAX_ENTRIES = 12
+/** Keep the terminal eviction explanation bounded as the session grows. */
+const MAX_EVICTED = 64
 
 /** The async raster cache with one global worker lane and an epoch fence. */
 export class SvgRasterLoader {
@@ -41,6 +43,8 @@ export class SvgRasterLoader {
   private readonly entries = new Map<string, Entry>()
   private readonly listeners = new Map<string, Set<() => void>>()
   private readonly queue: Queued[] = []
+  /** Digests whose live entries were evicted: a terminal, non-retrying state. */
+  private readonly evicted = new Set<string>()
   private active: Queued | undefined
   private epoch = 0
 
@@ -50,6 +54,9 @@ export class SvgRasterLoader {
 
   /** The current display state; a render call never awaits. */
   get(digest: string): SvgRasterState {
+    if (this.evicted.has(digest)) {
+      return { state: 'error', error: new Error('the SVG image was evicted from the display cache') }
+    }
     return this.entries.get(digest)?.state ?? { state: 'idle' }
   }
 
@@ -77,7 +84,9 @@ export class SvgRasterLoader {
    * @param targetWidth - the requested raster width in pixels.
    */
   load(digest: string, source: string, targetWidth: number): void {
-    if (this.entries.has(digest)) return
+    // An evicted digest is terminal for this epoch; re-requesting it would
+    // immediately evict another visible image and thrash the cache.
+    if (this.evicted.has(digest) || this.entries.has(digest)) return
     const entry: Entry = { controller: new AbortController(), state: { state: 'loading' } }
     this.entries.set(digest, entry)
     this.queue.push({ digest, source, targetWidth, entry })
@@ -88,11 +97,14 @@ export class SvgRasterLoader {
   /** Drop every entry and abort the active/queued children (session epoch swap). */
   clear(): void {
     this.epoch += 1
+    // The active lane stays claimed until its rasterizer promise settles (the
+    // real child closes). A new load after clear must queue behind it, never
+    // start a second native child early.
     this.active?.entry.controller.abort()
-    this.active = undefined
     for (const item of this.queue) item.entry.controller.abort()
     this.queue.length = 0
     this.entries.clear()
+    this.evicted.clear()
   }
 
   /** Release every subscription and in-flight child (renderer retirement). */
@@ -146,7 +158,17 @@ export class SvgRasterLoader {
       if (oldest === undefined) return
       const entry = this.entries.get(oldest)
       this.entries.delete(oldest)
+      // The component subscribed to this digest must leave the loading line:
+      // publish a terminal eviction state and notify exactly once. A ready
+      // thumbnail keeps its own last image (SvgThumbnail.lastReady), so this
+      // notification cannot trigger a re-request storm.
+      this.evicted.add(oldest)
+      if (this.evicted.size > MAX_EVICTED) {
+        const first = this.evicted.values().next().value
+        if (first !== undefined) this.evicted.delete(first)
+      }
       entry?.controller.abort()
+      this.notify(oldest)
       if (this.active?.digest === oldest) {
         // The active settle sees the entry-identity mismatch and drops it;
         // pump() starts the next queued request after that abort settles.

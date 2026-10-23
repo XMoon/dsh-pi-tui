@@ -124,8 +124,9 @@ function svgTool() {
   return defineTool({
     name: SVG_TOOL_NAME,
     description: 'Render one static, self-contained SVG figure. Use only when a diagram communicates better than text. '
-      + 'The document must have an explicit viewBox or width/height and use only static shapes, paths, text, gradients, masks and local references. '
+      + 'The document must have an explicit viewBox or absolute width/height and use only static shapes, paths, text, gradients, masks and local references. '
       + 'Scripts, foreignObject, CSS/style elements, animation, DOCTYPE, external files or URLs are rejected. '
+      + 'Use absolute coordinates and dimensions: length percentages are rejected (a gradient stop offset may be a 0-100% fraction). '
       + 'Always provide a short readable description; the result keeps the description and a short source credential, '
       + 'while the SVG source itself stays in the tool call.',
     parameters: {

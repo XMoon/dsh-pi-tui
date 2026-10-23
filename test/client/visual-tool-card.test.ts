@@ -249,7 +249,8 @@ test('a chart label/unit with OSC/CSI/C1 bytes never reaches the tty', async () 
   const tui = mountApp({ width: 100 })
   const { vt, app } = tui
   await vt.waitForRender()
-  const hostile = '\u001b]52;c;YXR0YWNr\u0007p50\u001b[2J\u0001'
+  // 7-bit OSC + BEL, 8-bit CSI (C1), 8-bit OSC (C1) and a C0 payload.
+  const hostile = '\u001b]52;c;YXR0YWNr\u0007p50\u009b2J\u009d0;title\u0007\u0001'
   const args = {
     kind: 'bars' as const,
     title: 'Hostile',
@@ -261,9 +262,13 @@ test('a chart label/unit with OSC/CSI/C1 bytes never reaches the tty', async () 
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('\u001b]52'), `OSC must not reach the frame: ${view}`)
-  assert.ok(!view.includes('\u0007'), 'BEL must not reach the frame')
-  assert.ok(!view.includes('\u001b[2J'), 'CSI must not reach the frame')
+  // xterm consumes control bytes, so the security proof must inspect the RAW
+  // writes; the viewport is only the readability check.
+  const raw = vt.writes.join('')
+  assert.ok(!raw.includes('\u001b]52'), 'the 7-bit OSC52 must not be written')
+  assert.ok(!raw.includes('\u009b'), 'the 8-bit CSI (C1) must not be written')
+  assert.ok(!raw.includes('\u009d'), 'the 8-bit OSC (C1) must not be written')
+  assert.ok(!raw.includes('\u0001'), 'the C0 payload must not be written')
   assert.ok(view.includes('p50'), 'the readable label survives sanitization')
   app.stop()
 })
@@ -272,7 +277,7 @@ test('a PTC SVG child with an OSC description never reaches the tty', async () =
   const tui = mountApp({ width: 100 })
   const { vt, app } = tui
   await vt.waitForRender()
-  const hostile = 'Gateway\u001b]52;c;YXR0YWNr\u0007 -> App'
+  const hostile = 'Gateway\u001b]52;c;YXR0YWNr\u0007 -> App\u009b2J\u009d0;title\u0007'
   const args = { title: 'Child topology', description: hostile, svg: SVG_SOURCE }
   const fact = svgFactFromArgs(args)
   const child = {
@@ -287,7 +292,10 @@ test('a PTC SVG child with an OSC description never reaches the tty', async () =
   app.setTranscript([parent as never])
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('\u001b]52'), `child OSC must not reach the frame: ${view}`)
+  const raw = vt.writes.join('')
+  assert.ok(!raw.includes('\u001b]52'), 'the child 7-bit OSC52 must not be written')
+  assert.ok(!raw.includes('\u009b'), 'the child 8-bit CSI (C1) must not be written')
+  assert.ok(!raw.includes('\u009d'), 'the child 8-bit OSC (C1) must not be written')
   assert.ok(view.includes('Gateway'), 'the readable description survives')
   app.stop()
 })
