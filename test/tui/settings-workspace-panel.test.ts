@@ -306,3 +306,106 @@ test('C3 a same-epoch publication is not copyable until the frame paints it', ()
   assert.equal(copied.length, 2, 'the painted Ready view copies through both gestures')
   assert.match(copied[1]!, /Session ID: sess-repaint/u, 'Copy All serializes the PAINTED Ready view')
 })
+
+/** A static About owner for the panel-level contract cases below. */
+function staticAboutSource(view: AboutStatusView, onRefresh: () => void = () => {}): () => AboutStatusController {
+  const controller = {
+    snapshotView: () => view,
+    subscribe: () => () => {},
+    enter: () => {},
+    leave: () => {},
+    refresh: onRefresh,
+    dispose: () => {},
+  } as unknown as AboutStatusController
+  return () => controller
+}
+
+// ── C3: the Refresh action is SELECTED before Enter can fire it ───────────
+test('C3 Enter refreshes only the selected Refresh action, never an ordinary fact', () => {
+  let refreshes = 0
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: { kind: 'ready', sessionId: 'sess-action', title: 'action proof', cwd: '/ws', context: 'fresh' },
+    epoch: 3,
+  }
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    aboutStatusSource: staticAboutSource(view, () => { refreshes += 1 }),
+  })
+  plain(h, 120) // paint the About content and its action row
+  h.panel.handleInput('\r') // rail -> About content focus
+  plain(h, 120)
+  h.panel.handleInput('\r') // ordinary fact: inert
+  assert.equal(refreshes, 0, 'Enter on a selected fact never refreshes')
+  h.panel.handleInput('\x1b[F') // End: last fact
+  h.panel.handleInput('\x1b[B') // ↓ past the last fact: select the painted Refresh action
+  const frame = plain(h, 120)
+  assert.match(frame, /^ *> Refresh context \[R\]/mu, `the action is visibly selected:\n${frame}`)
+  h.panel.handleInput('\r')
+  assert.equal(refreshes, 1, 'Enter on the selected, visible Refresh action refreshes once')
+  h.panel.handleInput('\x1b[A') // ↑: back to the last fact
+  plain(h, 120)
+  h.panel.handleInput('\r')
+  assert.equal(refreshes, 1, 'Enter is inert again after leaving the action')
+  h.panel.handleInput('r')
+  assert.equal(refreshes, 2, 'r remains the About refresh shortcut')
+})
+
+// ── C3: a clipped Copy button never leaves a hit target ───────────────────
+test('C3 a truncated per-field Copy affordance paints no target; keyboard copy still works', () => {
+  for (const title of ['x'.repeat(31), '路径'.repeat(16)]) {
+    const copied: string[] = []
+    const view: AboutStatusView = {
+      runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+      session: { kind: 'ready', sessionId: 'sess-long', title, cwd: '/ws', context: 'fresh' },
+      epoch: 2,
+    }
+    const h = setup({
+      columns: 44,
+      rows: 20,
+      aboutStatusSource: staticAboutSource(view),
+      onCopy: text => { copied.push(text) },
+    })
+    const frame = plain(h, 44).split('\n')
+    const titleRow = frame.findIndex(line => line.includes('Title'))
+    assert.ok(titleRow >= 0, `the Title row paints:\n${frame.join('\n')}`)
+    // The whole `Copy [C]` cannot fit this row: neither the clipped affordance
+    // nor its target may survive. The keyboard `c` remains the copy path.
+    assert.equal(frame[titleRow]!.includes('Co…'), false, 'no clipped Copy affordance')
+    h.panel.onCellPress(43, titleRow)
+    h.panel.onCellClick(43, titleRow)
+    assert.equal(copied.length, 0, 'a click on the elided last cell never copies')
+    for (let step = 0; step < 4; step += 1) h.panel.handleInput('\x1b[B')
+    plain(h, 44)
+    h.panel.handleInput('c')
+    assert.equal(copied.at(-1), title, 'keyboard c copies the full long value')
+  }
+})
+
+// ── C3: the final Status row has its own unique fact identity ─────────────
+test('C3 End copies the final Status row of a degraded view, not the Projection row', () => {
+  const copied: string[] = []
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: {
+      kind: 'unavailable',
+      sessionId: 'sess-degraded',
+      projectionUnavailable: true,
+      projectionFailed: true,
+      context: 'unavailable',
+    },
+    epoch: 4,
+  }
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    aboutStatusSource: staticAboutSource(view),
+    onCopy: text => { copied.push(text) },
+  })
+  plain(h, 44)
+  h.panel.handleInput('\x1b[F') // End: the last fact is the final Status row
+  plain(h, 44)
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), 'Unavailable', 'End targets the final Status row, not the Projection')
+})

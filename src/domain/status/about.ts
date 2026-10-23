@@ -91,6 +91,7 @@ export type AboutFactId =
   | 'runtime.dsh'
   | 'runtime.backend'
   | 'status.unavailable'
+  | 'status.projection'
   | 'session.id'
   | 'session.title'
   | 'session.provider'
@@ -198,10 +199,9 @@ function formatLlmDuration(ms: number): string {
   return `${hours}h${String(minutes).padStart(2, '0')}m${String(seconds).padStart(2, '0')}s`
 }
 
-/** One tok/s display fact: full precision source, one-decimal presentation,
- *  never `0` for no samples (absent stays absent). */
-function formatRate(value: number | undefined): string | undefined {
-  if (value === undefined || !Number.isFinite(value)) return undefined
+/** One tok/s DISPLAY fact: one-decimal presentation of a finite source. The
+ *  raw source number is the fact's `copyValue`, never this rounded string. */
+function formatRate(value: number): string {
   const text = value.toFixed(1)
   return `${text.endsWith('.0') ? text.slice(0, -2) : text} tok/s`
 }
@@ -305,7 +305,8 @@ function statisticsFacts(
         section: 'statistics',
         label: 'Cache hit',
         displayValue: `${tokens.cacheHitPct.toFixed(1)}%`,
-        copyValue: `${tokens.cacheHitPct.toFixed(1)}%`,
+        // Exact numeric copy: the display rounds, the copied fact never does.
+        copyValue: String(tokens.cacheHitPct),
         available: true,
       },
     )
@@ -333,13 +334,13 @@ function performanceFacts(
       available: true,
     })
   }
-  const r5 = formatRate(recent?.tokensPerSec)
-  if (r5 !== undefined) {
-    facts.push({ id: 'performance.R5', section: 'performance', label: 'R5 tokens/sec', displayValue: r5, copyValue: r5, available: true })
+  const r5 = recent?.tokensPerSec
+  if (r5 !== undefined && Number.isFinite(r5)) {
+    facts.push({ id: 'performance.R5', section: 'performance', label: 'R5 tokens/sec', displayValue: formatRate(r5), copyValue: String(r5), available: true })
   }
-  const all = formatRate(sessionPerformance?.tokensPerSec)
-  if (all !== undefined) {
-    facts.push({ id: 'performance.All', section: 'performance', label: 'All tokens/sec', displayValue: all, copyValue: all, available: true })
+  const all = sessionPerformance?.tokensPerSec
+  if (all !== undefined && Number.isFinite(all)) {
+    facts.push({ id: 'performance.All', section: 'performance', label: 'All tokens/sec', displayValue: formatRate(all), copyValue: String(all), available: true })
   }
   return facts
 }
@@ -359,8 +360,16 @@ function contextFacts(
     facts.push({ id: 'context.window', section: 'context', label: 'Window tokens', displayValue: integerOr(window), copyValue: String(window), available: true })
   }
   if (used !== undefined && window !== undefined && window > 0) {
-    const percent = `${((used / window) * 100).toFixed(1)}%`
-    facts.push({ id: 'context.percent', section: 'context', label: 'Percent', displayValue: percent, copyValue: percent, available: true })
+    const percent = (used / window) * 100
+    facts.push({
+      id: 'context.percent',
+      section: 'context',
+      label: 'Percent',
+      displayValue: `${percent.toFixed(1)}%`,
+      // Exact numeric copy: the display rounds, the copied fact never does.
+      copyValue: String(percent),
+      available: true,
+    })
   }
   facts.push({
     id: 'context.observation',
@@ -415,7 +424,10 @@ export function aboutFactRows(view: AboutStatusView): readonly AboutFact[] {
     // absence (`Projection: Unavailable`).
     ...(session.projectionUnavailable === true
       ? [{
-          id: 'status.unavailable' as const,
+          // A DISTINCT stable id: the Projection row and the final Status row
+          // can coexist in the degraded view, and a shared id would make both
+          // rows paint selected and `find()` copy the wrong one.
+          id: 'status.projection' as const,
           section: 'session' as const,
           label: 'Projection',
           displayValue: session.projectionFailed === true ? 'Failed' : UNAVAILABLE,
@@ -474,6 +486,13 @@ export function serializeAboutStatus(view: AboutStatusView): string {
     rows.find(row => row.id === id)?.copyValue ?? fallback
   const displayOf = (id: AboutFactId, fallback = UNAVAILABLE): string =>
     rows.find(row => row.id === id)?.displayValue ?? fallback
+  // Copy All keeps the fixed sections/labels/order and the human units, but a
+  // numeric row carries the EXACT source value — the report never re-rounds a
+  // copied number. An absent authority stays the bare `Unavailable`.
+  const exactWithUnit = (id: AboutFactId, unit: string): string => {
+    const value = valueOf(id)
+    return value === UNAVAILABLE ? value : `${value}${unit}`
+  }
   lines.push('', 'Session', `Session ID: ${safe(session.sessionId)}`)
   lines.push(
     `Title: ${valueOf('session.title')}`,
@@ -494,17 +513,17 @@ export function serializeAboutStatus(view: AboutStatusView): string {
     `Output tokens: ${valueOf('tokens.output')}`,
     `Cache read tokens: ${valueOf('tokens.cacheRead')}`,
     `Cache write tokens: ${valueOf('tokens.cacheWrite')}`,
-    `Cache hit: ${valueOf('tokens.cacheHitPct')}`,
+    `Cache hit: ${exactWithUnit('tokens.cacheHitPct', '%')}`,
     '',
     'Performance',
     `TTFB (recent): ${displayOf('performance.recentTTFB')}`,
-    `R5 tokens/sec: ${valueOf('performance.R5')}`,
-    `All tokens/sec: ${valueOf('performance.All')}`,
+    `R5 tokens/sec: ${exactWithUnit('performance.R5', ' tok/s')}`,
+    `All tokens/sec: ${exactWithUnit('performance.All', ' tok/s')}`,
     '',
     'Context',
     `Used tokens: ${valueOf('context.used')}`,
     `Window tokens: ${valueOf('context.window')}`,
-    `Percent: ${valueOf('context.percent')}`,
+    `Percent: ${exactWithUnit('context.percent', '%')}`,
     `Observation: ${session.kind === 'loading'
       ? 'Loading…'
       : session.context === 'fresh' ? 'Fresh' : session.context === 'last-known' ? 'Last-known' : UNAVAILABLE}`,

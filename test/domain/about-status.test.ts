@@ -131,9 +131,48 @@ test('per-field copy uses exact numeric representation, never a rounded display 
   const rows = aboutFactRows(readyView())
   const r5 = rows.find(row => row.id === 'performance.R5')!
   assert.equal(r5.displayValue, '33.3 tok/s')
-  assert.equal(r5.copyValue, '33.3 tok/s')
+  assert.equal(r5.copyValue, '33.3', 'the raw rate, not the rounded display string')
+  const all = rows.find(row => row.id === 'performance.All')!
+  assert.equal(all.displayValue, '30 tok/s')
+  assert.equal(all.copyValue, '29.97', '29.97 is never rounded to 30 for the copy')
+  const cache = rows.find(row => row.id === 'tokens.cacheHitPct')!
+  assert.equal(cache.displayValue, '41.6%')
+  assert.equal(cache.copyValue, '41.6')
+  const percent = rows.find(row => row.id === 'context.percent')!
+  assert.equal(percent.displayValue, '35.2%')
+  assert.equal(percent.copyValue, '35.15625')
   const ttfb = rows.find(row => row.id === 'performance.recentTTFB')!
   assert.equal(ttfb.copyValue, '812.4', 'TTFB copies the raw ms')
+})
+
+test('non-terminating decimal sources keep their exact numeric copy while the display rounds', () => {
+  const precise = readyView({
+    stats: {
+      lifetime: { turns: 1, steps: 1, llmMs: 1_000 },
+      tokens: { input: 1, output: 1, cacheRead: 1, cacheWrite: 0, cacheHitPct: 100 / 3 },
+      recent: { firstTokenMsAvg: 812.4, tokensPerSec: 100 / 3 },
+      sessionPerformance: { tokensPerSec: 29.970029970029973 },
+    },
+    contextUsed: 1,
+    contextWindow: 3,
+  })
+  const rows = aboutFactRows(precise)
+  const cache = rows.find(row => row.id === 'tokens.cacheHitPct')!
+  assert.equal(cache.displayValue, '33.3%')
+  assert.equal(cache.copyValue, String(100 / 3))
+  const r5 = rows.find(row => row.id === 'performance.R5')!
+  assert.equal(r5.displayValue, '33.3 tok/s')
+  assert.equal(r5.copyValue, String(100 / 3))
+  const all = rows.find(row => row.id === 'performance.All')!
+  assert.equal(all.copyValue, '29.970029970029973')
+  const percent = rows.find(row => row.id === 'context.percent')!
+  assert.equal(percent.displayValue, '33.3%')
+  assert.equal(percent.copyValue, String((1 / 3) * 100))
+  const lines = serializeAboutStatus(precise).split('\n')
+  assert.ok(lines.includes(`Cache hit: ${100 / 3}%`), 'the report keeps the exact percentage')
+  assert.ok(lines.includes(`R5 tokens/sec: ${100 / 3} tok/s`), 'the report keeps the exact rate and unit')
+  assert.ok(lines.includes('All tokens/sec: 29.970029970029973 tok/s'))
+  assert.ok(lines.includes(`Percent: ${(1 / 3) * 100}%`))
 })
 
 test('an unavailable projection keeps the captured session id and words the state Unavailable', () => {
@@ -144,6 +183,28 @@ test('an unavailable projection keeps the captured session id and words the stat
   const state = rows.find(row => row.id === 'status.unavailable')!
   assert.equal(state.displayValue, 'Unavailable')
   assert.equal(state.copyValue, 'Unavailable')
+})
+
+test('a degraded view keeps the Projection and final Status rows as unique stable facts', () => {
+  const base = readyView({ stats: undefined, contextUsed: undefined, context: 'unavailable' })
+  const degraded: AboutStatusView = {
+    ...base,
+    session: {
+      ...base.session,
+      kind: 'unavailable',
+      projectionUnavailable: true,
+      projectionFailed: true,
+    },
+  } as AboutStatusView
+  const rows = aboutFactRows(degraded)
+  const factIds = rows.map(row => row.id)
+  assert.equal(new Set(factIds).size, factIds.length, `every fact id is unique: ${factIds.join(', ')}`)
+  const projection = rows.find(row => row.id === 'status.projection')!
+  assert.equal(projection.displayValue, 'Failed')
+  assert.equal(projection.copyValue, 'Failed')
+  const status = rows.find(row => row.id === 'status.unavailable')!
+  assert.equal(status.displayValue, 'Unavailable')
+  assert.equal(status.copyValue, 'Unavailable')
 })
 
 test('a CJK / control-character fact never carries raw ANSI in a copy value', () => {
@@ -165,8 +226,8 @@ test('Copy All is the deterministic LF serialization: every defined id, sessionl
     'Turns: 12', 'Steps: 30', 'LLM wall: 27m58s (1678900 ms)',
     'Input tokens: 1234', 'Output tokens: 567', 'Cache read tokens: 890', 'Cache write tokens: 12',
     'Cache hit: 41.6%',
-    'TTFB (recent): 0.8s', 'R5 tokens/sec: 33.3 tok/s', 'All tokens/sec: 30 tok/s',
-    'Used tokens: 45000', 'Window tokens: 128000', 'Percent: 35.2%', 'Observation: Fresh',
+    'TTFB (recent): 0.8s', 'R5 tokens/sec: 33.3 tok/s', 'All tokens/sec: 29.97 tok/s',
+    'Used tokens: 45000', 'Window tokens: 128000', 'Percent: 35.15625%', 'Observation: Fresh',
   ]) {
     assert.ok(lines.some(line => line === key), `the report line ${key} is present verbatim`)
   }
