@@ -179,6 +179,18 @@ function setup(options: {
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
     captureLiveSessionScope: () => undefined,
+    // C3 About seams: this fixture composes no StatusRuntime, so the
+    // sessionless capture is the only reachable state (no scoped read can
+    // start). The subscription STILL must return a real disposer: opening
+    // `/settings` builds the About controller, its close calls `dispose()`,
+    // and a non-function return would abort the TuiApp teardown and leak the
+    // process slot into every later test.
+    isSessionScopeCurrent: () => false,
+    currentSessionStats: async () => undefined,
+    sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    backendKind: 'direct' as const,
+    subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
     displayPreset: () => app.displayPreset(),
     focusEnabled: () => false,

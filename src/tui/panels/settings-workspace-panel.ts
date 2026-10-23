@@ -35,7 +35,7 @@ import { renderActionBarRow, type ActionBarSegment } from '../presentation/actio
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH } from '../components/welcome-whale.ts'
-import { aboutFactRows, serializeAboutStatus as serializeAboutStatusOf, type AboutFact } from '../../domain/status/about.ts'
+import { aboutFactRows, serializeAboutStatus as serializeAboutStatusOf, type AboutFact, type AboutStatusView } from '../../domain/status/about.ts'
 import type { ModelsInitialView, ModelsPageExit, ModelsWorkspacePage } from './models-workspace-page.ts'
 import type { AccountInitialView, AccountWorkspacePage } from './account-workspace-page.ts'
 
@@ -623,10 +623,13 @@ export class SettingsWorkspacePanel implements Component {
    *  COLUMN rows (translated to panel rows by the direct-page painter):
    *  `copy` (the selected fact's Copy button), `copy-all`, `refresh`. */
   private paintedAboutTargets: readonly { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number; readonly factId?: string }[] = []
-  /** The view EPOCH the last painted About frame came from: a copy gesture is
-   *  refused unless the controller's CURRENT view is the SAME revision that
-   *  was painted (a publication between paint and copy revokes the targets). */
-  private paintedAboutViewEpoch = -1
+  /** The exact IMMUTABLE About view the last frame painted. A copy gesture is
+   *  refused unless this is still the controller's current snapshot: every
+   *  publication allocates a new view, so OBJECT IDENTITY (not the epoch)
+   *  distinguishes Loading from Ready inside one read — the epoch is shared by
+   *  both publications, and an epoch check would copy an unpainted Ready
+   *  snapshot from a frame that still shows Loading. */
+  private paintedAboutView: AboutStatusView | undefined
   /** The ids the LAST completed About frame really painted in-view (the
    *  NON-consuming keyboard-activation record — `takePaintedAboutTargets`
    *  empties the click-target list, never this). */
@@ -1109,6 +1112,7 @@ export class SettingsWorkspacePanel implements Component {
       lines.push(...this.aboutFactRows('TUI  ', facts.tui, width))
       lines.push(...this.aboutFactRows('DSH  ', facts.dsh ?? 'Unknown', width))
       this.paintedAboutFacts = []
+      this.paintedAboutView = undefined
       this.paintedAboutHeaderRows = 0
       this.aboutScrollExtent = Math.max(0, lines.length - rows)
       const offset = clampOffset(this.aboutOffset, lines.length, rows)
@@ -1119,7 +1123,6 @@ export class SettingsWorkspacePanel implements Component {
     // revision supplies every displayed string; copy reads THE SAME captured
     // view (bound below), never a re-read at copy time.
     const capturedView = controller.snapshotView()
-    const viewEpoch = capturedView.epoch
     const aboutFacts = aboutFactRows(capturedView)
     const selectedId = this.rebaseAboutSelection(aboutFacts)
     const bodyWidth = Math.max(1, width - 2)
@@ -1195,10 +1198,12 @@ export class SettingsWorkspacePanel implements Component {
     this.aboutOffset = offset
     // Drop targets whose absolute row the viewport slice cut off (they are
     // NOT painted; a click there is blank space and must never copy). The
-    // consumed targets are VIEWPORT-relative and bound to THE VIEW EPOCH the
+    // consumed targets are VIEWPORT-relative and bound to THE VIEW OBJECT the
     // paint came from: a publication that supersedes this view invalidates
-    // the whole target set at once (revoked by paintedViewEpoch check).
-    this.paintedAboutViewEpoch = viewEpoch
+    // the whole target set at once (revoked by the painted-view identity
+    // check). The epoch alone cannot prove the paint is current: Loading and
+    // Ready share one epoch.
+    this.paintedAboutView = capturedView
     // The NON-consuming record of what the frame painted (the Enter/keyboard
     // activation reads this AFTER the painter consumed the target list).
     this.paintedAboutActionIds = new Set([...copyTargets, ...actions]
@@ -1397,13 +1402,16 @@ export class SettingsWorkspacePanel implements Component {
   /** The per-fact physical row counts painted by the LAST frame. */
   private paintedAboutFactRows = new Map<string, number>()
 
-  /** The controller view ONLY when it is still the revision this panel
-   *  painted: a publication between the paint and the gesture revokes the
-   *  painted facts/targets (the gesture is refused, never retargeted). */
+  /** The controller ONLY when its current snapshot is still the exact view
+   *  this panel painted: a publication between the paint and the gesture
+   *  revokes the painted facts/targets (the gesture is refused, never
+   *  retargeted). Object identity, not the epoch: one read publishes Loading
+   *  and then Ready under the SAME epoch, so an epoch check would hand a
+   *  gesture a view the terminal never painted. */
   private paintedAboutController(): import('../../app/command/about-status.ts').AboutStatusController | undefined {
     const controller = this.aboutController()
-    if (controller === undefined) return undefined
-    if (controller.snapshotView().epoch !== this.paintedAboutViewEpoch) return undefined
+    if (controller === undefined || this.paintedAboutView === undefined) return undefined
+    if (controller.snapshotView() !== this.paintedAboutView) return undefined
     return controller
   }
 
@@ -1423,10 +1431,9 @@ export class SettingsWorkspacePanel implements Component {
    *  All contract, all defined facts even when offscreen; a publication
    *  between paint and gesture refuses the copy). */
   private copyAboutAll(): void {
-    const controller = this.paintedAboutController()
-    if (controller === undefined) return
-    const view = controller.snapshotView()
-    this.intents.onCopy(serializeAboutStatusOf(view))
+    const painted = this.paintedAboutView
+    if (this.paintedAboutController() === undefined || painted === undefined) return
+    this.intents.onCopy(serializeAboutStatusOf(painted))
   }
 
   /** `r` / the Refresh action: ONE About-scoped refresh (never the Web
@@ -3258,7 +3265,8 @@ export class SettingsWorkspacePanel implements Component {
         // The painted About affordance IS the action, exactly like the
         // keyboard: a stale release never reaches here (the revision/geometry
         // gate above already refused it), and the copy verbs bind to THE
-        // VIEW THIS PANEL PAINTED (epoch-fenced inside the copy methods).
+        // VIEW THIS PANEL PAINTED (fenced by the painted-view identity inside
+        // the copy methods: a newer same-epoch publication is refused).
         if (target.id === 'about:copy-all') this.copyAboutAll()
         else if (target.id === 'about:refresh') this.aboutRefresh()
         else if (target.id.startsWith('about:fact:')) {
