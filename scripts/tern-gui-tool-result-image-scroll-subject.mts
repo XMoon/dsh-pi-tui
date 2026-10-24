@@ -126,7 +126,7 @@ let current: ReturnType<typeof transcriptView> | undefined
 
 function render(): void {
   const view = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {
-    toolImageStates: new Map([['prc-synthetic-1', { state: 'ready', blobId }]]),
+    imageStates: new Map([['prc-synthetic-1', { state: 'ready', blobId }]]),
   })
   surface.render({ main: view })
   current = view

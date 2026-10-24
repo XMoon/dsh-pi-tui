@@ -117,6 +117,7 @@ async function mountHarness(): Promise<Harness> {
     cancel: () => { cancels.push(1) },
     submit: text => { submits.push(text) },
     steer: () => {},
+    pasteMedia: () => {},
     noteUserInput: () => {},
     listContinuedQuestions: () => harness.continued,
     reopenContinuedQuestion: (sessionId, callId) => {

@@ -145,6 +145,7 @@ async function compose(
     cancel() {},
     submit: () => { throw new Error('the Reader path must never reach the composer') },
     steer() {},
+    pasteMedia: () => {},
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

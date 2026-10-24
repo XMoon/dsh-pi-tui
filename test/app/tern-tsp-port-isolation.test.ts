@@ -32,6 +32,7 @@ import type { SubmissionComposerPort } from '../../src/app/submission/composer-p
 import { pituiSurfaceInteractionPresenter, type PiTuiInteractionApp, type SurfaceInteractionPresenter } from '../../src/app/surface/interaction-presenter.ts'
 import { createUserShell } from '../../src/app/submission/user-shell.ts'
 import type { InterruptAgentLike } from '../../src/app/session/interrupt.ts'
+import * as runtime from '../../src/app/surface/runtime.ts'
 
 const CONTROLLER_SOURCE = fileURLToPath(new URL('../../src/app/submission/controller.ts', import.meta.url))
 const USER_SHELL_SOURCE = fileURLToPath(new URL('../../src/app/submission/user-shell.ts', import.meta.url))
@@ -263,3 +264,61 @@ test('the UserShell interrupt error notice routes through the injected renderer-
     `the interrupt failure surfaced through the neutral notify: ${JSON.stringify(notices)}`)
   assert.deepEqual(cardCalls, [], 'the interrupt path never touches the PiTui local-card surface')
 })
+
+// ── PR4: the draft projection is READ-ONLY and LIVE ─────────────────────────
+
+test('the draft projection exposes no mutation member and reads the LIVE composer text', () => {
+  const { createSurfaceDraftImageProjection } = runtimeModule()
+  let draft = ''
+  const staged = [stagedDraft('a.png'), stagedDraft('b.png')]
+  const projection = createSurfaceDraftImageProjection(
+    () => ({ getDraft: () => draft } as unknown as SubmissionComposerPort),
+    { values: () => staged },
+  )
+
+  // The renderer never receives a writer: `occurrences()` is the whole surface.
+  assert.deepEqual(Object.keys(projection), ['occurrences'])
+  for (const forbidden of ['add', 'remove', 'clear', 'submit', 'upload', 'path']) {
+    assert.equal(forbidden in projection, false, `the projection must not expose ${forbidden}`)
+  }
+
+  assert.deepEqual(projection.occurrences(), [], 'an empty draft references nothing')
+  draft = `${staged[0]!.placeholder} and ${staged[1]!.placeholder}`
+  assert.deepEqual(projection.occurrences().map(occurrence => occurrence.image.id), [1, 2],
+    'the projection re-reads the live text on every call')
+  draft = staged[1]!.placeholder
+  assert.deepEqual(projection.occurrences().map(occurrence => occurrence.image.id), [2],
+    'deleting a token retires that occurrence on the NEXT call — no cache, no list')
+})
+
+test('the draft projection answers [] before the mount or without a preview source', () => {
+  const { createSurfaceDraftImageProjection } = runtimeModule()
+  const seat = { getDraft: () => '[image #1 (640×360)]' } as unknown as SubmissionComposerPort
+
+  assert.deepEqual(createSurfaceDraftImageProjection(() => undefined, { values: () => [] }).occurrences(), [],
+    'no live composer yet answers [] — never a fabricated occurrence')
+  assert.deepEqual(createSurfaceDraftImageProjection(() => seat, undefined).occurrences(), [],
+    'no preview source answers [] rather than inventing a store')
+})
+
+/** The runtime module's draft-projection construction (the ONE production path). */
+function runtimeModule(): { createSurfaceDraftImageProjection: typeof import('../../src/app/surface/runtime.ts')['createSurfaceDraftImageProjection'] } {
+  return { createSurfaceDraftImageProjection: runtime.createSurfaceDraftImageProjection }
+}
+
+/** One staged draft of the given name and a canonical placeholder. */
+function stagedDraft(name: string): import('../../src/client/media/image/types.ts').DraftImage {
+  const id = name === 'a.png' ? 1 : 2
+  return {
+    id,
+    kind: 'image',
+    source: { type: 'clipboard' },
+    bytes: new Uint8Array(4),
+    mediaType: 'image/png',
+    width: 640,
+    height: 360,
+    byteLength: 4,
+    name,
+    placeholder: `[image #${id} (640×360)]`,
+  }
+}

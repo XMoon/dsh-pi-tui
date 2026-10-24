@@ -149,6 +149,7 @@ async function mount(
     cancel: () => { harness.cancels.push(1) },
     submit: () => { throw new Error('Reader input must never reach the composer submit path') },
     steer() {},
+    pasteMedia: () => {},
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

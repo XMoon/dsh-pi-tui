@@ -58,7 +58,7 @@ test('production /model: a pane with the picker but without the Reader kinds sti
   assert.ok(session)
   const renderer = mountTspRenderer(session, { requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   assert.equal(renderer.modelPresentation, undefined, 'the native model UI fails closed')
   assert.equal(picker(pane), undefined)
 })
@@ -387,6 +387,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
     cancel() {},
     submit: () => assert.fail('picker must capture Enter'),
     steer() {},
+    pasteMedia: () => {},
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
@@ -1015,7 +1016,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
   assert.ok(session)
   const renderer = mountTspRenderer(session, { requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   assert.ok(renderer.modelPresentation)
   // The panel opens INSIDE the loop below, so the resize is delivered before any
   // handle exists. The catalogue owns the ONE write at every width.

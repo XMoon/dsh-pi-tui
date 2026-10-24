@@ -239,3 +239,134 @@ test('a Remote tool-result image is authorized by its retained Session and reach
     await fixture.dispose()
   }
 })
+
+test('a Remote USER body image is authorized by its retained Session and painted as a native blob', async t => {
+  const life = testLifecycle(t)
+  const host = await mountRemotePresentationHost(life, 'prc-remote-body-preset')
+  const BODY_SESSION_ID = 'prc-remote-body-session'
+  await host.harness.create(SessionId(BODY_SESSION_ID), { provider: 'smoke', model: 'smoke' } as never, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(BODY_SESSION_ID)) as unknown as HostSession
+  const fixture = await mountRemoteRunner(life, {
+    presetId: 'prc-remote-body-preset', resumeSessionId: BODY_SESSION_ID, host,
+    renderer: 'tsp', nativeImages: true,
+  })
+  try {
+    const attachments = host.ctx.get('attachments') as unknown as AttachmentStore
+    const png = await realPng()
+    const [image] = await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'body-shot.png' }])
+    const expectedBlobId = createHash('sha256').update(png).digest('hex')
+
+    // The PRODUCTION Remote read seam is observed one-to-one (the unbound
+    // original is saved and called through `original.call`, never `.bind`).
+    const presentation = fixture.aggregate.presentation as unknown as {
+      attachments: {
+        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+      }
+    }
+    const durableReads: { sessionId: string; attachmentId: string; hasLifetime: boolean }[] = []
+    const originalRead = presentation.attachments.readDurableImage
+    presentation.attachments.readDurableImage = function patched(
+      this: unknown, sessionId: string, attachmentId: string, lifetime: unknown,
+    ) {
+      durableReads.push({ sessionId, attachmentId, hasLifetime: lifetime !== undefined })
+      return originalRead.call(this, sessionId, attachmentId, lifetime)
+    }
+    try {
+      // A REAL durable USER message whose content carries the image block.
+      session.append('user/message', {
+        id: MessageId('remote-body-user'),
+        role: 'user',
+        content: [{ type: 'text', text: 'Remote body screenshot' }, { type: 'image', attachment: image! }],
+        source: { kind: 'user' },
+        turn: 1,
+      }, { surfaceOp: 'append' })
+
+      await waitFor('the SDK emitted the USER body image blob', () => fixture.pane!.blobIds().includes(expectedBlobId), 20_000)
+      const wire = fixture.pane!.output.text()
+      assert.equal(wire.includes('[IMAGE] body-shot.png'), true,
+        'the USER body identity row names the admitted attachment')
+      assert.equal(drewImage(wire, expectedBlobId), true,
+        'an official SDK frame references the USER body image blob')
+      assert.equal(durableReads.length > 0, true, 'the production Remote read seam served the bytes')
+      assert.equal(durableReads.every(read => read.sessionId === BODY_SESSION_ID), true,
+        'the read addressed the OWNING Session')
+      assert.equal(durableReads.every(read => read.attachmentId === image!.attachmentId), true,
+        'the read addressed the exact attachment')
+      assert.equal(durableReads.every(read => read.hasLifetime), true,
+        'the read carried the exact retained binding lifetime')
+    } finally {
+      presentation.attachments.readDurableImage = originalRead
+    }
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('a Remote USER body image whose read is refused after a generation rollover draws no blob', async t => {
+  const life = testLifecycle(t)
+  const host = await mountRemotePresentationHost(life, 'prc-remote-body-preset')
+  const BODY_SESSION_ID = 'prc-remote-body-stale-session'
+  await host.harness.create(SessionId(BODY_SESSION_ID), { provider: 'smoke', model: 'smoke' } as never, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(BODY_SESSION_ID)) as unknown as HostSession
+  const fixture = await mountRemoteRunner(life, {
+    presetId: 'prc-remote-body-preset', resumeSessionId: BODY_SESSION_ID, host,
+    renderer: 'tsp', nativeImages: true,
+  })
+  try {
+    const attachments = host.ctx.get('attachments') as unknown as AttachmentStore
+    const png = await realPng()
+    const [image] = await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'stale-shot.png' }])
+    const expectedBlobId = createHash('sha256').update(png).digest('hex')
+
+    // Gate the REAL retained binding's read so the transport lifetime can
+    // retire WHILE the read is open.
+    const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
+      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+    }
+    const retained = clientSessions.binding(SessionId(BODY_SESSION_ID))
+    assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
+    let releaseRead!: () => void
+    const gate = new Promise<void>(resolve => { releaseRead = resolve })
+    let readStarted = false
+    const originalRead = retained.session.readAttachment
+    retained.session.readAttachment = async (id: unknown) => {
+      readStarted = true
+      await gate
+      return originalRead.call(retained.session, id)
+    }
+    try {
+      session.append('user/message', {
+        id: MessageId('remote-body-stale'),
+        role: 'user',
+        content: [{ type: 'text', text: 'stale screenshot' }, { type: 'image', attachment: image! }],
+        source: { kind: 'user' },
+        turn: 1,
+      }, { surfaceOp: 'append' })
+      await waitFor('the REAL attachment read to start', () => readStarted, 20_000)
+
+      const connection = fixture.aggregate.wire.client.connection as unknown as {
+        generation: { getSnapshot(): { readonly id: number } | undefined }
+        reconnect(): void
+      }
+      const generationBefore = connection.generation.getSnapshot()?.id
+      connection.reconnect()
+      await waitFor('a NEW Connection generation', () => {
+        const current = connection.generation.getSnapshot()
+        return current !== undefined && current.id !== generationBefore
+      }, 20_000)
+
+      releaseRead()
+      await waitFor('the refused USER body read to settle', () =>
+        fixture.pane!.output.text().includes('Image read failed'), 20_000)
+
+      assert.equal(fixture.pane!.blobIds().includes(expectedBlobId), false,
+        'the refused USER body sent NO blob')
+      assert.equal(JSON.stringify(fixture.pane!.frames()).includes(expectedBlobId), false,
+        'no frame references the refused USER body attachment')
+    } finally {
+      retained.session.readAttachment = originalRead
+    }
+  } finally {
+    await fixture.dispose()
+  }
+})

@@ -40,6 +40,7 @@
 
 import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, TspEvent } from '@stencil-hq/tern'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type {
   DisplayDockNotice,
@@ -50,7 +51,8 @@ import type {
 import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
-import type { SurfaceImageBinding } from '../../app/surface/runtime.ts'
+import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
+import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
@@ -79,7 +81,7 @@ import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, MAX_IMAGE_BLOB_BYTES, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -160,6 +162,14 @@ export interface TspInputHandlers {
    * before-callback ordering; the submission controller owns the outcome.
    */
   steer(text: string): void
+  /**
+   * PR4: the Ctrl+V paste-media intent — the EXISTING application clipboard
+   * entry (`ApplicationEvents.events.onClipboardPaste`), which owns the ONE
+   * per-instance OS-clipboard FIFO, the image limits and the draft write. The
+   * renderer only routes the key here; it never probes the clipboard, never
+   * stages an image and owns no media queue of its own.
+   */
+  pasteMedia(): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -1044,7 +1054,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       presetPicker?.suspend()
       workHub?.suspend()
     }
-    const dockNode = dockView()
+    // PR4: the dock's draft blobs are prepared BEFORE the pure view, exactly
+    // like the transcript image states — `dockView` never calls `session.blob`.
+    // The fatal fences keep an aborted projection from painting a frame: a
+    // send that failed already routed the fatal lifecycle, and the last
+    // committed frame stands.
+    if (imageProjectionAborted || visualProjectionAborted) return
+    const draftStates = prepareDockDraftImageStates()
+    if (imageProjectionAborted) return
+    const dockNode = dockView(draftStates)
     const mainNode = lastMain
     surface.render({
       ...(mainNode === undefined ? {} : { main: mainNode }),
@@ -1095,15 +1113,38 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * order. The row rule is the mapper's own ({@link toolRowImageBlocks}), so
    * the reader and the view can never disagree: a row that does not project
    * an image is never read, and a malformed reference is never read either.
+   *
+   * PR4: the SAME enumeration now covers User/Assistant bodies beside Tool
+   * results. The block lists are chosen EXACTLY as the mapper chooses them
+   * (`displayBlocks` outranks settled `content` while an opaque block is open;
+   * User reads `content`), so a body the mapper draws block-wise is a body
+   * whose images are read, and a legacy flat body reads nothing.
    */
   const projectedImageRefs = (): ImageAttachmentRefLike[] => {
     const refs: ImageAttachmentRefLike[] = []
+    const push = (attachment: unknown): void => {
+      if (imageRefProblem(attachment) !== undefined) return
+      refs.push(attachment as ImageAttachmentRefLike)
+    }
+    const pushBodyImages = (blocks: readonly ContentBlock[]): void => {
+      for (const block of blocks) if (block.type === 'image') push(block.attachment)
+    }
     const visit = (message: TranscriptMessage): void => {
-      if (message.kind !== 'tool') return
-      for (const block of toolRowImageBlocks(message)) {
-        if (imageRefProblem(block.attachment) !== undefined) continue
-        refs.push(block.attachment as ImageAttachmentRefLike)
+      if (message.kind === 'user') {
+        if (message.content !== undefined) pushBodyImages(message.content)
+        return
       }
+      if (message.kind === 'assistant') {
+        const display = message.displayBlocks
+        if (display !== undefined) {
+          for (const block of display) if (block.kind === 'content') pushBodyImages([block.block])
+          return
+        }
+        if (message.content !== undefined) pushBodyImages(message.content)
+        return
+      }
+      if (message.kind !== 'tool') return
+      for (const block of toolRowImageBlocks(message)) push(block.attachment)
       for (const child of message.subCalls ?? []) visit(child)
     }
     for (const message of lastMessages) visit(message)
@@ -1175,6 +1216,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * the window is unsubscribed; a new one is subscribed BEFORE it is read.
    * The loader dedupes the read per (scope, attachment id), so two blocks
    * naming the same attachment read once.
+   *
+   * PR4: the wanted set is the SAME enumeration as the projection, extended
+   * with the valid RECALLED draft refs of the live composer. A recalled draft
+   * holds no local bytes, so the ONE existing loader (under the CURRENT
+   * immutable scope) is its only authorized read path — and it uses ONE
+   * subscription per attachment id, the same ledger as the transcript rows.
    */
   const syncImageSubscriptions = (): void => {
     const binding = imageBinding
@@ -1187,6 +1234,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     const wanted = new Map<string, ImageAttachmentRefLike>()
     for (const ref of projectedImageRefs()) wanted.set(ref.attachmentId, ref)
+    for (const ref of recalledDraftRefs()) wanted.set(ref.attachmentId, ref)
     for (const [id, unsubscribe] of imageSubscriptions) {
       if (wanted.has(id)) continue
       unsubscribe()
@@ -1208,6 +1256,102 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }, scope)
       imageSubscriptions.set(id, unsubscribe)
       if (binding.imageLoader.get(ref, scope).state === 'idle') binding.imageLoader.load(ref, scope)
+    }
+  }
+
+  /**
+   * PR4: the valid recalled-image refs the LIVE composer draft references. A
+   * recalled draft carries no bytes of its own, so its durable ref is the ONE
+   * readable authority — and only while the ref is structurally presentable.
+   * These refs join the SAME subscription/read ledger as the transcript rows.
+   */
+  const recalledDraftRefs = (): ImageAttachmentRefLike[] => {
+    const binding = imageBinding
+    if (binding === undefined) return []
+    const refs: ImageAttachmentRefLike[] = []
+    for (const occurrence of binding.draftImages.occurrences()) {
+      const image = occurrence.image
+      if (image.source.type !== 'recalled') continue
+      const ref = image.recalledRef
+      if (ref === undefined || imageRefProblem(ref) !== undefined) continue
+      refs.push(ref)
+    }
+    return refs
+  }
+
+  /**
+   * PR4: prepare the dock's per-occurrence state BEFORE the pure dock view.
+   *
+   * The staged LOCAL bytes are the draft's own (no read is authorized or
+   * needed); a recalled draft goes through the ONE existing loader above. Both
+   * send through the SAME `session.blob()` sender, whose content addressing
+   * means a repeated frame never re-sends bytes. Nothing here writes back to
+   * the draft store: a failed preview must not delete the user's draft.
+   *
+   * A fatal blob failure routes the renderer fatal and ABORTS this projection,
+   * exactly like the transcript image path: the caller must not paint a frame
+   * that pretends otherwise.
+   */
+  const prepareDockDraftImageStates = (): ReadonlyMap<string, ToolImageState> | undefined => {
+    const binding = imageBinding
+    if (binding === undefined) return undefined
+    const occurrences = binding.draftImages.occurrences()
+    if (occurrences.length === 0) return new Map()
+    const states = new Map<string, ToolImageState>()
+    if (!nativeImagesSupported()) {
+      for (const occurrence of occurrences) states.set(draftOccurrenceKey(occurrence), { state: 'unsupported' })
+      return states
+    }
+    for (const occurrence of occurrences) {
+      const key = draftOccurrenceKey(occurrence)
+      const image = occurrence.image
+      if (image.source.type === 'recalled') {
+        const ref = image.recalledRef
+        const scope = activeImageScope
+        // No structurally usable durable ref, or no owned scope: nothing may
+        // be read, and an empty byte array must NEVER become an image.
+        if (ref === undefined || imageRefProblem(ref) !== undefined || scope === undefined) {
+          states.set(key, { state: 'no-scope' })
+          continue
+        }
+        const load = binding.imageLoader.get(ref, scope)
+        if (load.state === 'idle' || load.state === 'loading') {
+          states.set(key, { state: 'loading' })
+          continue
+        }
+        if (load.state === 'error') {
+          states.set(key, { state: 'error' })
+          continue
+        }
+        if (load.bytes.length > MAX_IMAGE_BLOB_BYTES) {
+          states.set(key, { state: 'too-large' })
+          continue
+        }
+        const blobId = sendDraftBlob(load.bytes, ref.mediaType)
+        if (blobId === undefined) return undefined
+        states.set(key, { state: 'ready', blobId })
+        continue
+      }
+      if (image.bytes.byteLength > MAX_IMAGE_BLOB_BYTES) {
+        states.set(key, { state: 'too-large' })
+        continue
+      }
+      const blobId = sendDraftBlob(image.bytes, image.mediaType)
+      if (blobId === undefined) return undefined
+      states.set(key, { state: 'ready', blobId })
+    }
+    return states
+  }
+
+  /** PR4: send one draft's bytes through the ONE SDK blob sender. `undefined`
+   *  means the send failed and the projection was aborted (fatal routed). */
+  const sendDraftBlob = (bytes: Uint8Array, mediaType: string): string | undefined => {
+    try {
+      return session.blob(bytes, mediaType)
+    } catch (error) {
+      routeFatal(error)
+      imageProjectionAborted = true
+      return undefined
     }
   }
 
@@ -1340,7 +1484,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       chartKindsSupported: session.caps.kinds.includes('chart'),
       ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
       expandedToolKeys,
-      toolImageStates: imageStates,
+      imageStates,
     })
     // Record the CURRENT projection's actual tool-node id → disclosure path.
     // The walk uses the real parent/child key chain, so a dotted subCallId is
@@ -1366,8 +1510,34 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return true
   }
 
-  const dockView = (): Node | undefined => {
-    const lines: ReturnType<typeof ui.text | typeof ui.editor>[] = []
+  /**
+   * PR4: the dock's draft-image rows, built at render time from the LIVE
+   * projection (never a retained list) plus the state prepared just above.
+   *
+   * This function only maps already-prepared facts onto the ONE pure
+   * {@link dockDraftImageNodes} projection — it reads no bytes, sends no blob
+   * and consults no store, so the dock's node shape is testable without a
+   * session and cannot drift from the transcript's image vocabulary.
+   */
+  const dockDraftNodes = (states: ReadonlyMap<string, ToolImageState> | undefined): Node[] => {
+    const binding = imageBinding
+    if (binding === undefined || states === undefined) return []
+    const entries: DockDraftImageEntry[] = binding.draftImages.occurrences().map(occurrence => {
+      const identity = draftIdentityOf(occurrence.image)
+      return {
+        key: draftOccurrenceKey(occurrence),
+        identity: imageIdentityText(identity),
+        name: imageDisplayName(identity),
+        state: states.get(draftOccurrenceKey(occurrence)),
+      }
+    })
+    return dockDraftImageNodes(entries, session.caps.cols, nativeImagesSupported())
+  }
+
+  const dockView = (draftStates: ReadonlyMap<string, ToolImageState> | undefined): Node | undefined => {
+    // PR4: a draft preview is a `ui.image` node, so the line list holds any
+    // native node kind — not just text/editor.
+    const lines: Node[] = []
     for (const facts of dock.welcome) {
       const model = facts.model === undefined ? '' : ` · ${facts.model}`
       lines.push(ui.text({ key: `welcome-${facts.sessionId}`, text: sanitizeDisplayText(`DSH session ${facts.sessionId}${model}`) }))
@@ -1398,6 +1568,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const noticeText = sanitizeDisplayText(notice.text)
       lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${noticeText}` : noticeText }))
     }
+    // PR4: the staged draft images sit directly above the editor (the queue,
+    // notice and status order above is unchanged), so the token text and its
+    // previews are one seat and the caret never leaves the visible band.
+    lines.push(...dockDraftNodes(draftStates))
     // The controlled composer: SDK `ui.editor` with client-supplied
     // text/cursor (UTF-16). The native edit/undo/send features are NOT
     // advertised (`sendable` stays unset); the program owns every edit.
@@ -1698,6 +1872,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (modelPicker?.handleKey(key)) return false
     if (key.name === 'escape') {
       handlers.cancel()
+      return false
+    }
+    // PR4: the paste-media gesture. The SDK decodes Ctrl+V as the formal
+    // `Key` fields (`name === 'v'`, lowercase, `ctrl === true`) — a bracketed
+    // paste arrives separately as `name === 'paste'` and stays the composer's
+    // atomic text edit below. The renderer reads NOTHING itself: the one
+    // application callback owns the OS probe, the FIFO and the draft write, so
+    // this branch is exactly one forwarded intent.
+    if (key.name === 'v' && key.ctrl === true && key.alt !== true && key.meta !== true && key.shift !== true) {
+      handlers.noteUserInput()
+      handlers.pasteMedia()
       return false
     }
     // 5. The composer reducer owns everything else (Ctrl+D empty-exit,
@@ -2083,6 +2268,36 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       })()
       return disposeTask
     },
+  }
+}
+
+/**
+ * PR4: the render-state key of ONE draft occurrence. The draft id alone is not
+ * enough — the SAME image can appear under two tokens — so the occurrence's
+ * own text rank is part of the identity, matching the node key the dock builds.
+ */
+function draftOccurrenceKey(occurrence: SurfaceDraftImageOccurrence): string {
+  return `draft-image-${occurrence.image.id}-${occurrence.ordinal}`
+}
+
+/**
+ * PR4: the attachment-shaped identity of one staged draft. A LOCAL draft keeps
+ * its own metadata; a RECALLED draft's durable ref is the authority for the
+ * same fields (its local bytes are empty by contract). `bytes` is the recorded
+ * byte length, never a send permit.
+ */
+function draftIdentityOf(image: DraftImage): ImageAttachmentRefLike {
+  const source = image.source.type === 'recalled' && image.recalledRef !== undefined
+    ? image.recalledRef
+    : undefined
+  const name = source?.name ?? image.name
+  return {
+    attachmentId: source?.attachmentId ?? `draft-${image.id}`,
+    mediaType: source?.mediaType ?? image.mediaType,
+    bytes: source?.bytes ?? image.byteLength,
+    width: source?.width ?? image.width,
+    height: source?.height ?? image.height,
+    ...(name === undefined ? {} : { name }),
   }
 }
 

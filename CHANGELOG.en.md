@@ -24,8 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the bytes are streamed when the message is sent), and success is announced only after that intake
   succeeded and the placeholder was inserted. With no usable editor the command fails immediately
   instead of reading a file or claiming success. The experimental TSP renderer can now run
-  `/attach` and `/image` too, with the result landing in its own editor (Ctrl+V and native image
-  display remain later work).
+  `/attach` and `/image` too, with the result landing in its own editor.
+
+- **The experimental TSP renderer accepts a Ctrl+V image paste and shows draft and history images natively.**
+  Ctrl+V uses the existing clipboard-paste chain (concurrent pastes are still read one at a time,
+  in trigger order): an image gets its canonical placeholder and a draft preview while pasted text
+  lands at the live caret, and a bracketed text paste stays one ordinary text edit instead of
+  becoming an image paste. Draft images appear above the editor: up to two native previews at
+  ≥100 columns, one between 72 and 99, and only the count plus the first identity on a narrower
+  pane or a client without native images. Image blocks in user messages, assistant messages and
+  tool results are shown in their original order as an identity line plus a native image, and the
+  same image appearing several times stays several visible occurrences while being read and
+  uploaded once. Clicking an image, zooming and moving between neighbouring images are the Tern
+  client's own affordances: this program adds no page, command or dialog. A draft image pulled back
+  from the queue reuses the existing read path and shows its identity plus the reason when no
+  authorization is available, never an empty image. The default PiTui renderer's image behaviour is
+  unchanged.
 
 - **Transcript images can now be viewed at full size; the fullscreen info row gained its own fold control.**
   The rightmost 3 cells of every fullscreen image info row are an ASCII `[-]` / `[+]` control that

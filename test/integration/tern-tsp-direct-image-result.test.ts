@@ -218,3 +218,73 @@ test('an attachment the REAL service cannot read is refused and never painted', 
     await fixture.settle()
   }
 })
+
+test('a REAL durable image reaches a User body and an Assistant body as native blobs', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['DIRECT', '-BODY', '-OK'],
+    startup: { sessionId: SESSION_ID },
+    persistedBlankSessions: [{ id: SESSION_ID }],
+    nativeImages: true,
+  })
+  try {
+    const attachments = fixture.ctx.get('attachments') as unknown as FixtureAttachments
+    const userPng = await realPng('#112233', 4)
+    const assistantPng = await realPng('#445566', 4)
+    const [userImage] = await attachments.saveImages([{ data: userPng, mediaType: 'image/png', name: 'user-shot.png' }])
+    const [assistantImage] = await attachments.saveImages([{ data: assistantPng, mediaType: 'image/png', name: 'assistant-shot.png' }])
+    const userBlob = createHash('sha256').update(userPng).digest('hex')
+    const assistantBlob = createHash('sha256').update(assistantPng).digest('hex')
+
+    const session = await sessionOf(fixture)
+    // The REAL durable USER message carrying the image block.
+    session.append('user/message', {
+      id: MessageId('user-body-image'),
+      role: 'user',
+      content: [{ type: 'text', text: 'please inspect' }, { type: 'image', attachment: userImage! }],
+      source: { kind: 'user' },
+      turn: 1,
+    }, { surfaceOp: 'append' })
+    // The REAL durable ASSISTANT message carrying its own image block, settled
+    // through the official turn/step lifecycle (an `assistant/message` after the
+    // turn completed is a replay artifact the fold rejects).
+    session.append('turn/start', { turn: 2 })
+    session.append('step/start', { turn: 2, step: 0 })
+    // NOTE the shape: `assistant/message` nests the message under `data.message`
+    // (the user event carries content directly on its data).
+    session.append('assistant/message', {
+      turn: 2,
+      step: 0,
+      stream: [],
+      message: {
+        id: MessageId('assistant-body-image'),
+        role: 'assistant',
+        source: { kind: 'model', provider: 'scripted', model: 'scripted-model' },
+        content: [{ type: 'text', text: 'here is the diagram' }, { type: 'image', attachment: assistantImage! }],
+      },
+    }, { surfaceOp: 'append' })
+
+    await waitFor('the pane received BOTH body blobs', () => {
+      const ids = blobIds(fixture.pane.output.text())
+      return ids.includes(userBlob) && ids.includes(assistantBlob)
+    }, 30_000)
+
+    const wire = fixture.pane.output.text()
+    assert.equal(drewImage(wire, userBlob), true, 'a native node references the USER body blob')
+    assert.equal(drewImage(wire, assistantBlob), true, 'a native node references the ASSISTANT body blob')
+    assert.equal(wire.includes('[IMAGE] user-shot.png'), true, 'the user identity line names the real attachment')
+    assert.equal(wire.includes('[IMAGE] assistant-shot.png'), true, 'the assistant identity line names the real attachment')
+    // The wire bytes ARE the admitted PNGs: two independent authorized reads.
+    for (const [blob, png] of [[userBlob, userPng], [assistantBlob, assistantPng]] as const) {
+      const base64 = wire.match(new RegExp(`\\u001b_tsp;b;id=${blob};[^;]*;([A-Za-z0-9+/=]+)`))?.[1]
+      assert.ok(base64 !== undefined, `the blob ${blob.slice(0, 8)}… is on the wire`)
+      assert.deepEqual(new Uint8Array(Buffer.from(base64, 'base64')), png,
+        'the wire carries the exact admitted bytes')
+    }
+  } finally {
+    // The fixture's settle disposes the app, the pane and the Host context
+    // before the next case starts: a bounded teardown, not a blind sleep.
+    await fixture.settle()
+  }
+})

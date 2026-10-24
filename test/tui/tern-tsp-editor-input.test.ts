@@ -391,6 +391,8 @@ interface PaneHarness {
   frames(): WireFrame[]
   userInputs(): number
   cancels(): number
+  /** PR4: how many times the Ctrl+V media intent reached the application. */
+  pasteMedia(): number
   dispose(): Promise<void>
 }
 
@@ -408,6 +410,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
   let exitCount = 0
   let userInputs = 0
   let cancelCount = 0
+  let pasteMediaCalls = 0
   const renderer = mountTspRenderer(session, {
     requestExit: () => { exitCount += 1 },
   })
@@ -419,6 +422,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
       cancel: () => { cancelCount += 1 },
       submit: () => {},
       steer: () => {},
+      pasteMedia: () => { pasteMediaCalls += 1 },
       noteUserInput: () => { userInputs += 1 }, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
     })
   }
@@ -430,6 +434,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
     exitCount: () => exitCount,
     userInputs: () => userInputs,
     cancels: () => cancelCount,
+    pasteMedia: () => pasteMediaCalls,
     frames: () => framesOf(tern.output.text()),
     dispose: () => renderer.dispose(),
   }
@@ -529,7 +534,7 @@ test('one accepted edit calls Surface.render exactly ONCE (no double render)', a
     return surface
   }
   const renderer = mountTspRenderer(session, { requestExit: () => {} })
-  renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   await settle()
   const baseline = renderCalls
   tern.input.type('h')
@@ -586,6 +591,7 @@ test('a bound Enter submits the snapshot and clears the composer BEFORE the call
     cancel: () => {},
     submit: (text, request) => { submissions.push({ text, request, draftAtCallback: renderer.composer.getDraft() }) },
     steer: () => {},
+    pasteMedia: () => {},
     noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
   })
   await settle()
@@ -629,7 +635,7 @@ test('a PRE-BIND Enter is held and submits at the bind, never before it', async 
     renderer.bindInput({
       exit: () => {}, cancel: () => {},
       submit: (text: string) => { heldSubmits.push(text) },
-      steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+      steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
     })
     await settle()
     assert.deepEqual(heldSubmits, ['draft text'] as string[], 'the held keys replayed in order: the text then the submit')
@@ -733,11 +739,11 @@ test('keys before the bind are HELD, then consumed exactly once at the bind', as
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'a pre-bind key never edits the composer')
     assert.equal(harness.userInputs(), 0, 'no user activity is observed before the bind')
     // The bind consumes the held keys ONCE, in arrival order.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, 'held', 'the bind consumed the held keys')
     // A second bind is refused — exactly ONE input owner.
-    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }),
+    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }),
       /already bound/, 'a second bind throws')
   } finally {
     await harness.dispose()
@@ -752,7 +758,7 @@ test('a dispose before the bind discards the held keys unconsumed', async () => 
   await harness.session.close()
   const framesBefore = harness.frames().length
   // A late bind after dispose is refused; the held keys died with the renderer.
-  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }), /disposed/)
+  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }), /disposed/)
   harness.tern.input.type('late')
   await settle()
   assert.equal(harness.frames().length, framesBefore, 'nothing renders after dispose — the queue was discarded')
@@ -770,7 +776,7 @@ test('the bound exit handler routes the composer exit gesture', async () => {
   let boundExits = 0
   let boundCancels = 0
   const renderer = mountTspRenderer(session, { requestExit: () => { rendererExits += 1 } })
-  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   await settle()
   try {
     tern.input.type('a')
@@ -833,7 +839,7 @@ test('a held key orders the pre-bind Ctrl+D — no exit before the bind replays 
     assert.equal(harness.exitCount(), 0, 'no pre-bind exit while the held key makes the draft non-empty')
     // The bind replays 'a' then Ctrl+D in order: 'a' applies, Ctrl+D meets a
     // NON-empty draft and is an editor no-op — still no exit.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
     await settle()
     assert.equal(harness.exitCount(), 0, 'the replayed Ctrl+D saw the applied draft and did not exit')
     const editor = lastEditorProps(harness.frames())
@@ -873,10 +879,169 @@ test('a pre-bind input flood fails loud ONCE and still replays the held prefix',
     await settle()
     const wire = harness.tern.output.text()
     assert.ok(wire.includes('were dropped'), 'the overflow is observable (fail loud), not a silent drop')
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
     await settle()
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'a'.repeat(128), 'the held PREFIX (the bounded queue) still replayed at the bind')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+// ── PR4: the Ctrl+V paste-media route (real SDK key bytes → dispatchKey) ─────
+
+test('Ctrl+V forwards the media intent exactly once and leaves the draft untouched', async () => {
+  const harness = await mountPane()
+  try {
+    assert.equal(harness.pasteMedia(), 0, 'no paste intent before the gesture')
+    harness.tern.input.type('\x16')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pasteMedia(), 1, 'Ctrl+V routed the ONE application media intent')
+    assert.equal(lastEditorProps(harness.frames())?.text, '',
+      'the renderer owns no clipboard read: it never inserts text itself')
+    assert.equal(harness.exitCount(), 0, 'the paste gesture never exits')
+    assert.equal(harness.cancels(), 0, 'the paste gesture is not the cancel intent')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a bracketed paste of command-looking text never becomes a media intent', async () => {
+  const harness = await mountPane()
+  try {
+    // The terminal's bracketed-paste bytes: the SDK decodes `name === 'paste'`,
+    // which is the composer's atomic text edit — a DIFFERENT key from Ctrl+V.
+    harness.tern.input.type('\u001b[200~/image shot.png\n/exit\u001b[201~')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+
+    assert.equal(harness.pasteMedia(), 0, 'a text paste never probes the clipboard')
+    const editor = lastEditorProps(harness.frames())
+    assert.equal(editor?.text, '/image shot.png\n/exit', 'the pasted bytes are draft content')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a modal seat consumes Ctrl+V without forwarding it', async () => {
+  const harness = await mountPane()
+  const pending = harness.renderer.interaction.askQuestions(
+    [{ id: 'q1', question: 'Proceed?', options: [{ label: 'yes' }, { label: 'no' }] }],
+    undefined,
+    undefined,
+    false,
+  )
+  pending.catch(() => {})
+  try {
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pasteMedia(), 0, 'opening the form forwarded no paste')
+    harness.tern.input.type('\x16')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+
+    assert.equal(harness.pasteMedia(), 0,
+      'the modal seat consumed Ctrl+V: no clipboard probe while a form owns the keys')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a Ctrl+V held before the bind is replayed ONCE at the bind', async () => {
+  const harness = await mountPane({ bind: false })
+  try {
+    harness.tern.input.type('\x16')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pasteMedia(), 0, 'a pre-bind paste probes nothing')
+
+    let pastes = 0
+    harness.renderer.bindInput({
+      exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {},
+      pasteMedia: () => { pastes += 1 },
+      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+    })
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+
+    assert.equal(pastes, 1, 'the held Ctrl+V was replayed exactly once through the SAME dispatch')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a dispose before the bind discards a held Ctrl+V unconsumed', async () => {
+  const harness = await mountPane({ bind: false })
+  harness.tern.input.type('\x16')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+  await settle()
+  await harness.dispose()
+  await harness.session.close()
+
+  let pastes = 0
+  assert.throws(() => harness.renderer.bindInput({
+    exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {},
+    pasteMedia: () => { pastes += 1 },
+    noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+  }), /disposed/)
+  assert.equal(pastes, 0, 'a paste held across disposal never reaches the application')
+})
+
+test('Ctrl+C is the cancel intent, never the paste gesture', async () => {
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type('\x03')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+
+    assert.equal(harness.pasteMedia(), 0, 'Ctrl+C is not Ctrl+V')
+    assert.equal(harness.cancels(), 1, 'Ctrl+C kept its one cancel intent')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('Ctrl+V during session hydration is dropped, not held for the new subject', async () => {
+  const harness = await mountPane()
+  try {
+    harness.renderer.display.beginSessionHydration()
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pasteMedia(), 0, 'the hydration window starts with no paste')
+
+    harness.tern.input.type('\x16')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pasteMedia(), 0,
+      'a paste during hydration probes nothing: the draft belongs to the outgoing subject')
+
+    // The new subject's frame lifts the fence; the DROPPED key is not replayed.
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, {})
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+    harness.tern.input.type('\x16')
+    // The shared render wait: it covers the SDK frame/delivery the assertion
+    // reads, not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pasteMedia(), 1, 'a paste after the fence lifts forwards exactly once')
   } finally {
     await harness.dispose()
     await harness.session.close()

@@ -121,6 +121,8 @@ import type { QuestionAttentionRow } from './question-controller.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { ImageLoader } from '../../client/media/image/loader.ts'
+import { selectDraftImageOccurrences } from '../../client/media/image/placeholder.ts'
+import type { DraftImage } from '../../client/media/image/types.ts'
 import { SvgRasterLoader } from '../../client/media/svg/raster-loader.ts'
 import { isolatedSvgRasterSupported, rasterizeSvg } from '../../client/media/svg/rasterize.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
@@ -214,6 +216,13 @@ export interface SurfaceInputBinding {
   submit(text: string, request: ComposerSubmitRequest): void
   /** The draft-steer entry (B2): `ApplicationEvents.events.onSteer`. */
   steer(text: string): void
+  /**
+   * PR4: the paste-media intent — `ApplicationEvents.events.onClipboardPaste`,
+   * the ONE application entry that owns the OS clipboard FIFO, the image
+   * limits and the draft write. A TSP Ctrl+V forwards here exactly once; the
+   * renderer never probes the clipboard itself.
+   */
+  pasteMedia(): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -252,6 +261,69 @@ export interface SurfaceImageBinding {
    * under a successor's authorization.
    */
   readonly imageScope: () => unknown
+  /**
+   * PR4: the READ-ONLY live draft projection the dock presents. It is a
+   * DIFFERENT capability from the durable `imageLoader`/`imageScope` pair — a
+   * staged draft is Client-local editor state, not a durable attachment — and
+   * it exposes no mutation (`add`/`remove`/`clear`/`submit`/path read): the
+   * draft lifecycle stays with the ONE `DraftImageStore` the application owner
+   * writes. Each call re-reads the LIVE composer text, so the projection can
+   * never serve a stale occurrence list.
+   */
+  readonly draftImages: SurfaceDraftImageProjection
+}
+
+/** One ordered staged-image occurrence of the LIVE composer draft. */
+export interface SurfaceDraftImageOccurrence {
+  /** The staged draft entry (its own bytes, media type and identity). */
+  readonly image: DraftImage
+  /** The occurrence's 0-based rank among ALL canonical occurrences. */
+  readonly ordinal: number
+  /** The exact `[image #N (W×H)]` token text this occurrence matched. */
+  readonly placeholder: string
+}
+
+/**
+ * PR4: the narrow read-only draft projection a mounted renderer receives.
+ *
+ * It answers exactly one question — "which staged images does the CURRENT
+ * composer draft reference, in text order?" — through the ONE canonical
+ * parser (`selectDraftImageOccurrences`), so the dock's preview and the
+ * submission expansion can never disagree about WHICH images a draft holds.
+ * It reads live state on every call and owns no cache, no list and no
+ * subscription.
+ */
+export interface SurfaceDraftImageProjection {
+  occurrences(): readonly SurfaceDraftImageOccurrence[]
+}
+
+/**
+ * PR4: the ONE construction of the read-only draft projection the dock
+ * consumes. It reads the LIVE composer text and the ONE preview source on
+ * every call, through the canonical `selectDraftImageOccurrences` parser — so
+ * the dock's previews and the submission expansion can never disagree about
+ * which staged images a draft references, and no caller has to re-implement
+ * that scan.
+ *
+ * An absent composer (before the mount returns) or an absent preview source
+ * answers `[]`: the truthful "no live composer yet" state, never a fabricated
+ * occurrence.
+ */
+export function createSurfaceDraftImageProjection(
+  composer: () => SubmissionComposerPort | undefined,
+  preview: import('../../client/media/image/types.ts').DraftImagePreviewSource | undefined,
+): SurfaceDraftImageProjection {
+  return {
+    occurrences: () => {
+      const live = composer()
+      if (live === undefined || preview === undefined) return []
+      return selectDraftImageOccurrences(live.getDraft(), preview).map(occurrence => ({
+        image: occurrence.image,
+        ordinal: occurrence.ordinal,
+        placeholder: occurrence.image.placeholder,
+      }))
+    },
+  }
 }
 
 /**
@@ -1995,7 +2067,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // TuiApp exists on this branch, so every PiTui-only owner below simply
       // never receives a mounted app (their entries are input-gated).
       if (deps.renderer !== undefined) {
-        const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope })
+        // PR4: the dock's draft projection. It reads the LIVE composer text and
+        // the ONE preview source on every call — `composerPort` is assigned
+        // from the mount result just below, so a read during the mount itself
+        // answers `[]`, the truthful "no live composer yet" state. This closure
+        // never stages, removes or uploads anything, and it names no second
+        // store: the draft lifecycle stays with the application owner.
+        const preview = deps.draftImagePreviewSource
+        const draftImages = createSurfaceDraftImageProjection(() => composerPort, preview)
+        const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope, draftImages })
         display = mounted.display
         taskPresentation = mounted.taskPresentation
         composerPort = mounted.composer
@@ -2019,6 +2099,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           // guarded at construction): an absent one leaves the gesture a
           // committed no-op rather than a fabricated submission.
           steer: (text) => deps.events.onSteer?.(text),
+          // PR4: the Ctrl+V media intent forwards to the ONE application
+          // clipboard entry (`onClipboardPaste` is optional on the events
+          // table, so an events object without it leaves the gesture a
+          // committed no-op). The renderer never probes the OS clipboard.
+          pasteMedia: () => deps.events.onClipboardPaste?.(),
           noteUserInput: () => deps.events.onUserInput?.(),
           // PR3-B B3 (§3.8): the Alt+Q continued-Question read/reopen cross
           // through the SAME interaction owner. They are bound here but can

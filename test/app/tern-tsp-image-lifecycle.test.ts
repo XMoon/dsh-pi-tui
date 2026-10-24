@@ -25,8 +25,11 @@ import { EventEmitter } from 'node:events'
 import { connect as sdkConnect, concatBytes } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput } from '@stencil-hq/tern'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import type { DraftImage } from '../../src/client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
+import type { SubmissionComposerPort } from '../../src/app/submission/composer-port.ts'
+import { createSurfaceDraftImageProjection } from '../../src/app/surface/runtime.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 
 const ENCODER = new TextEncoder()
@@ -150,6 +153,14 @@ interface Harness {
   scope(scope: unknown): void
   /** The scope the renderer's binding currently hands out. */
   scopeValue(): unknown
+  /**
+   * PR4: stage draft images and set the LIVE composer draft text, then
+   * repaint. The projection the renderer holds is the production one: it
+   * re-reads the composer text and the store on every call.
+   */
+  stageDrafts(text: string, images: readonly DraftImage[]): void
+  /** The draft text the projection currently reads. */
+  draftText(): string
   dispose(): Promise<void>
 }
 
@@ -202,7 +213,16 @@ async function mountHarness(options: {
     requestExit: () => {},
     onFatal: (error) => { fatalErrors.push(error) },
   })
-  renderer.bindImages({ imageLoader: loader, imageScope: () => activeScope })
+  // PR4: the draft projection is the PRODUCTION construction over a real
+  // composer-shaped seat and the live staged store, so the dock's occurrences
+  // come from the SAME parser submission uses.
+  let draftText = ''
+  const staged: DraftImage[] = []
+  const draftImages = createSurfaceDraftImageProjection(
+    () => ({ getDraft: () => draftText } as unknown as SubmissionComposerPort),
+    { values: () => staged },
+  )
+  renderer.bindImages({ imageLoader: loader, imageScope: () => activeScope, draftImages })
   return {
     renderer,
     loader,
@@ -214,6 +234,14 @@ async function mountHarness(options: {
     },
     scopeValue(): unknown {
       return activeScope
+    },
+    stageDrafts(text: string, images: readonly DraftImage[]): void {
+      draftText = text
+      staged.splice(0, staged.length, ...images)
+      commit(renderer, [], {})
+    },
+    draftText(): string {
+      return draftText
     },
     dispose: async () => {
       await renderer.dispose()
@@ -610,5 +638,279 @@ test('a pane WITHOUT the image capability never reads and never sends a blob', a
   assert.deepEqual(harness.tern.blobIds(), [])
   const frame = harness.tern.frames().at(-1)
   assert.equal(JSON.stringify(frame).includes('Native image display unavailable in this Tern pane'), true)
+  await harness.dispose()
+})
+
+// ── PR4: the dock's read-only LIVE draft projection ─────────────────────────
+
+/** A staged LOCAL draft whose bytes the dock may send without any read. */
+function localDraft(id: number, placeholder: string, byteLength: number, name?: string): DraftImage {
+  return {
+    id,
+    kind: 'image',
+    source: { type: 'clipboard' },
+    bytes: new Uint8Array(byteLength).fill(id + 1),
+    mediaType: 'image/png',
+    width: 640,
+    height: 360,
+    byteLength,
+    ...(name === undefined ? {} : { name }),
+    placeholder,
+  }
+}
+
+/** A recalled draft: the durable ref carries the bytes, the draft raw bytes are empty. */
+function recalledDraft(id: number, ref: ImageAttachmentRefLike): DraftImage {
+  return {
+    id,
+    kind: 'image',
+    source: { type: 'recalled' },
+    bytes: new Uint8Array(0),
+    mediaType: ref.mediaType,
+    width: ref.width,
+    height: ref.height,
+    byteLength: ref.bytes,
+    ...(ref.name === undefined ? {} : { name: ref.name }),
+    placeholder: `[image #${id} (${ref.width}×${ref.height})]`,
+    recalledRef: ref,
+  }
+}
+
+/** The CURRENT dock draft nodes the pane really holds.
+ *
+ *  A node counts only when it is still in the live id map AND every ancestor on
+ *  its current parent chain is live too: the SDK's `del` removes a subtree, and
+ *  a node left referenced by a removed parent is NOT on screen. The order is the
+ *  dock subtree's own depth-first order; the exact emitted order is pinned
+ *  separately on the production mapper's pure output. */
+function dockDraftRows(tern: ScriptedTern): { id: string; kind: string; text?: string; blob?: string }[] {
+  const live = new Map<string, LiveNode>()
+  for (const node of currentNodes(tern)) live.set(node.id, node)
+  const parentOf = new Map<string, string>()
+  for (const node of live.values()) for (const child of node.children) parentOf.set(child.id, node.id)
+  const dock = live.get('dock')
+  if (dock === undefined) return []
+  const rows: { id: string; kind: string; text?: string; blob?: string }[] = []
+  const visit = (node: LiveNode): void => {
+    // Re-check reachability on every step: a removed ancestor retires the whole
+    // subtree even though the flat map may still hold the child.
+    for (let at: string | undefined = node.id; at !== undefined; at = parentOf.get(at)) {
+      if (live.get(at) === undefined) return
+    }
+    if (node.id.includes('dock.draft-image')) {
+      rows.push({
+        id: node.id,
+        kind: node.kind,
+        ...(typeof node.props.text === 'string' ? { text: node.props.text } : {}),
+        ...(typeof node.props.blob === 'string' ? { blob: node.props.blob } : {}),
+      })
+    }
+    for (const child of node.children) visit(child)
+  }
+  visit(dock)
+  return rows
+}
+
+test('an unreferenced draft is never drawn: only LIVE occurrences become dock rows', async () => {
+  const harness = await mountHarness()
+  const staged = localDraft(1, '[image #1 (640×360)]', 1024, 'shot.png')
+  harness.stageDrafts('text without any token', [staged])
+  await until('the dock to repaint', () => harness.tern.frames().length > 0)
+
+  assert.deepEqual(dockDraftRows(harness.tern), [],
+    'a staged but unreferenced image draws no dock row')
+  assert.deepEqual(harness.tern.blobIds(), [], 'no preview blob is sent for it')
+  await harness.dispose()
+})
+
+test('one referenced draft draws its identity line and one native preview over the SAME bytes', async () => {
+  const harness = await mountHarness()
+  const staged = localDraft(1, '[image #1 (640×360)]', 2048, 'shot.png')
+  harness.stageDrafts(`look at this ${staged.placeholder}`, [staged])
+  await until('the dock preview to be drawn', () => dockDraftRows(harness.tern).some(row => row.kind === 'image'))
+
+  const rows = dockDraftRows(harness.tern)
+  assert.deepEqual(rows.map(row => row.id.replace(/^.*dock\./, '')).sort(), [
+    'draft-image-1-0',
+    'draft-image-1-0-info',
+    'draft-images',
+  ])
+  assert.match(String(rows.find(row => row.id.endsWith('dock.draft-images'))?.text),
+    /^Draft images · 1 occurrence$/u)
+  assert.equal(rows.find(row => row.id.endsWith('-info'))?.text, '[IMAGE] shot.png · 640×360 · 2.0 KiB',
+    'the identity line names the staged image through the ONE shared vocabulary')
+  const blobs = harness.tern.blobIds()
+  assert.equal(blobs.length, 1, 'the staged bytes reached the ONE SDK blob sender')
+  assert.equal(rows.find(row => row.kind === 'image')?.blob, blobs[0], 'the native node names the sent blob')
+  await harness.dispose()
+})
+
+test('a repeated token draws TWO preview nodes while the SAME bytes are sent once', async () => {
+  const harness = await mountHarness()
+  const staged = localDraft(1, '[image #1 (640×360)]', 512, 'shot.png')
+  const twice = `${staged.placeholder} and again ${staged.placeholder}`
+  harness.stageDrafts(twice, [staged])
+  await until('both previews to be drawn',
+    () => dockDraftRows(harness.tern).filter(row => row.kind === 'image').length === 2)
+
+  const images = dockDraftRows(harness.tern).filter(row => row.kind === 'image')
+  assert.deepEqual(images.map(row => row.id.replace(/^.*dock\./, '')).sort(),
+    ['draft-image-1-0', 'draft-image-1-1'],
+    'each occurrence carries its own text rank, not an array index')
+  assert.equal(images[0]?.blob, images[1]?.blob, 'both nodes name the one content-addressed blob')
+  assert.equal(harness.tern.blobIds().length, 1, 'the SDK content dedupe kept ONE blob send')
+  await harness.dispose()
+})
+
+test('deleting the token removes exactly that preview on the next frame', async () => {
+  const harness = await mountHarness()
+  const first = localDraft(1, '[image #1 (640×360)]', 256, 'a.png')
+  const second = localDraft(2, '[image #2 (640×360)]', 256, 'b.png')
+  harness.stageDrafts(`${first.placeholder} ${second.placeholder}`, [first, second])
+  await until('both previews', () => dockDraftRows(harness.tern).filter(row => row.kind === 'image').length === 2)
+
+  harness.stageDrafts(`${second.placeholder}`, [first, second])
+  await until('the first preview to be retired',
+    () => dockDraftRows(harness.tern).filter(row => row.kind === 'image').length === 1)
+
+  const rows = dockDraftRows(harness.tern)
+  assert.equal(rows.some(row => row.id.includes('draft-image-1-')), false,
+    'the deleted token no longer draws a node')
+  assert.equal(rows.find(row => row.kind === 'image')?.id.includes('draft-image-2-0'), true,
+    'the remaining token keeps its own occurrence identity')
+  await harness.dispose()
+})
+
+test('bytes over the 16 MiB gate state the reason and send no blob', async () => {
+  const harness = await mountHarness()
+  const huge = localDraft(1, '[image #1 (640×360)]', 16 * 1024 * 1024 + 1, 'huge.png')
+  harness.stageDrafts(huge.placeholder, [huge])
+  await until('the over-limit row to state its reason', () =>
+    dockDraftRows(harness.tern).some(row => String(row.text ?? '').includes('Image exceeds 16 MiB Blob limit')))
+
+  assert.deepEqual(harness.tern.blobIds(), [], 'the over-limit draft never reaches the wire')
+  assert.equal(dockDraftRows(harness.tern).some(row => row.kind === 'image'), false,
+    'no native node is drawn for bytes that were never sent')
+  assert.equal(harness.draftText(), huge.placeholder, 'the draft token survives the preview refusal')
+  await harness.dispose()
+})
+
+test('a pane WITHOUT the native capability never reads or sends draft pixels', async () => {
+  const harness = await mountHarness({
+    hello: { ...HELLO, kinds: HELLO.kinds.filter(kind => kind !== 'image'), features: HELLO.features.filter(feature => feature !== 'blobs') },
+  })
+  const staged = localDraft(1, '[image #1 (640×360)]', 1024, 'shot.png')
+  harness.stageDrafts(staged.placeholder, [staged])
+  await until('the narrow degradation row', () => dockDraftRows(harness.tern).length > 0)
+
+  const rows = dockDraftRows(harness.tern)
+  assert.equal(rows.some(row => row.kind === 'image'), false, 'the pane draws no native image')
+  assert.deepEqual(harness.tern.blobIds(), [], 'and sends no blob at all')
+  assert.match(String(rows[0]?.text), /^Draft images · 1 occurrence · \[IMAGE\] shot\.png/u,
+    'the count and the first identity still tell the reader what the draft holds')
+  await harness.dispose()
+})
+
+test('a recalled draft reads through the ONE existing loader and never sends its empty bytes', async () => {
+  const harness = await mountHarness()
+  const recalled = recalledDraft(1, ATTACHMENT)
+  harness.stageDrafts(recalled.placeholder, [recalled])
+  await until('the recalled preview to settle', () => harness.tern.blobIds().length === 1)
+
+  assert.deepEqual(harness.reads.map(read => read.id), ['att-1'],
+    'the recalled ref was read through the ONE loader under the current scope')
+  assert.equal(harness.reads[0]?.scope, harness.scopeValue(), 'the read carried the current immutable scope')
+  const image = dockDraftRows(harness.tern).find(row => row.kind === 'image')
+  assert.equal(image?.blob, harness.tern.blobIds()[0], 'the native node names the sent blob')
+  await harness.dispose()
+})
+
+test('a recalled draft with NO owned scope states why and reads nothing', async () => {
+  const harness = await mountHarness()
+  harness.scope(undefined)
+  const recalled = recalledDraft(1, ATTACHMENT)
+  harness.stageDrafts(recalled.placeholder, [recalled])
+  await until('the no-scope reason', () =>
+    dockDraftRows(harness.tern).some(row => String(row.text ?? '').includes('Image unavailable for this session')))
+
+  assert.deepEqual(harness.reads, [], 'an absent scope reads nothing')
+  assert.deepEqual(harness.tern.blobIds(), [], 'an empty byte array never becomes an image')
+  await harness.dispose()
+})
+
+test('a recalled draft whose durable ref is structurally invalid is never read', async () => {
+  const harness = await mountHarness()
+  const broken = recalledDraft(1, { ...ATTACHMENT, attachmentId: '', width: 0 })
+  harness.stageDrafts(broken.placeholder, [broken])
+  await until('the recalled degradation row', () => dockDraftRows(harness.tern).length > 0)
+
+  assert.deepEqual(harness.reads, [], 'a malformed durable ref is never authorized for a read')
+  assert.deepEqual(harness.tern.blobIds(), [])
+  await harness.dispose()
+})
+
+// ── PR4: the ordered User/Assistant body through the REAL renderer ──────────
+
+/** One user row carrying ordered blocks. */
+function userRowWith(blocks: readonly unknown[]): TranscriptMessage {
+  return { kind: 'user', turn: 1, text: 'see attached', content: blocks } as unknown as TranscriptMessage
+}
+
+test('a user body image reads through the ONE loader under the current scope and paints before the frame', async () => {
+  const harness = await mountHarness()
+  commit(harness.renderer, [userRowWith([{ type: 'image', attachment: ATTACHMENT }])], {})
+  await until('the body image blob', () => harness.tern.blobIds().length === 1)
+
+  assert.deepEqual(harness.reads.map(read => read.id), ['att-1'], 'the body image was read once')
+  assert.equal(harness.reads[0]?.scope, harness.scopeValue(), 'the read carried the current immutable scope')
+  const image = currentImageNodes(harness.tern)[0]
+  assert.equal(image?.blob, harness.tern.blobIds()[0], 'the native node names the sent blob')
+  const blobIndex = harness.tern.events.findIndex(event => event.kind === 'blob')
+  const frameIndex = harness.tern.events.findIndex(event => event.kind === 'frame'
+    && JSON.stringify(event.frame).includes(image!.id))
+  assert.equal(frameIndex > blobIndex, true, 'the blob precedes the frame that references it')
+  await harness.dispose()
+})
+
+test('an assistant body image reads through the SAME one-loader path', async () => {
+  const harness = await mountHarness()
+  const message: TranscriptMessage = {
+    kind: 'assistant', turn: 1, text: 'diagram', content: [{ type: 'image', attachment: ATTACHMENT }],
+  } as unknown as TranscriptMessage
+  commit(harness.renderer, [message], {})
+  await until('the assistant image blob', () => harness.tern.blobIds().length === 1)
+
+  assert.deepEqual(harness.reads.map(read => read.id), ['att-1'])
+  assert.equal(currentImageNodes(harness.tern)[0]?.blob, harness.tern.blobIds()[0])
+  await harness.dispose()
+})
+
+test('a body image and a tool-result image of the SAME ref read once and send ONE blob', async () => {
+  const harness = await mountHarness()
+  const assistant: TranscriptMessage = {
+    kind: 'assistant', turn: 1, text: '', content: [{ type: 'image', attachment: ATTACHMENT }],
+  } as unknown as TranscriptMessage
+  commit(harness.renderer, [assistant, toolRowWithImage()], {})
+  await until('both rows to paint their image', () => currentImageNodes(harness.tern).length === 2)
+
+  assert.equal(harness.reads.length, 1, 'the loader deduped the read per (scope, attachment id)')
+  assert.equal(harness.tern.blobIds().length, 1, 'the SDK content dedupe kept ONE blob send')
+  const images = currentImageNodes(harness.tern)
+  assert.equal(images.length, 2, 'both occurrences are still visible')
+  assert.equal(new Set(images.map(image => image.blob)).size, 1, 'both nodes name the one blob')
+  await harness.dispose()
+})
+
+test('a retired subject draws none of its body images on the new subject', async () => {
+  const harness = await mountHarness()
+  harness.scope({ scope: 'A' })
+  commit(harness.renderer, [userRowWith([{ type: 'image', attachment: ATTACHMENT }])], {})
+  await until('the first subject blob', () => harness.tern.blobIds().length === 1)
+
+  harness.scope({ scope: 'B' })
+  commit(harness.renderer, [{ kind: 'user', turn: 1, text: 'no images now' } as TranscriptMessage], {})
+  await until('the retired image to leave the tree', () => currentImageNodes(harness.tern).length === 0)
+
+  assert.equal(harness.tern.blobIds().length, 1, 'the new subject sent no body blob')
   await harness.dispose()
 })
