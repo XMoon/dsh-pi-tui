@@ -117,7 +117,7 @@ async function openDiagnosticsPage(
 /** Reason: the real Plugin Manager harness pumps its queued render/microtask
  *  work; this is not a time-based product window. */
 async function settleHarness(harness: WorkspaceHarness): Promise<void> {
-  await harness.settle() // reason: harness pump, not a deadline
+  await harness.waitForFrame() // reason: harness pump, not a deadline
 }
 
 function memoryPort(options: {

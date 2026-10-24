@@ -382,7 +382,7 @@ test('real Host card → controller confirmation → real profile write', { skip
   const port = new DirectPluginManagerPort(host.ctx as never)
   const harness = await openWorkspace({ columns: 140, rows: 40, port })
   t.after(() => { try { harness.app.dispose() } catch {} })
-  await harness.settle()
+  await harness.waitForFrame()
 
   // The REAL Host catalog card: exact name, enabled, one addressable row.
   const card = harness.controller.model().cards.find(candidate => candidate.name === AUTO_REVIEW_BUNDLE)
@@ -392,32 +392,32 @@ test('real Host card → controller confirmation → real profile write', { skip
 
   // Filter to the one card, enter Details, open the shared confirmation.
   harness.vt.sendInput('/')
-  await harness.settle()
+  await harness.waitForFrame()
   for (const character of 'auto-review') harness.vt.sendInput(character)
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r') // Details
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r') // Disable… -> confirmation
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'confirm')
   assert.match(harness.view().replace(/\s+/gu, ' '), /Disabling Auto Review can change existing Auto sessions to Full access/)
   assert.equal(profileSelectsBundle(host.profileDir, B03), true, 'opening the confirmation does not write the profile')
 
   // Default Cancel performs NO real Host write.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'details')
   assert.equal(profileSelectsBundle(host.profileDir, B03), true, 'Cancel leaves the real profile selection untouched')
 
   // Explicit disable: the real Direct port calls the official Host setBundleEnabled.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\x1b[A') // Cancel -> Disable Auto Review
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   await waitFor(() => profileSelectsBundle(host.profileDir, B03) === false)
   assert.equal(profileSelectsBundle(host.profileDir, B03), false, 'the real Host write deselected the bundle')
 })
@@ -430,30 +430,30 @@ test('real Host row disable: shared confirmation → real setPluginEnabled', { s
   const port = new DirectPluginManagerPort(host.ctx as never)
   const harness = await openWorkspace({ columns: 140, rows: 40, port })
   t.after(() => { try { harness.app.dispose() } catch {} })
-  await harness.settle()
+  await harness.waitForFrame()
 
   const card = harness.controller.model().cards.find(candidate => candidate.name === AUTO_REVIEW_BUNDLE)
   const row = card?.rows.find(candidate => candidate.entryId.length > 0 && candidate.enabled)
   assert.ok(row !== undefined, 'the real Host Auto Review card carries an enabled addressable row')
 
   harness.vt.sendInput('/')
-  await harness.settle()
+  await harness.waitForFrame()
   for (const character of 'auto-review') harness.vt.sendInput(character)
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r') // apply search
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r') // Details
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\x1b[B') // Disable… -> Disable row <id>
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'confirm')
   assert.match(harness.view().replace(/\s+/gu, ' '), new RegExp(`Disable ${row.entryId.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')} in Auto Review\\?`))
 
   // Default Cancel: the real row stays enabled.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   let after = harness.controller.model().cards.find(candidate => candidate.name === AUTO_REVIEW_BUNDLE)
   assert.equal(after?.rows.find(candidate => candidate.entryId === row.entryId)?.enabled, true)
   assert.equal(readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8'), beforePatch,
@@ -462,12 +462,12 @@ test('real Host row disable: shared confirmation → real setPluginEnabled', { s
   // Explicit disable: the real Direct port calls setPluginEnabled(entryId,false).
   // After Cancel the Details selection still points at the row action.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'confirm')
   harness.vt.sendInput('\x1b[A') // Cancel -> Disable Auto Review
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   // The official Host row mutation is durable even when it reports
   // restart-required: the profile patch must disable the exact row id.
   const targetId = String(row.patchId ?? row.entryId)
