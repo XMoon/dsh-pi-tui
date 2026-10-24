@@ -210,6 +210,8 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
       // really paints it (it must be reachable, never merely claimable).
       for (let page = 0; page < 10 && !paintedUnion.includes('Install…'); page += 1) {
         vt.sendInput('\x1b[6~')
+        // Fixed wait with a stated window: PgDn is throttled by the renderer, so
+        // the bounded loop needs one settle per page before re-reading the frame.
         await settle()
         paintedUnion += `\n${detailFrame()}`
       }

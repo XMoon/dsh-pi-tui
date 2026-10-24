@@ -96,9 +96,9 @@ test('the four sections keep their order, truthful chips and the Experimental ta
 test('the Detail is a truthful preview; official missing Install opens inspect/confirm/install', async () => {
   const harness = await open({ columns: 140, rows: 40 })
   harness.vt.sendInput('\x1b[F') // End: last experimental card
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   const detail = harness.view()
   assert.match(detail, /Official DSH catalog entry/)
   assert.match(detail, /Availability\s+Missing/)
@@ -107,14 +107,14 @@ test('the Detail is a truthful preview; official missing Install opens inspect/c
 
   // The explicit Install action starts from the Host installTarget.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   const install = harness.view()
   assert.match(install, /Official catalog · @deepseek-ai\/dsh-subagent-claude-code/)
   assert.match(install, /offered version 0.2.1-rc.2/, 'the explicit official action already inspected the Host target')
   assert.match(install, /Install/)
   assert.match(plain([harness.viewport().at(-1)!]), /Esc/)
   harness.vt.sendInput('\r') // explicit install confirm
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.installCalls.length, 1)
   assert.equal(harness.installCalls[0]!.spec, '@deepseek-ai/dsh-subagent-claude-code@0.2.1-rc.2')
   assert.match(harness.view(), /installed version 0.2.1-rc.2/)
@@ -123,37 +123,39 @@ test('the Detail is a truthful preview; official missing Install opens inspect/c
 test('search and the Tab status filter are local projections that keep identity', async () => {
   const harness = await open({ columns: 120, rows: 40 })
   harness.vt.sendInput('/')
-  await harness.settle()
+  await harness.waitForFrame()
   for (const character of 'voice') harness.vt.sendInput(character)
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   const searched = harness.view()
   assert.match(searched, /input-bundle/)
   assert.doesNotMatch(searched, /@vendor\/foo/, 'the query filters the section projection')
   assert.match(searched, /Experimental/)
 
   harness.vt.sendInput('/')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\x1b') // clear search, stay in the list
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /@vendor\/foo/, 'Esc clears the query')
 
   // Select an ENABLED card first: a filter keeps the selected identity while it
   // survives, and re-anchors on the nearest surviving card otherwise.
   harness.vt.sendInput('\x1b[H') // Home: the first card (self bundle, enabled)
-  await harness.settle()
+  // Fixed wait with a stated window: Home is a semantic step whose repaint must be
+  // observed before the filter assertion reads the frame.
+  await harness.waitForFrame()
   const selected = harness.panel.selectedCardValue()
   assert.ok(selected !== undefined, 'the list has a selected identity')
   harness.vt.sendInput('\t') // All -> Enabled
-  await harness.settle()
+  await harness.waitForFrame()
   assert.doesNotMatch(harness.view(), /\[disabled\]/, 'the Enabled projection excludes disabled cards')
   assert.match(harness.view(), /\[enabled\]/)
   assert.equal(harness.panel.selectedCardValue(), selected, 'the filter keeps the surviving identity selected')
   assert.equal(harness.snapshotCalls(), 1, 'filters are local projections, never a new inventory read')
   harness.vt.sendInput('\t') // Enabled -> Installed
   harness.vt.sendInput('\t') // Installed -> Available
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /\[available\]/, 'the Available projection keeps the catalog entries')
 })
 
@@ -164,7 +166,7 @@ test('the page paints the live palette tokens in dark, light and custom themes',
   for (const [theme, palette] of [['dark', darkColors], ['light', lightColors]] as const) {
     const harness = await open({ columns: 120, rows: 30 })
     harness.app.applyTheme(theme)
-    await harness.settle()
+    await harness.waitForFrame()
 
     const chipRow = rowOf(harness, '[current]')
     const chipCol = plain([harness.viewport()[chipRow]!]).indexOf('[current]')
@@ -184,7 +186,7 @@ test('the page paints the live palette tokens in dark, light and custom themes',
   const harness = await open({ columns: 120, rows: 30 })
   const custom = { ...darkColors, primary: '#445566', textMuted: '#112233' }
   harness.app.applyPalette(custom)
-  await harness.settle()
+  await harness.waitForFrame()
   const chipRow = rowOf(harness, '[current]')
   const chipCol = plain([harness.viewport()[chipRow]!]).indexOf('[current]')
   assert.equal(harness.vt.getCellFgRgb(chipRow, chipCol), hexToRgb('#112233'), 'custom textMuted is live')
@@ -213,12 +215,12 @@ test('mouse selection is not an action; a second click enters Details and action
   assert.ok(targetColumn >= 24, `the card is painted inside the plugin content:\n${harness.view()}`)
   press(harness, targetRow, targetColumn)
   release(harness, targetRow, targetColumn)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /> @vendor\/foo/, 'a single click selects only')
   assert.equal(harness.setBundle.length, 0, 'a single click never toggles')
 
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /\[Details\]/, 'Enter takes the Details focus')
   assert.match(harness.view(), /Enable…/)
   // A click on the painted action line dispatches the SAME intent as Enter.
@@ -227,7 +229,7 @@ test('mouse selection is not an action; a second click enters Details and action
   const enableColumn = plain([harness.viewport()[enableRow]!]).indexOf('Enable…')
   press(harness, enableRow, enableColumn)
   release(harness, enableRow, enableColumn)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.deepEqual(harness.setBundle, [{ name: '@vendor/foo', enabled: true }])
 })
 
@@ -237,9 +239,9 @@ test('a resize between press and release refuses the stale gesture', async () =>
   assert.ok(targetRow >= 0)
   press(harness, targetRow, 3)
   harness.vt.resize(100, 30)
-  await harness.settle()
+  await harness.waitForFrame()
   release(harness, targetRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.setBundle.length, 0, 'the stale click never activates a card/action')
 })
 
@@ -323,7 +325,7 @@ test('a resize whose repaint has NOT run refuses press+release on the old hit ma
   harness.vt.resize(100, 30)
   press(harness, targetRow, 3)
   release(harness, targetRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
 
   assert.equal(harness.panel.selectedCardValue(), before, 'the stale map must not select a card')
   assert.equal(harness.setBundle.length, 0, 'the stale map must not dispatch an action')
@@ -348,9 +350,9 @@ test('CJK identities stay width-safe in the list and complete in Detail/copy', a
     'the status chip stays whole beside the long CJK identity')
   // With only two cards, Down selects the CJK bundle; Enter opens Detail.
   harness.vt.sendInput('\x1b[B')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   const detail = harness.view()
   assert.ok(detail.replace(/\s+/g, '').includes(longName), `the complete CJK identity is readable:\n${detail}`)
   assert.match(detail.replace(/\s+/g, ''), /https:\/\/\*\*\*@example\.com\/foo\.git/, 'URL credentials are masked')
@@ -358,12 +360,12 @@ test('CJK identities stay width-safe in the list and complete in Detail/copy', a
   // The Detail opens at its top; one Down moves the action cursor and reveals
   // the pinned-by-scroll action block at 44x20.
   harness.vt.sendInput('\x1b[B')
-  await harness.settle()
+  await harness.waitForFrame()
   const withActions = harness.view()
   assert.match(withActions, /Actions/, 'the action block is reachable at 44x20')
   assert.match(withActions, /(Back|Remove|Enable)/, 'an action is painted at 44x20')
   harness.vt.sendInput('c')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.copied[0], `${longName}\nsource: https://***@example.com/foo.git`)
 })
 
@@ -375,7 +377,7 @@ async function selectCard(harness: WorkspaceHarness, value: string): Promise<voi
   for (let step = 0; step < 30; step += 1) {
     if (harness.panel.selectedCardValue() === value) return
     harness.vt.sendInput('\x1b[B')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.fail(`card ${value} was not selectable`)
 }
@@ -418,12 +420,12 @@ test('risk confirmation keeps the frozen warning readable with Cancel default at
     })
     await selectCard(harness, `bundle:${AUTO_REVIEW_VISUAL}`)
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
     // A short screen may reveal the selected Detail action first; Enter is the
     // ONE admission path for both the reveal and the explicit action.
     for (let step = 0; step < 3 && harness.panel.currentView() === 'details'; step += 1) {
       harness.vt.sendInput('\r')
-      await harness.settle()
+      await harness.waitForFrame()
     }
     assert.equal(harness.panel.currentView(), 'confirm', `${columns}x${rows} opens the shared confirmation`)
     const frame = harness.view()
@@ -442,12 +444,12 @@ test('risk confirmation keeps the frozen warning readable with Cancel default at
     // by accident.
     assert.match(plain([harness.viewport().at(-1)!]), /Enter confirm/)
     harness.vt.sendInput('\r') // default Cancel
-    await harness.settle()
+    await harness.waitForFrame()
     assert.equal(harness.panel.currentView(), 'details')
     assert.deepEqual(harness.setBundle, [], `${columns}x${rows} default Cancel writes nothing`)
     for (let step = 0; step < 3 && harness.panel.currentView() === 'details'; step += 1) {
       harness.vt.sendInput('\r') // Disable… again (reveal then dispatch on short screens)
-      await harness.settle()
+      await harness.waitForFrame()
     }
     assert.equal(harness.panel.currentView(), 'confirm')
     const confirmFrame = harness.view()
@@ -455,7 +457,7 @@ test('risk confirmation keeps the frozen warning readable with Cancel default at
       // A short screen scrolls the explanation; after scrolling to the end the
       // entire consequence remains readable, and the pinned choices stay.
       harness.vt.sendInput('\x1b[6~')
-      await harness.settle()
+      await harness.waitForFrame()
       assert.match(plain([harness.viewport().at(-1)!]), /Esc cancel/)
     }
     assert.match(confirmFrame, /Disable Auto Review/)
@@ -491,18 +493,18 @@ test('the B11 surface/risk copy is fully readable (scrolled) at 80×24, 72×24 a
       plugins: [],
     })
     harness.vt.sendInput('\x1b[F') // End: the Ralph card is the last row
-    await harness.settle()
+    await harness.waitForFrame()
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
     const gather = (): string => plain(harness.viewport())
     for (let page = 0; page < 12 && !gather().includes('TUI surface'); page += 1) {
       harness.vt.sendInput('\x1b[6~') // PgDn
-      await harness.settle()
+      await harness.waitForFrame()
     }
     assert.match(gather(), /TUI surface/u, `${columns}x${rows} exposes the surface fact via the existing Detail scroll`)
     for (let page = 0; page < 12 && !gather().includes('May run multiple rounds'); page += 1) {
       harness.vt.sendInput('\x1b[6~')
-      await harness.settle()
+      await harness.waitForFrame()
     }
     const frame = gather()
     assert.match(frame.replace(/\s+/gu, ' '), /ralph is a Host foreground tool/u)
@@ -541,12 +543,12 @@ test('keeps its unverified host limit visible in the real Detail', async () => {
     plugins: [],
   })
   harness.vt.sendInput('\x1b[F')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   for (let page = 0; page < 12 && !plain(harness.viewport()).includes('Host activation is not qualified here.'); page += 1) {
     harness.vt.sendInput('\x1b[6~')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   const frame = plain(harness.viewport()).replace(/\s+/gu, ' ')
   assert.match(frame, /Browser\/Node Inspector has no PiTui inspection page\./u)

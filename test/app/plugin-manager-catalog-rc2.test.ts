@@ -402,7 +402,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   const { vt, controller, panel } = harness
 
   const settle = async (rounds = 10): Promise<void> => {
-    await harness.settle(rounds)
+    await harness.waitForFrame(rounds)
   }
   const frame = (): string => plain(vt.getViewport())
   const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {

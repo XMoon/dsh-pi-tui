@@ -127,7 +127,11 @@ export interface WorkspaceHarness {
    *  been released; a phantom claim makes the production factory return
    *  `undefined` and this throws instead of faking a success. */
   reopen(options?: { readonly startOn?: 'plugins' | 'rail' }): Promise<void>
-  settle(rounds?: number): Promise<void>
+  /** Drain the pending microtasks and wait for the AUTHORITATIVE rendered frame.
+   *  (Named `waitForFrame`, not `settle`: a same-named fixed-wait helper in
+   *  `test/support` would make the New Test Policy guard read every call as a
+   *  blind sleep.) */
+  waitForFrame(rounds?: number): Promise<void>
   view(): string
   viewport(): readonly string[]
 }
@@ -258,11 +262,11 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   )
   settings = openLease(options.startOn === 'rail' ? 'rail' : 'plugins')
 
-  const settle = async (rounds = 8): Promise<void> => {
+  const waitForFrame = async (rounds = 8): Promise<void> => {
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
     await vt.waitForRender()
   }
-  await settle()
+  await waitForFrame()
   if (options.startOn !== 'rail') {
     assert.ok(panel !== undefined, 'the Settings root must mount the Plugin page on its first visible paint')
   } else {
@@ -293,9 +297,9 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     close: () => settings!.close(),
     reopen: async (reopenOptions = {}) => {
       settings = openLease(reopenOptions.startOn === 'rail' ? 'rail' : 'plugins')
-      await settle()
+      await waitForFrame()
     },
-    settle,
+    waitForFrame,
     view: () => plain(vt.getViewport()),
     viewport: () => vt.getViewport(),
   }

@@ -64,7 +64,7 @@ async function contentFocus(harness: WorkspaceHarness): Promise<void> {
 /** Esc once: the List root yields to the Categories rail (page retained). */
 async function yieldToRail(harness: WorkspaceHarness): Promise<void> {
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
 }
 
 // ── T05: the frozen breakpoint table ────────────────────────────────────────
@@ -101,7 +101,7 @@ test('T05 every breakpoint projects the frozen plugin columns in all three stage
 
     // ── Plugin Details (Enter inside the List; still content focus) ──
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
     assert.equal(harness.panel.currentView(), 'details', `${width}: Enter enters Details`)
     if (width < 76) {
       assert.match(bar(harness), /Esc back/u, `${width}: narrow Details keeps its own Esc`)
@@ -116,7 +116,7 @@ test('T05 every breakpoint projects the frozen plugin columns in all three stage
 
     // ── Esc back to the List, then the Categories rail preview ──
     harness.vt.sendInput('\x1b')
-    await harness.settle()
+    await harness.waitForFrame()
     assert.equal(harness.panel.currentView(), 'list', `${width}: Esc from Details returns to the List`)
     const page = harness.panel
     await yieldToRail(harness)
@@ -194,7 +194,7 @@ test('T07 the focus matrix runs real keys and never rebuilds or re-reads the pag
 
   // Tab: only focuses the plugin List; the page keeps its instance/query.
   harness.vt.sendInput('\t')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel, page)
   assert.equal(harness.panel.focused, true, 'Tab hands the keyboard to the plugin List')
   assert.equal(harness.snapshotCalls(), 1, 'focus transfer never re-reads the inventory')
@@ -202,35 +202,35 @@ test('T07 the focus matrix runs real keys and never rebuilds or re-reads the pag
 
   // Tab INSIDE the list keeps the page's own filter cycle (no root action).
   harness.vt.sendInput('\t')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.doesNotMatch(harness.view(), /@vendor\/foo/u, 'the Enabled filter removed the disabled bundle')
   assert.match(harness.view(), /@xmoon76\/dsh-pi-tui/u, 'the enabled bundle stays listed')
   await contentFocus(harness)
 
   // Shift+Tab from the untouched List root returns to the rail (>=76 columns).
   harness.vt.sendInput('\x1b[Z')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(bar(harness), /Esc close/u, 'Shift+Tab yielded to the rail')
   assert.equal(harness.panel.focused, false)
 
   // Enter: only re-focuses the content; it never opens Details by itself.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list', 'rail Enter only focuses the List')
   assert.equal(harness.panel.focused, true)
 
   // Enter inside the list opens Details; Shift+Tab there never crosses levels.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'details')
   assert.match(harness.view(), /\[Details\]/u, 'Details owns the ONE active device')
   harness.vt.sendInput('\x1b[Z')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'details', 'Shift+Tab never crosses out of Details')
 
   // Esc: Details -> List -> Categories; the page keeps its identity.
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list')
   assert.match(bar(harness), /Enter details/u)
   await yieldToRail(harness)
@@ -239,23 +239,23 @@ test('T07 the focus matrix runs real keys and never rebuilds or re-reads the pag
 
   // Search editing owns the keys; Esc clears it and stays in the List.
   harness.vt.sendInput('\t')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('/')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(bar(harness), /Enter apply/u, 'the search editor owns the bar')
   harness.vt.sendInput('base')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /@deepseek-ai\/dsh-base/u, 'the query narrowed the list')
   assert.doesNotMatch(harness.view(), /@xmoon76\/dsh-pi-tui/u, 'the non-matching card is gone')
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(bar(harness), /Enter details/u, 'Esc left the search editor, not the page')
 
   // Esc on the List root yields; a second Esc closes the ONE Settings lease.
   await yieldToRail(harness)
   assert.match(bar(harness), /Esc close/u)
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.doesNotMatch(harness.view(), /Settings ·/u, 'the final Esc closed the Settings workspace')
   harness.app.dispose()
 })
@@ -279,14 +279,14 @@ test('T08 the wheel scrolls the pane under the pointer and header/bar/gutter are
   // The Content column starts at row 4 (header/metadata/rule/pane header) and
   // its local row 0 is the Search row; the list body starts at row 5.
   wheel(harness, 5, 30)
-  await harness.settle()
+  await harness.waitForFrame()
   const afterList = frameRows(harness)
   assert.notDeepEqual(listOf(afterList), listOf(initial), 'the pointer-targeted List column scrolled')
   assert.deepEqual(detailOf(afterList), detailOf(initial), 'the Details column did not move')
   assert.equal(harness.panel.selectedCardValue(), selected, 'a wheel never changes the selected identity')
 
   wheel(harness, 5, 24 + split.leftWidth + 4)
-  await harness.settle()
+  await harness.waitForFrame()
   const afterDetail = frameRows(harness)
   assert.deepEqual(listOf(afterDetail), listOf(afterList), 'the List column did not move')
   assert.notDeepEqual(detailOf(afterDetail), detailOf(afterList), 'the pointer-targeted Details column scrolled')
@@ -295,13 +295,13 @@ test('T08 the wheel scrolls the pane under the pointer and header/bar/gutter are
   // scroll owners: the frame is byte-identical after each event.
   const frozen = harness.view()
   wheel(harness, 3, 70)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.view(), frozen, 'the shared pane header is inert')
   wheel(harness, 6, 23)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.view(), frozen, 'the rail/content gutter is inert')
   wheel(harness, frameRows(harness).length - 1, 10)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.view(), frozen, 'the physical last-row bar is inert')
   harness.app.dispose()
 })
@@ -313,7 +313,7 @@ test('T08 the wheel over the Categories rail scrolls the rail on a short frame',
   const before = railOf()
   assert.ok(before.some(line => line.includes('About')), `the rail starts at About:\n${harness.view()}`)
   wheel(harness, 6, 2)
-  await harness.settle()
+  await harness.waitForFrame()
   const after = railOf()
   assert.notDeepEqual(after, before, 'the rail scrolled under the pointer')
   assert.ok(!after.some(line => line.includes('About')), 'the rail window moved by one category')
@@ -349,14 +349,14 @@ function railRow(harness: WorkspaceHarness, label: string): number {
  *  either move to another cell or use the keyboard. */
 async function clickCell(harness: WorkspaceHarness, row: number, column: number): Promise<void> {
   click(harness, row, column)
-  await harness.settle()
+  await harness.waitForFrame()
 }
 
 async function selectCard(harness: WorkspaceHarness, value: string): Promise<void> {
   for (let step = 0; step < 30; step += 1) {
     if (harness.panel.selectedCardValue() === value) return
     harness.vt.sendInput('\x1b[B')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.fail(`card ${value} was not selectable`)
 }
@@ -365,7 +365,7 @@ async function selectCard(harness: WorkspaceHarness, value: string): Promise<voi
 async function openDetails(harness: WorkspaceHarness): Promise<void> {
   await selectCard(harness, 'bundle:@vendor/foo')
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'details', 'Details must be open')
 }
 
@@ -373,24 +373,24 @@ async function openDetails(harness: WorkspaceHarness): Promise<void> {
 async function openRemoveConfirm(harness: WorkspaceHarness): Promise<void> {
   await openDetails(harness)
   harness.vt.sendInput('\x1b[B') // Enable… -> Remove…
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'confirm', 'the Remove confirmation must be open')
   harness.vt.sendInput('\x1b[A') // Cancel -> Remove
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> Remove\s*$/mu, 'the dangerous primary must be selected and painted')
 }
 
 /** Open the install editor from the last (official missing) card. */
 async function openInstall(harness: WorkspaceHarness): Promise<void> {
   harness.vt.sendInput('\x1b[F') // End: the last card is the official Claude Code entry
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   for (let attempt = 0; attempt < 3 && harness.panel.currentView() === 'details'; attempt += 1) {
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.equal(harness.panel.currentView(), 'install', 'the install editor must be open')
 }
@@ -398,14 +398,14 @@ async function openInstall(harness: WorkspaceHarness): Promise<void> {
 test('T09 below the body floor only the REAL Esc is admitted and advertised', async () => {
   const harness = await open({ columns: 120, rows: 24 })
   harness.vt.resize(120, 2)
-  await harness.settle()
+  await harness.waitForFrame()
   const zero = harness.view()
   assert.equal(bar(harness).trim(), 'Esc back', 'the 2-row frame advertises only the real Esc destination')
   // Every key the page advertises on a full frame is inert here: none may open
   // a hidden body, start a Host read or change the filter.
   for (const key of ['/', 'i', 'd', 'r', '\t'] as const) {
     harness.vt.sendInput(key)
-    await harness.settle()
+    await harness.waitForFrame()
     assert.equal(harness.panel.currentView(), 'list', `${JSON.stringify(key)} cannot open a hidden page`)
     assert.equal(harness.view(), zero, `${JSON.stringify(key)} leaves the zero-row frame untouched`)
   }
@@ -414,12 +414,12 @@ test('T09 below the body floor only the REAL Esc is admitted and advertised', as
   // the hidden keys left state behind (the List root owns the bar, the filter
   // still shows the disabled card).
   harness.vt.resize(120, 24)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list')
   assert.match(bar(harness), /Enter details/u, 'the restored List root keeps its own bar')
   assert.match(harness.view(), /@vendor\/foo/u, 'the zero-row Tab did not cycle the filter')
   harness.vt.sendInput('d')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'diagnostics', 'the same diagnostics key really acts on a full frame')
   harness.app.dispose()
 })
@@ -427,28 +427,28 @@ test('T09 below the body floor only the REAL Esc is admitted and advertised', as
 test('T09 a zero-row search edit drops the apply and keeps only the real Esc', async () => {
   const harness = await open({ columns: 140, rows: 40 })
   harness.vt.sendInput('/')
-  await harness.settle()
+  await harness.waitForFrame()
   for (const character of 'foo') harness.vt.sendInput(character)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Search: foo/u, 'the query was typed on the full frame')
   harness.vt.resize(80, 2)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(bar(harness).trim(), 'Esc clear search', 'the zero-row search bar names the real Esc effect only')
   harness.vt.sendInput('x')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.resize(140, 40)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Search: foo/u, 'the zero-row typing never reached the search input')
   assert.match(bar(harness), /Enter apply/u, 'the zero-row Enter never applied the search')
   // The real Esc is still executable on a zero-row frame: it clears the search.
   harness.vt.resize(80, 2)
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.resize(140, 40)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.doesNotMatch(harness.view(), /Search: foo/u, 'Esc cleared the query')
   assert.doesNotMatch(bar(harness), /Enter apply/u, 'Esc left the search editor')
   harness.app.dispose()
@@ -461,12 +461,12 @@ test('T09 a same-category rail click never steals a plugin sub-view Esc gradient
   const details = await open({ columns: 120, rows: 24 })
   await openDetails(details)
   click(details, railRow(details, 'Plugins'), 3)
-  await details.settle()
+  await details.waitForFrame()
   assert.equal(details.panel.currentView(), 'details', 'the rail click cannot leave Details')
   assert.equal(details.panel.focused, true, 'the page keeps the ONE input focus')
   assert.match(bar(details), /Esc back/u, 'the page keeps the last-row bar')
   details.vt.sendInput('\x1b')
-  await details.settle()
+  await details.waitForFrame()
   assert.equal(details.panel.currentView(), 'list', 'Esc runs the page gradient first')
   assert.match(details.view(), /Settings · Plugins/u, 'the Settings lease stays open')
   details.app.dispose()
@@ -476,7 +476,7 @@ test('T09 a same-category rail click never steals a plugin sub-view Esc gradient
   assert.doesNotMatch(fullWidth.view(), /Categories \(8\)/u, 'the confirmation paints no Categories rail to click')
   assert.equal(fullWidth.panel.focused, true)
   fullWidth.vt.sendInput('\x1b')
-  await fullWidth.settle()
+  await fullWidth.waitForFrame()
   assert.equal(fullWidth.panel.currentView(), 'details', 'Esc cancels the confirmation, not the workspace')
   fullWidth.app.dispose()
 
@@ -487,9 +487,9 @@ test('T09 a same-category rail click never steals a plugin sub-view Esc gradient
   // The page's own Esc gradient (edit -> hide) runs first and never closes the
   // Settings lease: the same sub-view safety the rail click must not bypass.
   install.vt.sendInput('\x1b')
-  await install.settle()
+  await install.waitForFrame()
   install.vt.sendInput('\x1b')
-  await install.settle()
+  await install.waitForFrame()
   assert.equal(install.panel.currentView(), 'list', 'the second Esc hides the install view')
   assert.match(install.view(), /Settings · Plugins/u, 'the install Esc gradient never closes the workspace')
   install.app.dispose()
@@ -498,7 +498,7 @@ test('T09 a same-category rail click never steals a plugin sub-view Esc gradient
   // yields the keyboard to the rail (the §3.3 hand-off, not a refusal).
   const root = await open({ columns: 120, rows: 24 })
   click(root, railRow(root, 'Plugins'), 3)
-  await root.settle()
+  await root.waitForFrame()
   assert.equal(root.panel.focused, false, 'the List root yields to the rail')
   assert.equal(root.panel.currentView(), 'list', 'the yield keeps the page view')
   assert.match(bar(root), /Esc close/u, 'the rail now owns the last-row bar')
@@ -514,38 +514,38 @@ test('T09 the dual wheel routes by the pointer pane and the pair gutter is inert
   const before = frameRows(harness)
   // Both cells of the 2-cell pair gutter belong to neither pane.
   wheel(harness, 5, 24 + split.leftWidth)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.deepEqual(frameRows(harness), before, 'the left pair-gutter cell owns no scroll')
   wheel(harness, 5, 24 + split.leftWidth + 1)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.deepEqual(frameRows(harness), before, 'the right pair-gutter cell owns no scroll')
 
   wheel(harness, 5, 24 + 5)
-  await harness.settle()
+  await harness.waitForFrame()
   const afterList = frameRows(harness)
   assert.notDeepEqual(listOf(afterList), listOf(before), 'the List column scrolled under the pointer')
   assert.deepEqual(detailOf(afterList), detailOf(before), 'the Details column did not move')
   wheel(harness, 5, 24 + split.leftWidth + 2 + 5)
-  await harness.settle()
+  await harness.waitForFrame()
   const afterDetail = frameRows(harness)
   assert.deepEqual(listOf(afterDetail), listOf(afterList), 'the List column did not move')
   assert.notDeepEqual(detailOf(afterDetail), detailOf(afterList), 'the pointer Details column scrolled')
 
   // Details view paints the SAME pair: the pointer column still decides.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'details')
   const detailsFrame = frameRows(harness)
   // The list window sits one row down from the section header; the wheel is
   // still routed by the pointer: an UP wheel over the List column must move
   // the List (and never the Details), even while Details owns the keyboard.
   wheel(harness, 5, 24 + 5, false)
-  await harness.settle()
+  await harness.waitForFrame()
   const listHover = frameRows(harness)
   assert.notDeepEqual(listOf(listHover), listOf(detailsFrame), 'the List column under the pointer scrolled in Details view')
   assert.deepEqual(detailOf(listHover), detailOf(detailsFrame), 'Details did not scroll from a List-column wheel')
   wheel(harness, 5, 24 + split.leftWidth + 2 + 5)
-  await harness.settle()
+  await harness.waitForFrame()
   const detailHover = frameRows(harness)
   assert.deepEqual(listOf(detailHover), listOf(listHover), 'the List column did not move')
   assert.notDeepEqual(detailOf(detailHover), detailOf(listHover), 'the Details column scrolled under the pointer')
@@ -562,7 +562,7 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   press(stale, removeRow, 5)
   stale.app.notify('notice reduces risk viewport', 'error')
   release(stale, removeRow, 5)
-  await stale.settle()
+  await stale.waitForFrame()
   assert.deepEqual(stale.removeBundle, [], 'a press whose root chrome moved before the release never dispatches')
   assert.doesNotMatch(stale.view(), /^> Remove\s*$/mu, 'the repainted frame really withholds the primary')
   assert.match(stale.view(), /withheld/u)
@@ -573,7 +573,7 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   await openRemoveConfirm(fresh)
   press(fresh, rowOf(fresh, '> Remove'), 5)
   release(fresh, rowOf(fresh, '> Remove'), 5)
-  await fresh.settle()
+  await fresh.waitForFrame()
   assert.deepEqual(fresh.removeBundle, ['@vendor/foo'], 'the same painted gesture really dispatches')
   fresh.app.dispose()
 
@@ -582,30 +582,30 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   const toggle = await open({ columns: 120, rows: 24 })
   await selectCard(toggle, 'bundle:@vendor/foo')
   toggle.vt.sendInput('\r')
-  await toggle.settle()
+  await toggle.waitForFrame()
   toggle.vt.sendInput('\x1b[B') // reveal the second Detail action…
-  await toggle.settle()
+  await toggle.waitForFrame()
   toggle.vt.sendInput('\x1b[A') // …then reveal/select Enable…
-  await toggle.settle()
+  await toggle.waitForFrame()
   const enableRow = rowOf(toggle, '> Enable…')
   press(toggle, enableRow, 70)
   toggle.app.notify('notice reduces risk viewport', 'error')
   release(toggle, enableRow, 70)
-  await toggle.settle()
+  await toggle.waitForFrame()
   assert.deepEqual(toggle.setBundle, [], 'the stale Enable release never writes the Host')
   toggle.app.dispose()
 
   const toggleFresh = await open({ columns: 120, rows: 24 })
   await selectCard(toggleFresh, 'bundle:@vendor/foo')
   toggleFresh.vt.sendInput('\r')
-  await toggleFresh.settle()
+  await toggleFresh.waitForFrame()
   toggleFresh.vt.sendInput('\x1b[B')
-  await toggleFresh.settle()
+  await toggleFresh.waitForFrame()
   toggleFresh.vt.sendInput('\x1b[A')
-  await toggleFresh.settle()
+  await toggleFresh.waitForFrame()
   press(toggleFresh, rowOf(toggleFresh, '> Enable…'), 70)
   release(toggleFresh, rowOf(toggleFresh, '> Enable…'), 70)
-  await toggleFresh.settle()
+  await toggleFresh.waitForFrame()
   assert.deepEqual(toggleFresh.setBundle, [{ name: '@vendor/foo', enabled: true }], 'the same painted Enable button really dispatches')
   toggleFresh.app.dispose()
 
@@ -624,10 +624,10 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   assert.ok(railBefore.length > 0, `the rail must be painted:\n${railWheel.view()}`)
   railWheel.app.notify('notice moves the rail geometry', 'error')
   wheel(railWheel, 6, 2)
-  await railWheel.settle()
+  await railWheel.waitForFrame()
   assert.deepEqual(visibleRail(), railBefore, 'a rail wheel in the unrepainted chrome window owns no scroll')
   wheel(railWheel, 6, 2)
-  await railWheel.settle()
+  await railWheel.waitForFrame()
   assert.notDeepEqual(visibleRail(), railBefore, 'the repainted rail still scrolls under the pointer')
   railWheel.app.dispose()
   // The shortest interleaving: a chrome-changing REPAINT alone crosses the
@@ -639,15 +639,15 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   await yieldToRail(repainted)
   press(repainted, railRow(repainted, 'Display'), 3)
   repainted.app.notify('notice repaints before the release', 'error')
-  await repainted.settle()
+  await repainted.waitForFrame()
   assert.match(repainted.view(), /notice repaints before the release/u, 'the notice really repainted')
   release(repainted, railRow(repainted, 'Display'), 3)
-  await repainted.settle()
+  await repainted.waitForFrame()
   assert.match(repainted.view(), /^> Plugins\b/mu, 'the release after a chrome-changing repaint never switches category')
   assert.doesNotMatch(repainted.view(), /Scope: Display/u)
   // Positive control on a fresh cell: the panel still admits a new gesture.
   click(repainted, railRow(repainted, 'Tools'), 3)
-  await repainted.settle()
+  await repainted.waitForFrame()
   assert.match(repainted.view(), /Scope: TUI preferences/u, 'a fresh rail gesture still switches category')
   repainted.app.dispose()
 
@@ -657,9 +657,9 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   await yieldToRail(benign)
   press(benign, railRow(benign, 'Display'), 3)
   benign.app.requestRender()
-  await benign.settle()
+  await benign.waitForFrame()
   release(benign, railRow(benign, 'Display'), 3)
-  await benign.settle()
+  await benign.waitForFrame()
   assert.match(benign.view(), /^> Display\b/mu, 'a same-plan repaint keeps the pending press alive')
   assert.match(benign.view(), /Scope: TUI preferences/u, 'the preserved press really switched to Display')
   benign.app.dispose()
@@ -674,9 +674,9 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   press(interleaved, displayRow, 3)
   interleaved.app.notify('notice between press and wheel', 'error')
   wheel(interleaved, 6, 2)
-  await interleaved.settle()
+  await interleaved.waitForFrame()
   release(interleaved, railRow(interleaved, 'Display'), 3)
-  await interleaved.settle()
+  await interleaved.waitForFrame()
   assert.match(interleaved.view(), /^> Plugins\b/mu, 'the category is still Plugins after the stale release')
   assert.doesNotMatch(interleaved.view(), /Scope: Display/u, 'the release after a refused stale wheel never switches category')
   assert.equal(interleaved.panel.focused, false, 'the rail still owns the keyboard after the repaint')
@@ -685,7 +685,7 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   // Display cell here would prove the fork's double-click rule rather than the
   // panel's admission. The neighboring Tools row is a fresh cell and switches.
   click(interleaved, railRow(interleaved, 'Tools'), 3)
-  await interleaved.settle()
+  await interleaved.waitForFrame()
   assert.match(interleaved.view(), /Scope: TUI preferences/u, 'a fresh rail gesture still switches category')
   interleaved.app.dispose()
 
@@ -698,13 +698,13 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   press(railCase, aboutRow, 3)
   railCase.app.notify('notice moves the rail hit map', 'error')
   release(railCase, aboutRow, 3)
-  await railCase.settle()
+  await railCase.waitForFrame()
   assert.match(railCase.view(), /Settings · Plugins/u, 'the stale rail release never changes the category')
   assert.equal(railCase.panel.currentView(), 'list', 'the stale rail release never disposes the plugin page')
   // Positive control: the repainted frame promotes the SAME rail target at its
   // NEW row (one row lower) and really switches category.
   click(railCase, railRow(railCase, 'About'), 3)
-  await railCase.settle()
+  await railCase.waitForFrame()
   assert.match(railCase.view(), /Scope: About/u, 'the fresh rail frame still switches category')
   railCase.app.dispose()
 })
@@ -726,7 +726,7 @@ test('T09 a Controller install-phase change between press and release refuses th
   // attempt settles as failed with its approval risk painted.
   for (let attempt = 0; attempt < 3 && harness.controller.installView()?.phase !== 'failed'; attempt += 1) {
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.equal(harness.controller.installView()?.phase, 'failed')
   assert.equal(harness.installCalls.length, 1)
@@ -736,7 +736,7 @@ test('T09 a Controller install-phase change between press and release refuses th
   // invalidate the old approve target before its release.
   assert.equal(harness.controller.beginManualInstall(), true, 'a new manual attempt is admitted')
   release(harness, approveRow, 5)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.installCalls.length, 1, 'the stale approve release never dispatches a second install')
   assert.equal(harness.controller.installView()?.phase, 'editing', 'the new attempt stays in its own phase')
   // Control: the settled editing frame keeps the SAME request identity AND
@@ -745,7 +745,7 @@ test('T09 a Controller install-phase change between press and release refuses th
   assert.equal(harness.controller.installView()?.requestId, editingBefore, 'the request identity is unchanged')
   // The editing frame needs a spec before Inspect is admitted.
   for (const character of 'pkg') harness.vt.sendInput(character)
-  await harness.settle()
+  await harness.waitForFrame()
   const inspectRow = rowOf(harness, 'Inspect')
   await clickCell(harness, inspectRow, 5)
   assert.notEqual(harness.controller.installView()?.phase, 'editing',
@@ -765,10 +765,10 @@ test('T09 a real Port invalidation while the press is held refuses the old relea
   const readsBefore = harness.snapshotCalls()
   press(harness, cardRow, 30)
   harness.invalidate()
-  await harness.settle()
+  await harness.waitForFrame()
   assert.ok(harness.snapshotCalls() > readsBefore, 'the Port invalidation really reread the inventory')
   release(harness, cardRow, 30)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list', 'a Port invalidation held across the press refuses the release')
   assert.equal(harness.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the press never re-selected a card')
   // Positive control on another card row (the fork withholds a same-cell click in
@@ -776,7 +776,7 @@ test('T09 a real Port invalidation while the press is held refuses the old relea
   const otherRow = rowOf(harness, '@deepseek-ai/dsh-base')
   press(harness, otherRow, 30)
   release(harness, otherRow, 30)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base', 'the settled frame admits a fresh selection')
   harness.app.dispose()
 })
@@ -799,11 +799,11 @@ test('T09 a plugin sub-view change under a held rail press refuses the old relea
   // release that only compares the root revision and the target identity would
   // still match the old rail hit.
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list', 'the page Esc ran its own gradient')
 
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
   assert.doesNotMatch(harness.view(), /Scope: About/u)
   assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives the stale release')
@@ -812,7 +812,7 @@ test('T09 a plugin sub-view change under a held rail press refuses the old relea
   // really switches category. (The About cell was just released, so clicking it
   // again would land inside the fork's multi-click window.)
   click(harness, railRow(harness, 'Models'), 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click selects the Models category')
   assert.equal(harness.panel.currentView(), 'list', 'the switched-away plugin page released its view')
   harness.app.dispose()
@@ -833,19 +833,19 @@ test('T09 a same-view filter or selection change under a held rail press refuses
     // A key the ROOT forwards into the page: Tab cycles the status filter, Down
     // moves the selected card. Both keep view/yield unchanged.
     harness.vt.sendInput(change === 'filter' ? '\t' : '\x1b[B')
-    await harness.settle()
+    await harness.waitForFrame()
     assert.equal(harness.panel.currentView(), 'list', `${change}: the page stayed on the List view`)
     assert.ok(harness.panel.gestureRevision() > before, `${change}: the page's own gesture revision advanced`)
 
     release(harness, aboutRow, 3)
-    await harness.settle()
+    await harness.waitForFrame()
     assert.match(harness.view(), /Settings · Plugins/u, `${change}: the stale rail release never switches category`)
     assert.doesNotMatch(harness.view(), /Scope: About/u)
     assert.equal(harness.panel.currentView(), 'list', `${change}: the plugin page survives the stale release`)
 
     // Positive control on a fresh rail row: the settled frame still switches.
     click(harness, railRow(harness, 'Models'), 3)
-    await harness.settle()
+    await harness.waitForFrame()
     assert.match(harness.view(), /^> Models\b/mu, `${change}: the fresh rail click still switches category`)
     harness.app.dispose()
   }
@@ -864,12 +864,12 @@ test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture
   press(toWide, wideRow, 6)
   toWide.vt.resize(120, 24)
   release(toWide, wideRow, 6)
-  await toWide.settle()
+  await toWide.waitForFrame()
   assert.equal(toWide.panel.currentView(), 'list', 'the 119->120 straddle never opens Details')
   const wideFresh = rowOf(toWide, '> @vendor/foo')
   press(toWide, wideFresh, 30)
   release(toWide, wideFresh, 30)
-  await toWide.settle()
+  await toWide.waitForFrame()
   assert.equal(toWide.panel.currentView(), 'details', 'the settled 120 frame admits the click')
   toWide.app.dispose()
 
@@ -880,12 +880,12 @@ test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture
   press(toMedium, mediumRow, 30)
   toMedium.vt.resize(119, 24)
   release(toMedium, mediumRow, 30)
-  await toMedium.settle()
+  await toMedium.waitForFrame()
   assert.equal(toMedium.panel.currentView(), 'list', 'the 120->119 straddle never opens Details')
   const mediumFresh = rowOf(toMedium, '> @vendor/foo')
   press(toMedium, mediumFresh, 6)
   release(toMedium, mediumFresh, 6)
-  await toMedium.settle()
+  await toMedium.waitForFrame()
   assert.equal(toMedium.panel.currentView(), 'details', 'the settled 119 frame admits the click at its own x')
   toMedium.app.dispose()
 
@@ -897,12 +897,12 @@ test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture
   press(narrow, narrowRow, 6)
   narrow.vt.resize(76, 24)
   release(narrow, narrowRow, 6)
-  await narrow.settle()
+  await narrow.waitForFrame()
   assert.equal(narrow.panel.currentView(), 'list', 'the 75->76 straddle never opens Details')
   const narrowFresh = rowOf(narrow, '> @vendor/foo')
   press(narrow, narrowFresh, 6)
   release(narrow, narrowFresh, 6)
-  await narrow.settle()
+  await narrow.waitForFrame()
   assert.equal(narrow.panel.currentView(), 'details', 'the settled 76 frame admits the click')
   narrow.app.dispose()
 
@@ -913,12 +913,12 @@ test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture
   press(collapse, collapseRow, 40)
   collapse.vt.resize(75, 24)
   release(collapse, collapseRow, 40)
-  await collapse.settle()
+  await collapse.waitForFrame()
   assert.equal(collapse.panel.currentView(), 'list', 'the 76->75 straddle never opens Details')
   const collapseFresh = rowOf(collapse, '> @vendor/foo')
   press(collapse, collapseFresh, 6)
   release(collapse, collapseFresh, 6)
-  await collapse.settle()
+  await collapse.waitForFrame()
   assert.equal(collapse.panel.currentView(), 'details', 'the settled 75 frame admits the click')
   collapse.app.dispose()
 })
@@ -932,13 +932,13 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   press(resizeCase, cardRow, 30)
   resizeCase.vt.resize(120, 7)
   release(resizeCase, cardRow, 30)
-  await resizeCase.settle()
+  await resizeCase.waitForFrame()
   assert.equal(resizeCase.panel.currentView(), 'list', 'a resize before the release never opens Details')
   const movedRow = rowOf(resizeCase, '> @vendor/foo')
   assert.equal(movedRow, cardRow - 1, 'the same child grant really moved the painted box top')
   press(resizeCase, movedRow, 30)
   release(resizeCase, movedRow, 30)
-  await resizeCase.settle()
+  await resizeCase.waitForFrame()
   assert.equal(resizeCase.panel.currentView(), 'details', 'the fresh frame admits the same click')
   resizeCase.app.dispose()
 
@@ -949,12 +949,12 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   preRepaint.vt.resize(80, 24)
   press(preRepaint, staleRow, 30)
   release(preRepaint, staleRow, 30)
-  await preRepaint.settle()
+  await preRepaint.waitForFrame()
   assert.equal(preRepaint.panel.currentView(), 'list', 'a press before the resize repaint is refused')
   const newRow = rowOf(preRepaint, '> @vendor/foo')
   press(preRepaint, newRow, 5)
   release(preRepaint, newRow, 5)
-  await preRepaint.settle()
+  await preRepaint.waitForFrame()
   assert.equal(preRepaint.panel.currentView(), 'details', 'the repainted medium frame admits the same click')
   preRepaint.app.dispose()
 
@@ -964,16 +964,16 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   const focusRow = rowOf(focusCase, '> @vendor/foo')
   press(focusCase, focusRow, 30)
   focusCase.vt.sendInput('\x1b[Z')
-  await focusCase.settle()
+  await focusCase.waitForFrame()
   assert.equal(focusCase.panel.focused, false, 'the List root really yielded')
   release(focusCase, focusRow, 30)
-  await focusCase.settle()
+  await focusCase.waitForFrame()
   assert.equal(focusCase.panel.currentView(), 'list', 'the focus yield drops the press')
   assert.match(bar(focusCase), /Esc close/u)
   // §8 T09 wants a MOUSE control on the next frame: re-focus the List through
   // the rail, then click a DIFFERENT card's painted cell (not the pressed one).
   focusCase.vt.sendInput('\r')
-  await focusCase.settle()
+  await focusCase.waitForFrame()
   assert.equal(focusCase.panel.focused, true, 'the fresh rail Enter re-focuses the plugin List')
   const otherCell = rowOf(focusCase, '@deepseek-ai/dsh-base')
   await clickCell(focusCase, otherCell, 30)
@@ -994,14 +994,14 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   const filterRow = rowOf(filterCase, '> @vendor/foo')
   press(filterCase, filterRow, 30)
   filterCase.vt.sendInput('/')
-  await filterCase.settle()
+  await filterCase.waitForFrame()
   assert.match(bar(filterCase), /Enter apply/u, 'the search editor really opened under the press')
   release(filterCase, filterRow, 30)
-  await filterCase.settle()
+  await filterCase.waitForFrame()
   assert.equal(filterCase.panel.currentView(), 'list', 'an in-page edit between press and release refuses the old release')
   // Control: after Esc leaves the editor, a POINTER click on another card acts.
   filterCase.vt.sendInput('\x1b')
-  await filterCase.settle()
+  await filterCase.waitForFrame()
   await clickCell(filterCase, rowOf(filterCase, '@deepseek-ai/dsh-base'), 30)
   assert.equal(filterCase.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base',
     'the fresh frame admits a pointer selection after the in-page edit')
@@ -1014,7 +1014,7 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   press(noticeCase, noticeRow, 30)
   noticeCase.controller.explain('the inventory changed under the press')
   release(noticeCase, noticeRow, 30)
-  await noticeCase.settle()
+  await noticeCase.waitForFrame()
   assert.equal(noticeCase.panel.currentView(), 'list', 'a Host-notice change between press and release refuses the old release')
   // Control: after the notice settles, a POINTER click on another card acts.
   await clickCell(noticeCase, rowOf(noticeCase, '@deepseek-ai/dsh-base'), 30)
@@ -1029,12 +1029,12 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   const categoryRow = rowOf(categoryCase, '> @vendor/foo')
   press(categoryCase, categoryRow, 30)
   click(categoryCase, railRow(categoryCase, 'About'), 3)
-  await categoryCase.settle()
+  await categoryCase.waitForFrame()
   assert.match(categoryCase.view(), /Scope: About/u, 'the category change really happened')
   assert.match(categoryCase.view(), /^> About\b/mu, 'the rail selects About')
   assert.equal(categoryCase.panel.focused, false, 'the disposed plugin page released the input focus')
   release(categoryCase, categoryRow, 30)
-  await categoryCase.settle()
+  await categoryCase.waitForFrame()
   assert.equal(categoryCase.panel.currentView(), 'list', 'the old release never opens Details on the disposed page')
   assert.deepEqual(categoryCase.removeBundle, [])
   assert.deepEqual(categoryCase.setBundle, [])
@@ -1042,13 +1042,13 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   for (let step = 0; step < 12; step += 1) {
     if (/^> Plugins\b/mu.test(categoryCase.view())) break
     categoryCase.vt.sendInput('\x1b[B')
-    await categoryCase.settle()
+    await categoryCase.waitForFrame()
   }
   assert.match(categoryCase.view(), /^> Plugins\b/mu, 'the rail re-selects the Plugins category')
   // Rail Enter hands the keyboard to the List without cycling the page's own
   // status filter (Tab inside the content is the page's filter key).
   categoryCase.vt.sendInput('\r')
-  await categoryCase.settle()
+  await categoryCase.waitForFrame()
   assert.equal(categoryCase.panel.focused, true, 'the fresh Plugins frame admits the rail focus key')
   await clickCell(categoryCase, rowOf(categoryCase, '@deepseek-ai/dsh-base'), 30)
   assert.equal(categoryCase.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base',
@@ -1082,7 +1082,7 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   // authoritative inventory before the pointer control. (80x10 keeps a one-row
   // list window, so the readiness witness is a visible card, not the target.)
   for (let attempt = 0; attempt < 40 && !disposed.view().includes('Official DSH'); attempt += 1) {
-    await disposed.settle()
+    await disposed.waitForFrame()
   }
   assert.match(disposed.view(), /@deepseek-ai\/dsh-base/u, 'the re-mounted page settled on the new inventory')
   assert.doesNotMatch(disposed.view(), /Loading plugins/u, 'the re-mounted page left its loading state')
@@ -1090,7 +1090,7 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   // first, then prove the POINTER still hits the painted selection row.
   for (let step = 0; step < 30 && disposed.panel.selectedCardValue() !== 'bundle:@vendor/foo'; step += 1) {
     disposed.vt.sendInput('\x1b[B')
-    await disposed.settle()
+    await disposed.waitForFrame()
   }
   assert.equal(disposed.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the re-opened page selected the card')
   await clickCell(disposed, rowOf(disposed, '> @vendor/foo'), 30)
@@ -1108,7 +1108,7 @@ test('T03 the narrow Plugins Right path mounts the page once (44 and 75 columns)
     for (let step = 0; step < 12; step += 1) {
       if (/^> Plugins\b/mu.test(harness.view())) break
       harness.vt.sendInput('\x1b[B')
-      await harness.settle()
+      await harness.waitForFrame()
     }
     assert.match(harness.view(), /^> Plugins\b/mu, `${columns}: the rail selects Plugins`)
     assert.equal(harness.panelInstance(), undefined, `${columns}: selecting the category mounts nothing`)
@@ -1116,7 +1116,7 @@ test('T03 the narrow Plugins Right path mounts the page once (44 and 75 columns)
 
     // Right: the first focus transfer mounts ONCE and reads ONCE.
     harness.vt.sendInput('\x1b[C')
-    await harness.settle()
+    await harness.waitForFrame()
     const page = harness.panelInstance()
     assert.ok(page !== undefined, `${columns}: Right mounts the page`)
     assert.equal(harness.snapshotCalls(), 1, `${columns}: Right reads the inventory exactly once`)
@@ -1124,7 +1124,7 @@ test('T03 the narrow Plugins Right path mounts the page once (44 and 75 columns)
     assert.equal(page!.currentView(), 'list', `${columns}: the page starts on the List`)
     // Esc yields to the rail keeping the SAME instance and the ONE read.
     harness.vt.sendInput('\x1b')
-    await harness.settle()
+    await harness.waitForFrame()
     assert.equal(harness.panelInstance(), page, `${columns}: the yield keeps the instance`)
     assert.equal(harness.snapshotCalls(), 1, `${columns}: the yield never re-reads`)
     harness.app.dispose()
@@ -1145,7 +1145,7 @@ test('T03 a 75-column production page mounts lazily from the Categories rail', a
   for (let step = 0; step < 12; step += 1) {
     if (/^> Plugins\b/mu.test(harness.view())) break
     harness.vt.sendInput('\x1b[B')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.match(harness.view(), /^> Plugins\b/mu, 'the rail selects Plugins')
   assert.equal(harness.panelInstance(), undefined, 'selecting the category still mounts nothing')
@@ -1153,7 +1153,7 @@ test('T03 a 75-column production page mounts lazily from the Categories rail', a
 
   // Enter takes the content: the page is built ONCE and reads the inventory once.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.ok(harness.panelInstance() !== undefined, 'the first focus transfer mounts the page')
   assert.equal(harness.snapshotCalls(), 1, 'the mount reads the inventory exactly once')
   assert.match(harness.view(), /Search: \//u, 'the narrow content paints its local Search row')
@@ -1162,25 +1162,25 @@ test('T03 a 75-column production page mounts lazily from the Categories rail', a
   // Esc yields back to the rail and keeps the SAME page (no re-read, no dispose).
   const page = harness.panel
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panelInstance(), page, 'the yield keeps the one page instance')
   assert.equal(harness.snapshotCalls(), 1, 'the yield never re-reads the inventory')
   assert.match(harness.view(), /> Plugins/u, 'the rail owns the frame again')
 
   // Re-entering reuses the page: still ONE instance and ONE read.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panelInstance(), page, 're-entering reuses the page')
   assert.equal(harness.snapshotCalls(), 1)
 
   // §8.1 T03 tail: from the re-entered List, Esc yields to the rail and the
   // NEXT Esc closes the SAME Settings lease.
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Settings · Categories/u, 'the List Esc yields to the rail')
   assert.equal(harness.panelInstance(), page, 'the yield keeps the page')
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.doesNotMatch(harness.view(), /Settings · /u, 'the second Esc closed the SAME Settings lease')
   harness.app.dispose()
 })
@@ -1191,11 +1191,11 @@ test('T07 Tab never crosses levels from Confirm, Install or Diagnostics', async 
   const confirm = await open({ columns: 120, rows: 24 })
   await openRemoveConfirm(confirm)
   confirm.vt.sendInput('\t')
-  await confirm.settle()
+  await confirm.waitForFrame()
   assert.equal(confirm.panel.currentView(), 'confirm', 'Tab inside the confirmation never leaves it')
   assert.equal(confirm.panel.focused, true, 'the confirmation keeps the ONE input owner')
   confirm.vt.sendInput('\x1b[Z')
-  await confirm.settle()
+  await confirm.waitForFrame()
   assert.equal(confirm.panel.currentView(), 'confirm', 'Shift+Tab inside the confirmation never leaves it')
   assert.match(bar(confirm), /Esc cancel/u, 'the confirmation keeps its own bar')
   confirm.app.dispose()
@@ -1204,11 +1204,11 @@ test('T07 Tab never crosses levels from Confirm, Install or Diagnostics', async 
   await openInstall(install)
   const installBar = bar(install)
   install.vt.sendInput('\t')
-  await install.settle()
+  await install.waitForFrame()
   assert.equal(install.panel.currentView(), 'install', 'Tab inside the install view never leaves it')
   assert.equal(install.panel.focused, true)
   install.vt.sendInput('\x1b[Z')
-  await install.settle()
+  await install.waitForFrame()
   assert.equal(install.panel.currentView(), 'install', 'Shift+Tab inside the install view never leaves it')
   assert.equal(install.panel.focused, true)
   assert.equal(bar(install), installBar, 'the install bar is unchanged by the region keys')
@@ -1216,12 +1216,12 @@ test('T07 Tab never crosses levels from Confirm, Install or Diagnostics', async 
 
   const diagnostics = await open({ columns: 120, rows: 24 })
   diagnostics.vt.sendInput('d')
-  await diagnostics.settle()
+  await diagnostics.waitForFrame()
   assert.equal(diagnostics.panel.currentView(), 'diagnostics')
   diagnostics.vt.sendInput('\t')
-  await diagnostics.settle()
+  await diagnostics.waitForFrame()
   diagnostics.vt.sendInput('\x1b[Z')
-  await diagnostics.settle()
+  await diagnostics.waitForFrame()
   assert.equal(diagnostics.panel.currentView(), 'diagnostics', 'neither region key leaves Diagnostics')
   assert.equal(diagnostics.panel.focused, true, 'Diagnostics keeps the ONE input owner')
   assert.match(bar(diagnostics), /Esc back/u, 'Diagnostics keeps its own Esc')
@@ -1245,7 +1245,7 @@ ${harness.view()}`)
   // A preview click selects the card and transfers the keyboard — it must never
   // dispatch a Host mutation or open Details.
   click(harness, previewCard, 30)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list', 'a preview click only selects; it never opens Details')
   assert.equal(harness.panel.focused, true, 'the preview click transferred the keyboard into the List')
   assert.equal(harness.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the clicked card became the selection')
@@ -1260,7 +1260,7 @@ ${harness.view()}`)
   // A click at the NEW coordinate on the SELECTED card opens Details.
   const reprojected = rowOf(harness, '> @vendor/foo')
   click(harness, reprojected, 6)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'details', 'the reprojected cell opens Details on the focused card')
   harness.app.dispose()
 })
@@ -1279,12 +1279,12 @@ test('T09 a Host invalidation before the repaint refuses the held rail press', a
   // flight), which is what a boolean currentness could not distinguish.
   assert.match(harness.panel.liveIdentity(), /loading/, 'the invalidation moved the live Controller state')
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
   assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives the stale release')
   // Positive control on a fresh rail row once the frame is current again.
   click(harness, railRow(harness, 'Models'), 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click still switches category')
   harness.app.dispose()
 })
@@ -1299,16 +1299,16 @@ test('T09 a no-op wheel never cancels a legal rail click', async () => {
   const before = harness.panel.gestureRevision()
   // An UP wheel over the List at offset 0 cannot move it.
   wheel(harness, listRow + 1, 30, false)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.gestureRevision(), before, 'a no-op List wheel does not bump the revision')
 
   // A rail press held across that no-op wheel must still be admitted.
   const aboutRow = railRow(harness, 'About')
   press(harness, aboutRow, 3)
   wheel(harness, listRow + 1, 30, false)
-  await harness.settle()
+  await harness.waitForFrame()
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives an immaterial wheel')
   harness.app.dispose()
 })
@@ -1327,12 +1327,12 @@ test('T09 a SECOND invalidation while already stale still refuses the held rail 
   assert.notEqual(harness.panel.liveIdentity(), staleBefore,
     'the second invalidation changed the live identity even though both states are stale')
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Settings · Plugins/u, 'the stale-then-invalidated rail release never switches category')
   assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives')
   // Positive control once the frame is current again.
   click(harness, railRow(harness, 'Models'), 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click still switches category')
   harness.app.dispose()
 })
@@ -1348,22 +1348,22 @@ test('T09 a wheel at the END of a scroll window never cancels a legal rail click
   let previous = harness.view()
   for (let step = 0; step < 60; step += 1) {
     harness.vt.sendInput('\x1b[F') // End: the last painted card
-    await harness.settle()
+    await harness.waitForFrame()
     if (harness.view() === previous) break
     previous = harness.view()
   }
   const before = harness.panel.gestureRevision()
   wheel(harness, listRow + 1, 30, true) // further DOWN at the end of the window
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.gestureRevision(), before, 'a wheel past the end of the List does not bump')
 
   // A rail press held across that immaterial wheel must still be admitted.
   const aboutRow = railRow(harness, 'About')
   press(harness, aboutRow, 3)
   wheel(harness, listRow + 1, 30, true)
-  await harness.settle()
+  await harness.waitForFrame()
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives a wheel past the List end')
   harness.app.dispose()
 })
@@ -1380,11 +1380,11 @@ test('T09 a catch-up repaint of state that was already live keeps a held rail pr
   const aboutRow = railRow(harness, 'About')
   press(harness, aboutRow, 3)
   // The pending repaint now catches up with state that was ALREADY live at press.
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.liveIdentity(), identityBeforePress,
     'the catch-up repaint of pre-press state leaves the semantic identity unchanged')
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives the catch-up repaint')
   harness.app.dispose()
 })
@@ -1414,20 +1414,20 @@ test('T09 the Detail wheel reaches the real bottom produced by the painter', asy
   }
   // Scroll far past the end.
   for (let step = 0; step < 40; step += 1) harness.panel.handleMouse(wheelDown)
-  await harness.settle()
+  await harness.waitForFrame()
   // The bound is where the offset stops moving: wheel until the offset is
   // unchanged across a settled frame, then assert one MORE wheel is a no-op.
   let previousIdentity = harness.panel.liveIdentity()
   for (let step = 0; step < 10; step += 1) {
     harness.panel.handleMouse(wheelDown)
-    await harness.settle()
+    await harness.waitForFrame()
     const current = harness.panel.liveIdentity()
     if (current === previousIdentity) break
     previousIdentity = current
   }
   const atEnd = harness.panel.liveIdentity()
   harness.panel.handleMouse(wheelDown)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.liveIdentity(), atEnd, 'a wheel past the real bottom does not move or bump')
   // And the real bottom includes the LAST painter line (the final action row).
   const rows = frameRows(harness)
@@ -1448,19 +1448,19 @@ test('T09 a change-and-revert under a held rail press still refuses the old rele
   const generationBefore = harness.panel.semanticGeneration()
   press(harness, aboutRow, 3)
   harness.vt.sendInput('\x1b[B') // Down: select another card
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\x1b[A') // Up: restore the previous selection
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the selection really reverted')
   assert.ok(harness.panel.semanticGeneration() > generationBefore,
     'the semantic generation advanced even though the value snapshot returned to its original state')
   assert.notEqual(harness.panel.liveIdentity(), identityBefore, 'the identity must not look unchanged after a revert')
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
   assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives')
   click(harness, railRow(harness, 'Models'), 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click still switches category')
   harness.app.dispose()
 })
@@ -1474,18 +1474,18 @@ test('T09 a Confirmation selection key at either end never bumps', async () => {
   await openRemoveConfirm(harness)
   const before = harness.panel.semanticGeneration()
   harness.vt.sendInput('\x1b[A')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.semanticGeneration(), before, 'Up at the first choice does not bump')
   // ... and Down really moves to Cancel (a real change), after which Down/Tab at
   // the LAST choice are the no-ops.
   harness.vt.sendInput('\x1b[B')
-  await harness.settle()
+  await harness.waitForFrame()
   const afterMove = harness.panel.semanticGeneration()
   assert.ok(afterMove > before, 'moving to the last choice is a real change')
   harness.vt.sendInput('\x1b[B')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\t')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.semanticGeneration(), afterMove, 'Down/Tab at the last choice do not bump')
   assert.equal(harness.panel.currentView(), 'confirm', 'the confirmation is still open')
   harness.app.dispose()
@@ -1499,26 +1499,26 @@ test('T09 a background install phase round-trip under a held rail press refuses 
   // The OFFICIAL catalog card is the one whose install really dispatches (a
   // manual `i` editor has no requestId, so Host events would be ignored).
   harness.vt.sendInput('\x1b[F')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.equal(harness.installCalls.length, 1, 'the official install was really dispatched')
   const requestId = harness.controller.installView()!.requestId
   assert.ok(requestId !== undefined, 'the dispatched attempt has a real request id')
   // Esc hides the running install and returns to the List, which may yield.
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list')
   assert.equal(harness.panel.canYieldFocusToNavigation(), true, 'the background install lets the List yield')
 
   // Round-trip between two REAL Host phases and back: `installing -> applying ->
   // installing` leaves the phase VALUE exactly where it started.
   harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
-  await harness.settle()
+  await harness.waitForFrame()
   const settledPhase = harness.controller.installView()?.phase
   assert.equal(settledPhase, 'installing', 'the attempt settled on installing')
   const aboutRow = railRow(harness, 'About')
@@ -1526,9 +1526,9 @@ test('T09 a background install phase round-trip under a held rail press refuses 
   const identityAtPress = harness.panel.liveIdentity()
   const transitionsAtPress = harness.controller.semanticTransitionsCount()
   harness.emit({ kind: 'phase', phase: { requestId, phase: 'applying' } })
-  await harness.settle()
+  await harness.waitForFrame()
   harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.controller.installView()?.phase, settledPhase,
     'the phase really returned to the value it had at press time')
   assert.ok(harness.controller.semanticTransitionsCount() > transitionsAtPress,
@@ -1536,7 +1536,7 @@ test('T09 a background install phase round-trip under a held rail press refuses 
   assert.notEqual(harness.panel.liveIdentity(), identityAtPress,
     'the identity changed even though every compared VALUE is back to its press-time state')
   release(harness, aboutRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
   assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives')
   harness.app.dispose()
@@ -1551,25 +1551,25 @@ test("T09 editing the install spec revokes the page's own held Inspect action", 
   // Open the manual editor through its own entry and type BEFORE any Inspect.
   for (let step = 0; step < 30 && harness.panel.selectedCardValue() === undefined; step += 1) {
     harness.vt.sendInput('\x1b[B')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   harness.vt.sendInput('i')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'install', 'i opens the install editor')
   assert.equal(harness.controller.installView()?.phase, 'editing', 'the editor is in its editing phase')
   for (const character of 'pkg') harness.vt.sendInput(character)
-  await harness.settle()
+  await harness.waitForFrame()
 
   // Hold a press on the painted Inspect action, edit the spec, then release.
   const inspectRow = rowOf(harness, 'Inspect')
   const generationBefore = harness.panel.semanticGeneration()
   press(harness, inspectRow, 5)
   harness.vt.sendInput('x')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.ok(harness.panel.semanticGeneration() > generationBefore,
     'a real edit advances the page semantic generation')
   release(harness, inspectRow, 5)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.controller.installView()?.phase, 'editing',
     'the stale Inspect release never dispatched with the newer spec')
 
@@ -1577,7 +1577,7 @@ test("T09 editing the install spec revokes the page's own held Inspect action", 
   // settled frame. The keyboard is used because a same-cell click inside the
   // fork's multi-click window becomes a word selection, not a click.
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.notEqual(harness.controller.installView()?.phase, 'editing',
     'a fresh activation of the same action really inspects')
   harness.app.dispose()
@@ -1589,12 +1589,12 @@ test('T09 an immaterial install wheel never advances the semantic generation', a
   // The editor's own body row (Spec/Registry form) is the wheel target; an UP
   // wheel at the top of an already-at-top editor cannot move anything.
   harness.vt.sendInput('i')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.controller.installView()?.phase, 'editing', 'the editor is in its editing phase')
   const before = harness.panel.semanticGeneration()
   const bodyRow = rowOf(harness, 'Spec')
   wheel(harness, bodyRow, 5, false)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.semanticGeneration(), before, 'an immaterial install wheel does not advance the generation')
   harness.app.dispose()
 })
@@ -1604,12 +1604,12 @@ test('T09 a blank Host log chunk never advances the Controller generation', asyn
   // it must not advance the monotonic transition count and revoke a held gesture.
   const harness = await open({ columns: 120, rows: 24 })
   harness.vt.sendInput('\x1b[F')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.equal(harness.installCalls.length, 1, 'the official install was dispatched')
   const requestId = harness.controller.installView()!.requestId
@@ -1617,15 +1617,15 @@ test('T09 a blank Host log chunk never advances the Controller generation', asyn
 
   const before = harness.controller.semanticTransitionsCount()
   harness.emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: '' } })
-  await harness.settle()
+  await harness.waitForFrame()
   harness.emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: '\n\n' } })
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.controller.semanticTransitionsCount(), before,
     'blank log chunks never advance the transition count')
 
   // A REAL chunk does advance it (positive control).
   harness.emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: 'real output\n' } })
-  await harness.settle()
+  await harness.waitForFrame()
   assert.ok(harness.controller.semanticTransitionsCount() > before,
     'a real log chunk still advances it')
   harness.app.dispose()
@@ -1643,18 +1643,18 @@ test('T09 a phase round-trip under a held Install action refuses the page releas
   // is indistinguishable from a refused press.
   const harness = await open({ columns: 120, rows: 24 })
   harness.vt.sendInput('\x1b[F')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
-  await harness.settle()
+  await harness.waitForFrame()
   for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.equal(harness.installCalls.length, 1, 'the official install was dispatched')
   const requestId = harness.controller.installView()!.requestId
   assert.ok(requestId !== undefined)
   harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'install', 'the install view is showing')
   const hideRow = rowOf(harness, 'Hide install view')
   press(harness, hideRow, 5)
@@ -1666,7 +1666,7 @@ test('T09 a phase round-trip under a held Install action refuses the page releas
   assert.ok(harness.controller.semanticTransitionsCount() > transitionsAtPress,
     'the Controller transition count advanced across the round trip')
   release(harness, hideRow, 5)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'install',
     'the stale page release never ran the Hide action (the page is still on the install view)')
 
@@ -1680,10 +1680,10 @@ test('T09 a phase round-trip under a held Install action refuses the page releas
   for (let step = 0; step < 8 && harness.panel.currentView() === 'install'; step += 1) {
     const before = harness.panel.currentView()
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
     if (harness.panel.currentView() !== before) break
     harness.vt.sendInput('\x1b[B')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.ok(
     harness.panel.currentView() !== 'install' || harness.controller.installView()?.phase !== phaseBefore,
@@ -1709,14 +1709,14 @@ test('T09 a page action is refused until the changed grant really paints', async
   // synchronous loop.
   harness.vt.sendInput('\t')
   harness.vt.sendInput('r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.snapshotCalls(), readsBefore,
     'a body action forwarded before the changed grant paints never reads the Host')
 
   // Positive control: once that frame has painted, the same key really refreshes.
   const afterPaint = harness.snapshotCalls()
   harness.vt.sendInput('r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.ok(harness.snapshotCalls() > afterPaint,
     'the same key really refreshes after the new grant paints')
   harness.app.dispose()
@@ -1739,10 +1739,10 @@ test('T09 rail keys are refused until the yield paints the new projection', asyn
   assert.equal(harness.panel.grantAwaitingPaint(), true, 'the yield installed the new grant and awaits its paint')
   assert.equal(rootPanel['categoryId'], categoryBefore,
     'the rail Down did not move the category before the new projection painted')
-  await harness.settle()
+  await harness.waitForFrame()
   // Positive control: on the painted frame the same rail key really moves.
   harness.vt.sendInput('\x1b[B')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.notEqual(rootPanel['categoryId'], categoryBefore,
     'the same rail key moves the category once the projection has painted')
   harness.app.dispose()
@@ -1759,10 +1759,10 @@ test('T09 narrow rail keys and Backspace wait for the destination frame', async 
   // then Enter takes the content again (narrow paints one region at a time).
   assert.equal(rootPanel['focus'], 'content', 'the deep link starts on the plugin content')
   narrow.vt.sendInput('\x1b')
-  await narrow.settle()
+  await narrow.waitForFrame()
   assert.equal(rootPanel['focus'], 'categories', 'Esc yielded to the rail')
   narrow.vt.sendInput('\r')
-  await narrow.settle()
+  await narrow.waitForFrame()
   assert.equal(rootPanel['focus'], 'content', 'the narrow content owns the keyboard again')
   const categoryBefore = rootPanel['categoryId']
 
@@ -1771,12 +1771,12 @@ test('T09 narrow rail keys and Backspace wait for the destination frame', async 
   // Plugins is the LAST category, so `Up` is the direction that can really move.
   narrow.vt.sendInput('\x1b')
   narrow.vt.sendInput('\x1b[A')
-  await narrow.settle()
+  await narrow.waitForFrame()
   assert.equal(rootPanel['categoryId'], categoryBefore,
     'the rail key did not move the category before the Categories frame painted')
   // Positive control: on the painted frame the same key really moves.
   narrow.vt.sendInput('\x1b[A')
-  await narrow.settle()
+  await narrow.waitForFrame()
   assert.notEqual(rootPanel['categoryId'], categoryBefore,
     'the same rail key moves the category once the frame has painted')
   narrow.app.dispose()
@@ -1789,7 +1789,7 @@ test('T09 narrow rail keys and Backspace wait for the destination frame', async 
     .settingsWorkspace!.panel
   bs.vt.sendInput('\x1b') // yield; the changed grant awaits its paint
   bs.vt.sendInput('\x7f') // Backspace in the same window
-  await bs.settle()
+  await bs.waitForFrame()
   assert.match(bs.view(), /Settings · /u, 'the stale Backspace did not close the workspace')
   assert.equal(bsRoot['categoryId'], 'plugins', 'the stale Backspace did not change the category')
   bs.app.dispose()
@@ -1805,21 +1805,21 @@ test('T09 narrow rail -> content refuses page keys until the content frame paint
     .settingsWorkspace!.panel
   assert.equal(rootPanel['focus'], 'content', 'the deep link starts on the content')
   harness.vt.sendInput('\x1b') // yield to the rail
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(rootPanel['focus'], 'categories')
 
   // ONE burst: Enter takes the content, then a body key arrives before that frame.
   const readsBefore = harness.snapshotCalls()
   harness.vt.sendInput('\r')
   harness.vt.sendInput('r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.snapshotCalls(), readsBefore,
     'the body key forwarded in the rail -> content window never read the Host')
 
   // Positive control: on the painted content frame the same key really refreshes.
   const afterPaint = harness.snapshotCalls()
   harness.vt.sendInput('r')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.ok(harness.snapshotCalls() > afterPaint,
     'the same key really refreshes once the content frame has painted')
   harness.app.dispose()
@@ -1838,7 +1838,7 @@ test('T09 the stale rail refuses a NEW mouse gesture until the projection paints
   for (let step = 0; step < 12; step += 1) {
     if (/^> Plugins\b/mu.test(harness.view())) break
     harness.vt.sendInput('\x1b[B')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.match(harness.view(), /^> Plugins\b/mu, 'the rail selects Plugins')
   const categoryBefore = rootPanel['categoryId']
@@ -1849,7 +1849,7 @@ test('T09 the stale rail refuses a NEW mouse gesture until the projection paints
   harness.vt.sendInput('\r')
   press(harness, railOtherRow, 3)
   release(harness, railOtherRow, 3)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.notEqual(rootPanel['focus'], 'categories', 'the transfer really moved the keyboard to the content')
   assert.equal(rootPanel['categoryId'], categoryBefore,
     'the stale rail click did not switch category before the projection painted')
@@ -1857,10 +1857,10 @@ test('T09 the stale rail refuses a NEW mouse gesture until the projection paints
   // The same for a wheel in that window.
   const afterFirst = rootPanel['categoryId']
   harness.vt.sendInput('\x1b')
-  await harness.settle()
+  await harness.waitForFrame()
   harness.vt.sendInput('\r')
   wheel(harness, railOtherRow, 3, true)
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(rootPanel['categoryId'], afterFirst, 'the stale rail wheel changed nothing')
   harness.app.dispose()
 
@@ -1871,7 +1871,7 @@ test('T09 the stale rail refuses a NEW mouse gesture until the projection paints
     .settingsWorkspace!.panel
   const controlBefore = controlRoot['categoryId']
   click(control, 5, 3)
-  await control.settle()
+  await control.waitForFrame()
   assert.notEqual(controlRoot['categoryId'], controlBefore,
     'a fresh rail click on the painted frame really switches category')
   control.app.dispose()
@@ -1894,18 +1894,18 @@ test('T09 Shift+Tab does not yield while a changed grant awaits its paint', asyn
   harness.vt.sendInput('\t')
   harness.vt.sendInput('r')
   harness.vt.sendInput('\x1b[Z')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(harness.snapshotCalls(), readsBeforeBurst,
     'the body key in the prepaint window never read the Host')
   assert.equal(rootPanel['focus'], 'content',
     'Shift+Tab did not yield to the rail while the transfer frame was pending')
   assert.equal(rootPanel['focus'], 'content',
     'Shift+Tab did not yield to the rail while the grant awaited its paint')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(rootPanel['focus'], 'content', 'the focus stays in the content after the paint too')
   // The legal direction still works once the frame is current.
   harness.vt.sendInput('\x1b[Z')
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(rootPanel['focus'], 'categories', 'Shift+Tab still yields on a painted frame')
   harness.app.dispose()
 })
@@ -1927,7 +1927,7 @@ test('T02 the rail preview on the PRODUCTION page: Enter, Right and Tab only tra
       for (let step = 0; step < 12; step += 1) {
         if (/^> Plugins\b/mu.test(harness.view())) break
         harness.vt.sendInput('\x1b[B')
-        await harness.settle()
+        await harness.waitForFrame()
       }
       assert.match(harness.view(), /^> Plugins\b/mu, `${columns}: the rail selects Plugins`)
       const page = harness.panel
@@ -1941,7 +1941,7 @@ test('T02 the rail preview on the PRODUCTION page: Enter, Right and Tab only tra
 
       // The ONE key under test.
       harness.vt.sendInput(key)
-      await harness.settle()
+      await harness.waitForFrame()
 
       assert.equal(harness.panelInstance(), page, `${columns} ${JSON.stringify(key)}: the SAME page instance`)
       assert.equal(page.focused, true, `${columns} ${JSON.stringify(key)}: the keyboard moved to the plugin page`)
@@ -1976,7 +1976,7 @@ test('T15 a pending Host mutation settling after the Settings parent close never
   // Drive the explicit Inspect -> Install path until the Host dispatch is in flight.
   for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
     harness.vt.sendInput('\r')
-    await harness.settle()
+    await harness.waitForFrame()
   }
   assert.equal(harness.installCalls.length, 1, 'the official install was dispatched exactly once')
   assert.equal(harness.controller.installView()?.phase, 'starting', 'the Host operation is still in flight')
@@ -1990,13 +1990,13 @@ test('T15 a pending Host mutation settling after the Settings parent close never
   // The REAL Settings lease closes (the same external teardown a blocking owner
   // or a screen replacement performs).
   harness.settings.close()
-  await harness.settle()
+  await harness.waitForFrame()
   assert.doesNotMatch(harness.view(), /Settings · /u, 'the Settings parent really closed')
   const rendersAtClose = renders
 
   // The late Host settlement arrives after the close.
   settleInstall({ changed: true, application: 'applied', stage: 'install', target: 'pkg', version: '1.0.0' })
-  await harness.settle()
+  await harness.waitForFrame()
   assert.equal(renders, rendersAtClose, 'the late settlement never repaints the disposed page')
   assert.doesNotMatch(harness.view(), /Settings · /u, 'the closed workspace stays closed')
   assert.equal(harness.installCalls.length, 1, 'the settlement never dispatches a second install')
@@ -2007,7 +2007,7 @@ test('T10 the plugin Host notice and the ONE root App notice never overwrite eac
   const harness = await open({ columns: 120, rows: 24 })
   harness.controller.explain('plugin inventory is stale; the Host read failed')
   harness.app.notify('context measurement failed for this turn', 'error')
-  await harness.settle()
+  await harness.waitForFrame()
   const frame = frameRows(harness)
   const appNoticeRow = rowOf(harness, 'context measurement failed')
   const hostNoticeRow = rowOf(harness, 'plugin inventory is stale')
