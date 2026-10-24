@@ -3344,6 +3344,10 @@ export class SettingsWorkspacePanel implements Component {
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (this.pluginPage !== undefined) return this.pluginPage.handleMouse?.(event)
+    // A resize that has not repainted makes every painted pane box stale: a
+    // wheel over the old geometry could scroll a pane the new frame does not
+    // paint at that cell.
+    if (this.terminalGeometryStale()) return undefined
     const inContent = this.contentAt(event.x, event.y)
     if (this.authPage !== undefined && inContent) {
       return this.authPage.handleMouse?.(this.translateMouseEvent(event))
@@ -3388,6 +3392,13 @@ export class SettingsWorkspacePanel implements Component {
       this.pluginPage.onCellPress?.(x, y)
       return
     }
+    // The pointer boxes still describe the previous terminal frame. Refuse the
+    // press entirely and revoke any child pointer state; the release must not
+    // resurrect an old hit at a cell that the new layout paints differently.
+    if (this.terminalGeometryStale()) {
+      this.authPage?.cancelPointer?.()
+      return
+    }
     if (this.authPage !== undefined) {
       this.syncAuthPageBody()
       this.contentPressed = undefined
@@ -3426,6 +3437,12 @@ export class SettingsWorkspacePanel implements Component {
       this.pressedGesture = undefined
       this.contentPressed = undefined
       this.pluginPage.onCellClick?.(x, y)
+      return
+    }
+    if (this.terminalGeometryStale()) {
+      this.pressedGesture = undefined
+      this.contentPressed = undefined
+      this.authPage?.cancelPointer?.()
       return
     }
     if (this.authPage !== undefined) {

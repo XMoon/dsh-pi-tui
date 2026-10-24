@@ -5000,6 +5000,34 @@ test('a resize that keeps the child grant still fails closed until the new termi
   assert.equal(reference.copied.length, copied + 1, 'the repainted frame authorizes the real copy')
   reference.dispose()
 
+  // The pointer boxes also describe the old terminal frame: a stale
+  // press/release must not activate the old Models action row.
+  const mouseModels = setup({ columns: 120, rows: 8, providerOptions: SETTINGS_PROVIDERS })
+  await mouseModels.open('Models')
+  await key(mouseModels, '\t')
+  const mouseAddRow = rowOf(mouseModels, 'Add Provider…')
+  const mouseAddCol = cellIndexOf(mouseModels, mouseAddRow, 'Add Provider…')
+  mouseModels.vt.resize(120, 7)
+  press(mouseModels, mouseAddRow, mouseAddCol)
+  release(mouseModels, mouseAddRow, mouseAddCol)
+  await settle(mouseModels)
+  assert.doesNotMatch(mouseModels.view(), /Custom provider…/u,
+    'the stale Models mouse gesture did not open the catalog')
+  mouseModels.dispose()
+
+  // The same guard covers the legacy Detail buttons.
+  const mouseLegacy = setup({ columns: 120, rows: 8, doc: { theme: 'dark' } })
+  await mouseLegacy.open('Appearance')
+  await key(mouseLegacy, '\r') // rows level, Detail buttons painted
+  const staleCopyRow = rowOf(mouseLegacy, 'Copy value [C]')
+  const staleCopyCol = cellIndexOf(mouseLegacy, staleCopyRow, 'Copy value [C]')
+  mouseLegacy.vt.resize(120, 7)
+  press(mouseLegacy, staleCopyRow, staleCopyCol)
+  release(mouseLegacy, staleCopyRow, staleCopyCol)
+  await settle(mouseLegacy)
+  assert.deepEqual(mouseLegacy.copied, [], 'the stale legacy Detail click did not copy')
+  mouseLegacy.dispose()
+
   // Backspace is not a portable back key: the Add Provider catalog binds it to
   // its query. A same-grant resize must not let it edit the hidden filter.
   const catalog = setup({ columns: 120, rows: 8, providerOptions: SETTINGS_PROVIDERS })
