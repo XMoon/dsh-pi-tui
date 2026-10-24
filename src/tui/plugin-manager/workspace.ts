@@ -2810,16 +2810,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return undefined
   }
 
-  /** True only while the live terminal geometry and state version still match
-   * the frame whose hit map is installed in `paintedTargets`. */
-  /** The semantic presentation key of the inventory. A same-truth reread
-   * creates a new model object but the SAME key, so an invalidation that
-   * returns identical facts cannot invalidate an already-painted action; any
-   * fact that could change a pixel or an action changes the key. */
+  /** The semantic presentation key of the inventory: the Host read generation
+   *  plus the classified model. ANY new read (an explicit refresh or a Host
+   *  invalidation) invalidates an already-painted action even when it returns
+   *  byte-identical facts — §3.4 lists `Press -> Host invalidate` among the
+   *  releases that must be refused — and any fact that could change a pixel or
+   *  an action changes the key as well. */
   private modelStateKey(): string {
-    // The Host READ GENERATION is part of the presentation key, not only the
-    // facts: a Host invalidation that returns byte-identical inventory still
-    // starts a new read, and §3.4 requires a press held across it to be refused.
     return JSON.stringify([this.controller.readGeneration(), this.controller.model()])
   }
 

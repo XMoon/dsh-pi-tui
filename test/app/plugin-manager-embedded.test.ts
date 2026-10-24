@@ -731,6 +731,18 @@ test('T09 a Controller install-phase change between press and release refuses th
   await harness.settle()
   assert.equal(harness.installCalls.length, 1, 'the stale approve release never dispatches a second install')
   assert.equal(harness.controller.installView()?.phase, 'editing', 'the new attempt stays in its own phase')
+  // Control: the settled editing frame still owns its own keys and the SAME
+  // request identity — the refused release changed neither.
+  const editingBefore = harness.controller.installView()?.requestId
+  harness.vt.sendInput('x')
+  await harness.settle()
+  assert.equal(harness.controller.installView()?.phase, 'editing', 'the fresh editing frame keeps its phase')
+  assert.equal(harness.controller.installView()?.requestId, editingBefore,
+    'the fresh editing frame keeps the ONE request identity')
+  harness.vt.sendInput('\t')
+  await harness.settle()
+  assert.equal(harness.controller.installView()?.phase, 'editing',
+    'the fresh editing frame admits its own field-switch key')
   harness.app.dispose()
 })
 
@@ -879,18 +891,44 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   await focusCase.settle()
   assert.equal(focusCase.panel.currentView(), 'list', 'the focus yield drops the press')
   assert.match(bar(focusCase), /Esc close/u)
+  // §8 T09: a legal gesture on the NEXT frame still works after the refusal. The
+  // rail already owns the keyboard here, so its own focus key is the legal one.
+  focusCase.vt.sendInput('\r')
+  await focusCase.settle()
+  assert.equal(focusCase.panel.focused, true, 'the fresh rail Enter re-focuses the plugin List')
+  // The legal control uses the keyboard on the CURRENT selection: the pointer
+  // cell just released sits inside the fork's multi-click window, and the page
+  // may have re-anchored its selection, so a stored row/cell would test the
+  // wrong thing. Details admission is what the refused release must not do.
+  focusCase.vt.sendInput('\r')
+  await focusCase.settle()
+  assert.equal(focusCase.panel.currentView(), 'details', 'the fresh frame admits the List Enter key')
+  assert.ok(focusCase.panel.selectedCardValue() !== undefined, 'Details opened on a real selected card')
   focusCase.app.dispose()
 
-  // Press -> the page's own filter edit -> release must not open Details.
+  // Press -> an in-page key that changes the page's own presentation -> release
+  // must not open Details. `Tab` cycles the STATUS FILTER, which hides the
+  // disabled card under test, so the witness uses the page's own search row:
+  // opening the editor repaints and moves the pointer target set while the
+  // pressed card stays visible.
   const filterCase = await open({ columns: 120, rows: 24 })
   await selectCard(filterCase, 'bundle:@vendor/foo')
   const filterRow = rowOf(filterCase, '> @vendor/foo')
   press(filterCase, filterRow, 30)
-  filterCase.vt.sendInput('\t')
+  filterCase.vt.sendInput('/')
   await filterCase.settle()
+  assert.match(bar(filterCase), /Enter apply/u, 'the search editor really opened under the press')
   release(filterCase, filterRow, 30)
   await filterCase.settle()
-  assert.equal(filterCase.panel.currentView(), 'list', 'a filter edit between press and release refuses the old release')
+  assert.equal(filterCase.panel.currentView(), 'list', 'an in-page edit between press and release refuses the old release')
+  // Control: after Esc leaves the editor, the SAME card's List Enter opens
+  // Details. (The keyboard is used because the pressed cell sits inside the
+  // fork's multi-click window, where a same-cell click becomes a word select.)
+  filterCase.vt.sendInput('\x1b')
+  await filterCase.settle()
+  filterCase.vt.sendInput('\r')
+  await filterCase.settle()
+  assert.equal(filterCase.panel.currentView(), 'details', 'the fresh frame admits Enter after the in-page edit')
   filterCase.app.dispose()
 
   // Press -> the page's own Host notice change -> release.
@@ -902,6 +940,14 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   release(noticeCase, noticeRow, 30)
   await noticeCase.settle()
   assert.equal(noticeCase.panel.currentView(), 'list', 'a Host-notice change between press and release refuses the old release')
+  // Control: after the notice settles, the page's own keys still act.
+  noticeCase.vt.sendInput('\x1b[B')
+  await noticeCase.settle()
+  assert.ok(noticeCase.panel.selectedCardValue() !== 'bundle:@vendor/foo',
+    'the settled frame admits a fresh selection move after the notice')
+  noticeCase.vt.sendInput('\r')
+  await noticeCase.settle()
+  assert.equal(noticeCase.panel.currentView(), 'details', 'the settled frame admits Enter on the new selection')
   noticeCase.app.dispose()
 
   // Press -> a real category change -> the original release must not act on the
@@ -920,6 +966,20 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   assert.equal(categoryCase.panel.currentView(), 'list', 'the old release never opens Details on the disposed page')
   assert.deepEqual(categoryCase.removeBundle, [])
   assert.deepEqual(categoryCase.setBundle, [])
+  // Control AFTER the stale release: return to Plugins and click a fresh cell.
+  for (let step = 0; step < 12; step += 1) {
+    if (/^> Plugins\b/mu.test(categoryCase.view())) break
+    categoryCase.vt.sendInput('\x1b[B')
+    await categoryCase.settle()
+  }
+  assert.match(categoryCase.view(), /^> Plugins\b/mu, 'the rail re-selects the Plugins category')
+  categoryCase.vt.sendInput('\t')
+  await categoryCase.settle()
+  assert.equal(categoryCase.panel.focused, true, 'the fresh Plugins frame admits its own Tab focus key')
+  assert.ok(categoryCase.panel.selectedCardValue() !== undefined, 'the fresh frame has a live selection')
+  categoryCase.vt.sendInput('\r')
+  await categoryCase.settle()
+  assert.equal(categoryCase.panel.currentView(), 'details', 'the fresh Plugins frame admits the List Enter key')
   categoryCase.app.dispose()
 
   // Press -> external parent close -> release must not write the Host.
@@ -931,6 +991,17 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   release(disposed, disposeRow, 5)
   assert.deepEqual(disposed.removeBundle, [], 'an externally closed workspace never dispatches the old release')
   disposed.app.dispose()
+
+  // Control: the SAME app can open a NEW Settings lease and its page still
+  // admits a real removal gesture (no phantom owner or stale claim survives).
+  const reopened = await open({ columns: 80, rows: 10 })
+  await openRemoveConfirm(reopened)
+  const reopenedRow = rowOf(reopened, '> Remove')
+  press(reopened, reopenedRow, 5)
+  release(reopened, reopenedRow, 5)
+  await reopened.settle()
+  assert.deepEqual(reopened.removeBundle, ['@vendor/foo'], 'a fresh lease still dispatches its own removal')
+  reopened.app.dispose()
 })
 
 test('T03 a 75-column production page mounts lazily from the Categories rail', async () => {
@@ -974,6 +1045,16 @@ test('T03 a 75-column production page mounts lazily from the Categories rail', a
   await harness.settle()
   assert.equal(harness.panelInstance(), page, 're-entering reuses the page')
   assert.equal(harness.snapshotCalls(), 1)
+
+  // §8.1 T03 tail: from the re-entered List, Esc yields to the rail and the
+  // NEXT Esc closes the SAME Settings lease.
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  assert.match(harness.view(), /Settings · Categories/u, 'the List Esc yields to the rail')
+  assert.equal(harness.panelInstance(), page, 'the yield keeps the page')
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  assert.doesNotMatch(harness.view(), /Settings · /u, 'the second Esc closed the SAME Settings lease')
   harness.app.dispose()
 })
 

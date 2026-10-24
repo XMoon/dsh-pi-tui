@@ -290,7 +290,12 @@ test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inven
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
-    captureLiveSessionScope: () => undefined,
+    // A sessionless entry must not create/open a Session OR admit an About read.
+    agents: {
+      create: async () => { counts.sessions += 1; throw new Error('a sessionless entry must not create a Session') },
+      open: async () => { counts.sessions += 1; throw new Error('a sessionless entry must not open a Session') },
+    },
+    captureLiveSessionScope: () => { counts.aboutEntries += 1; return undefined },
     isSessionScopeCurrent: () => false,
     currentSessionStats: async () => undefined,
     sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
@@ -328,20 +333,44 @@ test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inven
 
   assert.equal(pages, 1, 'the deep link mounts exactly ONE production page')
   assert.equal(snapshotCalls, 1, 'the Controller opened the semantic port exactly once')
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/u, 'the ONE Settings lease owns the frame')
+  // The inventory read is asynchronous: wait for the authoritative facts to
+  // paint instead of asserting against the one-frame loading state.
+  for (let attempt = 0; attempt < 40 && !plain(vt.getViewport()).includes('@vendor/foo'); attempt += 1) {
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    await vt.waitForRender()
+  }
   const view = plain(vt.getViewport())
-  assert.match(view, /Settings · Plugins/u, 'the ONE Settings lease owns the frame')
   assert.match(view, /Search: \//u, 'the REAL embedded list paints its local Search row')
   assert.match(view, /@vendor\/foo/u, 'the REAL inventory facts reach the painted list')
   assert.match(view, /Enter details/u, 'the keyboard starts on the plugin List')
+  assert.equal(snapshotCalls, 1, 'the ONE inventory read landed')
   assert.equal(counts.aboutEntries, 0, 'the deep link never admits an About read')
   assert.equal(counts.sessions, 0, 'the deep link creates no Session')
 
   // `i` enters the original install view through the REAL page keys.
   vt.sendInput('i')
   await vt.waitForRender()
-  assert.match(view.length > 0 ? plain(vt.getViewport()) : '', /Plugins · Install/u, 'i opens the install view')
+  assert.match(plain(vt.getViewport()), /Plugins · Install/u, 'i opens the install view')
   assert.equal(pages, 1, 'the install view never builds a second page')
   assert.equal(snapshotCalls, 1, 'opening the install view never re-reads the inventory')
+
+  // §8.1 T01 tail: Esc Install -> List -> Categories -> close the ONE lease.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.match(plain(vt.getViewport()), /Settings · Categories/u, 'Esc left the install view and yielded to the rail')
+  assert.equal(pages, 1, 'the whole Esc gradient never built a second page')
+  assert.equal(snapshotCalls, 1, 'the whole Esc gradient never re-read the inventory')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.doesNotMatch(plain(vt.getViewport()), /Settings · /u, 'the final Esc closed the ONE Settings lease')
+  // The ONE owner was released: a later deep link mounts a FRESH page instead of
+  // reporting a phantom claim (the production `page()` refuses only while a page
+  // still owns the controller).
+  assert.equal(surface.page(() => {}) !== undefined, true, 'the released owner admits a fresh page')
+  assert.equal(pages, 1, 'the fresh page is not the Settings deep link')
   app.dispose()
   runtime.dispose()
 })
