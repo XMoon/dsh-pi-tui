@@ -225,7 +225,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
           return accountState.view
         },
         cancelSignIn: async () => accountState.view,
-        signOut: async () => accountState.view,
+        signOut: async () => {
+          calls.push('signOut')
+          return accountState.view
+        },
         hasRunningAccountTasks: () => false,
       },
     },
@@ -1043,5 +1046,44 @@ test('paint order: opening the record clear confirmation starts its read only af
   assert.equal(h.credentialListWrites.length, 1, 'the clear target read starts exactly once')
   assert.match(writtenBefore(h, h.credentialListWrites[0]!), /Reading the credential store…/u,
     'the record-clear read must start only after the Reading frame was written')
+  h.close()
+})
+
+test('a shrink before repaint revokes a selected sign-out action; the short fallback keeps only Esc live', async () => {
+  const h = open()
+  h.setAccountView({
+    status: 'credential-stored',
+    links: { usageUrl: 'https://platform.example/usage', topUpUrl: 'https://platform.example/topup' },
+    attempt: null,
+  })
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/logout deepseek-account')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Sign out confirmation/u)
+  assert.match(h.view(), /Sign out/u, 'the real Sign out action is painted and selected at the full height')
+  assert.equal(h.calls.filter(call => call === 'signOut').length, 0, 'opening the confirmation never signs out')
+
+  // Shrink below the three-action confirmation and press Enter BEFORE the new
+  // frame paints: the old frame's action grant is stale and must not sign out.
+  h.vt.resize(120, 3)
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  // The dispatch is an owned async task: let it reach the fake Host before
+  // asserting the negative fact, so a wrongly dispatched sign-out cannot hide
+  // behind the render wait.
+  for (let index = 0; index < 10; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.calls.filter(call => call === 'signOut').length, 0,
+    'the stale Enter after a shrink never dispatches the old sign-out grant')
+  assert.match(h.rows().at(-1) ?? '', /Esc cancel/u, 'the short fallback names the real Esc cancel')
+
+  // Even after the fallback paints, Enter and the hidden refresh stay inert.
+  await key(h, '\r')
+  await key(h, 'r')
+  assert.equal(h.calls.filter(call => call === 'signOut').length, 0,
+    'the painted Esc-only fallback grants no hidden Enter')
+  await key(h, '\u001b') // the real cancel still works
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Sign out confirmation/u, 'Esc really cancelled the confirmation')
   h.close()
 })

@@ -373,6 +373,11 @@ export class ModelsWorkspacePage implements Component {
   private lastWidth = 0
   private lastHeight = 0
   private bodyHeight = 1
+  /** A height change since the last painted frame: every body key is
+   *  fail-closed until that frame repaints the new grant. */
+  private bodyHeightStale = false
+  /** The last painted frame could not fit its complete Action rows. */
+  private fallbackActive = false
   /** The last painted QuestionFlow region (page-local rows) for mouse input. */
   private questionTop = 0
   private questionRows = 0
@@ -1698,10 +1703,18 @@ export class ModelsWorkspacePage implements Component {
   /** The Settings root sets the live body height before each render. */
   setBodyHeight(rows: number): void {
     const next = Math.max(1, rows)
+    if (next === this.bodyHeight) return
     // A resize invalidates the last painted form budget BEFORE the resize
     // frame: Enter arriving in that gap must not submit a clipped form.
-    if (next !== this.bodyHeight && this.question !== undefined) this.questionUsable = false
+    if (this.question !== undefined) this.questionUsable = false
     this.bodyHeight = next
+    // The OLD frame's action/copy grants also die with the old height: a
+    // straddling Enter must not dispatch an action the new height cannot show.
+    if (this.lastHeight > 0) this.bodyHeightStale = true
+    this.paintedActionIds.clear()
+    this.paintedRowIds.clear()
+    this.paintedTargets = []
+    this.paintedCopy = false
   }
 
   render(width: number): string[] {
@@ -1711,6 +1724,7 @@ export class ModelsWorkspacePage implements Component {
     } finally {
       // The renderer writes this frame synchronously after render() returns;
       // every read armed during this frame starts only after that write.
+      this.bodyHeightStale = false
       this.flushAfterPaint()
     }
   }
@@ -1722,6 +1736,7 @@ export class ModelsWorkspacePage implements Component {
     this.armCatalogRead()
     this.lastWidth = width
     this.lastHeight = this.bodyHeight
+    this.fallbackActive = false
     const height = Math.max(1, this.bodyHeight)
     const lines: string[] = []
     const targets: HitTarget[] = []
@@ -1820,6 +1835,7 @@ export class ModelsWorkspacePage implements Component {
     const projection = this.project(width)
     const rowCount = this.rowOrder.length
     if (projection.actions.length >= height) {
+      this.fallbackActive = true
       this.paintedRowIds.clear()
       this.paintedActionIds.clear()
       this.paintedCopy = false
@@ -2600,6 +2616,9 @@ export class ModelsWorkspacePage implements Component {
 
   handleInput(data: string): ModelsPageExit {
     if (this.disposed) return 'handled'
+    // The last painted frame either has not adopted this height yet or showed
+    // only the Esc fallback. No other key may run an invisible body action.
+    if ((this.bodyHeightStale || this.fallbackActive) && !matchesKey(data, 'escape')) return 'handled'
     if (this.question !== undefined) {
       if (!this.questionFits()) {
         if (matchesKey(data, 'escape')) this.question.flow.handleInput(data)

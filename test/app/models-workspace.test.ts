@@ -2567,6 +2567,7 @@ test('Tab works exactly when the body and action regions fit, on every Tab encod
   page.handleInput('\t')
   assert.equal(viewText(page), noBody, 'no jump without a body row')
   page.setBodyHeight(5)
+  viewText(page) // fail-closed until the restored frame paints the new grant
   page.handleInput('\t')
   assert.match(viewText(page), /^> Add Provider…/m, 'the restored layout jumps again')
 
@@ -2835,4 +2836,17 @@ test('a pending clear names Esc wait on the clipped fallback', async () => {
   await flush()
   page.setBodyHeight(24)
   assert.match(viewText(page), /API key ACME_API_KEY cleared/u, 'the held clear still settles after the clipped frame')
+})
+
+test('a shrink before repaint revokes the old painted action grant', async () => {
+  const { source } = fakeSource()
+  const page = openWith(source, { view: 'records' }, 24)
+  await flush()
+  assert.match(viewText(page), /Stored credentials/u)
+  // The records page paints its `records:back` action at 24 rows. Shrink and
+  // press Enter BEFORE the resize frame: the old grant must not dispatch.
+  page.setBodyHeight(2)
+  page.handleInput('\r')
+  page.setBodyHeight(24)
+  assert.match(viewText(page), /Stored credentials/u, 'the stale Enter never left the records page')
 })
