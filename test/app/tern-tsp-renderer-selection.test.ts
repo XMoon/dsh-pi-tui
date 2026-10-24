@@ -438,7 +438,10 @@ test('A-03c: a fully negotiated pane declares the Task Center on the selected TS
   const harness = mountHarness()
   try {
     harness.mount(mount)
-    await settle()
+    // `harness.mount` commits the renderer synchronously (the production
+    // `surface.start` installs the display seam before it returns), so the
+    // capability read needs no observation window: it either answers on this
+    // line or the seam is not mounted at all (which throws).
     assert.equal(harness.surface.display.supportsTaskCenter, true,
       'the selected negotiated mount reports the production Task Center')
     assert.equal(harness.surface.display.supportsViewer, false, 'the Viewer stays unavailable')
@@ -459,7 +462,6 @@ test('A-03d: a lean negotiated pane (no picker/Reader kinds) declares no Task Ce
   const harness = mountHarness()
   try {
     harness.mount(mount)
-    await settle()
     assert.equal(harness.surface.display.supportsTaskCenter, false,
       'a lean pane reports no Task Center, so the SubmissionController refuses /tasks')
   } finally {

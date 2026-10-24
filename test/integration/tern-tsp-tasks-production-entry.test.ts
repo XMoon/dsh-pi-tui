@@ -169,6 +169,8 @@ test('E01: /tasks from the real editor reaches the ONE TaskRuntime and mounts th
       'the command was admitted by the real capability gate')
     assert.equal(screens(fixture), 0, 'opening the Hub acquires no Screen by itself')
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -201,6 +203,8 @@ test('E02: the registered /subagents alias opens the same Hub and no second brow
     assert.equal(new Set(hubs).size, 1, 'the alias mounted exactly ONE Hub instance')
     assert.equal(screens(fixture), 0, 'the alias opens no Screen by itself')
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -249,6 +253,8 @@ test('E03: Enter opens ONE Reader for the current row and Back returns to the sa
     assert.equal(screens(fixture), 1, 'reading acquired exactly ONE Screen over the run')
     assert.equal(pickerProps(fixture.pane, HUB).selected, target, 'the Hub kept its selection')
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -272,6 +278,8 @@ test('E05: a lean pane refuses /tasks, restores the draft, opens no Hub and no S
       'the refusal is a visible dock notice')
     assert.equal(fixture.modelCalls(), 0, 'the refused command never reached the model')
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -299,6 +307,8 @@ test('E06: a genuine Host command named tasks keeps its Host sink and never open
       'the TUI Task Center never captured a Host-owned winner')
     assert.equal(screens(fixture), 0)
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -323,6 +333,8 @@ test('E06b: a genuine Host command named subagents keeps its Host sink on the al
     assert.equal(pickerNode(fixture.pane, HUB), undefined,
       'the TUI Task Center never captured the Host alias winner')
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -359,6 +371,8 @@ test('E04: a Job-only roster shows the real Job and invents no descendant row', 
       'no descendant row is invented when the catalog is empty')
     assert.ok(ids.includes(`job:${jobId}`), 'the real Job row is present')
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -385,6 +399,8 @@ test('E04b: an empty roster states the real empty Hub and invents no work item',
     const actions = (pickerProps(fixture.pane, HUB).actions ?? []) as Array<{ readonly id: string }>
     assert.ok(actions.some(action => action.id === 'close'), 'the empty Hub keeps its Close action')
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
@@ -447,6 +463,8 @@ test('E12: reading every real row never stops a Job, interrupts a subagent or ca
       registry.kill = originalKill
     }
   } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
     await fixture.settle()
   }
 })
