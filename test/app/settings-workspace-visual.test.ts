@@ -5000,6 +5000,25 @@ test('a resize that keeps the child grant still fails closed until the new termi
   assert.equal(reference.copied.length, copied + 1, 'the repainted frame authorizes the real copy')
   reference.dispose()
 
+  // Backspace is not a portable back key: the Add Provider catalog binds it to
+  // its query. A same-grant resize must not let it edit the hidden filter.
+  const catalog = setup({ columns: 120, rows: 8, providerOptions: SETTINGS_PROVIDERS })
+  await catalog.open('Models')
+  await key(catalog, '\t')
+  const catalogAddRow = rowOf(catalog, 'Add Provider…')
+  press(catalog, catalogAddRow, cellIndexOf(catalog, catalogAddRow, 'Add Provider…'))
+  release(catalog, catalogAddRow, cellIndexOf(catalog, catalogAddRow, 'Add Provider…'))
+  await settle(catalog)
+  assert.match(catalog.view(), /Add Provider/u, 'the catalog is open at 8 rows')
+  for (const character of 'acme') await key(catalog, character)
+  catalog.vt.resize(120, 7)
+  catalog.vt.sendInput('\u007f') // Backspace before the resize frame
+  await catalog.vt.waitForRender()
+  catalog.vt.resize(120, 24)
+  await catalog.vt.waitForRender()
+  assert.match(catalog.view(), /Filter: acme/u, 'the same-grant stale Backspace did not edit the hidden filter')
+  catalog.dispose()
+
   // Account uses the same root fence: its r refresh is not admitted before the
   // new terminal frame paints.
   const account = setup({ columns: 120, rows: 8 })
