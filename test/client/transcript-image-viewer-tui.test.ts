@@ -833,6 +833,32 @@ test('the list action bar advertises the LIVE keybindings and degrades by whole 
   }
   assert.ok(barAt(80).includes('Enter view'), 'restoring the bindings restores the hint')
 
+  // An EMPTY cancel binding is a reachable state (`KeybindingsManager` accepts
+  // `[]`), and it must not produce a bar that promises a key doing nothing:
+  // the workspace keeps a fixed Esc fallback, and the bar advertises exactly it.
+  keybindings.setUserBindings({ 'tui.select.cancel': [] })
+  try {
+    let closes = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => ({ ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }),
+      onStale: () => {},
+      onClose: () => { closes += 1 },
+      initial: { kind: 'list' },
+    })
+    const lines = workspace.render(60)
+    const bar = strip(lines[lines.length - 1] ?? '').trimEnd()
+    assert.ok(bar.includes('Esc close'), `an unbound cancel still advertises the fixed Esc: ${bar}`)
+    workspace.handleInput('\x1b')
+    assert.equal(closes, 1, 'the advertised Esc REALLY closes the workspace (no dead hint)')
+    workspace.dispose()
+  } finally {
+    keybindings.setUserBindings({})
+  }
+
   // Whole-segment degradation: `Esc close` survives every width, and no
   // surviving row is ever wider than its grant.
   for (const width of [40, 30, 24, 20, 14, 8]) {
