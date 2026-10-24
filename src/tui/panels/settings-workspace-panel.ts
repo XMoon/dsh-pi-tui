@@ -561,6 +561,22 @@ function planSettingsChrome(
   }
 }
 
+/** Whether two chrome plans allocate the SAME rows. The pointer hit maps of
+ *  every projection derive from this allocation alone, so a repaint that keeps
+ *  it is benign for a pending press while ANY change is a gesture boundary. */
+function sameChromeRows(left: SettingsChromePlan | undefined, right: SettingsChromePlan): boolean {
+  return left !== undefined
+    && left.width === right.width
+    && left.rows === right.rows
+    && left.headerRows === right.headerRows
+    && left.metaRows === right.metaRows
+    && left.ruleRows === right.ruleRows
+    && left.noticeRows === right.noticeRows
+    && left.paneHeaderRows === right.paneHeaderRows
+    && left.actionRows === right.actionRows
+    && left.bodyRows === right.bodyRows
+}
+
 /** The physical projection of ONE chrome plan: `bodyTop` is the first granted
  *  body row, a granted pane header occupies it, and `contentRows` are the real
  *  content rows left below. Every root-level paint and hit decision derives
@@ -977,6 +993,16 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.notice() !== undefined,
       choosing,
     )
+    // A paint whose ROW ALLOCATION really changed is the same gesture boundary
+    // as an unrepainted chrome change: the previous frame's press identity no
+    // longer describes this frame, even when the pressed target's own cells
+    // happen to be identical (an App notice can take the rule row while leaving
+    // contentTop/contentRows untouched). A benign repaint with the same
+    // allocation keeps the pending press.
+    if (!sameChromeRows(this.chrome, plan)) {
+      this.bumpRevision()
+      this.cancelPointerOwners()
+    }
     this.chrome = plan
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
@@ -2656,15 +2682,7 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.notice() !== undefined,
       this.choiceField() !== undefined,
     )
-    return live.width !== painted.width
-      || live.rows !== painted.rows
-      || live.headerRows !== painted.headerRows
-      || live.metaRows !== painted.metaRows
-      || live.ruleRows !== painted.ruleRows
-      || live.noticeRows !== painted.noticeRows
-      || live.paneHeaderRows !== painted.paneHeaderRows
-      || live.actionRows !== painted.actionRows
-      || live.bodyRows !== painted.bodyRows
+    return !sameChromeRows(painted, live)
   }
 
   /** The current projection (see {@link projectionWidth}). */
