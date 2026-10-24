@@ -473,6 +473,13 @@ interface MountedHarness {
   /** Execute one line through the REAL Client registry (the TSP route). */
   execute(line: string): Promise<ClientCommandExecution | undefined>
   /**
+   * The READ WITNESS: how many times the intake's own file-read call evaluated
+   * its `runner.cwd` argument. Both intake legs pass it as a direct argument of
+   * `readImageFile`/`probeAttachment`, so the counter moves exactly when a read
+   * is actually attempted — a store/notice assertion cannot see that.
+   */
+  cwdReads(): number
+  /**
    * Resolves when the intake reached its POST-READ session-scope fence. The
    * fence is a real production call issued only after the file read settled,
    * so this is an authoritative "the read finished" signal — needed where the
@@ -500,6 +507,7 @@ function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: 
   let limits: Parameters<typeof checkImageLimits>[2] | undefined
   let markPostRead!: () => void
   const postRead = new Promise<void>(resolve => { markPostRead = resolve })
+  let cwdReads = 0
   const scopeFacts = sessionScopeFacts(() => undefined, () => generation)
   const runner: TuiCommandRunner = {
     ctx,
@@ -557,7 +565,9 @@ function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: 
       rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
-    cwd: options.cwd,
+    // A GETTER, not a value: `readImageFile`/`probeAttachment` receive this as a
+    // direct call argument, so every access is one real read attempt.
+    get cwd() { cwdReads += 1; return options.cwd },
     sessionCwd: () => options.sessionCwd ?? options.cwd,
     fileStore,
     imageStore,
@@ -622,6 +632,7 @@ function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: 
     setImageLimits: (next) => { limits = next },
     execute: line => runner.clientCommands.execute({ line, signal: new AbortController().signal }),
     postRead: () => postRead,
+    cwdReads: () => cwdReads,
   }
 }
 
@@ -689,33 +700,37 @@ test('an absent composer refuses image and attach before any intake, staging or 
   writeFileSync(png, pngBytes())
   writeFileSync(join(dir, 'report.pdf'), Buffer.from('%PDF-1.7 report'))
 
-  // CONTROL: with a composer mounted, the very same inputs are readable and DO
-  // stage. That proves the refusal below is not an artifact of an unreadable
-  // file: had an intake been accepted, these bytes would have reached the store.
+  // CONTROL: with a composer mounted the very same inputs read AND stage. This
+  // proves both that the files are readable and that the read witness below
+  // really moves when an intake runs (a witness that can never move would make
+  // the refusal assertion vacuous).
   const control = mountedHarness({ cwd: dir })
+  const controlReadsBefore = control.cwdReads()
   assert.deepEqual((await control.execute(`/image ${png}`))?.result, { kind: 'success' })
   await waitFor(() => control.imageStore.size() === 1)
   assert.deepEqual((await control.execute('/attach report.pdf'))?.result, { kind: 'success' })
   await waitFor(() => control.fileStore.values().length === 1)
+  assert.ok(control.cwdReads() > controlReadsBefore,
+    'the read witness moves when a real intake reads the Client cwd')
 
   const h = mountedHarness({ cwd: dir })
   h.replaceComposer(undefined as never)
+  const readsBefore = h.cwdReads()
   for (const line of [`/image ${png}`, '/attach report.pdf']) {
     const execution = await h.clientCommands.execute({ line, signal: new AbortController().signal })
     // `{kind:'error'}` (never `success`) is the discriminating fact: accepting
-    // an intake is the ONLY way this handler reads a file, so a refusal proves
-    // no read was started.
+    // an intake is the ONLY way this handler reads a file.
     assert.equal(execution?.result.kind, 'error', `${line} is refused synchronously without a composer`)
     assert.equal((execution?.result as { text: string }).text, 'the draft composer is unavailable on this renderer')
   }
-  // Nothing was staged and no notice can exist: there is no seat to carry one.
+  // Give any (non-existent) detached task a chance to run before the read
+  // witness is trusted: a spawn-then-refuse implementation would read here.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.cwdReads(), readsBefore,
+    'the refusal evaluated no read argument: no image read and no attachment probe were attempted')
   assert.equal(h.imageStore.size(), 0)
   assert.equal(h.fileStore.values().length, 0)
   assert.deepEqual(h.reads, [], 'the PiTui-only insertIntoEditor seam was never used')
-  // Give any detached task a chance to run before the empty-store assertion is
-  // trusted; the sync refusal above means none exists.
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(h.imageStore.size(), 0, 'no late intake staged after the refusal')
 })
 
 test('a command intake completing after a session generation change never writes the replacement composer', async (t) => {
@@ -1105,7 +1120,41 @@ test('a card-less Remote /image with a real path reaches the mounted composer th
   // becomes a model prompt.
   assert.deepEqual(h.composer.notices, [{ text: `attached ${draft.placeholder} — Enter to send`, kind: undefined }],
     'the ONLY success message is the composer notice published after the commit')
-  assert.equal(h.composer.getDraft(), `${draft.placeholder} `)
+  const composerDraft = h.composer.getDraft()
+  assert.equal(composerDraft, `${draft.placeholder} `)
   assert.deepEqual(notices, [], 'the error-only result scope published nothing for a successful intake')
   assert.deepEqual(modelPrompts, [], 'the line never reached the model as a prompt')
+
+  // The SAME chain's sink: the draft and store THIS controller just produced
+  // are consumed by the existing submission-preparation pipeline. (The plan's
+  // C1 requires one continuous positive chain — this is not a separate case.)
+  const message = await prepareUserMessage(composerDraft, h.imageStore, {
+    attachments: {
+      imageLimits: {
+        maxImageBytes: 20 * 1024 * 1024,
+        maxImagesPerMessage: 4,
+        maxMessageImageBytes: 200 * 1024 * 1024,
+        maxImagePixels: 64_000_000,
+        maxImageDimension: 8192,
+        mediaTypes: ['image/png'],
+      },
+      saveImages: async inputs => inputs.map((input, index) => ({
+        attachmentId: `att-${index + 1}`,
+        mediaType: input.mediaType,
+        bytes: input.data.byteLength,
+        width: 1,
+        height: 1,
+        name: input.name,
+      })),
+    },
+    llm: { resolveModelInfo: async () => ({ inputModalities: ['text', 'image'] }) } as never,
+    currentModel: () => ({ provider: 'provider', model: 'model' }),
+    canonicalizeMentions: async text => text,
+  })
+  const imageBlocks = message.content.filter(block => block.type === 'image')
+  assert.equal(imageBlocks.length, 1, 'the existing preparation consumes exactly the token the controller produced')
+  assert.equal((imageBlocks[0] as { attachment: { bytes: number } }).attachment.bytes, 33,
+    'the admitted block carries the SAME bytes the intake staged')
+  assert.ok(!message.content.some(block => block.type === 'text' && block.text.includes(draft.placeholder)),
+    'the canonical token is resolved into the image block, never sent as literal text')
 })
