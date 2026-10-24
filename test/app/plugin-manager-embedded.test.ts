@@ -1729,8 +1729,8 @@ test('T09 rail keys are refused until the yield paints the new projection', asyn
   const harness = await open({ columns: 100, rows: 24 })
   await selectCard(harness, 'bundle:@vendor/foo')
   await contentFocus(harness)
-  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
-    .settingsWorkspace!.panel
+  const rootPanel = (harness.app as never as { workspaceLease?: { panel: Record<string, unknown> } })
+    .workspaceLease!.panel
   const categoryBefore = rootPanel['categoryId']
   // One burst: the page Esc yields to the rail (installing the new grant), then a
   // rail key arrives before that projection paints.
@@ -1753,8 +1753,8 @@ test('T09 narrow rail keys and Backspace wait for the destination frame', async 
   // returns early because the page is not painted in that projection), yet the
   // Categories frame has not painted either — so the ROOT needs its own guard.
   const narrow = await open({ columns: 72, rows: 24 })
-  const rootPanel = (narrow.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
-    .settingsWorkspace!.panel
+  const rootPanel = (narrow.app as never as { workspaceLease?: { panel: Record<string, unknown> } })
+    .workspaceLease!.panel
   // `/plugins` lands with the content already focused; Esc yields to the rail,
   // then Enter takes the content again (narrow paints one region at a time).
   assert.equal(rootPanel['focus'], 'content', 'the deep link starts on the plugin content')
@@ -1785,8 +1785,8 @@ test('T09 narrow rail keys and Backspace wait for the destination frame', async 
   const bs = await open({ columns: 100, rows: 24 })
   await selectCard(bs, 'bundle:@vendor/foo')
   await contentFocus(bs)
-  const bsRoot = (bs.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
-    .settingsWorkspace!.panel
+  const bsRoot = (bs.app as never as { workspaceLease?: { panel: Record<string, unknown> } })
+    .workspaceLease!.panel
   bs.vt.sendInput('\x1b') // yield; the changed grant awaits its paint
   bs.vt.sendInput('\x7f') // Backspace in the same window
   await bs.waitForFrame()
@@ -1801,8 +1801,8 @@ test('T09 narrow rail -> content refuses page keys until the content frame paint
   // so the page's own query stays false. The root must fence the keys it would
   // dispatch into the new focus until the content frame paints.
   const harness = await open({ columns: 72, rows: 24 })
-  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
-    .settingsWorkspace!.panel
+  const rootPanel = (harness.app as never as { workspaceLease?: { panel: Record<string, unknown> } })
+    .workspaceLease!.panel
   assert.equal(rootPanel['focus'], 'content', 'the deep link starts on the content')
   harness.vt.sendInput('\x1b') // yield to the rail
   await harness.waitForFrame()
@@ -1830,8 +1830,8 @@ test('T09 the stale rail refuses a NEW mouse gesture until the projection paints
   // not. At 76..119 columns a rail -> content focus transfer changes the projection,
   // and the OLD rail cells are still on screen when the transfer's key is consumed.
   const harness = await open({ columns: 100, rows: 24, startOn: 'rail' })
-  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
-    .settingsWorkspace!.panel
+  const rootPanel = (harness.app as never as { workspaceLease?: { panel: Record<string, unknown> } })
+    .workspaceLease!.panel
   assert.equal(rootPanel['focus'], 'categories', 'the rail owns the keys')
   // The transfer that changes the projection is Plugins' content focus, so select
   // Plugins first (the rail still owns the keys at that point).
@@ -1867,8 +1867,8 @@ test('T09 the stale rail refuses a NEW mouse gesture until the projection paints
   // Positive control on a fresh lease: once the rail frame is painted, a real rail
   // click on a DIFFERENT category switches.
   const control = await open({ columns: 100, rows: 24, startOn: 'rail' })
-  const controlRoot = (control.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
-    .settingsWorkspace!.panel
+  const controlRoot = (control.app as never as { workspaceLease?: { panel: Record<string, unknown> } })
+    .workspaceLease!.panel
   const controlBefore = controlRoot['categoryId']
   click(control, 5, 3)
   await control.waitForFrame()
@@ -1884,8 +1884,8 @@ test('T09 Shift+Tab does not yield while a changed grant awaits its paint', asyn
   const harness = await open({ columns: 100, rows: 24 })
   await selectCard(harness, 'bundle:@vendor/foo')
   await yieldToRail(harness)
-  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
-    .settingsWorkspace!.panel
+  const rootPanel = (harness.app as never as { workspaceLease?: { panel: Record<string, unknown> } })
+    .workspaceLease!.panel
   // ONE burst: focus transfer -> body key -> Shift+Tab, all before the frame that
   // shows the new focus. The root's projection guard refuses the body key first
   // (the page's grant is never even synchronized), so the observable property is
