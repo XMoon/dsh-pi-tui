@@ -618,6 +618,31 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   await railWheel.settle()
   assert.notDeepEqual(visibleRail(), railBefore, 'the repainted rail still scrolls under the pointer')
   railWheel.app.dispose()
+  // The interleaving that neither single case covers: a pending rail press, a
+  // refused wheel in the unrepainted window, then a release after the repaint.
+  // 120x8 keeps contentTop/contentRows (and the pressed target's row) identical
+  // across the notice, so only the revoked press prevents the category change.
+  const interleaved = await open({ columns: 120, rows: 8 })
+  await yieldToRail(interleaved)
+  const displayRow = railRow(interleaved, 'Display')
+  press(interleaved, displayRow, 3)
+  interleaved.app.notify('notice between press and wheel', 'error')
+  wheel(interleaved, 6, 2)
+  await interleaved.settle()
+  release(interleaved, railRow(interleaved, 'Display'), 3)
+  await interleaved.settle()
+  assert.match(interleaved.view(), /^> Plugins\b/mu, 'the category is still Plugins after the stale release')
+  assert.doesNotMatch(interleaved.view(), /Scope: Display/u, 'the release after a refused stale wheel never switches category')
+  assert.equal(interleaved.panel.focused, false, 'the rail still owns the keyboard after the repaint')
+  // Positive control on a DIFFERENT rail row: the fork withholds a click whose
+  // press lands on the same cell inside its multi-click window, so reusing the
+  // Display cell here would prove the fork's double-click rule rather than the
+  // panel's admission. The neighboring Tools row is a fresh cell and switches.
+  click(interleaved, railRow(interleaved, 'Tools'), 3)
+  await interleaved.settle()
+  assert.match(interleaved.view(), /Scope: TUI preferences/u, 'a fresh rail gesture still switches category')
+  interleaved.app.dispose()
+
   // The same notice moves the ROOT-owned rail hit map. A press on the old About
   // row must not become a category change (which would dispose the List page)
   // after the notice took a row.
