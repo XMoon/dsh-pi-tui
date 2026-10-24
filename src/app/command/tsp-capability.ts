@@ -64,15 +64,21 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
  * admitted set above plus the argument-shaped `/logout`, and it is deliberately
  * NOT a routing authority — the classifier and the gate above own that.
  *
- * Image UX PR3-B2: `/attach` and `/image` are EXCLUDED. Their handler returns
- * `{ kind: 'success' }` as soon as one asynchronous intake intent was accepted —
- * not when the file was read, staged and its token inserted. The ONLY success
- * message is the composer notice the intake publishes after the token is
- * committed, so a generic result notice here would announce a false success
- * before the bytes exist (and would then duplicate the real one).
+ * The scope is ERROR-ONLY: its one production consumer publishes a returned
+ * `CommandResult` solely when `kind === 'error'` and the text is non-empty
+ * (`app/submission/controller.ts`, the card-less Client-registry branch). A
+ * successful result is never announced from here.
+ *
+ * Image UX PR3-B2: `/attach` and `/image` therefore stay IN this set. Their
+ * synchronous `CommandResult.error` branches (a bare command, a malformed
+ * argument, an unavailable draft composer) run no intake at all, so this notice
+ * is their ONLY visible outcome on a renderer without a command card; dropping
+ * them here would silently swallow a real refusal. Their asynchronous intake is
+ * unaffected: the single success/error message comes from the mounted composer
+ * after the bytes are staged and the canonical token inserted.
  */
 export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
-  ...[...TSP_SUPPORTED_TUI_BUILTINS].filter(name => name !== 'attach' && name !== 'image'),
+  ...TSP_SUPPORTED_TUI_BUILTINS,
   'logout',
 ])
 
