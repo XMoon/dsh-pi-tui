@@ -229,3 +229,78 @@ test('a real Ctrl+V with an image clipboard lands a composer token and submits a
     await fixture.settle()
   }
 })
+
+/**
+ * The plain-text half of the same gesture, on the same production chain: a
+ * clipboard holding TEXT must insert at the live caret and produce no draft
+ * image, no image notice and no submission. The helper answers the probe with
+ * a text payload only, exactly as `wl-paste`/`xclip` do for a text clipboard.
+ */
+test('a real Ctrl+V with a TEXT clipboard inserts at the caret and stages no image', async (t) => {
+  const { chmodSync, mkdirSync, writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['L6', '-TEXT', '-OK'],
+    nativeImages: true,
+  })
+  const previousPath = process.env.PATH
+  const previousDisplay = process.env.DISPLAY
+  const prepared: unknown[] = []
+  const recorder = fixture.recordPrompts(call => { prepared.push(call.message) })
+  try {
+    const binDir = join(fixture.workRoot, 'bin')
+    mkdirSync(binDir, { recursive: true })
+    const helper = join(binDir, 'xclip')
+    writeFileSync(helper, [
+      '#!/bin/sh',
+      'for arg in "$@"; do',
+      '  if [ "$arg" = "TARGETS" ]; then printf "UTF8_STRING\\n"; exit 0; fi',
+      'done',
+      'printf "pasted text"',
+      '',
+    ].join('\n'))
+    chmodSync(helper, 0o755)
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`
+    process.env.DISPLAY = ':0'
+
+    await waitForInputDelivery(fixture.pane)
+    fixture.pane.input.type('lead ')
+    await waitFor('the composer to hold the typed prefix', () =>
+      (latestComposerText(fixture.pane.output.text()) ?? '').includes('lead'), 25_000)
+
+    fixture.pane.input.type('\x16')
+    await waitFor('the pasted text to land after the typed prefix', () =>
+      latestComposerText(fixture.pane.output.text()) === 'lead pasted text', 25_000)
+
+    const draft = latestComposerText(fixture.pane.output.text())!
+    assert.equal(draft, 'lead pasted text', 'the text landed at the live caret, after what was typed')
+    assert.equal(/\[image #\d+/u.test(draft), false, 'a text paste stages NO draft image')
+    assert.deepEqual(fixture.pane.blobIds(), [], 'a text paste sends no image blob')
+    assert.equal(paneHasImageNotice(fixture.pane.output.text()), false,
+      'a text paste never shows an image notice')
+    assert.equal(recorder.calls(), 0, 'a text paste never submits')
+
+    // The text half survives the real submission path too (one text block, no image).
+    fixture.pane.input.type('\r')
+    await waitFor('the settled prompt write', () => recorder.calls() >= 1, 30_000)
+    const wire = JSON.stringify(prepared[0])
+    assert.equal(wire.includes('pasted text'), true, 'the submitted message carries the pasted text')
+    assert.equal(wire.includes('"type":"image"'), false, 'the submitted message carries no image block')
+  } finally {
+    recorder.detach()
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    if (previousDisplay === undefined) delete process.env.DISPLAY
+    else process.env.DISPLAY = previousDisplay
+    // The fixture's settle disposes the app, the pane and the Host context
+    // before the next case starts: a bounded teardown, not a blind sleep.
+    await fixture.settle()
+  }
+})
+
+/** Whether the wire shows an image-intake notice (never for a text paste). */
+function paneHasImageNotice(wire: string): boolean {
+  return wire.includes('attached [image') || wire.includes('Image read failed')
+}
