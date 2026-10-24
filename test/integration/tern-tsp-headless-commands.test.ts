@@ -668,43 +668,37 @@ test('a real /attach of a regular file stages metadata and inserts the canonical
   const { join } = await import('node:path')
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['ATTACH-INTAKE'] })
+  // Teardown is registered on `life` by the fixture itself, so this case needs
+  // no explicit settle step of its own.
   const file = join(fixture.workRoot, 'report.pdf')
   writeFileSync(file, Buffer.from('%PDF-1.7 report'))
-  try {
-    await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, `/attach ${file}`)
-    // The success notice is published by the INTAKE, after the metadata draft
-    // exists and its token was inserted — never by the synchronous command
-    // result (the card-less result scope is error-only).
-    await waitFor('the attach success notice', () =>
-      dockNotices(fixture).some(text => text.includes('attached [file #1')), 25_000)
-    // The token is in the MOUNTED composer: the TSP renderer's own draft seat,
-    // which is the whole point of the composer seam.
-    await waitFor('the canonical file token in the composer', () =>
-      (composerText(fixture) ?? '').includes('[file #1 ('), 25_000)
-    assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
-      'the Client-local intake is admitted instead of refused')
-    assert.deepEqual(welcomeSessionIds(fixture), [], 'the intake created no Session')
-    assert.equal(fixture.modelCalls(), 0, 'the intake never reached the model')
-  } finally {
-    await fixture.settle()
-  }
+  await waitForInputDelivery(fixture.pane)
+  await submitInput(fixture, `/attach ${file}`)
+  // The success notice is published by the INTAKE, after the metadata draft
+  // exists and its token was inserted — never by the synchronous command
+  // result (the card-less result scope is error-only).
+  await waitFor('the attach success notice', () =>
+    dockNotices(fixture).some(text => text.includes('attached [file #1')), 25_000)
+  // The token is in the MOUNTED composer: the TSP renderer's own draft seat,
+  // which is the whole point of the composer seam.
+  await waitFor('the canonical file token in the composer', () =>
+    (composerText(fixture) ?? '').includes('[file #1 ('), 25_000)
+  assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
+    'the Client-local intake is admitted instead of refused')
+  assert.deepEqual(welcomeSessionIds(fixture), [], 'the intake created no Session')
+  assert.equal(fixture.modelCalls(), 0, 'the intake never reached the model')
 })
 
 test('a real /attach of a missing path reports the real Client-local error and stages nothing', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['ATTACH-MISSING'] })
-  try {
-    await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/attach no-such-file-here.bin')
-    await waitFor('the not-found notice', () =>
-      dockNotices(fixture).some(text => text.includes('File not found: no-such-file-here.bin')), 25_000)
-    assert.equal(composerText(fixture), '', 'no canonical token was inserted for a failed probe')
-    assert.deepEqual(welcomeSessionIds(fixture), [], 'a failed intake created no Session')
-    assert.equal(fixture.modelCalls(), 0)
-  } finally {
-    await fixture.settle()
-  }
+  await waitForInputDelivery(fixture.pane)
+  await submitInput(fixture, '/attach no-such-file-here.bin')
+  await waitFor('the not-found notice', () =>
+    dockNotices(fixture).some(text => text.includes('File not found: no-such-file-here.bin')), 25_000)
+  assert.equal(composerText(fixture), '', 'no canonical token was inserted for a failed probe')
+  assert.deepEqual(welcomeSessionIds(fixture), [], 'a failed intake created no Session')
+  assert.equal(fixture.modelCalls(), 0)
 })
 
 // ── A09: the flow-route logout branch (capability absent here) ──────────────
