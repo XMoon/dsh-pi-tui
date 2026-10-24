@@ -781,6 +781,43 @@ test('T09 a real Port invalidation while the press is held refuses the old relea
   harness.app.dispose()
 })
 
+test('T09 a plugin sub-view change under a held rail press refuses the old release', async () => {
+  // §3.4/§4.4: a Plugin sub-view change (Details -> List via the page's own Esc)
+  // must invalidate a root gesture recorded against the rail. The wide
+  // projection and the content box are UNCHANGED across that transition, so the
+  // root revision must be bumped for the old release to be refused.
+  const harness = await open({ columns: 120, rows: 24 })
+  await openDetails(harness)
+  assert.equal(harness.panel.currentView(), 'details')
+
+  // Hold a press on another category's rail row while the page owns the content.
+  const aboutRow = railRow(harness, 'About')
+  press(harness, aboutRow, 3)
+  assert.equal(harness.panel.currentView(), 'details', 'the rail press never activates immediately')
+
+  // The PAGE consumes Esc: Details -> List. The projection is unchanged, so a
+  // release that only compares the root revision and the target identity would
+  // still match the old rail hit.
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list', 'the page Esc ran its own gradient')
+
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
+  assert.doesNotMatch(harness.view(), /Scope: About/u)
+  assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives the stale release')
+
+  // Positive control on the settled frame: a fresh rail click on ANOTHER row
+  // really switches category. (The About cell was just released, so clicking it
+  // again would land inside the fork's multi-click window.)
+  click(harness, railRow(harness, 'Models'), 3)
+  await harness.settle()
+  assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click selects the Models category')
+  assert.equal(harness.panel.currentView(), 'list', 'the switched-away plugin page released its view')
+  harness.app.dispose()
+})
+
 test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture', async () => {
   // 119 -> 120: the rail APPEARS, so the plugin content starts at x=24 instead
   // of x=0 while the pressed screen cell keeps the same number.
