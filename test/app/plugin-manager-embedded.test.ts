@@ -1825,6 +1825,52 @@ test('T09 Shift+Tab does not yield while a changed grant awaits its paint', asyn
   harness.app.dispose()
 })
 
+test('T02 the rail preview on the PRODUCTION page: Enter, Right and Tab only transfer focus', async () => {
+  // §8.1 T02: at 80 and 120 columns, moving the rail onto Plugins shows the REAL
+  // plugin List while the keyboard stays on Categories, and Enter / Right / Tab
+  // each transfer ONLY the focus — no Host mutation, no second inventory read, no
+  // new page, never Details. Each key is exercised on its own fresh lease.
+  for (const columns of [80, 120] as const) {
+    for (const key of ['\r', '\x1b[C', '\t'] as const) {
+      const harness = await open({ columns, rows: 24, startOn: 'rail' })
+      // The rail path: nothing is mounted while only About is selected.
+      assert.equal(harness.panelInstance(), undefined, `${columns}: no page on the About home`)
+      assert.equal(harness.snapshotCalls(), 0, `${columns}: no inventory read on the About home`)
+
+      // Walk the rail onto Plugins with the real keys: the preview mounts the ONE
+      // real page and reads the inventory exactly once, keyboard still on the rail.
+      for (let step = 0; step < 12; step += 1) {
+        if (/^> Plugins\b/mu.test(harness.view())) break
+        harness.vt.sendInput('\x1b[B')
+        await harness.settle()
+      }
+      assert.match(harness.view(), /^> Plugins\b/mu, `${columns}: the rail selects Plugins`)
+      const page = harness.panel
+      assert.ok(page !== undefined, `${columns}: the preview mounts the real page`)
+      assert.equal(page.focused, false, `${columns}: the rail keeps the keyboard`)
+      assert.equal(harness.snapshotCalls(), 1, `${columns}: the preview reads the inventory once`)
+      assert.equal(bar(harness).includes('Enter details'), false,
+        `${columns}: the rail owns the bar, not the plugin list`)
+      assert.match(harness.view(), /@vendor\/foo|TUI & Extensions/u, `${columns}: the real list is painted`)
+      const readsBeforeKey = harness.snapshotCalls()
+
+      // The ONE key under test.
+      harness.vt.sendInput(key)
+      await harness.settle()
+
+      assert.equal(harness.panelInstance(), page, `${columns} ${JSON.stringify(key)}: the SAME page instance`)
+      assert.equal(page.focused, true, `${columns} ${JSON.stringify(key)}: the keyboard moved to the plugin page`)
+      assert.equal(page.currentView(), 'list', `${columns} ${JSON.stringify(key)}: still the List, never Details`)
+      assert.equal(harness.snapshotCalls(), readsBeforeKey,
+        `${columns} ${JSON.stringify(key)}: no second inventory read`)
+      assert.deepEqual(harness.setBundle, [], `${columns} ${JSON.stringify(key)}: no Host mutation`)
+      assert.deepEqual(harness.removeBundle, [], `${columns} ${JSON.stringify(key)}: no Host removal`)
+      assert.equal(harness.installCalls.length, 0, `${columns} ${JSON.stringify(key)}: no install dispatched`)
+      harness.app.dispose()
+    }
+  }
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
 test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {
