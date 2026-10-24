@@ -873,3 +873,53 @@ test('the list action bar advertises the LIVE keybindings and degrades by whole 
     }
   }
 })
+
+test('a hostile attachment name cannot emit terminal controls through the /view-image list', async () => {
+  // The attachment name is untrusted and the list renders it on a terminal row.
+  // `SearchablePicker` folds line breaks only — it is NOT a control filter — so
+  // the list row must be produced through `sanitizedPhysicalLine`, exactly like
+  // every other external label (docs/architecture/terminal-output.md). The
+  // durable ref keeps the original name; only the PAINTED label is projected.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  // OSC 0 (set window title) and a pseudo Kitty APC placement, both live if
+  // they reach the terminal unfiltered.
+  const hostile = 'evil\u001b]0;pwned\u0007\u001b_Ga=T,f=100,c=99;\u001b\\photo.png'
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'hostile' },
+      { type: 'image', attachment: { ...IMAGE_REF, attachmentId: 'att-hostile', name: hostile } },
+    ], 1),
+  ])
+  app.setTranscript(folder.messages())
+  const internals = app as unknown as {
+    openTranscriptImagePicker(): void
+    mountedImageOccurrences(): { ref: { name?: string } }[]
+  }
+  // The raw occurrence keeps the REAL name (the projection is display-only).
+  assert.equal(internals.mountedImageOccurrences()[0]?.ref.name, hostile,
+    'the durable occurrence is not rewritten by the display projection')
+  const writesBefore = vt.writes.length
+  internals.openTranscriptImagePicker()
+  const view = await viewport(vt)
+  // The VIEWPORT cannot prove this: `getViewport()` reads xterm's PARSED buffer,
+  // so a control sequence would already have been consumed by the emulator. The
+  // decisive evidence is the RAW bytes the renderer wrote.
+  const emitted = vt.writes.slice(writesBefore).join('')
+  // Targeted signatures, not "any APC": the renderer legitimately emits its own
+  // Kitty control APC (`\x1b_Ga=d,d=A`) and OSC 7501 state frames, so a blanket
+  // check would fail on correct behaviour. The FORGED sequence advertises
+  // `a=T` (transmit) with a payload id, and the OSC payload is `pwned`.
+  assert.ok(!emitted.includes('a=T,f=100,c=99'),
+    `the forged APC placement never reaches the terminal: ${JSON.stringify(emitted.slice(-300))}`)
+  assert.ok(!emitted.includes('pwned'),
+    `the OSC payload never reaches the terminal: ${JSON.stringify(emitted.slice(-300))}`)
+  assert.ok(!/\u001b\]0;/.test(emitted), 'no OSC-0 title sequence reaches the terminal')
+  // ...while the benign remainder of the name is still identifiable.
+  assert.ok(view.includes('evilphoto.png'), `the safe part of the name is still shown:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
