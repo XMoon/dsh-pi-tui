@@ -1598,6 +1598,67 @@ test('T09 a blank Host log chunk never advances the Controller generation', asyn
   harness.app.dispose()
 })
 
+test('T09 a phase round-trip under a held Install action refuses the page release', async () => {
+  // RFL-016: the ROOT fence compares the Controller's monotonic transitions, but
+  // the PAGE's own press/release gate compared only the painted frame. A phase
+  // round trip that returns to its press-time value and does not repaint must
+  // still refuse the page's own held action.
+  //
+  // The witness uses the `Hide install view` action: it has an immediate, local,
+  // observable effect (the page returns to its List), so "nothing happened" really
+  // means the gate refused. `Stop` would dispatch a Host cancel whose fake result
+  // is indistinguishable from a refused press.
+  const harness = await open({ columns: 120, rows: 24 })
+  harness.vt.sendInput('\x1b[F')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  assert.equal(harness.installCalls.length, 1, 'the official install was dispatched')
+  const requestId = harness.controller.installView()!.requestId
+  assert.ok(requestId !== undefined)
+  harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'install', 'the install view is showing')
+  const hideRow = rowOf(harness, 'Hide install view')
+  press(harness, hideRow, 5)
+  const transitionsAtPress = harness.controller.semanticTransitionsCount()
+  // A phase round trip that RETURNS to `installing`, with no paint in between.
+  harness.emit({ kind: 'phase', phase: { requestId, phase: 'applying' } })
+  harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
+  assert.equal(harness.controller.installView()?.phase, 'installing', 'the phase returned to its press-time value')
+  assert.ok(harness.controller.semanticTransitionsCount() > transitionsAtPress,
+    'the Controller transition count advanced across the round trip')
+  release(harness, hideRow, 5)
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'install',
+    'the stale page release never ran the Hide action (the page is still on the install view)')
+
+  // Positive control: the SAME painted action really runs on the settled frame.
+  // The keyboard is used because a same-cell click inside the fork's multi-click
+  // window becomes a word selection instead of a click.
+  // Walk the CURRENT install action list and activate the first enabled action;
+  // any real dispatch leaves the Install view or changes its phase, which is the
+  // property the refused release did not have.
+  const phaseBefore = harness.controller.installView()?.phase
+  for (let step = 0; step < 8 && harness.panel.currentView() === 'install'; step += 1) {
+    const before = harness.panel.currentView()
+    harness.vt.sendInput('\r')
+    await harness.settle()
+    if (harness.panel.currentView() !== before) break
+    harness.vt.sendInput('\x1b[B')
+    await harness.settle()
+  }
+  assert.ok(
+    harness.panel.currentView() !== 'install' || harness.controller.installView()?.phase !== phaseBefore,
+    `a fresh activation really dispatched:\n${harness.view()}`,
+  )
+  harness.app.dispose()
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
 test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {

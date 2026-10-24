@@ -3758,16 +3758,13 @@ export class SettingsWorkspacePanel implements Component {
   private childGestureIdentity(): string {
     const page = this.pluginPage
     if (page === undefined) return 'none'
-    // The page's OWN gesture revision is the authority: it bumps on every local
-    // change that can move a painted target or its meaning (view, filter, query,
-    // selected card, install phase, scroll, painted action set). The view/yield
-    // triple alone misses a filter or selection change inside the SAME view, so
-    // both parts are required.
-    // `liveIdentity()` is the comparable live half: painted revision, local
-    // grant and the Controller's CURRENT model/read generation, install phase,
-    // notice and status. Using the VALUE (not a stale boolean) is what makes a
-    // press held across a SECOND Host invalidation invalid, while a repaint that
-    // only catches up with facts already live before the press stays comparable.
+    // `liveIdentity()` is the child-side authority: it carries the page's
+    // monotonic semantic generation (a change that REVERTS inside the gesture),
+    // the Controller's monotonic transition count (an asynchronous phase round
+    // trip), the install editor's field values, and the semantic state/grant/
+    // Controller facts. Because it is a VALUE, a repaint that only catches up with
+    // facts already live before the press stays comparable. The view/mutation/
+    // yield triple is appended for readable failures; it is already implied.
     return `${page.liveIdentity()}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
   }
 

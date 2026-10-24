@@ -196,6 +196,10 @@ interface PressedGesture {
   readonly width: number
   readonly rows: number
   readonly allowDual: boolean
+  /** The Controller's monotonic transition count at press time. `phase` alone
+   *  cannot see a round trip that returns to the same value (installing ->
+   *  applying -> installing), and the page's own release gate must refuse it. */
+  readonly transitions: number
 }
 
 /** One line of the list projection. */
@@ -618,6 +622,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         width: this.viewport.width,
         rows: this.viewport.rows,
         allowDual: this.viewport.allowDual,
+        transitions: this.controller.semanticTransitionsCount(),
       }
   }
 
@@ -633,9 +638,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const target = this.targetAt(x, y)
     if (pressed === undefined || target === undefined) return
     // The gesture must still resolve to the SAME painted target AND the same
-    // revision/view/selection/LOCAL viewport: a refresh, filter/search change,
-    // page switch OR a local viewport change (even before its repaint) refuses
-    // the click.
+    // revision/view/selection/LOCAL viewport/Controller transition count: a
+    // refresh, filter/search change, page switch, local viewport change or an
+    // asynchronous Controller transition (even one that returns to the same
+    // phase value, and even before its repaint) refuses the click.
     if (
       this.revision !== pressed.revision
       || this.view !== pressed.view
@@ -643,6 +649,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       || this.viewport.width !== pressed.width
       || this.viewport.rows !== pressed.rows
       || this.viewport.allowDual !== pressed.allowDual
+      || this.controller.semanticTransitionsCount() !== pressed.transitions
       || target.kind !== pressed.target.kind
       || target.value !== pressed.target.value
       || target.row !== pressed.target.row
