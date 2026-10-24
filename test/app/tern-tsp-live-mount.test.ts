@@ -1345,6 +1345,16 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
         assert.equal(typeof binding.imageScope, 'function')
         return {
           display,
+          // The TSP mount always supplies the Task Center presentation sink
+          // (the internal Work Hub); this surface fixture never opens it.
+          taskPresentation: {
+            openBrowser: () => ({ close: () => {}, setItems: () => {}, setRefreshState: () => {} }),
+            setQuickTaskItems: () => {},
+            setAgents: () => {},
+            setTasks: () => {},
+            setQuestionAttention: () => {},
+            setTaskSummary: () => {},
+          },
           composer,
           interaction: presenter,
           bindInput: () => {},

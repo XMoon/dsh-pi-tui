@@ -24,13 +24,14 @@ import type { TaskBrowserHandle, TuiAppEvents } from '../../src/tui-app.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { JobInspectorPanel, deriveJobInspectorView } from '../../src/tui/panels/job-inspector-panel.ts'
 import { createTaskRuntime, type JobInspectorState, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../../src/runtime/job-observation-port.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import type { TranscriptMessage } from '../../src/transcript.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { displaySeamStub } from '../support/display-seam-stub.ts'
+import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 /** Every TuiApp started here is disposed after each test: the process's
@@ -183,7 +184,8 @@ function attachTasks(app: TuiApp, options: { jobIds?: readonly string[] } = {}):
   }
   const tasks = createTaskRuntime({
     mounted: () => app,
-    display: () => displaySeamStub(),
+    display: () => pituiDisplaySeam(app),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
   })

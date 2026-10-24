@@ -165,6 +165,8 @@ import {
 } from './event-routing.ts'
 import type { SurfaceDisplaySeam } from './display-seam.ts'
 import { pituiDisplaySeam } from './display-seam-pitui.ts'
+import { pituiTaskCenterPresentation } from './task-presentation-pitui.ts'
+import type { TaskCenterPresentationPort } from './task-presentation-port.ts'
 
 // The moved public/internal surface types stay importable from this exact path
 // (the aggregate remains the stable entry for its consumers).
@@ -272,6 +274,13 @@ export interface SurfaceRendererMount {
   mount(binding: SurfaceImageBinding): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
+    /**
+     * B3-A1: the renderer's Task Center presentation sink. The ONE Task
+     * Runtime keeps every business fact; this port only carries the rows and
+     * chrome it already decided. A renderer without a Task Center still
+     * supplies the port (its capability flag is the reachability truth).
+     */
+    readonly taskPresentation: TaskCenterPresentationPort
     /**
      * PR3-B §3.1: the renderer's composer projection (B1: the TSP
      * renderer's ONE program-owned composer; the PiTui branch is the live
@@ -811,6 +820,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    */
   let display: SurfaceDisplaySeam | undefined
   /**
+   * B3-A1: the mounted renderer's Task Center presentation sink. Late-bound
+   * exactly like {@link display}: the Task Runtime is constructed before the
+   * renderer mounts and reads this through a closure. A read before the mount
+   * is an internal wiring failure — there is no no-op fallback port.
+   */
+  let taskPresentation: TaskCenterPresentationPort | undefined
+  /**
    * PR3-B §3.1: the live composer projection. PiTui assigns the mounted app
    * (structurally a `SubmissionComposerPort`); a renderer mount injects its
    * own composer port instead of a TuiApp.
@@ -990,6 +1006,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const task = createTaskRuntime({
     mounted: () => mounted(),
     display: () => displaySeam(),
+    // B3-A1: the Task Center presentation sink is read LATE because this owner
+    // is constructed before the renderer mount transfers the terminal. The
+    // normal product always presents through a mounted sink; a read before
+    // the mount is a wiring failure, not a silent no-op.
+    presentation: () => {
+      if (taskPresentation === undefined) throw new Error('task presentation not mounted')
+      return taskPresentation
+    },
     isCleanedUp: () => isCleanedUp(),
     attention: {
       rows: () => interaction.attentionRows(),
@@ -1973,6 +1997,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (deps.renderer !== undefined) {
         const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope })
         display = mounted.display
+        taskPresentation = mounted.taskPresentation
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation
         presetPresentation = mounted.presetPresentation
@@ -2037,6 +2062,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
       display = pituiDisplaySeam(app)
+      // B3-A1: the PiTui Task Center presentation sink is the ONE live app
+      // itself, wrapped by the pure delegation adapter. It is installed
+      // BEFORE the post-mount attention republish below, so that republish
+      // reaches the real Quick window.
+      taskPresentation = pituiTaskCenterPresentation(app)
       // PR3-B §3.1/§3.2: the PiTui branch's projections are the ONE live app
       // itself (structural compatibility is the contract). The modal presenter
       // is the narrow DELEGATING adapter over it (PR3-B B3): the app has no

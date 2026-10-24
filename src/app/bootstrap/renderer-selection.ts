@@ -31,6 +31,10 @@ export interface RendererSelectionDeps {
    */
   readonly connectTsp: () => Promise<{
     readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
+    /** B3-A1: the renderer's Task Center presentation sink (the internal
+     *  native Work Hub on TSP). It carries presentation only; the renderer's
+     *  own capability flag decides production reachability. */
+    readonly taskPresentation: import('../surface/task-presentation-port.ts').TaskCenterPresentationPort
     readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
     readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
     readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
@@ -73,6 +77,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
       tsp.bindImages(binding)
       return {
         display: tsp.display,
+        taskPresentation: tsp.taskPresentation,
         composer: tsp.composer,
         modelPresentation: tsp.modelPresentation,
         presetPresentation: tsp.presetPresentation,
@@ -115,6 +120,7 @@ export function productionTspConnector(
   deps: ProductionTspConnectorDeps,
 ): () => Promise<{
   readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
+  readonly taskPresentation: import('../surface/task-presentation-port.ts').TaskCenterPresentationPort
   readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
   readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
   readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
