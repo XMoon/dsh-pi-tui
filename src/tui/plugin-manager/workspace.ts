@@ -519,7 +519,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return { handled: true }
     }
     if (this.view === 'install') {
-      if (this.scrollInstall(delta, plan)) this.bumpRevision(); this.bumpSemantic()
+      if (this.scrollInstall(delta, plan)) {
+        this.bumpRevision(); this.bumpSemantic()
+      }
       this.intents.requestRender()
       return { handled: true }
     }
@@ -978,8 +980,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           this.submitInspect()
           return
         }
+        const beforeSpec = this.specInput.getValue()
         this.specInput.handleInput(data)
         this.sanitizeSpecInput()
+        // A REAL edit is a semantic change: it must revoke the page's own
+        // pressed actions (Inspect would otherwise fire with a different spec).
+        if (this.specInput.getValue() !== beforeSpec) {
+          this.bumpRevision(); this.bumpSemantic()
+        }
         this.intents.requestRender()
         return
       }
@@ -988,8 +996,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           this.submitInspect()
           return
         }
+        const beforeRegistry = this.registryInput.getValue()
         this.registryInput.handleInput(data)
         this.sanitizeRegistryInput()
+        if (this.registryInput.getValue() !== beforeRegistry) {
+          this.bumpRevision(); this.bumpSemantic()
+        }
         this.intents.requestRender()
         return
       }
@@ -2937,6 +2949,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // grant) is represented by the terms below.
     return JSON.stringify([
       this.semanticGenerationValue,
+      // The install editor's field values: Inspect dispatches with them, so a
+      // press taken before an edit must not fire on the newer text.
+      this.specInput.getValue(),
+      this.registryInput.getValue(),
+      this.installFocus,
+      this.customRegistry,
+      // The Controller's monotonic transition count: an asynchronous phase that
+      // returns to the same value (installing -> applying -> installing) must
+      // still fence a held gesture, and the value term alone cannot see it.
+      this.controller.semanticTransitionsCount(),
       this.view,
       this.focus,
       this.searchEditing,
