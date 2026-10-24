@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 64
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 48, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 65
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 49, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -156,6 +156,7 @@
 | X061 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
 | X062 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
 | X063 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
+| X064 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -5397,3 +5398,97 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced for Phase 3B/B4-B (the implementation plan's X061 slot; renumbered X063 because rollout PR5b claimed X061/X062 — Owner-approved 2026-10-14). The 2026-10-15 delta rechecks the fork input path, single host subclass, package entry and callback facts, including same-turn boundary consumption and jump completion/abort.
+
+### X064 — Narrow Editor seams for the scoped submit bridge and the real Undo-history lifetime of draft images
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/components/editor.ts`, `src/undo-stack.ts`
+- Last audited: `2026-10-24`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The composer preview must keep a draft image's bytes alive exactly as long as the HOST EDITOR's real Undo history can still restore its canonical placeholder, and it must carry the submitted images across the synchronous submit clear until the existing business owner takes its own attachment reservation. Three facts live only inside the fork Editor: (a) submitValue()/undoStack are private, so the host cannot bracket the clear + synchronous onSubmit dispatch; (b) setText('') pushes an undo snapshot, so a host clear that does NOT retire the history needs its own seam; (c) nothing can inspect which snapshots reference an image, so a consumer-only design guessed from backend acceptance/settlement and leaked or released the wrong retention. The Owner explicitly authorized this minimal fork exception (A) after external findings established the consumer-only lifecycle could not stay consistent; the scope stayed limited to these narrow seams (no generic UndoStack API, no Editor rewrite).
+
+#### Changed surface
+
+- `public onBeforeSubmitClear?: (text: string) => (() => void) | undefined` — called by submitValue() with the expanded submitted value BEFORE the clear. The host reserves submission-time resources and returns a ONE-SHOT release; submitValue() runs it in a `finally` after `clearDraftAfterSubmit()` + the synchronous `onSubmit(value)` dispatch (success and throw). A throwing hook aborts the submit before any clear.
+- `public onUndoHistoryRetired?: () => void` — fired by clearDraftAfterSubmit() AFTER `undoStack.clear()` and BEFORE `onChange('')`. It is the only signal that the editor's real undo history is gone; prompt history (`clearHistory()`) and `setText()` never fire it.
+- `public replaceTextUndoable(text, cursor): void` — replaces the whole document as ONE real undoable edit: cancels autocomplete/history browsing, pushes the pre-edit snapshot, installs the text/cursor while keeping surviving paste entries, and fires onChange. The host uses it for the composer preview image removal so a following Undo restores exactly the removed occurrence (setTextAndCursor() deliberately records nothing).
+- `public undoImagePlaceholders(): ReadonlySet<string>` — the canonical draft-image placeholders (`[image #<id> (<w>×<h>)]`) referenced by SOME current undo snapshot, in raw document lines or stored paste bodies. Maintained incrementally on push/pop/clear/trim. The paste-body helper cache is bounded (8 entries) and only stores bodies containing a canonical placeholder, so historical/ordinary large pastes are never retained by it.
+- `private submitValue(): void` — computes the submitted value, calls onBeforeSubmitClear() (pre-clear), delegates the clear to clearDraftAfterSubmit(), fires onSubmit(value), and releases the bridge in a `finally`.
+- `public clearDraftAfterSubmit(): void` — clears the draft, paste registry and undoStack exactly like submitValue() (without firing onSubmit), resets the undo image-reference observation and its paste cache, fires onUndoHistoryRetired(), then onChange('').
+- `public retireDraftImageFromUndo(placeholder: string): void` — trims the placeholder occurrence from every undo snapshot whose raw text or stored paste body contains it, preserving the rest of the snapshot (including newer still-retained images) and clamping the snapshot cursor; the observation drops the placeholder.
+- `public transformSnapshots(transform)` on the internal UndoStack — narrow primitive used only by the Editor method above; UndoStack is not exported from the package entry.
+
+#### Dependency map
+
+**Vendor internal**
+- `UndoStack.transformSnapshots()` is called only by Editor.retireDraftImageFromUndo(); no vendored component or other caller consumes it.
+- submitValue() keeps its exact observable input/submit contract: the same expanded submitted value, the same clear, onChange('') before onSubmit(value); the only addition is the pre-clear hook and its scoped release around that synchronous sequence.
+- replaceTextUndoable() reuses the same install/prune step as setTextAndCursor() but adds the real edit semantics (snapshot + onChange); it does not introduce a second undo stack or a host-side edit ledger.
+- The undo image-reference bookkeeping reads only the Editor's own snapshot containers; its bounded cache holds at most eight image-bearing paste bodies and never a full paste-body history.
+- Audit note: The UndoStack method is an internal primitive; the Editor is the only caller. The observation and retirement methods operate on the Editor's own snapshots.
+
+**Inheritance / structural**
+- `TuiEditor extends Editor` (src/tui/interaction/tui-editor.ts) is the only host subclass and exposes the seams to the host through the structural SeatEditor adapter.
+- No other fork subclass exists; a replacement/plugin editor that does not extend this Editor simply does not provide the seams, and the host gates the preview-removal control on their presence instead of extending the public plugin API.
+- Audit note: The structural edge is the intended contract; the new methods are additive public members on the already-exported Editor class.
+
+**Host**
+- `src/tui-app.ts` wires `onBeforeSubmitClear` to the scoped bridge reservation and lets the fork's `finally` release it; Ctrl+Enter/plugin `submitDraft` acquires the same bridge around its own clear + synchronous dispatch. No host-side reservation array, in-flight counter, clear generation or accepted-settlement release exists.
+- `src/tui-app.ts` registers the host editor as the Store's ONLY undo-lease owner and releases that owner on the real `onUndoHistoryRetired`; it reconciles the leases from `undoImagePlaceholders()` after host-editor mutations (onChange, the setTextAndCursor preview removal, and seat handoff). The Store never guesses the owner from the current seat.
+- `DraftImageStore` calls the registered owner's `retireDraftImageFromUndo()` when the bounded undo-retention budget evicts a retained image, BEFORE dropping its bytes; submission pins and live expanded-draft occurrences are never evicted.
+- A replacement editor without the undo-retirement seam keeps the preview display-only (no `x`); a seat switch never retires another editor's snapshots.
+- Audit note: The host consumes the narrow seams; the fork owns no submission, retention or budget policy.
+
+**Public / extension**
+- The two new methods are additive public members of the vendored Editor class. The package entry (`src/index.ts`) already exports Editor; no new export, no entry-graph change and no generic UndoStack export is added.
+- Third-party editors are not required to implement them; the host gates the preview-removal control on the structural capability instead of extending the public plugin API.
+- Audit note: Additive only; no existing member is repurposed or removed.
+
+**Behavioral coupling**
+- The submit bridge is scoped to ONE synchronous Editor→app→business dispatch: acquired before the clear, released in the fork's (or host's) `finally` even when onSubmit throws; a throwing hook aborts before any clear and a double release is impossible.
+- `onUndoHistoryRetired` fires exactly at a real undo-history retirement (after `undoStack.clear()`, before onChange('')), never for prompt recall or a programmatic setText.
+- `replaceTextUndoable()` records one snapshot; Undo restores exactly the pre-edit document (including the removed image occurrence) and surviving paste entries keep their content; unchanged text records no extra undo step.
+- `undoImagePlaceholders()` reports only canonical placeholders referenced by current snapshots (raw text or paste bodies); it is empty before any image-bearing snapshot, drops popped snapshots and retired placeholders, and ignores hand-edited/non-canonical text. Its paste cache is bounded and image-only.
+- Ordinary typing, paste, undo and Enter-submit behavior is unchanged; the seams add no routing, submit or retention policy.
+- Audit note: The seams answer the bridge and undo-retention lifetime questions only.
+
+#### Guarding tests
+
+- packages/pi-tui/test/editor.test.ts: submitValue reserves before the clear and releases after the synchronous dispatch; a throwing hook aborts before any clear; a throwing onSubmit still releases exactly once; onUndoHistoryRetired fires after the undo clear and before onChange (Enter + the host clear seam) and never for clearHistory/setText; replaceTextUndoable records one real edit (Undo restores the removed text, surviving paste entries keep their content, unchanged text records nothing); undoImagePlaceholders reports canonical raw-text and paste-body references, ignores hand-edited tokens, drops popped/retired placeholders, and its paste cache is bounded, image-only and recomputed on a miss.
+- test/client/draft-image-preview-tui.test.ts: the app/store lifecycle matrix (Enter/Ctrl+Enter bridge, x→Undo→x lease idempotency, x immediately after insertion is undoable, successful Ctrl+S steer retires the history and cannot resurrect a consumed image, failed steer restores real bytes, bounded retention eviction through the owner, live-vs-retention classification, seat handoff, session switch, dispose).
+- test/client/draft-image-submit-lifecycle.test.ts: the REAL Editor→TuiApp→SubmissionController→bindSubmissionRuntime→preparePrompt→writer path for nine pinned images (success), accelerated submit, async writer rejection and deferred session-create failure (restore before release).
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- packages/tui/src/components/editor.ts
+- packages/tui/src/undo-stack.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream's Editor keeps submitValue()/undoStack private, has no pre-clear scoped reservation seam, no undo-history-retired notification, and no way to observe or trim image-referencing undo snapshots. The fork adds exactly those narrow seams without changing ordinary input, submit, paste or undo behavior.
+
+#### Retirement conditions
+
+- Upstream exposes an equivalent public pre-clear hook whose returned release brackets the synchronous submit dispatch.
+- And upstream exposes a real undo-history-retirement notification plus a narrow image-reference observation/trim seam (or the host no longer needs undo-driven image retention).
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced under the Owner's explicit A authorization (2026-10-24) to unify Enter/Ctrl+Enter/submitDraft/Ctrl+S submission clearing and to tie image retention to the editor's REAL undo history. The host registers the editor owner and bridges actual mutations; the store owns bytes, budget and leases. The fork seam itself only exposes the submit/undo-edit facts.

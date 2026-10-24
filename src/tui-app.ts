@@ -127,6 +127,8 @@ import {
   OutputViewerPanel,
 } from './tui/panels/output-viewer-panel.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
+import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
+import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
 import {
   editorTheme,
@@ -1833,6 +1835,35 @@ export interface TuiAppOptions {
    * store, exposed so a mounted test can stage REAL draft bytes through the
    * production intake surface. Never read by production code paths. */
   draftImageStoreForTest?: import('./client/media/image/draft-store.ts').DraftImageStore
+  /**
+   * The READ-ONLY composer draft-image projection (image UX plan PR1). The
+   * runner supplies the live store's staged values; the preview never
+   * stages, removes by id or changes submission order. Absent: the preview
+   * band renders nothing (headless fixtures).
+   */
+  draftImagePreviewSource?: import('./client/media/image/types.ts').DraftImagePreviewSource
+  /**
+   * Register the LIVE composer draft reader with the store, so an image that
+   * Undo restored into the draft counts as ACTIVE again rather than as a
+   * retention-only entry.
+   */
+  draftImagePreviewLiveDraft?: (read: () => string) => void
+  /**
+   * Reserve the submitted text's images for the SYNCHRONOUS submit bridge.
+   * Acquired BEFORE the draft clear and released in the fork's `finally`
+   * (Enter) or this app's `finally` (`submitDraft`), so the clear's undo
+   * retirement can never evict an image the business owner is about to take
+   * over. The narrow `DraftImageStore.pinReferenced` is the production
+   * implementation.
+   */
+  draftImagePreviewReserve?: (text: string) => (() => void) | undefined
+  /**
+   * The Client-local undo-lease capability: the Store owns the bounded
+   * retention budget, the host editor's real Undo history owns whether an
+   * image can still come back. `TuiApp` only bridges actual editor
+   * mutations and real history retirement — it keeps no mirror of either.
+   */
+  draftImagePreviewUndo?: import('./client/media/image/draft-store.ts').DraftImageUndoLeasePort
   imageTheme?: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme
   /**
    * PR-D: the Client-local SVG raster cache. Wired by the mount composition
@@ -2840,12 +2871,18 @@ export class TuiApp {
    * collapse): a repaint that reinterprets the row can never pass the
    * fence even when the card object and the relative row are unchanged. */
   private fullscreenCellGesture: TranscriptCellGesture | undefined
+  /** The press-time composer-preview `×` identity (image UX PR1). Kept
+   * apart from the transcript-cell gesture: the preview is pinned chrome,
+   * not a transcript row, and its release must re-prove the exact draft
+   * text/occurrence geometry it was pressed against. */
+  private draftPreviewGesture: { remove: DraftPreviewRemoveHit; columns: number; termRows: number } | undefined
 
   /** Invalidate every fullscreen press/release latch at an ownership or
    * surface boundary. A gesture captured by one owner must never be
    * interpreted by a later modal, session, or screen. */
   private clearFullscreenPointerGestures(): void {
     this.fullscreenCellGesture = undefined
+    this.draftPreviewGesture = undefined
     this.questionPressGesture = undefined
     this.questionTranscriptGesture = undefined
     this.approvalPressGesture = undefined
@@ -3418,6 +3455,32 @@ export class TuiApp {
   private readonly svgRasterLoader: SvgRasterLoader | undefined
   /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
   readonly draftImageStoreForTest: import('./client/media/image/draft-store.ts').DraftImageStore | undefined
+  /** @see TuiAppOptions.draftImagePreviewSource — the production preview source. */
+  private readonly draftImagePreviewSource: import('./client/media/image/types.ts').DraftImagePreviewSource | undefined
+  /** @see TuiAppOptions.draftImagePreviewLiveDraft — live-draft reader. */
+  private readonly draftImagePreviewLiveDraft: ((read: () => string) => void) | undefined
+  /** @see TuiAppOptions.draftImagePreviewReserve — the synchronous pre-clear
+   *  bridge reservation. */
+  private readonly draftImagePreviewReserve: ((text: string) => (() => void) | undefined) | undefined
+  /** @see TuiAppOptions.draftImagePreviewUndo — Store-owned undo leases. */
+  private readonly draftImagePreviewUndo: import('./client/media/image/draft-store.ts').DraftImageUndoLeasePort | undefined
+  /** The ONE first-party composer draft-image preview band. */
+  private readonly draftImagePreview: DraftImagePreview
+  /** Expanded preview-text cache (raw body + mode → wire text). */
+  private draftPreviewTextCache: { raw: string; mode: string; text: string; hasPasteMarker: boolean } | undefined
+  /** Occurrence cache for the exact expanded text (no per-frame re-scan). */
+  private draftPreviewOccurrenceCache: { text: string; occurrences: readonly DraftImageOccurrence[] } | undefined
+  /** Decision for the previewed LAST occurrence when a paste marker hides
+   *  same-id occurrences (canRemove + raw-last mapping). */
+  private draftPreviewRemovalCache: {
+    raw: string
+    expanded: string
+    imageId: number
+    startOffset: number
+    endOffset: number
+    canRemove: boolean
+    lastVisible: boolean
+  } | undefined
   /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
   private readonly imageTheme: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
   private readonly imageScope: (() => unknown) | undefined
@@ -3705,6 +3768,19 @@ export class TuiApp {
          * (the seat frame and the Todo/dock block) must subtract them. */
         widgetAboveHeight: number
         widgetBelowHeight: number
+        /** Image UX PR1: the composer draft-image preview band's painted
+         * height and last-painted `×` hit. The band is pinned between the
+         * above widget zone and the editor seat; bottom-anchored hit tests
+         * subtract it exactly like the other pinned chrome. */
+        draftPreviewHeight: number
+        /** The preview component's last-painted absolute top. The pinned
+         * band can include a leading blank row, so the removal hit row must
+         * be anchored to the component's own painted box, not reconstructed
+         * from sibling heights. */
+        draftPreviewTop: number
+        /** The component's own painted hit-map height. */
+        draftPreviewHitHeight: number
+        draftPreviewRemoves: readonly DraftPreviewRemoveHit[] | undefined
         /** B4-A: the painted footprint of the first-party Task Quick band. It
          * is pinned BETWEEN the editor seat and the below widget zone, so every
          * bottom-anchored hit test must subtract it exactly like the widget
@@ -4111,6 +4187,11 @@ export class TuiApp {
       })
     }
     this.editorBorder = this.editor.borderColor
+    // The SCOPED submit bridge: the fork acquires the host reservation before
+    // its clear (onBeforeSubmitClear) and runs the returned release in a
+    // finally after the synchronous clear + onSubmit dispatch. The host keeps
+    // no array/counter of these — one gesture, one release.
+    this.editor.onBeforeSubmitClear = (text) => this.draftImagePreviewReserve?.(text)
     this.editor.onSubmit = (text) => {
       const gesture: ComposerSubmitGesture = 'enter'
       // Enter is a fresh submit attempt, including an empty no-op attempt.
@@ -4173,6 +4254,10 @@ export class TuiApp {
       // does the same later. Resetting after the dispatch would clobber a
       // synchronous restore.
       this.resetEditorMode()
+      // The host editor's clear already retired its undo history and the
+      // scoped bridge holds the submitted images until this dispatch returns;
+      // the business owner (runReservedSubmit/dispatchViaSession) takes its own
+      // synchronous attachment reservation inside this call.
       this.events.onSubmit(serialized, 'enter', scopeToken)
     }
     this.editor.onChange = () => {
@@ -4180,6 +4265,14 @@ export class TuiApp {
       // pending exit confirmation. Ctrl+C clear-draft arms again after its
       // own setText mutation completes.
       this.clearExitConfirmation()
+      // The host editor's REAL Undo snapshots are the authority for what can
+      // still come back: converge the store's undo leases to them after every
+      // mutation (typing, deletion, paste, Undo, programmatic restore). An
+      // image that is still live stays ACTIVE; one that left the draft while
+      // an older snapshot still contains it becomes retention-only under the
+      // bounded budget. Idempotent, and cheap when the snapshot references
+      // did not change.
+      this.reconcileDraftImageUndo()
       // A text edit invalidates the prior rendered-layout snapshot and any
       // pending X063 fact. The Editor's next render publishes its already
       // computed boundary; only a hint-relevant layout change composes Footer.
@@ -4218,6 +4311,26 @@ export class TuiApp {
     this.imageLoader = options.imageLoader
     this.imageScope = options.imageScope
     this.draftImageStoreForTest = options.draftImageStoreForTest
+    this.draftImagePreviewSource = options.draftImagePreviewSource
+    this.draftImagePreviewLiveDraft = options.draftImagePreviewLiveDraft
+    this.draftImagePreviewReserve = options.draftImagePreviewReserve
+    this.draftImagePreviewUndo = options.draftImagePreviewUndo
+    // The store's ACTIVE/retention accounting follows the REAL expanded
+    // draft: an Undo-restored placeholder is a live attachment again, and an
+    // image in a viewer-covered composer draft is still live (the preview is
+    // merely hidden there). Never retention-evict a visible occurrence.
+    this.draftImagePreviewLiveDraft?.(() => this.draftImageLiveText())
+    // The HOST fork Editor is the ONE Undo-history owner whose snapshots can be
+    // inspected and trimmed. It is registered with the Store (which owns the
+    // bytes/budget), so an eviction trims the RIGHT editor's history even if
+    // the seat has moved on since. The store never consults `seatEditor()`.
+    if (this.draftImagePreviewUndo !== undefined) {
+      const undo = this.draftImagePreviewUndo
+      undo.registerUndoOwner(this.editor, placeholder => this.editor.retireDraftImageFromUndo(placeholder))
+      // A REAL undo-history retirement (submit clear) releases this owner's
+      // leases immediately; backend acceptance is irrelevant to the history.
+      this.editor.onUndoHistoryRetired = () => { undo.releaseUndoForOwner(this.editor) }
+    }
     this.imageTheme = options.imageTheme
     this.svgRasterLoader = options.svgRasterLoader
     this.historySearchSource = options.historySearchSource
@@ -4285,10 +4398,22 @@ export class TuiApp {
             // Paste markers are EXPANDED — the steer wire never carries
             // registry-bound marker text.
             const serialized = this.expandedSeatWireDraft()
-            this.seatEditor().setText('')
-            this.editorSeatHolder.notifyChanged()
-            this.resetEditorMode()
-            this.events.onSteer?.(serialized)
+            // Same scoped bridge as the Ctrl+S action: the clear's retention
+            // reconcile must not evict an image the steer dispatch needs.
+            const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
+            try {
+              // Same undo-retiring clear as the Ctrl+S action; a queue-only
+              // empty gesture leaves the editor history alone.
+              if (serializedDraftHasPayload(serialized)) this.clearSubmittedDraft()
+              else {
+                this.seatEditor().setText('')
+                this.editorSeatHolder.notifyChanged()
+              }
+              this.resetEditorMode()
+              this.events.onSteer?.(serialized)
+            } finally {
+              bridgeRelease?.()
+            }
             return true
           }
           case 'open-external-editor': {
@@ -4387,6 +4512,18 @@ export class TuiApp {
     // replaces this.editorSeat's occupant through the NON-owning mount;
     // the previous occupant is never disposed by the seat).
     this.reconcileEditorWinner()
+    // Image UX PR1: the ONE first-party composer draft preview. It projects
+    // the EXPANDED composer draft (the submission text); the editor's
+    // canonical placeholders stay the submission authority. The band sits
+    // directly below the plugin widget zone and above the editor seat on
+    // BOTH roots.
+    this.draftImagePreview = new DraftImagePreview({
+      getDraftText: () => this.draftPreviewText(),
+      source: this.draftImagePreviewSource ?? { values: () => [] },
+      maxRows: (width) => this.draftImagePreviewMaxRows(width),
+      fullscreenMouse: () => this.fullscreen !== undefined,
+      removable: (occurrence) => this.draftPreviewCanRemove(occurrence),
+    }, this.imageTheme ?? { fallbackColor: text => color.textDim(text) })
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
     // statusContainer). The widget zones sit directly around the editor
@@ -4404,6 +4541,7 @@ export class TuiApp {
     this.tui.addChild(this.queuePane)
     this.tui.addChild(this.working)
     this.tui.addChild(this.widgetsAbove)
+    this.tui.addChild(this.draftImagePreview)
     this.tui.addChild(this.editorSeat)
     this.tui.addChild(this.widgetsBelow)
     this.tui.addChild(this.footer)
@@ -5138,6 +5276,12 @@ export class TuiApp {
       // no later settlement, projection or focus path in this batch may touch
       // it, and no stale surface callback can survive the teardown.
       ...(optionalSeat === undefined ? [] : [() => optionalSeat.close()]),
+      // Release the composer preview's short-lived Image/base64 caches with
+      // the surface (the component is non-owning in the shared roots).
+      () => this.draftImagePreview.dispose(),
+      // The host Editor's undo leases die with this surface: a re-created
+      // surface must never act on a retired editor's history.
+      () => this.releaseDraftPreviewUndoLeases(),
       // The diagnostic scroll-profiler instrumentation dies with the app: the
       // write-wrap is unwrapped first and any latched frame window discarded.
       () => this.resetScrollProfileFrame(),
@@ -6348,13 +6492,31 @@ export class TuiApp {
         // re-serialized here (serializeSeatDraft) and the mode reset with
         // the draft.
         const serialized = this.expandedSeatWireDraft()
-        this.seatEditor().setText('')
-        this.editorSeatHolder.notifyChanged()
-        this.resetEditorMode()
-        // Consumed at the app level: request the frame ourselves (the
-        // stale-clear trap — see the Ctrl+C branch).
-        this.requestRender()
-        this.events.onSteer?.(serialized)
+        // The SCOPED bridge: the clear below pushes an undo snapshot and fires
+        // onChange, whose retention reconcile must never evict an image the
+        // steer dispatch is about to hand to the business owner. Released after
+        // the synchronous steer dispatch, like the submit paths.
+        const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
+        try {
+          // The SAME undo-retiring clear as a successful submit: a delivered
+          // steer draft must not be resurrected by Undo (its images are
+          // consumed by the business owner on success). The empty accelerated
+          // gesture sends the QUEUE only — it delivers no draft, so the
+          // editor's own history stays. A Replacement Editor without the seam
+          // falls back to setText('') (pushes undo), outside this assurance.
+          if (serializedDraftHasPayload(serialized)) this.clearSubmittedDraft()
+          else {
+            this.seatEditor().setText('')
+            this.editorSeatHolder.notifyChanged()
+          }
+          this.resetEditorMode()
+          // Consumed at the app level: request the frame ourselves (the
+          // stale-clear trap — see the Ctrl+C branch).
+          this.requestRender()
+          this.events.onSteer?.(serialized)
+        } finally {
+          bridgeRelease?.()
+        }
         return true
       },
       dequeueDraft: () => {
@@ -7530,6 +7692,9 @@ export class TuiApp {
         // renderWidgets() and may be ZERO — an empty Text occupies no row,
         // so a compensated fullscreen simply shows no widget zone.
         { component: this.widgetsAbove, shrink: 0 },
+        // Image UX PR1: the composer draft preview is first-party pinned
+        // chrome between the plugin widget zone and the editor seat.
+        { component: this.draftImagePreview, shrink: 0 },
         { component: this.editorSeat, shrink: 0 },
         // Phase 3B / B4-B (Owner revision 2026-10-15): the on-demand Task
         // Quick accessory rides the pinned stack as the band UNDER THE WHOLE
@@ -7861,17 +8026,17 @@ export class TuiApp {
 
   /** The live non-History pinned chrome rows the History grant reserves: the
    *  header, subject bar, dock, todo, goal, queue, busy indicator, BOTH widget
-   *  zones and the footer — the editor seat is deliberately EXCLUDED (measuring
-   *  the seat from inside its own render would be cyclic; the widget zones
-   *  re-budget themselves from the live chrome, so they are counted at their
-   *  CURRENT grant). */
+   *  zones, the composer draft preview and the footer — the editor seat is
+   *  deliberately EXCLUDED (measuring the seat from inside its own render
+   *  would be cyclic; the widget zones re-budget themselves from the live
+   *  chrome, so they are counted at their CURRENT grant). */
   private historyChromeRows(width: number, footerRows?: number): number {
     const safeWidth = Math.max(1, Math.floor(width))
     let used = 0
     for (const chrome of [
       this.header, this.viewerSubjectBar, this.dock, this.todoPanel,
       this.goalLine, this.queuePane, this.working, this.widgetsAbove,
-      this.widgetsBelow, this.footer,
+      this.draftImagePreview, this.widgetsBelow, this.footer,
     ]) {
       used += chrome === this.footer && footerRows !== undefined
         ? footerRows
@@ -11511,6 +11676,18 @@ export class TuiApp {
     this.syncExtensionState()
   }
 
+  /**
+   * Converge the Store's undo leases to the HOST editor's real Undo
+   * snapshots. The Editor owns the history; the Store owns the bytes and the
+   * bounded budget; this bridge runs after every host-editor mutation and
+   * after a seat handoff, and keeps no mirror of either fact.
+   */
+  private reconcileDraftImageUndo(): void {
+    const undo = this.draftImagePreviewUndo
+    if (undo === undefined) return
+    undo.reconcileUndoOwner(this.editor, this.editor.undoImagePlaceholders())
+  }
+
   /** The working row's effective label: the base Working label (or the
    * Phase-4 plugin override, or the pending-submit ack) ALWAYS leads, and
    * a running compaction appends its stage — one unified row whether the
@@ -11979,6 +12156,10 @@ export class TuiApp {
       dockHeight: paintedHeight(this.dock),
       widgetAboveHeight: paintedHeight(this.widgetsAbove),
       widgetBelowHeight: paintedHeight(this.widgetsBelow),
+      draftPreviewHeight: paintedHeight(this.draftImagePreview),
+      draftPreviewTop: this.fullscreen?.getPaintedBox(this.draftImagePreview)?.y ?? 0,
+      draftPreviewHitHeight: this.draftImagePreview.hitMap()?.height ?? 0,
+      draftPreviewRemoves: this.draftImagePreview.hitMap()?.removes,
       taskQuickHeight: paintedHeight(this.taskQuick),
       scrollTop: scroll?.scrollTop ?? 0,
       viewportHeight: scroll?.viewportHeight ?? 0,
@@ -12418,6 +12599,7 @@ export class TuiApp {
       widgetAboveHeight: number
       widgetBelowHeight: number
       taskQuickHeight: number
+      draftPreviewHeight: number
     },
     y: number,
   ): 'todo:dock' | 'todo:panel' | undefined {
@@ -12430,6 +12612,7 @@ export class TuiApp {
       snapshot.termRows - snapshot.taskQuickHeight - snapshot.footerHeight
       - snapshot.widgetBelowHeight
       - snapshot.editorHeight
+      - snapshot.draftPreviewHeight
       - snapshot.widgetAboveHeight - snapshot.workingHeight
       - snapshot.queueHeight - snapshot.goalHeight))
     const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
@@ -12470,6 +12653,37 @@ export class TuiApp {
       columns: snapshot.columns,
       termRows: snapshot.termRows,
       target: 'transcript',
+    }
+  }
+
+  /** Resolve one screen row against the LAST-PAINTED composer preview band
+   * (image UX PR1). `undefined` means the row is not part of the band; a
+   * band without a removal control returns an empty `removes` array (inert).
+   * The band is pinned chrome above the editor seat, so its top is
+   * derived from the same painted heights as the layout, never a live
+   * re-render. */
+  private draftPreviewHitAt(y: number): {
+    top: number
+    removes: readonly DraftPreviewRemoveHit[]
+    columns: number
+    termRows: number
+  } | undefined {
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) return undefined
+    if (snapshot.columns !== this.terminal.columns || snapshot.termRows !== this.terminal.rows) return undefined
+    if (snapshot.draftPreviewHeight <= 0) return undefined
+    const hitHeight = snapshot.draftPreviewHitHeight
+    if (hitHeight <= 0) return undefined
+    // The component's own last-painted box is authoritative: the pinned band
+    // can include a leading blank row, so a sibling-height reconstruction can
+    // be off by one after a composer repaint.
+    const hitTop = snapshot.draftPreviewTop
+    if (y < hitTop || y >= hitTop + hitHeight) return undefined
+    return {
+      top: hitTop,
+      removes: snapshot.draftPreviewRemoves ?? [],
+      columns: snapshot.columns,
+      termRows: snapshot.termRows,
     }
   }
 
@@ -12540,6 +12754,27 @@ export class TuiApp {
    */
   private handleFullscreenPress(x: number, y: number): void {
     this.clearFullscreenPointerGestures()
+    // Image UX PR1: the composer preview band is pinned chrome above the
+    // editor. A modal owner or a capturing overlay consumes it as inert
+    // (never a hidden draft edit); only the last-painted `×` cell starts a
+    // removal gesture that the release re-proves against the same snapshot.
+    const preview = this.draftPreviewHitAt(y)
+    if (preview !== undefined) {
+      if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+      if (this.overlayBlocksTranscriptPointer() || this.searchOverlayCoversCell(x, y)) return
+      const row = y - preview.top
+      const remove = preview.removes.find(candidate =>
+        candidate.row === row
+        && x >= candidate.startCol && x < candidate.endCol)
+      if (remove !== undefined) {
+        this.draftPreviewGesture = {
+          remove,
+          columns: preview.columns,
+          termRows: preview.termRows,
+        }
+      }
+      return
+    }
     // The press half of a same-cell click: while a question owns the
     // modal front, record the flow's press-time semantic identity (the
     // release click in handleFullscreenClick validates it — a question
@@ -12698,6 +12933,31 @@ export class TuiApp {
   }
 
   private handleFullscreenClick(x: number, y: number): void {
+    // Image UX PR1: complete a composer-preview `×` gesture before the
+    // transcript/modal ladders. The pressed occurrence must still occupy the
+    // exact same painted row/columns and draft text; a repaint, a draft edit
+    // or a newly opened modal drops the gesture without acting.
+    const pressedPreview = this.draftPreviewGesture
+    if (pressedPreview !== undefined) {
+      this.draftPreviewGesture = undefined
+      if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+      if (this.overlayBlocksTranscriptPointer() || this.searchOverlayCoversCell(x, y)) return
+      const preview = this.draftPreviewHitAt(y)
+      if (preview === undefined) return
+      if (preview.columns !== pressedPreview.columns || preview.termRows !== pressedPreview.termRows) return
+      const pressed = pressedPreview.remove
+      const current = preview.removes.find(candidate =>
+        candidate.imageId === pressed.imageId
+        && candidate.ordinal === pressed.ordinal
+        && candidate.startOffset === pressed.startOffset
+        && candidate.endOffset === pressed.endOffset
+        && candidate.draftText === pressed.draftText)
+      if (current === undefined) return
+      if (y - preview.top !== current.row) return
+      if (x < current.startCol || x >= current.endCol) return
+      this.removeDraftPreviewOccurrence(current)
+      return
+    }
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
     // the body scroll marker toggles the expanded region. The seat's screen
@@ -13454,6 +13714,15 @@ export class TuiApp {
   /** Drop all per-message expansion overrides (session-scoped state: a
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
+    // The composer preview is session-scoped presentation: re-project the
+    // new owner's draft and release the previous session's pixel caches. The
+    // retained draft pins are NOT released here: a session switch does not
+    // retire the host editor undo stack (the fork's clearHistory is prompt
+    // recall only), so an undo after the switch must still resolve its
+    // placeholder. Pins are released at Enter submit (undoStack retired) or
+    // dispose.
+    this.invalidateDraftPreviewCaches()
+    this.draftImagePreview.invalidate()
     // A session switch is a terminal-ownership boundary: a leased workspace
     // screen (Job OR Settings) is retired FIRST, through the same close path Esc
     // uses, so it can never keep consuming input or hold a pointer/copy lease
@@ -13668,6 +13937,7 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     this.clearExitConfirmation()
+    this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
@@ -13697,6 +13967,7 @@ export class TuiApp {
    */
   insertIntoEditor(text: string): void {
     this.clearExitConfirmation()
+    this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       const editor = this.seatEditor()
@@ -13737,6 +14008,7 @@ export class TuiApp {
    * @param mode - the viewer target; `undefined` leaves the viewer.
    */
   setViewerMode(mode: SubagentViewerTarget | undefined): void {
+    this.invalidateDraftPreviewCaches()
     // Viewer entry, exit, and child switches are focus/session transitions;
     // an armed parent exit confirmation must not survive them.
     this.clearExitConfirmation()
@@ -15005,6 +15277,28 @@ export class TuiApp {
   private hostEditorAdapter(): import('./tui/interaction/editor-seat-holder.ts').HostEditorAdapter {
     // Capture the editor so object-literal getters keep the right `this`.
     const editor = this.editor
+    // Editor.setTextAndCursor/replaceTextUndoable normalize CRLF/CR and expand
+    // tabs before clamping the cursor. Convert the flat replacement offset
+    // against that same stored representation, otherwise a tab/newline before
+    // the cursor would shift the host position by a different amount.
+    const mapFlatTextAndCursor = (text: string, offset: number): {
+      text: string
+      cursor: { line: number; col: number }
+    } => {
+      const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ')
+      const lines = normalized.split('\n')
+      let remaining = Math.max(0, Math.min(offset, text.length))
+      const rawPrefix = text.slice(0, remaining)
+      remaining = rawPrefix.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ').length
+      let line = 0
+      for (; line < lines.length; line++) {
+        const length = lines[line]?.length ?? 0
+        if (remaining <= length) break
+        remaining -= length + 1
+      }
+      const targetLine = Math.min(line, Math.max(0, lines.length - 1))
+      return { text: normalized, cursor: { line: targetLine, col: remaining } }
+    }
     return {
       getText: () => editor.getText(),
       // P1 (large-paste external-editor loss): the draft that LEAVES the
@@ -15015,6 +15309,8 @@ export class TuiApp {
       getExpandedText: () => editor.getExpandedText(),
       getExpandedCursor: () => editor.getExpandedCursor(),
       setText: (text) => editor.setText(text),
+      clearDraftAfterSubmit: () => editor.clearDraftAfterSubmit(),
+      retireDraftImageFromUndo: (placeholder) => editor.retireDraftImageFromUndo(placeholder),
       isShowingAutocomplete: () => editor.isShowingAutocomplete(),
       getInputMode: () => editor.getInputMode(),
       setInputMode: (mode) => editor.setInputMode(mode),
@@ -15044,23 +15340,12 @@ export class TuiApp {
         editor.setCursor?.({ line, col: lines[line]?.length ?? 0 })
       },
       setTextAndCursor: (text, offset) => {
-        // Editor.setTextAndCursor normalizes CRLF/CR and expands tabs before
-        // clamping the cursor. Convert the flat replacement offset against
-        // that same stored representation, otherwise a tab/newline before
-        // the cursor would shift the host position by a different amount.
-        const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ')
-        const lines = normalized.split('\n')
-        let remaining = Math.max(0, Math.min(offset, text.length))
-        const rawPrefix = text.slice(0, remaining)
-        remaining = rawPrefix.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ').length
-        let line = 0
-        for (; line < lines.length; line++) {
-          const length = lines[line]?.length ?? 0
-          if (remaining <= length) break
-          remaining -= length + 1
-        }
-        const targetLine = Math.min(line, Math.max(0, lines.length - 1))
-        editor.setTextAndCursor(normalized, { line: targetLine, col: remaining })
+        const mapped = mapFlatTextAndCursor(text, offset)
+        editor.setTextAndCursor(mapped.text, mapped.cursor)
+      },
+      replaceTextUndoable: (text, offset) => {
+        const mapped = mapFlatTextAndCursor(text, offset)
+        editor.replaceTextUndoable(mapped.text, mapped.cursor)
       },
       cancelAutocomplete: () => editor.cancelHostAutocomplete(),
       insertTextAtCursor: (text) => editor.insertTextAtCursor(text),
@@ -15108,6 +15393,13 @@ export class TuiApp {
     // Re-mount the seat child: the editor seat now holds the new
     // occupant's component (the host default editor or the plugin's).
     this.mountSeatChild()
+    // A replacement editor is a new draft-text/mode authority (a host editor
+    // may also have a different paste registry): re-project the preview.
+    this.invalidateDraftPreviewCaches()
+    // The handoff rewrote the host editor's draft (and pushed its own undo
+    // state) while `current` was still the outgoing occupant: reconcile the
+    // host undo leases against the NOW-visible draft and the host snapshots.
+    this.reconcileDraftImageUndo()
   }
 
   /**
@@ -15279,7 +15571,8 @@ export class TuiApp {
     let chrome = this.header.render(width).length + bottomChrome
     if (this.fullscreen !== undefined) {
       chrome += painted(this.viewerSubjectBar)
-        + painted(this.widgetsAbove) + painted(this.working)
+        + painted(this.widgetsAbove) + painted(this.draftImagePreview)
+        + painted(this.working)
         + painted(this.queuePane) + painted(this.goalLine)
         + painted(this.todoPanel) + painted(this.dock)
     }
@@ -16016,6 +16309,7 @@ export class TuiApp {
    * the raw text. The single decode point for every host restore path.
    */
   private setSeatSerializedInput(text: string): void {
+    this.invalidateDraftPreviewCaches()
     const seat = this.seatEditor()
     if (seat.id === 'host') {
       this.editor.setSerializedInput(text)
@@ -19764,6 +20058,7 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     this.clearExitConfirmation()
+    this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
@@ -19866,15 +20161,35 @@ export class TuiApp {
       return
     }
     const scopeToken = this.rememberInput(serialized)
-    // Clear the draft like a normal Enter submit (the runner's dispatch
-    // owns the session/guard path). M9: clear the CURRENT seat occupant.
-    this.seatEditor().setText('')
+    // The SCOPED bridge: reserve the submitted images BEFORE the clear (which
+    // retires the seat's undo history) and release after the synchronous
+    // submit dispatch. The business owner takes its own submission pin inside
+    // that dispatch; nothing here survives the call stack.
+    const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
+    try {
+      // Clear the draft through the SAME seam as the host Enter submit. A
+      // Replacement Editor without it falls back to setText('') (which PUSHES
+      // an undo snapshot); its seat exposes no preview `x`, so no image can
+      // depend on a retired history there.
+      this.clearSubmittedDraft()
+      // Reset BEFORE the dispatch: a synchronous rejection restores the
+      // serialized text (and with it the mode) through setEditorText.
+      this.resetEditorMode()
+      this.events.onSubmit(serialized, request, scopeToken)
+      this.requestRender()
+    } finally {
+      bridgeRelease?.()
+    }
+  }
+
+  /** Clear the current Composer draft through the host Editor's undo-retiring
+   *  seam when present; a Replacement Editor without it falls back to setText
+   *  (which PUSHES undo). */
+  private clearSubmittedDraft(): void {
+    const editor = this.seatEditor()
+    if (editor.clearDraftAfterSubmit !== undefined) editor.clearDraftAfterSubmit()
+    else editor.setText('')
     this.editorSeatHolder.notifyChanged()
-    // Reset BEFORE the dispatch: a synchronous rejection restores the
-    // serialized text (and with it the mode) through setEditorText.
-    this.resetEditorMode()
-    this.events.onSubmit(serialized, request, scopeToken)
-    this.requestRender()
   }
 
   /**
@@ -19975,8 +20290,10 @@ export class TuiApp {
       const width = Math.max(1, this.terminal.columns)
       // The protected pinned chrome is EXACTLY the set
       // footerPhysicalLineBudget() measures for the same root, minus the
-      // widget zones themselves (they are what this budget decides).
-      const fixed = this.protectedChromeRows(width)
+      // widget zones themselves (they are what this budget decides). The
+      // composer preview is higher-priority pinned chrome, so its painted
+      // height is reserved before a widget row is admitted.
+      const fixed = this.protectedChromeRows(width) + this.draftImagePreview.render(width).length
       // Reserve the FULL supported footer capacity plus the one-row
       // transcript minimum before admitting a widget row (plan §3.1). The
       // reservation is deliberately conservative: the composer still renders
@@ -20032,6 +20349,247 @@ export class TuiApp {
     return used
   }
 
+  /**
+   * The EXPANDED composer draft the preview projects (image UX PR1). This is
+   * the same text submission expands (`getDraft()`), so occurrence count and
+   * identity can never disagree with what would be sent. Large-paste markers
+   * are expanded here; the raw body is kept separately for safe occurrence
+   * removal. Subagent viewers are text-only today, so the preview is hidden
+   * there. The cache is keyed by raw body + visible mode.
+   */
+  private draftPreviewText(): string {
+    if (this.viewerMode !== undefined) return ''
+    const editor = this.seatEditor()
+    const raw = editor.getText()
+    const mode = this.seatInputMode()
+    const cached = this.draftPreviewTextCache
+    if (cached !== undefined && cached.raw === raw && cached.mode === mode) return cached.text
+    const hasPasteMarker = raw.includes('[paste #')
+    const text = hasPasteMarker ? this.getDraft() : this.serializeSeatDraft(raw)
+    this.draftPreviewTextCache = { raw, mode, text, hasPasteMarker }
+    return text
+  }
+
+  /** The REAL expanded draft the store classifies ACTIVE vs retention-only
+   *  against. Unlike the preview projection it stays defined while a viewer
+   *  covers the composer: both the child draft and the preserved main draft
+   *  can return to the composer, so either one's images are live. */
+  private draftImageLiveText(): string {
+    if (this.viewerMode === undefined) return this.draftPreviewText()
+    return `${this.mainDraftBeforeViewer ?? ''}\n${this.getDraft()}`
+  }
+
+  /** Occurrences of the exact expanded preview text (cached per text). */
+  private draftPreviewOccurrencesFor(text: string): readonly DraftImageOccurrence[] {
+    const source = this.draftImagePreviewSource
+    if (source === undefined) return []
+    const cached = this.draftPreviewOccurrenceCache
+    if (cached !== undefined && cached.text === text) return cached.occurrences
+    const occurrences = selectDraftImageOccurrences(text, source)
+    this.draftPreviewOccurrenceCache = { text, occurrences }
+    return occurrences
+  }
+
+  /**
+   * Whether the previewed (LAST) occurrence can be removed from the raw
+   * editor text. With no paste marker every occurrence is visible. With a
+   * paste marker:
+   * - raw/expanded counts per image id being equal proves no hidden
+   *   occurrence of that id (all visible);
+   * - when the counts differ, ONLY the previewed last occurrence can still be
+   *   proven visible by the suffix test below. The previewed last is the last
+   *   occurrence of its id; if the raw text after the raw LAST occurrence of
+   *   that id is a marker-free literal identical to the expanded suffix after
+   *   the previewed occurrence, no hidden content can follow it, so it maps
+   *   safely to the raw last occurrence. This is the same-id hidden-before-
+   *   visible-last case. A hidden LAST occurrence has the paste marker after
+   *   the raw last, so the suffix contains `[paste #` and the control is
+   *   suppressed.
+   */
+  private draftPreviewRemovalDecision(): {
+    imageId: number
+    startOffset: number
+    endOffset: number
+    canRemove: boolean
+    lastVisible: boolean
+  } | undefined {
+    const cache = this.draftPreviewTextCache
+    if (cache === undefined) return undefined
+    if (!cache.hasPasteMarker) {
+      return { imageId: -1, startOffset: -1, endOffset: -1, canRemove: true, lastVisible: false }
+    }
+    const cached = this.draftPreviewRemovalCache
+    if (cached !== undefined && cached.raw === cache.raw && cached.expanded === cache.text) {
+      return {
+        imageId: cached.imageId,
+        startOffset: cached.startOffset,
+        endOffset: cached.endOffset,
+        canRemove: cached.canRemove,
+        lastVisible: cached.lastVisible,
+      }
+    }
+    const source = this.draftImagePreviewSource
+    if (source === undefined) return undefined
+    const expandedOccurrences = this.draftPreviewOccurrencesFor(cache.text)
+    const last = expandedOccurrences[expandedOccurrences.length - 1]
+    if (last === undefined) return undefined
+    const rawOccurrences = selectDraftImageOccurrences(cache.raw, source)
+    const rawOfImage = rawOccurrences.filter(candidate => candidate.image.id === last.image.id)
+    const expandedOfImage = expandedOccurrences.filter(candidate => candidate.image.id === last.image.id)
+    const decision = {
+      imageId: last.image.id,
+      startOffset: last.startOffset,
+      endOffset: last.endOffset,
+      canRemove: false,
+      lastVisible: false,
+    }
+    if (rawOfImage.length === expandedOfImage.length) {
+      decision.canRemove = true
+    } else if (rawOfImage.length > 0) {
+      const rawLast = rawOfImage[rawOfImage.length - 1]!
+      const rawSuffix = cache.raw.slice(rawLast.endOffset)
+      const expandedSuffix = cache.text.slice(last.endOffset)
+      if (!rawSuffix.includes('[paste #') && rawSuffix === expandedSuffix) {
+        decision.canRemove = true
+        decision.lastVisible = true
+      }
+    }
+    this.draftPreviewRemovalCache = { raw: cache.raw, expanded: cache.text, ...decision }
+    return decision
+  }
+
+  /** Whether the component's previewed occurrence has a removal control. */
+  private draftPreviewCanRemove(occurrence: DraftImageOccurrence): boolean {
+    // A removal is only safe when the current seat can (a) record it as a real
+    // undoable edit — the following Undo must restore exactly this occurrence —
+    // and (b) retire the Editor's undo snapshots when the bounded retention
+    // budget evicts the image. The host Editor exposes both seams; a plugin
+    // Replacement Editor exposes neither (preview stays display-only).
+    const seat = this.seatEditor()
+    if (seat.retireDraftImageFromUndo === undefined || seat.replaceTextUndoable === undefined) return false
+    const decision = this.draftPreviewRemovalDecision()
+    if (decision === undefined) return false
+    if (decision.imageId === -1) return true
+    return decision.canRemove
+      && decision.imageId === occurrence.image.id
+      && decision.startOffset === occurrence.startOffset
+      && decision.endOffset === occurrence.endOffset
+  }
+
+  /**
+   * The composer preview band's row grant for one frame (image UX PR1).
+   *
+   * One card needs four rows (identity + up to three image rows); a one-to-
+   * three-row grant degrades to the one-line summary. The grant is derived
+   * from the SAME unified layout budget as the pinned chrome: terminal rows
+   * minus the current protected chrome/editor plus a bounded reservation for
+   * the widget zones and the full footer capacity, minus one transcript row.
+   * The bounded reservation avoids a preview↔widget/footer feedback cycle; it
+   * may under-grant, never overflow. No stale cached height is read.
+   */
+  private draftImagePreviewMaxRows(width: number): number {
+    const source = this.draftImagePreviewSource
+    if (source === undefined || this.disposed || this.viewerMode !== undefined) return 0
+    // No staged image can be referenced: never expand a large paste on the
+    // typing/render hot path just to discover an empty band.
+    if (source.values().length === 0) return 0
+    const text = this.draftPreviewText()
+    if (this.draftPreviewOccurrencesFor(text).length === 0) return 0
+    const safeWidth = Math.max(1, Math.floor(width))
+    const rows = Math.max(1, Math.floor(this.terminal.rows))
+    const widgetAboveMax = 3
+    const widgetBelowMax = Math.max(1, Math.min(3, Math.max(1, Math.floor(rows / 4))))
+    const used = this.protectedChromeRows(safeWidth) + widgetAboveMax + widgetBelowMax + FOOTER_MAX_PHYSICAL_LINES
+    const room = rows - used - 1
+    if (room <= 0) return 0
+    if (safeWidth < DRAFT_PREVIEW_COMPACT_WIDTH) return 1
+    return room >= DRAFT_PREVIEW_MAX_ROWS ? DRAFT_PREVIEW_MAX_ROWS : 1
+  }
+
+  /**
+   * Remove the previewed occurrence from the RAW editor text (the fullscreen
+   * composer preview `x`). The previewed expanded occurrence is mapped back
+   * to its raw occurrence by the SAME image id's occurrence rank; when the
+   * previewed last occurrence is proven visible after a hidden same-id
+   * occurrence, it maps to the raw LAST occurrence instead. Only occurrences
+   * approved by {@link draftPreviewRemovalDecision} have a control. One
+   * adjacent separator space is removed, the cursor is shifted, paste
+   * markers/mode are preserved via `setTextAndCursor`. The removed draft is
+   * NOT pruned here: the store keeps it exactly while the host editor's real
+   * undo snapshots can still restore the canonical placeholder, and the
+   * ordinary attach/submit cleanup honors that leased draft.
+   */
+  private removeDraftPreviewOccurrence(hit: DraftPreviewRemoveHit): void {
+    if (this.viewerMode !== undefined) return
+    if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+    const source = this.draftImagePreviewSource
+    if (source === undefined) return
+    this.clearExitConfirmation()
+    const editor = this.seatEditor()
+    const raw = editor.getText()
+    const expanded = this.draftPreviewText()
+    if (expanded !== hit.draftText) return
+    const decision = this.draftPreviewRemovalDecision()
+    if (decision === undefined) return
+    if (decision.imageId !== -1) {
+      if (!decision.canRemove
+        || decision.imageId !== hit.imageId
+        || decision.startOffset !== hit.startOffset
+        || decision.endOffset !== hit.endOffset) return
+    }
+    const expandedOccurrences = this.draftPreviewOccurrencesFor(expanded)
+    const hitIndex = expandedOccurrences.findIndex(candidate =>
+      candidate.image.id === hit.imageId
+      && candidate.startOffset === hit.startOffset
+      && candidate.endOffset === hit.endOffset)
+    if (hitIndex === -1) return
+    let imageOrdinal = 0
+    for (let index = 0; index < hitIndex; index += 1) {
+      if (expandedOccurrences[index]!.image.id === hit.imageId) imageOrdinal += 1
+    }
+    const rawOfImage = selectDraftImageOccurrences(raw, source)
+      .filter(candidate => candidate.image.id === hit.imageId)
+    const occurrence = decision.lastVisible
+      ? rawOfImage[rawOfImage.length - 1]
+      : rawOfImage[imageOrdinal]
+    if (occurrence === undefined) return
+    let start = occurrence.startOffset
+    let end = occurrence.endOffset
+    if (raw[end] === ' ') end += 1
+    else if (start > 0 && raw[start - 1] === ' ') start -= 1
+    const cursor = editor.getCursor?.() ?? raw.length
+    const next = raw.slice(0, start) + raw.slice(end)
+    const removed = end - start
+    const nextCursor = cursor <= start ? cursor : cursor >= end ? cursor - removed : start
+    // A REAL undoable edit: push the pre-removal snapshot (so the following
+    // Undo restores exactly this one occurrence), install the text/cursor
+    // while preserving surviving paste entries, and fire onChange. The host
+    // onChange converges the Store's undo leases for the removed image.
+    if (editor.replaceTextUndoable === undefined) return
+    editor.replaceTextUndoable(next, nextCursor)
+    this.invalidateDraftPreviewCaches()
+    // The fork withholds onCellClick when a second press at the same cell
+    // falls inside its 500 ms multi-click window (a double-click/word-select
+    // gesture). A successful removal must leave the next x as a fresh click.
+    this.fullscreen?.resetTextSelection()
+    this.requestRender()
+  }
+
+  /** Dispose backstop: the surface releases the host Editor's undo leases so
+   *  a re-created surface can never act on a retired editor's history. The
+   *  Store owns every lease record and its own teardown. */
+  private releaseDraftPreviewUndoLeases(): void {
+    this.draftImagePreviewUndo?.releaseUndoForOwner(this.editor)
+  }
+
+  /** Invalidate the expanded-text/occurrence/removal caches at every
+   * editor-ownership or explicit draft-restore boundary. */
+  private invalidateDraftPreviewCaches(): void {
+    this.draftPreviewTextCache = undefined
+    this.draftPreviewOccurrenceCache = undefined
+    this.draftPreviewRemovalCache = undefined
+  }
+
   /** PR-D (review F1): re-derive the fullscreen widget zones when the LIVE
    * protected pinned chrome height differs from the one the current grant
    * was derived from. The chrome height changes WITHOUT a terminal resize —
@@ -20049,7 +20607,8 @@ export class TuiApp {
   private syncLiveWidgetBudget(): void {
     if (this.fullscreen === undefined || this.extensionHost === undefined) return
     const width = Math.max(1, this.terminal.columns)
-    if (this.protectedChromeRows(width) === this.lastWidgetBudgetChromeRows) return
+    const chromeRows = this.protectedChromeRows(width) + this.draftImagePreview.render(width).length
+    if (chromeRows === this.lastWidgetBudgetChromeRows) return
     this.renderWidgets()
   }
 
@@ -20342,7 +20901,7 @@ export class TuiApp {
       return { perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW, total: FOOTER_MAX_PHYSICAL_LINES }
     }
     let used = 0
-    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.widgetsAbove, this.editorSeat, this.widgetsBelow]) {
+    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.widgetsAbove, this.draftImagePreview, this.editorSeat, this.widgetsBelow]) {
       used += chrome.render(width).length
     }
     return {

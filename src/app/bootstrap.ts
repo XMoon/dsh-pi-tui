@@ -2805,6 +2805,21 @@ export function applyRunnerWithRuntime(
       // Headless-test seam (M3-4 PR3 image L6): the live image draft store.
       // Production paths never read it.
       draftImageStoreForTest: draftImages,
+      // Image UX PR1: the composer preview reads the SAME store through a
+      // READ-ONLY projection. The Store owns the bytes and the bounded
+      // undo-retention budget; the host fork Editor owns the real Undo
+      // history. The bridge reservation is scoped to one synchronous submit
+      // dispatch. No second writer/table.
+      draftImagePreviewSource: {
+        values: () => draftImages.values(),
+      },
+      draftImagePreviewLiveDraft: (read) => draftImages.setLiveDraftTextSource(read),
+      draftImagePreviewReserve: (text) => draftImages.pinReferenced(text),
+      draftImagePreviewUndo: {
+        registerUndoOwner: (owner, retireDraftImage) => draftImages.registerUndoOwner(owner, retireDraftImage),
+        releaseUndoForOwner: (owner) => draftImages.releaseUndoForOwner(owner),
+        reconcileUndoOwner: (owner, placeholders) => draftImages.reconcileUndoOwner(owner, placeholders),
+      },
       // Fullscreen OSC 8 link clicks + the Windows right-click paste: the alt
       // screen's mouse capture swallows both native behaviors, so the host
       // opens http/https links itself and reads the clipboard through the same

@@ -67,6 +67,24 @@ export interface SeatEditor {
    */
   getExpandedCursor?(): number
   setText(text: string): void
+  /** Clear a submitted draft while retiring the Editor's undo history.
+   *  Absent on plugin Replacement Editors without a verified undo seam. */
+  clearDraftAfterSubmit?(): void
+  /** Retire the undo snapshots that could restore one image placeholder
+   *  after its retained bytes are evicted. Absent on Replacement Editors. */
+  retireDraftImageFromUndo?(placeholder: string): void
+  /** Replace the document as ONE real, undoable edit (push snapshot →
+   *  install text/cursor → onChange), preserving surviving paste entries.
+   *  The composer preview removal requires it: a following Undo must restore
+   *  the removed text. Absent on Replacement Editors. */
+  replaceTextUndoable?(text: string, cursor: number): void
+  /**
+   * Replace the document and cursor ATOMICALLY without clearing the
+   * editor's transient state (the host fork's paste-marker registry,
+   * autocomplete and undo history). Absent on plugin editors: callers fall
+   * back to setText + setCursor.
+   */
+  setTextAndCursor?(text: string, cursor: number): void
   getCursor(): number
   setCursor(offset: number): void
   /**
@@ -113,6 +131,12 @@ export interface HostEditorAdapter {
   /** The cursor offset in the expanded text's coordinates (X045). */
   getExpandedCursor?(): number
   setText(text: string): void
+  /** Retire the undo history on submit (the host fork Editor implements it). */
+  clearDraftAfterSubmit?(): void
+  /** Retire image-referencing undo snapshots (the host fork Editor). */
+  retireDraftImageFromUndo?(placeholder: string): void
+  /** Replace the document as one real, undoable edit (the host fork Editor). */
+  replaceTextUndoable?(text: string, cursor: number): void
   /** Whether the host editor's autocomplete dropdown is open. */
   isShowingAutocomplete?(): boolean
   /** The host editor's current input mode (shell-mode serialization). */
@@ -277,6 +301,16 @@ export class EditorSeatHolder {
         ? undefined
         : () => editor.getExpandedCursor!(),
       setText: (text) => editor.setText(text),
+      clearDraftAfterSubmit: editor.clearDraftAfterSubmit === undefined
+        ? undefined
+        : () => editor.clearDraftAfterSubmit!(),
+      retireDraftImageFromUndo: editor.retireDraftImageFromUndo === undefined
+        ? undefined
+        : (placeholder) => editor.retireDraftImageFromUndo!(placeholder),
+      replaceTextUndoable: editor.replaceTextUndoable === undefined
+        ? undefined
+        : (text, cursor) => editor.replaceTextUndoable!(text, cursor),
+      setTextAndCursor: (text, cursor) => editor.setTextAndCursor(text, cursor),
       isShowingAutocomplete: () => editor.isShowingAutocomplete?.() ?? false,
       getInputMode: () => editor.getInputMode?.() ?? 'prompt',
       // Only expose the mode setter when the underlying adapter implements

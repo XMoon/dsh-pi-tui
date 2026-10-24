@@ -2153,6 +2153,319 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "");
 		});
 
+		it("clearDraftAfterSubmit clears the draft and undo history without submitting", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			let changes = 0;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+			editor.onChange = () => {
+				changes += 1;
+			};
+
+			editor.handleInput("h");
+			editor.handleInput("e");
+			editor.clearDraftAfterSubmit();
+
+			assert.strictEqual(editor.getText(), "");
+			assert.strictEqual(submitted, "", "the clear seam must not fire onSubmit");
+			assert.ok(changes > 0, "the editor change notification still fires");
+
+			editor.handleInput("\x1b[45;5u"); // undo
+			assert.strictEqual(editor.getText(), "", "the undo stack was retired");
+		});
+
+		it("retireDraftImageFromUndo drops snapshots that could restore the placeholder", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const placeholder = "[image #1 (10×10)]";
+
+			editor.handleInput("a");
+			editor.insertTextAtCursor(placeholder);
+			editor.handleInput(" ");
+			editor.handleInput("b");
+			editor.setText("");
+			editor.handleInput("safe");
+
+			editor.retireDraftImageFromUndo(placeholder);
+
+			for (let index = 0; index < 5; index += 1) {
+				editor.handleInput("\x1b[45;5u"); // undo
+				assert.ok(
+					!editor.getText().includes(placeholder),
+					"no surviving undo snapshot may restore the retired placeholder",
+				);
+			}
+		});
+
+		it("retireDraftImageFromUndo trims only the retired occurrence and preserves newer history", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const retired = "[image #1 (10×10)]";
+			const kept = "[image #2 (10×10)]";
+
+			editor.insertTextAtCursor(`${kept} ${retired}`);
+			editor.setText("");
+			editor.handleInput("safe");
+
+			editor.retireDraftImageFromUndo(retired);
+
+			editor.handleInput("\x1b[45;5u"); // undo -> ""
+			editor.handleInput("\x1b[45;5u"); // undo -> the trimmed snapshot
+			assert.strictEqual(editor.getText(), `${kept} `, "the older snapshot keeps the still-retained image");
+			assert.ok(!editor.getText().includes(retired), "the retired occurrence cannot be restored");
+		});
+
+		it("retireDraftImageFromUndo also retires snapshots whose paste body holds the placeholder", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const placeholder = "[image #1 (10×10)]";
+			const paste = Array.from({ length: 12 }, (_, index) =>
+				index === 5 ? placeholder : `line ${index}`,
+			).join("\n");
+
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			editor.handleInput("x");
+			editor.setText("");
+			editor.handleInput("safe");
+
+			editor.retireDraftImageFromUndo(placeholder);
+
+			for (let index = 0; index < 5; index += 1) {
+				editor.handleInput("\x1b[45;5u"); // undo
+				assert.ok(
+					!editor.getExpandedText().includes(placeholder),
+					"a retired placeholder must not reappear from a paste-bearing undo snapshot",
+				);
+			}
+		});
+
+		it("submitValue reserves before the clear and releases after the synchronous dispatch", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const events: string[] = [];
+			editor.onBeforeSubmitClear = (text) => {
+				// The submitted value is already known, the draft is still intact.
+				events.push(`reserve:${text}:${editor.getText()}`);
+				return () => {
+					events.push("release");
+				};
+			};
+			editor.onChange = (text) => {
+				events.push(`change:${text}`);
+			};
+			editor.onSubmit = (text) => {
+				events.push(`submit:${text}`);
+			};
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			events.length = 0;
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(events, ["reserve:hi:hi", "change:", "submit:hi", "release"]);
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("a throwing onBeforeSubmitClear aborts BEFORE any clear", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = false;
+			editor.onBeforeSubmitClear = () => {
+				throw new Error("reserve failed");
+			};
+			editor.onSubmit = () => {
+				submitted = true;
+			};
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			assert.throws(() => editor.handleInput("\r"), /reserve failed/);
+			assert.strictEqual(editor.getText(), "hi", "the draft was never cleared");
+			assert.strictEqual(submitted, false, "onSubmit was never reached");
+		});
+
+		it("a throwing onSubmit still releases the bridge exactly once", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let released = 0;
+			editor.onBeforeSubmitClear = () => () => {
+				released += 1;
+			};
+			editor.onSubmit = () => {
+				throw new Error("submit failed");
+			};
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			assert.throws(() => editor.handleInput("\r"), /submit failed/);
+			assert.strictEqual(released, 1, "the finally released the scoped bridge");
+			assert.strictEqual(editor.getText(), "", "the clear ran before the throwing dispatch");
+		});
+
+		it("onUndoHistoryRetired fires after the undo clear and before onChange", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const events: string[] = [];
+			editor.onUndoHistoryRetired = () => {
+				events.push("retired");
+			};
+			editor.onChange = (text) => {
+				events.push(`change:${text}`);
+			};
+
+			editor.handleInput("h");
+			events.length = 0;
+			editor.handleInput("\r");
+			assert.deepStrictEqual(events, ["retired", "change:"], "Enter retirement order");
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), "", "the history is really retired");
+
+			editor.handleInput("a");
+			events.length = 0;
+			editor.clearDraftAfterSubmit();
+			assert.deepStrictEqual(events, ["retired", "change:"], "the host clear seam shares the order");
+		});
+
+		it("clearHistory (prompt recall) and setText never fire onUndoHistoryRetired", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let retired = 0;
+			editor.onUndoHistoryRetired = () => {
+				retired += 1;
+			};
+
+			editor.addToHistory("hello");
+			editor.clearHistory();
+			editor.setText("draft");
+			editor.handleInput("\x1b[45;5u"); // undo
+			assert.strictEqual(retired, 0, "only a submitted-draft clear retires the undo history");
+		});
+
+		it("undoImagePlaceholders reports only canonical placeholders referenced by undo snapshots", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const first = "[image #1 (10×10)]";
+			const second = "[image #2 (20×20)]";
+			const handEdited = "[image #3 30x30]";
+
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set());
+			editor.insertTextAtCursor(first); // the snapshot predates the insertion
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set());
+			editor.handleInput("x"); // snapshot now references the first image
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set([first]));
+			editor.insertTextAtCursor(second);
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set([first]));
+			editor.handleInput("y"); // snapshot references both
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set([first, second]));
+			editor.handleInput("z");
+			editor.insertTextAtCursor(handEdited);
+			editor.handleInput("w");
+			assert.ok(!editor.undoImagePlaceholders().has(handEdited), "a hand-edited token is plain text");
+
+			editor.clearDraftAfterSubmit();
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set(), "the clear retires the observation");
+		});
+
+		it("undoImagePlaceholders counts a paste-body reference once a snapshot captures it", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const placeholder = "[image #1 (10×10)]";
+			const paste = Array.from({ length: 12 }, (_, index) =>
+				index === 5 ? placeholder : `line ${index}`,
+			).join("\n");
+
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set(), "the pre-paste snapshot cannot restore it");
+			editor.handleInput("x");
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set([placeholder]), "the stored paste body is a real undo reference");
+		});
+
+		it("undoImagePlaceholders drops a popped or retired placeholder", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const placeholder = "[image #1 (10×10)]";
+
+			editor.insertTextAtCursor(placeholder);
+			editor.handleInput("x");
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set([placeholder]));
+			editor.handleInput("\x1b[45;5u"); // undo -> only the pre-insert snapshot remains
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set(), "the popped snapshot no longer counts");
+
+			editor.handleInput("y"); // push a snapshot holding the restored token
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set([placeholder]));
+			editor.retireDraftImageFromUndo(placeholder);
+			assert.deepStrictEqual(editor.undoImagePlaceholders(), new Set(), "the retirement drops the observation");
+		});
+
+		it("replaceTextUndoable records ONE real edit and Undo restores the removed text", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const placeholder = "[image #1 (10×10)]";
+			let changes = 0;
+			editor.onChange = () => {
+				changes += 1;
+			};
+
+			editor.insertTextAtCursor(`${placeholder} hello`);
+			changes = 0;
+			editor.replaceTextUndoable(" hello", { line: 0, col: 0 });
+
+			assert.strictEqual(editor.getText(), " hello");
+			assert.strictEqual(changes, 1, "the replace fires exactly one onChange");
+
+			editor.handleInput("\x1b[45;5u"); // undo
+			assert.strictEqual(editor.getText(), `${placeholder} hello`, "Undo restores exactly the removed occurrence");
+		});
+
+		it("replaceTextUndoable preserves surviving paste entries and prunes vanished ones", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const paste = Array.from({ length: 12 }, (_, index) => `real line ${index + 1}`).join("\n");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			const raw = editor.getText();
+
+			editor.replaceTextUndoable(`${raw} tail`, { line: 0, col: raw.length + 5 });
+			assert.ok(editor.getExpandedText().includes("real line 12"), "the surviving paste marker keeps its content");
+
+			editor.handleInput("\x1b[45;5u"); // undo
+			assert.strictEqual(editor.getText(), raw, "Undo restores the pre-replace document");
+			assert.ok(editor.getExpandedText().includes("real line 12"));
+		});
+
+		it("replaceTextUndoable with unchanged text records no extra undo step", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.handleInput("a");
+			editor.replaceTextUndoable("a", { line: 0, col: 1 });
+			editor.handleInput("\x1b[45;5u"); // undo
+			assert.strictEqual(editor.getText(), "", "the first Undo reaches the pre-typing state");
+		});
+
+		it("the paste-image observation cache never retains image-free bodies and stays bounded", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const placeholder = "[image #1 (10×10)]";
+			const cache = (editor as unknown as { pasteImagePlaceholders: Map<number, { body: string }> }).pasteImagePlaceholders;
+
+			// Each paste gets a DISTINCT stored paste id: the cache would grow
+			// once per pasted body without the fixed cap.
+			for (let round = 0; round < 12; round += 1) {
+				const imagePaste = Array.from({ length: 12 }, (_, index) => index === 5 ? placeholder : `round ${round} line ${index}`).join("\n");
+				editor.handleInput(`\x1b[200~${imagePaste}\x1b[201~`);
+				editor.handleInput("x");
+			}
+			assert.ok(cache.size <= 8, `image-bearing paste cache stays bounded: ${cache.size}`);
+			for (let undo = 0; undo < 60; undo += 1) editor.handleInput("\x1b[45;5u");
+			assert.ok(cache.size <= 8, "retiring the undo history never grows the cache");
+
+			const plainPaste = Array.from({ length: 12 }, (_, index) => `plain line ${index}`).join("\n");
+			editor.handleInput(`\x1b[200~${plainPaste}\x1b[201~`);
+			editor.handleInput("y");
+			assert.ok(![...cache.values()].some(entry => entry.body === plainPaste), "an image-free body is never cached");
+			assert.ok(cache.size <= 8);
+		});
+
+		it("a cache miss during the observation is recomputed from the live registry", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const placeholder = "[image #1 (10×10)]";
+			const imagePaste = Array.from({ length: 12 }, (_, index) => index === 5 ? placeholder : `line ${index}`).join("\n");
+			const cache = (editor as unknown as { pasteImagePlaceholders: Map<number, unknown> }).pasteImagePlaceholders;
+
+			editor.handleInput(`\x1b[200~${imagePaste}\x1b[201~`);
+			editor.handleInput("x");
+			assert.ok(editor.undoImagePlaceholders().has(placeholder));
+			cache.clear(); // simulate an evicted entry
+			editor.handleInput("y"); // a fresh snapshot must rescan the live body
+			assert.ok(editor.undoImagePlaceholders().has(placeholder), "the observation still sees the paste-body image");
+		});
+
 		it("exits history browsing mode on undo", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

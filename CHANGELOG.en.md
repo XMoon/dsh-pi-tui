@@ -32,6 +32,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed). An unreadable Host configuration shows `Unavailable` and refuses the write instead
   of presenting the default as a current value.
 
+- **Draft images now preview live above the editor.** Pasted or `/image`-staged images
+  render as one bounded thumbnail card for the **last referenced occurrence** between the
+  plugin widget zone and the editor: up to 44×3 on wide terminals, 22×3 in a split view,
+  with an identity row showing `#id/total`, dimensions, bytes and the remaining count; a
+  narrow or 1–3-row viewport degrades to a one-line count/latest-identity summary. In
+  fullscreen the ASCII `x` at the identity-row tail removes only the previewed canonical
+  placeholder occurrence (a still-referenced, in-flight or paste-hidden image survives);
+  regular mode has no control — the user deletes the placeholder text in the editor. The
+  `x` removal is itself an undoable edit (Ctrl+- restores exactly the removed occurrence),
+  while a successful submit or Ctrl+S steer retires the draft's undo history, so Undo cannot
+  resurrect a delivered image. A removed image stays staged exactly
+  while the **editor's real undo history can still restore it** (bounded undo-retention
+  budget: 8 images / 32 MiB, counted separately from the active 16 / 64 MiB draft caps), so
+  new images can still be staged after removals. When the budget is exceeded, the oldest
+  evictable image is first retired from the undo snapshots that could restore it and only
+  then released by the store (a newer still-retained image in the same snapshot remains
+  undoable). Whether an image is ACTIVE or retention-only follows the live expanded draft the
+  store reads, so an Undo-restored image is a live attachment again. A real undo-history
+  retirement (a submitted-draft clear) releases that retention immediately — backend
+  acceptance plays no part; a session switch does not retire the history, so undo-referenced
+  images survive it. A submit takes a one-shot bridge reservation of the submitted images
+  BEFORE the clear and releases it right after the synchronous business dispatch; the
+  business owner takes its own submission reservation in the same call stack, so the clear can
+  never drop images that are part of the outgoing message, and local commands/early refusals
+  leave no long-lived reservation. On the default host seat, Enter, Ctrl+Enter and plugin
+  submits share the same undo-retiring clear; a Replacement Editor without a verified
+  undo-retirement seam falls back to a plain clear, offers no `x` removal and keeps its
+  history until dispose, while still showing the preview. The editor's undo (Ctrl+-)
+  therefore restores a live image that the prepared prompt still carries, never a token that
+  is sent as text; a rejected submit restores the draft before its business reservation
+  releases. The preview is display-only and never changes the model-facing text, image order
+  or attachment semantics.
 - **Settings now opens on an About home and uses a real two-column layout on wide and
   medium terminals.** The left column is the category rail (About, Models, Account,
   Appearance, Display, Tools, Plugins, Other settings) and the right column is the real content:
