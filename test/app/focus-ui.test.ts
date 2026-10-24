@@ -2347,7 +2347,9 @@ test('Question modal inspection allowlist separates presentation from mutation',
     'ptc:1:call-1',
     'message:disclosure:1',
     'message:toggle:1',
-    'attachment:1:0',
+    // Image UX PR2: only the read-only occurrence FOLD is modal-safe; the
+    // image body's Viewer route is explicitly rejected below.
+    'attachment:collapse:1:0',
     'todo:dock',
     'todo:panel',
     'workflow:run:run-1',
@@ -2355,6 +2357,8 @@ test('Question modal inspection allowlist separates presentation from mutation',
   ]
   for (const hitId of allowed) assert.equal(internals.isModalInspectionSafeHit(hitId), true, hitId)
   const blocked = [
+    'attachment:view:1:0',
+    'attachment:1:0',
     'workflow:member:run-1:1:child-1',
     'workflow:phase-agents:run-1:phase-1',
     'workflow:run-agents:run-1',

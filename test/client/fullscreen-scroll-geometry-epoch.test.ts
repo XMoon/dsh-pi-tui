@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
-import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
+import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
@@ -45,6 +45,20 @@ const IMAGE_REF = {
   width: 800,
   height: 100,
   name: 'shot.png',
+}
+
+/** The 1-based cell of the right-edge info control on the first viewport row
+ * containing the needle (the image fold is only operable on that 3-cell span;
+ * the info text itself is read-only since Image UX PR2). */
+async function controlCellAt(vt: VirtualTerminal, needle: string): Promise<{ x: number; row: number }> {
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const index = view.findIndex(line => line.includes(needle))
+  assert.ok(index !== -1, `missing ${needle}:\n${view.join('\n')}`)
+  const line = view[index]!
+  const at = line.includes('[-]') ? line.indexOf('[-]') : line.indexOf('[+]')
+  assert.ok(at !== -1, `no info control painted on ${JSON.stringify(line)}`)
+  return { x: visibleWidth(line.slice(0, at)) + 2, row: index + 1 }
 }
 
 /** Append `turns` plain user/assistant turns to the event list. */
@@ -227,10 +241,10 @@ test('the press/release fence keeps its semantics across scrolled repaints', asy
   // (a) press on the info bar → scroll away → release at the SAME cell: the
   // cell now shows shifted content, so the fence must REJECT the click and
   // the image must stay expanded.
-  const pressRow = await rowOf(vt, '🖼️ shot.png · 800×100', 'press info bar')
-  vt.sendInput(`\x1b[<0;4;${pressRow}M`)
+  const pressed = await controlCellAt(vt, '🖼️ shot.png · 800×100')
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}M`)
   for (let i = 0; i < 3; i += 1) await wheel(vt, 'up')
-  vt.sendInput(`\x1b[<0;4;${pressRow}m`)
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}m`)
   await viewport(vt)
   const rejectedGap = await gap('rejected')
   assert.equal(rejectedGap, expandedGap, 'a shifted release must be rejected by the fence — the image stays expanded')
@@ -242,11 +256,11 @@ test('the press/release fence keeps its semantics across scrolled repaints', asy
   // (c) press at the info bar's CURRENT cell → scroll away and back (the
   // geometry returns byte-identical) → release at the same cell: the fence
   // must ACCEPT — reused rows preserve press-time identities.
-  const pressRow2 = await rowOf(vt, '🖼️ shot.png · 800×100', 'second press info bar')
-  vt.sendInput(`\x1b[<0;4;${pressRow2}M`)
+  const pressed2 = await controlCellAt(vt, '🖼️ shot.png · 800×100')
+  vt.sendInput(`\x1b[<0;${pressed2.x};${pressed2.row}M`)
   for (let i = 0; i < 3; i += 1) await wheel(vt, 'up')
   for (let i = 0; i < 3; i += 1) await wheel(vt, 'down')
-  vt.sendInput(`\x1b[<0;4;${pressRow2}m`)
+  vt.sendInput(`\x1b[<0;${pressed2.x};${pressed2.row}m`)
   await new Promise(resolve => setTimeout(resolve, 600))
   await viewport(vt)
   const acceptedGap = await gap('accepted')

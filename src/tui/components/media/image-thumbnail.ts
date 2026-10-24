@@ -12,6 +12,15 @@
  * live `collapsedRef` (read at render time, so a toggle only repaints; the
  * render cache key carries the bit).
  *
+ * FULLSCREEN INFO CONTROL (Image UX PR2): when the host renderer enables it
+ * and this occurrence owns a `collapsedRef`, the info bar carries a 3-cell
+ * ASCII control at its RIGHT EDGE — `[-]` while expanded, `[+]` while
+ * collapsed. Only that right-edge span is operable; the identity text to its
+ * left is read-only. `collapseControlRange(width)` reports the span the LAST
+ * render at that width actually painted (the host row mapper reads it right
+ * after measuring the same render), so a click can only ever hit a control
+ * the user actually saw. The control is never painted on the regular surface.
+ *
  * The component never awaits: it consults the loader synchronously and
  * asks the loader to fire the async read on first render; the loader's
  * subscriber notification invalidates the component, which repaints with
@@ -19,21 +28,32 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-thumbnail
  */
 
-import { Image, getCapabilities } from '@xmoon76/pi-tui'
+import { Image, getCapabilities, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { formatBytes } from '../../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
+import { color } from '../../theme/runtime.ts'
 
 /** The thumbnail sizing constants (kimi parity, §17). */
 export const MAX_IMAGE_ROWS = 12
 export const MAX_IMAGE_WIDTH = 40
 /** Widths below this many cells fall back to text (§17.2). */
 export const NARROW_WIDTH_THRESHOLD = 42
+/** The fullscreen info control's painted width: ASCII `[-]` / `[+]`. */
+const COLLAPSE_CONTROL_WIDTH = 3
+/** The gap between the identity text and the right-aligned control. */
+const CONTROL_GAP = 1
 
 /** The pi-tui `Image` theme surface (fallback coloring). */
 export interface ImageThumbnailTheme {
   fallbackColor(text: string): string
+}
+
+/** The immutable presentation source one rendered occurrence reads through. */
+export interface ImageViewerSource {
+  readonly ref: ImageAttachmentRefLike
+  readonly scope: unknown
 }
 
 /** A component rendering one durable attachment ref as an inline image. */
@@ -52,10 +72,21 @@ export class ImageThumbnail implements Component {
    * sending its ref to whoever is displayed by then.
    */
   private readonly scope: unknown
+  /**
+   * Whether the HOST surface currently wants the fullscreen collapse control
+   * painted on the info row (Image UX PR2): true only on the fullscreen
+   * surface. Absent in regular mode / loader-less constructions (where the
+   * component is not used at all). The control additionally requires a
+   * `collapsedRef` — only Host-wired occurrences participate in the fold.
+   */
+  private readonly fullscreenCollapseControl: (() => boolean) | undefined
   private unsubscribe: (() => void) | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
+  /** The control span the LAST painted info row actually carried, keyed by
+   * the render width it was painted at. */
+  private paintedControl: { width: number; startCol: number; endCol: number } | undefined
 
   constructor(
     ref: ImageAttachmentRefLike,
@@ -64,6 +95,7 @@ export class ImageThumbnail implements Component {
     requestRender: () => void,
     collapsedRef?: () => boolean,
     scope?: unknown,
+    fullscreenCollapseControl?: () => boolean,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
@@ -72,6 +104,7 @@ export class ImageThumbnail implements Component {
     this.requestRender = requestRender
     this.collapsedRef = collapsedRef
     this.scope = scope
+    this.fullscreenCollapseControl = fullscreenCollapseControl
     // Subscribe to THIS (scope, attachment)'s settles only: N thumbnails loading
     // in parallel never invalidate each other, and another presentation's settle
     // for the same content id never wakes this component (review finding 8 — no
@@ -86,12 +119,18 @@ export class ImageThumbnail implements Component {
   }
 
   /** Whether this thumbnail participates in the fullscreen collapse
-   * toggle: only instances the host wired a `collapsedRef` for (user and
-   * assistant message attachments). Tool-card images stay inside their
-   * card's own click surface — their rows must never swallow a click that
-   * would otherwise fold/unfold the card. */
+   * toggle: only instances the host wired a `collapsedRef` for. Tool-card
+   * images participate too (Image UX PR2) — their own info control folds
+   * just the image body, while the card header keeps the card disclosure. */
   get collapsible(): boolean {
     return this.collapsedRef !== undefined
+  }
+
+  /** The immutable read source captured at construction (Image UX PR2): the
+   * exact durable ref and presentation scope this occurrence renders through.
+   * Never re-samples the scope and never exposes the loader or bytes. */
+  get viewerSource(): ImageViewerSource {
+    return { ref: this.ref, scope: this.scope }
   }
 
   /** Whether the image rows are collapsed (the info line stays constant). */
@@ -126,10 +165,53 @@ export class ImageThumbnail implements Component {
     return `🖼️ ${this.label()} · ${this.ref.width}×${this.ref.height} · ${formatBytes(this.ref.bytes)}`
   }
 
+  /** Whether the fullscreen info control applies to THIS occurrence. */
+  private controlWanted(): boolean {
+    return this.collapsedRef !== undefined && this.fullscreenCollapseControl?.() === true
+  }
+
+  /**
+   * Compose one info row for the given width. When the fullscreen control
+   * applies, the 3-cell `[-]`/`[+]` is right-aligned at `width - 3` and the
+   * identity text is truncated to leave one gap cell, so the action can never
+   * be pushed off the terminal. Records the painted span (read back through
+   * {@link collapseControlRange}) only for the row actually returned.
+   */
+  private infoRow(width: number, text: string): string {
+    const wanted = this.controlWanted()
+      && width >= COLLAPSE_CONTROL_WIDTH + CONTROL_GAP + 1
+    if (!wanted) {
+      this.paintedControl = undefined
+      return this.theme.fallbackColor(text)
+    }
+    const startCol = width - COLLAPSE_CONTROL_WIDTH
+    const endCol = width
+    const control = this.collapsed() ? '[+]' : '[-]'
+    const left = truncateToWidth(text, startCol - CONTROL_GAP, '…')
+    const pad = ' '.repeat(Math.max(1, width - COLLAPSE_CONTROL_WIDTH - visibleWidth(left)))
+    this.paintedControl = { width, startCol, endCol }
+    return this.theme.fallbackColor(left) + pad + color.primary(control)
+  }
+
+  /**
+   * The column span of the fullscreen info control the LAST render at `width`
+   * actually painted (the host row mapper reads this right after measuring the
+   * same render). `undefined` when no control was painted — regular mode, a
+   * non-collapsible occurrence, or no render at that width. Loading / error /
+   * narrow states still paint the control (the fold only affects body rows);
+   * their lack of a body is reported by the hit map instead.
+   */
+  collapseControlRange(width: number): { startCol: number; endCol: number } | undefined {
+    const painted = this.paintedControl
+    if (painted === undefined || painted.width !== width) return undefined
+    return { startCol: painted.startCol, endCol: painted.endCol }
+  }
+
   invalidate(): void {
     this.instance = undefined
     this.cachedLines = undefined
     this.cachedKey = undefined
+    this.paintedControl = undefined
   }
 
   render(width: number): string[] {
@@ -137,10 +219,12 @@ export class ImageThumbnail implements Component {
     // reuse keeps hitting when the same lines come back, while a terminal
     // capability flip (kitty → unsupported) invalidates the cache so a
     // stale inline sequence never survives (round-3 finding 2). The
-    // collapse bit rides the key too: a fullscreen click only repaints —
-    // no rebuild, no invalidate — and the flipped bit misses the cache.
+    // collapse bit and the fullscreen-control bit ride the key too: a
+    // fullscreen click only repaints — no rebuild, no invalidate — and the
+    // flipped bit misses the cache.
     const capabilities = getCapabilities().images ?? 'none'
-    const key = `${width}:${capabilities}:${this.collapsed() ? 'collapsed' : 'expanded'}`
+    const control = this.controlWanted() ? 'ctl' : 'noctl'
+    const key = `${width}:${capabilities}:${this.collapsed() ? 'collapsed' : 'expanded'}:${control}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
     const lines = this.renderLines(width)
     this.cachedLines = lines
@@ -151,32 +235,32 @@ export class ImageThumbnail implements Component {
   private renderLines(width: number): string[] {
     // Narrow terminals fall back BEFORE any load (round-2 finding 4).
     if (width < NARROW_WIDTH_THRESHOLD) {
-      return [this.theme.fallbackColor(this.infoLine())]
+      return [this.infoRow(width, this.infoLine())]
     }
     // Inline graphics only when the terminal reports them; tmux and other
     // unsupported terminals keep the text fallback AND never trigger a
     // pointless read of the full bytes (§17.3, round-2 finding 4).
     if (getCapabilities().images === null) {
-      return [this.theme.fallbackColor(this.infoLine())]
+      return [this.infoRow(width, this.infoLine())]
     }
     const state = this.loader.get(this.ref, this.scope)
     if (state.state === 'idle') {
       // Fire the read; the settle notification invalidates this component.
       this.loader.load(this.ref, this.scope)
-      return [this.theme.fallbackColor(this.infoLine())]
+      return [this.infoRow(width, this.infoLine())]
     }
     if (state.state === 'loading') {
-      return [this.theme.fallbackColor(`${this.infoLine()} …`)]
+      return [this.infoRow(width, `${this.infoLine()} …`)]
     }
     if (state.state === 'error') {
-      return [this.theme.fallbackColor(`${this.infoLine()} — ${state.error.message}`)]
+      return [this.infoRow(width, `${this.infoLine()} — ${state.error.message}`)]
     }
     // Ready: the info line stays constant — only the image rows collapse
     // (the fullscreen click toggle). A collapsed image needs no placement;
     // the fork's differential renderer deletes the vanished kitty tile of
     // the previous frame automatically.
     if (this.collapsed()) {
-      return [this.theme.fallbackColor(this.infoLine())]
+      return [this.infoRow(width, this.infoLine())]
     }
     if (this.instance === undefined) {
       this.instance = new Image(
@@ -191,6 +275,6 @@ export class ImageThumbnail implements Component {
         { widthPx: this.ref.width, heightPx: this.ref.height },
       )
     }
-    return [this.theme.fallbackColor(this.infoLine()), ...this.instance.render(width)]
+    return [this.infoRow(width, this.infoLine()), ...this.instance.render(width)]
   }
 }

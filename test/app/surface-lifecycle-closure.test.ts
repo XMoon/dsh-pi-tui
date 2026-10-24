@@ -1421,7 +1421,7 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
       onStop: () => {},
       onClose: () => {},
     }),
-    /a Settings workspace screen is already leased/,
+    /another workspace screen is already leased/,
   )
 
   handle.close()

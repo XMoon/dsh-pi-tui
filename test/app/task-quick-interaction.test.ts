@@ -1098,7 +1098,7 @@ test('a synchronous Footer callback workspace wins over an older Quick opener', 
     canStop: () => false,
     onStop: () => {},
     onClose: () => {},
-  }), /a Settings workspace screen is already leased/)
+  }), /another workspace screen is already leased/)
   assert.ok(nestedSettings, 'the synchronous Footer callback committed the newer Settings lease')
   assert.ok(h.app.focusedComponentForTest() instanceof SettingsWorkspacePanel, 'the newer workspace remains the owner')
   assert.equal(h.app.taskQuickFocusedForTest(), false, 'Quick was retired before the callback opened Settings')

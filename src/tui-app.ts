@@ -127,6 +127,8 @@ import {
   OutputViewerPanel,
 } from './tui/panels/output-viewer-panel.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
+import { ImageWorkspacePanel } from './tui/components/media/image-workspace.ts'
+import type { ImageAttachmentRefLike } from './domain/media/types.ts'
 import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
@@ -1711,9 +1713,10 @@ type WorkspaceLeasePanel = Component & {
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
 }
 
-/** The ONE temporary fullscreen workspace lease (Settings OR Plugin root). */
+/** The ONE temporary fullscreen workspace lease (Settings, Plugin or the
+ * Image UX PR2 picker/Viewer screen). */
 interface WorkspaceLeaseRecord {
-  readonly kind: 'settings' | 'plugin'
+  readonly kind: 'settings' | 'plugin' | 'image'
   readonly token: object
   readonly screen: TuiAltScreen
   readonly panel: WorkspaceLeasePanel
@@ -2407,6 +2410,11 @@ type TranscriptCellGesture = {
   hitId: string
   columns: number
   termRows: number
+  /** Image UX PR2: the resolved column span of an image hit (the info
+   * control range or the body row's full span). Press and release must
+   * resolve the SAME span; rows outside the image area leave it unset so the
+   * original row-only hit map/route is unchanged. */
+  imageSpan?: { startCol: number; endCol: number }
 }
 
 /** The gesture hit id of the pinned viewer subject bar's `‹ back` affordance. */
@@ -2427,9 +2435,69 @@ type ModalTranscriptGesture<T extends object> = TranscriptCellGesture & {
   target: 'transcript' | 'todo'
 }
 
+/** One mounted transcript image OCCURRENCE (Image UX PR2): the source
+ * ContentBlock position (message OBJECT + image ordinal) and the immutable
+ * read source the thumbnail captured at construction. `imageIndex` is the
+ * image block's rank among ALL image blocks of its message (an open opaque
+ * assistant image block reserves a rank too), never the durable
+ * attachmentId — the same attachment shown in two messages, or twice in one
+ * message, is two independent occurrences. */
+type TranscriptImageOccurrence = {
+  readonly message: TranscriptMessage
+  readonly imageIndex: number
+  readonly ref: ImageAttachmentRefLike
+  /** The presentation scope captured at thumbnail construction; the viewer
+   * reads through exactly this value, never a fresh current subject. */
+  readonly scope: unknown
+  /** The mounted thumbnail component when the host rendered pixels for this
+   * occurrence (a loader-less host keeps a metadata-only occurrence). */
+  readonly thumbnail?: ImageThumbnail
+}
+
+/** One rendered image occurrence's painted hit geometry inside its message:
+ * message-relative rows plus the info row's right-edge control columns. The
+ * info row is always the thumbnail's FIRST rendered row. */
+type TranscriptImageHit = {
+  readonly occurrence: TranscriptImageOccurrence
+  readonly infoRow: number
+  /** First body row (inclusive); equal to bodyEnd when no body is painted. */
+  readonly bodyStart: number
+  /** One past the last body row (exclusive). */
+  readonly bodyEnd: number
+  /** The info row's painted control span [startCol, endCol); zero width when
+   * no control was painted (regular surface / narrow). */
+  readonly controlStartCol: number
+  readonly controlEndCol: number
+}
+
+/** One column-ranged image hit identity of a painted fullscreen row
+ * (Image UX PR2): the info row's right-edge control (`collapse`) or any
+ * visible body row (`view`). A row listed here resolves through this
+ * descriptor — an info row outside its control span resolves `inert` and
+ * must never fall through to the card/container ladder. */
+type FullscreenImageRowHit = {
+  readonly row: number
+  readonly kind: 'info' | 'body'
+  /** The `[startCol, endCol)` control span for an info descriptor. */
+  readonly controlStartCol: number
+  readonly controlEndCol: number
+  readonly hitId: string
+}
+
+/** One PAINTED transcript row of the committed fullscreen frame snapshot
+ * (Image UX PR2): the owner/height plus the row-level semantic identities and
+ * the column-ranged image descriptors painted in that row. Values only — the
+ * snapshot never references a live row entry. */
+type FullscreenPaintedRow = {
+  readonly ownerId: string
+  readonly height: number
+  readonly hits: ReadonlyArray<string>
+  readonly imageHits?: ReadonlyArray<FullscreenImageRowHit>
+}
+
 /** One rendered transcript block in the fullscreen row map (mouse
  * hit-testing): the message/activity owner, the painted height, the
- * attachment spans, the PTC sub-call header spans, the Workflow card hit
+ * image occurrence hits, the PTC sub-call header spans, the Workflow card hit
  * spans, and the Focus owner mark. The per-row SEMANTIC hit identity
  * (fullscreenRowHitIdentity) is derived from these spans. */
 type FullscreenRowEntry = {
@@ -2442,7 +2510,8 @@ type FullscreenRowEntry = {
   /** The stable disclosure identity of an ambient Context cluster (its owner). */
   clusterOwner?: TranscriptMessage
   height: number
-  attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  /** Image UX PR2: every mounted image occurrence's painted geometry. */
+  attachments: ReadonlyArray<TranscriptImageHit>
   /** The outer-to-inner semantic container ancestry of this row (projected, not
    * geometry-guessed). `undefined` means the row is owned by no container. */
   containerPath?: TranscriptContainerPath
@@ -2520,7 +2589,7 @@ type RenderedTranscriptBlock = {
   /** Physical non-owning gutter mount; absent for zero-height blocks. */
   mount?: TranscriptGutterComponent
   truncatedMarker: boolean
-  attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  attachments: ReadonlyArray<TranscriptImageHit>
   /** The outer-to-inner semantic container ancestry of this rendered block. */
   containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
@@ -3119,7 +3188,7 @@ export class TuiApp {
    * freeze latch and one `activeScreen` derivation, so no two physical owners
    * can ever coexist.
    */
-  private settingsWorkspace: WorkspaceLeaseRecord | undefined
+  private workspaceLease: WorkspaceLeaseRecord | undefined
   /**
    * Nesting depth of the windows that refuse a NEW workspace screen lease
    * (Job OR Settings) even though the surface is not disposed. Two kinds of
@@ -3674,14 +3743,23 @@ export class TuiApp {
    * switch with the other click overrides.
    */
   private readonly collapsedOccurrences = new Map<TranscriptMessage, Set<number>>()
-  /** The stable occurrence identity of every rendered collapsible thumbnail:
-   * the image block's rank among ALL image blocks of its message (open
-   * opaque image blocks reserve a rank too), so a live stream that closes
-   * blocks out of order never renumbers an occurrence under a pressed or
-   * collapsed identity. Written at thumbnail creation, read by
-   * {@link attachmentRangesOf} (which cannot see open opaque rows — they
-   * render as plain Text children). */
-  private readonly thumbnailOccurrence = new WeakMap<ImageThumbnail, number>()
+  /** The derived OCCURRENCE record of every rendered host thumbnail
+   * (Image UX PR2): the message object + source image ordinal + the immutable
+   * read source captured at construction. Identity is the object pair
+   * (message, imageIndex) — never a string key — so the SAME durable
+   * attachment displayed in two messages, or twice in one message, is two
+   * independent occurrences. Written at thumbnail creation; read by
+   * {@link attachmentHitsOf} while measuring the mounted render tree. */
+  private readonly thumbnailOccurrence = new WeakMap<ImageThumbnail, TranscriptImageOccurrence>()
+  /** The host-rendered image occurrences of each mounted message, in render
+   * order (Image UX PR2): the `/view-image` candidate source. A metadata-only
+   * host (no ImageLoader) records occurrences without a thumbnail; a folded
+   * Tool card records none because its body is not rendered. Rebuilt with the
+   * message component, so it always describes the mounted projection. */
+  private readonly messageImageOccurrences = new Map<TranscriptMessage, TranscriptImageOccurrence[]>()
+  /** Transient collector of the occurrences produced while one message
+   * component is built; consumed by `buildMessage`. */
+  private capturedImageOccurrences: TranscriptImageOccurrence[] | undefined
   /** Rendered row heights per transcript block, for mouse hit-testing.
    * Message rows carry their message + attachment spans; Focus activity
    * rows carry the activity (the whole collapsed Thought block — and the
@@ -3797,7 +3875,7 @@ export class TuiApp {
          * workflow run-phase-member / attachment / Focus owner collapse),
          * so a repaint that reinterprets the pressed row can never pass
          * the release fence. */
-        rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+        rows: ReadonlyArray<FullscreenPaintedRow>
         /** The PAINTED viewer subject bar band (viewer UX plan §6.2): the bar's
          * own 0-based screen row and the navigation hit cells `[0, cells)`
          * exactly as drawn in THIS frame, plus the viewer subject/generation
@@ -4725,7 +4803,7 @@ export class TuiApp {
     // cannot mint a screen that would outlive the suspend.
     this.workspaceLeaseFreezeDepth += 1
     this.jobWorkspace?.close()
-    this.settingsWorkspace?.close()
+    this.workspaceLease?.close()
     this.keybindings.cancelLeader()
     this.clearExitConfirmation()
     this.lastEscapeAt = undefined
@@ -4813,7 +4891,7 @@ export class TuiApp {
       // the return surface only re-asserts presentation, which the
       // `leaveTerminalPresentation` closing step below releases again.
       () => this.jobWorkspace?.close(),
-      () => this.settingsWorkspace?.close(),
+      () => this.workspaceLease?.close(),
       () => this.clearNotify(),
       // Issue #8: the exit-confirmation timer dies with the surface — a stopped
       // TUI must never fire a stale disarm into a dead footer.
@@ -5271,7 +5349,7 @@ export class TuiApp {
       // teardown below never meets a foreign physical owner. `disposed` is
       // already latched, so the close deliberately skips the screen restore.
       () => this.jobWorkspace?.close(),
-      () => this.settingsWorkspace?.close(),
+      () => this.workspaceLease?.close(),
       // The optional tenant is released FIRST (its identity is already gone):
       // no later settlement, projection or focus path in this batch may touch
       // it, and no stale surface callback can survive the teardown.
@@ -5823,9 +5901,9 @@ export class TuiApp {
     // blocking owners above already had their chance, and the three blocking
     // entries abandon this workspace before it could swallow a key they need)
     // keeps input out of the hidden editor, transcript and host actions.
-    if (this.settingsWorkspace !== undefined) {
+    if (this.workspaceLease !== undefined) {
       this.clearExitConfirmation()
-      this.settingsWorkspace.panel.handleInput?.(data)
+      this.workspaceLease.panel.handleInput?.(data)
       return { consume: true }
     }
     // The subagent viewer input policy is MODE-AWARE:
@@ -6806,7 +6884,7 @@ export class TuiApp {
    * ACTIVE screen (M0 naming; previously overlayHost).
    */
   private get activeScreen(): TuiMainScreen | TuiAltScreen {
-    return this.jobWorkspace?.screen ?? this.settingsWorkspace?.screen ?? this.fullscreen ?? this.tui
+    return this.jobWorkspace?.screen ?? this.workspaceLease?.screen ?? this.fullscreen ?? this.tui
   }
 
   /**
@@ -7485,7 +7563,7 @@ export class TuiApp {
     // preference. The request is simply not applied while a workspace is leased
     // — the preference value itself is untouched and takes effect after the user
     // leaves it.
-    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) return
+    if (this.jobWorkspace !== undefined || this.workspaceLease !== undefined) return
     // Fullscreen transitions change the focused screen and disarm transient
     // keyboard confirmation state.
     this.clearExitConfirmation()
@@ -10775,7 +10853,7 @@ export class TuiApp {
       const component = resolvedComponent ?? this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
       const rendered = component.render(width)
       let truncatedMarker = false
-      let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      let attachments: ReadonlyArray<TranscriptImageHit> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       let subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined
@@ -10789,7 +10867,7 @@ export class TuiApp {
         })
       } else if (block.kind === 'message') {
         truncatedMarker = block.truncated === true
-        attachments = this.attachmentRangesOf(component, width)
+        attachments = this.attachmentHitsOf(component, width, block.message)
         if (isUserMessageDisclosureCandidate(block.message)) {
           userDisclosureHits = this.userDisclosureHitsFor(component, {
             kind: 'durable',
@@ -11039,7 +11117,7 @@ export class TuiApp {
       if (entry.block.kind !== 'message') {
         return { ...entry, rendered }
       }
-      const attachments = this.attachmentRangesOf(entry.component, width)
+      const attachments = this.attachmentHitsOf(entry.component, width, entry.block.message)
       const userDisclosureHits = isUserMessageDisclosureCandidate(entry.block.message)
         ? this.userDisclosureHitsFor(entry.component, {
             kind: 'durable',
@@ -11292,6 +11370,22 @@ export class TuiApp {
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
     this.fullscreenRowsDirty = true
+    // The image candidate map describes the CURRENT window only: a paged
+    // window must never retain retired messages (nor their captured scopes)
+    // as an off-window gallery.
+    this.pruneImageOccurrencesToBatch(renderedBlocks)
+  }
+
+  /** Bound the per-message image candidate map to the mounted batch (the map
+   * feeds `/view-image` and must never grow with full paged history). */
+  private pruneImageOccurrencesToBatch(batch: readonly RenderedTranscriptBlock[]): void {
+    const live = new Set<TranscriptMessage>()
+    for (const entry of batch) {
+      if (entry.block.kind === 'message') live.add(entry.block.message)
+    }
+    for (const message of this.messageImageOccurrences.keys()) {
+      if (!live.has(message)) this.messageImageOccurrences.delete(message)
+    }
   }
 
   /** Refresh aligned transcript blocks without clearing the mounted tree.
@@ -11455,39 +11549,70 @@ export class TuiApp {
     this.setCompactionPhase(active ? 'summarizing' : 'idle')
   }
 
-  /** The per-attachment click regions inside one message component: the row
-   * span (message-relative) of every COLLAPSIBLE `ImageThumbnail` child —
-   * the host wires a `collapsedRef` only for user/assistant message
-   * attachments. Tool-card images (no collapsedRef) stay inside their
-   * card's own click surface: their rows advance the counter but never
-   * enter a collapse range, so a click there still folds/unfolds the card
-   * instead of being swallowed by an inert attachment toggle. Every other
-   * child's height still advances the row counter, so the spans line up
-   * with the rendered layout.
+  /** The image occurrence hit regions inside one HOST-rendered message
+   * component (Image UX PR2): message-relative info/body rows and the info
+   * row's right-edge control columns for EVERY mounted image thumbnail.
    *
-   * The identity is the thumbnail's occurrence rank tag (written at
-   * creation by the renderers): the image block's position among ALL image
-   * blocks of the message — open opaque image blocks reserve a rank too —
-   * so a live stream that closes blocks out of order never renumbers an
-   * occurrence under a pressed or collapsed identity. The same rank the
-   * host's collapsedRef getter reads. */
-  private attachmentRangesOf(
+   * The rows are measured from the REAL render tree: a `Container` renders
+   * its children in order at the same width, so descending through the
+   * wrapper containers the host itself builds (the delivered-files /
+   * interrupted wrappers, the tool card) yields the exact painted offsets —
+   * no generic reflection over arbitrary component types, and no second
+   * component batch. Plugin-owned message components contain no host
+   * `ImageThumbnail` (the class is repository-internal), so they mint no
+   * hits and keep their original behavior.
+   *
+   * Each hit's identity is the thumbnail's derived occurrence record
+   * (message object + source image ordinal): open opaque image blocks
+   * reserve a rank too, so a live stream that closes blocks out of order
+   * never renumbers an occurrence under a pressed or collapsed identity. */
+  private attachmentHitsOf(
     component: Component,
     width: number,
-  ): ReadonlyArray<{ imageIndex: number; start: number; end: number }> {
-    if (!(component instanceof Container)) return []
-    const ranges: Array<{ imageIndex: number; start: number; end: number }> = []
-    let row = 0
-    for (const child of component.children) {
-      const height = child.render(width).length
-      if (child instanceof ImageThumbnail && child.collapsible) {
-        // Every collapsible thumbnail is created by the host renderers,
-        // which tag it with its stable occurrence rank.
-        ranges.push({ imageIndex: this.thumbnailOccurrence.get(child)!, start: row, end: row + height })
+    message: TranscriptMessage,
+  ): ReadonlyArray<TranscriptImageHit> {
+    const hits: TranscriptImageHit[] = []
+    this.collectImageHits(component, width, message, 0, hits)
+    return hits
+  }
+
+  /** Walk one Host-rendered component subtree, appending the image hits and
+   * returning the component's painted height (so the caller's row counter
+   * stays aligned with the real layout). Only `Container` children are
+   * descended into — the exact wrapper shape the host renderers build. */
+  private collectImageHits(
+    component: Component,
+    width: number,
+    message: TranscriptMessage,
+    rowOffset: number,
+    hits: TranscriptImageHit[],
+  ): number {
+    if (component instanceof ImageThumbnail) {
+      const height = component.render(width).length
+      const occurrence = this.thumbnailOccurrence.get(component)
+      if (occurrence !== undefined && occurrence.message === message) {
+        const control = component.collapseControlRange(width)
+        hits.push({
+          occurrence,
+          // The info row is ALWAYS the thumbnail's first rendered row; the
+          // body starts right below it and is empty when height === 1.
+          infoRow: rowOffset,
+          bodyStart: rowOffset + 1,
+          bodyEnd: rowOffset + height,
+          controlStartCol: control?.startCol ?? 0,
+          controlEndCol: control?.endCol ?? 0,
+        })
       }
-      row += height
+      return height
     }
-    return ranges
+    if (component instanceof Container) {
+      let row = rowOffset
+      for (const child of component.children) {
+        row += this.collectImageHits(child, width, message, row, hits)
+      }
+      return row - rowOffset
+    }
+    return component.render(width).length
   }
 
   /** Re-measure the message row map (heights + attachment spans) from the
@@ -11604,20 +11729,58 @@ export class TuiApp {
    * sampled ONCE here and the component keeps it for life, so a deferred or stale
    * re-render always reads through the OWNING presentation's authorization instead
    * of whichever subject is displayed by then.
+   *
+   * Image UX PR2: the component is also tagged with its derived occurrence
+   * (message object + source image ordinal + the CAPTURED ref/scope read back
+   * from the thumbnail itself) and joins the current message's render-order
+   * candidate list. All Host image creation points go through here.
    */
   private imageThumbnail(
-    ref: import('./domain/media/types.ts').ImageAttachmentRefLike,
+    ref: ImageAttachmentRefLike,
+    message: TranscriptMessage,
+    imageIndex: number,
     collapsedRef?: () => boolean,
   ): ImageThumbnail {
     // Callers gate on the loader/theme; the assertions mirror the call sites.
-    return new ImageThumbnail(
+    const thumbnail = new ImageThumbnail(
       ref,
       this.imageLoader!,
       this.imageTheme!,
       () => this.settleThumbnailRender(),
       collapsedRef,
       this.imageScope?.(),
+      // The `[-]`/`[+]` control is a FULLSCREEN info-row affordance only.
+      () => this.fullscreen !== undefined,
     )
+    const source = thumbnail.viewerSource
+    const occurrence: TranscriptImageOccurrence = {
+      message,
+      imageIndex,
+      ref: source.ref,
+      scope: source.scope,
+      thumbnail,
+    }
+    this.thumbnailOccurrence.set(thumbnail, occurrence)
+    this.capturedImageOccurrences?.push(occurrence)
+    return thumbnail
+  }
+
+  /** Record one METADATA-ONLY image occurrence (Image UX PR2): a loader-less
+   * host keeps the source ContentBlock as a `/view-image` candidate WITHOUT
+   * creating a thumbnail or triggering any read. The Viewer renders
+   * `Preview unavailable` for it. Folded/hidden blocks never record because
+   * their render branch is not reached. */
+  private recordImageOccurrence(
+    message: TranscriptMessage,
+    imageIndex: number,
+    ref: ImageAttachmentRefLike,
+  ): void {
+    this.capturedImageOccurrences?.push({
+      message,
+      imageIndex,
+      ref,
+      scope: this.imageScope?.(),
+    })
   }
 
   /** The live collapse flag for ONE image-block occurrence (message object
@@ -12120,7 +12283,7 @@ export class TuiApp {
     // keep their own `refreshMessageRows` calls, so press/release validation
     // measures live state exactly as before.
     const rowsDirty = this.fullscreenRowsDirty
-    let rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+    let rows: ReadonlyArray<FullscreenPaintedRow>
     const refreshStart = this.scrollProfiler.enabled ? performance.now() : 0
     let refreshEnd = refreshStart
     let hitsEnd = refreshStart
@@ -12133,6 +12296,7 @@ export class TuiApp {
         ownerId: this.fullscreenRowOwnerId(entry, index),
         height: entry.height,
         hits: this.fullscreenRowHits(entry, index),
+        ...(entry.attachments.length === 0 ? {} : { imageHits: this.fullscreenImageRowHits(entry) }),
       }))
       hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
     } else {
@@ -12211,14 +12375,107 @@ export class TuiApp {
   /** The per-row SEMANTIC hit identities of one painted transcript block
    * (mouse parity): one immutable string per row, naming the row's
    * ACTUAL action target at the last paint — the card toggle, a PTC
-   * sub-call header, a Workflow run/phase/member/agents row, an
-   * attachment, or a Focus owner collapse. The release click recomputes
+   * sub-call header, a Workflow run/phase/member/agents row, an image
+   * occurrence, or a Focus owner collapse. The release click recomputes
    * the CURRENT identity of the pressed cell and requires equality, so a
    * repaint that reinterprets the row (a Workflow 5→6 aggregate switch, a
-   * PTC settle reflow, an async image growth) can never pass the fence. */
+   * PTC settle reflow, an async image growth) can never pass the fence.
+   * Image rows additionally carry their column-ranged identities in
+   * {@link fullscreenImageRowHits}; this row-level array is what the
+   * column-independent routes read (column 0 resolution). */
   private fullscreenRowHits(entry: FullscreenRowEntry, index: number): ReadonlyArray<string> {
     const nextVisible = this.nextVisibleRowEntry(index)
-    return Array.from({ length: entry.height }, (_, row) => this.fullscreenRowHitIdentity(entry, row, nextVisible))
+    return Array.from({ length: entry.height }, (_, row) =>
+      this.fullscreenRowHitIdentity(entry, row, nextVisible, 0))
+  }
+
+  /** The column-ranged image descriptors painted in one row-map entry (Image
+   * UX PR2): the info row's right-edge control (collapse) and one descriptor
+   * per visible body row (view). The descriptors are STABLE values recorded
+   * into the frame snapshot, so a press resolves exactly the geometry the
+   * user saw. */
+  private fullscreenImageRowHits(entry: FullscreenRowEntry): ReadonlyArray<FullscreenImageRowHit> {
+    const rows: FullscreenImageRowHit[] = []
+    for (const hit of entry.attachments) {
+      const token = this.identityToken(hit.occurrence.message)
+      const ordinal = hit.occurrence.imageIndex
+      rows.push({
+        row: hit.infoRow,
+        kind: 'info',
+        controlStartCol: hit.controlStartCol,
+        controlEndCol: hit.controlEndCol,
+        hitId: `attachment:collapse:${token}:${ordinal}`,
+      })
+      for (let row = hit.bodyStart; row < hit.bodyEnd; row += 1) {
+        rows.push({
+          row,
+          kind: 'body',
+          controlStartCol: 0,
+          controlEndCol: 0,
+          hitId: `attachment:view:${token}:${ordinal}`,
+        })
+      }
+    }
+    return rows
+  }
+
+  /** Resolve ONE painted image descriptor against a press/release column. A
+   * row listed in the image descriptors NEVER falls through to the card or
+   * container ladder: an info row outside its control span resolves `inert`
+   * (plan §6.2). `undefined` means the row carries no image descriptor. */
+  private resolvePaintedImageRowHit(
+    imageHits: ReadonlyArray<FullscreenImageRowHit> | undefined,
+    inMessage: number,
+    x: number,
+  ): { hitId: string; span: { startCol: number; endCol: number } } | undefined {
+    const hit = imageHits?.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    if (hit.kind === 'body') {
+      return { hitId: hit.hitId, span: { startCol: 0, endCol: this.transcriptRenderWidth() } }
+    }
+    const span = { startCol: hit.controlStartCol, endCol: hit.controlEndCol }
+    if (span.endCol > span.startCol && x >= span.startCol && x < span.endCol) {
+      return { hitId: hit.hitId, span }
+    }
+    return { hitId: 'inert', span }
+  }
+
+  /** Resolve one LIVE image row against a column (Image UX PR2): the info
+   * row only acts inside its painted control span (otherwise inert), every
+   * visible body row is the occurrence's view target. `undefined` means this
+   * row carries no image occurrence. */
+  private imageRowActionAt(
+    entry: Readonly<{ attachments: ReadonlyArray<TranscriptImageHit> }>,
+    inMessage: number,
+    x: number,
+  ):
+    | {
+        readonly hitId: string
+        readonly kind: 'collapse' | 'view' | 'inert'
+        readonly occurrence: TranscriptImageOccurrence
+        readonly span: { startCol: number; endCol: number }
+      }
+    | undefined {
+    for (const hit of entry.attachments) {
+      const token = this.identityToken(hit.occurrence.message)
+      const ordinal = hit.occurrence.imageIndex
+      if (inMessage === hit.infoRow) {
+        const span = { startCol: hit.controlStartCol, endCol: hit.controlEndCol }
+        if (span.endCol > span.startCol && x >= span.startCol && x < span.endCol) {
+          return { hitId: `attachment:collapse:${token}:${ordinal}`, kind: 'collapse', occurrence: hit.occurrence, span }
+        }
+        return { hitId: 'inert', kind: 'inert', occurrence: hit.occurrence, span }
+      }
+      if (inMessage >= hit.bodyStart && inMessage < hit.bodyEnd) {
+        return {
+          hitId: `attachment:view:${token}:${ordinal}`,
+          kind: 'view',
+          occurrence: hit.occurrence,
+          span: { startCol: 0, endCol: this.transcriptRenderWidth() },
+        }
+      }
+    }
+    return undefined
   }
 
   /** The next VISIBLE transcript block after `index` (the blank-row
@@ -12235,18 +12492,25 @@ export class TuiApp {
   /** The per-row SEMANTIC hit identity of one transcript row (mouse
    * parity): the row's ACTUAL action target, following the click-path
    * priority EXACTLY (long-user disclosure > blank-row escape hatch > Focus
-   * activity > PTC sub-call > Workflow > attachment > Focus-secondary/card).
-   * The long-user control wins first because the bubble BODY must never fall
-   * through to the blank-row escape hatch or a container owner; a row inside a
-   * Workflow card that
+   * activity > PTC sub-call > Workflow > image occurrence > Focus-secondary/
+   * card). The long-user control wins first because the bubble BODY must never
+   * fall through to the blank-row escape hatch or a container owner; a row
+   * inside a Workflow card that
    * matches no hit is INERT (the card consumes every click — it must never
    * fall through to the owner/card branch). Shared by the paint-snapshot
    * commit and the release-click validation so both sides compute the EXACT
-   * same identity string. */
+   * same identity string.
+   *
+   * `x` is consulted ONLY for image rows (plan §6.5): the info row's
+   * right-edge control is `attachment:collapse:…`, its other columns are
+   * `inert`, and a visible body row is `attachment:view:…`. Every other
+   * route stays row-only — the F6/Question/Approval pointer semantics are
+   * deliberately unchanged. */
   private fullscreenRowHitIdentity(
     entry: FullscreenRowEntry,
     inMessage: number,
     nextVisible: FullscreenRowEntry | undefined,
+    x: number,
   ): string {
     // The long-user disclosure targets win FIRST: the bubble BODY is the local
     // disclosure surface and must never fall through to a Work/Thought
@@ -12290,12 +12554,12 @@ export class TuiApp {
       if (hit !== undefined) return this.workflowHitIdentity(hit.hit)
       return 'inert'
     }
-    // Attachment rows.
-    for (const attachment of entry.attachments) {
-      if (inMessage >= attachment.start && inMessage < attachment.end) {
-        return `attachment:${token}:${attachment.imageIndex}`
-      }
-    }
+    // Image occurrence rows: the info row's right-edge control folds THIS
+    // occurrence, a visible body row opens the Viewer, and any other info
+    // column is inert. The image rows win before the nearest container/card
+    // so an expanded Tool card's image body never folds the card.
+    const imageAction = this.imageRowActionAt(entry, inMessage, x)
+    if (imageAction !== undefined) return imageAction.hitId
     // Nearest semantic container from the PROJECTED ancestry: a foldable card
     // toggles ITSELF; every other process row collapses the nearest container
     // (nested Work beats the outer Thought).
@@ -12517,7 +12781,10 @@ export class TuiApp {
       || hitId.startsWith('ptc:')
       || hitId.startsWith('message:disclosure:')
       || hitId.startsWith('message:toggle:')
-      || hitId.startsWith('attachment:')
+      // Image UX PR2: only the READ-ONLY occurrence fold is inspection-safe
+      // during a Question/Approval modal. `attachment:view:` opens the image
+      // Viewer and must never be reachable from the modal plane.
+      || hitId.startsWith('attachment:collapse:')
       || hitId.startsWith('workflow:run:')
       || hitId.startsWith('workflow:phase:')
       || hitId === 'todo:dock'
@@ -12527,7 +12794,7 @@ export class TuiApp {
   /** Apply one already-fenced modal inspection hit. The caller has checked
    * the painted and current semantic identities; this helper intentionally
    * has no fallback to the ordinary fullscreen action ladder. */
-  private applyModalInspectionHit(entry: FullscreenRowEntry, entryIndex: number, inMessage: number): void {
+  private applyModalInspectionHit(entry: FullscreenRowEntry, entryIndex: number, inMessage: number, x: number): void {
     const nextVisible = this.nextVisibleRowEntry(entryIndex)
     if (entry.userDisclosureHits !== undefined) {
       const hit = this.userDisclosureHitAt(entry, inMessage)
@@ -12570,11 +12837,14 @@ export class TuiApp {
       }
       return
     }
-    for (const attachment of entry.attachments) {
-      if (inMessage >= attachment.start && inMessage < attachment.end) {
-        this.toggleAttachmentCollapsed(message, attachment.imageIndex)
-        return
+    // Image rows are resolved by column: only the info control is inspection-
+    // safe (the whitelist rejected a body view before this point).
+    const imageAction = this.imageRowActionAt(entry, inMessage, x)
+    if (imageAction !== undefined) {
+      if (imageAction.kind === 'collapse') {
+        this.toggleAttachmentCollapsed(imageAction.occurrence.message, imageAction.occurrence.imageIndex)
       }
+      return
     }
     const container = this.nearestRowContainer(entry)
     if (container !== undefined) {
@@ -12623,8 +12893,10 @@ export class TuiApp {
 
   /** Record one blocking-owner inspection press against the last painted
    * snapshot. The owner identity is stored with the gesture so a
-   * settle/replacement cannot hand the release to another owner. */
-  private beginModalTranscriptInspection<T extends object>(owner: T, y: number): ModalTranscriptGesture<T> | undefined {
+   * settle/replacement cannot hand the release to another owner. `x` is
+   * consulted for the image info control (its painted column span), exactly
+   * like the normal fullscreen path. */
+  private beginModalTranscriptInspection<T extends object>(owner: T, y: number, x: number): ModalTranscriptGesture<T> | undefined {
     const snapshot = this.fullscreenPaintSnapshot
     if (snapshot === undefined) return undefined
     if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return undefined
@@ -12643,7 +12915,8 @@ export class TuiApp {
     const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
     if (cell === undefined) return undefined
     const painted = snapshot.rows[cell.entryIndex]!
-    const hitId = painted.hits[cell.inMessage] ?? 'inert'
+    const imageHit = this.resolvePaintedImageRowHit(painted.imageHits, cell.inMessage, x)
+    const hitId = imageHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert'
     if (!this.isModalInspectionSafeHit(hitId)) return undefined
     return {
       owner,
@@ -12652,6 +12925,7 @@ export class TuiApp {
       hitId,
       columns: snapshot.columns,
       termRows: snapshot.termRows,
+      ...(imageHit === undefined ? {} : { imageSpan: imageHit.span }),
       target: 'transcript',
     }
   }
@@ -12691,7 +12965,7 @@ export class TuiApp {
    * re-check as the normal fullscreen path. The snapshot supplies what the
    * user pressed; the refreshed live row map proves that target still means
    * the same disclosure before any action runs. */
-  private completeModalTranscriptInspection<T extends object>(pressed: ModalTranscriptGesture<T>, y: number): void {
+  private completeModalTranscriptInspection<T extends object>(pressed: ModalTranscriptGesture<T>, y: number, x: number): void {
     const snapshot = this.fullscreenPaintSnapshot
     if (snapshot === undefined) return
     if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
@@ -12715,34 +12989,41 @@ export class TuiApp {
     const entry = this.messageRows[cell.entryIndex]
     if (entry === undefined) return
     const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
-    const hitId = this.fullscreenRowHitIdentity(entry, cell.inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    const hitId = this.fullscreenRowHitIdentity(entry, cell.inMessage, this.nextVisibleRowEntry(cell.entryIndex), x)
+    const imageAction = this.imageRowActionAt(entry, cell.inMessage, x)
+    const sameImageSpan = pressed.imageSpan === undefined
+      ? imageAction === undefined
+      : imageAction !== undefined
+        && imageAction.span.startCol === pressed.imageSpan.startCol
+        && imageAction.span.endCol === pressed.imageSpan.endCol
     if (!this.isModalInspectionSafeHit(hitId)
       || pressed.ownerId !== ownerId
       || pressed.row !== cell.inMessage
-      || pressed.hitId !== hitId) return
-    this.applyModalInspectionHit(entry, cell.entryIndex, cell.inMessage)
+      || pressed.hitId !== hitId
+      || !sameImageSpan) return
+    this.applyModalInspectionHit(entry, cell.entryIndex, cell.inMessage, x)
   }
 
-  private beginQuestionTranscriptInspection(question: QuestionState, y: number): void {
-    this.questionTranscriptGesture = this.beginModalTranscriptInspection(question, y)
+  private beginQuestionTranscriptInspection(question: QuestionState, y: number, x: number): void {
+    this.questionTranscriptGesture = this.beginModalTranscriptInspection(question, y, x)
   }
 
-  private completeQuestionTranscriptInspection(question: QuestionState, y: number): void {
+  private completeQuestionTranscriptInspection(question: QuestionState, y: number, x: number): void {
     const pressed = this.questionTranscriptGesture
     this.questionTranscriptGesture = undefined
     if (pressed === undefined || pressed.owner !== question) return
-    this.completeModalTranscriptInspection(pressed, y)
+    this.completeModalTranscriptInspection(pressed, y, x)
   }
 
-  private beginApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number): void {
-    this.approvalTranscriptGesture = this.beginModalTranscriptInspection(frame, y)
+  private beginApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number, x: number): void {
+    this.approvalTranscriptGesture = this.beginModalTranscriptInspection(frame, y, x)
   }
 
-  private completeApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number): void {
+  private completeApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number, x: number): void {
     const pressed = this.approvalTranscriptGesture
     this.approvalTranscriptGesture = undefined
     if (pressed === undefined || pressed.owner !== frame) return
-    this.completeModalTranscriptInspection(pressed, y)
+    this.completeModalTranscriptInspection(pressed, y, x)
   }
 
   /**
@@ -12801,7 +13082,7 @@ export class TuiApp {
         }
         return
       }
-      this.beginQuestionTranscriptInspection(question, y)
+      this.beginQuestionTranscriptInspection(question, y, x)
       return
     }
     // The approval action sheet owns the modal front in fullscreen: only its
@@ -12822,7 +13103,7 @@ export class TuiApp {
         }
         return
       }
-      this.beginApprovalTranscriptInspection(frame, y)
+      this.beginApprovalTranscriptInspection(frame, y, x)
       return
     }
     // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
@@ -12891,16 +13172,20 @@ export class TuiApp {
     // Transcript cells: record the press-time semantic identity (the
     // message/activity owner + the block-relative row + the row's per-row
     // SEMANTIC hit identity) so a release on a repainted projection
-    // cannot activate whatever moved onto the cell.
+    // cannot activate whatever moved onto the cell. Image rows additionally
+    // record the pressed COLUMN SPAN (the info control range or the body
+    // row's full span) so a release can prove the same actionable segment.
     const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
     if (cell !== undefined) {
       const painted = snapshot.rows[cell.entryIndex]!
+      const imageHit = this.resolvePaintedImageRowHit(painted.imageHits, cell.inMessage, x)
       this.fullscreenCellGesture = {
         ownerId: painted.ownerId,
         row: cell.inMessage,
-        hitId: painted.hits[cell.inMessage] ?? 'inert',
+        hitId: imageHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert',
         columns: snapshot.columns,
         termRows: snapshot.termRows,
+        ...(imageHit === undefined ? {} : { imageSpan: imageHit.span }),
       }
       return
     }
@@ -13006,7 +13291,7 @@ export class TuiApp {
         return
       }
       this.questionPressGesture = undefined
-      this.completeQuestionTranscriptInspection(question, y)
+      this.completeQuestionTranscriptInspection(question, y, x)
       return
     }
     // Approval owns the modal front: a release inside the action sheet may run
@@ -13036,7 +13321,7 @@ export class TuiApp {
         }
         return
       }
-      this.completeApprovalTranscriptInspection(frame, y)
+      this.completeApprovalTranscriptInspection(frame, y, x)
       return
     }
     this.approvalPressGesture = undefined
@@ -13055,7 +13340,6 @@ export class TuiApp {
       this.fullscreenCellGesture = undefined
       return
     }
-    void x
     // The region determination uses the SAME last-painted snapshot as the
     // press (the fork's click detection already restricted the release to
     // the pressed cell): no render() call here either — the seat's
@@ -13189,11 +13473,23 @@ export class TuiApp {
     // settle reflow, an async image growth) — the release recomputes the
     // CURRENT hit identity and requires equality.
     const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
-    const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex), x)
+    const imageAction = this.imageRowActionAt(entry, inMessage, x)
+    const pressed = this.fullscreenCellGesture
+    // A pressed image hit must still resolve the SAME actionable column span:
+    // a repaint/reflow that moved the control (or turned the pressed body row
+    // into an info row) drops the gesture even if a same-shaped target moved
+    // under the cell.
+    const sameImageSpan = pressed?.imageSpan === undefined
+      ? imageAction === undefined
+      : imageAction !== undefined
+        && imageAction.span.startCol === pressed.imageSpan.startCol
+        && imageAction.span.endCol === pressed.imageSpan.endCol
     if (
-      this.fullscreenCellGesture?.ownerId !== ownerId ||
-      this.fullscreenCellGesture?.row !== inMessage ||
-      this.fullscreenCellGesture?.hitId !== hitId
+      pressed?.ownerId !== ownerId ||
+      pressed?.row !== inMessage ||
+      pressed?.hitId !== hitId ||
+      !sameImageSpan
     ) {
       this.fullscreenCellGesture = undefined
       return
@@ -13289,17 +13585,19 @@ export class TuiApp {
           }
           return
         }
-        // Attachment rows win FIRST (plan §8.3): a click on an image's
-        // info bar or its image rows toggles THAT OCCURRENCE's display —
-        // the identity stays, the picture collapses/expands, and a
-        // repeated attachment elsewhere stays untouched. A click on an
-        // attachment inside an EXPANDED Thought must never collapse the
-        // whole turn (the attachment's own hit area is the intent).
-        for (const attachment of entry.attachments) {
-          if (inMessage >= attachment.start && inMessage < attachment.end) {
-            this.toggleAttachmentCollapsed(message, attachment.imageIndex)
-            return
+        // Image occurrence rows win FIRST (plan §6.4): the info row's
+        // right-edge `[-]`/`[+]` folds THAT occurrence, a visible body row
+        // opens the read-only Viewer, and every other info column is inert.
+        // The image rows are resolved by column BEFORE the container/card
+        // ladder, so an expanded Tool card's image body never folds the card
+        // while its other rows keep the card disclosure.
+        if (imageAction !== undefined) {
+          if (imageAction.kind === 'collapse') {
+            this.toggleAttachmentCollapsed(imageAction.occurrence.message, imageAction.occurrence.imageIndex)
+          } else if (imageAction.kind === 'view') {
+            this.openImageViewer(imageAction.occurrence)
           }
+          return
         }
         // A message row REVEALED BY an expanded Thought/Work container (its
         // thinking / tool / result / intermediate rows carry the projected
@@ -13786,6 +14084,10 @@ export class TuiApp {
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
+    // Image UX PR2: the image workspace (picker/Viewer) is a leased screen
+    // whose occurrences carry the OLD owner's immutable read scope. The
+    // physical-screen lease is already retired by `closeLeasedWorkspaces`
+    // above, so a switched-in session can never re-authorize that scope.
     // The PTC sub-call disclosure state and its render-time hit map are
     // session-scoped too: a switched-in session must never inherit the old
     // session's subCallId expansions, and the old message objects must not
@@ -13824,6 +14126,9 @@ export class TuiApp {
       }
     }
     this.messageComponents.clear()
+    // The candidate snapshot describes the disposed projection: drop it with
+    // the components whose image occurrences it references.
+    this.messageImageOccurrences.clear()
   }
 
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
@@ -16282,7 +16587,7 @@ export class TuiApp {
     if (this.optionalTenantOwnsSeat()) return false
     if (this.overlayBroker.hasFocusedOverlay()) return false
     if (this.jobWorkspace !== undefined) return false
-    if (this.settingsWorkspace !== undefined) return false
+    if (this.workspaceLease !== undefined) return false
     if (this.keybindings.leaderMachine()?.pending === true) return false
     return true
   }
@@ -16897,13 +17202,16 @@ export class TuiApp {
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
       this.searchSourceRegionsByMessage.delete(message)
+      // A plugin-owned component renders no Host image occurrences, so a
+      // stale candidate list from a previous Host build must not survive.
+      this.messageImageOccurrences.delete(message)
     }
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
       // renderer: fullscreen secondaries default compact (per-card
       // override full-reveals), regular expanded roots full-reveal.
       component: hostBuilt
-        ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
+        ? this.renderHostMessage(message, state, width)
         : this.withDeliveredFiles(rendered.component, message, state.expanded),
       boundary,
       userBoundary,
@@ -16921,6 +17229,25 @@ export class TuiApp {
       rendererRevision,
       subCallExpandedRev: this.subCallExpandedRevision,
       searchPresentationRev: this.searchPresentationRevision,
+    }
+  }
+
+  /** Build one HOST message component while collecting its rendered image
+   * occurrences in render order (Image UX PR2). Called once per host build
+   * from `buildMessage`; the collector is consumed in `finally` so a throwing
+   * renderer never leaks a half-built candidate list into the picker. */
+  private renderHostMessage(
+    message: TranscriptMessage,
+    state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
+    width: number,
+  ): Component {
+    const occurrences: TranscriptImageOccurrence[] = []
+    this.capturedImageOccurrences = occurrences
+    try {
+      return this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
+    } finally {
+      this.capturedImageOccurrences = undefined
+      this.messageImageOccurrences.set(message, occurrences)
     }
   }
 
@@ -17057,16 +17384,19 @@ export class TuiApp {
         textBlocks.push(block)
       } else if (block.type === 'image') {
         if (!canRenderImages) {
-          // Loader-less hosts keep the image position as an inline marker.
+          // Loader-less hosts keep the image position as an inline marker —
+          // and still register the source occurrence as a viewer candidate
+          // (the Viewer will show `Preview unavailable`; no read is fired).
           textBlocks.push(block)
+          this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
         } else {
           flushText()
-          const thumbnail = this.imageThumbnail(
-            block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
+          container.addChild(this.imageThumbnail(
+            block.attachment as ImageAttachmentRefLike,
+            message,
+            imageIndex,
             this.occurrenceCollapsedRef(message, imageIndex),
-          )
-          this.thumbnailOccurrence.set(thumbnail, imageIndex)
-          container.addChild(thumbnail)
+          ))
         }
         imageIndex += 1
       } else if (block.type === 'file') {
@@ -17128,12 +17458,14 @@ export class TuiApp {
       for (const block of content) {
         if (block.type === 'image') {
           if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-            const thumbnail = this.imageThumbnail(
-              block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
+            container.addChild(this.imageThumbnail(
+              block.attachment as ImageAttachmentRefLike,
+              message,
+              imageIndex,
               this.occurrenceCollapsedRef(message, imageIndex),
-            )
-            this.thumbnailOccurrence.set(thumbnail, imageIndex)
-            container.addChild(thumbnail)
+            ))
+          } else {
+            this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
           }
           imageIndex += 1
         }
@@ -17156,12 +17488,14 @@ export class TuiApp {
         textBlocks.push(block)
         flushText()
         if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-          const thumbnail = this.imageThumbnail(
-            block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
+          container.addChild(this.imageThumbnail(
+            block.attachment as ImageAttachmentRefLike,
+            message,
+            imageIndex,
             this.occurrenceCollapsedRef(message, imageIndex),
-          )
-          this.thumbnailOccurrence.set(thumbnail, imageIndex)
-          container.addChild(thumbnail)
+          ))
+        } else {
+          this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
         }
         imageIndex += 1
       } else if (block.type === 'file') {
@@ -18659,6 +18993,7 @@ export class TuiApp {
           const content = resultView.content ?? []
           if (content.length > 0) {
             const hasImages = content.some(block => block.type === 'image')
+            let imageIndex = 0
             if (hasImages && this.imageLoader !== undefined && this.imageTheme !== undefined) {
               let buffer = ''
               const flush = (): void => {
@@ -18672,7 +19007,15 @@ export class TuiApp {
                   buffer += block.text
                 } else if (block.type === 'image') {
                   flush()
-                  card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
+                  // The ordinal is the image block's SOURCE rank (all image
+                  // blocks reserve a rank), never "the Nth thumbnail".
+                  card.addChild(this.imageThumbnail(
+                    block.attachment as ImageAttachmentRefLike,
+                    message,
+                    imageIndex,
+                    this.occurrenceCollapsedRef(message, imageIndex),
+                  ))
+                  imageIndex += 1
                 } else {
                   // Known process blocks keep their legacy JSON form;
                   // file and unknown blocks use their bounded presentation,
@@ -18685,7 +19028,13 @@ export class TuiApp {
             } else {
               for (const block of content) {
                 if (block.type === 'text') card.addChild(new Text(color.textDim(sanitizeDisplayText(block.text)), 0, 0))
-                else card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
+                else {
+                  if (block.type === 'image') {
+                    this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
+                    imageIndex += 1
+                  }
+                  card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
+                }
               }
             }
             return
@@ -18779,11 +19128,11 @@ export class TuiApp {
       if (envelope !== undefined) {
         card.addChild(new Text(color.textDim(`  ${sanitizeDisplayText(envelope.summary)}`), 0, 0))
         card.addChild(new Text(color.textMuted(`  path: ${sanitizeDisplayText(relativizeToCwd(envelope.path, this.workspaceRoot))}`), 0, 0))
-        this.renderResultImageBlocks(card, message.resultBlocks)
+        this.renderResultImageBlocks(card, message.resultBlocks, message)
         return
       }
       if (message.status === 'ok') {
-        this.renderResultImageBlocks(card, message.resultBlocks)
+        this.renderResultImageBlocks(card, message.resultBlocks, message)
         return
       }
     }
@@ -18819,6 +19168,7 @@ export class TuiApp {
       // M11: covers read-image, MCP image results, screenshot tools).
       const blocks = message.resultBlocks ?? []
       const hasResultImages = blocks.some(block => block.type === 'image')
+      let imageIndex = 0
       if (hasResultImages && this.imageLoader !== undefined && this.imageTheme !== undefined) {
         let buffer = ''
         const flush = (): void => {
@@ -18832,7 +19182,15 @@ export class TuiApp {
             buffer += block.text
           } else if (block.type === 'image') {
             flush()
-            card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
+            // The ordinal is the image block's SOURCE rank among all result
+            // image blocks, never "the Nth rendered thumbnail".
+            card.addChild(this.imageThumbnail(
+              block.attachment as ImageAttachmentRefLike,
+              message,
+              imageIndex,
+              this.occurrenceCollapsedRef(message, imageIndex),
+            ))
+            imageIndex += 1
           } else {
             // Known process blocks keep their legacy JSON form; file and
             // unknown blocks use their bounded presentation, in order.
@@ -18842,6 +19200,14 @@ export class TuiApp {
         }
         flush()
       } else {
+        // Loader-less host: keep the image blocks as metadata-only viewer
+        // candidates (never a read) and render the bounded text projection.
+        for (const block of blocks) {
+          if (block.type === 'image') {
+            this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
+            imageIndex += 1
+          }
+        }
         const lines = blocks.length > 0
           ? resultTextLines(blocks, message.status === 'error' ? { name: 'error', code: 'tool' } : undefined)
           : [message.result]
@@ -18869,17 +19235,30 @@ export class TuiApp {
 
   /** Append the result's IMAGE blocks as thumbnails (any tool card that
    * returns images but has its own summary path — read_image today, MCP
-   * image results and screenshot tools next). No-op without the pipeline
-   * or without image blocks. */
+   * image results and screenshot tools next). Each thumbnail carries its
+   * SOURCE image ordinal and the same per-occurrence collapse owner user/
+   * assistant images use (Image UX PR2). Without a loader the blocks still
+   * register as metadata-only viewer candidates — never a read. */
   private renderResultImageBlocks(
     card: Container,
     blocks: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] | undefined,
+    message: TranscriptMessage,
   ): void {
-    if (blocks === undefined || this.imageLoader === undefined || this.imageTheme === undefined) return
+    if (blocks === undefined) return
+    let imageIndex = 0
     for (const block of blocks) {
-      if (block.type === 'image') {
-        card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
+      if (block.type !== 'image') continue
+      if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
+        card.addChild(this.imageThumbnail(
+          block.attachment as ImageAttachmentRefLike,
+          message,
+          imageIndex,
+          this.occurrenceCollapsedRef(message, imageIndex),
+        ))
+      } else {
+        this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
       }
+      imageIndex += 1
     }
   }
 
@@ -22219,7 +22598,7 @@ export class TuiApp {
       throw new Error('cannot lease a Job workspace screen while the surface is completing a transition')
     }
     if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
-    if (this.settingsWorkspace !== undefined) throw new Error('a Settings workspace screen is already leased')
+    if (this.workspaceLease !== undefined) throw new Error('another workspace screen is already leased')
     // A blocking owner outranks the Job view: refuse the lease and leave the
     // current keyboard owner untouched (the opener releases its observation).
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
@@ -22235,7 +22614,7 @@ export class TuiApp {
         throw new Error('cannot lease a Job workspace screen while the surface is completing a transition')
       }
       if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
-      if (this.settingsWorkspace !== undefined) throw new Error('a Settings workspace screen is already leased')
+      if (this.workspaceLease !== undefined) throw new Error('another workspace screen is already leased')
       if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
         throw new Error('a blocking modal owns the surface')
       }
@@ -22453,7 +22832,7 @@ export class TuiApp {
    * is disposed or rebuilt, and `TuiApp.fullscreen` (the USER's transcript
    * display mode) is never touched, so no `onFullscreenChange` is emitted.
    *
-   * The lease is committed to `this.settingsWorkspace` BEFORE the physical
+   * The lease is committed to `this.workspaceLease` BEFORE the physical
    * switch, so every render request, input route and re-entrant closer observes
    * the same current owner. It is MUTUALLY EXCLUSIVE with the Job lease: at most
    * ONE workspace screen owns the terminal, and a blocking Question/Approval/Save
@@ -22488,20 +22867,20 @@ export class TuiApp {
       onCopy: (text) => {
         const copy = this.copySelection
         const runner = this.events.runOwned
-        if (copy === undefined || runner === undefined || this.settingsWorkspace !== record) {
-          if (this.settingsWorkspace === record) this.notify('Copy failed', 'error')
+        if (copy === undefined || runner === undefined || this.workspaceLease !== record) {
+          if (this.workspaceLease === record) this.notify('Copy failed', 'error')
           return
         }
         runner('settings copy', () => copy(text), {
           onResult: (ok) => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             // `true` only proves the strategy EMITTED the bytes (OSC52 has no
             // clipboard ACK), so the wording never claims the system clipboard
             // received them.
             this.notify(ok ? 'Copy sent' : 'Copy failed', ok ? 'info' : 'error')
           },
           onError: () => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             this.notify('Copy failed', 'error')
           },
         })
@@ -22519,11 +22898,11 @@ export class TuiApp {
         }
         runner('settings field write', () => commit(request), {
           onResult: (outcome) => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             settle(outcome)
           },
           onError: (error) => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             settle({ outcome: 'not-saved', reason: safeErrorMessage(error) })
           },
         })
@@ -22545,12 +22924,12 @@ export class TuiApp {
      *  already be gone. A failed open restores the main surface with a real error
      *  and never resurrects the closed workspace. */
     const openLegacy = (targetId?: string): void => {
-      if (this.settingsWorkspace !== record) return
+      if (this.workspaceLease !== record) return
       close()
       if (this.disposed) return
       if (
         this.jobWorkspace !== undefined ||
-        this.settingsWorkspace !== undefined ||
+        this.workspaceLease !== undefined ||
         this.activeQuestions !== undefined ||
         this.approvals.isActive() ||
         this.activeSaveLocation !== undefined ||
@@ -22570,7 +22949,7 @@ export class TuiApp {
     return {
       close,
       refreshRow: (rowId, facts) => {
-        if (this.disposed || this.settingsWorkspace !== record || record.kind !== 'settings') return
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') return
         ;(record.panel as SettingsWorkspacePanel).refreshRow(rowId, facts)
         this.requestRender()
       },
@@ -22588,7 +22967,7 @@ export class TuiApp {
     if (this.workspaceLeaseFreezeDepth > 0) {
       throw new Error(`cannot lease a ${which} workspace screen while the surface is completing a transition`)
     }
-    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+    if (this.jobWorkspace !== undefined || this.workspaceLease !== undefined) {
       throw new Error('a workspace screen is already leased')
     }
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
@@ -22600,7 +22979,7 @@ export class TuiApp {
     if (this.workspaceLeaseFreezeDepth > 0) {
       throw new Error(`cannot lease a ${which} workspace screen while the surface is completing a transition`)
     }
-    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+    if (this.jobWorkspace !== undefined || this.workspaceLease !== undefined) {
       throw new Error('a workspace screen is already leased')
     }
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
@@ -22612,15 +22991,15 @@ export class TuiApp {
    * The ONE temporary fullscreen lease primitive shared by the Settings
    * workspace and the direct `/plugins` root: same Alt Screen start/stop,
    * return-focus restore, re-entrant cleanup and mutual exclusion. It commits
-   * the record to `this.settingsWorkspace` BEFORE the physical switch, so every
+   * the record to `this.workspaceLease` BEFORE the physical switch, so every
    * render request, input route and closer observes the same current owner.
    */
   private leaseWorkspaceScreen(
-    kind: 'settings' | 'plugin',
+    kind: 'settings' | 'plugin' | 'image',
     panel: WorkspaceLeasePanel,
     onClose?: () => void,
   ): WorkspaceLeaseRecord {
-    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : 'Plugin Manager')
+    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : kind === 'plugin' ? 'Plugin Manager' : 'Image')
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()
     const token: object = {}
@@ -22645,7 +23024,7 @@ export class TuiApp {
     const finalizeOnce = (): void => {
       if (finalized) return
       finalized = true
-      if (this.settingsWorkspace === record) this.settingsWorkspace = undefined
+      if (this.workspaceLease === record) this.workspaceLease = undefined
     }
     const close = (): void => {
       if (finalized) return
@@ -22655,7 +23034,7 @@ export class TuiApp {
         () => panel.dispose?.(),
         () => {
           // Restore ONLY while no newer physical owner exists.
-          if (!this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
+          if (!this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
             this.resumeReturnSurface(returnScreen, returnFocus)
           }
         },
@@ -22666,10 +23045,10 @@ export class TuiApp {
      *  close or replace THIS workspace. The stale opener then abandons its own
      *  sequence instead of starting a screen for a record that is already gone. */
     const assertStillOpening = (): void => {
-      if (this.settingsWorkspace !== record) throw new Error(`the ${kind} workspace was superseded while it was opening`)
+      if (this.workspaceLease !== record) throw new Error(`the ${kind} workspace was superseded while it was opening`)
     }
     record = { kind, token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
-    this.settingsWorkspace = record
+    this.workspaceLease = record
     try {
       this.leaveTerminalPresentation()
       assertStillOpening()
@@ -22684,13 +23063,13 @@ export class TuiApp {
       screen.setFocus(panel)
       this.completeScreenHandoff()
     } catch (error) {
-      const alreadyClosed = this.settingsWorkspace !== record
+      const alreadyClosed = this.workspaceLease !== record
       runSyncDisposalStepsWithPrimary(`${kind} workspace open unwind`, error, [
         finalizeOnce,
         () => { if (!alreadyClosed) screen.stop({ preserveScreen: true }) },
         () => { if (!alreadyClosed) panel.dispose?.() },
         () => {
-          if (!alreadyClosed && !this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
+          if (!alreadyClosed && !this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
             this.resumeReturnSurface(returnScreen, returnFocus)
           }
         },
@@ -22842,7 +23221,7 @@ export class TuiApp {
    * A no-op when nothing is leased.
    */
   private closeLeasedWorkspaces(context: string): void {
-    if (this.jobWorkspace === undefined && this.settingsWorkspace === undefined) return
+    if (this.jobWorkspace === undefined && this.workspaceLease === undefined) return
     const freezeDepthBefore = this.workspaceLeaseFreezeDepth
     this.workspaceLeaseFreezeDepth = freezeDepthBefore + 1
     try {
@@ -22852,13 +23231,147 @@ export class TuiApp {
         this.routeTerminalSettlementFailure(`job workspace abandonment (${context})`, error)
       }
       try {
-        this.settingsWorkspace?.close()
+        this.workspaceLease?.close()
       } catch (error) {
         this.routeTerminalSettlementFailure(`settings workspace abandonment (${context})`, error)
       }
     } finally {
       this.workspaceLeaseFreezeDepth = freezeDepthBefore
     }
+  }
+
+  /**
+   * The image occurrences of the CURRENT mounted transcript batch, in
+   * projection order (mounted message order + each message's render order) —
+   * the ONE `/view-image` candidate source and the currentness check for a
+   * candidate opened from an older list snapshot. Only actually rendered
+   * occurrences are recorded (a folded Tool card / hidden Focus Work member /
+   * open opaque marker records none).
+   */
+  private mountedImageOccurrences(): TranscriptImageOccurrence[] {
+    const occurrences: TranscriptImageOccurrence[] = []
+    for (const block of this.mountedTranscriptBlocks) {
+      if (block.block.kind !== 'message') continue
+      const rendered = this.messageImageOccurrences.get(block.block.message)
+      if (rendered !== undefined) occurrences.push(...rendered)
+    }
+    return occurrences
+  }
+
+  /** One occurrence of the CURRENT mounted batch, matched by its identity
+   * (message OBJECT + source image ordinal) — never by attachment id or file
+   * name. `undefined` means the candidate left the mounted window. */
+  private mountedImageOccurrence(
+    message: TranscriptMessage,
+    imageIndex: number,
+  ): TranscriptImageOccurrence | undefined {
+    const mounted = this.mountedTranscriptBlocks.some(block =>
+      block.block.kind === 'message' && block.block.message === message)
+    if (!mounted) return undefined
+    return this.messageImageOccurrences.get(message)?.find(occurrence => occurrence.imageIndex === imageIndex)
+  }
+
+  /** A workspace lease must be idle and unclaimed (the shared lease primitive
+   * re-asserts exactly these conditions before the physical switch). */
+  private canLeaseImageWorkspace(): boolean {
+    return !this.disposed
+      && this.workspaceLeaseFreezeDepth === 0
+      && this.jobWorkspace === undefined
+      && this.workspaceLease === undefined
+      && this.activeQuestions === undefined
+      && !this.approvals.isActive()
+      && this.activeSaveLocation === undefined
+  }
+
+  /**
+   * `/view-image` (Image UX PR2): open the LEAASED image workspace in its list
+   * state. The list is the CURRENT mounted transcript window's occurrence
+   * snapshot (`SearchablePicker`, no full-text search); Enter opens the Viewer
+   * as the same screen's second internal state, Esc returns to the list and a
+   * second Esc closes the workspace, restoring the original transcript screen
+   * untouched. No occurrence → a notice, never a screen, never a read.
+   *
+   * ARCHITECTURE (Owner decision, 2026-10-24): this is a temporary physical
+   * screen lease (like the Settings/Job workspaces), not a capturing overlay:
+   * the pinned pi-tui overlay compositor drops any row whose BASE is an inline
+   * image line, so a framed overlay cannot reliably paint the transcript
+   * image or cover the rows behind it. A leased screen renders the image as a
+   * normal BASE line of its own screen — the proven path.
+   */
+  openTranscriptImagePicker(): void {
+    if (!this.canLeaseImageWorkspace()) return
+    const occurrences = this.mountedImageOccurrences()
+    if (occurrences.length === 0) {
+      this.notify('No images in the current transcript window', 'info')
+      return
+    }
+    const byValue = new Map<string, TranscriptImageOccurrence>()
+    const candidates = occurrences.map((occurrence, index) => {
+      const value = `${this.identityToken(occurrence.message)}:${occurrence.imageIndex}`
+      byValue.set(value, occurrence)
+      const name = occurrence.ref.name ?? 'image'
+      return {
+        value,
+        label: `#${index + 1} · ${name} · ${occurrence.ref.width}×${occurrence.ref.height} · ${occurrence.ref.mediaType}`,
+      }
+    })
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ImageWorkspacePanel({
+      rows: () => this.terminal.rows,
+      requestRender: () => this.requestRender(),
+      ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
+      candidates,
+      // Currentness at SELECTION time: a candidate that left the mounted
+      // window (a page change, a folded Tool card, a session switch already
+      // closes the screen) never authorizes a read of a retired scope.
+      resolve: (value) => {
+        const snapshot = byValue.get(value)
+        if (snapshot === undefined) return undefined
+        const current = this.mountedImageOccurrence(snapshot.message, snapshot.imageIndex)
+        return current === undefined ? undefined : { ref: current.ref, scope: current.scope }
+      },
+      onStale: () => {
+        record?.close()
+        this.notify('the image left the current transcript window', 'info')
+      },
+      onClose: () => record?.close(),
+      initial: { kind: 'list' },
+    })
+    record = this.leaseWorkspaceScreen('image', panel)
+  }
+
+  /**
+   * Open the image workspace DIRECTLY in its Viewer state (a fullscreen image
+   * body click): the same leased screen and Viewer panel, without the list
+   * below, so Esc closes the workspace and restores the transcript exactly.
+   * The occurrence must still belong to the current mounted batch; it reads
+   * through the immutable captured scope and never rebuilds/scrolls the
+   * transcript.
+   */
+  openImageViewer(occurrence: TranscriptImageOccurrence): void {
+    if (!this.canLeaseImageWorkspace()) return
+    const current = this.mountedImageOccurrence(occurrence.message, occurrence.imageIndex)
+    if (current === undefined) {
+      this.notify('the image left the current transcript window', 'info')
+      return
+    }
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ImageWorkspacePanel({
+      rows: () => this.terminal.rows,
+      requestRender: () => this.requestRender(),
+      ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
+      candidates: [],
+      resolve: () => undefined,
+      onStale: () => {
+        record?.close()
+        this.notify('the image left the current transcript window', 'info')
+      },
+      onClose: () => record?.close(),
+      initial: { kind: 'viewer', source: { ref: current.ref, scope: current.scope } },
+    })
+    record = this.leaseWorkspaceScreen('image', panel)
   }
 
   /**
@@ -23012,7 +23525,7 @@ export class TuiApp {
    *  runtime change — including one the workspace's own pending commit applied before
    *  its write settled. */
   private refreshSettingsWorkspaceFacts(): void {
-    const workspace = this.settingsWorkspace
+    const workspace = this.workspaceLease
     if (workspace === undefined || workspace.kind !== 'settings') return
     ;(workspace.panel as SettingsWorkspacePanel).rereadFacts()
   }
@@ -23243,7 +23756,7 @@ export class TuiApp {
     // nothing (and a switch to a manual theme would keep the subscription) until the
     // lease ended. Job and Settings are the two leases.
     this.jobWorkspace?.screen.setTerminalColorSchemeNotifications(following)
-    this.settingsWorkspace?.screen.setTerminalColorSchemeNotifications(following)
+    this.workspaceLease?.screen.setTerminalColorSchemeNotifications(following)
   }
 
   /**
@@ -23274,7 +23787,7 @@ export class TuiApp {
     // A Job or Settings workspace screen owns the terminal just like the
     // transcript alt screen: scheme reports arrive THERE while it is leased.
     if (this.jobWorkspace !== undefined) screens.push(this.jobWorkspace.screen)
-    if (this.settingsWorkspace !== undefined) screens.push(this.settingsWorkspace.screen)
+    if (this.workspaceLease !== undefined) screens.push(this.workspaceLease.screen)
     for (const screen of screens) {
       this.schemeDisposers.push(screen.onTerminalColorSchemeChange((scheme) => {
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)

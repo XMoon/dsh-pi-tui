@@ -351,7 +351,7 @@ function pngBytes(): Buffer {
 }
 
 test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment (plan §8.3/R5)', async () => {
-  const { resetCapabilitiesCache, setCapabilities } = await import('@xmoon76/pi-tui')
+  const { resetCapabilitiesCache, setCapabilities, visibleWidth } = await import('@xmoon76/pi-tui')
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const vt = new VirtualTerminal(100, 30)
@@ -418,14 +418,22 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   const imageY = findRow(view, '· 800×100 · 33 B')
   assert.ok(imageY >= 0, `attachment info bar missing:\n${joined}`)
   assert.equal(collapsedCount(), 0, 'precondition: the attachment starts expanded')
-  click(vt, 10, imageY + 1)
+  /** Image UX PR2: the info row's fold control is ONLY the right-edge 3-cell
+   * `[-]`/`[+]`; the metadata text is inert. The cell is read from the painted
+   * row (ANSI aware), never assumed. */
+  const controlCell = (line: string): number => {
+    const at = line.includes('[-]') ? line.indexOf('[-]') : line.indexOf('[+]')
+    assert.ok(at !== -1, `no info control painted on ${JSON.stringify(line)}`)
+    return visibleWidth(line.slice(0, at)) + 2
+  }
+  click(vt, controlCell(view[imageY]!), imageY + 1)
   await settleClick()
   view = vt.getViewport()
   const after = view.join('\n')
   assert.ok(hasFocusHeader(after, true), `the Thought must stay expanded after an attachment click:\n${after}`)
   assert.equal(collapsedCount(), 1, `the attachment must collapse (its own toggle):\n${after}`)
   // Click again: the attachment expands back, the Thought still expanded.
-  click(vt, 10, imageY + 1)
+  click(vt, controlCell(view[imageY]!), imageY + 1)
   await settleClick()
   view = vt.getViewport()
   assert.equal(collapsedCount(), 0, `attachment must expand back:\n${view.join('\n')}`)

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Transcript images can now be viewed at full size; the fullscreen info row gained its own fold control.**
+  The rightmost 3 cells of every fullscreen image info row are an ASCII `[-]` / `[+]` control that
+  folds only that image's body; the rest of the info row is inert. Clicking a visible image body
+  opens a read-only viewer (no transcript rebuild, no scroll, no implicit fold change) that fits the
+  image into the available area and distinguishes `Loading…`, `Read failed: <reason>` and
+  `Preview unavailable`. The new `/view-image` command (no Session required) lists the images of
+  the **currently mounted** transcript window as a single-choice list: Enter views, `Esc back`
+  returns to the same list and selection, a second Esc closes; an empty window reports
+  `No images in the current transcript window`. The same attachment shown in different messages,
+  or twice in one message, remains independent occurrences. The viewer reuses the one existing
+  image loader and immutable read scope, and a closed viewer never reads the replacement
+  session's images. Kitty terminals show real pixels; in this release the large-image viewer on
+  iTerm2 shows metadata plus `Preview unavailable` (native pixels are deferred to later
+  renderer/protocol work). `/image`, `/attach` and the composer draft preview are unchanged.
+
 - **The model can now draw: two resident tools, `dsh_pi_tui_chart` and `dsh_pi_tui_svg`.**
   Charts support bars/spark (2–12 labelled values with an optional unit); SVG supports
   self-contained static figures. Results stay inside the existing Tool Card — no new page,
