@@ -1008,16 +1008,75 @@ jobs:
           name: dsh-source-pack
           path: ${{ runner.temp }}/dsh-source-pack
 
-      - name: Do the packaging inputs still match the recorded proof?
+      # TWO independent questions, deliberately not collapsed into one:
+      #   records   - is the recorded baseline valid for THIS tree?
+      #   sensitive - does this PR change anything that produces the proof?
+      #
+      # `sensitive` decides whether this run OWES its own real comparison even
+      # when the baseline matches: a PR that edits a packaging input, the
+      # baseline, the checker or the workflow cannot inherit someone else's
+      # evidence. `records` decides whether a NON-sensitive run may take the
+      # fast path. In Source Mode the proof is not compared against the npm
+      # baseline, so the sync gate does not apply there (existing behaviour).
+      - name: Decide whether this run owes a real comparison
         id: trigger
         run: |
           set -euo pipefail
-          if node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json \
-               --mode "${{ needs.dsh-context.outputs.mode }}" --node 24 --platform "${{ runner.os }}"; then
-            echo 'needed=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          mode="${{ needs.dsh-context.outputs.mode }}"
+
+          check_args=(--check scripts/pack-equivalence-baseline.json --mode "$mode" --node 24 --platform "${{ runner.os }}")
+          if [ "$mode" = "source" ]; then
+            # The source proof is bound to the verified distribution's own
+            # identity; the artifact `prepare-dsh-source` already produced is the
+            # only thing consulted, so this step never fetches or builds DSH.
+            check_args+=(--source-distribution "$RUNNER_TEMP/dsh-source-pack")
           fi
+          if node scripts/pack-equivalence-input.mjs "${check_args[@]}"; then
+            records=true
+          else
+            records=false
+          fi
+
+          # Compare against the PR BASE, never the working tree: a file that is
+          # already stale in `main` is not this PR's debt, while a file this PR
+          # changed is its debt even if the resulting bytes match the baseline.
+          base=''
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            base="origin/${{ github.base_ref }}"
+          else
+            before="${{ github.event.before || '' }}"
+            if [ -n "$before" ] && git rev-parse --verify --quiet "$before^{commit}" >/dev/null; then
+              base="$before"
+            fi
+          fi
+
+          if [ -z "$base" ]; then
+            # An unknown base is not evidence of "untouched".
+            echo 'sensitive: base commit unknown, assuming this run owes a real comparison'
+            sensitive=true
+          elif node scripts/pack-equivalence-input.mjs --sensitive --base "$base" | tee sensitive.txt \
+                 && grep -q 'changes packaging evidence inputs' sensitive.txt; then
+            sensitive=true
+          else
+            sensitive=false
+          fi
+
+          if [ "$sensitive" = "true" ] || [ "$records" = "false" ]; then
+            needed=true
+            enforce=true
+          else
+            needed=false
+            enforce=true
+          fi
+
+          echo "records=$records sensitive=$sensitive"
+          {
+            echo "needed=$needed"
+            echo "records=$records"
+            echo "sensitive=$sensitive"
+            echo "enforce=$enforce"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Report this run's packaging input digest
         run: node scripts/pack-equivalence-input.mjs --write packaging-inputs.json
@@ -1069,6 +1128,59 @@ jobs:
             packs/pack-equivalence.json
           if-no-files-found: warn
           retention-days: 7
+
+      # The proof is uploaded ABOVE, before this gate can fail, so a developer
+      # whose baseline is stale always has the evidence needed to fix it.
+      - name: Offer the baseline this comparison authorises
+        if: ${{ steps.trigger.outputs.needed == 'true' }}
+        run: |
+          set -euo pipefail
+          if [ ! -f packs/pack-equivalence.json ]; then
+            echo 'no comparison report: this run produced no equivalence proof to authorise a baseline'
+            exit 0
+          fi
+          mode="${{ needs.dsh-context.outputs.mode }}"
+          args=(
+            --baseline scripts/pack-equivalence-baseline.json
+            --comparison packs/pack-equivalence.json
+            --out pack-equivalence-baseline.candidate.json
+            --mode "$mode"
+            --node 24 --platform "${{ runner.os }}"
+            --run "${{ github.event.repository.html_url }}/actions/runs/${{ github.run_id }}"
+            --commit "${{ github.sha }}"
+          )
+          if [ "$mode" = "source" ]; then
+            args+=(--source-distribution "$RUNNER_TEMP/dsh-source-pack")
+          fi
+          node scripts/pack-equivalence-input.mjs "${args[@]}"
+
+      - name: Upload the baseline candidate
+        if: ${{ always() && steps.trigger.outputs.needed == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-pi-tui-pack-equivalence-candidate-${{ needs.dsh-context.outputs.mode }}
+          path: pack-equivalence-baseline.candidate.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      # The gate that makes "update the baseline in the SAME PR" enforceable.
+      # It runs only after the comparison and its artifact are complete, so a
+      # failing gate never costs a developer the evidence.
+      - name: Does the committed baseline describe THIS tree?
+        if: ${{ steps.trigger.outputs.enforce == 'true' && steps.trigger.outputs.records == 'false' }}
+        run: |
+          set -euo pipefail
+          echo '::error title=pack-equivalence baseline is stale::This change alters packaging inputs, so the comparison had to run again.'
+          echo 'The committed scripts/pack-equivalence-baseline.json does not describe this tree:'
+          node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json \
+            --mode "${{ needs.dsh-context.outputs.mode }}" --node 24 --platform "${{ runner.os }}" || true
+          echo ''
+          echo 'A passing comparison already produced the record you need: download the'
+          echo '"dsh-pi-tui-pack-equivalence-candidate" artifact from this run and commit it as'
+          echo 'scripts/pack-equivalence-baseline.json (do not hand-edit hashes). Push again:'
+          echo 'this run will still re-prove equivalence, because that real comparison is the'
+          echo 'evidence, not the recorded file.'
+          exit 1
 
   # ---------------------------------------------------------------------------
   # THE QUALIFIED ARTIFACT.
