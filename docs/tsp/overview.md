@@ -91,6 +91,11 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
   second `TranscriptFolder`, nor a second SessionEvent subscription, nor a new
   Host port, nor a Host service read (`src/app/surface/**` stays Host-free and
   is gate-enforced).
+- Local surfaces that read one already-projected row (the Work Hub and its
+  bounded reader) stay inside the same renderer: the Hub resolves the current
+  row, the renderer owns the surface, and the reading is a pure projection that
+  cannot select, stop or answer anything. Reads can be synchronous; no
+  arbitrary await, timeout or watchdog is introduced for them.
 - Locality: the whole path is Client-local presentation. Nothing here reads Host
   cwd/filesystem or Session writer authority.
 - `TERM_PROGRAM=tern` handling in `src/tui/terminal/tern.ts` (OSC 7 / OSC 9;4)
@@ -108,9 +113,17 @@ frame, and `dispose()` releases the observer before the app dies.
 
 ## Surface, frame and lifecycle invariants
 
-- One Tern surface per TSP renderer; the live `layer` producers return a
-  `ui.col` region root, with overlays/pickers as children. That is a verified
-  project shape, not an SDK mandate that every root must be `col`.
+- One persistent inline Tern surface per TSP renderer, with ONE bounded
+  exception: a temporary read-only `mode:'screen'` **reader surface** on the same
+  SDK session and in the same pane, reachable only after a current Work Hub row
+  exists, used to make that one row readable. It is a rendering container, not a
+  second UI application: no business authority, no second input iterator, no
+  second transcript chain, no Host read, no state the base surface needs. At most
+  one exists, and the base surface stays resident
+  ([foundation.md](./foundation.md#bounded-reader-surface-lifecycle)).
+- The live `layer` producers return a `ui.col` region root, with
+  overlays/pickers as children. That is a verified project shape, not an SDK
+  mandate that every root must be `col`.
 - `surface.render(view)` sends only the diff from the last sent view; every
   region that must exist is submitted on every frame (an omitted region is
   deleted). Node identity follows the presenter's own key/epoch/revision

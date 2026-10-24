@@ -7,11 +7,14 @@
  * `TaskCenterPresentationPort`, and this class owns only the discardable
  * panel state (selection, query, refresh state, targets).
  *
- * A1 deliberately exposes ONE native action (`Close`): `View details` belongs
- * to A2's real Reader, so no placeholder button exists here. Production
- * `/tasks` stays unreachable — the TSP display seam advertises
- * `supportsTaskCenter: false`; this presenter is only reachable through the
- * internal presentation harness until A3 opens the real command path.
+ * A2 adds the ONE local Read intent: `Enter` on the current row and the native
+ * `View details` action ask the SESSION RENDERER to open a read-only Work
+ * Details Reader. This presenter never opens a surface, never keeps a second
+ * row catalog and never calls the business `onSelect` — the Reader's resource,
+ * identity and lifecycle belong to `tsp/session.ts`. Production `/tasks` stays
+ * unreachable — the TSP display seam advertises `supportsTaskCenter: false`;
+ * this presenter is only reachable through the internal presentation harness
+ * until A3 opens the real command path.
  *
  * Not owned here: catalog reads, Job observation/Stop, subagent viewer,
  * Question answering, a second Session or a second surface. The native
@@ -39,11 +42,29 @@ const WIDE_PANE_PIXELS = 1120
  * A3's; this only keeps the internal presenter honest.)
  */
 const MIN_PANE_PIXELS = 320
-/** The native footer action id: the ONE executable action of A1. */
+/** The native dismissal action id (idempotent, so it carries no revision). */
 const CLOSE_ACTION_ID = 'close'
+/**
+ * The native read-only Reader action's BASE id. Its real id carries the frame
+ * revision (`details#<rev>`), so an action painted by an older frame can never
+ * open a newer row.
+ */
+const DETAILS_ACTION_ID = 'details'
+/** The truthful Picker message when the pane lacks the Reader's capabilities. */
+const DETAILS_UNAVAILABLE = 'Work details unavailable in this pane.'
 
 type WorkHubZone = 'list' | 'actions'
 type WorkHubRefresh = 'loading' | 'ready' | 'stale'
+/** The ONE native action the action zone can hold. */
+type WorkHubAction = 'close' | 'details'
+/**
+ * Why the native Read action is (or is not) painted. The three states are
+ * distinct FACTS, not one boolean: a pane that cannot present a Reader at all is
+ * a durable pane limitation and states itself, while a Reader merely occupying
+ * the renderer right now is a TEMPORARY state that must neither paint a dead
+ * action nor claim the pane cannot read.
+ */
+export type WorkHubDetailsAdmission = 'available' | 'busy' | 'unsupported'
 
 /** A failed/timed-out/lost work status (attention marker, not a tone-only fact). */
 const FAILURE_STATUSES = new Set(['failed', 'timed_out', 'lost'])
@@ -59,7 +80,8 @@ interface WorkHubPanel {
   zone: WorkHubZone
   refresh: WorkHubRefresh
   refreshError: string | undefined
-  actionFocus: 'close'
+  /** The one focused native action of the `actions` zone (local cursor only). */
+  actionFocus: WorkHubAction
   readonly onSelect: (value: string) => 'close' | 'keep-open'
   readonly onClose: () => void
   readonly options: TaskBrowserPresentationOpen
@@ -80,9 +102,11 @@ interface WorkHubGroups {
 type WorkHubIntent =
   | { readonly kind: 'consume' }
   | { readonly kind: 'close' }
+  | { readonly kind: 'details'; readonly targetValue: string }
   | { readonly kind: 'zone'; readonly zone: WorkHubZone }
   | { readonly kind: 'select'; readonly value: string }
   | { readonly kind: 'query'; readonly query: string; readonly cursor: number }
+  | { readonly kind: 'action-focus'; readonly delta: -1 | 1 }
   | { readonly kind: 'activate-action' }
 
 const graphemeSegmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })
@@ -287,8 +311,16 @@ function subtitleText(groups: WorkHubGroups): string | undefined {
   return parts.length === 0 ? undefined : parts.join(' · ')
 }
 
-/** The ONE layer node: one native picker plus the optional Inspector child. */
-function hubLayer(panel: WorkHubPanel, wide: boolean): Node {
+/**
+ * The ONE layer node: one native picker plus the optional Inspector child.
+ *
+ * The native actions are `Close` plus — ONLY while a current visible row can
+ * be read and the renderer negotiated the Reader's capabilities — the primary
+ * `View details` whose id carries this frame's revision. A pane that cannot
+ * present the Reader paints the truthful unavailability message instead of a
+ * button that would do nothing.
+ */
+function hubLayer(panel: WorkHubPanel, wide: boolean, admission: WorkHubDetailsAdmission): Node {
   const rows = visibleRows(panel)
   const groups = groupsOf(rows)
   const selectedRow = panel.selected === undefined
@@ -307,15 +339,34 @@ function hubLayer(panel: WorkHubPanel, wide: boolean): Node {
     order.push({ group: 'work-jobs', label: 'Work · Jobs', count: groups.jobs.length })
     for (const row of groups.jobs) order.push(row.value)
   }
-  const message = panel.refresh === 'stale'
-    ? `Could not refresh tasks; showing last known entries.${panel.refreshError === undefined ? '' : ` ${sanitizeTerminalText(panel.refreshError)}`}`
-    : undefined
+  // The truthful unavailability line is a CAPABILITY fact, so it outranks a
+  // stale refresh error but never appears merely because the list is empty —
+  // and never because a Reader is temporarily open (`busy` is not a pane
+  // limitation).
+  const message = admission === 'unsupported'
+    ? DETAILS_UNAVAILABLE
+    : panel.refresh === 'stale'
+      ? `Could not refresh tasks; showing last known entries.${panel.refreshError === undefined ? '' : ` ${sanitizeTerminalText(panel.refreshError)}`}`
+      : undefined
   const subtitle = subtitleText(groups)
+  const detailsAvailable = admission === 'available' && selectedRow !== undefined
+  // The focused action is the one a keyboard Enter would run: the local
+  // `details` preference falls back to `close` whenever details cannot open.
+  const focused: WorkHubAction | undefined = panel.zone !== 'actions'
+    ? undefined
+    : detailsAvailable && panel.actionFocus === 'details' ? 'details' : 'close'
   const actions: PickerAction[] = [{
     id: CLOSE_ACTION_ID,
-    label: panel.zone === 'actions' && panel.actionFocus === 'close' ? 'Close [Enter]' : 'Close',
+    label: focused === 'close' ? 'Close [Enter]' : 'Close',
     keys: ['escape'],
   }]
+  if (detailsAvailable) {
+    actions.push({
+      id: `${DETAILS_ACTION_ID}#${panel.revision}`,
+      label: focused === 'details' ? 'View details [Enter]' : 'View details',
+      primary: true,
+    })
+  }
   const props: PickerProps & { readonly key: string } = {
     key: `work-hub-picker-${panel.serial}`,
     title: 'Work Hub',
@@ -353,6 +404,22 @@ export interface TspWorkHubDeps {
   canInteract(): boolean
   /** The live pane width in client pixels (`caps.cols * caps.cell.w`). */
   paneWidth(): number
+  /**
+   * Ask the SESSION RENDERER to open the read-only Work Details Reader for the
+   * CURRENT selected row. This is a local Read intent — never the business
+   * `onSelect` — and the hub keeps no Reader state afterwards.
+   */
+  onViewDetails(request: {
+    readonly panelSerial: number
+    readonly targetValue: string
+  }): void
+  /**
+   * Why the Reader action may (not) be painted right now. `unsupported` is the
+   * pane's own negotiated capability; `busy` means a reading is opening, open
+   * or still closing. Only PAINTS the action; the renderer rechecks before
+   * acquiring the Screen.
+   */
+  detailsAdmission(): WorkHubDetailsAdmission
 }
 
 /**
@@ -364,6 +431,8 @@ export class TspWorkHub {
   private readonly render: () => void
   private readonly canInteract: () => boolean
   private readonly paneWidth: () => number
+  private readonly onViewDetails: TspWorkHubDeps['onViewDetails']
+  private readonly detailsAdmissionOf: TspWorkHubDeps['detailsAdmission']
   private panel: WorkHubPanel | undefined
   private serial = 0
   private suspended = false
@@ -374,6 +443,8 @@ export class TspWorkHub {
     this.render = deps.render
     this.canInteract = deps.canInteract
     this.paneWidth = deps.paneWidth
+    this.onViewDetails = deps.onViewDetails
+    this.detailsAdmissionOf = deps.detailsAdmission
   }
 
   /**
@@ -425,7 +496,9 @@ export class TspWorkHub {
       zone: 'list',
       refresh: options.loading ? 'loading' : 'ready',
       refreshError: undefined,
-      actionFocus: 'close',
+      // The primary read action is the initial action-zone focus whenever this
+      // pane can really present the Reader; otherwise dismissal is the only one.
+      actionFocus: this.detailsAdmissionOf() === 'available' ? 'details' : 'close',
       onSelect,
       onClose,
       options,
@@ -566,16 +639,23 @@ export class TspWorkHub {
     if (key.name === 'escape') return { kind: 'close' }
     // A pane too narrow for an honest pivot keeps only the close gesture.
     if (this.tooNarrow()) return { kind: 'consume' }
+    // Two zones, one ring: Tab and Shift+Tab are the same inverse transition.
     if (key.name === 'tab') return { kind: 'zone', zone: panel.zone === 'list' ? 'actions' : 'list' }
     if (panel.zone === 'actions') {
       if (key.name === 'enter') return { kind: 'activate-action' }
-      // One action: left/right/up/down have no focus to move.
-      if (key.name === 'up' || key.name === 'down' || key.name === 'left' || key.name === 'right') return { kind: 'consume' }
+      if (key.name === 'up' || key.name === 'down' || key.name === 'left' || key.name === 'right') {
+        if (!this.detailsAvailable(panel)) return { kind: 'consume' }
+        return { kind: 'action-focus', delta: key.name === 'up' || key.name === 'left' ? -1 : 1 }
+      }
       const edited = editQuery(panel, key)
       return edited === undefined ? { kind: 'consume' } : { kind: 'query', ...edited }
     }
-    // A1: Enter/activate is consumed but opens nothing (the Reader is A2).
-    if (key.name === 'enter') return { kind: 'consume' }
+    // Enter is the LOCAL Read intent for the current row only. Pointer
+    // `activate` is not more permissive (see `eventIntent`).
+    if (key.name === 'enter') {
+      const current = this.resolveDetails(panel.serial, panel.selected)
+      return current === undefined ? { kind: 'consume' } : { kind: 'details', targetValue: current.value }
+    }
     const rows = visibleRows(panel)
     const index = rows.findIndex(row => row.value === panel.selected)
     const targetIndex = key.name === 'home' ? 0
@@ -591,6 +671,12 @@ export class TspWorkHub {
     return edited === undefined ? { kind: 'consume' } : { kind: 'query', ...edited }
   }
 
+  /** Whether the current row can be read AND the renderer can present it. */
+  private detailsAvailable(panel: WorkHubPanel): boolean {
+    return this.detailsAdmissionOf() === 'available'
+      && this.resolveDetails(panel.serial, panel.selected) !== undefined
+  }
+
   private act(panel: WorkHubPanel, revision: number, intent: WorkHubIntent): void {
     if (!this.canInteract() || this.current() !== panel || panel.revision !== revision) return
     switch (intent.kind) {
@@ -599,7 +685,23 @@ export class TspWorkHub {
       case 'close':
         this.userClose(panel)
         return
+      case 'details': {
+        // Re-resolve through the ONE current-row resolver AND re-read the
+        // renderer capability at admission: a resolution from an older
+        // frame/revision can never open a newer row or a missing capability.
+        if (this.detailsAdmissionOf() !== 'available') return
+        const current = this.resolveDetails(panel.serial, intent.targetValue)
+        if (current === undefined) return
+        const request = { panelSerial: panel.serial, targetValue: current.value }
+        // The renderer may synchronously open (and even retire) a sibling
+        // presenter; after this call the captured `panel` is NOT authoritative.
+        this.onViewDetails(request)
+        return
+      }
       case 'zone':
+        // The stored focus survives a re-entry: returning from the Reader keeps
+        // the exact zone/action focus. A stale `details` focus falls back to
+        // `close` only at PAINT/activation time (`focusedAction`).
         panel.zone = intent.zone
         this.change(panel)
         return
@@ -618,32 +720,60 @@ export class TspWorkHub {
         this.change(panel)
         return
       }
-      case 'activate-action':
-        if (panel.zone === 'actions') this.userClose(panel)
+      case 'action-focus': {
+        if (!this.detailsAvailable(panel)) return
+        panel.actionFocus = panel.actionFocus === 'details' ? 'close' : 'details'
+        this.change(panel)
         return
+      }
+      case 'activate-action': {
+        if (panel.zone !== 'actions') return
+        if (this.focusedAction(panel) === 'details') {
+          if (this.detailsAdmissionOf() !== 'available') return
+          const current = this.resolveDetails(panel.serial, panel.selected)
+          if (current === undefined) return
+          this.onViewDetails({ panelSerial: panel.serial, targetValue: current.value })
+          return
+        }
+        this.userClose(panel)
+        return
+      }
     }
+  }
+
+  /** The action the action zone's Enter would run, normalized to what exists. */
+  private focusedAction(panel: WorkHubPanel): WorkHubAction {
+    return panel.actionFocus === 'details' && this.detailsAvailable(panel) ? 'details' : 'close'
   }
 
   private eventIntent(panel: WorkHubPanel, event: TspEvent, target: WorkHubTarget): WorkHubIntent | undefined {
     if (event.ev === 'select') {
       if (target.kind !== 'picker' || event.item === undefined) return undefined
       // A select can ONLY name a currently visible row: a stale/foreign ID is
-      // ignored, never mapped to a row by index.
+      // ignored, never mapped to a row by index. Selection alone never reads.
       return visibleRows(panel).some(row => row.value === event.item)
         ? { kind: 'select', value: event.item }
         : undefined
     }
     if (event.ev === 'activate') {
       if (target.kind !== 'picker' || event.item === undefined) return undefined
-      // A1 consumes activation (no business router); only a current row is a
-      // valid consume, so a stale activation changes nothing.
-      return visibleRows(panel).some(row => row.value === event.item) ? { kind: 'consume' } : undefined
+      // Activation reads ONLY the row it names AND only while that row is still
+      // the CURRENT selection: a delayed activation of a row that is no longer
+      // selected is consumed instead of silently switching and opening it.
+      if (event.item !== panel.selected) return undefined
+      const current = this.resolveDetails(panel.serial, event.item)
+      return current === undefined ? undefined : { kind: 'details', targetValue: current.value }
     }
     if (target.kind !== 'picker') return undefined
     if (event.ev !== 'action') return undefined
-    // A1's ONLY executable action. Its id carries no revision because closing
-    // is idempotent; any future action must carry its frame revision.
+    // `Close` is idempotent dismissal, so it carries no token.
     if (event.act === CLOSE_ACTION_ID) return { kind: 'close' }
+    // `View details` carries the frame revision that painted it, and must name
+    // the frame this event's registered picker target belongs to.
+    if (event.act === `${DETAILS_ACTION_ID}#${target.revision}`) {
+      const current = this.resolveDetails(panel.serial, panel.selected)
+      return current === undefined ? undefined : { kind: 'details', targetValue: current.value }
+    }
     return undefined
   }
 
@@ -691,7 +821,7 @@ export class TspWorkHub {
       )
     }
     const revision = panel.revision
-    const node = hubLayer(panel, this.paneWidth() >= WIDE_PANE_PIXELS)
+    const node = hubLayer(panel, this.paneWidth() >= WIDE_PANE_PIXELS, this.detailsAdmissionOf())
     const pickerKey = `work-hub-picker-${panel.serial}`
     for (const root of View.from({ layer: node }).regions) {
       const visit = (candidate: typeof root): void => {
@@ -704,5 +834,22 @@ export class TspWorkHub {
       visit(root)
     }
     return node
+  }
+
+  isCurrentPanel(panelSerial: number): boolean {
+    return this.current()?.serial === panelSerial
+  }
+
+  /**
+   * The ONE current-row resolver used by the Read admission and by every
+   * Reader rerender: the row must survive in the SAME current panel, stay in
+   * the CURRENT visible filter and remain the CURRENT selection. It performs
+   * no source read, no query change and no selection mutation.
+   */
+  resolveDetails(panelSerial: number, targetValue: string | undefined): TaskPanelItem | undefined {
+    const panel = this.current()
+    if (panel === undefined || panel.serial !== panelSerial) return undefined
+    if (targetValue === undefined || panel.selected !== targetValue) return undefined
+    return visibleRows(panel).find(row => row.value === targetValue)
   }
 }
