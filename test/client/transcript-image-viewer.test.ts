@@ -45,8 +45,16 @@ function stripSgr(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, '')
 }
 
-function settle(): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, 10))
+/**
+ * Drain the loader's settle chain to its authoritative end.
+ *
+ * The loader resolves through promise continuations only (no timer, no I/O),
+ * so the settle notification and the cache write land within a bounded number
+ * of microtask turns; the panel's `requestRender` is then observable. A
+ * wall-clock wait would be a blind sleep: this awaits the actual fact.
+ */
+async function drainLoaderSettle(): Promise<void> {
+  for (let index = 0; index < 40; index += 1) await Promise.resolve()
 }
 
 interface Gate {
@@ -89,7 +97,7 @@ test('a ready PNG on kitty paints title, metadata and Esc close within the grant
   panel.setMaxRows(14)
   const loading = panel.render(80)
   assert.ok(stripSgr(loading[1]!).includes('Loading…'), `first idle frame asks for a frame: ${loading[1]}`)
-  await settle()
+  await drainLoaderSettle()
   const lines = panel.render(80)
   assert.ok(lines.length <= 14, `rows stay inside the grant (${lines.length} <= 14)`)
   assert.equal(stripSgr(lines[0]!), 'Image · shot.png')
@@ -155,7 +163,7 @@ test('loading → ready transition repaints on the loader settle and requests a 
   assert.equal(reads, 1, 'the first render starts exactly one read')
   assert.equal(requested, 0, 'no frame was requested before the settle')
   pending.resolve()
-  await settle()
+  await drainLoaderSettle()
   assert.equal(requested, 1, 'the settle callback requested exactly one frame')
   const ready = panel.render(60)
   assert.ok(ready.join('\n').includes('\x1b_G'), 'the kitty sequence appears after the settle')
@@ -170,7 +178,7 @@ test('a rejected read paints Read failed and folds hostile whitespace into one r
   const panel = panelOf(loader)
   panel.setMaxRows(8)
   panel.render(60)
-  await settle()
+  await drainLoaderSettle()
   const lines = panel.render(60)
   const body = lines[1]!
   assert.ok(stripSgr(body).includes('Read failed: storage'), `error row names the failure: ${stripSgr(body)}`)
@@ -192,7 +200,7 @@ test('kitty refuses non-PNG refs instead of building an Image or reading bytes',
   panel.setMaxRows(8)
   const lines = panel.render(60)
   assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'))
-  await settle()
+  await drainLoaderSettle()
   assert.equal(reads, 0, 'an undisplayable ref triggers no read')
   assert.ok(!panel.render(60).join('\n').includes('\x1b_G'), 'no kitty placement for a non-PNG ref')
 })
@@ -211,7 +219,7 @@ test('iTerm2 keeps metadata + Preview unavailable (PR2 workspace scope) and neve
   const panel = panelOf(loader, { ref: JPEG_REF })
   panel.setMaxRows(10)
   panel.render(60)
-  await settle()
+  await drainLoaderSettle()
   const lines = panel.render(60)
   const text = lines.map(line => stripSgr(line)).join('\n')
   assert.ok(text.includes('Preview unavailable'), `the workspace states the unavailable preview:\n${text}`)
@@ -232,7 +240,7 @@ test('an unsupported terminal paints Preview unavailable and never reads', async
   panel.setMaxRows(8)
   const lines = panel.render(60)
   assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'))
-  await settle()
+  await drainLoaderSettle()
   assert.equal(reads, 0, 'no pointless read on an unsupported terminal')
 })
 
@@ -241,7 +249,7 @@ test('empty ready bytes paint Preview unavailable', async () => {
   const panel = panelOf(loaderOf(new Uint8Array(0)))
   panel.setMaxRows(8)
   panel.render(60)
-  await settle()
+  await drainLoaderSettle()
   const lines = panel.render(60)
   assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'))
   assert.ok(!lines.join('\n').includes('\x1b_G'))
@@ -283,13 +291,13 @@ test('scope isolation: one scope settle never repaints another scope panel', asy
   b.setMaxRows(10)
   a.render(60)
   b.render(60)
-  await settle()
+  await drainLoaderSettle()
   const bReady = b.render(60)
   assert.ok(bReady.join('\n').includes('\x1b_G'), 'B paints its own resolved bytes')
   assert.ok(stripSgr(a.render(60)[1]!).includes('Loading…'), 'A is still held by its own read')
   assert.equal(requestedB, 1, 'B heard only its own settle')
   pendingA.resolve()
-  await settle()
+  await drainLoaderSettle()
   assert.equal(requestedA, 1, 'A heard its own settle')
   assert.equal(requestedB, 1, "A's settle never wakes B")
   assert.deepEqual(b.render(60), bReady, "A's settle never changes B's painted content")
@@ -314,7 +322,7 @@ test('dispose is idempotent and a late settle never touches the disposed panel',
   panel.dispose()
   assert.equal(loader.listenerCount(), before, 'dispose unsubscribes exactly once')
   pending.resolve()
-  await settle()
+  await drainLoaderSettle()
   assert.equal(requested, 0, 'a settle after dispose never requests a frame')
   // The loader cache is owned by the loader: dispose must not clear it.
   assert.equal(loader.get(PNG_REF, scope).state, 'ready')
@@ -326,7 +334,7 @@ test('every row stays inside the width at 40 and 70 while Esc close survives', a
   const panel = panelOf(loaderOf(PNG_BYTES))
   panel.setMaxRows(20)
   panel.render(40)
-  await settle()
+  await drainLoaderSettle()
   for (const width of [40, 70]) {
     const lines = panel.render(width)
     for (const line of lines) {
@@ -347,7 +355,7 @@ test('setMaxRows shrink then grow reflows the body without another loader read',
   })
   const panel = panelOf(loader)
   panel.render(70)
-  await settle()
+  await drainLoaderSettle()
   const tall = panel.render(70)
   const tallBody = tall.length - 2
   assert.ok(tallBody > 4, `the tall grant uses several image rows (${tallBody})`)
@@ -370,7 +378,7 @@ test('the constructor default budget is finite and an unnamed ref falls back to 
   const anonymous: ImageAttachmentRefLike = { ...PNG_REF, name: undefined }
   const panel = panelOf(loaderOf(PNG_BYTES), { ref: anonymous })
   panel.render(60)
-  await settle()
+  await drainLoaderSettle()
   const lines = panel.render(60)
   assert.ok(lines.length <= 22, `the pre-grant default stays finite (${lines.length} <= 22)`)
   assert.equal(stripSgr(lines[0]!), 'Image · image')
@@ -381,7 +389,7 @@ test('unchanged inputs reuse the local Image instance instead of rebuilding it',
   const panel = panelOf(loaderOf(PNG_BYTES))
   panel.setMaxRows(12)
   panel.render(60)
-  await settle()
+  await drainLoaderSettle()
   const first = panel.render(60)
   const second = panel.render(60)
   // A rebuilt Image would allocate a fresh kitty image id and therefore emit
@@ -395,7 +403,7 @@ test('the panel paints the frame inner width and the close hint survives Frame',
   panel.setMaxRows(14)
   const frame = new Frame(panel, true)
   panel.render(40)
-  await settle()
+  await drainLoaderSettle()
   const framed = frame.render(44)
   for (const line of framed) {
     assert.ok(visibleWidth(line) <= 44, `framed row ${visibleWidth(line)} <= 44`)
