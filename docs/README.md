@@ -85,6 +85,7 @@ MANDATORY or BLOCKING.
 | `tsp/model-selection.md` | TSP contributors | The current two-page `/model` semantics and the single explicit writer |
 | `tsp/preset-selection.md` | TSP contributors | The current two-page `/preset` semantics, footer writer and Reader |
 | `tsp/session-browser.md` | TSP contributors | SessionReader, listing/search/lineage/workspace, guarded resume and the native viewer contract |
+| `tsp/work-hub.md` | TSP contributors | Native Work Hub entry, read-only Picker/Inspector/Details, capability and return contract |
 
 ### `guides/` — reusable procedures
 

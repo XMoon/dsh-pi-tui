@@ -28,18 +28,22 @@ export interface PluginsCommandDeps {
 }
 
 /** `/tasks` (`/subagents`) — the merged Task Center browser behind the
- *  full surface (jobs + subagents in one searchable list, row-level
- *  confirmed Stop on capable rows). */
+ *  full surface (jobs + subagents in one searchable list). The Task Runtime's
+ *  own business layer implements row-level confirmed Stop on the PiTui
+ *  renderer; the TSP Work Hub behind the same command is read-only. */
 export function registerTasksCommand({ runner, registerTuiCommand }: TasksCommandDeps): void {
   registerTuiCommand({
     name: 'tasks',
-    description: 'Open the full Task Center for this session (scope, type, search, and tree controls)',
+    description: 'Browse tasks, subagents and jobs for the current session',
     aliases: ['subagents'],
     handler: async () => {
-      // The merged browser: jobs + subagents in one searchable list, with
-      // row-level confirmed Stop on capable rows — the full surface behind
-      // `/tasks` (runner.openTasksBrowser). Completed jobs and finished
-      // one-shot children are reachable exactly through this path.
+      // The merged browser: jobs + subagents in one searchable list — the full
+      // surface behind `/tasks` (runner.openTasksBrowser). Completed jobs and
+      // finished one-shot children are reachable exactly through this path.
+      // The renderer decides what the surface offers: the PiTui Task Center
+      // keeps its row-level confirmed Stop, and the TSP Work Hub reads only.
+      // This handler holds NO renderer branch — the registered command, its
+      // alias and the business entry stay ONE path.
       await runner.requireLiveSessionScope()
       runner.openTasksBrowser()
       return { kind: 'success' }

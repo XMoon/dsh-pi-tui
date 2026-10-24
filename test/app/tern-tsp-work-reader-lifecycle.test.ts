@@ -883,11 +883,14 @@ test('a pane without the negotiated scroll feature opens no Screen and states th
   assert.equal(h.renderer.display.supportsViewer, false, 'the Viewer capability never flips')
 })
 
-test('the production A2 seam still declares no Task Center and no Viewer', async (t) => {
+test('the production seam declares the Task Center only with the negotiated kinds and no Viewer', async (t) => {
   const h = await mount(t)
-  assert.equal(h.renderer.display.supportsTaskCenter, false,
-    'A2 is PROJECTION_ONLY: /tasks stays unreachable in production')
-  assert.equal(h.renderer.display.supportsViewer, false, 'A2 adds no Agent Viewer')
+  // B3-A3: this pane negotiated `picker` plus the Reader's `col`/`row`/`text`
+  // and `scroll`, so the display seam truthfully reports the Task Center. The
+  // missing-capability negative is the test ABOVE (no `scroll` ⇒ false).
+  assert.equal(h.renderer.display.supportsTaskCenter, true,
+    'a fully negotiated pane declares the production Task Center')
+  assert.equal(h.renderer.display.supportsViewer, false, 'A2/A3 add no Agent Viewer')
   // The Reader is reachable ONLY through the internal presentation port, so
   // without an open Hub there is no local Read entry at all.
   h.pane.key('q')

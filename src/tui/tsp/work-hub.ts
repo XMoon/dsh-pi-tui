@@ -11,10 +11,11 @@
  * `View details` action ask the SESSION RENDERER to open a read-only Work
  * Details Reader. This presenter never opens a surface, never keeps a second
  * row catalog and never calls the business `onSelect` — the Reader's resource,
- * identity and lifecycle belong to `tsp/session.ts`. Production `/tasks` stays
- * unreachable — the TSP display seam advertises `supportsTaskCenter: false`;
- * this presenter is only reachable through the internal presentation harness
- * until A3 opens the real command path.
+ * identity and lifecycle belong to `tsp/session.ts`. A3 opens the real command
+ * path: the registered `/tasks` (`/subagents`) handler reaches this presenter
+ * through the ONE `TaskRuntime`, and the TSP display seam advertises
+ * `supportsTaskCenter` only for a pane that negotiated the kinds this Hub and
+ * its Reader really emit.
  *
  * Not owned here: catalog reads, Job observation/Stop, subagent viewer,
  * Question answering, a second Session or a second surface. The native

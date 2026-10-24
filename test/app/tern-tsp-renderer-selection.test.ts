@@ -127,13 +127,16 @@ class ScriptedTern {
   readonly opened: unknown[] = []
   /** Whether a DA1/hello probe ever ran (the SDK connected). */
   probed = false
+  /** The hello the pane answers the probe with (a case can narrow it). */
+  private readonly hello: typeof HELLO
 
-  constructor() {
+  constructor(hello: typeof HELLO = HELLO) {
+    this.hello = hello
     this.output.onWrite = bytes => {
       const text = DECODER.decode(bytes)
       if (text.includes('\u001b[c')) {
         this.probed = true
-        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c`), 1)
+        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(this.hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
       for (const match of text.matchAll(/\u001b_to?;o;([\s\S]*?)\u001b\\/g)) {
@@ -411,6 +414,54 @@ test('A-03: without the opt-in the PRODUCTION selection never invokes the connec
   try {
     harness.mount(renderer)
     assert.equal(typeof harness.surface.app.start, 'function', 'the default PiTui mount ran')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── B3-A3: the Task Center capability through the PRODUCTION selection ──────
+
+test('A-03c: a fully negotiated pane declares the Task Center on the selected TSP mount', async () => {
+  // The real production selector + the shipped SDK: the negotiated HELLO
+  // carries `picker`/`row`/`text` and `scroll`, so the mounted seam the
+  // composition root reads (`surface.display.supportsTaskCenter`) is TRUE.
+  const tern = new ScriptedTern({
+    ...HELLO,
+    kinds: [...HELLO.kinds, 'picker', 'row', 'overlay', 'text'],
+    features: [...HELLO.features, 'scroll'],
+  })
+  const mount = await selectRenderer({
+    env: { DSH_PI_TUI_RENDERER: 'tsp' },
+    connect: async () => await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 }),
+  })
+  assert.ok(mount !== undefined, 'the production selection produced the TSP mount')
+  const harness = mountHarness()
+  try {
+    harness.mount(mount)
+    await settle()
+    assert.equal(harness.surface.display.supportsTaskCenter, true,
+      'the selected negotiated mount reports the production Task Center')
+    assert.equal(harness.surface.display.supportsViewer, false, 'the Viewer stays unavailable')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('A-03d: a lean negotiated pane (no picker/Reader kinds) declares no Task Center', async () => {
+  // The same production selection over the DEFAULT lean HELLO: /tasks can
+  // never reach a Hub this pane could neither paint nor read.
+  const tern = new ScriptedTern()
+  const mount = await selectRenderer({
+    env: { DSH_PI_TUI_RENDERER: 'tsp' },
+    connect: async () => await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 }),
+  })
+  assert.ok(mount !== undefined, 'the lean pane still mounts the TSP renderer')
+  const harness = mountHarness()
+  try {
+    harness.mount(mount)
+    await settle()
+    assert.equal(harness.surface.display.supportsTaskCenter, false,
+      'a lean pane reports no Task Center, so the SubmissionController refuses /tasks')
   } finally {
     await harness.dispose()
   }

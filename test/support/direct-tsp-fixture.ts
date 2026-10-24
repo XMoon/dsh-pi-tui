@@ -317,6 +317,14 @@ export interface DirectTspFixtureOptions {
     readonly permissionPresets?: boolean
     /** `dsh-authorization` (the provider sign-in flow targets). */
     readonly authorization?: boolean
+    /**
+     * B3-A3: mount the official `@deepseek-ai/dsh-subagent` runtime (the SAME
+     * plugin row the shipped base layer mounts). The Direct Task read composes
+     * `subagents.listDescendants`, so without this runtime the Task Center has
+     * NO descendant half at all — the production bundle always mounts it, and a
+     * suite that proves the real `/tasks` roster must reproduce that row.
+     */
+    readonly subagentRuntime?: boolean
   }
   /**
    * Negative composition: mount no credentials provider at all, so the
@@ -621,6 +629,14 @@ export async function createDirectTspFixture(
     // through (`flowForRoute`), and whose keyless login stores a RECORD.
     const { default: AuthorizationService } = await import('@deepseek-ai/dsh-authorization')
     await ctx.plugin(AuthorizationService as never, undefined as never)
+  }
+  if (officialServices.subagentRuntime === true) {
+    // B3-A3: the official subagent runtime row the shipped base layer mounts. It
+    // must precede the runner, because the composition root reads `ctx.get(
+    // 'subagents')` when it builds the Direct Task source. Its `inject` names
+    // `workingDirectory`, so a composition opting in must mount that row too.
+    const { default: SubagentRuntime } = await import('@deepseek-ai/dsh-subagent')
+    await ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
   }
   const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
     pluginCtx,

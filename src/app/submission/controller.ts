@@ -240,6 +240,13 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   /** The installed native Session Browser presenter, including its capabilities. */
   readonly supportsSessionBrowserUi?: () => boolean
   /**
+   * B3-A3: the mounted renderer's ONE Task Center capability
+   * (`SurfaceDisplaySeam.supportsTaskCenter`). It admits the `/tasks` +
+   * `/subagents` family ONLY; the winner still comes from the existing
+   * classifier and the handler stays the unchanged registered one.
+   */
+  readonly supportsTaskCenterUi?: () => boolean
+  /**
    * PR3-B §7.3 (F2): whether this renderer RETAINS a stale submission's
    * draft restore across a session switch. PiTui = true (steer.test.ts's
    * restore family is its contract); the TSP renderer = false (its
@@ -1727,6 +1734,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         modelPicker: deps.supportsModelPickerUi?.() === true,
         presetPicker: deps.supportsPresetPickerUi?.() === true,
         sessionBrowser: deps.supportsSessionBrowserUi?.() === true,
+        taskCenter: deps.supportsTaskCenterUi?.() === true,
       }, parsed.rawInput)
       // ONLY the TUI-owned builtin family is this gate's business. A Host
       // command, an extension contribution, a skill invocation or an ordinary

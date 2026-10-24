@@ -235,10 +235,10 @@ export interface TspRenderer extends TspInputBinding {
   /** Internal read-only Session Browser seam; absent unless all required kinds are negotiated. */
   readonly sessionBrowserPresentation: SessionBrowserPresentation | undefined
   /**
-   * B3-A1: the Task Center presentation sink. It is ALWAYS present — the
-   * internal native Work Hub is the renderer's implementation — but the
-   * renderer's `display.supportsTaskCenter` stays false, so no production
-   * `/tasks` path reaches it in A1.
+   * B3-A1/B3-A3: the Task Center presentation sink. It is ALWAYS present — the
+   * internal native Work Hub is the renderer's implementation — and the
+   * renderer's `display.supportsTaskCenter` reports whether this pane negotiated
+   * the kinds the Hub and its Reader really need.
    */
   readonly taskPresentation: TaskCenterPresentationPort
   /**
@@ -741,6 +741,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   function readerCapabilitiesNegotiated(): boolean {
     return WORK_DETAILS_KINDS.every(kind => session.caps.kinds.includes(kind))
       && session.caps.features.includes(WORK_DETAILS_FEATURE)
+  }
+
+  /**
+   * B3-A3: whether this pane can present the WHOLE Work Hub entry — the native
+   * `ui.picker` roster AND a readable Work Details Reader. It is the negotiated
+   * capability of {@link WORK_DETAILS_KINDS}/{@link WORK_DETAILS_FEATURE} plus
+   * the ONE node kind the Hub itself is built from; a pane missing either half
+   * refuses `/tasks` before any TaskRuntime opener runs, instead of mounting a
+   * Hub the user could neither read nor leave.
+   */
+  function taskCenterCapabilitiesNegotiated(): boolean {
+    return session.caps.kinds.includes('picker') && readerCapabilitiesNegotiated()
   }
 
   /**
@@ -1591,7 +1603,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     getSessionTitle: () => statusFacts.sessionTitle ?? '',
     getViewerGeneration: () => viewerGeneration,
-    supportsTaskCenter: false,
+    // B3-A3: the ONE Task Center reachability truth. It reports the renderer's
+    // STRUCTURAL negotiated capability only (`picker` + the Reader's kinds and
+    // `scroll`), never a transient interaction condition: input binding, modal
+    // seat, hydration and Reader-slot state keep their own existing admissions.
+    // A background TaskRuntime refresh therefore cannot be skipped just because
+    // a Modal happens to be up or a Reader is closing.
+    get supportsTaskCenter() {
+      return !disposed && taskCenterCapabilitiesNegotiated()
+    },
     supportsViewer: false,
     // PR3-B B3 (§3.5.1): the capability is advertised only once the seat's
     // application wiring is real — `bindInput` has installed the handlers the
@@ -1938,8 +1958,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     interaction: seat.presenter,
     // B3-A1: the internal native Work Hub presentation sink, wrapped by the
     // seat's four-way presenter exclusivity. It is always supplied with the
-    // mount; the display seam's `supportsTaskCenter:false` stays the ONE
-    // production reachability truth until A3.
+    // mount; the display seam's `supportsTaskCenter` getter above is the ONE
+    // production reachability truth (B3-A3).
     taskPresentation,
     // PR-C: the ONE image binding. It is installed before the first tool
     // projection (the mount does it) and never twice.

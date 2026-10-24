@@ -673,8 +673,13 @@ test('real Task Runtime task facts commit through the TSP presentation port to t
     hubItems(h.pane).some(item => item.id === 'agent:child-1') && hubItems(h.pane).some(item => item.id === 'job:j1'))
   assert.deepEqual(hubItems(h.pane).map(item => item.id), ['agent:child-1', 'job:j1'],
     'the presenter shows the exact Task Runtime projection, in its order')
-  assert.equal(h.renderer.display.supportsTaskCenter, false,
-    'the real TSP display seam still declares no production Task Center (A1)')
+  // B3-A3: this pane negotiated the Hub's `picker` AND the Reader's
+  // `col`/`row`/`text` + `scroll`, so the display seam's ONE capability truth
+  // is TRUE. The negative (a pane missing any of them) is the dedicated
+  // capability test below; the Viewer capability never flips.
+  assert.equal(h.renderer.display.supportsTaskCenter, true,
+    'the negotiated pane declares the production Task Center capability')
+  assert.equal(h.renderer.display.supportsViewer, false, 'the read-only Hub never adds a Viewer')
 })
 
 // ── Plan §10.2: the FOUR non-blocking presenters are mutually exclusive ─────

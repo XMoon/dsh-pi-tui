@@ -2409,6 +2409,11 @@ export function applyRunnerWithRuntime(
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
        supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
+      // B3-A3: the ONE Task Center capability of the CURRENTLY mounted display
+      // seam (PiTui = true, TSP = its negotiated kinds). Read live at the
+      // post-classification admission, so the SDK-decline PiTui fallback keeps
+      // its own truth instead of an env-string guess.
+      supportsTaskCenterUi: () => surface.display.supportsTaskCenter,
       // PR3-B §7.3 (F2): PiTui retains a stale submission's draft restore
       // across a switch (its contract); the TSP renderer's committed switch
       // DROPPED the outgoing draft, so the stale restore is suppressed.

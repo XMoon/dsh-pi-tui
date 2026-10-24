@@ -553,6 +553,41 @@ test('A-07b: SurfaceRuntime retires all native presenter getters on dispose', as
   }
 })
 
+// ── B3-A3: the Task Center capability is the NEGOTIATED pane truth ──────────
+
+test('A-07c: the default HELLO (no picker/row/text/scroll) declares no Task Center', async () => {
+  const harness = await mountTspHarness()
+  const session = harness.session
+  try {
+    assert.equal(harness.surface.display.supportsTaskCenter, false,
+      'the default pane cannot present the Hub or read its Reader, so /tasks stays refused')
+    assert.equal(harness.surface.display.supportsViewer, false, 'and no Viewer is advertised')
+  } finally {
+    await harness.dispose().catch(() => {})
+    await session.close().catch(() => {})
+  }
+})
+
+test('A-07d: a fully negotiated HELLO declares the Task Center and STILL no Viewer', async () => {
+  // The Session Browser opt-in advertises exactly the negotiated vocabulary the
+  // Hub + Reader need (`picker`, `row`, `text`, `overlay` and `scroll`; `col` is
+  // base), so the display seam's ONE capability truth flips — and nothing else
+  // on the seam does.
+  const harness = await mountTspHarness({ sessionBrowserCapabilities: true })
+  const session = harness.session
+  try {
+    assert.equal(harness.surface.display.supportsTaskCenter, true,
+      'the negotiated pane truthfully declares the production Task Center')
+    assert.equal(harness.surface.display.supportsViewer, false,
+      'the Task Center capability never implies the business Viewer')
+    assert.equal(harness.surface.display.supportsModals, false,
+      'and never implies modals: the interaction seat keeps its own admission')
+  } finally {
+    await harness.dispose().catch(() => {})
+    await session.close().catch(() => {})
+  }
+})
+
 // ── The exit intent: B1 semantics (q is text; Ctrl+D exits only empty) ──────
 
 test('A-04b: exit routes Ctrl+C and empty-draft Ctrl+D; a typed q is editor text', async () => {
