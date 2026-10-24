@@ -618,6 +618,40 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   await railWheel.settle()
   assert.notDeepEqual(visibleRail(), railBefore, 'the repainted rail still scrolls under the pointer')
   railWheel.app.dispose()
+  // The shortest interleaving: a chrome-changing REPAINT alone crosses the
+  // gesture boundary — no wheel or second press ever samples a stale gate. At
+  // 120x8 the notice takes the rule row while contentTop/contentRows and the
+  // pressed rail target stay identical, so only the paint-time boundary
+  // prevents the release from completing the pre-repaint click.
+  const repainted = await open({ columns: 120, rows: 8 })
+  await yieldToRail(repainted)
+  press(repainted, railRow(repainted, 'Display'), 3)
+  repainted.app.notify('notice repaints before the release', 'error')
+  await repainted.settle()
+  assert.match(repainted.view(), /notice repaints before the release/u, 'the notice really repainted')
+  release(repainted, railRow(repainted, 'Display'), 3)
+  await repainted.settle()
+  assert.match(repainted.view(), /^> Plugins\b/mu, 'the release after a chrome-changing repaint never switches category')
+  assert.doesNotMatch(repainted.view(), /Scope: Display/u)
+  // Positive control on a fresh cell: the panel still admits a new gesture.
+  click(repainted, railRow(repainted, 'Tools'), 3)
+  await repainted.settle()
+  assert.match(repainted.view(), /Scope: TUI preferences/u, 'a fresh rail gesture still switches category')
+  repainted.app.dispose()
+
+  // The other half of the contract: a repaint that keeps the SAME row
+  // allocation is benign and must NOT drop an accepted press.
+  const benign = await open({ columns: 120, rows: 8 })
+  await yieldToRail(benign)
+  press(benign, railRow(benign, 'Display'), 3)
+  benign.app.requestRender()
+  await benign.settle()
+  release(benign, railRow(benign, 'Display'), 3)
+  await benign.settle()
+  assert.match(benign.view(), /^> Display\b/mu, 'a same-plan repaint keeps the pending press alive')
+  assert.match(benign.view(), /Scope: TUI preferences/u, 'the preserved press really switched to Display')
+  benign.app.dispose()
+
   // The interleaving that neither single case covers: a pending rail press, a
   // refused wheel in the unrepainted window, then a release after the repaint.
   // 120x8 keeps contentTop/contentRows (and the pressed target's row) identical
