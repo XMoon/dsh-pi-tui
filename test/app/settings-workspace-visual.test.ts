@@ -159,6 +159,10 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   gestureRevision(): number {
     return this.viewRevision
   }
+
+  semanticGeneration(): number {
+    return this.viewRevision
+  }
   liveIdentity(): string {
     return `${this.viewRevision}:${this.view}`
   }

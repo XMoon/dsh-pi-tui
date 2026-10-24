@@ -61,6 +61,7 @@ function embeddedPage(counts: CommandCounts): EmbeddedPluginPage {
     canYieldFocusToNavigation: () => true,
     pendingMutation: () => false,
     gestureRevision: () => 0,
+    semanticGeneration: () => 0,
     liveIdentity: () => 'fake-live',
     cancelPointer: () => {},
     handleInput: () => {},

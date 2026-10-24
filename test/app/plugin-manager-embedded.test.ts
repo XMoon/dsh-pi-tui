@@ -1404,6 +1404,60 @@ test('T09 the Detail wheel reaches the real bottom produced by the painter', asy
   harness.app.dispose()
 })
 
+test('T09 a change-and-revert under a held rail press still refuses the old release', async () => {
+  // RFL-011 follow-up: comparing the semantic VALUE at press and release misses a
+  // change that reverts (Down then Up restores the same selection). The monotonic
+  // semantic generation must catch it.
+  const harness = await open({ columns: 120, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  const aboutRow = railRow(harness, 'About')
+  const identityBefore = harness.panel.liveIdentity()
+  const generationBefore = harness.panel.semanticGeneration()
+  press(harness, aboutRow, 3)
+  harness.vt.sendInput('\x1b[B') // Down: select another card
+  await harness.settle()
+  harness.vt.sendInput('\x1b[A') // Up: restore the previous selection
+  await harness.settle()
+  assert.equal(harness.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the selection really reverted')
+  assert.ok(harness.panel.semanticGeneration() > generationBefore,
+    'the semantic generation advanced even though the value snapshot returned to its original state')
+  assert.notEqual(harness.panel.liveIdentity(), identityBefore, 'the identity must not look unchanged after a revert')
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
+  assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives')
+  click(harness, railRow(harness, 'Models'), 3)
+  await harness.settle()
+  assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click still switches category')
+  harness.app.dispose()
+})
+
+test('T09 a Confirmation selection key at either end never bumps', async () => {
+  // RFL-012: Up on the first choice (or Down on the last) must not bump, or a
+  // held pointer action on the confirmation is revoked with no visible change.
+  const harness = await open({ columns: 120, rows: 24 })
+  // `openRemoveConfirm` leaves the cursor on the FIRST choice (Remove), so Up is
+  // the no-op direction there...
+  await openRemoveConfirm(harness)
+  const before = harness.panel.semanticGeneration()
+  harness.vt.sendInput('\x1b[A')
+  await harness.settle()
+  assert.equal(harness.panel.semanticGeneration(), before, 'Up at the first choice does not bump')
+  // ... and Down really moves to Cancel (a real change), after which Down/Tab at
+  // the LAST choice are the no-ops.
+  harness.vt.sendInput('\x1b[B')
+  await harness.settle()
+  const afterMove = harness.panel.semanticGeneration()
+  assert.ok(afterMove > before, 'moving to the last choice is a real change')
+  harness.vt.sendInput('\x1b[B')
+  await harness.settle()
+  harness.vt.sendInput('\t')
+  await harness.settle()
+  assert.equal(harness.panel.semanticGeneration(), afterMove, 'Down/Tab at the last choice do not bump')
+  assert.equal(harness.panel.currentView(), 'confirm', 'the confirmation is still open')
+  harness.app.dispose()
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
 test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {

@@ -150,6 +150,9 @@ export interface EmbeddedPluginPage extends Component {
    * page: the same view and yield status can still hide a changed list.
    */
   gestureRevision(): number
+  /** The monotonic SEMANTIC generation: advances on every real state change and
+   *  NEVER on a paint catch-up, so a change-and-revert is still visible. */
+  semanticGeneration(): number
   /**
    * The page's LIVE currentness identity: the local painted revision, the local
    * viewport grant and every Controller fact `frameIsCurrent()` compares
@@ -311,6 +314,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private _focused = false
   private disposed = false
   private revision = 0
+  /** Monotonic count of REAL semantic changes (see {@link bumpSemantic}). */
+  private semanticGenerationValue = 0
   private paintedTargets: readonly HitTarget[] = []
   private paintedRevision = -1
   private paintedChrome: ChromePlan | undefined
@@ -386,7 +391,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // resize round trip restores the SAME action the user was on.
     this.revokePaintedGrants()
     this.pressedGesture = undefined
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
   }
 
   /**
@@ -411,6 +416,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   /** See {@link EmbeddedPluginPage.gestureRevision}. */
   gestureRevision(): number {
     return this.revision
+  }
+
+  semanticGeneration(): number {
+    return this.semanticGenerationValue
   }
 
   /** Revoke one in-flight press (never a Host operation). */
@@ -510,7 +519,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return { handled: true }
     }
     if (this.view === 'install') {
-      if (this.scrollInstall(delta, plan)) this.bumpRevision()
+      if (this.scrollInstall(delta, plan)) this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return { handled: true }
     }
@@ -571,7 +580,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const next = Math.min(Math.max(0, this.listOffset + delta), max)
     if (next !== this.listOffset) {
       this.listOffset = next
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
     this.intents.requestRender()
   }
@@ -581,7 +590,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const next = Math.min(Math.max(0, this.detailOffset + delta), max)
     if (next !== this.detailOffset) {
       this.detailOffset = next
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
     this.intents.requestRender()
   }
@@ -592,7 +601,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // repaint has not run must not record a target from the stale hit map.
     if (!this.frameIsCurrent()) {
       this.pressedGesture = undefined
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -615,7 +624,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const pressed = this.pressedGesture
     this.pressedGesture = undefined
     if (!this.frameIsCurrent()) {
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -711,7 +720,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.diagnosticsOffset = 0
     this.diagnosticsReveal = false
     this.view = 'diagnostics'
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -719,7 +728,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'list'
     this.focus = 'list'
     this.diagnosticsReveal = false
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -730,7 +739,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const count = this.diagnosticsFacts().length
     this.diagnosticsSelection = Math.min(this.diagnosticsSelection, Math.max(0, count - 1))
     this.diagnosticsReveal = true
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -788,7 +797,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       // the controller's exact spec/registry instead of a blank form.
       this.seedInstallInputs(install)
     }
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -799,7 +808,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'install'
     this.installFocus = 'spec'
     this.resetInstallInputs()
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -887,7 +896,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (matchesKey(data, 'enter')) {
       this.searchEditing = false
       this.syncInputFocus()
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -898,7 +907,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (next !== this.query) {
       this.query = next
       this.renarrowSelection()
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
     }
   }
@@ -913,20 +922,27 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'up') || matchesKey(data, 'left')) {
-      this.confirmSelection = Math.max(0, this.confirmSelection - 1)
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.moveConfirmSelection(-1)
       return
     }
     if (matchesKey(data, 'down') || matchesKey(data, 'right') || matchesKey(data, 'tab')) {
-      this.confirmSelection = Math.min(this.confirmSelection + 1, Math.max(0, this.paintedConfirmActionValues.length - 1))
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.moveConfirmSelection(1)
       return
     }
     if (matchesKey(data, 'enter')) {
       this.activateConfirmSelection()
     }
+  }
+
+  /** Move the pinned choice. A key at either end is a no-op and must NOT bump:
+   *  a bump there would revoke a held pointer action for no visible change. */
+  private moveConfirmSelection(delta: number): void {
+    const last = Math.max(0, this.paintedConfirmActionValues.length - 1)
+    const next = Math.min(Math.max(0, this.confirmSelection + delta), last)
+    if (next === this.confirmSelection) return
+    this.confirmSelection = next
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
   }
 
   /** Scroll only the confirmation content; the two choices stay pinned. */
@@ -936,7 +952,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const next = Math.min(Math.max(0, this.confirmOffset + direction * step), this.paintedConfirmScrollMax)
     if (next === this.confirmOffset) return
     this.confirmOffset = next
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -944,7 +960,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const install = this.controller.installView()
     if (install === undefined) {
       this.view = 'list'
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -952,7 +968,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (matchesKey(data, 'tab')) {
         this.installFocus = this.installFocus === 'spec' ? 'registry' : 'spec'
         this.syncInputFocus()
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       }
@@ -1011,7 +1027,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (data === WORKSPACE_KEYS.logs || data === WORKSPACE_KEYS.logs.toUpperCase()) {
         this.logsExpanded = !this.logsExpanded
         this.logOffset = 0
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       }
@@ -1052,7 +1068,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (data === WORKSPACE_KEYS.logs || data === WORKSPACE_KEYS.logs.toUpperCase()) {
       this.logsExpanded = !this.logsExpanded
       this.logOffset = 0
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -1068,7 +1084,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.searchEditing = false
       this.syncInputFocus()
       this.renarrowSelection()
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -1115,7 +1131,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.detailOffset = 0
     this.detailSelection = 0
     this.detailReveal = false
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1126,7 +1142,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const next = Math.min(Math.max(0, offset), max)
     if (next !== this.detailOffset) {
       this.detailOffset = next
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
     this.intents.requestRender()
   }
@@ -1135,7 +1151,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'list'
     this.focus = 'list'
     this.detailReveal = false
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1144,7 +1160,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'confirm'
     this.confirmSelection = 1
     this.confirmOffset = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1152,7 +1168,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private closeConfirmation(): void {
     this.confirmOffset = 0
     this.view = 'details'
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1163,7 +1179,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'list'
     this.focus = 'list'
     this.searchEditing = false
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1171,7 +1187,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.searchEditing = true
     this.searchInput.setValue(this.query)
     this.syncInputFocus()
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1186,7 +1202,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = cards[Math.min(previousIndex, Math.max(0, cards.length - 1))]?.value
     this.detailSelection = 0
     this.detailOffset = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1200,7 +1216,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = card.value
     this.detailOffset = 0
     this.detailSelection = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1211,7 +1227,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = first.value
     this.detailOffset = 0
     this.detailSelection = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1222,7 +1238,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = last.value
     this.detailOffset = 0
     this.detailSelection = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1235,7 +1251,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (next === this.detailSelection) return
     this.detailSelection = next
     this.detailReveal = true
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1245,7 +1261,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const next = Math.min(Math.max(0, this.installSelection + delta), actions.length - 1)
     if (next === this.installSelection) return
     this.installSelection = next
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1283,7 +1299,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.diagnosticsSelection >= count) {
       this.diagnosticsSelection = count - 1
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
   }
 
@@ -1294,7 +1310,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (next === this.diagnosticsSelection) return
     this.diagnosticsSelection = next
     this.diagnosticsReveal = true
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1303,7 +1319,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // when its index is already first.
     this.diagnosticsSelection = 0
     this.diagnosticsReveal = true
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1312,7 +1328,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (count === 0) return
     this.diagnosticsSelection = count - 1
     this.diagnosticsReveal = true
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1384,7 +1400,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     this.diagnosticsReveal = false
     if (next !== beforeOffset || this.diagnosticsSelection !== beforeSelection || this.diagnosticsReveal !== beforeReveal) {
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
     this.intents.requestRender()
   }
@@ -1658,14 +1674,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.filter = next
         const cards = this.filteredCards(this.controller.model())
         this.selectedValue = cards[Math.min(previousIndex, Math.max(0, cards.length - 1))]?.value
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       }
       case 'pane':
         this.focus = target.value === 'details' ? 'details' : 'list'
         this.view = target.value === 'details' ? 'details' : 'list'
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       case 'card':
@@ -1673,7 +1689,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           this.selectedValue = target.value
           this.detailOffset = 0
           this.detailSelection = 0
-          this.bumpRevision()
+          this.bumpRevision(); this.bumpSemantic()
           this.intents.requestRender()
           return
         }
@@ -1722,7 +1738,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         if (this.controller.beginOfficialInstall(card.value)) {
           this.view = 'install'
           this.installFocus = 'spec'
-          this.bumpRevision()
+          this.bumpRevision(); this.bumpSemantic()
           this.intents.requestRender()
         }
         return
@@ -1777,7 +1793,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // painted it: a resize/scroll that left it offscreen reveals it first.
     if (!this.frameIsCurrent() || !this.paintedDetailSelectionVisible) {
       this.detailReveal = true
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -1827,7 +1843,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.registryIndex = ((this.registryIndex + delta) % total + total) % total
     this.customRegistry = this.registryIndex === options.length
     this.syncInputFocus()
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1949,7 +1965,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (cards.length === 0) {
       if (this.selectedValue !== undefined) {
         this.selectedValue = undefined
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
       }
       if (this.view === 'details') {
         this.view = 'list'
@@ -1957,7 +1973,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.detailSelection = 0
         this.detailOffset = 0
         this.detailReveal = false
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
       }
       return
     }
@@ -1975,7 +1991,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = cards[0]!.value
     this.detailSelection = 0
     this.detailOffset = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
   }
 
   private listEntries(model: ReturnType<PluginManagerController['model']>): ListEntry[] {
@@ -2200,6 +2216,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.diagnosticsSnapshot = next
       if (this.lastDiagnosticsKey !== key) { this.lastDiagnosticsKey = key; changed = true }
     }
+    // PAINT catch-up only: it may re-derive the frame from facts that were
+    // already live, so it must never advance the semantic generation.
     if (changed) this.bumpRevision()
   }
 
@@ -2214,7 +2232,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.detailSelection >= detail.actions.length) {
       this.detailSelection = detail.actions.length - 1
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
   }
 
@@ -2589,7 +2607,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.currentInstallActions = actions
     if (actions.length > 0 && this.installSelection >= actions.length) {
       this.installSelection = actions.length - 1
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
     const out = padBody(body.visible, body.contentViewport, plan.width)
     for (const line of body.actionBlock) out.push(fit(line, plan.width))
@@ -2918,6 +2936,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // (view/filter/query/selection/scroll/install/notice/model+read generation/
     // grant) is represented by the terms below.
     return JSON.stringify([
+      this.semanticGenerationValue,
       this.view,
       this.focus,
       this.searchEditing,
@@ -2956,6 +2975,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private bumpRevision(): void {
     this.revision += 1
+  }
+
+  /** Advance the monotonic SEMANTIC generation. Every real state change calls
+   *  this; a repaint that only catches up with existing state does NOT. The root
+   *  fence compares it so a change-and-revert (Down then Up, Details then back)
+   *  is still a boundary, which a value snapshot alone cannot see. */
+  private bumpSemantic(): void {
+    this.semanticGenerationValue += 1
   }
 }
 
