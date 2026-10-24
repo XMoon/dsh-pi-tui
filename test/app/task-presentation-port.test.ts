@@ -593,7 +593,7 @@ test('a browser opened synchronously from a retire callback keeps its token agai
   h.tasks.resetTasks()
 })
 
-test('an old catalog read cannot commit after resetTasks replaced the browser', async () => {
+test('a catalog read held across resetTasks never repaints the replaced generation', async () => {
   let release!: (value: {
     parentSessionId: string
     parentAvailable: boolean
@@ -616,9 +616,13 @@ test('an old catalog read cannot commit after resetTasks replaced the browser', 
     }),
   })
   assert.equal(reads, 1)
-  h.tasks.resetTasks()
+  h.tasks.refreshTasks()
   h.tasks.openTasksBrowser('full')
-  const fresh = h.opens.at(-1)!
+  assert.equal(reads, 1, 'the open coalesced into the still in-flight catalog read')
+  // The reset replaces the generation while that read is still in flight.
+  h.tasks.resetTasks()
+  const sinksAfterReset = { ...h.sinks }
+  const opensAfterReset = h.opens.length
   release({
     parentSessionId: 'sess-main',
     parentAvailable: true,
@@ -626,8 +630,9 @@ test('an old catalog read cannot commit after resetTasks replaced the browser', 
     jobs: [],
   })
   await flush()
-  assert.ok(!fresh.items.some(item => item.value.includes('stale-child')),
-    'the superseded generation must never paint its catalog')
+  assert.deepEqual(h.sinks, sinksAfterReset,
+    'a read started before the reset must never commit rows or chrome into the new generation')
+  assert.equal(h.opens.length, opensAfterReset, 'no panel may be opened by a superseded read')
   h.tasks.resetTasks()
 })
 
