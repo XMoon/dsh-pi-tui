@@ -15,7 +15,8 @@ import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
+import { getKeybindings, resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
+import { ImageWorkspacePanel } from '../../src/tui/components/media/image-workspace.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
@@ -785,4 +786,64 @@ test('a fallback row carrying a crafted protocol sequence in the attachment name
   assert.equal(rowOfNth(after, 'NEXT', 0), nextBefore, `the layout is unchanged:\n${after}`)
   app.setFullscreen(false)
   app.stop()
+})
+
+test('the list action bar advertises the LIVE keybindings and degrades by whole segments', async () => {
+  // Two design-language §7 rules the previous hard-coded string broke:
+  //  - the advertised keys must be the LIVE bindings SearchablePicker matches,
+  //    so a remap cannot leave the bar lying;
+  //  - degradation is whole-segment (§7.2), with `Esc` (the workspace close)
+  //    kept to the narrowest width, never a mid-word cut.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const keybindings = getKeybindings()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const barAt = (width: number): string => {
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png · 800×100 · image/png' }],
+      resolve: () => ({ ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }),
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const lines = workspace.render(width)
+    const last = strip(lines[lines.length - 1] ?? '').trimEnd()
+    workspace.dispose()
+    return last
+  }
+
+  // Defaults come from the same binding source the picker uses.
+  const defaults = barAt(80)
+  assert.ok(defaults.includes('Enter view'), `the default confirm key is advertised: ${defaults}`)
+  assert.ok(defaults.includes('Esc close'), `the default close key is advertised: ${defaults}`)
+  assert.ok(defaults.includes('navigate'), `the navigation keys are advertised: ${defaults}`)
+
+  // A remap MUST change the bar: this is the assertion the hard-coded string failed.
+  keybindings.setUserBindings({ 'tui.select.confirm': ['ctrl+y'], 'tui.select.cancel': ['ctrl+g'] })
+  try {
+    const remapped = barAt(80)
+    assert.ok(remapped.includes('Ctrl+Y view'), `the bar follows the live confirm binding: ${remapped}`)
+    assert.ok(remapped.includes('Ctrl+G close'), `the bar follows the live close binding: ${remapped}`)
+    assert.ok(!remapped.includes('Enter view'), `the stale default is gone: ${remapped}`)
+  } finally {
+    keybindings.setUserBindings({})
+  }
+  assert.ok(barAt(80).includes('Enter view'), 'restoring the bindings restores the hint')
+
+  // Whole-segment degradation: `Esc close` survives every width, and no
+  // surviving row is ever wider than its grant.
+  for (const width of [40, 30, 24, 20, 14, 8]) {
+    const bar = barAt(width)
+    assert.ok(visibleWidth(bar) <= width, `the bar fits ${width} cells: ${JSON.stringify(bar)}`)
+    assert.ok(bar.includes('Esc'), `Esc survives at width ${width}: ${JSON.stringify(bar)}`)
+    // Whole-segment drops never leave a dangling separator or an ellipsis
+    // (a single surviving segment is the only thing the helper may truncate).
+    if (width >= 24) {
+      assert.ok(!bar.includes('…'), `no truncation marker at ${width}: ${JSON.stringify(bar)}`)
+      assert.ok(!/[·]\s*$/.test(bar), `no dangling separator at ${width}: ${JSON.stringify(bar)}`)
+    }
+  }
 })
