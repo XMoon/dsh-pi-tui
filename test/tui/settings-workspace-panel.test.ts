@@ -140,8 +140,8 @@ class FakePluginPage implements EmbeddedPluginPage {
   gestureRevision(): number {
     return 0
   }
-  frameIsCurrent(): boolean {
-    return true
+  liveIdentity(): string {
+    return `${this.view}:${this.inputs.length}`
   }
   cancelPointer(): void {}
   contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number } {
