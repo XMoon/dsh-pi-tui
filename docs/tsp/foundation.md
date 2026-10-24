@@ -322,9 +322,13 @@ does not become a second data surface.
   a narrow pane shows fewer lines, it does not lose the value.
 - Reading is scroll-driven and scoped: the scroll target is the document's own
   region on the reading surface, the anchor is established once per reading, and
-  a resize or a background repaint must not reset it. The client may present the
-  screen as its own tab or window; that presentation is the client's, and a
-  claim about it needs real-client evidence, not an inference from the SDK call.
+  a resize or a background repaint must not reset it. HOW the client presents
+  the screen is the client's own decision and varies by build: a measured client
+  keeps one surface tab and retitles it (`dsh` → `Work details` → `dsh`) while
+  the resident session tab stays untouched, so the base surface remains
+  reachable and its frame stays visible. Do not describe the reading as adding a
+  tab, a window or a pane from the SDK call alone, and do not assume the base is
+  hidden — a claim about presentation needs real-client evidence.
 - The Back path is a real native control bound to the same dismissal as the
   reading keys' Escape, and it is admitted only for the current reading; the
   base surface's own row selection is not re-run by returning.

@@ -593,9 +593,17 @@ export class TspWorkHub {
   }
 
   /**
-   * Invalidate the current frame's targets while a Modal owns the keyboard.
-   * The selection and query survive; the next real render rebuilds the
-   * current targets.
+   * Invalidate the current frame's targets while another owner takes this
+   * pane's screen (a Modal, or the read-only Reader that covers it). The
+   * selection and query survive; the next real render rebuilds the current
+   * targets.
+   *
+   * The panel revision bump is what retires an ALREADY DELIVERED action id
+   * across that handover. `details#<revision>` names the frame that painted it,
+   * so once this panel is painted again its actions carry a different token. A
+   * delayed `details#N` from before the Reader therefore cannot open a second
+   * reading after the return — a panel whose selection and query are unchanged
+   * would otherwise still match it, letting an old interactive stage run twice.
    */
   suspend(): void {
     if (this.suspended) return

@@ -945,12 +945,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     } finally {
       openingDetails = false
     }
-    // RFL-002: the base surface is presented in its OWN client tab, so its
-    // retained frame is still reachable while the Reader is open. Its painted
-    // read action must follow the admission that is now `busy`, otherwise the
-    // user can switch tabs and click an action this renderer would refuse. The
-    // base `render()` is the ONE frame owner, so the repaint goes through it.
-    if (detailsSlot !== undefined) render()
+    // RFL-002: the client keeps the base surface reachable while the Reader is
+    // open (the measured client switches its single surface tab's title rather
+    // than unmounting the base), so the base's retained frame can still be seen
+    // and clicked. Its painted read action must follow the admission that is now
+    // `busy`, otherwise that frame offers an action this renderer would refuse.
+    // The base `render()` is the ONE frame owner, so the repaint goes through it.
+    //
+    // The Hub is SUSPENDED first: that advances the panel revision, so the
+    // `details#<revision>` token painted before the reading is dead for good.
+    // Without it a delayed action from the pre-Reader frame would still match
+    // after the return, because nothing else about the panel changed — an old
+    // interactive stage could then run a second time.
+    if (detailsSlot !== undefined) {
+      workHub?.suspend()
+      render()
+    }
   }
 
   /**
@@ -1027,13 +1037,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(dockNode === undefined ? {} : { dock: dockNode }),
       // Modal-first, then the four mutually-exclusive non-blocking presenters
       // in their frozen priority order; the empty seat layer is the fallback.
-      layer: seat.hasModalSeat()
-        ? seat.renderLayer()
-        : workHub?.renderLayer()
-          ?? sessionBrowser?.renderLayer()
-          ?? presetPicker?.renderLayer()
-          ?? modelPicker?.renderLayer()
-          ?? seat.renderLayer(),
+      // B3-A2: while the temporary Reader still physically exists its close is
+      // in flight, and the client may still be painting it in front of this pane.
+      // The seat's logical activation has already happened, so publishing an
+      // OPERABLE form here would paint a form the user cannot see yet. The modal
+      // is therefore withheld until that close settles; the post-close `render()`
+      // in `retireWorkDetails` then paints the current seat (or whatever newer
+      // owner took it). This is a visibility hold, not a second modal queue: the
+      // slot, its promise and the seat's own admission are untouched, and the
+      // retained Hub keeps painting so returning still shows it.
+      layer: detailsSlot !== undefined && seat.hasModalSeat()
+        ? seat.renderEmptyLayer()
+        : seat.hasModalSeat()
+          ? seat.renderLayer()
+          : workHub?.renderLayer()
+            ?? sessionBrowser?.renderLayer()
+            ?? presetPicker?.renderLayer()
+            ?? modelPicker?.renderLayer()
+            ?? seat.renderLayer(),
     })
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.

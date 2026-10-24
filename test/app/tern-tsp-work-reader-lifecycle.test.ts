@@ -36,6 +36,7 @@ import {
   surfaceNodes,
   surfaceScrollOps,
   surfaceTexts,
+  sendAction,
   sendSelect,
 } from '../support/tsp-picker-wire.ts'
 
@@ -306,6 +307,47 @@ test('clicking the REAL `← Work` row returns, and a stale or foreign target is
   assert.deepEqual(h.cancels, [], 'the native Back never cancels the main Agent')
 })
 
+// ── currentness across the Reader handover ─────────────────────────────────
+
+test('a delayed `details#N` from BEFORE the reading cannot open a second screen after the return', async (t) => {
+  const h = await mount(t)
+  await openHub(h, [row('job:j1', { label: 'build' })])
+  const pickerId = pickerNode(h.pane, HUB)!.id
+  const staleAction = String(((pickerProps(h.pane, HUB).actions ?? []) as Array<Record<string, unknown>>)[1]!.id)
+  assert.equal(/^details#\d+$/u.test(staleAction), true, `the pre-reading token is revision-tokened: ${staleAction}`)
+  const screens = (): number => h.pane.openSurfaces().filter(entry => entry.mode === 'screen').length
+
+  // A full reading round trip. Nothing about the panel changes except the
+  // handover itself, so without a handover-scoped invalidation the SAME token
+  // would still address the re-painted action.
+  const reader = await enterReader(h)
+  h.pane.key('\u001b')
+  await waitUntil('the Reader closed', () => h.pane.closedSurfaceIds().includes(reader))
+  await waitUntil('the Hub is painted again with the read action',
+    () => ((pickerProps(h.pane, HUB).actions ?? []) as unknown[]).length === 2)
+
+  // The pre-reading action must now be dead. A stale action that is (wrongly)
+  // accepted would acquire a NEW surface synchronously, so the negative window
+  // is bounded and the assertion is on the real open count, not on a string.
+  const freshActions = (): Array<Record<string, unknown>> => (pickerProps(h.pane, HUB).actions ?? []) as Array<Record<string, unknown>>
+  const freshToken = String(freshActions()[1]?.id ?? '')
+  sendAction(h.pane, staleAction, undefined, pickerId)
+  await new Promise(resolve => setTimeout(resolve, 150)) // reason: bounded negative-observation window for a rejected stale action
+  // `screens()` counts every screen the wire ever OPENED; a second acquisition
+  // would raise it. A closed-and-settled reading leaves the count unchanged.
+  assert.equal(screens(), 1, 'a delayed pre-reading action NEVER opens a second screen')
+  assert.notEqual(staleAction, freshToken,
+    `the re-painted action carries a DIFFERENT token than the pre-reading frame: stale=${staleAction} fresh=${freshToken}`)
+
+  // …while the action painted AFTER the return still reads normally.
+  const freshAction = String(((pickerProps(h.pane, HUB).actions ?? []) as Array<Record<string, unknown>>)[1]!.id)
+  assert.notEqual(freshAction.replace(/#\d+$/u, ''), '', 'the returned action is still the read intent')
+  sendAction(h.pane, freshAction, undefined, pickerId)
+  await waitUntil('the fresh action opens a NEW reading', () => screens() === 2)
+  assert.equal(screens(), 2, 'the current action opens exactly one new screen')
+  assert.deepEqual(h.selects, [], 'neither the stale nor the fresh read action ran the business router')
+})
+
 // ── R09: a NEW reading takes a NEW identity, one Screen at a time ───────────
 
 test('a second reading after Back takes a new surface and epoch with only one Reader present', async (t) => {
@@ -488,13 +530,19 @@ test('a Question preempted behind a delayed Reader close aborts with the existin
   assert.equal(closeCalls, 1, 'the Question seat preempts the Reader with exactly one close')
 
   // While the Screen is still up no answer key may reach the invisible form,
-  // and the Question must not have been painted over the old Screen either.
-  const overlaysBefore = surfaceNodes(h.pane, BASE).filter(node => /^\.modal-\d+$/u.test(node.id))
+  // and NO operable Question node may be published to the base layer either:
+  // the seat's logical activation already happened, so painting it now would
+  // put a form behind the Screen that the client cannot see.
+  const modalNodes = (): string[] => surfaceNodes(h.pane, BASE)
+    .filter(node => node.id.startsWith('layer.modal-'))
+    .map(node => node.id)
+  assert.deepEqual(modalNodes(), [],
+    'the Question was NOT published while the Reader close is still in flight')
   for (const key of ['1', '\r', 'y', '\u001b[B', '\r']) h.pane.key(key)
   await new Promise(resolve => setTimeout(resolve, 120)) // reason: bounded negative-observation window while the close is held
   assert.equal(closeCalls, 1, 'no key started a second close')
-  assert.equal(surfaceNodes(h.pane, BASE).filter(node => /^\.modal-\d+$/u.test(node.id)).length, overlaysBefore.length,
-    'the hidden Question form was never painted behind the old Screen')
+  assert.deepEqual(modalNodes(), [],
+    'no Question node appeared on the base layer while the close is in flight')
   let settled = false
   void answers.then(() => { settled = true })
   assert.equal(settled, false, 'no hidden answer settled the Question')
@@ -515,8 +563,8 @@ test('a Question preempted behind a delayed Reader close aborts with the existin
     () => pickerNode(h.pane, HUB) !== undefined
       && surfaceNodes(h.pane, BASE).filter(node => node.id.includes('modal')).length === 0)
   await new Promise(resolve => setTimeout(resolve, 120)) // reason: bounded negative-observation window for "no ghost form appears"
-  assert.equal(surfaceNodes(h.pane, BASE).some(node => /\.q-row-0$/u.test(node.id)), false,
-    'the aborted Question painted no interactive form')
+  assert.deepEqual(surfaceNodes(h.pane, BASE).filter(node => node.id.startsWith('layer.modal-')).map(node => node.id), [],
+    'the aborted Question published no operable modal node at all')
   assert.ok(pickerNode(h.pane, HUB) !== undefined, 'the same Hub owns the base again')
   assert.deepEqual(h.closes, [], 'the preemption never closed the Hub itself')
 })

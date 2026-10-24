@@ -123,6 +123,14 @@ export interface TspInteractionSeat {
   handleEvent(event: TspInteractionEvent): boolean
   /** The ONE `layer` region node for the current frame (never undefined). */
   renderLayer(): Node
+  /**
+   * The seat's own EMPTY layer: the same region root `renderLayer()` returns
+   * when no slot and no transient list are presented. The renderer uses it to
+   * hold the base surface's layer while another owner (the bounded Reader) is
+   * still physically in front of this pane, so no operable form is published
+   * ahead of its own visibility. It is not a queue and not a second seat.
+   */
+  renderEmptyLayer(): Node
   /** The node id that should hold the hardware caret (`null` = none). */
   desiredFocusId(): string | null
   /** The parked-Question count projected into the dock (`0` hides the line). */
@@ -1137,13 +1145,15 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     return ui.overlay({ key: overlayKey(), modal: true, head: 'Continued questions', anchor: 'center', size: 'md' }, ...body)
   }
 
+  const renderEmptyLayer = (): Node => ui.col({ key: LAYER_KEY })
+
   const renderLayer = (): Node => {
     if (active !== undefined) {
       return ui.col({ key: LAYER_KEY }, active.kind === 'approval' ? approvalOverlay(active) : questionOverlay(active))
     }
     const callbacks = listCallbacks
     if (listOpen && callbacks !== undefined) return ui.col({ key: LAYER_KEY }, listOverlay(callbacks))
-    return ui.col({ key: LAYER_KEY })
+    return renderEmptyLayer()
   }
 
   const desiredFocusId = (): string | null => {
@@ -1291,6 +1301,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       return event.ev === 'focus' || event.ev === 'edit' || event.ev === 'undo' || event.ev === 'send'
     },
     renderLayer,
+    renderEmptyLayer,
     desiredFocusId,
     attentionCount: () => attention,
     closeTransientList,
