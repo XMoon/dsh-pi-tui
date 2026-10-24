@@ -1715,6 +1715,53 @@ test('T09 rail keys are refused until the yield paints the new projection', asyn
   harness.app.dispose()
 })
 
+test('T09 narrow rail keys and Backspace wait for the destination frame', async () => {
+  // RFL-017: at narrow widths a yield leaves NO page grant to arm (`syncPluginFrame`
+  // returns early because the page is not painted in that projection), yet the
+  // Categories frame has not painted either — so the ROOT needs its own guard.
+  const narrow = await open({ columns: 72, rows: 24 })
+  const rootPanel = (narrow.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
+    .settingsWorkspace!.panel
+  // `/plugins` lands with the content already focused; Esc yields to the rail,
+  // then Enter takes the content again (narrow paints one region at a time).
+  assert.equal(rootPanel['focus'], 'content', 'the deep link starts on the plugin content')
+  narrow.vt.sendInput('\x1b')
+  await narrow.settle()
+  assert.equal(rootPanel['focus'], 'categories', 'Esc yielded to the rail')
+  narrow.vt.sendInput('\r')
+  await narrow.settle()
+  assert.equal(rootPanel['focus'], 'content', 'the narrow content owns the keyboard again')
+  const categoryBefore = rootPanel['categoryId']
+
+  // One burst: Esc yields back to the rail, then a rail key arrives before the
+  // Categories frame paints. No page grant exists here, so this is the root guard.
+  // Plugins is the LAST category, so `Up` is the direction that can really move.
+  narrow.vt.sendInput('\x1b')
+  narrow.vt.sendInput('\x1b[A')
+  await narrow.settle()
+  assert.equal(rootPanel['categoryId'], categoryBefore,
+    'the rail key did not move the category before the Categories frame painted')
+  // Positive control: on the painted frame the same key really moves.
+  narrow.vt.sendInput('\x1b[A')
+  await narrow.settle()
+  assert.notEqual(rootPanel['categoryId'], categoryBefore,
+    'the same rail key moves the category once the frame has painted')
+  narrow.app.dispose()
+
+  // §4.2 admits only the REAL Esc while the frame is stale: Backspace must not act.
+  const bs = await open({ columns: 100, rows: 24 })
+  await selectCard(bs, 'bundle:@vendor/foo')
+  await contentFocus(bs)
+  const bsRoot = (bs.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
+    .settingsWorkspace!.panel
+  bs.vt.sendInput('\x1b') // yield; the changed grant awaits its paint
+  bs.vt.sendInput('\x7f') // Backspace in the same window
+  await bs.settle()
+  assert.match(bs.view(), /Settings · /u, 'the stale Backspace did not close the workspace')
+  assert.equal(bsRoot['categoryId'], 'plugins', 'the stale Backspace did not change the category')
+  bs.app.dispose()
+})
+
 test('T09 Shift+Tab does not yield while a changed grant awaits its paint', async () => {
   // §4.2 covers the key the ROOT intercepts itself, not only the keys it forwards:
   // the root's Shift+Tab handler runs before `syncPluginFrame()` and would
