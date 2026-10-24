@@ -1689,6 +1689,32 @@ test('T09 a page action is refused until the changed grant really paints', async
   harness.app.dispose()
 })
 
+test('T09 rail keys are refused until the yield paints the new projection', async () => {
+  // RFL-017: yielding out of the plugin content changes the direct page's
+  // projection at 76..119 columns. Until the frame for it paints, a rail key must
+  // not move or activate a category the user cannot see yet.
+  const harness = await open({ columns: 100, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  await contentFocus(harness)
+  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
+    .settingsWorkspace!.panel
+  const categoryBefore = rootPanel['categoryId']
+  // One burst: the page Esc yields to the rail (installing the new grant), then a
+  // rail key arrives before that projection paints.
+  harness.vt.sendInput('\x1b')
+  harness.vt.sendInput('\x1b[B') // Down on the rail
+  assert.equal(harness.panel.grantAwaitingPaint(), true, 'the yield installed the new grant and awaits its paint')
+  assert.equal(rootPanel['categoryId'], categoryBefore,
+    'the rail Down did not move the category before the new projection painted')
+  await harness.settle()
+  // Positive control: on the painted frame the same rail key really moves.
+  harness.vt.sendInput('\x1b[B')
+  await harness.settle()
+  assert.notEqual(rootPanel['categoryId'], categoryBefore,
+    'the same rail key moves the category once the projection has painted')
+  harness.app.dispose()
+})
+
 test('T09 Shift+Tab does not yield while a changed grant awaits its paint', async () => {
   // §4.2 covers the key the ROOT intercepts itself, not only the keys it forwards:
   // the root's Shift+Tab handler runs before `syncPluginFrame()` and would

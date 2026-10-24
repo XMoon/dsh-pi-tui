@@ -2800,6 +2800,10 @@ export class SettingsWorkspacePanel implements Component {
     page.focused = false
     page.cancelPointer()
     this.focus = 'categories'
+    // §4.2: the yield changes the direct page's projection at 76..119 columns.
+    // Install the new grant NOW so the page's own pending-grant query reports the
+    // unpainted window instead of waiting for the next forwarded key.
+    this.syncPluginFrame()
     this.pressedGesture = undefined
     this.contentPressed = undefined
     this.bumpRevision()
@@ -2998,6 +3002,12 @@ export class SettingsWorkspacePanel implements Component {
     // lifecycle/back key remains available. Read the live geometry because input
     // may arrive before a resize-triggered frame has painted.
     if (this.bodyFloor() < 1) return
+    // §4.2: while the plugin page still awaits the paint for a grant the ROOT
+    // installed (a yield out of the content changes the projection at 76..119),
+    // a rail key must not move or activate a category the new frame does not show
+    // yet. Only the back keys above are admitted. The page is the ONE owner of
+    // that state, so the root asks it instead of duplicating the rule.
+    if (this.categoryId === 'plugins' && this.pluginPage?.grantAwaitingPaint() === true) return
     // Tab / Shift+Tab re-focus the ONE navigation owner (plan §2.2). The key is
     // matched semantically, so legacy `\t` and every protocol's Tab byte agree.
     const tabForward = matchesKey(data, 'tab')
