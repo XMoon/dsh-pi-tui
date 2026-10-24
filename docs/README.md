@@ -81,7 +81,7 @@ MANDATORY or BLOCKING.
 | Path | Audience | What it owns |
 |---|---|---|
 | `tsp/overview.md` | TSP contributors | TSP-vs-Luau boundary, renderer ownership, capability/admission, run/verify entry points |
-| `tsp/foundation.md` | TSP contributors | SDK/client/app authority split, node identity/revision, seat ownership, async currentness and evidence tiers |
+| `tsp/foundation.md` | TSP contributors | SDK/client/app authority split, node identity/revision, bounded reader surface lifecycle, seat ownership, async currentness and evidence tiers |
 | `tsp/model-selection.md` | TSP contributors | The current two-page `/model` semantics and the single explicit writer |
 | `tsp/preset-selection.md` | TSP contributors | The current two-page `/preset` semantics, footer writer and Reader |
 | `tsp/session-browser.md` | TSP contributors | SessionReader, listing/search/lineage/workspace, guarded resume and the native viewer contract |

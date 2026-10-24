@@ -96,6 +96,17 @@ export interface TspInteractionSeatOptions {
   readonly notify: (text: string, kind?: 'info' | 'error') => void
   /** Forward the authoritative settled-answer lookup to the transcript owner. */
   readonly setSettledQuestionAnswersLookup: (lookup: SettledQuestionAnswersLookup | undefined) => void
+  /**
+   * B3-A2: run when an official Approval/Question slot actually TAKES the seat
+   * (in `activate`, before it becomes the visible/answerable form). The
+   * renderer uses it to retire its temporary Work Details Screen, which may
+   * still be painted in front of this pane: a form that is logically active
+   * while physically hidden must never accept a key.
+   *
+   * It is NOT called for a refused/invalid request that never occupies the
+   * seat, and it is idempotent (a promoted slot may run it again).
+   */
+  readonly beforeModalSeat?: () => void
 }
 
 /** The seat's narrow surface for its owning renderer. */
@@ -316,6 +327,10 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   const activate = (slot: Slot): void => {
     active = slot
     modalEpoch += 1
+    // B3-A2: the LOGICAL seat is committed above; the renderer now retires any
+    // temporary Screen still painted in front of this pane BEFORE the form can
+    // accept a key (its own close is asynchronous and owned by the renderer).
+    options.beforeModalSeat?.()
   }
 
   const detachSlot = (slot: Slot): void => {

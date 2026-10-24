@@ -38,8 +38,8 @@
  * @module @xmoon76/dsh-pi-tui/tui/tsp/session
  */
 
-import { connect as sdkConnect, ui } from '@stencil-hq/tern'
-import type { Key, Node, Session, SessionInput, Surface } from '@stencil-hq/tern'
+import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
+import type { Key, Node, ScrollTo, Session, SessionInput, Surface, TspEvent } from '@stencil-hq/tern'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type {
   DisplayDockNotice,
@@ -60,10 +60,18 @@ import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
 import { TspWorkHub } from './work-hub.ts'
+import {
+  WORK_DETAILS_REGION,
+  buildWorkDetails,
+  workDetailsBackKey,
+  type WorkDetailsIdentity,
+} from './work-details.ts'
 import type { ModelPresentation } from '../../app/command/model-presentation.ts'
 import type { PresetPresentation } from '../../app/command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import type { TaskCenterPresentationPort } from '../../app/surface/task-presentation-port.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
@@ -97,6 +105,31 @@ interface DockState {
 
 /** How many transient notices the dock keeps (oldest evicted). */
 const NOTICE_LIMIT = 3
+
+/** The temporary Reader's lifecycle phase: it reserves the Screen until close settles. */
+type DetailsPhase = 'open' | 'closing'
+
+/**
+ * The ONE temporary Reader resource of this renderer. `phase:'closing'` keeps
+ * the physical Screen reserved until the SDK close settles, so
+ * `detailsSlot === undefined` alone never permits a new `session.open`.
+ */
+interface DetailsSlot {
+  readonly surface: Surface
+  readonly panelSerial: number
+  readonly targetValue: string
+  readonly readingEpoch: number
+  phase: DetailsPhase
+  /** The actual registered node id of the document's `← Work` row. */
+  backId: string | undefined
+}
+
+/** Why a Reader is being retired (diagnostics and event attribution only). */
+type DetailsRetireReason = 'back' | 'failure' | 'modal' | 'hub-replaced' | 'session-change' | 'target-invalid' | 'dispose'
+
+/** The exact kinds and feature the Reader's document and keys require. */
+const WORK_DETAILS_KINDS = ['col', 'row', 'text'] as const
+const WORK_DETAILS_FEATURE = 'scroll' as const
 
 /**
  * PR3-B §3.3 (the B1 slice): the renderer's editor-local + lifecycle input
@@ -354,6 +387,25 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let sessionBrowser: TspSessionBrowser | undefined
   /** B3-A1: the internal native Work Hub presenter (same ONE layer). */
   let workHub: TspWorkHub | undefined
+  /**
+   * B3-A2: the ONE temporary `mode:'screen'` Work Details Reader. It is an
+   * ephemeral read-only RENDERING resource of this renderer — not a fifth
+   * Presenter, not a catalog, not a business owner. Exactly one may exist
+   * (open OR closing) at a time.
+   */
+  let detailsSlot: DetailsSlot | undefined
+  /** The ONE owned close promise of the retired Reader (teardown awaits it). */
+  let detailsCloseTask: Promise<void> | undefined
+  /** Ephemeral per-Reader identity (never a Session generation). */
+  let nextReadingEpoch = 0
+  /** The synchronous reentrancy boundary of the Screen acquisition. */
+  let openingDetails = false
+  /**
+   * The shared disposal promise: every `dispose()` call returns THIS promise
+   * while cleanup is pending, so a concurrent caller can never observe a
+   * premature no-op (and the resources are still released exactly once).
+   */
+  let disposeTask: Promise<void> | undefined
   const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
@@ -392,6 +444,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (!rebuildLastMain()) return
       render()
     },
+    // B3-A2 §6.6: the temporary Screen may still be painted when an official
+    // modal takes the LOGICAL seat. Retire it synchronously here, BEFORE the
+    // form becomes visible/answerable; the close stays owned by this renderer.
+    beforeModalSeat: () => { retireWorkDetails('modal') },
   })
   modelPicker = new TspModelPicker({
     render: () => render(),
@@ -422,10 +478,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   workHub = new TspWorkHub({
     surfaceId: surface.id,
     render: () => render(),
-    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
+    // B3-A2: a live (or still closing) Reader physically covers the base
+    // surface, so the hidden Hub must never keep a clickable/typable seat.
+    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat()
+      && !openingDetails && detailsSlot === undefined && detailsCloseTask === undefined,
     // The pane width is derived from the SDK's live geometry — NEVER from a
     // desktop window width (a TSP pane can be a split of any window).
     paneWidth: () => session.caps.cols * session.caps.cell.w,
+    // A local Read intent: it opens the read-only Reader and never the
+    // business `onSelect` route (Job/Question/Agent authority stays untouched).
+    onViewDetails: request => { openWorkDetails(request) },
+    // The paint-time admission. `unsupported` is the pane's own negotiated
+    // capability (the durable pane limitation the Hub states); `busy` is this
+    // renderer's current Reader slot, which must not paint an action that would
+    // be refused — and must not claim the pane cannot read at all.
+    detailsAdmission: () => {
+      if (!readerCapabilityPresent()) return 'unsupported'
+      return canPresentWorkDetails() ? 'available' : 'busy'
+    },
   })
   /**
    * The ONE seat's FOUR-WAY presenter exclusivity (plan §10.2).
@@ -467,8 +537,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (!excluded.includes('model')) steps.push(() => modelPicker?.retire())
     if (!excluded.includes('preset')) steps.push(() => presetPicker?.retire())
     if (!excluded.includes('browser')) steps.push(() => sessionBrowser?.retire())
-    if (!excluded.includes('hub')) steps.push(() => workHub?.retire())
+    if (!excluded.includes('hub')) steps.push(() => { retireHubWithDetails('hub-replaced') })
     return steps
+  }
+  /**
+   * B3-A2 §8.1: ONE local retirement helper for the Hub seat. The Reader is
+   * revoked SYNCHRONOUSLY first (it physically covers the Hub), then the Hub's
+   * own A1 retirement notifies its owner. It is used by the sibling sweep AND
+   * by every path that replaces the Hub, so a Reader can never outlive the
+   * panel that owns its row identity.
+   */
+  const retireHubWithDetails = (reason: DetailsRetireReason): void => {
+    retireWorkDetails(reason)
+    workHub?.retire()
   }
   const modelPresentation: ModelPresentation = {
     open: (request) => openExclusively(
@@ -518,11 +599,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * projection).
    */
   const taskPresentation: TaskCenterPresentationPort = {
-    openBrowser: (items, onSelect, onClose, openOptions) => openExclusively(
-      siblingRetirements('hub'),
-      () => workHub!.taskPresentation.openBrowser(items, onSelect, onClose, openOptions),
-      { close: () => {}, setItems: () => {}, setRefreshState: () => {} },
-    ),
+    openBrowser: (items, onSelect, onClose, openOptions) =>
+      openExclusively(
+        // `siblingRetirements('hub')` deliberately EXCLUDES the Hub (the open
+        // below replaces it), so the open Hub's own Reader must be revoked by
+        // this wrapper FIRST: `workHub.open()` alone never touches the Screen.
+        [() => { retireWorkDetails('hub-replaced') }, ...siblingRetirements('hub')],
+        () => workHub!.taskPresentation.openBrowser(items, onSelect, onClose, openOptions),
+        { close: () => {}, setItems: () => {}, setRefreshState: () => {} },
+      ),
     setQuickTaskItems: items => workHub!.taskPresentation.setQuickTaskItems(items),
     setAgents: agents => workHub!.taskPresentation.setAgents(agents),
     setTasks: jobs => workHub!.taskPresentation.setTasks(jobs),
@@ -618,6 +703,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** Apply the seat's desired hardware focus after a committed frame. */
   const applyFocus = (force: boolean): void => {
     if (disposed) return
+    // B3-A2: while the temporary Screen is frontmost (or closing) the BASE
+    // surface must not claim the caret, and the composer is not the visible
+    // seat either. The base comparison is invalidated so the post-close
+    // restore commits exactly once against the frame that is really visible.
+    if (detailsSlot !== undefined) {
+      composer.setFocused(false)
+      lastAppliedFocusId = undefined
+      return
+    }
     const desired = seat.hasModalSeat()
       ? seat.desiredFocusId()
       : workHub?.isOpen() === true
@@ -633,6 +727,286 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     lastAppliedFocusId = desired
     composer.setFocused(desired === 'dock.composer')
     surface.focus(desired)
+  }
+
+  // ── B3-A2: the ONE temporary Work Details Reader ──
+  //
+  // The Reader is an EPHEMERAL read-only rendering resource of this renderer:
+  // one `mode:'screen'` SDK Surface on the SAME Session, one input iterator,
+  // one close owner. It is not a fifth Presenter, keeps no row catalog and
+  // owns no business action — `TspWorkHub` resolves the current row and this
+  // owner decides whether the Screen may exist.
+
+  /** Whether the pane negotiated everything the Reader's document needs. */
+  function readerCapabilitiesNegotiated(): boolean {
+    return WORK_DETAILS_KINDS.every(kind => session.caps.kinds.includes(kind))
+      && session.caps.features.includes(WORK_DETAILS_FEATURE)
+  }
+
+  /**
+   * Whether THIS pane can present a Work Details Reader at all: the negotiated
+   * kinds the document really emits, the official `scroll` feature, and the
+   * renderer's own mounted/bound/no-modal state. It answers the CAPABILITY
+   * question, without any Reader-slot state.
+   */
+  function readerCapabilityPresent(): boolean {
+    return !disposed
+      && !hydrating
+      && inputBound
+      && !seat.hasModalSeat()
+      && readerCapabilitiesNegotiated()
+  }
+
+  /**
+   * Whether a Reader could be ADMITTED right now. It is the capability above
+   * plus the Reader's own lifecycle: nothing may be admitted while a reading is
+   * opening, open or still closing.
+   */
+  function canPresentWorkDetails(): boolean {
+    return readerCapabilityPresent()
+      && !openingDetails
+      && detailsSlot === undefined
+      && detailsCloseTask === undefined
+  }
+
+  /**
+   * The ONE admission predicate of a NEW Reader (plan §6.2): the predicate
+   * above PLUS a current Hub. It is rechecked immediately before the Screen is
+   * acquired.
+   *
+   * The Hub PAINTS its action from {@link canPresentWorkDetails} for the same
+   * reason: while a Reader is open or still closing the action must not be
+   * offered at all. The base surface stays visible in its own client tab, so an
+   * action painted there would be a real thing a user could click — and it
+   * would be refused by this very predicate.
+   */
+  function supportsWorkDetails(): boolean {
+    return canPresentWorkDetails() && workHub?.isOpen() === true
+  }
+
+  function detailsIdentity(slot: DetailsSlot): WorkDetailsIdentity {
+    return {
+      panelSerial: slot.panelSerial,
+      readingEpoch: slot.readingEpoch,
+      targetValue: slot.targetValue,
+    }
+  }
+
+  /**
+   * Build the document and resolve the ACTUAL registered node id of its
+   * `← Work` row through the shipped SDK's own view derivation — never a
+   * guessed id path.
+   */
+  function buildDetailsDocument(
+    slot: DetailsSlot,
+    item: TaskPanelItem,
+  ): { readonly node: Node; readonly backId: string | undefined } {
+    const identity = detailsIdentity(slot)
+    const node = buildWorkDetails(item, identity, () => { returnFromWorkDetails(slot) })
+    const backKey = workDetailsBackKey(identity)
+    let backId: string | undefined
+    for (const root of View.from({ [WORK_DETAILS_REGION]: node }).regions) {
+      const visit = (candidate: typeof root): void => {
+        if (candidate === undefined) return
+        if (candidate.props['key'] === backKey) backId = candidate.id
+        for (const child of candidate.children) visit(child)
+      }
+      visit(root)
+    }
+    return { node, backId }
+  }
+
+  /** The `← Work`/Esc return: admitted only for the CURRENT reading. */
+  function returnFromWorkDetails(slot: DetailsSlot): void {
+    if (detailsSlot !== slot || slot.phase !== 'open') return
+    retireWorkDetails('back')
+  }
+
+  /**
+   * The ONE Reader retirement: synchronous revocation, one owned asynchronous
+   * close, exactly one `close()` call. It is the SAME operation for Back, a
+   * modal preemption, a sibling presenter, hydration, a disappeared target and
+   * disposal — never a second public Presenter.
+   */
+  function retireWorkDetails(reason: DetailsRetireReason): Promise<void> | undefined {
+    const slot = detailsSlot
+    if (slot === undefined) return detailsCloseTask
+    if (slot.phase === 'closing') return detailsCloseTask
+    // Everything is revoked SYNCHRONOUSLY, before the SDK close and before any
+    // user callback: no key, scroll, Back click or pointer event may be
+    // admitted against a Reader that is on its way out.
+    slot.phase = 'closing'
+    slot.backId = undefined
+    options.log?.('tsp renderer: work details retired', { reason, panelSerial: slot.panelSerial })
+    let closeTask: Promise<void>
+    try {
+      closeTask = slot.surface.close({ keep: false })
+    } catch (error) {
+      closeTask = Promise.reject(error)
+    }
+    // This IS the one teardown-awaited promise, and its rejection is observed
+    // here from the first instant: no unhandled rejection and no fake success.
+    detailsCloseTask = closeTask
+    closeTask.then(
+      () => {
+        try {
+          if (detailsSlot === slot) {
+            detailsSlot = undefined
+            detailsCloseTask = undefined
+          }
+          if (disposed) return
+          // The physically visible base frame is re-evaluated only now: the
+          // current seat (modal, the same Hub, or a newer sibling presenter)
+          // owns the caret, never the Screen that just went away.
+          lastAppliedFocusId = undefined
+          render()
+        } catch (error) {
+          if (!disposed) routeFatal(error)
+        }
+      },
+      (error: unknown) => {
+        // The failure-bearing promise stays the owner's: the surface is NOT
+        // reported as closed, no admission is restored, and the lifecycle's
+        // disposal still attempts every remaining release independently.
+        try {
+          if (!disposed) routeFatal(error)
+        } catch (secondary) {
+          options.logError?.('tsp renderer: work details close failure could not be routed', {
+            error: errorText(error),
+            secondary: errorText(secondary),
+          })
+        }
+      },
+    )
+    return closeTask
+  }
+
+  /**
+   * Open the read-only Reader for the CURRENT Work Hub row. There is NO
+   * independent await in the successful path: the SDK open/render/scroll/focus
+   * calls are synchronous, and only the CLOSE is owned and asynchronous.
+   */
+  function openWorkDetails(request: { readonly panelSerial: number; readonly targetValue: string }): void {
+    if (disposed) return
+    // The Hub is the ONE current-row authority: a stale/foreign row is a
+    // consumed no-op (never an open of a different or no-longer-visible row).
+    const item = workHub?.resolveDetails(request.panelSerial, request.targetValue)
+    if (item === undefined) return
+    // A deliberate action on a pane that negotiated no Reader is told the
+    // truth; anything else (modal, hydration, pending close, existing Reader)
+    // is silently consumed rather than fabricating a second Screen.
+    if (!readerCapabilitiesNegotiated()) {
+      display.notify('Work details are unavailable in this Tern pane.', 'info')
+      return
+    }
+    if (!supportsWorkDetails()) return
+    openingDetails = true
+    nextReadingEpoch += 1
+    const readingEpoch = nextReadingEpoch
+    try {
+      let screen: Surface
+      try {
+        screen = session.open({ mode: 'screen', title: 'Work details' })
+      } catch (error) {
+        // A failed Screen acquisition is a broken SDK/resource transition, not
+        // a fallback opportunity: the rendered base surface stays exactly as it
+        // is and the fatal lifecycle owns the exit.
+        routeFatal(error)
+        return
+      }
+      const slot: DetailsSlot = {
+        surface: screen,
+        panelSerial: request.panelSerial,
+        targetValue: item.value,
+        readingEpoch,
+        phase: 'open',
+        backId: undefined,
+      }
+      // The slot owns the acquired Screen BEFORE the first render/focus call:
+      // a failure below must be able to retire exactly this resource.
+      detailsSlot = slot
+      try {
+        const document = buildDetailsDocument(slot, item)
+        slot.backId = document.backId
+        screen.render({ [WORK_DETAILS_REGION]: document.node })
+        // ONE initial position and ONE initial focus, for THIS reading only.
+        screen.scroll(WORK_DETAILS_REGION, 'start')
+        screen.focus(WORK_DETAILS_REGION)
+      } catch (error) {
+        retireWorkDetails('failure')
+        routeFatal(error)
+        return
+      }
+      // A row that stopped being the current one during the open call must not
+      // be promoted over the newer Hub/selection.
+      if (workHub?.resolveDetails(request.panelSerial, request.targetValue) === undefined) {
+        retireWorkDetails('target-invalid')
+      }
+    } finally {
+      openingDetails = false
+    }
+    // RFL-002: the base surface is presented in its OWN client tab, so its
+    // retained frame is still reachable while the Reader is open. Its painted
+    // read action must follow the admission that is now `busy`, otherwise the
+    // user can switch tabs and click an action this renderer would refuse. The
+    // base `render()` is the ONE frame owner, so the repaint goes through it.
+    if (detailsSlot !== undefined) render()
+  }
+
+  /**
+   * The Reader's stable rerender: the base render path calls this AFTER its
+   * own frame, and a resize/status update only rebuilds the document. It never
+   * starts a new scroll, re-focuses, opens a Screen or reads a source.
+   */
+  function syncWorkDetails(): void {
+    const slot = detailsSlot
+    if (slot === undefined || slot.phase !== 'open') return
+    const item = workHub?.resolveDetails(slot.panelSerial, slot.targetValue)
+    if (item === undefined) {
+      retireWorkDetails('target-invalid')
+      return
+    }
+    try {
+      const document = buildDetailsDocument(slot, item)
+      // The Back key is stable for the reading, so its registered id must not
+      // move; a document rebuild can therefore never re-route the old target.
+      slot.backId = document.backId
+      slot.surface.render({ [WORK_DETAILS_REGION]: document.node })
+    } catch (error) {
+      retireWorkDetails('failure')
+      routeFatal(error)
+    }
+  }
+
+  /** Map one visible-Reader key onto the SDK's own scroll operations. */
+  function handleDetailsKey(slot: DetailsSlot, key: Key): void {
+    const step: ScrollTo | undefined = key.name === 'up' ? 'line-up'
+      : key.name === 'down' ? 'line-down'
+        : key.name === 'page_up' ? 'page-up'
+          : key.name === 'page_down' ? 'page-down'
+            : key.name === 'home' ? 'start'
+              : key.name === 'end' ? 'end'
+                : undefined
+    if (step !== undefined) {
+      slot.surface.scroll(WORK_DETAILS_REGION, step)
+      return
+    }
+    // EVERY other key is consumed as Reader input: Esc leaves, and a letter,
+    // Enter, Ctrl+D, Alt+Q, Ctrl+C or a paste gesture never reaches the
+    // composer, the main Agent or the transient continuation list.
+    if (key.name === 'escape') retireWorkDetails('back')
+  }
+
+  /** Admit one native event for the CURRENT Reader, or report it as foreign. */
+  function handleDetailsEvent(event: TspEvent): boolean {
+    const slot = detailsSlot
+    if (slot === undefined || slot.phase !== 'open') return false
+    if (event.ev !== 'action') return false
+    if (!('sf' in event) || event.sf !== slot.surface.id) return false
+    if (!('id' in event) || event.id === undefined || event.id !== slot.backId) return false
+    if (event.act !== 'click') return false
+    returnFromWorkDetails(slot)
+    return true
   }
 
   /** Re-render every region in ONE frame (the SDK diffs). The `layer` region is
@@ -664,6 +1038,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.
     applyFocus(false)
+    // B3-A2 §5.3: the base frame is the ONE point that reconciles the Reader
+    // with the CURRENT row (the Hub already renders after `setItems`), so a
+    // background status commit or a removed row is projected without a second
+    // TaskRuntime subscription. It never opens a Screen nor resets the scroll.
+    syncWorkDetails()
   }
 
   /**
@@ -1089,6 +1468,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      // B3-A2 §8.2: the Reader belongs to the OUTGOING subject, so it is
+      // revoked FIRST — before any retiring Presenter callback can run — and
+      // its close stays owned here. `resetSessionFacts()` deliberately does
+      // NOT do this: a same-subject facts clear is not an ownership change.
+      retireWorkDetails('session-change')
       sessionBrowser?.retire()
       modelPicker?.retire()
       presetPicker?.retire()
@@ -1221,7 +1605,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
 
   const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
-    // 2. The MODAL SEAT owns every key while it is up (PR3-B B3 addendum
+    // 2. B3-A2 §6.6: a temporary Screen that is still physically open or
+    //    closing covers this pane. While it exists the modal seat's logical
+    //    activation must not accept a key against an INVISIBLE form: every
+    //    ordinary key (answer keys included) is consumed here and nothing is
+    //    stored, queued or interpreted. This is a visibility fence, not a
+    //    second modal queue; once the close settles, the normal modal routing
+    //    below resumes for the form that is then really visible.
+    const details = detailsSlot
+    if (details !== undefined) {
+      if (details.phase === 'closing') return false
+      if (!seat.hasModalSeat()) {
+        handleDetailsKey(details, key)
+        return false
+      }
+    }
+    // 3. The MODAL SEAT owns every key while it is up (PR3-B B3 addendum
     //    §3.5.4). The SDK's `overlay(modal: true)` masks the picture but does
     //    NOT capture the keyboard, so this app-side route IS the modal
     //    boundary; it precedes the hydration fence (a form for the CURRENT
@@ -1231,7 +1630,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       seat.handleKey(key, handlers)
       return false
     }
-    // 3. `Alt+Q` (PR3-B B3 §3.8): the inspection entry for parked continued
+    // 4. `Alt+Q` (PR3-B B3 §3.8): the inspection entry for parked continued
     //    Questions — only with no modal and outside the hydration window (the
     //    list belongs to the subject that is currently owned, so the SAME
     //    fence as every other key applies).
@@ -1240,7 +1639,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       seat.openContinuedList(handlers)
       return false
     }
-    // 4. The interrupt/cancel intent (PR3-B §3.4 row 3): Ctrl+C and Escape
+    // 5. The interrupt/cancel intent (PR3-B §3.4 row 3): Ctrl+C and Escape
     //    map to the EXISTING application cancel path — never an
     //    unconditional exit. Interrupting a live Agent must not kill the
     //    TUI. The composer's exit-empty (below) is the only exit gesture.
@@ -1310,15 +1709,45 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // means it cannot reach the seat or a presenter, re-assert focus, settle a modal,
       // repaint or write. It is NOT fatal and is never retried.
       if (input.event.ev === 'error') {
-        if (input.event.sf === undefined || input.event.sf === surface.id) {
+        // B3-A2: a CURRENT or CLOSING Reader surface is attributed here too —
+        // it is still this renderer's own resource — but it stays purely
+        // diagnostic: no retry, no fatal, no repaint.
+        const detailsSurfaceId = detailsSlot?.surface.id
+        if (input.event.sf === undefined || input.event.sf === surface.id || input.event.sf === detailsSurfaceId) {
           options.logError?.('tsp renderer: client rejected protocol operation', {
             ...(input.event.sf === undefined ? {} : { sf: input.event.sf }),
+            ...(input.event.sf !== undefined && input.event.sf === detailsSurfaceId ? { origin: 'work-details' } : {}),
             ...(input.event.s === undefined ? {} : { s: input.event.s }),
             ...(input.event.op === undefined ? {} : { op: input.event.op }),
             msg: input.event.msg,
           })
         }
         return false
+      }
+      // B3-A2 §7.3: the temporary Screen is frontmost, so its admission comes
+      // BEFORE every base event branch (the base is physically covered).
+      const details = detailsSlot
+      if (details !== undefined) {
+        // A resize addressed at the CURRENT Screen is that Screen's own
+        // geometry event: the document is re-rendered with the SAME keyed tree
+        // and NO start scroll, and it is never reinterpreted as a base layout
+        // change or a base node claim.
+        if (input.event.ev === 'resize' && input.event.sf === details.surface.id) {
+          syncWorkDetails()
+          return false
+        }
+        // Only the CURRENT Reader's own actual `← Work` target may act; a
+        // stale/foreign `sf`, an old Back node id or any other action is
+        // dropped here instead of falling through to the hidden base.
+        if (details.phase === 'open' && handleDetailsEvent(input.event)) return false
+        if ('sf' in input.event && input.event.sf === details.surface.id) return false
+        // While the Screen exists the masked base takes no user input claim at
+        // all — not even through an event carrying the base surface id.
+        if (input.event.ev === 'focus' || input.event.ev === 'edit' || input.event.ev === 'undo'
+          || input.event.ev === 'send' || input.event.ev === 'toggle'
+          || input.event.ev === 'select' || input.event.ev === 'activate' || input.event.ev === 'action') {
+          return false
+        }
       }
       // PR3-B B3 (§3.5.5): the modal seat gates events addressed at the
       // underlying composer. A terminal focus claim must not move the caret
@@ -1354,11 +1783,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         modelPicker?.resize(input.event.cols, session.caps.cell.w)
         render()
       }
+      // B3-A2 §7.3: a resize addressed at the CURRENT temporary Screen is that
+      // Screen's own geometry event — it is never reinterpreted as a base node
+      // claim nor as the base presenter chain's layout change.
+      if (input.event.ev === 'resize' && detailsSlot !== undefined
+        && input.event.sf === detailsSlot.surface.id) {
+        syncWorkDetails()
+        return false
+      }
       if (seat.hasModalSeat()) { if (seat.handleEvent(input.event)) applyFocus(true); return false }
       if (!hydrating && inputBound && 'sf' in input.event && input.event.sf === surface.id) {
-        // B3-A1: the Work Hub is the highest non-modal native presenter. Its
+        // B3-A1/A2: the Work Hub is the highest non-modal native presenter. Its
         // local SELECT/ACTIVATE/ACTION admission never reaches a business
-        // router (A1 has no details/stop/open path).
+        // router; Enter/View details is a LOCAL Read intent.
         if (workHub?.handleEvent(input.event)) return false
         if (sessionBrowser?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
@@ -1502,44 +1939,101 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (dispatchKey(key, handlers)) routeExit(true)
       }
     },
-    dispose: async () => {
-      if (disposed) return
+    // B3-A2 §9: the disposal is a STORED promise, not an async wrapper. The
+    // first call latches `disposed` and starts the ordered release; every later
+    // call returns the SAME promise (an `async dispose()` would mint a different
+    // wrapper promise and fail the shared-identity contract).
+    dispose: () => {
+      if (disposeTask !== undefined) return disposeTask
       disposed = true
-      // PR-C: the image subscriptions die BEFORE the surface closes: an
-      // in-flight read may still settle inside the loader, but it can no
-      // longer send a blob or a frame.
-      releaseImageSubscriptions()
-      // PR3-B B3 (§3.5.6): the seat retires SYNCHRONOUSLY — every active and
-      // queued modal promise settles (approval `cancelled`, question the flow's
-      // cancellation error) before the surface/session close below, and the
-      // call is idempotent with the interaction owner's own `withdrawPending`.
-      seat.dispose()
-      // B3-A1: the Work Hub retires BEFORE the older presenters and before
-      // the surface/session close (A1 adds no second SDK resource).
-      workHub?.retire()
-      sessionBrowser?.retire()
-      modelPicker?.retire()
-      presetPicker?.retire()
-      // Both steps are ALWAYS attempted — the tty restore (and the SDK's own
-      // input drain) lives inside `session.close()`, so a surface-close
-      // failure must still reach it, exactly once. A `try/finally` would
-      // silently DISCARD the surface-close error in favour of the session
-      // error (R3-2); instead both are collected and surfaced with the
-      // repository's disposal contract: one failure rethrows the exact
-      // thrown value, two or more aggregate without truncating either.
+      // B3-A2 §9: the shared Promise's IDENTITY is latched BEFORE any cleanup
+      // runs at all. Two separate hazards require this exact shape:
+      //   1. the seat/Hub retirements call out to owner callbacks that may
+      //      THROW (a `TaskBrowserPresentationOpen.onRetired` cleanup re-raises
+      //      from `runSyncDisposalSteps`), and
+      //   2. those same callbacks may REENTER `dispose()` synchronously.
+      // An `async` IIFE would satisfy neither: its body runs synchronously up
+      // to the first `await`, so a throwing step would escape before assignment
+      // and a reentrant call would still observe `disposeTask === undefined`,
+      // starting a second teardown and returning a different Promise. The
+      // deferred form below publishes the one Promise FIRST, then performs the
+      // synchronous cleanup, then settles it with the collected outcome, so a
+      // reentrant caller shares the identical Promise and every release is
+      // still attempted in order.
+      const disposal = Promise.withResolvers<void>()
+      disposeTask = disposal.promise
       const failures: unknown[] = []
+      // B3-A2: a live Reader is retired FIRST, so its own Screen close is the
+      // one teardown awaits before the base surface. `retireWorkDetails` is
+      // idempotent: an already-closing Reader returns the existing task.
+      let detailsClose: Promise<void> | undefined
+      // The synchronous cleanup steps keep their ownership order — Reader,
+      // image subscriptions, modal seat, then Hub → Browser → Model → Preset —
+      // and the repository's own non-truncating primitive attempts every one
+      // even when an earlier one throws. Its failure enters the SAME collected
+      // list as the async releases below, so a throwing owner callback can no
+      // longer skip the base/Session close. A multi-step synchronous failure
+      // stays ONE entry (never flattened), exactly like
+      // `runSyncDisposalStepsWithPrimary`'s primary contract.
       try {
-        await surface.close({ keep: false })
+        runSyncDisposalSteps('TSP renderer synchronous disposal', [
+          () => { detailsClose = retireWorkDetails('dispose') },
+          // PR-C: the image subscriptions die BEFORE the surface closes: an
+          // in-flight read may still settle inside the loader, but it can no
+          // longer send a blob or a frame.
+          () => { releaseImageSubscriptions() },
+          // PR3-B B3 (§3.5.6): the seat retires SYNCHRONOUSLY — every active
+          // and queued modal promise settles (approval `cancelled`, question the
+          // flow's cancellation error) before the surface/session close below,
+          // and the call is idempotent with the interaction owner's own
+          // `withdrawPending`.
+          () => { seat.dispose() },
+          // B3-A1: the Work Hub retires BEFORE the older presenters and before
+          // the surface/session close (A1 adds no second SDK resource).
+          () => { workHub?.retire() },
+          () => { sessionBrowser?.retire() },
+          () => { modelPicker?.retire() },
+          () => { presetPicker?.retire() },
+        ])
       } catch (error) {
         failures.push(error)
       }
-      try {
-        await session.close()
-      } catch (error) {
-        failures.push(error)
-      }
-      if (failures.length === 1) throw failures[0]
-      if (failures.length > 1) throw new AggregateError(failures, 'TSP renderer disposal')
+      // Every ASYNC release is ALWAYS attempted too — the tty restore (and the
+      // SDK's own input drain) lives inside `session.close()`, so a preceding
+      // failure must still reach it, exactly once. A `try/finally` would
+      // silently DISCARD an earlier error in favour of a later one (R3-2);
+      // instead the failures are collected in RESOURCE RELEASE ORDER and
+      // surfaced with the repository's disposal contract: one failure rethrows
+      // the exact thrown value, two or more aggregate without truncating
+      // either. The one published Promise settles with that outcome, so a
+      // reentrant caller from the synchronous steps above already shares it.
+      void (async () => { // allowlist: settles the ONE latched disposal promise; every rejection is delivered through it, never left unobserved
+        if (detailsClose !== undefined) {
+          try {
+            await detailsClose
+          } catch (error) {
+            failures.push(error)
+          }
+        }
+        try {
+          await surface.close({ keep: false })
+        } catch (error) {
+          failures.push(error)
+        }
+        try {
+          await session.close()
+        } catch (error) {
+          failures.push(error)
+        }
+        if (failures.length === 0) {
+          disposal.resolve()
+        } else if (failures.length === 1) {
+          disposal.reject(failures[0])
+        } else {
+          disposal.reject(new AggregateError(failures, 'TSP renderer disposal'))
+        }
+      })()
+      return disposeTask
     },
   }
 }

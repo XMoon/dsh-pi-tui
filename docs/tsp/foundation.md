@@ -53,7 +53,8 @@ bootstrap.ts renderer-selection
  → bindRendererInput (one-time held-key replay)
  → SurfaceRuntime.repaintTarget → canonical projection
  → tsp/session.ts setTranscript / transcript-view / render
- → one surface.render({ main?, dock, layer })
+ → base surface.render({ main?, dock, layer })
+    └─ (read-only reading only) temporary screen.render({ main })
  → SDK View.from / ops / frame queue / TSP wire / Tern
 
 Tern input → SDK session iterator → tsp/session.ts routeInput
@@ -62,8 +63,16 @@ Tern input → SDK session iterator → tsp/session.ts routeInput
       → existing submission, model/preset, or Question/Approval owner
 
 teardown → seat.dispose → retire presentational panels
- → surface.close({ keep: false }) → session.close → renderer release
+ → temporary screen.close({ keep: false })  [only if one exists]
+ → base surface.close({ keep: false }) → session.close → renderer release
 ```
+
+The renderer mounts ONE base surface for its whole life. A reading adds at most
+one temporary `mode:'screen'` surface on the SAME SDK `Session` (see
+[§3](#bounded-reader-surface-lifecycle)); it is acquired for that reading and
+closed before teardown finishes. Both surfaces belong to this renderer and share
+its ONE input iterator, ONE base focus owner and ONE lifecycle promise — the
+reading is an additional rendering container, never a second renderer.
 
 | Fact / operation | Existing authority / owner | Forbidden substitute |
 |---|---|---|
@@ -72,10 +81,11 @@ teardown → seat.dispose → retire presentational panels
 | Tool-result image content and bytes | The result's own structured content blocks, plus the existing attachment read port under the existing immutable display-subject scope | The flat result text, the tool name, the args, a path, a URL, or a second attachment cache |
 | Visual tool result (chart/SVG) | The FINAL `tool/result` content (versioned machine line/credential) plus the durable `tool/call.arguments` for an SVG source; TSP blobs and PiTui PNGs are Client-local derivatives | `presentationMeta`, a renderer-created fact, a cached blob, or reconstructing an unadmitted source |
 | TSP connection and terminal input lifecycle | Composition bootstrap + mounted renderer + pinned SDK | A second direct stdin reader or ad-hoc wire pump |
-| Surface regions and emitted node projection | `src/tui/tsp/session.ts` (one `surface.render`) | Independently mounted competing renderers |
+| Surface regions and emitted node projection | `src/tui/tsp/session.ts` (one base `surface.render`, plus the one temporary screen's own `render` for a reading) | Independently mounted competing renderers, or a second surface for any non-reading surface |
 | Modal seat/keyboard precedence | `src/tui/tsp/session.ts` + `interaction.ts` and its application owner | `modal:true` as an automatic JavaScript keyboard handler |
 | UI highlight, draft, pending, local page | The current presenter for that UI | Durable business authority |
 | SDK frame/ACK/current sent View | Installed SDK `Surface`/`Session` | A second application-side reconciler without a demonstrated gap |
+| The temporary reading surface, its reading identity and its close | `src/tui/tsp/session.ts` (the reader slot) | A presenter-owned surface, a business owner, a second Session, or a persisted reading state |
 | Terminal rendering, pixel clipping and scroll view state | Tern client | Node-tree text, TypeScript props, guessed pixels |
 
 State-representation rule: authority, disposable projection, SDK transport
@@ -86,9 +96,21 @@ reduction; a search hit or "two variables" is not proof of entropy.
 ## 3. Surface, frame and lifecycle invariants
 
 1. The renderer opens one inline SDK surface; `main`, `dock` and `layer` are SDK
-   region names. There is exactly one `surface.render` call. `layer` is always
-   provided; `main` waits for its initial projection; `dock` is provided by the
-   renderer. Do not create a second surface/owner for one panel.
+   region names. There is exactly one `surface.render` call PER OWNED SURFACE.
+   `layer` is always provided; `main` waits for its initial projection; `dock`
+   is provided by the renderer. Do not create a second surface/owner for one
+   panel.
+   The one bounded exception is a **bounded reader surface**: a temporary
+   `mode:'screen'` surface owned by the same renderer, on the same SDK
+   `Session`, for one read-only projection of an already-selected row. It is a
+   *rendering container*, not a second UI application: it carries no business
+   authority, its only side effect is closing itself, and it is never a place to
+   route selection, stop, answer or any other write. The renderer stays the
+   single owner of both surfaces, and the base surface stays resident — the
+   screen is an addition, never a replacement and never a place to migrate state
+   into. Anything that would need a second concurrent screen, its own input
+   loop, its own business presenter or its own lifecycle authority is outside
+   this exception.
 2. Live `layer` producers return a `ui.col` region root; overlays/pickers are
    children of that root. This is a verified project shape, not an SDK type law
    mandating `col` everywhere. A bare overlay as a region root does not acquire
@@ -119,6 +141,57 @@ reduction; a search hit or "two variables" is not proof of entropy.
    retry/watchdog. SDK `close()` can force a final flush; it is teardown, not a
    runtime delivery cure.
 
+### Bounded reader surface lifecycle
+
+A bounded reader surface stays correct only under all of the following; each is
+a contract, not an implementation preference.
+
+- **At most one, only while it is current.** The renderer holds one slot. A
+  reading is identified by `(panel serial, reading epoch, target value)`; the
+  epoch advances per reading, so a node/action id minted for an earlier reading
+  can never address a later one. A second concurrent screen, a successor opened
+  automatically after a target disappears, or a screen opened while a close is
+  still settling are all forbidden.
+- **Admission is capability plus currency.** The screen is offered only when the
+  negotiated capabilities really cover its kinds AND the reading feature it
+  depends on, and only for the row the owning panel currently has selected.
+  Capability without currency (a stale/foreign target) and currency without
+  capability both refuse. A refusal states itself in the panel; it never
+  fabricates a screen, a fallback overlay or a fake success.
+- **Read-only projection.** The screen paints a pure function of the selected
+  row. It owns no state the base surface needs, performs no business write, and
+  its only control is its own dismissal. Every key it receives is either a
+  reading gesture or the dismissal; nothing falls through to the composer,
+  Agent cancel, exit or another presenter.
+- **One synchronous ownership transition.** Retiring a reading is one
+  synchronous step that removes the slot from admission (no new key, no new
+  open, no new event accepted) and starts exactly one `close({keep:false})`.
+  The slot stays registered — in a distinct closing phase — until that close
+  settles, so a duplicate close, a re-open or a second retirement in the same
+  window is impossible.
+- **Every owner that replaces the reader retires it first.** A modal seat, a
+  sibling presenter taking the base layer, session hydration and teardown all
+  retire the reader before doing anything else, and they retire it in the same
+  synchronous step as the replacement — so no key can reach the reader after its
+  replacement was decided.
+- **Failure has exactly one destination.** An acquisition or render failure is
+  routed once, with the original error, and leaves no resource claimed. A
+  rejected or failed close is routed once and is NOT converted into a retry, a
+  silent success or an info notice; the reader is never re-shown to hide it.
+- **A background repaint is not a new reading.** A status/detail update for the
+  same target repaints the same keyed document: the initial scroll anchor and
+  the focus seat are established once per reading, never per frame. A
+  same-subject facts reset preserves the reading; a subject change does not.
+- **Teardown releases independently.** The reader close, the base surface close
+  and the session close are attempted in that order even when an earlier one
+  fails; one failure propagates as itself, several aggregate with their original
+  errors. Repeated disposal calls share one promise rather than re-attempting.
+- **Coexistence, not conflict.** The base region ids (`main`, `dock`, `layer`)
+  recur on the screen surface. They are distinct node spaces with the same
+  names: cross-surface evidence must fold per surface id, and an event is
+  admitted only when its surface id, node id and payload agree with the current
+  reading.
+
 ## 4. Node identity, event admission and focus
 
 ### Node identity and currentness
@@ -132,6 +205,12 @@ reduction; a search hit or "two variables" is not proof of entropy.
   Picker/layer key stable for one panel (`panel.serial`), gives each new Reader
   reading a separate epoch, and revision-tokens mutating/read-operation action
   IDs (`apply#<rev>`, `retry#<rev>`); `close` remains untokened for dismissal.
+  The retained Work Hub follows the same shape for its own two operations: the
+  Read intent is `details#<row revision>`, so a delayed click/activate can only
+  act on the row revision it was painted with, while `close` stays untokened.
+  The bounded reader surface carries the reading identity in its Back target
+  (`work-back-<panel serial>-<reading epoch>`) and nowhere else: a repaint of the
+  same reading keeps every node id, and a new reading takes a new target.
   Preset identity must be checked against its own source and is not silently
   changed by Model evidence. Stable identity is allowed only with explicit
   currentness/admission proof; never copy OMP as a substitute.
@@ -162,6 +241,26 @@ reduction; a search hit or "two variables" is not proof of entropy.
 toggle/pressed state; none is a universal keyboard focus token. The client's
 caret/editing effect for a region-root focus was not established; do not
 classify that as a confirmed bug or confirmed correct caret behavior.
+
+### Reader event admission and reading anchor
+
+- An event addressed at the temporary reading surface is admitted only when ALL
+  of its identity facts agree with the current reading: the event's `sf` is that
+  surface's own id, a pointer target is the Node id the document actually
+  registered for that reading, and the reading's `(panel serial, reading epoch,
+  target value)` still resolves to the row the owning panel has selected. A
+  foreign `sf`, a retired reading's target or a target the panel no longer holds
+  is dropped — never re-mapped by index, label or position, and never forwarded
+  to the base surface just because the reading is gone.
+- The reading anchor belongs to the client. One `start` is requested when a
+  reading opens; a resize, a background status/detail repaint or a same-subject
+  facts reset must not request another `start`, must not re-issue focus and must
+  not remount the document. A numeric scroll position is not saved, restored or
+  shadowed by the renderer.
+- A modal's logical seat can be active while the client still paints the reading.
+  While that is possible, ordinary keys (including answer keys) are consumed and
+  nothing is queued or interpreted, so no answer can reach an invisible form;
+  the form becomes answerable only after the reading is really gone.
 
 ### Modal scope
 
@@ -203,6 +302,32 @@ or later build.
   `caps.cols` for terminal columns and real client geometry for pixels. Preserve
   business authority across wide↔narrow adaptation; component fallback/overflow
   is a product decision, not a reason to invent a second writer.
+
+### Reading a projected row
+
+A bounded reader surface exists to make one already-projected row readable; it
+does not become a second data surface.
+
+- The document is a pure projection: the row's own label, its classification and
+  status, its durable stable id, whatever structured facts the row really
+  carries, and its detail body. Every field it cannot honestly source is absent
+  — no invented activity, output, transcript, elapsed time, authority or "live"
+  marker, and no business control. A row type that is human attention (for
+  example a pending question) is classified as such and gets no answer control.
+- Text is untrusted input at this boundary: labels, ids, details and every
+  derived fact pass through the same display sanitization as the rest of the
+  TSP surface, so no control byte, OSC sequence or forged row reaches the client.
+- The document is delivered whole and wrapped by the client
+  (`wrap:'word'`), never pre-truncated and never pre-wrapped to a guessed width;
+  a narrow pane shows fewer lines, it does not lose the value.
+- Reading is scroll-driven and scoped: the scroll target is the document's own
+  region on the reading surface, the anchor is established once per reading, and
+  a resize or a background repaint must not reset it. The client may present the
+  screen as its own tab or window; that presentation is the client's, and a
+  claim about it needs real-client evidence, not an inference from the SDK call.
+- The Back path is a real native control bound to the same dismissal as the
+  reading keys' Escape, and it is admitted only for the current reading; the
+  base surface's own row selection is not re-run by returning.
 
 ### Tool-result image projection
 
