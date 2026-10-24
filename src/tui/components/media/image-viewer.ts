@@ -133,7 +133,15 @@ export class ImageViewerPanel implements Component {
     const bottom = this.withCloseHint(this.metadataText(), safeWidth)
     if (this.maxRows === 2) return [title, bottom]
     const bodyRows = this.maxRows - 2
-    return [title, ...this.bodyLines(safeWidth, bodyRows), bottom]
+    // The pane FILLS its grant: title on row 1, the metadata + `Esc close` bar
+    // pinned to the LAST granted row, and the body absorbing every row between
+    // (blank rows are the image's surrounding space, never trailing dead space
+    // that would leave the bar floating under a short image).
+    const body = this.bodyLines(safeWidth, bodyRows)
+    const padded = body.length >= bodyRows
+      ? body.slice(0, bodyRows)
+      : [...body, ...Array.from({ length: bodyRows - body.length }, () => '')]
+    return [title, ...padded, bottom]
   }
 
   /** `Image · <name>` (the attachment's presentation name, never a path). */

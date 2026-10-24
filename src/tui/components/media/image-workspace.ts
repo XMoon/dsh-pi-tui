@@ -29,9 +29,10 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-workspace
  */
 
+import { truncateToWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { SearchablePicker } from '../../pickers/searchable-picker.ts'
-import { selectListTheme } from '../../theme/runtime.ts'
+import { color, selectListTheme } from '../../theme/runtime.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import { ImageViewerPanel } from './image-viewer.ts'
@@ -95,7 +96,10 @@ export class ImageWorkspacePanel implements Component {
         {
           enableSearch: false,
           header: 'Images · current transcript',
-          showHint: true,
+          // The LIST paints its own pinned bottom bar below (the grid must
+          // FILL the grant so the bar lands on the last physical row); the
+          // picker's floating hint would sit right under the last candidate.
+          showHint: false,
         },
       )
       this.picker.onSelect = (item): void => {
@@ -135,13 +139,28 @@ export class ImageWorkspacePanel implements Component {
   render(width: number): string[] {
     const rows = Math.max(1, Math.floor(this.input.rows()))
     if (this.mode === 'list' && this.picker !== undefined) {
-      this.picker.setMaxRows(rows)
-      return this.picker.render(width).slice(0, rows)
+      // The bar is ALWAYS the last physical row: grant the grid everything
+      // above it, then pad the grid so a short candidate list cannot leave the
+      // bar floating in the middle of the screen.
+      const bar = this.listBar(width)
+      const gridRows = Math.max(0, rows - 1)
+      this.picker.setMaxRows(gridRows)
+      const grid = this.picker.render(width).slice(0, gridRows)
+      const padded = grid.length >= gridRows
+        ? grid
+        : [...grid, ...Array.from({ length: gridRows - grid.length }, () => '')]
+      return rows === 1 ? [bar] : [...padded, bar]
     }
     const panel = this.viewPanel
     if (panel === undefined) return []
     panel.setMaxRows(rows)
     return panel.render(width).slice(0, rows)
+  }
+
+  /** The list state's pinned action bar: the REAL keys of this surface, with
+   * `Esc` naming its actual effect (close the workspace, D13). */
+  private listBar(width: number): string {
+    return color.textDim(truncateToWidth('  ↑↓ navigate · Enter view · Esc close', width, '…', true))
   }
 
   /** Create the Viewer state. `fromList` keeps the list (and its selection)
