@@ -127,6 +127,74 @@ test('the Session Browser capability never captures a non-TUI family', () => {
   }
 })
 
+// ── B3-A3: the ONE Task Center family (/tasks + its /subagents alias) ───────
+
+test('G01/G02: /tasks is admitted ONLY when the display seam really declares the Task Center', () => {
+  const tui = classify({ tuiCommand: true })
+  // G01 — the mounted renderer negotiated the Hub + Reader capability.
+  assert.deepEqual(bare(tui, 'tasks', { taskCenter: true }), { kind: 'available' })
+  // G02 — false/undefined refuse it, and no OTHER picker stands in.
+  assert.deepEqual(bare(tui, 'tasks', { taskCenter: false }), { kind: 'unsupported' })
+  assert.deepEqual(bare(tui, 'tasks', {}), { kind: 'unsupported' })
+  for (const substitute of [
+    { modelPicker: true }, { presetPicker: true }, { sessionBrowser: true },
+    { modelPicker: true, presetPicker: true, sessionBrowser: true },
+  ]) {
+    assert.deepEqual(bare(tui, 'tasks', substitute), { kind: 'unsupported' },
+      'a sibling presenter is never a Task Center substitute')
+  }
+})
+
+test('G03: the registered /subagents alias follows the SAME admission as /tasks', () => {
+  const tui = classify({ tuiCommand: true })
+  assert.deepEqual(bare(tui, 'subagents', { taskCenter: true }), { kind: 'available' })
+  assert.deepEqual(bare(tui, 'subagents', { taskCenter: false }), { kind: 'unsupported' })
+  assert.deepEqual(bare(tui, 'subagents', {}), { kind: 'unsupported' })
+  // The alias is the SAME business entry: an argument never changes the verdict.
+  for (const rawInput of ['', 'unrelated', 'agent:child-1']) {
+    assert.deepEqual(tspBuiltinAvailability(tui, 'subagents', { taskCenter: true }, rawInput),
+      { kind: 'available' }, 'the alias never gains or loses the capability by its argument shape')
+  }
+})
+
+test('G04/G05/G06: the Task Center admission never captures a non-TUI family', () => {
+  const capable = { taskCenter: true }
+  // G04 — a genuine Host-origin /tasks keeps its own routing.
+  const hostClaimed = classify({ hostClaim: { claimed: true, attachments: false }, tuiCommand: true })
+  assert.deepEqual(bare(hostClaimed, 'tasks', capable), { kind: 'not-a-tui-builtin' })
+  assert.deepEqual(bare(hostClaimed, 'subagents', capable), { kind: 'not-a-tui-builtin' })
+  // A Host name that does not claim the argued line is an ordinary submission.
+  assert.deepEqual(bare(classify({ hostClaim: { claimed: false }, tuiCommand: true }), 'tasks', capable),
+    { kind: 'not-a-tui-builtin' })
+  // G05 — an extension contribution or a skill invocation has its own owner.
+  assert.deepEqual(bare(classify({ extensionCommand: true }), 'tasks', capable), { kind: 'not-a-tui-builtin' })
+  assert.deepEqual(bare(classify({ skillInvocation: true }), 'tasks', capable), { kind: 'not-a-tui-builtin' })
+  // G06 — an unregistered slash line / plain prompt is never captured by name.
+  for (const name of ['tasks', 'subagents', 'tasks-and-more']) {
+    assert.deepEqual(bare(classify({}), name, capable), { kind: 'not-a-tui-builtin' })
+  }
+})
+
+test('G07/G08: the Task Center admission leaves the other builtins and the unconditional set untouched', () => {
+  // G07 — the existing per-capability gates keep their verdicts, and the
+  // Task Center capability never widens them.
+  const tui = classify({ tuiCommand: true })
+  assert.deepEqual(bare(tui, 'model', { taskCenter: true }), { kind: 'unsupported' })
+  assert.deepEqual(bare(tui, 'preset', { taskCenter: true }), { kind: 'unsupported' })
+  assert.deepEqual(bare(tui, 'sessions', { taskCenter: true }), { kind: 'unsupported' })
+  assert.deepEqual(tspBuiltinAvailability(tui, 'logout', { taskCenter: true }, ''), { kind: 'unsupported' })
+  assert.deepEqual(bare(tui, 'settings', { taskCenter: true }), { kind: 'unsupported' })
+  for (const name of ['exit', 'quit', 'new', 'fork', 'title', 'rename', 'copy', 'yolo']) {
+    assert.deepEqual(bare(tui, name, {}), { kind: 'available' })
+  }
+  // G08 — the Task Center is NOT an unconditional builtin, and the B2-A notice
+  // scope keeps its membership (the success receipt of /tasks is the UI).
+  assert.ok(!TSP_SUPPORTED_TUI_BUILTINS.has('tasks'))
+  assert.ok(!TSP_SUPPORTED_TUI_BUILTINS.has('subagents'))
+  assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('tasks'))
+  assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('subagents'))
+})
+
 // ── The FAMILY is part of the result (the F1 fix) ───────────────────────────
 
 test('every non-TUI family reports not-a-tui-builtin, never unsupported', () => {

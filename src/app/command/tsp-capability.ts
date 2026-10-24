@@ -24,9 +24,11 @@
  * whose ENTIRE outcome is carried by the existing business owner (Session
  * runtime, SessionWriter, permission writer, credential port, clipboard
  * policy) and needs no PiTui pane. Native Model, Preset and Session Browser
- * commands are admitted only when their mounted presenters are available;
- * every other TUI builtin is refused. `/logout` is the ONE input-shaped
- * member: only its explicit-target form is admitted (see the predicate).
+ * commands are admitted only when their mounted presenters are available, and
+ * the Task Center family (`/tasks` + `/subagents`) only when the mounted
+ * renderer's ONE Task Center capability is present; every other TUI builtin is
+ * refused. `/logout` is the ONE input-shaped member: only its explicit-target
+ * form is admitted (see the predicate).
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
@@ -100,6 +102,14 @@ export interface TspBuiltinPickers {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * B3-A3: the mounted renderer's ONE Task Center reachability truth
+   * (`SurfaceDisplaySeam.supportsTaskCenter`). The `/tasks` + `/subagents`
+   * family runs the EXISTING registered handler into the EXISTING
+   * `TaskRuntime`, so this is a capability of that one display seam — never a
+   * second renderer state.
+   */
+  readonly taskCenter?: boolean
 }
 
 /**
@@ -156,6 +166,14 @@ export function tspBuiltinAvailability(
     // handler's own resolver; bare `/logout` (and whitespace-only) needs the
     // credential picker and is refused BEFORE any credential read or mutation.
     return rawInput.trim().length > 0 ? { kind: 'available' } : { kind: 'unsupported' }
+  }
+  if (name === 'tasks' || name === 'subagents') {
+    // B3-A3: the ONE Task Center family. `/subagents` is the registered alias
+    // of `/tasks`, so both ride the same admission and reach the SAME
+    // registered handler. The display seam's `supportsTaskCenter` is the only
+    // capability read: no other picker stands in for it, and an unnegotiated
+    // pane refuses the command instead of mounting an unreadable Hub.
+    return pickers.taskCenter === true ? { kind: 'available' } : { kind: 'unsupported' }
   }
   return (name === 'model' && pickers.modelPicker === true)
     || (name === 'preset' && pickers.presetPicker === true)

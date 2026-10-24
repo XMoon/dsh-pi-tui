@@ -9,9 +9,10 @@
  *
  * STANDS-IN: the tty is the scripted pane and the Host task source is a fixture
  * (the same narrow `TaskSurfaceSource` the Task Runtime tests use) — never a
- * re-implemented runtime. A2 is `PROJECTION_ONLY`: `supportsTaskCenter` stays
- * false, so the browser is opened through the internal port exactly as the
- * still-gated `/tasks` path would.
+ * re-implemented runtime. A3 makes the REAL TSP display seam the capability
+ * truth: a pane that negotiated `picker` + the Reader's `col`/`row`/`text` and
+ * `scroll` admits the production `/tasks` entry, and a pane missing any of them
+ * is refused before the browser is mounted.
  *
  * @module @xmoon76/dsh-pi-tui/tern-tsp-work-reader-composition.test
  */
@@ -26,7 +27,6 @@ import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { QuestionAttentionRow } from '../../src/app/surface/question-controller.ts'
-import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import {
@@ -94,9 +94,9 @@ async function compose(
   t: { after(fn: () => unknown): void },
   descendants: readonly TaskSubagentEntry[],
   attentionRows: readonly QuestionAttentionRow[] = [],
-  options: { readonly realDisplaySeam?: boolean } = {},
+  options: { readonly pane?: Parameters<typeof installTspPane>[0] } = {},
 ): Promise<Composition> {
-  const pane = installTspPane({ sessionBrowser: true, workDetails: true })
+  const pane = installTspPane(options.pane ?? { sessionBrowser: true, workDetails: true })
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session, 'the scripted pane must connect through the shipped SDK')
   let disposed = false
@@ -177,12 +177,10 @@ async function compose(
   }
   const tasks = createTaskRuntime({
     mounted: () => { throw new Error('the TSP branch must never read a mounted PiTui app') },
-    // Two modes: the presentation sink (so the internal port can open the Hub
-    // exactly as A3 will), and the PRODUCTION seam (which truthfully declares
-    // no Task Center, so the real `/tasks` entry must refuse).
-    display: () => options.realDisplaySeam === true
-      ? renderer.display
-      : displaySeamStub({ supportsTaskCenter: true }),
+    // The PRODUCTION seam: the renderer's own `supportsTaskCenter` is the ONE
+    // reachability truth, so `/tasks` is admitted exactly when this pane
+    // negotiated the Hub + Reader capability.
+    display: () => renderer.display,
     // The PRODUCTION sink: the surface wrapper over the internal Work Hub.
     presentation: () => renderer.taskPresentation,
     isCleanedUp: () => false,
@@ -196,7 +194,7 @@ async function compose(
   // bounded drain lets the initial commit land before the browser opens.
   for (let index = 0; index < 12; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
   tasks.openTasksBrowser('full')
-  if (options.realDisplaySeam !== true) {
+  if (renderer.display.supportsTaskCenter) {
     await waitUntil('the real Task Runtime rows reach the Work Hub', () => pickerNode(pane, HUB) !== undefined)
   } else {
     // A refused open has no positive signal to await, so this is the bounded
@@ -230,14 +228,15 @@ async function enterReader(composition: Composition): Promise<string> {
   return composition.readerId()!
 }
 
-test('the production /tasks entry still refuses in A2 and mounts no Work Hub or Reader', async (t) => {
+test('a pane WITHOUT the negotiated Hub+Reader capability refuses the production /tasks entry', async (t) => {
   // The REAL TSP display seam is installed in the Task Runtime, so this is the
-  // production reachability truth (not a stub): A2 must leave `/tasks`
+  // production reachability truth (not a stub): the default HELLO advertises
+  // neither `picker` nor the Reader's kinds/feature, so `/tasks` must stay
   // explicit-unavailable, mount no browser and acquire no Screen. The
   // `mounted()` callback throws for any PiTui read, which never happens here.
-  const composition = await compose(t, DESCENDANTS, [], { realDisplaySeam: true })
+  const composition = await compose(t, DESCENDANTS, [], { pane: {} })
   assert.equal(composition.renderer.display.supportsTaskCenter, false,
-    'the production seam declares no Task Center in A2')
+    'an unnegotiated pane declares no Task Center')
   const hubKeys = composition.pane.frames().flatMap(frame => frame.ops)
     .filter(op => op[0] === 'add')
     .map(op => String((op[4] as unknown as { p?: { key?: string } }).p?.key ?? ''))
@@ -248,6 +247,18 @@ test('the production /tasks entry still refuses in A2 and mounts no Work Hub or 
   // The refusal is expressed to the user, never a silent no-op.
   assert.ok(composition.pane.output.text().includes('Work Hub is not available in this renderer yet.'),
     'the refused entry states itself once')
+})
+
+test('a pane without the Reader kinds refuses the production entry even with the Picker', async (t) => {
+  // `picker`/`row` present but `text` is missing: the Hub would mount a Reader
+  // it cannot read, so /tasks stays refused (both halves of the one capability).
+  const composition = await compose(t, DESCENDANTS, [], {
+    pane: { kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'picker', 'row'], features: ['flow', 'styles', 'scroll'] },
+  })
+  assert.equal(composition.renderer.display.supportsTaskCenter, false,
+    'a half-capable pane declares no Task Center')
+  assert.equal(composition.pane.openSurfaces().filter(entry => entry.mode === 'screen').length, 0)
+  assert.ok(pickerNode(composition.pane, HUB) === undefined, 'no Hub is mounted on a half-capable pane')
 })
 
 test('a real Job row reaches the temporary Reader with its own facts and no business selection', async (t) => {
@@ -268,8 +279,8 @@ test('a real Job row reaches the temporary Reader with its own facts and no busi
   assert.ok(content.includes('Started   1970-01-01T00:00:02.000Z'), 'the real start time is UTC ISO 8601')
   assert.ok(content.includes('Finished  1970-01-01T00:00:05.000Z'), 'the real finish time is UTC ISO 8601')
   assert.deepEqual(composition.scrollOps(reader), ['start'], 'the reading starts once at the top')
-  assert.equal(composition.renderer.display.supportsTaskCenter, false,
-    'A2 keeps the production Task Center capability false')
+  assert.equal(composition.renderer.display.supportsTaskCenter, true,
+    'a fully negotiated pane keeps the production Task Center capability')
 
   // Back returns to the SAME real Hub with the same row.
   composition.pane.key('\u001b')

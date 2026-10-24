@@ -5,8 +5,9 @@ the single projection chain, the renderer opt-in and its verification entry
 points. The ownership/event contract is specified in
 [foundation.md](./foundation.md); the product surfaces in
 [model-selection.md](./model-selection.md),
-[preset-selection.md](./preset-selection.md) and
-[session-browser.md](./session-browser.md); real-pane operations in
+[preset-selection.md](./preset-selection.md),
+[session-browser.md](./session-browser.md) and
+[work-hub.md](./work-hub.md); real-pane operations in
 [../guides/tern-pane-testing.md](../guides/tern-pane-testing.md).
 
 ## What TSP is, and is not
