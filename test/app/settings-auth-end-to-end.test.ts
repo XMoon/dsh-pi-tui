@@ -271,6 +271,21 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   } as unknown as Harness & { invoke: (line: string) => unknown }
 }
 
+/** Wait for a stable Host-side fact (the fake records every credential write
+ *  before awaiting the held gate). This is a state barrier, not a fixed sleep:
+ *  a painted frame alone does not prove the pending mutation started. */
+async function waitForCall(
+  h: Harness,
+  predicate: (call: string) => boolean,
+  label: string,
+): Promise<void> {
+  const started = Date.now()
+  while (!h.calls.some(predicate)) {
+    if (Date.now() - started > 5_000) assert.fail(`${label}; calls: ${h.calls.join(', ')}`)
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+}
+
 const rowOf = (h: Harness, needle: string): number => {
   const row = h.rows().findIndex(line => line.includes(needle))
   assert.ok(row >= 0, `the frame must contain ${JSON.stringify(needle)}:\n${h.view()}`)
@@ -525,8 +540,8 @@ test('the category rail cannot abandon a pending API-key write (pending mutation
   await key(h, 'sk-held')
   await key(h, '\r') // review
   await key(h, '\r') // submit (setReference is held open)
+  await waitForCall(h, call => call.startsWith('set:'), 'the held API-key write must start before the rail click')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Saving|write|Verified|API Key Reference/u)
 
   const accountRow = railEntryRow(h, 'Account')
   await click(h, accountRow, 2)
@@ -747,6 +762,7 @@ test('a rail selection is refused while the page owns a pending Host mutation', 
   await key(h, 'sk-held')
   await key(h, '\r') // review
   await key(h, '\r') // submit (the write is held open)
+  await waitForCall(h, call => call.startsWith('set:'), 'the held API-key write must start before the rail click')
   await h.vt.waitForRender()
 
   const accountRow = railRow(h, 'Account')
