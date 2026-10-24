@@ -400,13 +400,14 @@ projection window is:
 - The width authority is the SDK's `caps.cols` ONLY. The protocol publishes no
   pane-rows fact, so no height-driven degradation is designed or claimed here;
   a short pane's clipping is a client behaviour measured in a real run.
-- The dock is ONE scrolling document, not a pinned footer. Because the native
-  previews carry the staging image's own pixel size and the protocol offers no
-  pane-rows fact, a SHORT pane can lay the controlled editor below the visible
-  viewport once previews sit above it. That is a measured client-layout outcome
-  and an OPEN owner decision; it is never reported as a pass, and the fix is
-  neither a height probe (no protocol authority) nor a fixed preview size (a
-  forbidden pane-pixel budget).
+- The dock is ONE scrolling document, not a pinned footer: the editor is its
+  last child, and nothing in the protocol pins it. Because a native preview
+  carries the staging image's own pixel size and no pane-rows fact exists, a
+  short pane can therefore lay the controlled editor below the visible viewport
+  once previews sit above it. A claim that the editor is visible on a short pane
+  is a per-run client observation, not something this contract guarantees, and
+  the two tempting fixes are both wrong here: a height probe has no protocol
+  authority, and a fixed preview size is a forbidden pane-pixel budget.
 - The canonical `[image #N (W×H)]` token parser is the ONE source of WHICH
   occurrences a draft references, so the preview and the submission expansion
   cannot disagree. A staged image that no live token references is not a
