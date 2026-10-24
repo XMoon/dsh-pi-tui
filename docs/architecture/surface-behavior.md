@@ -608,10 +608,13 @@ Attachment completion and intake are Client-local:
   and the existing draft stores; there is no second draft copy. `/attach` and
   `/image` read the current draft and insert the canonical placeholder through
   the mounted composer of the active renderer, and announce success only AFTER
-  the bytes are staged and the placeholder inserted; with no mounted composer —
-  or with the renderer's own builtin admission refusing the command — they fail
-  instead of staging. A pending intake never writes a replaced composer seat or
-  a newer ownership generation/session; its late outcomes are published only
+  that intake succeeded and the placeholder inserted — for an image that means
+  its bytes were read, for a generic regular file that means the metadata draft
+  exists (only a bounded signature prefix was inspected; the content streams at
+  submit time, see above); with no mounted composer — or with the renderer's own
+  builtin admission refusing the command — they fail instead of staging. A
+  pending intake never writes a replaced composer seat or a newer ownership
+  generation/session; its late outcomes are published only
   while both its own seat and its session are still current, and the explicit
   session-changed/transition refusal is published only while its own seat is
   still current (it exists precisely because the session moved). On a renderer
