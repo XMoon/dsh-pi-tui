@@ -90,6 +90,10 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   semanticGeneration(): number {
     return this.viewRevision
   }
+  grantAwaitingPaint(): boolean {
+    return false
+  }
+
   liveIdentity(): string {
     return `${this.viewRevision}:${this.view}`
   }

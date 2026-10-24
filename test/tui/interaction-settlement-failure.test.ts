@@ -82,6 +82,7 @@ test('a throwing plugin page dispose still fires the one-shot Settings lease not
     gestureRevision: () => 0,
     semanticGeneration: () => 0,
     liveIdentity: () => 'fake-live',
+    grantAwaitingPaint: () => false,
     cancelPointer: () => {},
     handleInput: () => {},
     handleMouse: () => undefined,

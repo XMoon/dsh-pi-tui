@@ -165,6 +165,12 @@ export interface EmbeddedPluginPage extends Component {
    * root stores this string at press time and requires the same value at release.
    */
   liveIdentity(): string
+  /**
+   * Whether a changed viewport grant is still awaiting the paint that installs
+   * it (§4.2). While true ONLY the real Esc may act, and the Settings root must
+   * apply the same rule to keys it intercepts itself (Shift+Tab).
+   */
+  grantAwaitingPaint(): boolean
   cancelPointer(): void
   handleInput(data: string): void
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined
@@ -342,7 +348,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   /** Armed by `setViewport` when the grant really changed; cleared only by the
    *  paint that installs the new grant. §4.2: until that paint, only the real Esc
    *  may act — the previous frame does not describe what the user now sees. */
-  private grantAwaitingPaint = false
+  private grantAwaitingPaintArmed = false
   private lastRenderWidth = -1
   private lastRenderRows = -1
   private lastRenderAllowDual: boolean | undefined
@@ -399,7 +405,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // resize round trip restores the SAME action the user was on.
     this.revokePaintedGrants()
     this.pressedGesture = undefined
-    this.grantAwaitingPaint = true
+    this.grantAwaitingPaintArmed = true
     this.bumpRevision(); this.bumpSemantic()
   }
 
@@ -487,7 +493,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // §4.2: `setViewport` revokes the previous frame's grants; until the frame that
     // installs the new grant paints, every body action/copy/edit is refused. A
     // page that has never painted has no stale frame to protect.
-    if (this.grantAwaitingPaint && this.lastRenderWidth >= 0) return
+    if (this.grantAwaitingPaint()) return
     if (this.searchEditing) {
       this.handleSearchInput(data)
       return
@@ -2180,7 +2186,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     lines.push(this.renderActionBar(plan))
     this.paintedTargets = targets
     this.paintedRevision = this.revision
-    this.grantAwaitingPaint = false
+    this.grantAwaitingPaintArmed = false
     this.lastRenderWidth = this.viewport.width
     this.lastRenderRows = this.viewport.rows
     this.lastRenderAllowDual = this.viewport.allowDual
@@ -2958,6 +2964,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    * update whose queued repaint has not run yet. */
   /** See {@link EmbeddedPluginPage.liveIdentity}. Pure: reads local state and
    *  the Controller's CURRENT facts; never starts a read or a mutation. */
+  grantAwaitingPaint(): boolean {
+    // A page that has never painted has no stale frame to protect.
+    return this.grantAwaitingPaintArmed && this.lastRenderWidth >= 0
+  }
+
   liveIdentity(): string {
     // SEMANTIC facts only. The paint-time revision is deliberately excluded: a
     // catch-up repaint that merely reflects state the page already had before the

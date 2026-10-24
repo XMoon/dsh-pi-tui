@@ -506,9 +506,13 @@ test('mounted TuiApp: hide while installing, re-enter the same attempt, Stop, an
   fixture.vt.sendInput('\x1b') // hide the install view while the real install runs
   // Wait for the PAGE STATE, not for a title every sub-view shares: `/Settings ·
   // Plugins/` matches the install frame that is still on screen, so it would
-  // return before the List frame ever painted. The List is the only sub-view that
-  // paints the Search/Filters row and the `Esc back` list bar.
-  await waitForFrame(fixture.vt, /Search: \/.*All · Enabled · Installed · Available/su, 'the LIST frame after hide')
+  // return before the List frame ever painted.
+  //
+  // `Enter details` is painted ONLY by the List root's action bar (the Details,
+  // Install, Confirm and Diagnostics bars use `Enter action`/`Enter confirm`/etc.),
+  // so it identifies the List rather than "List or Details" — the Search/Filters
+  // row alone would also match Details.
+  await waitForFrame(fixture.vt, /Enter details/u, 'the LIST frame after hide (List-only action bar)')
   assert.doesNotMatch(plain(fixture.vt.getViewport()), /Plugins · Install/u,
     'the List frame really replaced the install frame')
   fixture.vt.sendInput('i') // re-enter the SAME attempt

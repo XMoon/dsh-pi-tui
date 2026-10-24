@@ -1689,6 +1689,34 @@ test('T09 a page action is refused until the changed grant really paints', async
   harness.app.dispose()
 })
 
+test('T09 Shift+Tab does not yield while a changed grant awaits its paint', async () => {
+  // §4.2 covers the key the ROOT intercepts itself, not only the keys it forwards:
+  // the root's Shift+Tab handler runs before `syncPluginFrame()` and would
+  // otherwise bypass the page's prepaint gate.
+  const harness = await open({ columns: 100, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  await yieldToRail(harness)
+  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
+    .settingsWorkspace!.panel
+  // ONE burst. `r` is what synchronizes the changed grant (the root only calls
+  // `syncPluginFrame()` when it forwards a content key), so the sequence is:
+  // focus transfer -> body key that installs the new grant and is refused ->
+  // Shift+Tab arriving before the frame that renders that grant.
+  harness.vt.sendInput('\t')
+  harness.vt.sendInput('r')
+  assert.equal(harness.panel.grantAwaitingPaint(), true, 'the changed grant awaits its paint')
+  harness.vt.sendInput('\x1b[Z')
+  assert.equal(rootPanel['focus'], 'content',
+    'Shift+Tab did not yield to the rail while the grant awaited its paint')
+  await harness.settle()
+  assert.equal(rootPanel['focus'], 'content', 'the focus stays in the content after the paint too')
+  // The legal direction still works once the frame is current.
+  harness.vt.sendInput('\x1b[Z')
+  await harness.settle()
+  assert.equal(rootPanel['focus'], 'categories', 'Shift+Tab still yields on a painted frame')
+  harness.app.dispose()
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
 test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {

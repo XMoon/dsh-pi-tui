@@ -144,6 +144,10 @@ class FakePluginPage implements EmbeddedPluginPage {
   semanticGeneration(): number {
     return 0
   }
+  grantAwaitingPaint(): boolean {
+    return false
+  }
+
   liveIdentity(): string {
     return `${this.view}:${this.inputs.length}`
   }
