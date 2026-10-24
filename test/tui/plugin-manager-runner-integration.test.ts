@@ -80,6 +80,53 @@ function plain(view: readonly string[]): string {
   return view.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
 }
 
+/**
+ * Press Enter on the frame that really painted the action, until the frame it
+ * is supposed to produce is on screen.
+ *
+ * The embedded page admits a Detail action only from the frame that painted it:
+ * a Host re-read or a chrome notice landing between the paint and the key
+ * revokes that frame, so the key merely reveals/re-arms instead of dispatching
+ * (§4.2, the same rule the mouse gates use). That refusal is the intended
+ * safety behaviour and a test must never assume "the second Enter acts". Each
+ * round therefore presses ONLY while the current frame still paints the action
+ * it names; a frame that no longer paints it was consumed, and the round waits
+ * for the destination instead of pressing whatever the new frame offers. The
+ * bound turns a gate that never admits into a failure that prints the frame.
+ */
+async function pressPaintedAction(
+  vt: VirtualTerminal,
+  painted: RegExp,
+  isDone: (frame: string) => boolean,
+  label: string,
+): Promise<string> {
+  for (let round = 0; round < 8; round += 1) {
+    const frame = plain(vt.getViewport())
+    if (isDone(frame)) return frame
+    // The FIRST round must prove the action is really on screen: starting this
+    // helper on the wrong view is a broken call, not a slow destination.
+    if (round === 0) {
+      assert.match(frame, painted,
+        `the frame must paint the action it is about to run (towards ${label}):\n${frame}`)
+    }
+    if (painted.test(frame)) {
+      vt.sendInput('\r')
+      await vt.waitForRender()
+      continue
+    }
+    // Already consumed: an async step owns the next frame.
+    await vt.waitForRender()
+  }
+  throw new Error(`the painted Enter never reached ${label}; last frame:\n${plain(vt.getViewport())}`)
+}
+
+/** Enter the Details view from an admitted List frame. The List bar's
+ *  `Enter details` and the Details bar's `Enter action` are disjoint, so each
+ *  side identifies exactly one view. */
+async function openPaintedDetails(vt: VirtualTerminal): Promise<string> {
+  return pressPaintedAction(vt, /Enter details/u, frame => frame.includes('Enter action'), 'the Details view')
+}
+
 async function mountPluginRunner(
   t: Parameters<typeof testLifecycle>[0],
   manager: Record<string, unknown> = fakePluginManager(),
@@ -281,8 +328,9 @@ test('hostile plugin metadata never reaches the mounted panel TTY raw', async (t
   await vt.waitForRender()
   vt.resize(120, 60)
   await vt.waitForRender()
-  vt.sendInput('\r') // open Details; the row action label carries entryId
-  await vt.waitForRender()
+  // Open Details from the frame that painted the selection: the row action
+  // label carrying `entryId` only exists on the Detail pane.
+  await openPaintedDetails(vt)
   const raw = vt.writes.join('')
   assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from plugin metadata reaches the TTY:\n${plain(vt.getViewport())}`)
   assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from plugin metadata reaches the TTY')
@@ -306,14 +354,12 @@ test('a hostile Host installTarget spec is projected before the install Input re
   const { vt, harness } = await mountPluginRunner(t, manager)
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  vt.sendInput('\r') // Details
-  await vt.waitForRender()
-  vt.sendInput('\r') // Install… -> official inspect (fails back to the editor)
-  for (let round = 0; round < 40 && !plain(vt.getViewport()).includes('Inspect'); round += 1) {
-    await new Promise<void>(resolve => setTimeout(resolve, 5))
-    await vt.waitForRender()
-  }
-  assert.match(plain(vt.getViewport()), /Inspect/, 'the errored inspect reached the seeded editor')
+  await openPaintedDetails(vt)
+  // `Enter inspect` is painted ONLY by the install view's editing phase (the
+  // Details bar says `Enter action`, the List bar `Enter details`), so it
+  // identifies the real editor rather than any frame of the same page.
+  await pressPaintedAction(vt, /> Install…/u, frame => frame.includes('Enter inspect'),
+    'the seeded install editor')
   const raw = vt.writes.join('')
   assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from installTarget.spec reaches the TTY:\n${plain(vt.getViewport())}`)
   assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from installTarget.spec reaches the TTY')
