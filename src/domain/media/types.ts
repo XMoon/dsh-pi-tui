@@ -55,8 +55,12 @@ export type InlineImageProtocol = 'kitty' | 'iterm2' | null
 /**
  * Whether a surface with `protocol` paints REAL PIXELS for `mediaType`.
  *
- * This is the ONE answer to "does this row carry a pixel body?", consumed by
- * every surface that must distinguish painted pixels from a text fallback:
+ * This is the hit-model authority for the transcript viewer: it decides whether
+ * an image row carries a clickable pixel body at all (and the Viewer panel uses
+ * it for the same question). It does NOT absorb a surface's own extra admission
+ * rules — a caller with additional constraints (the composer draft preview's
+ * byte budget) combines them with this answer rather than re-deriving the
+ * protocol/MIME rule:
  *
  * - `null` (no inline graphics) — never.
  * - Kitty accepts PNG only. This bundle installs no transcoder, so another

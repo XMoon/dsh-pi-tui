@@ -185,9 +185,13 @@ test('a rejected read paints Read failed and folds hostile whitespace into one r
   assert.ok(stripSgr(body).includes('down'), 'the folded remainder stays visible')
   assert.ok(!body.includes('\n') && !body.includes('\t'), 'an embedded newline/tab never breaks the row')
   // The pane FILLS its grant and pins the bottom bar to the last row; the
-  // single status row sits first in the body and the rest is blank space.
+  // single status row sits first in the body and EVERY row between it and the
+  // bar is blank (the old `length === 3` proved exactly one status row; this
+  // keeps that strength under the new fill layout).
   assert.equal(lines.length, 8, 'the pane fills the granted rows')
-  assert.ok(stripSgr(lines[2]!).trim() === '', 'the status is one row: the rest of the body is blank')
+  for (let index = 2; index < lines.length - 1; index += 1) {
+    assert.equal(stripSgr(lines[index]!).trim(), '', `body row ${index} is blank: a single status row`)
+  }
   assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Esc close'), 'the bar is pinned to the LAST row')
   assert.ok(visibleWidth(body) <= 60)
 })
@@ -269,8 +273,13 @@ test('a panel without a loader paints Preview unavailable and subscribes to noth
   })
   panel.setMaxRows(8)
   const lines = panel.render(60)
-  assert.equal(lines.length, 8, 'title fills the grant, one status row, bottom bar last')
+  assert.equal(lines.length, 8, 'the pane fills the grant, bottom bar last')
   assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'))
+  // Same strength as the error case: ONE status row, every remaining body row
+  // blank (the old `length === 3` guaranteed this).
+  for (let index = 2; index < lines.length - 1; index += 1) {
+    assert.equal(stripSgr(lines[index]!).trim(), '', `body row ${index} is blank: a single status row`)
+  }
   assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Esc close'), 'the bar is pinned to the LAST row')
   panel.dispose()
 })

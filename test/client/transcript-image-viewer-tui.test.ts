@@ -710,3 +710,44 @@ test('a Tool card generic-presenter image reaches the Viewer and the picker by i
   app.setFullscreen(false)
   app.stop()
 })
+
+test('a click between the painted footprint and the max-width ceiling is inert (square image)', async () => {
+  // The decisive negative for EXT-P2-1. A square image granted 40 columns does
+  // NOT paint 40 columns: the fork fits it to the 12-row cap, which for a
+  // 100x100 ref at 9x18 cells is ~24 columns. A hit test must cover the REAL
+  // footprint, so a click at x=30 is inside the ceiling yet outside the image —
+  // it must do nothing. A ceiling-based hit (the previous implementation) opens
+  // the Viewer here.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'square' },
+      { type: 'image', attachment: { ...IMAGE_REF, attachmentId: 'att-square', width: 100, height: 100, name: 'square.png' } },
+    ], 1),
+    userMessage([{ type: 'text', text: 'NEXT' }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  const before = await viewport(vt)
+  const infoRow = rowOfNth(before, '🖼️ square.png · 100×100', 0)
+  assert.ok(infoRow > 0, `the square image is painted:\n${before}`)
+  const bodyRow = infoRow + 1
+  const nextBefore = rowOfNth(before, 'NEXT', 0)
+  // x = 30 is BELOW the 40-column ceiling but ABOVE the real ~24-column
+  // footprint of a 100x100 image.
+  await clickCell(vt, 30, bodyRow)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Image · square.png'),
+    `a click past the real footprint opens no Viewer (ceiling is not the footprint):\n${after}`)
+  assert.ok(after.includes('[-]'), `the occurrence did not fold:\n${after}`)
+  assert.equal(rowOfNth(after, 'NEXT', 0), nextBefore, `the layout is unchanged:\n${after}`)
+  // Control: inside the real footprint the SAME row opens the Viewer.
+  await clickCell(vt, 8, bodyRow)
+  const opened = await viewport(vt)
+  assert.ok(opened.includes('Image · square.png'), `the real footprint still opens the Viewer:\n${opened}`)
+  app.setFullscreen(false)
+  app.stop()
+})
