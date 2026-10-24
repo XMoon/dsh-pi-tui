@@ -303,6 +303,10 @@ interface SettingsChromePlan {
   readonly metaRows: number
   readonly ruleRows: number
   readonly noticeRows: number
+  /** The pane header is reserved INSIDE `bodyRows` (0/1), never as a second
+   *  physical grant: it exists only on a multi-column frame that can still
+   *  leave one real content row. */
+  readonly paneHeaderRows: 0 | 1
   readonly actionRows: number
   readonly bodyRows: number
 }
@@ -491,22 +495,22 @@ function layoutForWidth(width: number): SettingsLayout {
  * Action Bar and the Header are granted first, then the BODY keeps at least one
  * real row (from three terminal rows on), then the optional notice (rows>=6,
  * body>=2 after it) and freshness/scope metadata (rows>=8, body>=3 after it).
- * The decorative rules are LAST: they are granted only when the body would still
+ * The decorative rule is LAST: it is granted only when the body would still
  * keep three real rows, so decoration never crowds out readable content.
  *
- * `rules` is the number of decorative boundaries the projection spends: the
- * legacy three-level projection draws a rule above AND below its body, while
- * the direct projection draws only the upper one — its lower boundary is the
- * content page's own action bar, which must stay the physical last row.
+ * Every projection paints at most ONE rule, above its body. The pane header is
+ * not an extra grant: `paneHeaderRows` is reserved INSIDE `bodyRows`, so a
+ * multi-column frame spends its first body row on the header and leaves
+ * `bodyRows - paneHeaderRows` real content rows.
  */
 function planSettingsChrome(
   width: number,
   rows: number,
   noticeLive: boolean,
   choosing = false,
-  rules = 2,
 ): SettingsChromePlan {
   const safeRows = Math.max(1, Math.floor(rows))
+  const layout = layoutForWidth(width)
   const headerRows = safeRows >= 2 ? 1 : 0
   const actionRows = 1
   // Rows the body could use once the mandatory chrome is granted.
@@ -515,18 +519,37 @@ function planSettingsChrome(
   const noticeRows = safeRows >= 6 && noticeLive && base - 1 >= 2 ? 1 : 0
   const metaRows = !choosing && safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
   const bodyWithoutRules = base - noticeRows - metaRows
-  const ruleRows = !choosing && bodyWithoutRules >= 5 ? rules : 0
+  const ruleRows = !choosing && bodyWithoutRules >= 5 ? 1 : 0
   const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
+  const paneHeaderRows: 0 | 1 = layout !== 'narrow' && bodyRows >= 2 ? 1 : 0
   return {
     width,
     rows: safeRows,
-    layout: layoutForWidth(width),
+    layout,
     headerRows,
     metaRows,
     ruleRows,
     noticeRows,
+    paneHeaderRows,
     actionRows,
     bodyRows,
+  }
+}
+
+/** The physical projection of ONE chrome plan: `bodyTop` is the first granted
+ *  body row, a granted pane header occupies it, and `contentRows` are the real
+ *  content rows left below. Every root-level paint and hit decision derives
+ *  from these values, so the direct and legacy projections cannot drift. */
+function chromeGeometry(plan: SettingsChromePlan): {
+  readonly bodyTop: number
+  readonly contentTop: number
+  readonly contentRows: number
+} {
+  const bodyTop = plan.headerRows + plan.metaRows + plan.ruleRows + plan.noticeRows
+  return {
+    bodyTop,
+    contentTop: bodyTop + plan.paneHeaderRows,
+    contentRows: Math.max(0, plan.bodyRows - plan.paneHeaderRows),
   }
 }
 
@@ -861,10 +884,12 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.columns(),
       this.intents.rows(),
       this.intents.notice() !== undefined,
-      false,
-      1,
+      this.choiceField() !== undefined,
     )
-    page.setBodyHeight(Math.max(1, plan.bodyRows + plan.actionRows))
+    // The child is rendered into the body grant + the ONE physical action row:
+    // its own pinned bar is the semantic source of the root bar, and its body
+    // must match what renderContentColumn really paints.
+    page.setBodyHeight(Math.max(1, chromeGeometry(plan).contentRows + plan.actionRows))
   }
 
   private authPageHasPendingMutation(): boolean {
@@ -925,7 +950,6 @@ export class SettingsWorkspacePanel implements Component {
       liveRows,
       this.intents.notice() !== undefined,
       choosing,
-      direct ? 1 : 2,
     )
     this.chrome = plan
     this.paintedChoiceCandidateVisible = false
@@ -950,12 +974,10 @@ export class SettingsWorkspacePanel implements Component {
     const panes: PaneBoxes = {}
     if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
     if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
-    if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
-    const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0)
-    if (plan.bodyRows > 0) lines.push(...this.renderBody(plan, bodyTop, targets, panes))
-    this.paintedPanes = panes
-    if (plan.ruleRows >= 2) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
+    if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    if (plan.bodyRows > 0) lines.push(...this.renderBody(plan, chromeGeometry(plan).bodyTop, targets, panes))
+    this.paintedPanes = panes
     if (plan.actionRows === 1) lines.push(this.renderActionBar(plan))
     this.paintedTargets = targets
     this.paintedPanes = panes
@@ -998,24 +1020,34 @@ export class SettingsWorkspacePanel implements Component {
 
   /**
    * Render the direct content page (About, Models, Account) inside the
-   * workspace chrome: the category rail stays visible on wide/medium; the
-   * content owns the rest of the screen, INCLUDING the single physical action
-   * bar on the last row.
+   * workspace chrome: the category rail stays visible on wide/medium, the
+   * pane header states who owns the keyboard, and the content owns the rest of
+   * the body. The ONE physical action bar is always the last row, starting at
+   * X=0 exactly like the legacy bar.
    */
   private renderDirectPage(plan: SettingsChromePlan): string[] {
     const lines: string[] = []
     const targets: HitTarget[] = []
     if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
     if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
-    if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
+    if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
-    const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0) + plan.noticeRows
     const narrow = plan.layout === 'narrow'
     const categoryWidth = narrow ? 0 : plan.layout === 'wide' ? WIDE_CATEGORY_WIDTH : MEDIUM_CATEGORY_WIDTH
     const contentX = narrow ? 0 : categoryWidth + COLUMN_GAP
     const contentWidth = Math.max(1, plan.width - contentX)
-    const contentRows = Math.max(1, plan.bodyRows + plan.actionRows)
-    const contentColumn = this.renderContentColumn(contentWidth, contentRows)
+    const geometry = chromeGeometry(plan)
+    if (plan.paneHeaderRows === 1) {
+      lines.push(this.renderDirectPaneHeader(categoryWidth, contentWidth))
+    }
+    const contentTop = geometry.contentTop
+    const contentRows = geometry.contentRows
+    // The child is laid out for its body PLUS its own pinned last-row bar. The
+    // root then keeps the body rows and moves that already-generated hint to
+    // the frame's physical last row instead of letting the child own it.
+    const childHeight = contentRows + plan.actionRows
+    const contentColumn = this.renderContentColumn(contentWidth, childHeight)
+    const semanticBar = contentColumn[childHeight - 1] ?? ''
     // C3: the About page's own painted targets (field Copy / Copy All /
     // Refresh rows), collected during the content render in COLUMN coordinates.
     const aboutTargets = this.takePaintedAboutTargets()
@@ -1029,7 +1061,7 @@ export class SettingsWorkspacePanel implements Component {
         const rail = fit(id === undefined ? '' : this.categoryLine(id), categoryWidth)
         lines.push(`${rail}${' '.repeat(COLUMN_GAP)}${content}`)
         if (id !== undefined) {
-          targets.push({ kind: 'category', id, row: bodyTop + index, startCol: 0, endCol: categoryWidth })
+          targets.push({ kind: 'category', id, row: contentTop + index, startCol: 0, endCol: categoryWidth })
         }
       }
       // The About targets translate from COLUMN rows to panel rows. A PAINTED
@@ -1042,18 +1074,24 @@ export class SettingsWorkspacePanel implements Component {
         targets.push({
           kind: 'about-action',
           id: columnTarget.id,
-          row: bodyTop + index,
+          row: contentTop + index,
           startCol: contentX + columnTarget.startCol,
           endCol: contentX + columnTarget.endCol,
         })
       }
     }
-    this.paintedContentBox = { x: contentX, top: bodyTop, width: contentWidth, rows: contentRows }
+    // The ONE physical last-row bar: the rail's own semantics while the rail
+    // owns the keyboard, else the semantic hint the child page generated. It
+    // starts at X=0 and spans the whole frame; the child chose its segments
+    // against the content width it really paints.
+    const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : semanticBar
+    lines.push(fit(bar, plan.width))
+    this.paintedContentBox = { x: contentX, top: contentTop, width: contentWidth, rows: contentRows }
     this.paintedPanes = {
       categories: narrow ? undefined : {
         x: 0,
         width: categoryWidth,
-        contentTop: bodyTop,
+        contentTop,
         contentRows: Math.min(CATEGORY_ORDER.length, contentRows),
         maxOffset: Math.max(0, CATEGORY_ORDER.length - contentRows),
       },
@@ -1063,12 +1101,21 @@ export class SettingsWorkspacePanel implements Component {
     return lines.slice(0, plan.rows)
   }
 
+  /** The direct layout's pane header: the category rail on the left and the
+   *  selected content page on the right, using the SAME `[Label]` active device
+   *  as the legacy pane headers. Display-only: it publishes no hit target and
+   *  owns no focus. */
+  private renderDirectPaneHeader(categoryWidth: number, contentWidth: number): string {
+    const left = fit(this.paneHeader(`Categories (${CATEGORY_ORDER.length})`, this.focus === 'categories'), categoryWidth)
+    const right = fit(this.paneHeader(CATEGORY_LABELS[this.categoryId], this.focus !== 'categories'), contentWidth)
+    return `${left}${' '.repeat(COLUMN_GAP)}${right}`
+  }
+
   /**
    * The content column of the direct layout. The real page owns its own lines
-   * (its last line is its action bar); the About page is a root-owned
-   * read-only projection with the root's own action bar. The single physical
-   * action bar is ALWAYS the last row: the navigation focus replaces the
-   * page's hint line, the content focus keeps it.
+   * (its last line is its semantic action hint); the About page is a root-owned
+   * read-only projection with the root's own semantic bar. The root moves that
+   * last line to the physical last row and paints only the body here.
    */
   private renderContentColumn(width: number, rows: number): string[] {
     const page = this.authPage
@@ -1740,12 +1787,13 @@ export class SettingsWorkspacePanel implements Component {
     targets: HitTarget[],
     panes: PaneBoxes,
   ): string[] {
-    // The shared pane-header line is a grant of its own: keep it whenever one
-    // real content row remains, including during choice editing. With only one
-    // body row it would replace the candidate/content line, so the header yields.
-    const showPaneHeader = plan.bodyRows >= 2
-    const contentTop = bodyTop + (showPaneHeader ? 1 : 0)
-    const contentRows = Math.max(0, plan.bodyRows - (showPaneHeader ? 1 : 0))
+    // The shared pane-header line is the planner's own grant INSIDE the body:
+    // it exists only while one real content row remains, including during
+    // choice editing. With a single body row it would replace the
+    // candidate/content line, so the planner withholds it.
+    const showPaneHeader = plan.paneHeaderRows === 1
+    const contentTop = bodyTop + plan.paneHeaderRows
+    const contentRows = chromeGeometry(plan).contentRows
     this.paintedViewport = Math.max(1, contentRows)
     const layout = this.visiblePaneLayout(plan)
 
@@ -2562,7 +2610,9 @@ export class SettingsWorkspacePanel implements Component {
   /** The per-frame body floor at the LIVE terminal height: below it every
    *  navigation/clipboard action is hidden and therefore inert. Only the row
    *  allocation matters here, and that is a pure function of the height (the
-   *  width only chooses the projection). */
+   *  width only chooses the projection). The grant includes the pane header
+   *  when present; the planner withholds that header unless a real content row
+   *  remains, so a floor below 1 is also exactly "no real content row". */
   private bodyFloor(): number {
     const width = this.projectionWidth()
     return planSettingsChrome(
@@ -2570,7 +2620,6 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.rows(),
       this.intents.notice() !== undefined,
       this.choiceField() !== undefined,
-      this.paintsDirectPage(width) ? 1 : 2,
     ).bodyRows
   }
 

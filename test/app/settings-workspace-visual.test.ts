@@ -1382,13 +1382,16 @@ test('a real category/row item click takes that level and selects the item', asy
 test('below the body floor the Action Bar advertises only the Esc semantics', async () => {
   for (const [columns, rows] of [[72, 2], [44, 2], [100, 2]] as const) {
     const h = setup({ columns, rows })
-    await h.open()
+    // Two rows grant no body, so the rail is not painted at all; the workspace's
+    // home entry is the only reachable first frame.
+    await h.openHome()
     const bar = h.rowsPlain().at(-1)!
     // The bar is the ONLY thing on the last row: it states the Esc semantics
-    // alone. A two-column frame puts the bar in the CONTENT column (beside
-    // the rail's own cell), so the assertion reads the bar's TEXT, not its
-    // column.
-    assert.ok(bar.includes('Esc close'), `the bar keeps its Esc semantics at ${columns}x${rows}: ${bar}`)
+    // alone and starts at X=0 in every projection. A narrow terminal opens on
+    // the About CONTENT (Esc back to the rail); 76+ opens on the rail (Esc
+    // close).
+    const back = columns < 76 ? 'Esc back' : 'Esc close'
+    assert.ok(bar.includes(back), `the bar keeps its ${back} semantics at ${columns}x${rows}: ${bar}`)
     for (const forbidden of ['Up/Down', 'Left', 'Right', 'Enter', 'Tab', 'r refresh', 'c copy', 'PgDn', 'PgUp']) {
       assert.ok(!bar.includes(forbidden), `${columns}x${rows} must not advertise the inert ${forbidden}: ${bar}`)
     }
@@ -3532,32 +3535,40 @@ test('B-17 the diagnostic line keeps its field name muted and tones only the sta
 
 interface SettingsLadder {
   readonly layout: 'wide' | 'medium' | 'narrow'
+  readonly headerRows: number
   readonly metaRows: number
   readonly ruleRows: number
   readonly noticeRows: number
-  readonly bodyRows: number
+  readonly paneHeaderRows: number
+  readonly contentRows: number
 }
 
 /**
  * The §8 ladder over the panel's own documented grants
- * (`settings-workspace-panel.ts:302-345`: the exported `76` medium minimum and
- * the `108` wide minimum, the notice `base - 1 >= 2` floor, the diagnostic
- * `base - 1 >= 3` floor, and `bodyWithoutRules >= 5` for the two rules).
+ * (`settings-workspace-panel.ts`: the exported `76` medium minimum, the `108`
+ * wide minimum, the notice `base - 1 >= 2` floor, the diagnostic
+ * `base - 1 >= 3` floor, one top rule while the body grant keeps >= 5 rows, and
+ * a pane header reserved INSIDE that body grant).
  */
 function settingsLadder(width: number, rows: number, noticeLive: boolean): SettingsLadder {
   const safeRows = Math.max(1, Math.floor(rows))
+  const layout = width >= 108 ? 'wide' : width >= 76 ? 'medium' : 'narrow'
   const headerRows = safeRows >= 2 ? 1 : 0
   const base = Math.max(0, safeRows - headerRows - 1)
   const noticeRows = safeRows >= 6 && noticeLive && base - 1 >= 2 ? 1 : 0
   const metaRows = safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
   const bodyWithoutRules = base - noticeRows - metaRows
-  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
+  const ruleRows = bodyWithoutRules >= 5 ? 1 : 0
+  const bodyRows = bodyWithoutRules - ruleRows
+  const paneHeaderRows = layout !== 'narrow' && bodyRows >= 2 ? 1 : 0
   return {
-    layout: width >= 108 ? 'wide' : width >= 76 ? 'medium' : 'narrow',
+    layout,
+    headerRows,
     metaRows,
     ruleRows,
     noticeRows,
-    bodyRows: bodyWithoutRules - ruleRows,
+    paneHeaderRows,
+    contentRows: bodyRows - paneHeaderRows,
   }
 }
 
@@ -3594,26 +3605,27 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
           ? 'Up/Down select · Right open · Enter open · Esc close'
           : 'Up/Down select · Right open · Enter open · Tab panes · Esc close'
       assertBarIsLastRow(painted, frame.readColor, categoryBar)
-      const bodyTop = 1 + ladder.metaRows + (ladder.ruleRows >= 1 ? 1 : 0)
-      const bodyIndexes = Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index)
+      const bodyTop = ladder.headerRows + ladder.metaRows + ladder.ruleRows + ladder.noticeRows
+      const contentTop = bodyTop + ladder.paneHeaderRows
+      const bodyIndexes = Array.from({ length: ladder.contentRows }, (_, index) => contentTop + index)
       assertBodyFloor(painted, bodyIndexes, line => /^> \S/.test(line), `Settings ${columns}x${rows}`)
       assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
       assertRowWidths(h, columns)
 
       // §11.3.2/§4.5: exactly ONE chrome active device, and it is the focused pane
-      // label. Wide/medium L0 put the pane header on the body's first row, so the
-      // focused `[Categories (8)]` is the ONE primary label. The narrow projection
-      // paints NO pane header at all (settings-workspace-panel.ts:739-803): the
-      // MEASURED 72x24/44x20 frames put the plain list cursor on that row
-      // (`3|> Appearance`), so the returned device list is EMPTY there.
+      // label. Wide/medium put the shared pane header on the body's first row, so
+      // the focused `[Categories (8)]` is the ONE primary label. The narrow
+      // projection paints NO pane header at all: the plain list cursor is not a
+      // chrome active device, so the returned device list is EMPTY there.
       const device = assertOneActiveDevice(frame, {
         rows: [bodyTop],
         labelPrefixes: ['[Categories', '[Rows', '[Details'],
       })
-      assert.deepEqual(device, ladder.layout === 'narrow' ? [] : ['[Categories'],
+      assert.deepEqual(device, ladder.paneHeaderRows === 1 ? ['[Categories'] : [],
         `the focused pane device at ${columns}x${rows} (${ladder.layout}):\n${h.view()}`)
 
-      // §8 step 2: the full-width rules exist exactly while the body keeps >= 5 rows.
+      // §8 step 2: the ONE top rule exists exactly while the body grant keeps
+      // >= 5 rows without it.
       assert.equal(painted.filter(line => /^─+$/.test(line)).length, ladder.ruleRows,
         `the decorative rules at ${columns}x${rows}:\n${h.view()}`)
 
@@ -3808,14 +3820,12 @@ test('the direct pages paint exactly the category rail and the content column', 
     assert.ok(!h.view().includes('Rows ('), `the direct layout paints NO Rows pane at ${columns}x${rows}:\n${h.view()}`)
     assert.ok(!h.view().includes('Details'), `the direct layout paints NO Details pane at ${columns}x${rows}:\n${h.view()}`)
     // The single physical action bar is the last row and states the rail's
-    // keys. The two-column frame paints it in the CONTENT column.
+    // keys. It spans the WHOLE frame from X=0 (the legacy bar's position), so
+    // the 80-column frame no longer squeezes its segments.
     assertBarIsLastRow(
       painted,
       (row, col) => h.vt.getCellFgRgb(row, col),
-      columns >= 100
-        ? 'Up/Down navigate · Enter/Right focus · Tab focus · Esc close'
-        : 'Up/Down navigate · Enter/Right focus · Esc close',
-      24,
+      'Up/Down navigate · Enter/Right focus · Tab focus · Esc close',
     )
     h.dispose()
   }
@@ -4018,14 +4028,14 @@ test('the 90-column Settings split keeps the Models refresh hint over the region
   h.dispose()
 })
 
-test('the Tab hints drop as whole segments and the action bar keeps the last physical row', async () => {
-  // 80x10: the medium content column is too narrow for the rail's Tab focus
-  // segment; it is dropped WHOLE, never truncated, and Esc keeps the bar.
+test('the Tab hints are whole segments and the action bar keeps the last physical row', async () => {
+  // 80x10: the direct bar spans the whole 80-cell frame from X=0, so the whole
+  // Tab focus segment fits and is painted intact (it is never squeezed into
+  // the 56-cell content column and never cut mid-word).
   const narrow = setup({ columns: 80, rows: 10 })
   await narrow.openHome()
   const bar80 = narrow.rowsPlain().at(-1) ?? ''
-  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Esc close/u)
-  assert.doesNotMatch(bar80, /Tab focus/u)
+  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Tab focus · Esc close/u)
   assert.doesNotMatch(bar80, /…/u, 'the bar never truncates a segment mid-word')
   assertNoHalfSegmentInBar(narrow.rowsPlain(), narrow.rowsPlain().length - 1, ' · ')
   narrow.dispose()
@@ -4339,4 +4349,474 @@ test('B-05h the Visual tools row keeps its focus/choice/confirm contract at medi
   await key(narrow, '\x1b') // rows -> categories
   assert.ok(narrow.rowsPlain().some(line => line.includes('> Tools')), 'Esc returns to the narrow rail with Tools selected')
   narrow.dispose()
+})
+
+// ── The shared Settings vertical chrome ───────────────────────────────────
+//
+// Every case drives the real `/settings` entry, the real TuiApp lease and the
+// real VirtualTerminal cells. The expected geometry is the frozen planner:
+// header → metadata → at most one top rule → optional notice → optional pane
+// header → body → the ONE physical last-row action bar.
+
+const SETTINGS_PROVIDERS: readonly CredentialProviderOption[] = [{
+  route: 'acme',
+  label: 'Acme Gateway',
+  ref: 'ACME_API_KEY',
+  configured: true,
+  declared: false,
+  namesCredential: true,
+  group: 'configured',
+  canProvisionProfile: true,
+}]
+
+/** The physical rows every multi-column frame must agree on. */
+const pr1Geometry = (h: Harness): { paneY: number; contentY: number; barY: number } => {
+  const rows = h.rowsPlain()
+  const paneY = rows.findIndex(line => line.includes('Categories (8)'))
+  assert.ok(paneY >= 0, `the shared pane header must be painted:\n${h.view()}`)
+  const contentY = paneY + 1
+  assert.notEqual((rows[contentY] ?? '').trim(), '', `the first content row must carry real content:\n${h.view()}`)
+  return { paneY, contentY, barY: rows.length - 1 }
+}
+
+test('direct and legacy settings categories share the pane-header, first-body and action-bar rows at medium and wide widths', async () => {
+  const pairs = [['About', 'Appearance'], ['Models', 'Display'], ['Account', 'Tools']] as const
+  for (const columns of [80, 100, 107, 108, 120] as const) {
+    for (const [directCategory, legacyCategory] of pairs) {
+      const direct = setup({ columns, rows: 24 })
+      await direct.open(directCategory)
+      const directGeometry = pr1Geometry(direct)
+      const directHead = direct.rowsPlain()[directGeometry.paneY]!
+      assert.match(directHead, /\[Categories \(8\)\]/u, `the rail is the active device:\n${directHead}`)
+      assert.match(directHead, new RegExp(`\\b${directCategory}\\b`, 'u'), `the right label names the page:\n${directHead}`)
+      assert.doesNotMatch(directHead, /Rows \(|Details/u, 'the direct header fakes no legacy panes')
+      assert.match(direct.rowsPlain().at(-1) ?? '', /Esc close/u, 'the last row is the rail action bar')
+      direct.dispose()
+
+      const legacy = setup({ columns, rows: 24 })
+      await legacy.open(legacyCategory)
+      const legacyGeometry = pr1Geometry(legacy)
+      const legacyHead = legacy.rowsPlain()[legacyGeometry.paneY]!
+      assert.match(legacyHead, /\[Categories \(8\)\].*Rows \(\d+\)/u, `the legacy panes stay adjacent:\n${legacyHead}`)
+      legacy.dispose()
+
+      assert.deepEqual(directGeometry, legacyGeometry,
+        `direct ${directCategory} and legacy ${legacyCategory} must share the chrome Y at ${columns}:\n${direct.view()}\n---\n${legacy.view()}`)
+    }
+  }
+})
+
+test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar at the frozen rows', async () => {
+  for (const rows of [24, 40] as const) {
+    const direct = setup({ columns: 120, rows })
+    await direct.openHome()
+    const frame = direct.rowsPlain()
+    assert.equal(frame.length, rows)
+    assert.match(frame[0]!, /^Settings · Categories/u)
+    assert.match(frame[1]!, /^Scope: /u)
+    assert.match(frame[2]!, /^─+$/u)
+    assert.match(frame[3]!, /^\[Categories \(8\)\].*About/u)
+    assert.doesNotMatch(frame[3]!, /Rows \(|Details/u, 'the direct projection paints exactly two labels')
+    assert.match(frame[4]!, /^> About/u, 'the first real content row follows the pane header')
+    assert.match(frame.at(-1) ?? '', /Esc close/u)
+    direct.dispose()
+
+    const legacy = setup({ columns: 120, rows })
+    await legacy.open('Appearance')
+    const legacyFrame = legacy.rowsPlain()
+    assert.equal(legacyFrame.length, rows)
+    assert.match(legacyFrame[0]!, /^Settings · Categories/u)
+    assert.match(legacyFrame[1]!, /^Scope: /u)
+    assert.match(legacyFrame[2]!, /^─+$/u)
+    assert.match(legacyFrame[3]!, /^\[Categories \(8\)\].*Rows \(2\).*Details/u,
+      'the wide legacy frame keeps all three pane headers')
+    assert.match(legacyFrame[4]!, /^ {2}About/u)
+    assert.match(legacyFrame.at(-1) ?? '', /Esc close/u)
+    legacy.dispose()
+  }
+})
+
+test('medium legacy levels keep Categories+Rows at L0 and Rows+Details at L1/L2', async () => {
+  for (const columns of [76, 80, 100, 107] as const) {
+    const h = setup({ columns, rows: 24 })
+    await h.open('Appearance')
+    let frame = h.rowsPlain()
+    let pane = frame.findIndex(line => line.includes('Categories (8)'))
+    assert.ok(pane >= 0)
+    assert.match(frame[pane]!, /\[Categories \(8\)\].*Rows \(2\)/u, 'L0 is Categories + Rows')
+    assert.doesNotMatch(frame[pane]!, /Details/u)
+
+    await key(h, '\r') // L0 -> L1
+    frame = h.rowsPlain()
+    pane = frame.findIndex(line => line.includes('[Rows (2)]'))
+    assert.ok(pane >= 0, `L1 must paint the focused Rows header at ${columns}:\n${h.view()}`)
+    assert.match(frame[pane]!, /\[Rows \(2\)\].*Details/u, 'L1 is Rows + Details')
+    assert.doesNotMatch(frame[pane]!, /Categories/u, 'the categories column is NOT pinned at L1/L2')
+
+    await key(h, '\x1b[C') // L1 -> L2 inline choice
+    frame = h.rowsPlain()
+    pane = frame.findIndex(line => line.includes('[Details]'))
+    assert.ok(pane >= 0)
+    assert.match(frame[pane]!, /Rows \(2\).*\[Details\]/u, 'L2 keeps Rows + the focused Details')
+    assert.doesNotMatch(frame[pane]!, /Categories/u)
+    h.dispose()
+  }
+})
+
+test('the 72/75/76/107/108 breakpoint edges keep their projection and at most one top rule', async () => {
+  for (const columns of [72, 75, 76, 107, 108] as const) {
+    const direct = setup({ columns, rows: 24 })
+    await direct.openHome()
+    assertRowWidths(direct, columns)
+    let frame = direct.rowsPlain()
+    assert.ok(frame.filter(line => /^─+$/.test(line)).length <= 1, `no second rule at ${columns}:\n${direct.view()}`)
+    if (columns < 76) {
+      assert.ok(!direct.view().includes('Categories ('), `narrow paints no pane header:\n${direct.view()}`)
+    } else {
+      const pane = frame.findIndex(line => line.includes('[Categories (8)]'))
+      assert.ok(pane >= 0)
+      assert.match(frame[pane]!, /\[Categories \(8\)\].*About/u)
+      assert.doesNotMatch(frame[pane]!, /Rows \(|Details/u)
+    }
+    direct.dispose()
+
+    const legacy = setup({ columns, rows: 24 })
+    await legacy.open('Appearance')
+    assertRowWidths(legacy, columns)
+    frame = legacy.rowsPlain()
+    assert.equal(frame.filter(line => /^─+$/.test(line)).length, 1, `the one top rule at ${columns}:\n${legacy.view()}`)
+    if (columns < 76) {
+      assert.ok(!legacy.view().includes('Categories ('), `narrow paints no pane header:\n${legacy.view()}`)
+      assert.ok(frame.some(line => line.startsWith('> Appearance')), 'the narrow list is the one pane')
+    } else {
+      const pane = frame.findIndex(line => line.includes('Categories (8)'))
+      assert.ok(pane >= 0)
+      assert.match(frame[pane]!, /\[Categories \(8\)\].*Rows \(2\)/u)
+      if (columns >= 108) assert.match(frame[pane]!, /Details/u, '108 is the three-column edge')
+      else assert.doesNotMatch(frame[pane]!, /Details/u, '76..107 stays two-column')
+    }
+    legacy.dispose()
+  }
+})
+
+test('an app notice sits after the top rule and before the pane header at every granted height', async () => {
+  const h = setup({ columns: 120, rows: 24, doc: { theme: 'dark' } })
+  await h.open('Appearance')
+  await key(h, '\r') // L1 exposes the real Detail copy button
+  const copyRow = rowOf(h, 'Copy value [C]')
+  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
+  press(h, copyRow, copyCol)
+  release(h, copyRow, copyCol)
+  await settle(h)
+  assert.ok(h.view().includes('Copy sent'), `the app notice is live:\n${h.view()}`)
+  let frame = h.rowsPlain()
+  assert.equal(frame.findIndex(line => line.includes('Copy sent')), 3, 'the notice follows the top rule')
+  assert.equal(frame.findIndex(line => line.includes('Rows (2)')), 4, 'the pane header follows the notice')
+  assert.match(frame[5]!, /Configured theme/u, 'the first real body row follows the pane header')
+  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'exactly one app-level notice')
+
+  h.vt.resize(100, 6)
+  await h.vt.waitForRender()
+  frame = h.rowsPlain()
+  assert.equal(frame[1]!.includes('Copy sent'), true, `the notice follows the header at 6 rows:\n${h.view()}`)
+  assert.equal(frame[2]!.includes('Rows (2)'), true, `the pane header follows the notice at 6 rows:\n${h.view()}`)
+  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'still one notice')
+
+  h.vt.resize(100, 8)
+  await h.vt.waitForRender()
+  frame = h.rowsPlain()
+  assert.equal(frame[2]!.includes('Copy sent'), true, `the notice follows the diagnostic line at 8 rows:\n${h.view()}`)
+  assert.equal(frame[3]!.includes('Rows (2)'), true, `the pane header follows the notice at 8 rows:\n${h.view()}`)
+  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  h.dispose()
+})
+
+test('tiny heights grant only the allowed chrome and keep hidden actions inert', async () => {
+  const expected: Record<number, { meta: boolean; rule: boolean; pane: boolean; content: number }> = {
+    1: { meta: false, rule: false, pane: false, content: 0 },
+    2: { meta: false, rule: false, pane: false, content: 0 },
+    3: { meta: false, rule: false, pane: false, content: 1 },
+    5: { meta: false, rule: false, pane: true, content: 2 },
+    6: { meta: false, rule: false, pane: true, content: 3 },
+    8: { meta: true, rule: true, pane: true, content: 3 },
+    10: { meta: true, rule: true, pane: true, content: 5 },
+  }
+  for (const [heightText, grant] of Object.entries(expected)) {
+    const height = Number(heightText)
+    const h = setup({ columns: 100, rows: height })
+    await h.openHome()
+    const painted = h.rowsPlain()
+    assert.equal(painted.length, height)
+    const headerRows = height >= 2 ? 1 : 0
+    const paneY = headerRows + (grant.meta ? 1 : 0) + (grant.rule ? 1 : 0)
+    const contentY = paneY + (grant.pane ? 1 : 0)
+    assert.equal(painted.some(line => line.startsWith('Settings ·')), headerRows === 1, 'the header needs two rows')
+    assert.equal(painted.some(line => line.startsWith('Scope: ')), grant.meta, 'the diagnostic keeps its floor')
+    assert.equal(painted.filter(line => /^─+$/.test(line)).length, grant.rule ? 1 : 0, 'the one rule keeps its floor')
+    assert.equal(painted.some(line => line.includes('Categories (8)')), grant.pane, 'the pane header keeps one content row')
+    if (grant.pane) assert.notEqual((painted[contentY] ?? '').trim(), '', 'a granted pane header leaves real content below it')
+    assert.match(painted.at(-1) ?? '', /Esc close/u, 'the bar is the physical last row')
+    assert.equal(contentY + grant.content, height - 1, 'the granted body ends directly above the bar')
+
+    if (grant.content === 0) {
+      const before = h.view()
+      for (const data of ['c', 'r', '\r', '\t']) await key(h, data)
+      assert.equal(h.view(), before, `no hidden action fires at ${height} rows`)
+      assert.deepEqual(h.copied, [], 'copy stays inert with no body')
+      assert.equal(h.replacements(), 0, 'refresh never reads/writes with no body')
+      await key(h, '\u001b')
+      assert.ok(!h.view().includes('Settings ·'), 'Esc still leaves the workspace')
+    }
+    h.dispose()
+  }
+
+  // Narrow: no pane header at any granted body height.
+  for (const height of [3, 5, 8] as const) {
+    const h = setup({ columns: 72, rows: height })
+    await h.openHome()
+    const painted = h.rowsPlain()
+    assert.equal(painted.length, height)
+    assert.ok(!h.view().includes('Categories ('), 'narrow never paints a pane header')
+    const headerRows = height >= 2 ? 1 : 0
+    const metaRows = height >= 8 ? 1 : 0
+    const ruleRows = height >= 8 ? 1 : 0
+    const bodyTop = headerRows + metaRows + ruleRows
+    assert.notEqual((painted[bodyTop] ?? '').trim(), '', 'the narrow body starts at the shared top')
+    assert.match(painted.at(-1) ?? '', /Esc back/u)
+    h.dispose()
+  }
+})
+
+test('each frame paints one last-row action bar naming the live keyboard owner', async () => {
+  const assertOneBar = (h: Harness, expected: RegExp, absent: RegExp): void => {
+    const rows = h.rowsPlain()
+    const bars = rows.filter(line => /Esc (?:close|back)/u.test(line))
+    assert.equal(bars.length, 1, `exactly one action bar row:\n${h.view()}`)
+    const bar = rows.at(-1)!
+    assert.match(bar, expected)
+    assert.doesNotMatch(bar, absent)
+    assert.doesNotMatch(bar, /^ /u, 'the bar starts at X=0')
+  }
+
+  const about = setup({ columns: 120, rows: 24 })
+  await about.openHome()
+  assertOneBar(about, /Enter\/Right focus · Tab focus · Esc close/u, /Esc back/u)
+  await key(about, '\t') // rail -> the About content
+  assertOneBar(about, /Esc back/u, /Esc close/u)
+  about.dispose()
+
+  const models = setup({ columns: 120, rows: 24, providerOptions: SETTINGS_PROVIDERS })
+  await models.open('Models')
+  await key(models, '\t')
+  assertOneBar(models, /r refresh · .*Esc back/u, /Esc close/u)
+  models.dispose()
+
+  const account = setup({ columns: 120, rows: 24 })
+  await account.open('Account')
+  await key(account, '\t')
+  assertOneBar(account, /Esc back/u, /Esc close/u)
+  account.dispose()
+
+  const legacy = setup({ columns: 120, rows: 24 })
+  await legacy.open('Appearance')
+  assertOneBar(legacy, /Right open · Enter open · Tab panes · Esc close/u, /Esc back/u)
+  await key(legacy, '\r')
+  assertOneBar(legacy, /Enter choose · .*Esc back/u, /Esc close/u)
+  await key(legacy, '\x1b[C') // the inline choice (Details holds the keyboard)
+  assertOneBar(legacy, /Enter confirm · .*Esc back/u, /Esc close/u)
+  legacy.dispose()
+})
+
+test('a direct page focus transfer reuses the painted page and performs no settings read or write', async () => {
+  const h = setup({ columns: 120, rows: 24, providerOptions: SETTINGS_PROVIDERS })
+  await h.open('Models')
+  assert.match(h.view(), /Models & Credentials/u)
+  const reads = h.reads()
+
+  await key(h, '\t') // the rail hands the keyboard to the SAME page
+  assert.match(h.rowsPlain()[0]!, /Settings · Models/u)
+  assert.match(h.view(), /Models & Credentials/u)
+  assert.equal(h.reads(), reads, 'the focus transfer performed no settings read')
+  assert.equal(h.replacements(), 0, 'the focus transfer performed no write')
+  await key(h, 'x') // a page-local inert key
+  assert.equal(h.reads(), reads)
+  assert.equal(h.replacements(), 0)
+
+  await key(h, '\u001b') // the page reports its own exit
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
+  await key(h, '\u001b[B') // Models -> Account preview
+  assert.match(h.view(), /DeepSeek Account/u)
+  assert.equal(h.reads(), reads, 'selecting the preview reads no settings document')
+  await key(h, '\t') // Account content focus
+  assert.match(h.rowsPlain()[0]!, /Settings · Account/u)
+  assert.equal(h.reads(), reads)
+  assert.equal(h.replacements(), 0)
+  h.dispose()
+})
+
+test('pointer and wheel act only on the last-painted body cells', async () => {
+  const about = setup({ columns: 120, rows: 24 })
+  await about.openHome()
+  const copyRow = rowOf(about, 'Copy All [C]')
+  const copyCol = cellIndexOf(about, copyRow, 'Copy All [C]')
+  press(about, copyRow, copyCol + 2)
+  release(about, copyRow, copyCol + 2)
+  await settle(about)
+  assert.equal(about.copied.length, 1, 'the painted Copy All button is the action')
+  const stable = about.view()
+
+  const paneRow = about.rowsPlain().findIndex(line => line.includes('[Categories (8)]'))
+  assert.ok(paneRow >= 0)
+  press(about, paneRow, 30)
+  release(about, paneRow, 30)
+  await settle(about)
+  assert.equal(about.view(), stable, 'a pane-header click is inert')
+  const barRow = about.rowsPlain().length - 1
+  press(about, barRow, 2)
+  release(about, barRow, 2)
+  await settle(about)
+  assert.equal(about.view(), stable, 'a bottom-bar click is inert')
+  const modelsRail = about.rowsPlain().findIndex(line => line.slice(0, 22).trim() === 'Models')
+  assert.ok(modelsRail >= 0)
+  press(about, modelsRail, 2)
+  release(about, modelsRail, 2)
+  await settle(about)
+  assert.match(about.rowsPlain()[0]!, /Settings · Categories/u, 'a rail click keeps the keyboard on the rail')
+  assert.match(about.view(), /Models & Credentials/u)
+  about.dispose()
+
+  const models = setup({ columns: 120, rows: 24, providerOptions: SETTINGS_PROVIDERS })
+  await models.open('Models')
+  const addRow = rowOf(models, 'Add Provider…')
+  const addCol = cellIndexOf(models, addRow, 'Add Provider…')
+  press(models, addRow, addCol)
+  release(models, addRow, addCol)
+  await settle(models)
+  assert.match(models.view(), /Add Provider/u, 'the page action row is a real body target')
+  assert.equal(models.replacements(), 0, 'opening the add-provider form writes nothing')
+  models.dispose()
+
+  const account = setup({ columns: 120, rows: 24 })
+  await account.open('Account')
+  const backRow = rowOf(account, '← Settings')
+  const backCol = cellIndexOf(account, backRow, '← Settings')
+  press(account, backRow, backCol)
+  release(account, backRow, backCol)
+  await settle(account)
+  assert.match(account.rowsPlain()[0]!, /Settings · Categories/u, 'the page action returned to the rail')
+  account.dispose()
+
+  // Wheel: only the pane under the pointer scrolls; chrome is inert.
+  const wheelHarness = setup({ columns: 80, rows: 10 })
+  await wheelHarness.openHome()
+  const frame0 = wheelHarness.view()
+  const wheelPane = wheelHarness.rowsPlain().findIndex(line => line.includes('Categories (8)'))
+  assert.ok(wheelPane >= 0)
+  wheel(wheelHarness, wheelPane, 2, true)
+  await wheelHarness.vt.waitForRender()
+  assert.equal(wheelHarness.view(), frame0, 'a wheel on the pane header is inert')
+  wheel(wheelHarness, wheelHarness.rowsPlain().length - 1, 2, true)
+  await wheelHarness.vt.waitForRender()
+  assert.equal(wheelHarness.view(), frame0, 'a wheel on the bottom bar is inert')
+  wheel(wheelHarness, wheelPane + 1, 2, true)
+  await wheelHarness.vt.waitForRender()
+  assert.notEqual(wheelHarness.view(), frame0, 'the wheel over the rail scrolls the rail')
+  wheelHarness.dispose()
+})
+
+test('a resize, category change or notice insertion between press and release refuses the gesture', async () => {
+  const resized = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
+  await resized.open('Appearance')
+  await key(resized, '\r')
+  const resizeRow = rowOf(resized, 'Copy value [C]')
+  const resizeCol = cellIndexOf(resized, resizeRow, 'Copy value [C]')
+  press(resized, resizeRow, resizeCol)
+  resized.vt.resize(120, 24)
+  await resized.vt.waitForRender()
+  release(resized, resizeRow, resizeCol)
+  await settle(resized)
+  assert.deepEqual(resized.copied, [], 'a resize between press and release refuses the gesture')
+  const freshRow = rowOf(resized, 'Copy value [C]')
+  const freshCol = cellIndexOf(resized, freshRow, 'Copy value [C]')
+  press(resized, freshRow, freshCol)
+  release(resized, freshRow, freshCol)
+  await settle(resized)
+  assert.equal(resized.copied.length, 1, 'an unchanged gesture on the repainted target still copies')
+  resized.dispose()
+
+  const switched = setup({ columns: 120, rows: 24 })
+  await switched.openHome()
+  const accountRow = switched.rowsPlain().findIndex(line => line.slice(0, 22).trim() === 'Account')
+  assert.ok(accountRow >= 0)
+  press(switched, accountRow, 2)
+  await key(switched, '\u001b[B') // About -> Models bumps the state version
+  release(switched, accountRow, 2)
+  await settle(switched)
+  assert.match(switched.view(), /Models & Credentials/u)
+  assert.doesNotMatch(switched.view(), /DeepSeek Account/u, 'the old Account press never activated')
+  switched.dispose()
+
+  const noticed = setup({ columns: 120, rows: 24 })
+  await noticed.openHome()
+  const noticeRow = rowOf(noticed, 'Copy All [C]')
+  const noticeCol = cellIndexOf(noticed, noticeRow, 'Copy All [C]')
+  press(noticed, noticeRow, noticeCol + 2)
+  noticed.app.notify('gesture notice', 'info')
+  await noticed.vt.waitForRender()
+  release(noticed, noticeRow, noticeCol + 2)
+  await settle(noticed)
+  assert.deepEqual(noticed.copied, [], 'a notice insertion between press and release refuses the gesture')
+  const shiftedRow = rowOf(noticed, 'Copy All [C]')
+  const shiftedCol = cellIndexOf(noticed, shiftedRow, 'Copy All [C]')
+  press(noticed, shiftedRow, shiftedCol + 2)
+  release(noticed, shiftedRow, shiftedCol + 2)
+  await settle(noticed)
+  assert.equal(noticed.copied.length, 1, 'the repainted target still works')
+  noticed.dispose()
+})
+
+test('CJK values wrap inside their pane and the pane-header device follows the live theme token', async () => {
+  const longValue = 'file:主题-主题-主题-主题-主题-主题-主题-主题-主题-主题'
+  for (const [columns, rows] of [[80, 24], [120, 40], [44, 20]] as const) {
+    const h = setup({ columns, rows, doc: { theme: longValue } })
+    await h.open('Appearance')
+    if (columns >= 76) {
+      const pane = h.rowsPlain().findIndex(line => line.includes('[Categories (8)]'))
+      assert.ok(pane >= 0)
+      assert.ok(visibleWidth(h.vt.getViewport()[pane]!) <= columns, `the pane header fits ${columns}`)
+    }
+    await key(h, '\r') // L0 -> L1
+    if (columns >= 76) {
+      const pane = h.rowsPlain().findIndex(line => line.includes('Rows (2)'))
+      assert.ok(pane >= 0)
+      assert.ok(visibleWidth(h.vt.getViewport()[pane]!) <= columns, `the rows pane header fits ${columns}`)
+    }
+    await key(h, '\r') // L1 -> the theme detail / inline choice
+    assert.ok(h.view().includes('主题'), `the complete CJK value stays readable at ${columns}x${rows}:\n${h.view()}`)
+    assertRowWidths(h, columns)
+    h.dispose()
+  }
+
+  const h = setup({ columns: 120, rows: 24 })
+  await h.openHome()
+  let paneRow = h.rowsPlain().findIndex(line => line.includes('[Categories (8)]'))
+  assert.ok(paneRow >= 0)
+  assert.equal(h.vt.getCellFgRgb(paneRow, 0), hexToRgb(currentPalette.primary), 'the focused rail label uses primary')
+  assert.equal(h.vt.getCellFgRgb(paneRow, cellIndexOf(h, paneRow, 'About')), hexToRgb(currentPalette.textDim),
+    'the unfocused page label uses textDim')
+  await key(h, '\t') // About content owns the keyboard
+  paneRow = h.rowsPlain().findIndex(line => line.includes('[About]'))
+  assert.ok(paneRow >= 0)
+  assert.equal(h.vt.getCellFgRgb(paneRow, 0), hexToRgb(currentPalette.textDim))
+  assert.equal(h.vt.getCellFgRgb(paneRow, cellIndexOf(h, paneRow, '[About]')), hexToRgb(currentPalette.primary))
+  setTheme('light')
+  h.app.requestRender(true)
+  await h.vt.waitForRender()
+  paneRow = h.rowsPlain().findIndex(line => line.includes('[About]'))
+  assert.ok(paneRow >= 0)
+  assert.equal(h.vt.getCellFgRgb(paneRow, cellIndexOf(h, paneRow, '[About]')), hexToRgb(currentPalette.primary),
+    'the pane-header device follows the live light palette')
+  h.dispose()
 })

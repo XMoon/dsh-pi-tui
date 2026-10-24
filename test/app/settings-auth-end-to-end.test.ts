@@ -727,10 +727,12 @@ test('Enter on the rail hands the keyboard to the SAME Account page without runn
   assert.equal(h.calls.some(call => call.includes('startSignIn')), false,
     'the focus transfer must not run the highlighted Sign in action')
   // The SAME page instance is still painted: only the chrome around it
-  // changes (the header names the new focus owner and the action bar swaps
-  // the rail hints for the page own hints).
-  const page = (frame: string): string => frame.split('\n').slice(1, -1).join('\n')
-  assert.equal(page(h.view()), page(before), 'the focus transfer repaints the same page')
+  // changes (the header names the new focus owner, the pane header moves the
+  // active device to `[Account]`, and the action bar swaps the rail hints for
+  // the page's own hints). This 120x40 frame spends its first four rows on
+  // chrome: header, metadata, top rule and the pane header.
+  const page = (frame: string): string => frame.split('\n').slice(4, -1).join('\n')
+  assert.equal(page(h.view()), page(before), 'the focus transfer repaints the same page body')
   h.close()
 })
 

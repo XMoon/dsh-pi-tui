@@ -41,9 +41,10 @@ const frameText = (rows: readonly string[]): string =>
  * painted (its first cell has an RGB foreground), and that no blank trailing row
  * pushed the bar up.
  *
- * `firstCell` is the column the bar STARTS at: a two-column frame (the Settings
- * category rail and its content column) paints the bar in the CONTENT column,
- * so its first cell is not column 0.
+ * `firstCell` is the column the bar STARTS at. The caller supplies its
+ * surface's own inset: a full-width bar starts at column 0 (the Settings
+ * workspace's single bar), while a surface that paints its bar inside an inset
+ * passes that first cell.
  */
 export function assertBarIsLastRow(
   rows: readonly string[],

@@ -1726,84 +1726,88 @@ export class ModelsWorkspacePage implements Component {
     const lines: string[] = []
     const targets: HitTarget[] = []
     if (this.question !== undefined) {
+      const bodyRows = Math.max(0, height - 1)
       const notice = this.renderAuthNotice(width)
-      const questionRows = Math.max(1, height - 1 - notice.length)
+      const questionRows = Math.max(1, bodyRows - notice.length)
       const usable = questionRows >= 8
       this.questionUsable = usable
       this.question.flow.setMaxRows(Math.max(8, questionRows))
-      lines.push(...notice.map(line => fit(line, width)))
-      this.questionTop = lines.length
+      const body = notice.map(line => fit(line, width))
+      this.questionTop = body.length
       this.questionRows = usable ? questionRows : 0
       if (usable) {
-        lines.push(...this.question.flow.render(width).slice(0, questionRows).map(line => fit(line, width)))
+        body.push(...this.question.flow.render(width).slice(0, questionRows).map(line => fit(line, width)))
       } else {
-        lines.push(color.warning('Resize the terminal: the full form and its confirm hint need at least 8 rows. Enter is disabled.'))
+        body.push(fit(color.warning('Resize the terminal: the full form and its confirm hint need at least 8 rows. Enter is disabled.'), width))
       }
-      lines.push(color.textMuted(renderActionBarRow([
+      const bar = color.textMuted(renderActionBarRow([
         { text: 'type to edit', priority: 5 },
         { text: usable ? 'Enter continue' : 'Enter disabled', priority: 6 },
         { text: 'Esc back', priority: 8 },
-      ], width)))
+      ], width))
       this.paintedCopy = false
       this.copyValue = undefined
       this.paintedTargets = []
-      return this.pad(lines, height, width)
+      return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
     if (this.modelPicker !== undefined) {
+      const bodyRows = Math.max(0, height - 1)
       const notice = this.renderAuthNotice(width)
       const required = notice.length + 2
       this.pickerUsable = required <= height
+      this.paintedCopy = false
       if (!this.pickerUsable) {
-        lines.push(color.warning(`Resize the terminal: the authorization notice, model choices and actions need ${required} rows.`))
-        lines.push(color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width)))
-        this.paintedCopy = false
         this.paintedTargets = []
-        return this.pad(lines, height, width)
+        const bar = color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width))
+        const warning = fit(color.warning(`Resize the terminal: the authorization notice, model choices and actions need ${required} rows.`), width)
+        return this.pad(this.barAtLastRow([warning], height, width, bar), height, width)
       }
-      lines.push(...notice.map(line => fit(line, width)))
-      const pickerRows = Math.max(1, height - 1 - notice.length)
+      const body = notice.map(line => fit(line, width))
+      const pickerTop = body.length
+      const pickerRows = Math.max(1, bodyRows - pickerTop)
       const targetStart = targets.length
-      lines.push(...this.renderModelPicker(width, pickerRows, targets))
+      body.push(...this.renderModelPicker(width, pickerRows, targets))
       for (let index = targetStart; index < targets.length; index += 1) {
         const target = targets[index]!
-        targets[index] = { ...target, row: target.row + notice.length }
+        targets[index] = { ...target, row: target.row + pickerTop }
       }
-      lines.push(color.textMuted(renderActionBarRow([
+      const bar = color.textMuted(renderActionBarRow([
         { text: 'Space toggle', priority: 5 },
         { text: 'Enter apply', priority: 6 },
         { text: 'm manual', priority: 4 },
         { text: 'Esc cancel', priority: 8 },
-      ], width)))
-      this.paintedCopy = false
+      ], width))
       this.paintedTargets = targets
-      return this.pad(lines, height, width)
+      return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
     if (this.picker !== undefined) {
+      const bodyRows = Math.max(0, height - 1)
       const notice = this.renderAuthNotice(width)
       const required = notice.length + 2
       this.pickerUsable = required <= height
+      this.paintedCopy = false
       if (!this.pickerUsable) {
-        lines.push(color.warning(`Resize the terminal: the authorization notice, sign-in choices and actions need ${required} rows.`))
-        lines.push(color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width)))
-        this.paintedCopy = false
         this.paintedTargets = []
-        return this.pad(lines, height, width)
+        const bar = color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width))
+        const warning = fit(color.warning(`Resize the terminal: the authorization notice, sign-in choices and actions need ${required} rows.`), width)
+        return this.pad(this.barAtLastRow([warning], height, width, bar), height, width)
       }
-      lines.push(...notice.map(line => fit(line, width)))
+      const body = notice.map(line => fit(line, width))
+      const pickerTop = body.length
+      const pickerRows = Math.max(1, bodyRows - pickerTop)
       const targetStart = targets.length
-      lines.push(...this.renderPicker(width, Math.max(1, height - 1 - notice.length), targets))
+      body.push(...this.renderPicker(width, pickerRows, targets))
       for (let index = targetStart; index < targets.length; index += 1) {
         const target = targets[index]!
-        targets[index] = { ...target, row: target.row + notice.length }
+        targets[index] = { ...target, row: target.row + pickerTop }
       }
-      lines.push(color.textMuted(renderActionBarRow([
+      const bar = color.textMuted(renderActionBarRow([
         { text: 'Up/Down choose', priority: 5 },
         { text: 'Enter select', priority: 6 },
         { text: 'Esc cancel', priority: 8 },
-      ], width)))
-      this.paintedCopy = false
+      ], width))
       this.paintedTargets = targets
-      return this.pad(lines, height, width)
+      return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
     const projection = this.project(width)
     const rowCount = this.rowOrder.length
@@ -1812,7 +1816,9 @@ export class ModelsWorkspacePage implements Component {
       this.paintedActionIds.clear()
       this.paintedCopy = false
       this.paintedTargets = []
-      return this.pad([fit(color.warning('Resize the terminal to show the page actions.'), width)], height, width)
+      const bar = color.textMuted(renderActionBarRow([{ text: 'Esc back', priority: 8 }], width))
+      const body = [fit(color.warning('Resize the terminal to show the page actions.'), width)]
+      return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
     this.paintedRowIds.clear()
     this.paintedActionIds.clear()
@@ -1860,6 +1866,16 @@ export class ModelsWorkspacePage implements Component {
   private pad(lines: string[], height: number, width: number): string[] {
     const out = lines.slice(0, height)
     while (out.length < height) out.push(fit('', width))
+    return out
+  }
+
+  /** Keep the page's semantic bar on the physical last row: the body is
+   *  padded/clipped to the rows above it, never the bar. */
+  private barAtLastRow(body: readonly string[], height: number, width: number, bar: string): string[] {
+    const bodyRows = Math.max(0, height - 1)
+    const out = body.slice(0, bodyRows).map(line => fit(line, width))
+    while (out.length < bodyRows) out.push(fit('', width))
+    out.push(bar)
     return out
   }
 
