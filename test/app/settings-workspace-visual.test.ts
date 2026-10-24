@@ -137,6 +137,8 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   readonly viewports: PluginContentViewport[] = []
   disposed = false
   focused = false
+  /** Bumps on every fake-local state change (see gestureRevision()). */
+  private viewRevision = 0
   private view: PluginWorkspaceView = 'list'
   private readonly yieldNavigation: () => void
   constructor(yieldNavigation: () => void) {
@@ -153,6 +155,9 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   }
   pendingMutation(): boolean {
     return false
+  }
+  gestureRevision(): number {
+    return this.viewRevision
   }
   cancelPointer(): void {}
   private layout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number; readonly body: number } {

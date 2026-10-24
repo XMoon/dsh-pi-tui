@@ -142,6 +142,14 @@ export interface EmbeddedPluginPage extends Component {
   currentView(): PluginWorkspaceView
   canYieldFocusToNavigation(): boolean
   pendingMutation(): boolean
+  /**
+   * The page's monotonic gesture revision. It bumps on EVERY local state change
+   * that can move a painted target or its meaning (view, filter, query,
+   * selected card, install phase, scroll, painted action set), so the Settings
+   * root can fence a rail press it recorded before forwarding a key to this
+   * page: the same view and yield status can still hide a changed list.
+   */
+  gestureRevision(): number
   cancelPointer(): void
   handleInput(data: string): void
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined
@@ -386,6 +394,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    */
   pendingMutation(): boolean {
     return this.controller.busy() !== undefined
+  }
+
+  /** See {@link EmbeddedPluginPage.gestureRevision}. */
+  gestureRevision(): number {
+    return this.revision
   }
 
   /** Revoke one in-flight press (never a Host operation). */

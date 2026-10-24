@@ -60,6 +60,7 @@ function embeddedPage(counts: CommandCounts): EmbeddedPluginPage {
     currentView: () => 'list',
     canYieldFocusToNavigation: () => true,
     pendingMutation: () => false,
+    gestureRevision: () => 0,
     cancelPointer: () => {},
     handleInput: () => {},
     handleMouse: () => undefined,
