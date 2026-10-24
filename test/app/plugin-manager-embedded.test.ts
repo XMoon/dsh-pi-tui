@@ -344,6 +344,14 @@ function railRow(harness: WorkspaceHarness, label: string): number {
   return row
 }
 
+/** Click a FRESH screen cell (never the just-pressed one) and settle. The fork
+ *  withholds a same-cell click inside its multi-click window, so a control must
+ *  either move to another cell or use the keyboard. */
+async function clickCell(harness: WorkspaceHarness, row: number, column: number): Promise<void> {
+  click(harness, row, column)
+  await harness.settle()
+}
+
 async function selectCard(harness: WorkspaceHarness, value: string): Promise<void> {
   for (let step = 0; step < 30; step += 1) {
     if (harness.panel.selectedCardValue() === value) return
@@ -731,18 +739,19 @@ test('T09 a Controller install-phase change between press and release refuses th
   await harness.settle()
   assert.equal(harness.installCalls.length, 1, 'the stale approve release never dispatches a second install')
   assert.equal(harness.controller.installView()?.phase, 'editing', 'the new attempt stays in its own phase')
-  // Control: the settled editing frame still owns its own keys and the SAME
-  // request identity — the refused release changed neither.
+  // Control: the settled editing frame keeps the SAME request identity AND
+  // admits a real POINTER click on its painted Inspect action.
   const editingBefore = harness.controller.installView()?.requestId
-  harness.vt.sendInput('x')
+  assert.equal(harness.controller.installView()?.requestId, editingBefore, 'the request identity is unchanged')
+  // The editing frame needs a spec before Inspect is admitted.
+  for (const character of 'pkg') harness.vt.sendInput(character)
   await harness.settle()
-  assert.equal(harness.controller.installView()?.phase, 'editing', 'the fresh editing frame keeps its phase')
+  const inspectRow = rowOf(harness, 'Inspect')
+  await clickCell(harness, inspectRow, 5)
+  assert.notEqual(harness.controller.installView()?.phase, 'editing',
+    'the fresh editing frame admits a pointer click on its own Inspect action')
   assert.equal(harness.controller.installView()?.requestId, editingBefore,
-    'the fresh editing frame keeps the ONE request identity')
-  harness.vt.sendInput('\t')
-  await harness.settle()
-  assert.equal(harness.controller.installView()?.phase, 'editing',
-    'the fresh editing frame admits its own field-switch key')
+    'the pointer-driven Inspect keeps the ONE request identity')
   harness.app.dispose()
 })
 
@@ -891,19 +900,18 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   await focusCase.settle()
   assert.equal(focusCase.panel.currentView(), 'list', 'the focus yield drops the press')
   assert.match(bar(focusCase), /Esc close/u)
-  // §8 T09: a legal gesture on the NEXT frame still works after the refusal. The
-  // rail already owns the keyboard here, so its own focus key is the legal one.
+  // §8 T09 wants a MOUSE control on the next frame: re-focus the List through
+  // the rail, then click a DIFFERENT card's painted cell (not the pressed one).
   focusCase.vt.sendInput('\r')
   await focusCase.settle()
   assert.equal(focusCase.panel.focused, true, 'the fresh rail Enter re-focuses the plugin List')
-  // The legal control uses the keyboard on the CURRENT selection: the pointer
-  // cell just released sits inside the fork's multi-click window, and the page
-  // may have re-anchored its selection, so a stored row/cell would test the
-  // wrong thing. Details admission is what the refused release must not do.
-  focusCase.vt.sendInput('\r')
-  await focusCase.settle()
-  assert.equal(focusCase.panel.currentView(), 'details', 'the fresh frame admits the List Enter key')
-  assert.ok(focusCase.panel.selectedCardValue() !== undefined, 'Details opened on a real selected card')
+  const otherCell = rowOf(focusCase, '@deepseek-ai/dsh-base')
+  await clickCell(focusCase, otherCell, 30)
+  assert.equal(focusCase.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base',
+    'the fresh frame admits a real pointer selection on another card')
+  assert.equal(focusCase.panel.currentView(), 'list', 'a first click on an unselected card only selects')
+  // One pointer control is the requirement; a second same-cell click would land
+  // inside the fork's multi-click window (word select) rather than test admission.
   focusCase.app.dispose()
 
   // Press -> an in-page key that changes the page's own presentation -> release
@@ -921,14 +929,12 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   release(filterCase, filterRow, 30)
   await filterCase.settle()
   assert.equal(filterCase.panel.currentView(), 'list', 'an in-page edit between press and release refuses the old release')
-  // Control: after Esc leaves the editor, the SAME card's List Enter opens
-  // Details. (The keyboard is used because the pressed cell sits inside the
-  // fork's multi-click window, where a same-cell click becomes a word select.)
+  // Control: after Esc leaves the editor, a POINTER click on another card acts.
   filterCase.vt.sendInput('\x1b')
   await filterCase.settle()
-  filterCase.vt.sendInput('\r')
-  await filterCase.settle()
-  assert.equal(filterCase.panel.currentView(), 'details', 'the fresh frame admits Enter after the in-page edit')
+  await clickCell(filterCase, rowOf(filterCase, '@deepseek-ai/dsh-base'), 30)
+  assert.equal(filterCase.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base',
+    'the fresh frame admits a pointer selection after the in-page edit')
   filterCase.app.dispose()
 
   // Press -> the page's own Host notice change -> release.
@@ -940,14 +946,10 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   release(noticeCase, noticeRow, 30)
   await noticeCase.settle()
   assert.equal(noticeCase.panel.currentView(), 'list', 'a Host-notice change between press and release refuses the old release')
-  // Control: after the notice settles, the page's own keys still act.
-  noticeCase.vt.sendInput('\x1b[B')
-  await noticeCase.settle()
-  assert.ok(noticeCase.panel.selectedCardValue() !== 'bundle:@vendor/foo',
-    'the settled frame admits a fresh selection move after the notice')
-  noticeCase.vt.sendInput('\r')
-  await noticeCase.settle()
-  assert.equal(noticeCase.panel.currentView(), 'details', 'the settled frame admits Enter on the new selection')
+  // Control: after the notice settles, a POINTER click on another card acts.
+  await clickCell(noticeCase, rowOf(noticeCase, '@deepseek-ai/dsh-base'), 30)
+  assert.equal(noticeCase.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base',
+    'the settled frame admits a pointer selection after the notice')
   noticeCase.app.dispose()
 
   // Press -> a real category change -> the original release must not act on the
@@ -973,13 +975,14 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
     await categoryCase.settle()
   }
   assert.match(categoryCase.view(), /^> Plugins\b/mu, 'the rail re-selects the Plugins category')
-  categoryCase.vt.sendInput('\t')
-  await categoryCase.settle()
-  assert.equal(categoryCase.panel.focused, true, 'the fresh Plugins frame admits its own Tab focus key')
-  assert.ok(categoryCase.panel.selectedCardValue() !== undefined, 'the fresh frame has a live selection')
+  // Rail Enter hands the keyboard to the List without cycling the page's own
+  // status filter (Tab inside the content is the page's filter key).
   categoryCase.vt.sendInput('\r')
   await categoryCase.settle()
-  assert.equal(categoryCase.panel.currentView(), 'details', 'the fresh Plugins frame admits the List Enter key')
+  assert.equal(categoryCase.panel.focused, true, 'the fresh Plugins frame admits the rail focus key')
+  await clickCell(categoryCase, rowOf(categoryCase, '@deepseek-ai/dsh-base'), 30)
+  assert.equal(categoryCase.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base',
+    'the fresh Plugins frame admits a real pointer selection')
   categoryCase.app.dispose()
 
   // Press -> external parent close -> release must not write the Host.
@@ -990,18 +993,21 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   disposed.settings.close()
   release(disposed, disposeRow, 5)
   assert.deepEqual(disposed.removeBundle, [], 'an externally closed workspace never dispatches the old release')
-  disposed.app.dispose()
 
-  // Control: the SAME app can open a NEW Settings lease and its page still
-  // admits a real removal gesture (no phantom owner or stale claim survives).
-  const reopened = await open({ columns: 80, rows: 10 })
-  await openRemoveConfirm(reopened)
-  const reopenedRow = rowOf(reopened, '> Remove')
-  press(reopened, reopenedRow, 5)
-  release(reopened, reopenedRow, 5)
-  await reopened.settle()
-  assert.deepEqual(reopened.removeBundle, ['@vendor/foo'], 'a fresh lease still dispatches its own removal')
-  reopened.app.dispose()
+  // Control on the SAME app/runtime: the closed lease is re-opened and its page
+  // admits a real pointer gesture (no phantom owner or stale claim survives).
+  await disposed.reopen()
+  assert.match(disposed.view(), /Settings · Plugins/u, 'the SAME app re-opened the Settings lease')
+  // 80x10 keeps a one-row list window: select the target with the page's own keys
+  // first, then prove the POINTER still hits the painted selection row.
+  for (let step = 0; step < 30 && disposed.panel.selectedCardValue() !== 'bundle:@vendor/foo'; step += 1) {
+    disposed.vt.sendInput('\x1b[B')
+    await disposed.settle()
+  }
+  assert.equal(disposed.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the re-opened page selected the card')
+  await clickCell(disposed, rowOf(disposed, '> @vendor/foo'), 30)
+  assert.equal(disposed.panel.currentView(), 'details', 'the re-opened page admits a real pointer click')
+  disposed.app.dispose()
 })
 
 test('T03 a 75-column production page mounts lazily from the Categories rail', async () => {

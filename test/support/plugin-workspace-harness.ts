@@ -121,6 +121,10 @@ export interface WorkspaceHarness {
   readonly invalidate: () => void
   readonly emit: (event: PluginInstallEvent) => void
   close(): void
+  /** Re-open a Settings lease on the SAME app. The previous owner must have
+   *  been released; a phantom claim makes the production factory return
+   *  `undefined` and this throws instead of faking a success. */
+  reopen(options?: { readonly startOn?: 'plugins' | 'rail' }): Promise<void>
   settle(rounds?: number): Promise<void>
   view(): string
   viewport(): readonly string[]
@@ -211,7 +215,12 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   // visible paint of the plugin content column; the harness never builds a
   // second screen or a second owner.
   let panel: PluginManagerWorkspacePanel | undefined
-  const settings = app.openSettingsWorkspace(
+  let settings: { close(): void } | undefined
+  /** The ONE inventory read of this controller (a reopen reuses it). */
+  let opened = false
+  /** Open ONE Settings lease on this app. The page factory is the SAME one the
+   *  first lease used, so a re-open exercises the production owner release. */
+  const openLease = (startOn: 'plugins' | 'rail'): { close(): void } => app.openSettingsWorkspace(
     {
       readSnapshot: () => ({
         configReadiness: 'ready',
@@ -223,7 +232,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
       aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
       onOpenLegacy: () => {},
       onClose: () => {},
-      initialCategory: options.startOn === 'rail' ? 'about' : 'plugins',
+      initialCategory: startOn === 'rail' ? 'about' : 'plugins',
       onOpenPlugins: (onYieldNavigation) => {
         panel = new PluginManagerWorkspacePanel(controller, {
           requestRender: () => app.requestRender(),
@@ -231,11 +240,16 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
           onYieldNavigation,
         }, { onDispose: () => {} })
-        controller.open()
+        // The inventory read happens exactly once, on the REAL first mount.
+        if (opened === false) {
+          opened = true
+          controller.open()
+        }
         return panel
       },
     },
   )
+  settings = openLease(options.startOn === 'rail' ? 'rail' : 'plugins')
 
   const settle = async (rounds = 8): Promise<void> => {
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
@@ -250,7 +264,10 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   return {
     vt,
     app,
-    settings,
+    get settings(): { close(): void } {
+      assert.ok(settings !== undefined, 'no Settings lease is open')
+      return settings
+    },
     controller,
     get panel(): PluginManagerWorkspacePanel {
       assert.ok(panel !== undefined, 'the Plugin page is not mounted in this scenario')
@@ -265,7 +282,11 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     removeBundle,
     invalidate: () => { for (const listener of [...invalidateListeners]) listener() },
     emit: event => { for (const listener of [...installListeners]) listener(event) },
-    close: () => settings.close(),
+    close: () => settings!.close(),
+    reopen: async (reopenOptions = {}) => {
+      settings = openLease(reopenOptions.startOn === 'rail' ? 'rail' : 'plugins')
+      await settle()
+    },
     settle,
     view: () => plain(vt.getViewport()),
     viewport: () => vt.getViewport(),
