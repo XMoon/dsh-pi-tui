@@ -12,6 +12,8 @@
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/extension-inventory
  */
 
+import { copySafe } from '../../domain/terminal/copy-safe.ts'
+
 /** The minimal read view of one live contribution (`ContributionHealth`). */
 export interface TuiExtensionHealthRecord {
   readonly id: string
@@ -203,10 +205,13 @@ export function formatTuiExtensionCapabilities(capabilities: readonly string[]):
  * are part of the copied identity: an unassociated record must never look
  * like an attached package. */
 export function formatTuiContributionDiagnostic(entry: TuiContributionDiagnostic): string {
-  const lines = [`Owner: ${entry.owner}`]
-  if (entry.entryId !== undefined) lines.push(`Entry: ${entry.entryId}`)
-  lines.push(`Contribution: ${entry.extensionPoint}:${entry.id}`, `State: ${entry.state}`)
-  if (entry.lastError !== undefined) lines.push(`Error: ${entry.lastError}`)
+  // The report's own line structure is generated here; every EXTERNAL field
+  // passes the shared terminal-control guard so a hostile owner/id/state/error
+  // cannot inject ESC/CSI/OSC/C1 or forge a line in the copied block.
+  const lines = [`Owner: ${copySafe(entry.owner)}`]
+  if (entry.entryId !== undefined) lines.push(`Entry: ${copySafe(entry.entryId)}`)
+  lines.push(`Contribution: ${copySafe(entry.extensionPoint)}:${copySafe(entry.id)}`, `State: ${copySafe(entry.state)}`)
+  if (entry.lastError !== undefined) lines.push(`Error: ${copySafe(entry.lastError)}`)
   return lines.join('\n')
 }
 
@@ -215,9 +220,9 @@ export function formatTuiContributionDiagnostic(entry: TuiContributionDiagnostic
 export function serializeTuiExtensionDiagnostics(view: TuiExtensionDiagnostics): string {
   const lines = [
     'dsh-pi-tui Plugin Diagnostics',
-    `Health: ${view.healthSummary}`,
-    `Registries: ${formatTuiExtensionRegistryCounts(view.registryCounts)}`,
-    `Capabilities: ${formatTuiExtensionCapabilities(view.capabilities)}`,
+    `Health: ${copySafe(view.healthSummary)}`,
+    `Registries: ${copySafe(formatTuiExtensionRegistryCounts(view.registryCounts))}`,
+    `Capabilities: ${copySafe(formatTuiExtensionCapabilities(view.capabilities))}`,
   ]
   if (view.entries.length > 0) {
     lines.push('')
