@@ -140,6 +140,9 @@ class FakePluginPage implements EmbeddedPluginPage {
   gestureRevision(): number {
     return 0
   }
+  frameIsCurrent(): boolean {
+    return true
+  }
   cancelPointer(): void {}
   contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number } {
     const viewport = this.viewports[this.viewports.length - 1] ?? { width: 1, rows: 1, allowDual: false }
