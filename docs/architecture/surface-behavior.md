@@ -594,12 +594,110 @@ Attachment completion and intake are Client-local:
   the row map before resolving, and attachment rows win over the message-card
   toggle. A session switch clears the collapse set. Re-expanding re-uploads the
   base64 (accepted cost).
+- Composer draft images have a live, bounded preview band between the plugin
+  widget zone and the editor seat on both roots. It is a READ-ONLY projection
+  of the **expanded composer draft** (`getDraft()`/`getExpandedText()`, the
+  same text submission uses) and the live `DraftImageStore`, so its occurrence
+  count and identities agree with the images that would be sent. The source
+  capability exposes only `values()`; the preview never stages a second
+  attachment, removes by id or reorders the draft. The store owns every staged
+  byte and every budget; the existing unreferenced-draft cleanup is a separate
+  runtime-owned path.
+- The band shows exactly ONE card for the **LAST referenced occurrence** in
+  the draft, so a newly pasted image is immediately visible. The identity row
+  is painted first: `🖼️ #<draftId>/<totalOccurrences> · W×H · bytes`, then the
+  remaining-occurrence count and, fullscreen only, an ASCII `x` removal
+  control at the far right. The image is fit to at most **44×3** at >=70
+  columns and **22×3** at 50–69; the identity row plus image rows never exceed
+  four rows. Under 50 columns or with a 1–3 row grant the band degrades to a
+  one-line count/latest-identity summary with no pixel card and no removal
+  control; with no safe space it paints zero rows. The line/total identity
+  uses the canonical `🖼️ ` marker (VS16). Pixel rendering is limited to PNG on
+  Kitty and the original format on iTerm2 at or under 4 MiB; unsupported/
+  oversized/recalled drafts paint the real MIME, name, dimensions and
+  `Preview unavailable` in the **card identity row**. The one-line summary
+  fallback paints only the occurrence count plus the latest `#id W×H`, never
+  a pixel claim. The band reads no new file
+  and registers no decoder. Its row grant participates in the unified
+  fullscreen pinned-chrome/footer/widget budget; the widget/footer reservation
+  is bounded to avoid a feedback cycle and may under-grant, never overflow.
+- The fullscreen `x` control edits exactly ONE canonical placeholder occurrence
+  in the **visible editor text** (removing at most one adjacent separator
+  space), preserves the cursor's relative position, paste markers and mode.
+  It deliberately does NOT prune the removed draft: the editor undo history
+  can restore the canonical placeholder from an older snapshot. The removal is
+  itself a REAL undoable editor edit (the pre-removal document is recorded), so
+  Undo restores exactly the removed occurrence; it is never a silent
+  programmatic text replacement. Staged bytes
+  are protected by the `DraftImageStore`'s idempotent `(editor owner, image id)`
+  undo leases: the host fork Editor exposes the canonical placeholders its real
+  Undo snapshots still reference, and the surface reconciles the leases after
+  every host-editor mutation (typing, paste, Undo, programmatic restore) and
+  after a preview removal. Repeated `x → Undo → x` therefore cannot multiply a
+  lease. When the editor's undo history is really retired (a submitted-draft
+  clear), the store releases that owner's leases immediately — backend
+  acceptance, working state and turn identity are not part of the undo
+  lifetime. A session switch does not retire the host undo history, so
+  undo-referenced bytes survive it, and the retained PiTui editor draft keeps
+  every image it still references; dispose drops every lease.
+- The undo-retention budget (8 images / 32 MiB, separate from the active
+  16 / 64 MiB draft caps) applies only to images that are undo-leased and no
+  longer referenced by the live **expanded** draft; an image Undo restored into
+  the draft is an ACTIVE attachment again. Active admission never evicts
+  retention-only bytes to make room. When the budget is exceeded, the oldest
+  evictable retention-only image is retired: the REGISTERED OWNER's editor
+  trims the placeholder from the undo snapshots that could restore it (the
+  rest of those snapshots, including newer still-retained images, stays
+  undoable) and only then do its bytes leave the store. Live occurrences and
+  in-flight submission pins are never evicted; when every candidate is
+  protected the budget may temporarily exceed its cap and re-converges later.
+- A Composer submit takes a SCOPED bridge reservation of the submitted images
+  BEFORE the clear (the fork's `onBeforeSubmitClear`, which returns a one-shot
+  release) and releases it in a `finally` after the synchronous submit
+  dispatch — for Enter, Ctrl+Enter, plugin submits and Ctrl+S steer alike. The
+  existing business owner (`pinDraftAttachments`/`runReservedSubmit`, the
+  HostCommand fallback) takes its own attachment reservation synchronously
+  inside that dispatch, so the clear can never strand images that are part of
+  the outgoing message and no bridge outlives the call stack. These clears
+  retire the editor's undo history, so a delivered message — and the image
+  bytes its successful write consumed — cannot be resurrected by Undo; a
+  failed submission restores the draft before its reservation releases. Local
+  commands, early refusals and empty submits acquire no long-lived reservation.
+- The `x` control is offered only when the current seat editor exposes the
+  narrow Undo-retirement seam; a Replacement Editor without it still renders
+  the preview but has no safe removal control. A Replacement Editor without a
+  real undo-retiring clear falls back to a plain text clear (which pushes
+  undo), so the host editor's leases stay and a handoff back to the host seat
+  can still undo the placeholder with real bytes. A rejected submission
+  restores the draft before its business reservation releases, so a restored
+  placeholder never becomes dead text. A successful removal also resets the
+  fork's multi-click selection history, so an immediate second x after undo is
+  a fresh click rather than a swallowed double-click. Undo (the editor's
+  `tui.editor.undo`) therefore restores a live image, never a token that
+  renders as text. An occurrence
+  that exists only inside a large-paste marker is shown by the expanded
+  projection but has NO removal control: the editor text cannot address it
+  safely, and its draft (and any in-flight pin) must survive. When the
+  previewed last occurrence shares an image id with an earlier hidden
+  occurrence, it still gets a control only when the raw text after the raw
+  last occurrence is a marker-free literal identical to the expanded suffix
+  after the previewed occurrence; that proves no hidden content follows it and
+  it maps to the raw last occurrence. Otherwise the control is suppressed.
+  Regular mode has no fake mouse control: the user deletes the canonical
+  placeholder text. The preview is display-only and never changes submission
+  semantics. Its Image/base64 caches are short-lived: pruned to the
+  currently displayed card on render and released on session switch/dispose.
 
 Authority: `src/commands.ts` (`PATH_ARGUMENT_COMMANDS`),
 `src/tui/file-completion/path-argument.ts`,
 `src/tui/interaction/autocomplete/provider.ts`,
 `src/domain/transcript/content-blocks.ts`,
-`src/tui/components/media/image-thumbnail.ts`.
+`src/tui/components/media/image-thumbnail.ts`,
+`src/tui/components/media/draft-image-preview.ts`,
+`src/client/media/image/placeholder.ts`,
+`src/client/media/image/draft-store.ts`,
+`src/client/media/image/types.ts`,
+`src/app/submission/submit-flow.ts`.
 
 ## Session `@` completion routing
 

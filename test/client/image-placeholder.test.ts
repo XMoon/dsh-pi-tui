@@ -9,7 +9,7 @@ import test from 'node:test'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { pinDraftAttachments, pruneUnreferencedDraftAttachments } from '../../src/client/media/draft-attachments.ts'
 import { ImageTooLargeError } from '../../src/domain/media/errors.ts'
-import { expandImagePlaceholders, formatImagePlaceholder, type DraftSegment } from '../../src/client/media/image/placeholder.ts'
+import { expandImagePlaceholders, formatImagePlaceholder, selectDraftImageOccurrences, type DraftSegment } from '../../src/client/media/image/placeholder.ts'
 import type { DraftImage, DraftImageInput } from '../../src/client/media/image/types.ts'
 
 /** One canonical PNG-ish draft (bytes content is irrelevant to M1). */
@@ -286,6 +286,20 @@ test('clearUnpinned keeps in-flight pinned drafts; clear drops everything (revie
   assert.equal(store.get(pinned.id), undefined)
 })
 
+test('clearUnpinned keeps a draft the LIVE retained editor draft still references', () => {
+  const store = new DraftImageStore()
+  let live = ''
+  store.setLiveDraftTextSource(() => live)
+  const liveImage = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 8, height: 8 })
+  const stale = store.add({ bytes: new Uint8Array([2]), mediaType: 'image/png', width: 8, height: 8 })
+  live = liveImage.placeholder
+  // The PiTui editor RETAINS its main draft across a committed session switch,
+  // so the switch must keep the image the retained draft still references.
+  store.clearUnpinned()
+  assert.equal(store.get(liveImage.id), liveImage, 'the retained live draft keeps its image')
+  assert.equal(store.get(stale.id), undefined, 'an unreferenced unpinned draft is dropped')
+})
+
 test('recalled refs stay pinned while delayed queue removal is in flight', async () => {
   const store = new DraftImageStore()
   const recalled = store.add({
@@ -332,4 +346,43 @@ test('a submission pinned BEFORE its async phase survives concurrent pruning (de
   store.remove(draft.id) // consumeDraftAttachments equivalent
   release()
   assert.equal(store.isPinned(draft.id), false)
+})
+
+test('selectDraftImageOccurrences reports exact offsets and text order', () => {
+  const store = new DraftImageStore()
+  const one = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 800, height: 600 })
+  const two = store.add({ bytes: new Uint8Array([2]), mediaType: 'image/jpeg', width: 640, height: 480 })
+  const text = `A ${one.placeholder} B ${two.placeholder} C ${one.placeholder}`
+  const occurrences = selectDraftImageOccurrences(text, store)
+  assert.equal(occurrences.length, 3)
+  assert.deepEqual(occurrences.map(occurrence => occurrence.image.id), [one.id, two.id, one.id])
+  assert.deepEqual(occurrences.map(occurrence => occurrence.ordinal), [0, 1, 2])
+  for (const occurrence of occurrences) {
+    assert.equal(text.slice(occurrence.startOffset, occurrence.endOffset), occurrence.image.placeholder)
+  }
+  // The same canonical tokens expand in the SAME order the preview projects.
+  const expanded = expandImagePlaceholders(text, store)
+  const expandedIds = expanded.filter(segment => segment.type === 'image').map(segment => segment.type === 'image' && segment.image.id)
+  assert.deepEqual(expandedIds, [one.id, two.id, one.id])
+})
+
+test('selectDraftImageOccurrences accepts only complete live canonical tokens', () => {
+  const store = new DraftImageStore()
+  const image = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 800, height: 600 })
+  assert.deepEqual(selectDraftImageOccurrences(`pre ${image.placeholder} post`, store).map(item => item.ordinal), [0])
+  // A hand-edited dimension and a fake id are ordinary text.
+  assert.deepEqual(selectDraftImageOccurrences('see [image #1 (999×999)]', store), [])
+  assert.deepEqual(selectDraftImageOccurrences('see [image #99 (800×600)]', store), [])
+  // A removed draft stops resolving even though its token text remains.
+  store.remove(image.id)
+  assert.deepEqual(selectDraftImageOccurrences(image.placeholder, store), [])
+})
+
+test('selectDraftImageOccurrences never returns overlapping occurrences', () => {
+  const store = new DraftImageStore()
+  const one = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 800, height: 600 })
+  const occurrences = selectDraftImageOccurrences(`${one.placeholder}${one.placeholder}`, store)
+  assert.equal(occurrences.length, 2)
+  assert.equal(occurrences[0]!.endOffset, occurrences[1]!.startOffset)
+  assert.notEqual(occurrences[0]!.startOffset, occurrences[1]!.startOffset)
 })

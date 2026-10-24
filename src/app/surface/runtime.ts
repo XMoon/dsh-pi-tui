@@ -377,6 +377,20 @@ export interface SurfaceMountDeps {
    * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
    * paths never read it. */
   readonly draftImageStoreForTest?: import('../../client/media/image/draft-store.ts').DraftImageStore
+  /** The READ-ONLY composer preview projection (image UX PR1): the live
+   *  draft store's staged values. The TUI never stages or reorders through
+   *  it; absent means no preview band. */
+  readonly draftImagePreviewSource?: import('../../client/media/image/types.ts').DraftImagePreviewSource
+  /** Register the LIVE composer draft reader (expanded text) so the store can
+   *  tell an active attachment from an undo-retention-only entry. */
+  readonly draftImagePreviewLiveDraft?: (read: () => string) => void
+  /** Reserve the submitted text's images for the SCOPED synchronous submit
+   *  bridge (acquired before the draft clear, released after the synchronous
+   *  dispatch). */
+  readonly draftImagePreviewReserve?: (text: string) => (() => void) | undefined
+  /** The Client-local undo-lease capability: the Store owns the bytes and the
+   *  bounded retention budget, the host Editor owns the real Undo history. */
+  readonly draftImagePreviewUndo?: import('../../client/media/image/draft-store.ts').DraftImageUndoLeasePort
   /** OSC 8 link activation (the runner owns the platform opener). */
   readonly openExternalUrl: OptionCapability<'openExternalUrl'>
   /** Right-click clipboard read (the runner owns the platform policy). */
@@ -1718,6 +1732,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // intent and share ONE clipboard policy owned by the runner.
     copySelection: deps.copySelection,
     draftImageStoreForTest: deps.draftImageStoreForTest,
+    draftImagePreviewSource: deps.draftImagePreviewSource,
+    draftImagePreviewLiveDraft: deps.draftImagePreviewLiveDraft,
+    draftImagePreviewReserve: deps.draftImagePreviewReserve,
+    draftImagePreviewUndo: deps.draftImagePreviewUndo,
     // Fullscreen OSC 8 link clicks + the Windows right-click paste.
     openExternalUrl: deps.openExternalUrl,
     readClipboardText: deps.readClipboardText,

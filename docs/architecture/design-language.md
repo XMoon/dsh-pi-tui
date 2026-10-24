@@ -187,7 +187,7 @@ can be reviewed against a frame:
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
 | 13 | Action hint | `textMuted` | no | `Esc back`, `Enter details` |
-| 14 | Affordance (clickable/keyed verb) | `primary` | no | `↗ Command`, `Copy All [C]`, `Change…` |
+| 14 | Affordance (clickable/keyed verb) | `primary` | no | `↗ Command`, `Copy All [C]`, `Change…`, `x remove` (fullscreen draft preview) |
 | 15 | Rule / gutter | `border` | no | `─`, 2-cell column gutter |
 | 16 | Placeholder / empty state | `textDim`, and `error` for the word of a *failed* one | no | `No matching commands`, `Model catalog unavailable: …`, `Waiting for retained output…` |
 | 17 | Notice | `textMuted` (info) / `error` (error) | no | `ℹ Copy sent`, `✗ Copy failed` |
@@ -402,6 +402,7 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 | Rule | `─` | boundary only |
 | Fact + action-bar separator | ` · ` | D4; the single separator for segments and facts |
 | Notice prefix | `ℹ` / `✗` | info / error notice rows; both EAW neutral; D14 |
+| Remove affordance | `x` (ASCII, 1 cell) | label-tail control of the fullscreen composer draft preview only; never a status marker or a general close vocabulary |
 | Ellipsis | `…` | truncation of *content* only, never inside an action hint |
 
 ### 4.5 Bracket classes

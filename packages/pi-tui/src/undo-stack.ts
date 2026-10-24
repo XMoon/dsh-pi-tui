@@ -26,6 +26,16 @@ export class UndoStack<S> {
 		this.stack.length = 0;
 	}
 
+	/**
+	 * Transform every snapshot in place while preserving the stack order.
+	 * Narrow internal primitive used by Editor.retireDraftImageFromUndo() to
+	 * trim a retired image occurrence from older snapshots; this is not a
+	 * generic public UndoStack API.
+	 */
+	transformSnapshots(transform: (state: S) => S): void {
+		this.stack = this.stack.map(transform);
+	}
+
 	get length(): number {
 		return this.stack.length;
 	}
