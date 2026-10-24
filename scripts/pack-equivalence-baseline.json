@@ -50,16 +50,18 @@
       "why": "the protocol is the pair of commands being compared"
     }
   ],
-  "proof": {
-    "equivalent": true,
-    "mode": "npm",
-    "node": "24",
-    "platform": "Linux",
-    "entryCount": 40,
-    "differingFiles": [],
-    "manifestDifferences": [],
-    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40048155158",
-    "commit": "db889aa9bc2a71e7b46da649365cec40cd505d03",
-    "note": "Recorded from the PR #397 CI comparison: a REAL ordinary-vs-lifecycle-free pack of the exact inputs digested above (40 entries each, no differing file, no manifest difference). Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
+  "proofs": {
+    "npm": {
+      "equivalent": true,
+      "mode": "npm",
+      "node": "24",
+      "platform": "Linux",
+      "entryCount": 40,
+      "differingFiles": [],
+      "manifestDifferences": [],
+      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40048155158",
+      "commit": "db889aa9bc2a71e7b46da649365cec40cd505d03",
+      "note": "Recorded from the PR #397 CI comparison: a REAL ordinary-vs-lifecycle-free pack of the exact inputs digested above (40 entries each, no differing file, no manifest difference). Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
+    }
   }
 }
