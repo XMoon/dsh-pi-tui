@@ -1102,7 +1102,7 @@ test('one- and two-row frames paint only the truthful bar and publish no body ta
   }
 })
 
-test('below the body floor the content focus forwards only Esc/Backspace, never a hidden page action', () => {
+test('below the body floor the content focus forwards only Esc, never a hidden page action', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h, 120)
   h.panel.handleInput('\u001b[B') // About -> Models
@@ -1119,15 +1119,15 @@ test('below the body floor the content focus forwards only Esc/Backspace, never 
   assert.deepEqual(page.inputs, ['\u001b'], 'the real modal cancel still reaches the page')
   assert.match(plain(h, 120), /Settings · Categories/u, 'the page Esc returned the keyboard to the rail')
 
-  // Backspace is the same genuine back path and survives the floor gate.
+  // Backspace is NOT a portable back path: a page may bind it to a hidden
+  // edit (the Models catalog filter), so it must not reach the page either.
   h.resize(120, 40)
   plain(h, 120)
   h.panel.handleInput('\r') // re-enter the same mounted page
   h.resize(120, 2)
-  page.exitOn = '\u007f'
   h.panel.handleInput('\u007f')
-  assert.deepEqual(page.inputs, ['\u001b', '\u007f'])
-  assert.match(plain(h, 120), /Settings · Categories/u)
+  assert.deepEqual(page.inputs, ['\u001b'], 'the hidden Backspace never reaches the page')
+  assert.match(plain(h, 120), /Settings · Models/u, 'the page still owns the keyboard')
 
   // The narrow About content is the root-owned projection: a hidden refresh
   // never reaches its owner below the body floor.
