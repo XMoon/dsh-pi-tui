@@ -341,6 +341,28 @@ interface PaneBoxes {
   detail?: PaneBox
 }
 
+/** The absolute panel cells of ONE painted direct-page content column. */
+interface ContentBox {
+  readonly x: number
+  readonly top: number
+  readonly width: number
+  readonly rows: number
+}
+
+/** Whether two content boxes describe the SAME painted cells. */
+function sameContentBox(left: ContentBox | undefined, right: ContentBox | undefined): boolean {
+  return left !== undefined && right !== undefined
+    && left.x === right.x
+    && left.top === right.top
+    && left.width === right.width
+    && left.rows === right.rows
+}
+
+/** Whether one terminal cell belongs to the painted content column. */
+function contentBoxContains(box: ContentBox, x: number, y: number): boolean {
+  return x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows
+}
+
 /** The common page surface the Models and Account direct pages expose to this
  * workspace root. The root owns the screen/lease and the category rail; the
  * page owns its body, its action bar and its last-painted hit map. */
@@ -754,16 +776,19 @@ export class SettingsWorkspacePanel implements Component {
   /** The last painted content area (panel coordinates) for mouse translation.
    *  It covers the About page and the direct pages alike: the root owns ONE
    *  content box and ONE press map for the whole right column. */
-  private paintedContentBox: { readonly x: number; readonly top: number; readonly width: number; readonly rows: number } | undefined
-  /** The root-level identity of one press inside the content area: a resize or
-   *  a root state change between press and release refuses the gesture even
-   *  when the page has not repainted yet. */
+  private paintedContentBox: ContentBox | undefined
+  /** The root-level identity of one press inside the content area: a resize, a
+   *  root state change OR a chrome change that moves the content box (an App
+   *  notice) between press and release refuses the gesture even when the page
+   *  has not repainted yet. */
   private contentPressed: {
     readonly x: number
     readonly y: number
     readonly columns: number
     readonly rows: number
     readonly revision: number
+    /** The content box the press was admitted against. */
+    readonly box: ContentBox
   } | undefined
 
   constructor(
@@ -2732,20 +2757,27 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /**
-   * Recompute the plugin page's grant and focus owner BEFORE input is
-   * forwarded: a resize may arrive before its repaint frame, and no key may act
-   * on a viewport the page no longer has.
+   * Recompute the plugin page's grant from the LIVE chrome (width, height, App
+   * notice) and return the content box the CURRENT chrome paints. Mouse input
+   * calls this BEFORE translating a cell: a grant installed by the keyboard path
+   * (or a chrome change) may have moved the box while the painted frame is still
+   * the old one, and a press recorded against it could release on a different
+   * action.
    */
-  private syncPluginPage(): void {
+  private syncPluginFrame(): ContentBox | undefined {
     const page = this.pluginPage
-    if (page === undefined) return
-    const plan = planSettingsChrome(
-      this.intents.columns(),
-      this.intents.rows(),
-      this.intents.notice() !== undefined,
-    )
-    page.setViewport(this.pluginViewport(plan, page.currentView()))
+    if (page === undefined) return undefined
+    const columns = this.intents.columns()
+    // A narrow rail that does not paint the content column has no content box
+    // (and no grant to refresh): its page is not on screen at all.
+    if (!this.paintsDirectPage(columns)) return undefined
+    const view = page.currentView()
+    const plan = planSettingsChrome(columns, this.intents.rows(), this.intents.notice() !== undefined)
+    page.setViewport(this.pluginViewport(plan, view))
     page.focused = this.focus === 'content'
+    const projection = this.pluginProjection(plan, view, this.focus)
+    const geometry = chromeGeometry(plan)
+    return { x: projection.contentX, top: geometry.contentTop, width: projection.contentWidth, rows: geometry.contentRows }
   }
 
   /**
@@ -2887,7 +2919,7 @@ export class SettingsWorkspacePanel implements Component {
       this.yieldPluginNavigation()
       return
     }
-    this.syncPluginPage()
+    this.syncPluginFrame()
     page.handleInput(data)
   }
 
@@ -3043,6 +3075,16 @@ export class SettingsWorkspacePanel implements Component {
    */
   private handleContentInput(data: string): void {
     const page = this.authPage
+    // Below the body floor NO body action is visible: the frame paints only the
+    // truthful Esc bar. Only Esc may reach a page, because a page can bind
+    // other back-looking keys to a HIDDEN edit (the Models catalog filter binds
+    // Backspace to its query) or to a hidden body action (the embedded Plugin
+    // page's `/`, `i`, `r`, filter and diagnostics keys). Dropping them here
+    // prevents an invisible body from changing page state, reading the Host or
+    // running an action, while Esc keeps its real modal cancel/back meaning.
+    // The child repeats this floor against its OWN grant (a page notice row can
+    // lower it below the root's): the root gate is the first one, not the only.
+    if (this.bodyFloor() < 1 && !matchesKey(data, 'escape')) return
     // The plugin page owns its own body-floor policy: every frame it paints
     // advertises only the actions it really admits, so the root forwards its
     // keys unchanged (it never makes a painted hint a no-op).
@@ -3050,14 +3092,6 @@ export class SettingsWorkspacePanel implements Component {
       this.handlePluginContentInput(data)
       return
     }
-    // Below the body floor NO body action is visible: the frame paints only the
-    // truthful Esc bar. Only Esc may reach the page, because a page can bind
-    // other back-looking keys to a HIDDEN edit (the Models catalog filter binds
-    // Backspace to its query). Dropping them here prevents an invisible body
-    // from changing page state, reading the Host or running an action, while
-    // Esc keeps its real modal cancel/back meaning. The legacy panes use the
-    // same floor gate below.
-    if (this.bodyFloor() < 1 && !matchesKey(data, 'escape')) return
     // Tab / Shift+Tab leave a READ-ONLY direct region on a wide/medium frame:
     // About has no page key of its own, and a real page may only yield when its
     // own confirmation/pending state allows it. A narrow terminal has no second
@@ -3196,8 +3230,17 @@ export class SettingsWorkspacePanel implements Component {
     if (this.authPageHasPendingMutation() && (changed || focus !== 'content')) return
     // A category change abandons the plugin page; it is refused while the page
     // owns a mutation or a Details/Confirm/Install sub-state (the page's own Esc
-    // gradient must run first).
-    if (changed && this.pluginPage !== undefined && this.pluginBlocksLeave()) return
+    // gradient must run first). Re-selecting the ALREADY selected Plugins entry
+    // is a focus transfer to the rail: it is admitted only when the page really
+    // yields (never during an edit, a hidden sub-view or a mutation), or the
+    // next Esc would skip the page's own gradient and close Settings.
+    if (this.pluginPage !== undefined) {
+      if (changed) {
+        if (this.pluginBlocksLeave()) return
+      } else if (focus !== 'content' && !this.pluginPage.canYieldFocusToNavigation()) {
+        return
+      }
+    }
     if (changed) {
       if (this.authPageCategory !== undefined && this.authPageCategory !== category) this.closeAuthPage()
       if (this.categoryId === 'plugins' && category !== 'plugins') this.closePluginPage()
@@ -3576,13 +3619,22 @@ export class SettingsWorkspacePanel implements Component {
     // paint at that cell.
     if (this.terminalGeometryStale()) return undefined
     if (this.categoryId === 'plugins') {
-      const box = this.paintedContentBox
       const page = this.pluginPage
-      if (page !== undefined && box !== undefined
-        && event.x >= box.x && event.x < box.x + box.width
-        && event.y >= box.top && event.y < box.top + box.rows) {
+      const live = page === undefined ? undefined : this.syncPluginFrame()
+      const painted = this.paintedContentBox
+      // The LIVE chrome must still paint the box the last frame painted: an
+      // App notice or a focus transfer can move/shrink the content column
+      // WITHOUT a terminal resize, and the wheel must never scroll a pane at a
+      // cell the next frame paints differently. When they disagree, fail closed
+      // and repaint.
+      const current = sameContentBox(live, painted)
+      if (live !== undefined && !current) this.intents.requestRender()
+      if (page !== undefined && live !== undefined && current && contentBoxContains(live, event.x, event.y)) {
         return page.handleMouse(this.translateMouseEvent(event))
       }
+      // A wheel over the content of a stale frame is consumed: nothing may
+      // scroll an unmapped row, and the pending repaint restores the mapping.
+      if (painted !== undefined && contentBoxContains(painted, event.x, event.y)) return { handled: true }
       if (event.type !== 'wheel') return undefined
       const delta = event.wheelDelta ?? 0
       if (delta === 0) return undefined
@@ -3622,8 +3674,7 @@ export class SettingsWorkspacePanel implements Component {
   /** Whether one panel cell belongs to the painted content column. */
   private contentAt(x: number, y: number): boolean {
     const box = this.paintedContentBox
-    if (box === undefined) return false
-    return x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows
+    return box !== undefined && contentBoxContains(box, x, y)
   }
 
   onCellPress(x: number, y: number): void {
@@ -3641,17 +3692,31 @@ export class SettingsWorkspacePanel implements Component {
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
-      const box = this.paintedContentBox
-      if (page !== undefined && box !== undefined
-        && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+      const live = page === undefined ? undefined : this.syncPluginFrame()
+      const painted = this.paintedContentBox
+      // Admit the press ONLY while the LIVE chrome paints the same box the last
+      // frame painted: a notice/focus change that moved the column after the
+      // paint must not record a press the page would release on a different
+      // action.
+      const current = sameContentBox(live, painted)
+      if (live !== undefined && !current) this.intents.requestRender()
+      if (page !== undefined && live !== undefined && current && contentBoxContains(live, x, y)) {
         this.contentPressed = {
           x,
           y,
           columns: this.intents.columns(),
           rows: this.intents.rows(),
           revision: this.revision,
+          box: live,
         }
-        page.onCellPress(x - box.x, y - box.top)
+        page.onCellPress(x - live.x, y - live.top)
+        return
+      }
+      // A press inside the content of a stale frame is refused outright (it is
+      // never recorded as a category gesture either): its release must not
+      // dispatch anything.
+      if (painted !== undefined && contentBoxContains(painted, x, y)) {
+        page?.cancelPointer()
         return
       }
       page?.cancelPointer()
@@ -3672,13 +3737,14 @@ export class SettingsWorkspacePanel implements Component {
       this.syncAuthPageBody()
       this.contentPressed = undefined
       const box = this.paintedContentBox
-      if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+      if (box !== undefined && contentBoxContains(box, x, y)) {
         this.contentPressed = {
           x,
           y,
           columns: this.intents.columns(),
           rows: this.intents.rows(),
           revision: this.revision,
+          box,
         }
         this.authPage.onCellPress?.(x - box.x, y - box.top)
         return
@@ -3711,18 +3777,24 @@ export class SettingsWorkspacePanel implements Component {
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
-      const box = this.paintedContentBox
-      if (page !== undefined && box !== undefined
-        && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+      const live = page === undefined ? undefined : this.syncPluginFrame()
+      const painted = this.paintedContentBox
+      const current = sameContentBox(live, painted)
+      if (live !== undefined && !current) this.intents.requestRender()
+      if (page !== undefined && live !== undefined && current && contentBoxContains(live, x, y)) {
         // A release inside the content consumes the gesture: any root press from
         // before it is stale and must never fire the category rail.
         this.pressedGesture = undefined
         const pressed = this.contentPressed
         this.contentPressed = undefined
+        // The release must resolve against the SAME box the press was admitted
+        // against: a chrome change (App notice) that moved the column refuses the
+        // old gesture instead of running another row's action.
         if (pressed === undefined
           || pressed.columns !== this.intents.columns()
           || pressed.rows !== this.intents.rows()
-          || pressed.revision !== this.revision) return
+          || pressed.revision !== this.revision
+          || !sameContentBox(pressed.box, live)) return
         // The press is proven and the content owns the keyboard from now on;
         // the page runs its OWN painted action against the grant it really
         // painted. The new projection is installed by the NEXT paint, so a
@@ -3731,9 +3803,17 @@ export class SettingsWorkspacePanel implements Component {
         // while only the preview was on screen, so a preview click can
         // select/focus but never dispatch a Detail-only mutation.
         this.focus = 'content'
-        page.onCellClick(x - box.x, y - box.top)
+        page.onCellClick(x - live.x, y - live.top)
         this.bumpRevision()
         this.intents.requestRender()
+        return
+      }
+      // A release over the content of a frame whose LIVE box moved is consumed
+      // and refused (the press was refused too, or the chrome moved in between).
+      if (painted !== undefined && contentBoxContains(painted, x, y)) {
+        this.contentPressed = undefined
+        this.pressedGesture = undefined
+        page?.cancelPointer()
         return
       }
       this.contentPressed = undefined

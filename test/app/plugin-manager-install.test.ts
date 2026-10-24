@@ -77,11 +77,26 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
 }
 
 function installPage(controller: PluginManagerController): PluginManagerWorkspacePanel {
-  return new PluginManagerWorkspacePanel(controller, {
+  return granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }))
+}
+
+/**
+ * The embedded page only handles input AFTER the Settings root granted its
+ * local viewport (production order: grant -> sync focus -> forward). A direct
+ * page fixture therefore installs the grant before its first key.
+ */
+function granted(
+  page: PluginManagerWorkspacePanel,
+  width = 120,
+  rows = 40,
+  allowDual = false,
+): PluginManagerWorkspacePanel {
+  page.setViewport({ width, rows, allowDual })
+  return page
 }
 
 /** Plan the page at ONE local viewport, then paint that exact frame. */
@@ -280,7 +295,7 @@ test('a whole-panel teardown then reopen preserves the in-flight install and nev
   // controller starts on the list and `i` resumes the dispatched install with
   // the same request id.
   harness.controller.open()
-  const reopened = new PluginManagerWorkspacePanel(harness.controller, { requestRender: () => {}, onCopy: () => {}, onYieldNavigation: () => {} }, {})
+  const reopened = granted(new PluginManagerWorkspacePanel(harness.controller, { requestRender: () => {}, onCopy: () => {}, onYieldNavigation: () => {} }, {}), 60, 24)
   await tick()
   assert.equal(reopened.currentView(), 'list', 'a reopened page starts on the list; the attempt is never auto-opened')
   assert.equal(harness.installCalls.length, 1, 'reopening the surface must not dispatch a second installBundle')
@@ -342,11 +357,11 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => [] })
-  const panel = new PluginManagerWorkspacePanel(controller, {
+  const panel = granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }), 160, 40)
   const assertPhysicalRows = (rendered: readonly string[], where: string): string => {
     const text = rendered.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
     for (const line of rendered) {
@@ -408,11 +423,11 @@ test('a failed install reopens with the same request id and New install is expli
   assert.match(failedFrame, /Approve and retry evil-pkg/)
   assert.match(failedFrame, /New install/, 'the explicit new-install action is visible')
 
-  const short = new PluginManagerWorkspacePanel(controller, {
+  const short = granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }), 80, 6)
   short.handleInput('i')
   // The embedded page no longer plans the retired full-screen Header/Meta/Rule
   // rows (4), so the old 80x10 full-screen frame is the same body budget at a
@@ -425,11 +440,11 @@ test('a failed install reopens with the same request id and New install is expli
   assert.equal(installCalls.length, 1, 'Enter on the short frame cannot approve a hidden risk')
   short.dispose()
 
-  const tall = new PluginManagerWorkspacePanel(controller, {
+  const tall = granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }), 80, 24)
   tall.handleInput('i')
   const tallFrame = renderAt(tall, 80, 24).join('\n')
   assert.match(tallFrame, /Approve and retry evil-pkg/)
@@ -500,11 +515,11 @@ test('every pending package name must be fully visible before Approve is admitte
   gate.resolve(change({ application: 'failed', pendingBuilds: pending }))
   await tick()
 
-  const tall = new PluginManagerWorkspacePanel(controller, {
+  const tall = granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }), 80, 24)
   tall.handleInput('i')
   const tallFrame = renderAt(tall, 80, 24).join('\n')
   for (const name of pending) {
@@ -514,11 +529,11 @@ test('every pending package name must be fully visible before Approve is admitte
   assert.match(tallFrame, /Approve and retry/)
   tall.dispose()
 
-  const short = new PluginManagerWorkspacePanel(controller, {
+  const short = granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }), 80, 6)
   short.handleInput('i')
   // Same body budget as the retired 80x10 full-screen frame (see above).
   const shortFrame = renderAt(short, 80, 6).join('\n')
@@ -592,11 +607,11 @@ test('a zero-row body revokes build-script approval until an explicit re-selecti
   assert.equal(controller.installView()?.phase, 'failed')
 
   let rows = 24
-  const page = new PluginManagerWorkspacePanel(controller, {
+  const page = granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }), 80, 24)
   page.handleInput('i')
   assert.match(renderAt(page, 80, rows).join('\n'), /Approve and retry evil-pkg/)
   // A 1-row LOCAL viewport is the semantic bar alone: the business body is
@@ -835,11 +850,11 @@ test('the real Host cancel terminates the real pnpm install, restores the profil
 
   // Re-entering the surface starts on the list and `i` resumes the SAME request
   // id without a second dispatch; only an explicit New install may replace it.
-  const reopened = new PluginManagerWorkspacePanel(controller, {
+  const reopened = granted(new PluginManagerWorkspacePanel(controller, {
     requestRender: () => {},
     onCopy: () => {},
     onYieldNavigation: () => {},
-  })
+  }), 80, 24)
   t.after(() => reopened.dispose())
   assert.equal(reopened.currentView(), 'list', 'a reopened page always starts on the list')
   reopened.handleInput('i')
@@ -1020,11 +1035,11 @@ test('real pnpm blocked builds become pendingBuilds; only an explicit approval r
   ] as const
   for (const size of sizes) {
     // Re-create the page at the requested live viewport for this frame.
-    const sized = new PluginManagerWorkspacePanel(controller, {
+    const sized = granted(new PluginManagerWorkspacePanel(controller, {
       requestRender: () => {},
       onCopy: () => {},
       onYieldNavigation: () => {},
-    })
+    }), size.width, size.rows)
     sized.handleInput('i') // the list key opens the SAME failed attempt
     const frame = plainFrame(renderAt(sized, size.width, size.rows))
     const riskFullyVisible = /execute scripts with your[\s\S]*user privileges/.test(frame)
