@@ -161,6 +161,7 @@ async function mounted(
     cancel() {},
     submit: () => assert.fail('the picker must capture Enter'),
     steer() {},
+    pasteMedia: () => {},
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

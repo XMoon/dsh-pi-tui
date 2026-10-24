@@ -16,6 +16,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from '../support/direct-tsp-fixture.ts'
 
@@ -104,6 +105,127 @@ test('a TSP Enter drives a REAL Agent turn and the streamed reply reaches the pa
     recorder.detach()
   } finally {
     recorder.detach()
+    await fixture.settle()
+  }
+})
+
+// ── PR4: the L6 Ctrl+V → composer token → durable image block main chain ────
+
+/**
+ * The L6 main chain, end to end on the REAL Direct composition:
+ *
+ *     a clipboard helper on $PATH (the production `readClipboardImage` probe,
+ *     spawned through the production runner, plus the ONE application FIFO)
+ *       → the SDK's real Ctrl+V key → `dispatchKey` → `pasteMedia`
+ *       → `ApplicationEvents.onClipboardPaste` → the REAL `DraftImageStore`
+ *       → the live TSP composer token
+ *       → Enter → the REAL `SubmissionController` → `prepareUserMessage`
+ *       → the REAL Direct writer, whose prepared message carries an image block
+ *
+ * PRODUCTION PREREQUISITES REPRODUCED: the real Host service composition, the
+ * real runner, the real submission controller and Direct writer, the real TSP
+ * renderer, the real clipboard probe (it spawns the helper exactly as it does
+ * on a desktop), the real draft store, the real image limits.
+ *
+ * TEST STAND-INS: the model (the scripted streaming adapter) and the clipboard
+ * CONTENT (a scripted `xclip` that answers the two questions the real probe
+ * asks). DELIBERATELY ABSENT: a physical OS clipboard and a physical Tern GUI.
+ */
+test('a real Ctrl+V with an image clipboard lands a composer token and submits a durable image block', async (t) => {
+  const { chmodSync, mkdirSync, writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['L6', '-IMAGE', '-OK'],
+    nativeImages: true,
+  })
+  const previousPath = process.env.PATH
+  const previousDisplay = process.env.DISPLAY
+  // The write recorder is attached BEFORE any input: the submission it observes
+  // is the one this gesture causes, not a warm-up.
+  const prepared: unknown[] = []
+  const recorder = fixture.recordPrompts(call => { prepared.push(call.message) })
+  try {
+    // One REAL PNG, produced by the attachment backend's own dependency (the
+    // probe validates the format strictly).
+    const { createRequire } = await import('node:module')
+    const { dirname } = await import('node:path')
+    const require = createRequire(import.meta.url)
+    const storeDir = dirname(require.resolve('@deepseek-ai/dsh-attachment-local/package.json'))
+    const sharp = require(require.resolve('sharp', { paths: [storeDir] })) as (
+      input: unknown,
+    ) => { png(): { toBuffer(): Promise<Buffer> } }
+    const png = new Uint8Array(await sharp({ create: { width: 8, height: 8, channels: 3, background: '#abcdef' } }).png().toBuffer())
+    const expectedBlobId = createHash('sha256').update(png).digest('hex')
+
+    // A REAL clipboard helper on $PATH. The production X11 probe asks for
+    // `-t TARGETS -o`, then for the advertised raster type's bytes.
+    const binDir = join(fixture.workRoot, 'bin')
+    mkdirSync(binDir, { recursive: true })
+    const pngFile = join(fixture.workRoot, 'clipboard.png')
+    writeFileSync(pngFile, png)
+    const helper = join(binDir, 'xclip')
+    writeFileSync(helper, [
+      '#!/bin/sh',
+      'for arg in "$@"; do',
+      '  if [ "$arg" = "TARGETS" ]; then printf "image/png\\n"; exit 0; fi',
+      `  if [ "$arg" = "image/png" ]; then cat ${JSON.stringify(pngFile)}; exit 0; fi`,
+      'done',
+      'exit 0',
+      '',
+    ].join('\n'))
+    chmodSync(helper, 0o755)
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`
+    process.env.DISPLAY = ':0'
+
+    await waitForInputDelivery(fixture.pane)
+    // The REAL Ctrl+V byte: the SDK decodes it into the formal Key fields the
+    // production `dispatchKey` branch reads.
+    fixture.pane.input.type('\x16')
+    await waitFor('the composer to hold the canonical image token', () =>
+      /\[image #\d+ \(8×8\)\]/u.test(latestComposerText(fixture.pane.output.text()) ?? ''), 25_000)
+
+    const draft = latestComposerText(fixture.pane.output.text()) ?? ''
+    assert.match(draft, /\[image #\d+ \(8×8\)\]/u,
+      'the live composer carries the canonical draft-image token')
+    // The dock preview is a native node over the SAME staged bytes, so this also
+    // proves the blob channel ran for the draft.
+    assert.equal(fixture.pane.blobIds().includes(expectedBlobId), true,
+      'the staged bytes reached the ONE SDK blob sender through the production path')
+
+    // Submit through the REAL submission controller.
+    fixture.pane.input.type('\r')
+    await waitFor('the settled prompt write', () => recorder.calls() >= 1, 30_000)
+
+    const wire = JSON.stringify(prepared[0])
+    assert.ok(wire.includes('"type":"image"'),
+      `the prepared message carries a real image block (got ${wire.slice(0, 240)})`)
+    assert.equal(wire.includes('[image #'), false,
+      'the canonical draft token was expanded, never sent as literal text')
+    // The image half of the prepared message is the STAGED PNG's own bytes. The
+    // real attachment service stored them content-addressed and the prepared
+    // block names that durable ref, so the chain is closed by READING THEM BACK
+    // through the service rather than by trusting the identifier.
+    const ref = (prepared[0] as { content: { type: string; attachment?: { attachmentId: string; bytes: number } }[] })
+      .content.find(block => block.type === 'image')!.attachment!
+    assert.equal(ref.bytes, png.byteLength, 'the durable ref records the staged byte length')
+    const attachments = fixture.ctx.get('attachments') as unknown as {
+      readImage(ref: unknown): Promise<{ data: Uint8Array }>
+    }
+    const stored = await attachments.readImage(ref)
+    assert.deepEqual(new Uint8Array(stored.data), png,
+      'the durable image block carries the exact staged bytes')
+    // The text half survives beside the image block.
+    assert.equal(wire.includes('"type":"text"'), true, 'the message still carries its text block')
+  } finally {
+    recorder.detach()
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    if (previousDisplay === undefined) delete process.env.DISPLAY
+    else process.env.DISPLAY = previousDisplay
+    // The fixture's settle disposes the app, the pane and the Host context
+    // before the next case starts: a bounded teardown, not a blind sleep.
     await fixture.settle()
   }
 })

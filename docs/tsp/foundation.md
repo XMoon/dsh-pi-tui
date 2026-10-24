@@ -341,22 +341,34 @@ does not become a second data surface.
   reading keys' Escape, and it is admitted only for the current reading; the
   base surface's own row selection is not re-run by returning.
 
-### Tool-result image projection
+### Native image projection (draft + transcript)
 
-A tool result that carries structured image content is projected inside its
-existing tool card, in the result's own block order: the text blocks stay text,
-and each image block becomes an identity line plus — when the pane negotiated
-the `image` kind and the `blobs` feature — one native image node. The flat
-result text is not drawn again beside the block-wise result, and the tool card's
-own args, status, target and children are unchanged.
+A durable image block — in a **User** message, an **Assistant** message or a
+**Tool** result — is projected inside the row that already owns it, in that
+row's own block order: the text blocks stay text, and each image block becomes an
+identity line plus — when the pane negotiated the `image` kind and the `blobs`
+feature — one native image node. The flat text is not drawn again beside the
+block-wise body, and a tool card's own args, status, target and children are
+unchanged.
 
-- The authority for WHICH attachment a row shows is the result's own content
-  blocks. The tool name, the args, the flat result text and the rendered text
-  never imply an image.
+- The authority for WHICH attachment a row shows is that row's own structured
+  content: User `content`, Assistant `displayBlocks` (while an opaque block is
+  open) or its settled `content`, Tool `resultBlocks`. A display name, the flat
+  text, the tool name and the args never imply an image.
+- Assistant `displayBlocks` OUTRANKS the settled `content` — they are two views
+  of one stream, never two bodies. An `open-opaque` block states its own type
+  and that it is pending; it never fabricates a blob, a size or an image node.
+- One row's block keys are its own namespace (`body-b<index>` for a User or
+  Assistant body, `result-b<index>` for a tool result), so two rows under the
+  same parent can never collide, and an image inside a nested tool child keeps
+  the child's own ordering.
+- The SAME image state map feeds all three roles: one durable attachment of one
+  display subject has one render state, whichever row presents it.
 - The authority for reading the bytes is unchanged: the existing attachment
   read port, under the existing immutable display-subject scope. The projection
   adds no attachment cache, no read port, no permission check and no
-  session-scoped state of its own.
+  session-scoped state of its own. A duplicate reference is deduped for READING
+  and SUBSCRIBING only — every visible occurrence still gets its own node.
 - The renderer emits at most one blob per attachment through the official SDK
   session. The single-blob size limit is the SDK's own limit and is checked
   against the READY bytes, before anything is sent; the reference's own byte
@@ -372,20 +384,59 @@ own args, status, target and children are unchanged.
 - The image path is presentation-only: it adds no write, no new command and no
   new user action.
 
+#### The staged draft
+
+The composer's OWN staged images are Client-local draft state, never durable
+attachments: they are presented on the dock, above the controlled editor, from
+a READ-ONLY projection of the live composer text and the ONE draft store. The
+projection window is:
+
+| SDK `caps.cols` | native draft previews | text |
+|---|---|---|
+| `>= 100` | up to two | total count, each identity, plus the hidden count |
+| `72 … 99` | at most one | the same |
+| `< 72`, or no `image`/`blobs` | none | `Draft images · N` plus the first identity |
+
+- The width authority is the SDK's `caps.cols` ONLY. The protocol publishes no
+  pane-rows fact, so no height-driven degradation is designed or claimed here;
+  a short pane's clipping is a client behaviour measured in a real run.
+- The canonical `[image #N (W×H)]` token parser is the ONE source of WHICH
+  occurrences a draft references, so the preview and the submission expansion
+  cannot disagree. A staged image that no live token references is not a
+  preview; deleting a token retires its node on the next frame.
+- A LOCAL draft's own bytes go through the same one blob sender. A RECALLED
+  draft (a queue pull-back) carries NO local bytes: it reuses the existing read
+  port under the scope it really has, and with no usable scope it states that
+  rather than sending an empty image.
+- The projection never writes back to the draft store: a preview that cannot be
+  sent changes no token, deletes no bytes and blocks no submission.
+
+#### The paste intent
+
+`Ctrl+V` on the TSP surface forwards ONE application intent — the existing
+clipboard-paste entry that owns the OS probe FIFO, the image limits and the
+draft write. The renderer never probes the clipboard and owns no media queue. A
+bracketed text paste remains the editor's atomic text edit and is a different
+key. The existing hydration fence, modal seat and pre-bind held-key replay apply
+unchanged, so a paste during those windows reaches nothing.
+
 Reproducible runs (a real Tern client; not part of `pnpm test`/CI):
 
 ```sh
 node scripts/tern-pane-drive.mjs scripts/tern-pane-tool-result-image.mjs
+node scripts/tern-pane-drive.mjs scripts/tern-pane-draft-and-transcript-images.mjs
 DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image.mjs
 DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image-scroll.mjs
+DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-draft-and-transcript-images.mjs
 ```
 
-The headless lane mounts the production projection over one official inline
-surface and measures the client's own layout at a wide and at a NARROW
-viewport (the GUI client clamps its window, so the narrow case is a headless
-question); the GUI lanes add the real window, the client's own theme, the
-accessibility tree, a real pointer into the client's own image viewer, and the
-long-transcript reachability. Containment claims go through the visibility
+The headless lanes mount the production projections over one official inline
+surface and measure the client's own layout across real width bands (the GUI
+client clamps its window, so the narrow bands are a headless question); the GUI
+lanes add the real window, the client's own theme, the accessibility tree, a
+real pointer into the client's own image viewer — including the sibling
+navigation between two images of ONE message, which the SDK does not describe —
+and the long-transcript reachability. Containment claims go through the visibility
 oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect. See
 [the real-pane harness guide](../guides/tern-pane-testing.md) and
 [the real-GUI guide](../guides/tern-gui-testing.md) for the run preconditions

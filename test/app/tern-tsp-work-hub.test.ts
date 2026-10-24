@@ -160,6 +160,7 @@ async function mount(
     cancel() {},
     submit: () => assert.fail('Work Hub input must never reach the composer submit path'),
     steer() {},
+    pasteMedia: () => {},
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

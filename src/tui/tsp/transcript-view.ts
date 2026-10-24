@@ -29,7 +29,7 @@ import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import { subCallDisplayStatus } from '../../domain/transcript/folder.ts'
 import { formatBytes } from '../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import type { TranscriptMessage, TranscriptToolMessage } from '../../domain/transcript/types.ts'
+import type { AssistantDisplayBlock, TranscriptMessage, TranscriptToolMessage } from '../../domain/transcript/types.ts'
 import { contextPresentationKind } from '../transcript/context-structure.ts'
 import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
@@ -118,8 +118,12 @@ export interface TranscriptViewOptions {
    * projection (it is the only owner of the loader and of the blob sender);
    * an absent map means the renderer has no image capability at all, so an
    * image block renders its identity line and no native image.
+   *
+   * Every row kind shares this ONE map: a User/Assistant body image, a Tool
+   * result image and a recalled draft all name a durable attachment of the
+   * same display subject, so a per-role image state would be a second truth.
    */
-  readonly toolImageStates?: ReadonlyMap<string, ToolImageState>
+  readonly imageStates?: ReadonlyMap<string, ToolImageState>
   /**
    * PR-D: whether the current pane actually negotiated the native `chart`
    * kind. The Host tool is registered regardless; this flag is the CLIENT
@@ -337,8 +341,11 @@ export function toolRowImageBlocks(message: TranscriptToolMessage): readonly Pro
  * PR-C: the display name of one image attachment: the attachment's own name
  * when it has one, else `image`. The identity line and the native image's
  * accessible name are the SAME name — one attachment, one name.
+ *
+ * Exported for the dock's draft projection, so a staged image and a durable
+ * attachment cannot disagree about their display identity.
  */
-function imageDisplayName(ref: unknown): string {
+export function imageDisplayName(ref: unknown): string {
   const candidate = (ref === null || typeof ref !== 'object' ? undefined : ref) as Partial<ImageAttachmentRefLike> | undefined
   return candidate !== undefined && typeof candidate.name === 'string' && candidate.name !== ''
     ? candidate.name
@@ -350,8 +357,11 @@ function imageDisplayName(ref: unknown): string {
  * attachment's own name, or `image`), its SOURCE pixel size and its SOURCE
  * byte count. A malformed reference contributes only the parts that are well
  * formed — the status phrase still says what is wrong.
+ *
+ * Exported (with {@link imageStatusText}) so the dock's draft rows reuse this
+ * ONE identity/status vocabulary instead of formatting a second one.
  */
-function imageIdentityText(ref: unknown): string {
+export function imageIdentityText(ref: unknown): string {
   const candidate = (ref === null || typeof ref !== 'object' ? undefined : ref) as Partial<ImageAttachmentRefLike> | undefined
   const parts: string[] = [imageDisplayName(ref)]
   if (candidate !== undefined
@@ -366,7 +376,7 @@ function imageIdentityText(ref: unknown): string {
 }
 
 /** PR-C: the fixed status phrase of one image state (the frozen table). */
-function imageStatusText(state: ToolImageState): string | undefined {
+export function imageStatusText(state: ToolImageState): string | undefined {
   switch (state.state) {
     case 'unsupported': return 'Native image display unavailable in this Tern pane'
     case 'no-scope': return 'Image unavailable for this session'
@@ -385,25 +395,181 @@ function imageStatusText(state: ToolImageState): string | undefined {
  *
  * The image node's key is the SAME for the pending and the ready state, so
  * the pane replaces the placeholder in place instead of adding a second row.
+ * `keyPrefix` is the row's OWN block namespace (`result-b` for a tool card
+ * body, `body-b` for a User/Assistant message body): two rows under the same
+ * parent card must never share a block key.
  */
 function imageBlockNodes(
   block: ProjectedImageBlock,
   state: ToolImageState | undefined,
+  keyPrefix: 'result-b' | 'body-b',
 ): Node[] {
   const problem = imageRefProblem(block.attachment)
   const identity = imageIdentityText(block.attachment)
   if (problem !== undefined) {
     const phrase = problem === 'invalid' ? 'Invalid image attachment' : 'Unsupported image format'
-    return [ui.text({ key: `result-b${block.index}-info`, text: sanitizeDisplayText(`${identity} · ${phrase}`) })]
+    return [ui.text({ key: `${keyPrefix}${block.index}-info`, text: sanitizeDisplayText(`${identity} · ${phrase}`) })]
   }
   const alt = sanitizeDisplayText(imageDisplayName(block.attachment))
   const status = state === undefined ? 'Native image display unavailable in this Tern pane' : imageStatusText(state)
   const info = status === undefined ? identity : `${identity} · ${status}`
-  const nodes: Node[] = [ui.text({ key: `result-b${block.index}-info`, text: sanitizeDisplayText(info) })]
+  const nodes: Node[] = [ui.text({ key: `${keyPrefix}${block.index}-info`, text: sanitizeDisplayText(info) })]
   if (state === undefined || state.state === 'unsupported' || state.state === 'no-scope') return nodes
   const blob = state.state === 'ready' ? state.blobId : PENDING_IMAGE_BLOB_ID
-  nodes.push(ui.image({ key: `result-b${block.index}-image`, blob, alt }))
+  nodes.push(ui.image({ key: `${keyPrefix}${block.index}-image`, blob, alt }))
   return nodes
+}
+
+/**
+ * PR4: the frozen dock draft-preview width policy, in SDK `caps.cols` — the
+ * ONLY width authority the protocol publishes (there is no pane-rows fact, so
+ * no height rule can be inferred here):
+ *
+ * - `>= 100` columns: up to {@link DOCK_DRAFT_MAX_PREVIEWS} native previews;
+ * - `72 … 99`: at most ONE;
+ * - `< 72` (and any pane without `image`+`blobs`): none.
+ */
+export const DOCK_DRAFT_SINGLE_PREVIEW_COLS = 72
+export const DOCK_DRAFT_TWO_PREVIEW_COLS = 100
+export const DOCK_DRAFT_MAX_PREVIEWS = 2
+
+/** PR4: one staged draft occurrence, already reduced to its display facts. */
+export interface DockDraftImageEntry {
+  /** The occurrence's stable presentation identity (`draft-image-<id>-<rank>`). */
+  readonly key: string
+  /** The `[IMAGE] name · WxH · bytes` identity line of the staged image. */
+  readonly identity: string
+  /** The native node's accessible name (the same display name). */
+  readonly name: string
+  /** The prepared render state, or `undefined` when none was prepared. */
+  readonly state: ToolImageState | undefined
+}
+
+/**
+ * PR4: the dock's draft-image rows — a PURE projection of already-prepared
+ * state, exactly like the transcript image nodes.
+ *
+ * The caller prepares the blob/read state first; this function never reads
+ * bytes, never calls the SDK and never consults a store. The layout follows the
+ * frozen width policy, and the identity line is ALWAYS drawn for every shown
+ * occurrence (it is the only place the reader learns which staged image the
+ * draft holds and what happened to it).
+ */
+export function dockDraftImageNodes(
+  entries: readonly DockDraftImageEntry[],
+  cols: number,
+  nativeImagesSupported: boolean,
+): Node[] {
+  if (entries.length === 0) return []
+  const shown = !nativeImagesSupported || cols < DOCK_DRAFT_SINGLE_PREVIEW_COLS
+    ? 0
+    : cols >= DOCK_DRAFT_TWO_PREVIEW_COLS
+      ? Math.min(DOCK_DRAFT_MAX_PREVIEWS, entries.length)
+      : Math.min(1, entries.length)
+  const noun = entries.length === 1 ? 'occurrence' : 'occurrences'
+  if (shown === 0) {
+    // Narrow pane (or no native capability): the count plus the FIRST identity,
+    // so the reader still knows what the draft holds.
+    const first = entries[0]!
+    return [ui.text({
+      key: 'draft-images',
+      text: sanitizeDisplayText(`Draft images · ${entries.length} ${noun} · ${first.identity}`),
+    })]
+  }
+  const nodes: Node[] = [ui.text({ key: 'draft-images', text: `Draft images · ${entries.length} ${noun}` })]
+  for (const entry of entries.slice(0, shown)) {
+    const status = entry.state === undefined ? undefined : imageStatusText(entry.state)
+    nodes.push(ui.text({
+      key: `${entry.key}-info`,
+      text: sanitizeDisplayText(status === undefined ? entry.identity : `${entry.identity} · ${status}`),
+    }))
+    if (entry.state?.state === 'ready') {
+      nodes.push(ui.image({ key: entry.key, blob: entry.state.blobId, alt: sanitizeDisplayText(entry.name) }))
+    } else if (entry.state?.state === 'loading') {
+      // The client's own placeholder for a read that has not settled: the SAME
+      // node key, so the real blob replaces it in place.
+      nodes.push(ui.image({ key: entry.key, blob: PENDING_IMAGE_BLOB_ID, alt: sanitizeDisplayText(entry.name) }))
+    }
+  }
+  if (shown < entries.length) {
+    const rest = entries.length - shown
+    nodes.push(ui.text({
+      key: 'draft-images-more',
+      text: `… ${rest} more image ${rest === 1 ? 'occurrence' : 'occurrences'}`,
+    }))
+  }
+  return nodes
+}
+
+/**
+ * PR4: a bounded, PAYLOAD-FREE type tag for one block the TSP mapper does not
+ * present. The durable block object never reaches the terminal — no serialized
+ * JSON, no bytes, no path — only its type name does, so an unknown future
+ * block stays visible as a fact instead of being silently dropped.
+ */
+function typedBlockText(label: 'Unknown block' | 'Open block', type: unknown): string {
+  const raw = typeof type === 'string' ? sanitizeDisplayText(type).replace(/[\t\r\n]+/g, ' ').trim() : ''
+  const bounded = raw === '' ? 'unknown' : raw.length <= 60 ? raw : `${raw.slice(0, 59)}…`
+  return `${label} · ${bounded}`
+}
+
+/**
+ * PR4: the block-wise body of ONE User/Assistant message: every non-empty
+ * text block stays its own `ui.md`, every image block becomes its identity
+ * line plus the native image node, and every block type the mapper does not
+ * present degrades to its payload-free type tag.
+ *
+ * The image state is looked up in the SAME {@link TranscriptViewOptions.imageStates}
+ * map the Tool path consumes: all three roles present durable attachments of
+ * the one display subject, so a per-role state would be a second truth.
+ */
+function bodyBlockNodes(block: ContentBlock, index: number, options: TranscriptViewOptions): Node[] {
+  if (block.type === 'text') {
+    if (block.text === '') return []
+    return [ui.md({ key: `body-b${index}-text`, text: sanitizeDisplayText(block.text) })]
+  }
+  if (block.type === 'image') {
+    // A malformed reference is NEVER read and never looked up: it renders its
+    // own failure line, not a state the reader has to interpret.
+    const state = isPresentableImageRef(block.attachment)
+      ? options.imageStates?.get(block.attachment.attachmentId)
+      : undefined
+    return imageBlockNodes({ index, attachment: block.attachment }, state, 'body-b')
+  }
+  return [ui.text({ key: `body-b${index}-block`, text: sanitizeDisplayText(typedBlockText('Unknown block', block.type)) })]
+}
+
+/**
+ * PR4: the ordered body of one User/Assistant message whose content really
+ * carries non-text blocks. The flat `message.text` is NOT drawn beside it —
+ * the blocks are the authority and joining them would duplicate the body.
+ */
+function bodyContentNodes(blocks: readonly ContentBlock[], options: TranscriptViewOptions): Node[] {
+  return blocks.flatMap((block, index) => bodyBlockNodes(block, index, options))
+}
+
+/**
+ * PR4: the ordered body of one Assistant message that carries
+ * `displayBlocks` — the presentation-only evidence of an OPEN opaque block.
+ * A `content` member renders exactly like the settled body; an `open-opaque`
+ * member states its type and that it is still pending, and NEVER fabricates a
+ * blob or an image node. The two lists are never mixed: the caller chooses
+ * one authority, so no image can be drawn twice.
+ */
+function assistantDisplayNodes(
+  blocks: readonly AssistantDisplayBlock[],
+  options: TranscriptViewOptions,
+): Node[] {
+  return blocks.flatMap((displayBlock, index) => displayBlock.kind === 'open-opaque'
+    ? [ui.text({ key: `body-b${index}-block`, text: sanitizeDisplayText(`${typedBlockText('Open block', displayBlock.blockType)} · pending`) })]
+    : bodyBlockNodes(displayBlock.block, index, options))
+}
+
+/** Whether one chosen block list must render block-wise: it carries at least
+ *  one image the reader has to see. A list without an image keeps the legacy
+ *  single flat body and its stable `body` key. */
+function bodyHasImage(blocks: readonly ContentBlock[]): boolean {
+  return blocks.some(block => block.type === 'image')
 }
 
 /**
@@ -429,9 +595,9 @@ function imageResultNodes(
     // A malformed reference is NEVER read and never looked up: it renders its
     // own failure line, not a state the reader has to interpret.
     const state = isPresentableImageRef(block.attachment)
-      ? options.toolImageStates?.get(block.attachment.attachmentId)
+      ? options.imageStates?.get(block.attachment.attachmentId)
       : undefined
-    nodes.push(...imageBlockNodes(projected, state))
+    nodes.push(...imageBlockNodes(projected, state, 'result-b'))
   })
   return nodes
 }
@@ -774,9 +940,28 @@ function workflowNode(message: Extract<TranscriptMessage, { kind: 'workflow' }>,
 function messageNode(message: TranscriptMessage, key: string, options: TranscriptViewOptions): Node {
   switch (message.kind) {
     case 'user':
+      // PR4: only a body that really carries non-text content switches to the
+      // ordered block render; a text-only message keeps the exact legacy card
+      // and its stable `body` key.
+      if (message.content !== undefined && bodyHasImage(message.content)) {
+        return ui.card({ key, head: 'You' }, ...bodyContentNodes(message.content, options))
+      }
       return ui.card({ key, head: 'You' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
-    case 'assistant':
+    case 'assistant': {
+      // PR4: `displayBlocks` OUTRANKS the settled `content` — the folder only
+      // publishes it while an opaque block is OPEN, so its presence IS the
+      // "live presentation evidence" fact and the ONE reason an `open-opaque`
+      // row must still say what is pending. Choosing it can never double the
+      // body: the settled `content` it outranks is the same stream.
+      const display = message.displayBlocks
+      if (display !== undefined) {
+        return ui.card({ key, head: 'Assistant' }, ...assistantDisplayNodes(display, options))
+      }
+      if (message.content !== undefined && bodyHasImage(message.content)) {
+        return ui.card({ key, head: 'Assistant' }, ...bodyContentNodes(message.content, options))
+      }
       return ui.card({ key, head: 'Assistant' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
+    }
     case 'thinking':
       return ui.card(
         { key, head: 'Thinking', ...(message.running === true ? { status: 'running' } : {}) },

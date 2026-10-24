@@ -21,7 +21,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { textOf } from '../../src/domain/transcript/folder.ts'
-import type { TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
+import type { TranscriptMessage, TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import {
   PENDING_IMAGE_BLOB_ID,
@@ -72,7 +72,7 @@ function viewOf(message: TranscriptToolMessage, states?: ReadonlyMap<string, Too
   readonly children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[]
 } {
   const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), {
-    ...(states === undefined ? {} : { toolImageStates: states }),
+    ...(states === undefined ? {} : { imageStates: states }),
   })
   const tools: { kind: string; props: Record<string, unknown>; children: readonly { kind: string; props: Record<string, unknown> }[] }[] = []
   const walk = (node: { kind: string; props: Record<string, unknown>; children: readonly unknown[] }): void => {
@@ -222,7 +222,7 @@ test('a PTC child projects its OWN image blocks, under its own identity', () => 
   })
   const parent = toolRow([textBlock('parent result')], { name: 'parent_tool', args: '{"a":1}', subCalls: [child] })
   const view = transcriptView(projectTranscriptStructure([parent]), new TranscriptNodeKeys(), {
-    toolImageStates: new Map([['att-shot-1', { state: 'ready', blobId: 'd'.repeat(64) }]]),
+    imageStates: new Map([['att-shot-1', { state: 'ready', blobId: 'd'.repeat(64) }]]),
   })
 
   const childNode = JSON.stringify(view).includes('sub-sub-7')
@@ -265,7 +265,7 @@ test('an ask_user_question row keeps the settled-answer authority and its origin
     settledQuestionAnswersLookup: (callId: string) => (callId === 'call-1'
       ? [{ id: 'q1', selected: ['yes'] }]
       : undefined),
-    toolImageStates: new Map([['att-shot-1', { state: 'ready', blobId: 'h'.repeat(64) }]]),
+    imageStates: new Map([['att-shot-1', { state: 'ready', blobId: 'h'.repeat(64) }]]),
   })
   const flat = JSON.stringify(view)
 
@@ -364,4 +364,284 @@ test('the identity line runs the attachment name through the untrusted display s
   assert.equal(info.includes(escape), false, 'no escape character reaches the identity line')
   assert.equal(info.includes('31m'), false, 'the SGR body is dropped with its introducer')
   assert.equal(info.endsWith('\u00b7 Image read failed'), true, 'the status phrase is appended to the identity line')
+})
+
+// ── T4: the User / Assistant ordered body (PR4) ─────────────────────────────
+
+/** The rendered view of one NON-tool row (User/Assistant body projection). */
+function bodyViewOf(
+  message: TranscriptMessage,
+  states?: ReadonlyMap<string, ToolImageState>,
+): { readonly kind: string; readonly props: Record<string, unknown>; readonly children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[] } {
+  const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), {
+    ...(states === undefined ? {} : { imageStates: states }),
+  })
+  const cards: { kind: string; props: Record<string, unknown>; children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[] }[] = []
+  const walk = (node: { kind: string; props: Record<string, unknown>; children: readonly unknown[] }): void => {
+    if (node.kind === 'card') cards.push(node as never)
+    for (const child of node.children) walk(child as never)
+  }
+  walk(view as never)
+  const found = cards[0]
+  assert.ok(found !== undefined, 'the row must render one card node')
+  return found
+}
+
+function userRow(content: readonly ContentBlock[], text: string): TranscriptMessage {
+  return { kind: 'user', turn: 1, text, content } as unknown as TranscriptMessage
+}
+
+test('a user message with text→image→text→image renders the four blocks in order under one card', () => {
+  const message = userRow(
+    [textBlock('before'), imageBlock({ ...ATTACHMENT, attachmentId: 'att-a', name: 'a.png' }), textBlock('after'), imageBlock({ ...ATTACHMENT, attachmentId: 'att-b', name: 'b.png' })],
+    'beforeafter',
+  )
+  const states = new Map<string, ToolImageState>([
+    ['att-a', { state: 'ready', blobId: 'a'.repeat(64) }],
+    ['att-b', { state: 'ready', blobId: 'b'.repeat(64) }],
+  ])
+  const rows = rowsOf(bodyViewOf(message, states))
+
+  assert.deepEqual(rows.map(row => row.key), [
+    'body-b0-text',
+    'body-b1-info',
+    'body-b1-image',
+    'body-b2-text',
+    'body-b3-info',
+    'body-b3-image',
+  ])
+  assert.equal(rows.find(row => row.key === 'body-b1-image')?.blob, 'a'.repeat(64))
+  assert.equal(rows.find(row => row.key === 'body-b3-image')?.blob, 'b'.repeat(64))
+  assert.equal(rows.some(row => row.key === 'body'), false,
+    'the flat body must not be drawn beside the block-wise body')
+})
+
+test('a text-only user message keeps the EXACT legacy flat body and its body key', () => {
+  const withContent = userRow([textBlock('plain text')], 'plain text')
+  const withoutContent: TranscriptMessage = { kind: 'user', turn: 1, text: 'plain text' }
+  const shape = (message: TranscriptMessage): unknown => ({
+    kind: bodyViewOf(message).kind,
+    props: bodyViewOf(message).props,
+    children: bodyViewOf(message).children.map(child => ({ kind: child.kind, props: child.props })),
+  })
+
+  assert.deepEqual(rowsOf(bodyViewOf(withContent)).map(row => row.key), ['body'],
+    'a text-only content list keeps the single flat body')
+  assert.deepEqual(shape(withContent), shape(withoutContent),
+    'a text-only message is byte-identical to the same message with NO content list')
+})
+
+test('a user image without a prepared state states the reason and draws no image node', () => {
+  const rows = rowsOf(bodyViewOf(userRow([imageBlock()], '')))
+
+  assert.deepEqual(rows.map(row => row.key), ['body-b0-info'])
+  assert.match(String(rows[0]?.text), /Native image display unavailable in this Tern pane$/u)
+})
+
+test('the SAME attachment twice in one user body draws two sibling image nodes and one identity per block', () => {
+  const message = userRow([imageBlock(), imageBlock()], '')
+  const rows = rowsOf(bodyViewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'c'.repeat(64) }]])))
+
+  assert.deepEqual(rows.map(row => row.key), [
+    'body-b0-info',
+    'body-b0-image',
+    'body-b1-info',
+    'body-b1-image',
+  ])
+  assert.equal(rows.filter(row => row.kind === 'image').length, 2,
+    'two occurrences of the same durable ref are two visible nodes')
+  assert.equal(rows.every(row => row.blob === undefined || row.blob === 'c'.repeat(64)), true,
+    'both nodes name the one blob')
+})
+
+test('a malformed and an unsupported-format user image render their reasons and no image node', () => {
+  const broken = rowsOf(bodyViewOf(userRow([imageBlock({ ...ATTACHMENT, attachmentId: '' })], '')))
+  assert.match(String(broken.find(row => row.key === 'body-b0-info')?.text), /Invalid image attachment$/u)
+  assert.equal(broken.some(row => row.kind === 'image'), false)
+
+  const svg = rowsOf(bodyViewOf(userRow([imageBlock({ ...ATTACHMENT, mediaType: 'image/svg+xml' })], '')))
+  assert.match(String(svg.find(row => row.key === 'body-b0-info')?.text), /Unsupported image format$/u)
+  assert.equal(svg.some(row => row.kind === 'image'), false)
+})
+
+test('a settled assistant body with images renders block-wise; a text-only one keeps its flat body', () => {
+  const mixed: TranscriptMessage = {
+    kind: 'assistant', turn: 1, text: 'diagram', content: [imageBlock(), textBlock('diagram')],
+  } as unknown as TranscriptMessage
+  const rows = rowsOf(bodyViewOf(mixed, new Map([['att-shot-1', { state: 'ready', blobId: 'd'.repeat(64) }]])))
+  assert.deepEqual(rows.map(row => row.key), ['body-b0-info', 'body-b0-image', 'body-b1-text'])
+  assert.equal(rows.find(row => row.key === 'body-b0-image')?.blob, 'd'.repeat(64))
+
+  const textOnly: TranscriptMessage = { kind: 'assistant', turn: 1, text: 'hi', content: [textBlock('hi')] }
+  assert.deepEqual(rowsOf(bodyViewOf(textOnly)).map(row => row.key), ['body'])
+})
+
+test('an assistant displayBlocks list with an image outranks the settled content and never doubles it', () => {
+  const message: TranscriptMessage = {
+    kind: 'assistant',
+    turn: 1,
+    text: 'settled text',
+    content: [textBlock('settled text'), imageBlock({ ...ATTACHMENT, attachmentId: 'att-settled' })],
+    displayBlocks: [
+      { kind: 'content', block: textBlock('live text') },
+      { kind: 'content', block: imageBlock({ ...ATTACHMENT, attachmentId: 'att-live' }) },
+    ],
+  } as unknown as TranscriptMessage
+  const states = new Map<string, ToolImageState>([
+    ['att-settled', { state: 'ready', blobId: 'e'.repeat(64) }],
+    ['att-live', { state: 'ready', blobId: 'f'.repeat(64) }],
+  ])
+  const rows = rowsOf(bodyViewOf(message, states))
+
+  assert.deepEqual(rows.map(row => row.key), ['body-b0-text', 'body-b1-info', 'body-b1-image'])
+  assert.equal(rows.find(row => row.key === 'body-b0-text')?.text, 'live text',
+    'the live display list is the body authority')
+  assert.equal(rows.find(row => row.key === 'body-b1-image')?.blob, 'f'.repeat(64))
+  assert.equal(rows.some(row => row.blob === 'e'.repeat(64)), false,
+    'the settled content is NOT drawn beside the display list')
+})
+
+test('an assistant open-opaque image block states that it is pending and fabricates no image', () => {
+  const message: TranscriptMessage = {
+    kind: 'assistant',
+    turn: 1,
+    text: '',
+    content: [imageBlock({ ...ATTACHMENT, attachmentId: 'att-open' })],
+    displayBlocks: [{ kind: 'open-opaque', blockType: 'image' }],
+  } as unknown as TranscriptMessage
+  const rows = rowsOf(bodyViewOf(message, new Map([['att-open', { state: 'ready', blobId: 'g'.repeat(64) }]])))
+
+  assert.deepEqual(rows.map(row => row.key), ['body-b0-block'])
+  assert.match(String(rows[0]?.text), /^Open block · image · pending$/u)
+  assert.equal(rows.some(row => row.kind === 'image'), false,
+    'an unfinished block never becomes a drawn blob')
+})
+
+test('an unknown finalized block degrades to a payload-free type tag, never the block JSON', () => {
+  const unknownBlock = { type: 'future-thing', secret: 'do-not-print' } as unknown as ContentBlock
+  const message = userRow([imageBlock(), unknownBlock], '')
+  const rows = rowsOf(bodyViewOf(message, new Map([['att-shot-1', { state: 'ready', blobId: 'h'.repeat(64) }]])))
+
+  const tag = rows.find(row => row.key === 'body-b1-block')
+  assert.equal(tag?.text, 'Unknown block · future-thing')
+  assert.equal(JSON.stringify(rows).includes('do-not-print'), false,
+    'no block payload reaches the terminal')
+})
+
+test('the User image identity line runs an untrusted attachment name through the display sanitizer', () => {
+  const escape = String.fromCharCode(27)
+  const message = userRow([imageBlock({ ...ATTACHMENT, name: `shot${escape}[31m.png` })], '')
+  const rows = rowsOf(bodyViewOf(message, new Map([['att-shot-1', { state: 'loading' }]])))
+  const info = String(rows.find(row => row.key === 'body-b0-info')?.text)
+
+  assert.equal(info.includes(escape), false, 'no escape character reaches the body identity line')
+  assert.equal(info.includes('31m'), false, 'the SGR body is dropped with its introducer')
+})
+
+// ── T5: the dock's PURE draft-image projection (PR4) ────────────────────────
+
+import { dockDraftImageNodes, type DockDraftImageEntry } from '../../src/tui/tsp/transcript-view.ts'
+
+/** One prepared dock entry. */
+function dockEntry(id: number, ordinal: number, state?: ToolImageState, name = 'shot.png'): DockDraftImageEntry {
+  return {
+    key: `draft-image-${id}-${ordinal}`,
+    identity: `[IMAGE] ${name} · 640×360 · 2.0 KiB`,
+    name,
+    state,
+  }
+}
+
+test('the dock projection draws one identity line plus one native node per shown occurrence', () => {
+  const nodes = dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) })], 120, true)
+  const rows = rowsOf({ children: nodes })
+
+  assert.deepEqual(rows.map(row => row.key), ['draft-images', 'draft-image-1-0-info', 'draft-image-1-0'],
+    'the identity line precedes its native node, under one count line')
+  assert.equal(rows[0]?.text, 'Draft images · 1 occurrence')
+  assert.equal(rows[1]?.text, '[IMAGE] shot.png · 640×360 · 2.0 KiB')
+  assert.equal(rows[2]?.blob, 'a'.repeat(64))
+})
+
+test('the frozen width policy picks 2 / 1 / 0 previews at 100 / 72 / below', () => {
+  const entries = [
+    dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) }, 'a.png'),
+    dockEntry(2, 1, { state: 'ready', blobId: 'b'.repeat(64) }, 'b.png'),
+    dockEntry(3, 2, { state: 'ready', blobId: 'c'.repeat(64) }, 'c.png'),
+  ]
+  const images = (cols: number): number =>
+    dockDraftImageNodes(entries, cols, true).filter(node => node.kind === 'image').length
+
+  assert.equal(images(100), 2, 'exactly 100 columns shows two previews')
+  assert.equal(images(160), 2, 'a wider pane still caps at two')
+  assert.equal(images(99), 1, '99 columns shows one')
+  assert.equal(images(72), 1, 'exactly 72 columns still shows one')
+  assert.equal(images(71), 0, 'below 72 columns shows none')
+  assert.equal(images(100), 2, 'the cap is the two-preview limit, never the occurrence count')
+})
+
+test('a pane without the native capability degrades to the count plus the FIRST identity', () => {
+  const entries = [
+    dockEntry(1, 0, { state: 'unsupported' }, 'a.png'),
+    dockEntry(2, 1, { state: 'unsupported' }, 'b.png'),
+  ]
+  const nodes = dockDraftImageNodes(entries, 160, false)
+
+  assert.deepEqual(rowsOf({ children: nodes }).length, 1, 'one line only')
+  assert.equal(nodes[0]?.kind, 'text')
+  assert.match(String(nodes[0]?.props.text), /^Draft images · 2 occurrences · \[IMAGE\] a\.png/u)
+  assert.equal(nodes.some(node => node.kind === 'image'), false, 'no native node without the capability')
+})
+
+test('a panel below 72 columns degrades the same way even WITH the native capability', () => {
+  const nodes = dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) })], 60, true)
+
+  assert.equal(nodes.length, 1, 'a narrow pane draws no preview')
+  assert.equal(nodes.some(node => node.kind === 'image'), false)
+  assert.match(String(nodes[0]?.props.text), /^Draft images · 1 occurrence · \[IMAGE\] shot\.png/u)
+})
+
+test('a shown occurrence states its own reason and draws no image when it cannot be sent', () => {
+  const cases: readonly [ToolImageState, RegExp][] = [
+    [{ state: 'too-large' }, /Image exceeds 16 MiB Blob limit$/u],
+    [{ state: 'error' }, /Image read failed$/u],
+    [{ state: 'no-scope' }, /Image unavailable for this session$/u],
+  ]
+  for (const [state, pattern] of cases) {
+    const nodes = dockDraftImageNodes([dockEntry(1, 0, state)], 160, true)
+    const info = nodes.find(node => node.kind === 'text' && String(node.props.key).endsWith('-info'))
+    assert.match(String(info?.props.text), pattern, `${state.state} states its reason`)
+    assert.equal(nodes.some(node => node.kind === 'image'), false,
+      `${state.state} draws no native node`)
+  }
+})
+
+test('a LOADING occurrence draws the client placeholder under the SAME node key as the real blob', () => {
+  const loading = dockDraftImageNodes([dockEntry(1, 0, { state: 'loading' })], 160, true)
+  const ready = dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'd'.repeat(64) })], 160, true)
+  const loadingImage = loading.find(node => node.kind === 'image')
+  const readyImage = ready.find(node => node.kind === 'image')
+
+  assert.equal(loadingImage?.props.blob, PENDING_IMAGE_BLOB_ID)
+  assert.equal(loadingImage?.props.key, readyImage?.props.key,
+    'the placeholder is replaced in place, never beside a second node')
+})
+
+test('a lane wider than the preview cap states how many occurrences are hidden', () => {
+  const entries = [
+    dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) }, 'a.png'),
+    dockEntry(2, 1, { state: 'ready', blobId: 'b'.repeat(64) }, 'b.png'),
+    dockEntry(3, 2, { state: 'ready', blobId: 'c'.repeat(64) }, 'c.png'),
+  ]
+  const nodes = dockDraftImageNodes(entries, 100, true)
+  const more = nodes.find(node => node.props.key === 'draft-images-more')
+
+  assert.equal(more?.props.text, '… 1 more image occurrence',
+    'the third occurrence is counted, never silently dropped')
+  assert.equal(nodes.filter(node => node.kind === 'image').length, 2)
+})
+
+test('an empty draft projects NO dock node at all', () => {
+  assert.deepEqual(dockDraftImageNodes([], 160, true), [],
+    'an empty draft must be byte-identical to the pre-PR4 dock')
 })

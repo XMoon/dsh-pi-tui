@@ -132,6 +132,7 @@ async function mount(t: { after(fn: () => unknown): void }): Promise<ScrollHarne
     cancel: () => { harness.cancels.push(1) },
     submit: text => { harness.submits.push(text) },
     steer: text => { harness.steers.push(text) },
+    pasteMedia: () => {},
     noteUserInput() {},
     listContinuedQuestions: () => {
       harness.continuedOpens.push(1)
