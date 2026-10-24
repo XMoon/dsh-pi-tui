@@ -160,10 +160,13 @@ the `/footer` alias and never enters this workspace.
   one top rule, optional app notice, optional pane header, body, and the single
   physical last-row Action Bar. The app notice is the ONE root-level notice;
   a page's own business notices stay inside that page's body. At ≥76 columns a
-  direct About/Models/Account/Plugins page keeps the category rail and shares
+  direct About/Models/Account page keeps the category rail and shares
   ONE display-only pane header whose focused `[Label]` names the live keyboard
   owner; the page's own semantic hint line is moved unchanged to the frame's
-  last row instead of being regenerated at a wider width. The legacy medium
+  last row instead of being regenerated at a wider width. The Plugins page keeps
+  the rail only at ≥120 columns and while it is a rail preview: at 76..119 the
+  pair moves with the keyboard, so the rail steps aside for `List | Details`
+  once the plugin content owns the keys (see the Plugin Manager section). The legacy medium
   projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
   L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
   the frame's first column, and every child page keeps its own body and action
@@ -496,8 +499,12 @@ The page never paints root chrome: it receives a local
 its Search/Filters row (list/details, when admitted), its OWN Host
 notice/read-error/exemption row, its business body and ONE semantic bar as its
 local last row; the root installs that line as the physical last row only while
-the plugin content owns the keyboard. The adjacent `List | Details` pair needs
-`allowDual`, a local width ≥76 and six real body rows; the split is
+the plugin content owns the keyboard. At ≥120 columns the frame is
+`Categories | List | Details`; at 76..119 it is `Categories | List` while the
+rail owns the keys and `List | Details` once the plugin content does, so the rail
+is not painted in that second case. The adjacent `List | Details` pair needs
+`allowDual`, a local width ≥76 and SIX real business body rows, so a shorter
+frame degrades to ONE business column rather than squeezing the body; the split is
 `min(42, max(30, floor((width−2)×0.42))` for the list and the remainder for
 Details. A narrower or risk-starved frame degrades to ONE business column and
 never to a permanent Categories rail. A wheel is routed by the column the local
