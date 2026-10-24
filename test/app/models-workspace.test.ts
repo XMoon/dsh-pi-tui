@@ -2570,13 +2570,23 @@ test('Tab works exactly when the body and action regions fit, on every Tab encod
   page.handleInput('\t')
   assert.match(viewText(page), /^> Add Provider…/m, 'the restored layout jumps again')
 
-  // The action group no longer fits at all: the page paints its resize
-  // warning and must not grant an invisible cursor.
+  // The action group no longer fits at all: the warning keeps the body (when
+  // there is one) and the truthful Esc bar stays the physical LAST row.
   page.setBodyHeight(3)
   const warning = viewText(page)
+  const warningLines = warning.split('\n')
   assert.match(warning, /Resize the terminal to show the page actions/u)
+  assert.equal(warningLines.length, 3, 'the page paints exactly its granted rows')
+  assert.match(warningLines.at(-1)!, /Esc back/u, 'the resize fallback pins the truthful Esc bar last')
   page.handleInput('\t')
   assert.equal(viewText(page), warning, 'the resize warning never grants an invisible selection')
+
+  // One row: the warning has no body row and only the truthful bar survives.
+  page.setBodyHeight(1)
+  const one = viewText(page).split('\n')
+  assert.equal(one.length, 1)
+  assert.match(one[0]!, /^Esc back/u)
+  assert.doesNotMatch(one[0]!, /Resize|Enter/u, 'a one-row page advertises only the real Esc action')
 })
 
 test('an active picker, QuestionFlow or model picker keeps its own Tab', async () => {
@@ -2693,4 +2703,77 @@ test('the Models region hint never crowds the HOME refresh or catalog filter hin
 
   // A roomy bar still advertises the region key.
   assert.match(viewText(catalog, 100), /Tab sections/u)
+})
+
+test('short picker, QuestionFlow and model-picker frames keep their bar on the physical last row', async () => {
+  // The wire-protocol picker: a two-row budget keeps the warning/prompt body
+  // and the truthful Esc cancel bar; a one-row budget keeps the bar alone.
+  const { source } = fakeSource()
+  const page = openWith(source, { view: 'add-provider', route: 'pick-route' }, 30)
+  await flush()
+  viewText(page)
+  page.handleInput('\u001b[B') // API protocol
+  page.handleInput('\r')
+  assert.match(viewText(page), /Wire protocol/u)
+  page.setBodyHeight(3)
+  const picker = viewText(page).split('\n')
+  assert.equal(picker.length, 3)
+  assert.match(picker.at(-1)!, /Esc cancel/u, 'the picker bar is the last physical row')
+  page.setBodyHeight(1)
+  const pickerOne = viewText(page).split('\n')
+  assert.equal(pickerOne.length, 1)
+  assert.match(pickerOne[0]!, /^Esc cancel/u, 'one row paints only the real Esc action')
+  page.setBodyHeight(30)
+  page.handleInput('\u001b') // close the picker before driving the form below
+
+  // The embedded QuestionFlow: below its 8-row form gate the warning keeps the
+  // body and the dedicated bar stays last (never followed by padding).
+  page.handleInput('\u001b[A') // back to the Route field
+  page.handleInput('\r')
+  assert.match(viewText(page), /Add provider · Route/u)
+  page.setBodyHeight(6)
+  const question = viewText(page).split('\n')
+  assert.equal(question.length, 6)
+  assert.match(question.at(-1)!, /Enter disabled · Esc back/u, 'the disabled-Enter hint is the last row')
+  assert.ok(question.some(line => line.includes('Resize the terminal: the full form')), 'the warning keeps a body row')
+  page.setBodyHeight(1)
+  const questionOne = viewText(page).split('\n')
+  assert.equal(questionOne.length, 1)
+  assert.match(questionOne[0]!, /Enter disabled · Esc back/u, 'a one-row question advertises no hidden submit')
+
+  // The endpoint-discovered model multi-select picker.
+  const discovery = fakeSource()
+  discovery.source.discoverModels = async () => [{ id: 'm1' }, { id: 'm2' }]
+  const pickerPage = openWith(discovery.source, { view: 'add-provider', route: 'model-route' }, 30)
+  await flush()
+  viewText(pickerPage)
+  pickerPage.handleInput('\u001b[B')
+  pickerPage.handleInput('\u001b[B') // Base URL
+  pickerPage.handleInput('\r')
+  await flush()
+  pickerPage.render(100)
+  for (const character of 'https://models.example/v1') pickerPage.handleInput(character)
+  pickerPage.handleInput('\r')
+  pickerPage.handleInput('\r')
+  await flush()
+  pickerPage.render(100)
+  pickerPage.handleInput('\u001b[B')
+  pickerPage.handleInput('\u001b[B')
+  pickerPage.handleInput('\u001b[B') // Models
+  pickerPage.handleInput('\r')
+  await flush()
+  for (let index = 0; index < 50; index += 1) {
+    if (/Models advertised by the endpoint/u.test(viewText(pickerPage))) break
+    await new Promise<void>(resolve => setImmediate(resolve))
+    pickerPage.render(100)
+  }
+  assert.match(viewText(pickerPage), /Models advertised by the endpoint/u)
+  pickerPage.setBodyHeight(4)
+  const modelPicker = viewText(pickerPage).split('\n')
+  assert.equal(modelPicker.length, 4)
+  assert.match(modelPicker.at(-1)!, /Esc cancel/u, 'the model picker bar is the last physical row')
+  pickerPage.setBodyHeight(1)
+  const modelPickerOne = viewText(pickerPage).split('\n')
+  assert.equal(modelPickerOne.length, 1)
+  assert.match(modelPickerOne[0]!, /^Esc cancel/u)
 })

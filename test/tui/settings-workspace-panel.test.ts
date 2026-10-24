@@ -65,6 +65,11 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
 class FakePage implements SettingsAuthPage {
   readonly id: string
   readonly inputs: string[] = []
+  /** Every body grant the root handed the page, in order. */
+  readonly bodyHeights: number[] = []
+  /** Every content-cell press/click the root forwarded, in column coords. */
+  readonly pressed: Array<readonly [number, number]> = []
+  readonly clicked: Array<readonly [number, number]> = []
   disposed = false
   exitOn: string | undefined
   /** Whether the page owns an in-flight Host operation. */
@@ -82,14 +87,21 @@ class FakePage implements SettingsAuthPage {
   }
 
   invalidate(): void {}
-  setBodyHeight(rows: number): void {}
+  setBodyHeight(rows: number): void {
+    this.bodyHeights.push(rows)
+  }
   handleInput(data: string): 'handled' | 'exit' | 'open-account' {
     this.inputs.push(data)
     if (this.exitOn !== undefined && data === this.exitOn) return 'exit'
     return 'handled'
   }
-  onCellPress(x: number, y: number): void {}
-  onCellClick(): 'handled' | 'exit' | 'open-account' { return 'handled' }
+  onCellPress(x: number, y: number): void {
+    this.pressed.push([x, y])
+  }
+  onCellClick(x: number, y: number): 'handled' | 'exit' | 'open-account' {
+    this.clicked.push([x, y])
+    return 'handled'
+  }
   cancelPointer(): void {}
   pendingMutation(): boolean { return this.pending }
   canYieldFocusToNavigation(): boolean { return this.yieldAllowed }
@@ -116,7 +128,10 @@ interface Harness {
   readonly built: FakePage[]
   readonly pluginPages: readonly FakePluginPage[]
   /** The live column budget the panel reads for its layout/input decisions. */
-  readonly columns: number
+  readonly columns: () => number
+  readonly rows: () => number
+  /** Change the live geometry WITHOUT repainting (the resize-before-frame seam). */
+  readonly resize: (columns: number, rows: number) => void
   /** How many times the workspace asked to close. */
   readonly closes: () => number
   /** How many times a configuration write was dispatched. */
@@ -139,8 +154,8 @@ function setup(options: {
   /** C3: the clipboard sink (records what the copy gestures emit). */
   readonly onCopy?: (text: string) => void
 } = {}): Harness {
-  const columns = options.columns ?? 120
-  const rows = options.rows ?? 40
+  let columns = options.columns ?? 120
+  let rows = options.rows ?? 40
   const built: FakePage[] = []
   const pluginPages: FakePluginPage[] = []
   const settlements: ((outcome: SettingsWorkspaceCommitOutcome) => void)[] = []
@@ -188,7 +203,12 @@ function setup(options: {
     panel,
     built,
     pluginPages,
-    columns,
+    columns: () => columns,
+    rows: () => rows,
+    resize: (nextColumns: number, nextRows: number) => {
+      columns = nextColumns
+      rows = nextRows
+    },
     closes: () => closes,
     commits: () => commits,
     legacyOpens: () => legacyOpens,
@@ -196,7 +216,7 @@ function setup(options: {
   }
 }
 
-const plain = (harness: Harness, width = harness.columns): string =>
+const plain = (harness: Harness, width = harness.columns()): string =>
   harness.panel.render(width).map(stripTerminalSequences).join('\n')
 
 const header = (harness: Harness): string => plain(harness).split('\n')[0] ?? ''
@@ -963,4 +983,121 @@ test('the legacy 90-column bars keep refresh when the region hints drop', () => 
   assert.match(detailBar, /c copy value/u, 'the Detail copy hint stays visible')
   assert.match(detailBar, /Left back/u)
   assert.doesNotMatch(detailBar, /Tab panes/u, 'the region key is dropped before any semantic verb')
+})
+
+// ── The shared chrome budget at the panel seam ────────────────────────────
+
+test('the pane header names the keyboard owner at 80 and 120 columns', () => {
+  for (const columns of [120, 80] as const) {
+    const h = setup({ columns, rows: 24 })
+    h.panel.handleInput('\u001b[B') // About -> Models: the rail keeps the keys
+    const preview = plain(h, columns).split('\n')
+    const previewPane = preview.findIndex(line => line.includes('[Categories (8)]'))
+    assert.ok(previewPane >= 0, `the direct pane header paints at ${columns}:\n${preview.join('\n')}`)
+    assert.match(preview[previewPane]!, /\[Categories \(8\)\].*Models/u,
+      `the rail owns the active device:\n${preview[previewPane]}`)
+    assert.doesNotMatch(preview[previewPane]!, /Rows \(/u, 'the direct pane header fakes no Rows pane')
+
+    h.panel.handleInput('\r') // the content takes the keyboard, the page is reused
+    const content = plain(h, columns).split('\n')
+    const contentPane = content.findIndex(line => line.includes('Categories (8)'))
+    assert.ok(contentPane >= 0)
+    assert.match(content[contentPane]!, /Categories \(8\).*\[Models\]/u,
+      `the page owns the active device:\n${content[contentPane]}`)
+
+    // The legacy projection keeps its own pane names on the same shared row.
+    const legacy = setup({ columns, rows: 24 })
+    legacy.panel.handleInput('\u001b[B')
+    legacy.panel.handleInput('\u001b[B')
+    legacy.panel.handleInput('\u001b[B') // Appearance
+    const l0 = plain(legacy, columns).split('\n')
+    const l0Pane = l0.findIndex(line => line.includes('[Categories (8)]'))
+    assert.ok(l0Pane >= 0)
+    assert.match(l0[l0Pane]!, /\[Categories \(8\)\].*Rows \(2\)/u)
+    legacy.panel.handleInput('\t') // categories -> rows
+    const l1 = plain(legacy, columns).split('\n')
+    const l1Pane = l1.findIndex(line => line.includes('[Rows (2)]'))
+    assert.ok(l1Pane >= 0, `the focused Rows header paints at ${columns}:\n${l1.join('\n')}`)
+    assert.match(l1[l1Pane]!, /\[Rows \(2\)\].*Details/u)
+  }
+})
+
+test('the pane header publishes no hit target and a focus key reuses the mounted page', () => {
+  const h = setup({ columns: 120, rows: 24 })
+  plain(h, 120)
+  h.panel.handleInput('\u001b[B') // About -> Models
+  const page = h.built[0]
+  assert.ok(page !== undefined)
+  plain(h, 120)
+  h.panel.handleInput('\r') // focus transfer
+  assert.deepEqual(page.inputs, [], 'the focus transfer runs no page action')
+  assert.deepEqual(page.clicked, [], 'the focus transfer runs no page click')
+  assert.equal(h.built.length, 1, 'the focus transfer built no second page')
+  assert.equal(page.disposed, false)
+
+  // The header row is display-only: a click there owns no target.
+  const frame = plain(h, 120).split('\n')
+  const paneRow = frame.findIndex(line => line.includes('Categories (8)'))
+  assert.ok(paneRow >= 0)
+  h.panel.onCellPress(2, paneRow)
+  h.panel.onCellClick(2, paneRow)
+  assert.deepEqual(page.pressed, [], 'the pane header is outside the content box')
+  assert.deepEqual(page.clicked, [])
+  assert.equal(h.built.length, 1)
+  assert.match(plain(h, 120), /Settings · Models/u, 'the keyboard focus did not move')
+
+  // The page's own Esc report returns the keyboard to the rail, keeping the
+  // same page instance (the root never rebuilds it for a focus change).
+  page.exitOn = '\u001b'
+  h.panel.handleInput('\u001b')
+  assert.match(plain(h, 120), /Settings · Categories/u)
+  assert.equal(page.disposed, false, 'the page survives returning to the rail')
+})
+
+test('render and pre-repaint input hand the page the identical body grant', () => {
+  const h = setup({ columns: 100, rows: 24 })
+  plain(h, 100)
+  h.panel.handleInput('\u001b[B') // About -> Models
+  const page = h.built[0]
+  assert.ok(page !== undefined)
+  plain(h, 100)
+  // 24 rows: header 1 + metadata 1 + rule 1 => body grant 20; the pane header
+  // is reserved inside it, so the child is laid out for 19 content rows + its
+  // own bar = 20.
+  assert.equal(page.bodyHeights.at(-1), 20, 'the painted frame hands the child body+bar')
+
+  // A press recorded against the tall frame is refused after a shrink that has
+  // not repainted yet.
+  h.panel.onCellPress(30, 5)
+  h.resize(100, 8)
+  h.panel.onCellClick(30, 5)
+  assert.deepEqual(page.clicked, [], 'the old-frame click cannot reach the page')
+
+  // 8 rows: header 1 + metadata 1 + rule 1 => body grant 4; the pane header is
+  // reserved inside it, so the child gets 3 content rows + its bar = 4.
+  plain(h, 100)
+  assert.equal(page.bodyHeights.at(-1), 4, 'the next frame passes the identical grant')
+  // The press path recomputes the SAME grant before forwarding input.
+  h.panel.onCellPress(30, 5)
+  assert.equal(page.bodyHeights.at(-1), 4, 'the pre-repaint input path uses the same planner')
+  h.panel.onCellClick(30, 5)
+  assert.equal(page.clicked.length, 1, 'a click inside the live frame still reaches the page')
+})
+
+test('one- and two-row frames paint only the truthful bar and publish no body target', () => {
+  for (const rows of [1, 2] as const) {
+    const h = setup({ columns: 100, rows })
+    const before = plain(h, 100)
+    const frame = before.split('\n')
+    assert.equal(frame.length, rows, `the frame must paint exactly ${rows} rows`)
+    assert.equal(frame.filter(line => /Esc close|Esc back/u.test(line)).length, 1,
+      `exactly one Esc bar at ${rows} rows:\n${before}`)
+    assert.doesNotMatch(before, /Categories \(|Rows \(|Details| page/u, 'no pane header or page body is painted below the body grant')
+    h.panel.handleInput('\u001b[B')
+    h.panel.handleInput('\r')
+    assert.equal(h.built.length, 0, 'no direct page mounts below the body floor')
+    h.panel.onCellPress(2, rows - 1)
+    h.panel.onCellClick(2, rows - 1)
+    assert.equal(plain(h, 100), before, 'the bar is not an interactive body target')
+  }
 })

@@ -542,14 +542,16 @@ anchor, without inventing a fourth meaning for `primary`.
 <identity> · <context trail>                     <count / status>
 <diagnostic line: facts>
 ────────────────────────────────────────────────────────────────
+<optional notice>
 <optional pane header row>
 <body>
-────────────────────────────────────────────────────────────────
-<optional notice>
 <action bar>
 ```
 
 - Fullscreen workspaces draw **no border box** and no vertical rules.
+- The stable vertical order is **at most one top rule**, optional notice,
+  optional pane header, body and the action bar. A notice sits between the
+  rule and the body; no rule is painted between the body and the action bar.
 - Waist rows are granted in this order and dropped in reverse:
   identity → action bar → context trail → body floor → pane header → notice →
   diagnostic line → count/status → rules. (Both existing planners already do
@@ -577,6 +579,9 @@ anchor, without inventing a fourth meaning for `primary`.
   body.
 - A rule is the first thing to go when rows are scarce (`ruleRows` is already
   budgeted this way in Settings; the same budget applies to Job).
+- The Settings workspace spends its rule budget on the boundary ABOVE its
+  body only: at most one full-width rule per frame, and never one between the
+  body and the action bar.
 
 ### 6.3 Columns, gutters and the pane header row
 

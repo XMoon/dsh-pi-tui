@@ -493,3 +493,19 @@ test('a pending Account operation keeps the Left inside the Account page', async
   assert.equal(page.canYieldFocusToNavigation(), true,
     'a settled page yields the bare Left to the root again')
 })
+
+test('the page-actions fallback keeps the truthful Esc bar on the physical last row', () => {
+  const { page } = open()
+  page.setBodyHeight(3)
+  const rows = text(page).split('\n')
+  assert.equal(rows.length, 3)
+  assert.match(rows[0]!, /Resize the terminal to show the page actions/u, 'the warning keeps the body row')
+  assert.match(rows.at(-1)!, /Esc back/u, 'the truthful Esc action is the last physical row')
+  assert.doesNotMatch(rows.at(-1)!, /Resize/u, 'the bar is not pushed above a blank row')
+
+  page.setBodyHeight(1)
+  const one = text(page).split('\n')
+  assert.equal(one.length, 1)
+  assert.match(one[0]!, /^Esc back/u, 'a one-row page paints only its real Esc action')
+  assert.doesNotMatch(one[0]!, /Resize|Enter/u, 'no hidden business action is advertised')
+})

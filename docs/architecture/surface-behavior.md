@@ -156,6 +156,19 @@ Plugins, Other settings`; both names run the same handler and land on `About`
 with identical initial focus and entry-refresh behavior. `/statusline` remains
 the `/footer` alias and never enters this workspace.
 
+- Every category shares ONE root row plan: header, optional metadata, at most
+  one top rule, optional app notice, optional pane header, body, and the single
+  physical last-row Action Bar. The app notice is the ONE root-level notice;
+  a page's own business notices stay inside that page's body. At ≥76 columns a
+  direct About/Models/Account page keeps the category rail and paints its own
+  display-only pane header whose focused `[Label]` names the live keyboard
+  owner; the page's own semantic hint line is moved unchanged to the frame's
+  last row instead of being regenerated at a wider width. The legacy medium
+  projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
+  L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
+  the frame's first column, and every child page keeps its own body and action
+  rows above it.
+
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
   facts (the bundle's own version, the installed DSH version — `Unknown` when
   unreadable — and the selected backend) and, when a live main Session is

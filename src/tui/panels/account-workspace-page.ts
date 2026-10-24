@@ -383,8 +383,14 @@ export class AccountWorkspacePage implements Component {
       this.paintedCopy = false
       this.paintedTargets = []
       this.paintedRowOrder = []
-      const out = [fit(color.warning('Resize the terminal to show the page actions.'), width)]
-      while (out.length < height) out.push(fit('', width))
+      // The page actions do not fit: the warning keeps the body (when there is
+      // one) and the truthful Esc action stays the physical last row.
+      const bodyRows = Math.max(0, height - 1)
+      const out = bodyRows >= 1
+        ? [fit(color.warning('Resize the terminal to show the page actions.'), width)]
+        : []
+      while (out.length < bodyRows) out.push(fit('', width))
+      out.push(color.textMuted(renderActionBarRow([{ text: 'Esc back', priority: 8 }], width)))
       return out.slice(0, height)
     }
     this.paintedActionIds.clear()
