@@ -2177,6 +2177,13 @@ export function registerTuiCommands(
 
   artifactCommands.registerAttach()
 
+  // Image UX PR2: `/view-image` is a PiTui-local product surface (it lists the
+  // CURRENTLY MOUNTED transcript window and opens the PiTui Viewer), so it is
+  // registered ONLY where a PiTui `TuiApp` is mounted — the TSP read-only mount
+  // exposes no fake command gallery. Its sessionless/local policy entries make
+  // the static classification agree with this live registration.
+  if (app !== undefined) artifactCommands.registerViewImage()
+
   artifactCommands.registerExport()
 
   artifactCommands.registerTranscript()

@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
+import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
@@ -107,6 +107,35 @@ function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}m`)
 }
 
+/**
+ * The 1-based cell of the RIGHT-EDGE info control (`[-]` / `[+]`) painted on
+ * the first viewport row containing the needle. The control is ASCII and
+ * right-aligned, so its position comes from the painted row itself (ANSI
+ * aware) — the fold is only operable on that 3-cell span.
+ */
+async function controlAt(vt: VirtualTerminal, needle: string, n = 0): Promise<{ x: number; row: number }> {
+  const view = await viewport(vt)
+  let seen = 0
+  const index = view.split('\n').findIndex(line => {
+    if (!line.includes(needle)) return false
+    if (seen === n) return true
+    seen += 1
+    return false
+  })
+  assert.ok(index !== -1, `missing ${needle} #${n + 1} for its info control:\n${view}`)
+  const line = view.split('\n')[index]!
+  const at = line.includes('[-]') ? line.indexOf('[-]') : line.indexOf('[+]')
+  assert.ok(at !== -1, `no info control painted on ${JSON.stringify(line)}`)
+  // The middle cell of the 3-cell control: 0-based start + 1 (+1 for SGR).
+  return { x: visibleWidth(line.slice(0, at)) + 2, row: index + 1 }
+}
+
+async function clickControl(vt: VirtualTerminal, needle: string, n = 0): Promise<void> {
+  const { x, row } = await controlAt(vt, needle, n)
+  click(vt, x, row)
+  await settleClick(vt)
+}
+
 /** The alt screen treats a fast repeat at the same cell as a double-click
  * (word selection, like a native terminal) — mirror the existing card
  * toggle test's pause. */
@@ -135,20 +164,16 @@ test('a fullscreen click on the attachment collapses the image rows and a second
   const expandedRow = await rowOf(vt, 'NEXT', 'expanded layout')
   const view = await viewport(vt)
   assert.ok(view.includes('🖼️ shot.png · 800×100 · 33 B'), `info bar constant:\n${view}`)
-  // Click the attachment's info bar at its CURRENT row (header(1) +
-  // bubble(2) + spacer(3) → 1-based y=4 while expanded).
-  const infoRow = await rowOf(vt, '🖼️ shot.png · 800×100', 'info bar row')
-  click(vt, 4, infoRow)
-  await settleClick(vt)
+  // Click the info row's RIGHT-EDGE `[-]` control at its CURRENT row: only
+  // that 3-cell span is the fold control (the info text is read-only).
+  await clickControl(vt, '🖼️ shot.png · 800×100')
   // Collapsed: only the info bar remains; the NEXT message moves UP.
   const collapsedRow = await rowOf(vt, 'NEXT', 'collapsed layout')
   assert.ok(collapsedRow < expandedRow, `collapse must shrink the message (${collapsedRow} < ${expandedRow})`)
   assert.ok((await viewport(vt)).includes('🖼️ shot.png · 800×100 · 33 B'), 'the info bar stays after collapse')
   // A second click on the same info bar (it moved UP with the collapse)
   // expands the image again.
-  const collapsedInfoRow = await rowOf(vt, '🖼️ shot.png · 800×100', 'collapsed info bar row')
-  click(vt, 4, collapsedInfoRow)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100')
   const reExpandedRow = await rowOf(vt, 'NEXT', 're-expanded layout')
   assert.equal(reExpandedRow, expandedRow, 're-expand must restore the layout')
   app.setFullscreen(false)
@@ -177,25 +202,19 @@ test('collapsing one attachment never touches the other', async () => {
   // Collapse the FIRST attachment at its info bar; the SECOND attachment
   // stays expanded, so the NEXT message moves up by only the first image's
   // rows.
-  const firstInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'first info bar')
-  click(vt, 4, firstInfo)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100')
   const afterFirst = await rowOf(vt, 'NEXT', 'first collapsed')
   assert.ok(afterFirst < before, 'the first image collapsed')
   assert.ok((await viewport(vt)).includes('🖼️ second.png · 800×100 · 33 B'), 'the second info bar stays')
   // Collapse the SECOND attachment: its info bar is now above NEXT.
-  const secondInfo = await rowOf(vt, 'second.png · 800×100', 'second info bar')
-  click(vt, 4, secondInfo)
-  await settleClick(vt)
+  await clickControl(vt, 'second.png · 800×100')
   const afterSecond = await rowOf(vt, 'NEXT', 'second collapsed')
   assert.ok(afterSecond < afterFirst, 'the second image collapsed too')
   // Expand the FIRST attachment again (its info bar is still the top row
   // of the message): NEXT moves back down by EXACTLY the first image's
   // rows (before - afterFirst) — never the second image's, which stays
   // collapsed. Delta math only: the exact image row count never enters.
-  const firstInfoAgain = await rowOf(vt, '🖼️ shot.png · 800×100', 'first info bar again')
-  click(vt, 4, firstInfoAgain)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100')
   const reExpanded = await rowOf(vt, 'NEXT', 'first re-expanded')
   assert.equal(reExpanded, afterSecond + (before - afterFirst), 'only the first image re-expanded (its own rows came back)')
   app.setFullscreen(false)
@@ -219,9 +238,7 @@ test('collapsed state is session-scoped: clearSessionOverrides re-expands', asyn
   ] as never)
   app.setTranscript(folder.messages())
   const expandedRow = await rowOf(vt, 'NEXT', 'expanded')
-  const infoRow = await rowOf(vt, '🖼️ shot.png · 800×100', 'info bar row')
-  click(vt, 4, infoRow)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100')
   const collapsedRow = await rowOf(vt, 'NEXT', 'collapsed')
   assert.ok(collapsedRow < expandedRow, 'click collapsed the image')
   // A session switch clears every click override and pushes the NEW
@@ -236,14 +253,16 @@ test('collapsed state is session-scoped: clearSessionOverrides re-expands', asyn
   app.stop()
 })
 
-test('a tool-card image row still toggles the CARD — never swallowed by an attachment collapse', async () => {
+test('a tool-card image control folds only the image body; a caption row still folds the CARD', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  // Tool-card images are NOT collapse targets (the host wires a
-  // collapsedRef only for message attachments): their rows must keep the
-  // card's own click surface, so a click on the image folds the card.
+  // Image UX PR2: Tool-card images own the SAME per-occurrence info control
+  // as user/assistant images. The 3-cell RIGHT-EDGE control folds only the
+  // image body; the rest of the info row and every other card row keep the
+  // card's own disclosure surface (a body row opens the Viewer instead —
+  // covered by transcript-image-viewer-tui.test.ts).
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
@@ -265,16 +284,24 @@ test('a tool-card image row still toggles the CARD — never swallowed by an att
   const expandedView = await viewport(vt)
   assert.ok(expandedView.includes('caption'), 'expanded card shows its body')
   assert.ok(expandedView.includes('🖼️ shot.png · 800×100 · 33 B'), 'expanded card shows the image info bar')
-  // Click the IMAGE ROW: the card folds (the click belongs to the card's
-  // own surface — an attachment toggle must never intercept it).
-  const imageRow = await rowOf(vt, '🖼️ shot.png · 800×100', 'tool image info bar')
-  click(vt, 4, imageRow)
+  // The image control folds ONLY the image body: the card body (caption)
+  // and the image identity row stay mounted, and the control flips to `[+]`.
+  await clickControl(vt, '🖼️ shot.png · 800×100')
+  const foldedImage = await viewport(vt)
+  assert.ok(foldedImage.includes('caption'), `the card body stays expanded:\n${foldedImage}`)
+  assert.ok(foldedImage.includes('🖼️ shot.png · 800×100 · 33 B'), `the image identity row stays mounted:\n${foldedImage}`)
+  assert.ok(foldedImage.includes('[+]'), `the occurrence advertises [+]:\n${foldedImage}`)
+  // Re-expand through the same control.
+  await clickControl(vt, '🖼️ shot.png · 800×100')
+  const reExpanded = await viewport(vt)
+  assert.ok(reExpanded.includes('[-]'), `the occurrence re-expanded:\n${reExpanded}`)
+  // A NON-image card row still folds the card: the caption row keeps the
+  // card's own disclosure surface.
+  const captionRow = await rowOfNth(vt, 'caption', 0, 'tool caption row')
+  click(vt, 4, captionRow)
   await settleClick(vt)
-  const foldedView = await viewport(vt)
-  // The folded header keeps its summary line ('— caption'), so the body
-  // signal is the IMAGE row disappearing: the click folded the card
-  // instead of being swallowed by an attachment toggle.
-  assert.ok(!foldedView.includes('🖼️ shot.png · 800×100'), `the image-row click folds the tool card (image body gone):\n${foldedView}`)
+  const foldedCard = await viewport(vt)
+  assert.ok(!foldedCard.includes('🖼️ shot.png · 800×100'), `the caption row folded the tool card:\n${foldedCard}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -305,16 +332,12 @@ test('the SAME attachment in two messages collapses per occurrence, never togeth
   app.setTranscript(folder.messages())
   const before = await rowOf(vt, 'NEXT', 'both occurrences expanded')
   // The FIRST info bar — both messages' info bars are byte-identical.
-  const firstInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'first info bar')
-  click(vt, 4, firstInfo)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100')
   const afterFirst = await rowOf(vt, 'NEXT', 'after the first occurrence collapsed')
   assert.ok(afterFirst < before, 'the clicked occurrence collapsed')
   // Re-expanding the first occurrence restores the FULL layout — had the
   // second occurrence collapsed along, NEXT would stay short of `before`.
-  const firstInfoAgain = await rowOf(vt, '🖼️ shot.png · 800×100', 'first info bar again')
-  click(vt, 4, firstInfoAgain)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100')
   const reExpanded = await rowOf(vt, 'NEXT', 'after re-expand')
   assert.equal(reExpanded, before, 'only the clicked occurrence toggled; the repeated attachment stayed expanded')
   app.setFullscreen(false)
@@ -342,25 +365,19 @@ test('the same attachment twice in ONE message collapses per block index', async
   const before = await rowOf(vt, 'NEXT', 'both blocks expanded')
   // Two identical attachment occurrences inside ONE message: each block
   // index is its own occurrence.
-  const firstInfo = await rowOfNth(vt, '🖼️ shot.png · 800×100', 0, 'first info bar')
-  click(vt, 4, firstInfo)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100', 0)
   const afterFirst = await rowOf(vt, 'NEXT', 'after the first block collapsed')
   assert.ok(afterFirst < before, 'the first block collapsed')
   // The SECOND block is still expanded — clicking its info bar collapses
   // it too (NEXT moves up again). Under the old attachmentId-keyed state
   // the first click had folded BOTH blocks, and this click would EXPAND
   // the second instead (NEXT would move back DOWN).
-  const secondInfo = await rowOfNth(vt, '🖼️ shot.png · 800×100', 1, 'second info bar')
-  click(vt, 4, secondInfo)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100', 1)
   const afterSecond = await rowOf(vt, 'NEXT', 'after the second block collapsed')
   assert.ok(afterSecond < afterFirst, 'the second block collapsed independently (its own rows left)')
   // Re-expand the FIRST block: NEXT returns by exactly the first block's
   // rows — the second stays collapsed (delta math only).
-  const firstInfoAgain = await rowOfNth(vt, '🖼️ shot.png · 800×100', 0, 'first info bar again')
-  click(vt, 4, firstInfoAgain)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ shot.png · 800×100', 0)
   const reExpanded = await rowOf(vt, 'NEXT', 'after re-expanding the first block')
   assert.equal(reExpanded, afterSecond + (before - afterFirst), 'only the first block re-expanded')
   app.setFullscreen(false)
@@ -392,9 +409,10 @@ test('an attachment press cannot transfer to a sibling after an async image grow
   await vt.waitForRender()
   // Both images are still loading (info bar only).
   const bRow = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar row')
-  // Press B's info bar (no release): the press identity is
-  // attachment:<token>:1.
-  vt.sendInput(`\x1b[<0;4;${bRow}M`)
+  // Press B's info CONTROL (no release): the press records the image fold
+  // identity with its painted column span.
+  const pressed = await controlAt(vt, '🖼️ second.png · 800×100')
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}M`)
   await vt.waitForRender()
   // Image A loads and grows: the SAME message object is unchanged, A's
   // rows insert below A, and the old B cell falls inside A's range. The
@@ -412,8 +430,8 @@ test('an attachment press cannot transfer to a sibling after an async image grow
   const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar row')
   assert.ok(aInfo < bRow, `A's growth must push B down:\n${after}`)
   // Release on the old cell: the click must NOT toggle A (the press
-  // identity is B's attachment).
-  vt.sendInput(`\x1b[<0;4;${bRow}m`)
+  // identity is B's occurrence).
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}m`)
   await vt.waitForRender()
   const collapsed = (app as unknown as { collapsedOccurrences: Map<unknown, Set<number>> }).collapsedOccurrences
   assert.equal(collapsed.size, 0, `the stale attachment press must not toggle a sibling:\n${vt.getViewport().join('\n')}`)
@@ -486,9 +504,7 @@ test('a live out-of-order image close cannot transfer collapse state to the earl
   app.setTranscript(folder.messages())
   // B renders as the FIRST thumbnail (A is still an open opaque row): the
   // old ordinal identity would give B index 0.
-  const bInfo = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar')
-  click(vt, 4, bInfo)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ second.png · 800×100')
   // A closes AFTER B was collapsed: A must NOT inherit B's collapse state.
   input({ type: 'block-end', index: 0, block: { type: 'image', attachment: IMAGE_REF } }, 7)
   app.setTranscript(folder.messages())
@@ -537,8 +553,10 @@ test('a live out-of-order image close cannot transfer a press to the earlier occ
   // B is the first rendered thumbnail (A is still an open opaque row) and
   // still loading (info bar only).
   const bRow = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar row')
-  // Press B's info bar (no release): the press identity is B's occurrence.
-  vt.sendInput(`\x1b[<0;4;${bRow}M`)
+  // Press B's info CONTROL (no release): the press identity is B's
+  // occurrence and its painted span.
+  const pressed = await controlAt(vt, '🖼️ second.png · 800×100')
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}M`)
   await vt.waitForRender()
   // A closes and grows: the old B cell falls inside A's range. The loader
   // settle only invalidates the thumbnail (it does not schedule a frame),
@@ -559,7 +577,7 @@ test('a live out-of-order image close cannot transfer a press to the earlier occ
   assert.ok(aInfo < bRow, `A's growth must push B down past the old cell:\n${after}`)
   // Release on the old cell: the click must NOT toggle A (the press
   // identity is B's occurrence, not the ordinal that A now owns).
-  vt.sendInput(`\x1b[<0;4;${bRow}m`)
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}m`)
   await vt.waitForRender()
   const collapsed = (app as unknown as { collapsedOccurrences: Map<unknown, Set<number>> }).collapsedOccurrences
   assert.equal(collapsed.size, 0, `the stale live press must not toggle the earlier occurrence:\n${vt.getViewport().join('\n')}`)
@@ -590,9 +608,7 @@ test('a later first-seen lower-index image cannot inherit an earlier occurrence\
     ], source: { kind: 'user' } } },
   ] as never[])
   app.setTranscript(folder.messages())
-  const bInfo = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar')
-  click(vt, 4, bInfo)
-  await settleClick(vt)
+  await clickControl(vt, '🖼️ second.png · 800×100')
   // A first-seen AFTER B was collapsed: A must NOT inherit B's collapse.
   input({ type: 'block-start', index: 0, blockType: 'image' }, 6)
   input({ type: 'block-end', index: 0, block: { type: 'image', attachment: IMAGE_REF } }, 7)
@@ -633,9 +649,10 @@ test('a later first-seen lower-index image cannot receive a stale press', async 
   ] as never[])
   app.setTranscript(folder.messages())
   await vt.waitForRender()
-  const bRow = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar row')
-  // Press B's info bar (no release): the press identity is B's occurrence.
-  vt.sendInput(`\x1b[<0;4;${bRow}M`)
+  // Press B's info CONTROL (no release): the press identity is B's
+  // occurrence and its painted span.
+  const pressed = await controlAt(vt, '🖼️ second.png · 800×100')
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}M`)
   await vt.waitForRender()
   // A first-seen + closes: B stays the first block (first-seen order), so
   // the old cell is still B's — the release must act on B, never on A.
@@ -643,7 +660,7 @@ test('a later first-seen lower-index image cannot receive a stale press', async 
   input({ type: 'block-end', index: 0, block: { type: 'image', attachment: IMAGE_REF } }, 7)
   app.setTranscript(folder.messages())
   await vt.waitForRender()
-  vt.sendInput(`\x1b[<0;4;${bRow}m`)
+  vt.sendInput(`\x1b[<0;${pressed.x};${pressed.row}m`)
   await vt.waitForRender()
   const view = await viewport(vt)
   const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar')

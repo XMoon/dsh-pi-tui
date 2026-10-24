@@ -1768,13 +1768,13 @@ test('the built-in command decomposition preserves the exact primary set and reg
   // command, registered immediately after its primary. `/status` is the
   // `/settings` alias (C5).
   const ALIASES = new Set(['quit', 'status', 'statusline', 'resume', 'subagents', 'image', 'rename'])
-  // The 26 built-in primaries, in their frozen registration order.
+  // The 27 built-in primaries, in their frozen registration order.
   assert.deepEqual(
     services.registered.filter(name => !ALIASES.has(name)),
     [
       'exit', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
-      'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'export',
-      'transcript', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
+      'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
+      'export', 'transcript', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
   )
   // The raw sequence: every alias registers immediately after its primary.
@@ -1792,7 +1792,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'yolo', 'preset',
     'search',
     'title', 'rename',
-    'copy', 'attach', 'image', 'export', 'transcript',
+    'copy', 'attach', 'image', 'view-image', 'export', 'transcript',
     'fork', 'rewind',
     'login', 'logout',
     'help',

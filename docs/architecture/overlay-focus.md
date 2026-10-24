@@ -563,14 +563,16 @@ whose writable-row set and value contracts are owned by
 [surface-behavior.md](./surface-behavior.md) `Settings Workspace`; this section
 owns only the lease, focus and write-lifecycle mechanics.
 
-- **One lease latch for both workspaces.** `TuiApp.openSettingsWorkspace` mints a
+- **One lease latch for every workspace.** `TuiApp.openSettingsWorkspace` mints a
   short-lived `TuiAltScreen` whose layout root and keyboard focus target is the
-  `SettingsWorkspacePanel`, and commits it to `this.settingsWorkspace` BEFORE the
+  `SettingsWorkspacePanel`, and commits it to `this.workspaceLease` BEFORE the
   physical switch. `activeScreen` derives the physical owner from the leases
-  (`jobWorkspace.screen ?? settingsWorkspace.screen ?? fullscreen ?? tui`); the
+  (`jobWorkspace.screen ?? workspaceLease.screen ?? fullscreen ?? tui`); the
   refusal checks share ONE freeze depth (`workspaceLeaseFreezeDepth`), so a
   lifecycle transition, a blocking owner's commit window, or an existing lease
-  withholds a new one and no two physical owners can ever coexist.
+  withholds a new one and no two physical owners can ever coexist. The same
+  latch hosts the `/plugins` root and (see §10.4) the transcript image
+  workspace.
 - **The return surface is paused, never rebuilt**, exactly as §10.1: the screen
   that opened the workspace is stopped with `preserveScreen: true`, its object
   tree, overlay graph, focus, draft and scroll state survive, and closing restarts
@@ -709,6 +711,45 @@ this ONE lease.** The Plugins category is a direct page entry,
   exact source value synchronously and the app's settlement re-proves THIS
   workspace record before it may notify, so a late clipboard result can neither
   repaint nor address a replacement workspace.
+
+### 10.4 Image workspace: the third leased screen
+
+`/view-image` and a fullscreen transcript image-body click open the Image UX
+PR2 workspace. It is the SAME temporary physical-screen lease as §10.1/§10.3
+(`leaseWorkspaceScreen('image', …)` commits the one `this.workspaceLease`), not
+an OverlayBroker node. It is mutually exclusive with the Job, Settings and
+direct `/plugins` leases, and it obeys the same paused-return-surface,
+modal-pre-emption, exactly-once close and final-dispose rules.
+
+- **Why a screen, not an overlay.** The pinned renderer's overlay compositor
+  returns the BASE line unchanged when that line already contains an inline
+  image (`compositeTuiLine` → `isImageLine(baseLine)`), so a framed overlay
+  would silently drop its rows over transcript images and could not reliably
+  paint the image itself. A leased screen makes the image an ordinary BASE line
+  of its own `TuiAltScreen` — the proven `Image` rendering path — with the
+  transcript screen paused underneath.
+- **Two internal states, one screen owner.** The workspace panel hosts the
+  mounted-window occurrence LIST (`SearchablePicker`, no full-text search) and
+  the read-only VIEWER as mutually exclusive states of the SAME layout root.
+  Enter moves list → viewer; `Esc back` returns to the exact same list instance
+  and selection; a second Esc closes the workspace. A viewer opened directly
+  from a transcript image body has no list below and advertises `Esc close`.
+  No nested Alt Screen, no second focus owner, no overlay fallback.
+- **The return surface is paused, never rebuilt.** Opening/closing the workspace
+  never rebuilds, scrolls, collapses or expands the transcript; the paused
+  screen's object tree, focus, draft and scroll state survive. A session
+  switch, blocking Question/Approval/Save owner, or final dispose closes the
+  lease through the shared primitive — a retired occurrence scope can never be
+  re-authorized against the replacement session.
+- **Read authority and protocol scope.** The viewer reads through the ONE
+  existing `ImageLoader` keyed by the occurrence's immutable presentation scope
+  and `attachmentId`; one subscription, one idempotent unsubscribe, no second
+  cache or read service. PR2 renders real pixels on Kitty only: the AltScreen
+  deliberately disables the iTerm2 image capability and its cursor-up framing
+  is outside the fork's ANSI width layer, so the iTerm2 workspace shows the
+  real metadata plus `Preview unavailable`; native iTerm2 workspace pixels are
+  deferred to separate renderer/protocol work. Transcript thumbnails keep their
+  existing per-surface capability behavior.
 
 ## 11. Optional seat tenant: PARK / REFUSE
 A private Client-local caller may project ONE optional tenant into the editor

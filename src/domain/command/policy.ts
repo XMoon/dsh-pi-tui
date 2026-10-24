@@ -45,6 +45,10 @@ export const SESSIONLESS_COMMANDS = new Set([
   // `/status` is the approved alias of `/settings` (same handler/focus): it
   // is sessionless exactly like its primary, and stays in LOCAL_COMMANDS.
   'status',
+  // `/view-image` (Image UX PR2) lists the CURRENT mounted transcript window
+  // and opens the Client-local read-only Viewer: it never needs a Session and
+  // must not create one on a first-boot invocation.
+  'view-image',
 ])
 
 /**
@@ -75,6 +79,9 @@ export const LOCAL_COMMANDS = new Set([
   'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
+  // Image UX PR2: `/view-image` is a Client-local transcript presentation
+  // command (mounted window → PiTui picker/Viewer), never a Host/model line.
+  'view-image',
   // `/statusline` — the approved alias of `/footer`; `/status` is the
   // `/settings` alias (see the registration comments: both pairings are
   // explicit aliases, and the near-synonym rule stays for NEW commands).

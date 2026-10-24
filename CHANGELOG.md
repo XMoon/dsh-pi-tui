@@ -9,6 +9,18 @@
 
 ### 新增
 
+- **Transcript 图片现在可以放大查看；全屏信息行新增独立的折叠控件。**
+  全屏里每张图片信息行的最右 3 格是 ASCII `[-]` / `[+]`，只折叠/展开这一张图片的正文；
+  信息行其余文字不再可点。点击可见的图片正文会打开只读大图查看器（不重建、不滚动、
+  不改变折叠状态），其中的图片按当前终端可用区域 Fit，并区分 `Loading…`、
+  `Read failed: <原因>` 与 `Preview unavailable`。新增 `/view-image`（无需 Session）：
+  按当前**已挂载** transcript window 的图片列出单选列表，Enter 查看，`Esc back` 返回
+  原列表与原选择，再按一次 Esc 关闭；无图时提示 `No images in the current transcript window`。
+  同一附件在不同消息或同一消息内多次出现仍是各自独立的 occurrence。查看器使用现有的
+  唯一图片加载器与不可变读取 scope，关闭后不会读取新会话的图片。Kitty 终端显示真实像素；
+  iTerm2 在本版本的大图查看器中显示元信息与 `Preview unavailable`（原生像素留待后续
+  renderer/协议工作）。`/image`、`/attach` 与草稿图片预览的行为不变。
+
 - **模型现在可以在回答里画图：新增 `dsh_pi_tui_chart` 与 `dsh_pi_tui_svg` 两个常驻工具。**
   图表支持 bars/spark（2–12 个带标签的数值与可选单位），SVG 支持自包含的静态图形；结果仍
   显示在原来的 Tool Card 里，不新增页面、命令或弹窗。Tern 支持时显示原生图表/SVG，普通终端

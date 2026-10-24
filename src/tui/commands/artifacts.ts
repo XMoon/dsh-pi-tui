@@ -22,6 +22,7 @@ import type { RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../co
 /** The runner operations the artifact commands consume. */
 type ArtifactsCommandRunner = Pick<
   TuiCommandRunner,
+  | 'app'
   | 'captureSessionScope'
   | 'copyToClipboard'
   | 'currentSessionId'
@@ -63,6 +64,8 @@ type DetachTaskLike = (
 export interface ArtifactsCommandRegistrars {
   registerCopy(): void
   registerAttach(): void
+  /** Image UX PR2: the PiTui-only `/view-image` transcript window list. */
+  registerViewImage(): void
   registerExport(): void
   registerTranscript(): void
 }
@@ -226,6 +229,28 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
     })
   }
 
+  const registerViewImage = (): void => {
+    registerTuiCommand({
+      name: 'view-image',
+      description: 'View images in the current transcript window',
+      handler: (invocation) => {
+        // No arguments: the list is always the CURRENT mounted window.
+        if (invocation.rawInput.trim() !== '') {
+          return { kind: 'error', text: 'The /view-image command does not accept arguments.' }
+        }
+        // Registered only where a PiTui surface is mounted (see
+        // registerTuiCommands); this guard keeps a direct headless handler
+        // call honest instead of silently doing nothing.
+        const mountedApp = runner.app
+        if (mountedApp === undefined) {
+          return { kind: 'error', text: 'the image viewer is unavailable on this renderer' }
+        }
+        mountedApp.openTranscriptImagePicker()
+        return { kind: 'success' }
+      },
+    })
+  }
+
   const registerExport = (): void => {
     registerOne({
       name: 'export',
@@ -275,5 +300,5 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
     })
   }
 
-  return { registerCopy, registerAttach, registerExport, registerTranscript }
+  return { registerCopy, registerAttach, registerViewImage, registerExport, registerTranscript }
 }

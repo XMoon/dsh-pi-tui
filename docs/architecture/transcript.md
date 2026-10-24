@@ -832,9 +832,9 @@ Proof: `test/client/session-v4-tool-result.test.ts`.
 `onTranscriptJumpLatest` semantic action (global latest, not the current history
 window). Expanding a Thought honors scroll intent (follow only if already
 following and running); collapsing anchors the header. Nearest-owner click
-routing is attachment > secondary > outer Thought > ordinary message. The
-regular surface never installs an ANSI scrollback anchor; search jumps keep
-their own policy.
+routing is image hit (info control / body) > secondary > outer Thought >
+ordinary message. The regular surface never installs an ANSI scrollback
+anchor; search jumps keep their own policy.
 
 Authority: `TuiAltScreen` affordance + `TuiApp` disclosure/viewport transaction.
 Must-not: use the fork's local `scrollToBottom` as the claimed path, derive
@@ -866,6 +866,97 @@ identities. Pure scroll frames must reuse the committed row snapshot and must
 not remeasure.
 
 Proof: `test/client/fullscreen-scroll-geometry-epoch.test.ts`.
+
+## Transcript images: occurrence identity, fold control and the viewer
+
+An image in the transcript is a CLIENT-LOCAL presentation of a durable
+attachment. The attachment ref is content addressed and may be shared; the
+transcript OCCURRENCE is the pair **(message object, source image ordinal)**.
+The ordinal is the image block's rank among ALL image blocks of that message
+(an open opaque assistant image block reserves a rank even though it has no
+bytes yet; a Tool result counts its own result image blocks). The same
+attachment shown in two messages, or twice in one message, is therefore two
+independent occurrences with independent fold state.
+
+- **One occurrence record.** Every Host image creation point goes through
+  `TuiApp.imageThumbnail()`: the thumbnail, its derived occurrence record and
+  the message's render-order candidate list are written together. The
+  occurrence carries the IMMUTABLE presentation scope sampled at construction;
+  the viewer reads through exactly that value, never a re-resolved current
+  subject. A second read service, a second byte cache, or an
+  attachment-id-only occurrence identity is forbidden.
+- **The info row is identity; the control is the fold.** The thumbnail's first
+  rendered row is always the info bar. On the fullscreen surface a Host
+  thumbnail that owns a collapse ref paints a 3-cell ASCII `[-]` / `[+]`
+  control at the RIGHT EDGE of that row; only that span toggles the occurrence
+  body (via the existing `collapsedOccurrences` owner and structural
+  rebuild+anchor). Every other column of the info row is inert — clicking the
+  metadata never folds or opens anything. Regular mode paints no control.
+- **The body opens the read-only viewer.** A visible body row is the
+  occurrence's viewer target; the fold control and the viewer target are
+  distinct semantic hits (`attachment:collapse:…` / `attachment:view:…`) and the
+  press/release fence re-proves owner, row, action and column span against the
+  last-painted frame. A loading / unsupported / collapsed image has no body
+  hit; `ImageThumbnail` never fabricates one. During a blocking Question or
+  Approval only the read-only info-control fold stays inspection-safe; the
+  body's viewer action is never reachable from the modal plane.
+- **Tool cards keep their disclosure.** A Tool card's image body opens the
+  viewer and does not fold the card; the card's other rows keep the existing
+  card/container disclosure priority. Folded/hidden Tool images produce no hit
+  and no picker candidate.
+- **The viewer is a leased fullscreen workspace, not an overlay.** The pinned
+  renderer cannot composite an overlay row over a BASE line that already
+  contains an inline image (`compositeTuiLine` keeps the base line), so a framed
+  overlay would drop the viewer's rows behind transcript images and cannot
+  reliably paint the image itself. `/view-image` and a fullscreen body click
+  therefore lease the SAME temporary physical screen the Settings/Job
+  workspaces use (mutually exclusive with them), with two internal states: the
+  mounted-window image LIST (`SearchablePicker`, no full-text search) and the
+  VIEWER (`ImageViewerPanel`). Enter moves list → viewer, `Esc back` returns to
+  the same list/selection, a second Esc closes the workspace; a directly
+  opened viewer advertises `Esc close`. The return surface is stopped with
+  `preserveScreen` and restored untouched: opening/closing never rebuilds,
+  scrolls, collapses or expands the transcript.
+- **Fitted pixels, one loader.** The viewer renders the occurrence through the
+  ONE existing `ImageLoader` (`(scope, attachmentId)`; one subscription, one
+  idempotent unsubscribe). Its `Image` is sized from the live terminal grant
+  (`maxWidthCells` / `maxHeightCells` from the workspace's own base rows), never
+  from the thumbnail's `40×12` limits. States are distinguishable: `Loading…`,
+  `Read failed: <sanitized reason>`, `Preview unavailable` (no protocol, an
+  empty payload, an unsupported MIME, or a protocol this surface does not
+  support), each with the real name/dimensions/media type/bytes. The viewer is
+  read-only: no zoom, pan, export, edit, OCR, transcoding or second byte cache.
+- **Pickers are a mounted-window snapshot.** `/view-image` candidates come from
+  the SAME mounted transcript batch (message order then render order) and only
+  from occurrences the Host actually rendered. `/view-image` is a PiTui-local,
+  sessionless/local command (registered only where a PiTui surface exists); no
+  image → the exact notice `No images in the current transcript window`, never
+  a read. A candidate selected after the mounted window changed is refused with
+  `the image left the current transcript window` and the workspace closes; a
+  stale scope is never authorized against the replacement session.
+- **Protocol scope (PR2).** The leased AltScreen renders real pixels through the
+  Kitty protocol only. The pinned AltScreen disables the iTerm2 image
+  capability and its cursor-up framing is outside the fork's ANSI width layer,
+  so the iTerm2 workspace shows the metadata plus `Preview unavailable`; native
+  iTerm2 workspace pixels are deferred to separate renderer/protocol work.
+  Transcript thumbnails keep their existing per-surface capability behavior.
+
+Authority: `TuiApp` (occurrence projection, last-painted hit classifier, leased
+image workspace), `ImageThumbnail` (info/control/body geometry),
+`ImageViewerPanel` (read-only fitted render), `ImageLoader` (scoped reads),
+`src/tui/commands/artifacts.ts` + `src/domain/command/policy.ts` (`/view-image`).
+
+Must-not: derive occurrences from message text, filenames or attachment ids
+alone; scan off-window history or the draft store for candidates; re-resolve
+the scope on click; re-read/patch an image through a second loader/cache;
+rebuild or scroll the transcript to open the viewer; paint the viewer as a
+horizontal overlay over image base lines; add hover/zoom/export affordances.
+
+Proof: `test/client/image-collapse.test.ts`,
+`test/client/transcript-image-viewer.test.ts`,
+`test/client/transcript-image-viewer-tui.test.ts`,
+`test/app/view-image-command.test.ts`,
+`test/client/fullscreen-scroll-geometry-epoch.test.ts`.
 
 ## Display-order and read-grouping convergence
 
