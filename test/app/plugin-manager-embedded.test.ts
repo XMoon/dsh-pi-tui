@@ -1899,6 +1899,8 @@ test('T02 the rail preview on the PRODUCTION page: Enter, Right and Tab only tra
       assert.deepEqual(harness.setBundle, [], `${columns} ${JSON.stringify(key)}: no Host mutation`)
       assert.deepEqual(harness.removeBundle, [], `${columns} ${JSON.stringify(key)}: no Host removal`)
       assert.deepEqual(harness.setPlugin, [], `${columns} ${JSON.stringify(key)}: no standalone-entry mutation`)
+      assert.deepEqual(harness.cancelInstallCalls, [],
+        `${columns} ${JSON.stringify(key)}: no Host cancellation dispatched`)
       assert.equal(harness.installCalls.length, 0, `${columns} ${JSON.stringify(key)}: no install dispatched`)
       harness.app.dispose()
     }
