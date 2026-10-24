@@ -23,6 +23,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
+import type { PluginChangeFact } from '../../src/runtime/plugin-manager-port.ts'
 import { bundle, openWorkspace, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 
 const started: WorkspaceHarness[] = []
@@ -70,8 +71,10 @@ async function yieldToRail(harness: WorkspaceHarness): Promise<void> {
 
 test('T05 every breakpoint projects the frozen plugin columns in all three stages', async () => {
   const widths = [44, 72, 75, 76, 80, 95, 96, 100, 107, 108, 119, 120, 140]
+  // §8.2 mandates BOTH heights for every listed width and all three stages.
+  for (const height of [24, 40] as const) {
   for (const width of widths) {
-    const harness = await open({ columns: width, rows: 24 })
+    const harness = await open({ columns: width, rows: height })
     // ── plugin List (content focus) ──
     await contentFocus(harness)
     const listRows = frameRows(harness)
@@ -133,9 +136,10 @@ test('T05 every breakpoint projects the frozen plugin columns in all three stage
       } else {
         assert.doesNotMatch(railRows[header]!, /Details/u, `${width}: 76..119 previews Categories+List only`)
       }
-      assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, `${width}: the preview body starts at x=24`)
+      assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, `${width}x${height}: the preview body starts at x=24`)
     }
     harness.app.dispose()
+  }
   }
 })
 
@@ -730,6 +734,104 @@ test('T09 a Controller install-phase change between press and release refuses th
   harness.app.dispose()
 })
 
+test('T09 a real Port invalidation while the press is held refuses the old release', async () => {
+  // The harness wires the PRODUCTION `PluginManagerPort.subscribeInvalidation`
+  // subscription: `invalidate()` is the Host's own invalidation signal, which
+  // makes the Controller reread the authoritative inventory.
+  const harness = await open({ columns: 120, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  const cardRow = rowOf(harness, '> @vendor/foo')
+  const readsBefore = harness.snapshotCalls()
+  press(harness, cardRow, 30)
+  harness.invalidate()
+  await harness.settle()
+  assert.ok(harness.snapshotCalls() > readsBefore, 'the Port invalidation really reread the inventory')
+  release(harness, cardRow, 30)
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list', 'a Port invalidation held across the press refuses the release')
+  assert.equal(harness.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the press never re-selected a card')
+  // Positive control on another card row (the fork withholds a same-cell click in
+  // its multi-click window, so reusing the pressed cell would test the fork).
+  const otherRow = rowOf(harness, '@deepseek-ai/dsh-base')
+  press(harness, otherRow, 30)
+  release(harness, otherRow, 30)
+  await harness.settle()
+  assert.equal(harness.panel.selectedCardValue(), 'bundle:@deepseek-ai/dsh-base', 'the settled frame admits a fresh selection')
+  harness.app.dispose()
+})
+
+test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture', async () => {
+  // 119 -> 120: the rail APPEARS, so the plugin content starts at x=24 instead
+  // of x=0 while the pressed screen cell keeps the same number.
+  const toWide = await open({ columns: 119, rows: 24 })
+  await selectCard(toWide, 'bundle:@vendor/foo')
+  // 76..119 with the content focused is the adjacent pair WITHOUT the rail, so
+  // the same screen cell changes meaning across the boundary.
+  assert.doesNotMatch(toWide.view(), /Categories \(8\)/u, '119 content focus paints no Categories rail')
+  assert.match(toWide.view(), /\[Plugins\]/u, '119 paints the shared pane header')
+  const wideRow = rowOf(toWide, '> @vendor/foo')
+  press(toWide, wideRow, 6)
+  toWide.vt.resize(120, 24)
+  release(toWide, wideRow, 6)
+  await toWide.settle()
+  assert.equal(toWide.panel.currentView(), 'list', 'the 119->120 straddle never opens Details')
+  const wideFresh = rowOf(toWide, '> @vendor/foo')
+  press(toWide, wideFresh, 30)
+  release(toWide, wideFresh, 30)
+  await toWide.settle()
+  assert.equal(toWide.panel.currentView(), 'details', 'the settled 120 frame admits the click')
+  toWide.app.dispose()
+
+  // 120 -> 119: the rail disappears and the content takes x=0.
+  const toMedium = await open({ columns: 120, rows: 24 })
+  await selectCard(toMedium, 'bundle:@vendor/foo')
+  const mediumRow = rowOf(toMedium, '> @vendor/foo')
+  press(toMedium, mediumRow, 30)
+  toMedium.vt.resize(119, 24)
+  release(toMedium, mediumRow, 30)
+  await toMedium.settle()
+  assert.equal(toMedium.panel.currentView(), 'list', 'the 120->119 straddle never opens Details')
+  const mediumFresh = rowOf(toMedium, '> @vendor/foo')
+  press(toMedium, mediumFresh, 6)
+  release(toMedium, mediumFresh, 6)
+  await toMedium.settle()
+  assert.equal(toMedium.panel.currentView(), 'details', 'the settled 119 frame admits the click at its own x')
+  toMedium.app.dispose()
+
+  // 75 -> 76: the rail/content projection switches from ONE column to the
+  // adjacent pair, and the page is mounted on that transition.
+  const narrow = await open({ columns: 75, rows: 24 })
+  await selectCard(narrow, 'bundle:@vendor/foo')
+  const narrowRow = rowOf(narrow, '> @vendor/foo')
+  press(narrow, narrowRow, 6)
+  narrow.vt.resize(76, 24)
+  release(narrow, narrowRow, 6)
+  await narrow.settle()
+  assert.equal(narrow.panel.currentView(), 'list', 'the 75->76 straddle never opens Details')
+  const narrowFresh = rowOf(narrow, '> @vendor/foo')
+  press(narrow, narrowFresh, 6)
+  release(narrow, narrowFresh, 6)
+  await narrow.settle()
+  assert.equal(narrow.panel.currentView(), 'details', 'the settled 76 frame admits the click')
+  narrow.app.dispose()
+
+  // 76 -> 75: the pair collapses back to one column.
+  const collapse = await open({ columns: 76, rows: 24 })
+  await selectCard(collapse, 'bundle:@vendor/foo')
+  const collapseRow = rowOf(collapse, '> @vendor/foo')
+  press(collapse, collapseRow, 40)
+  collapse.vt.resize(75, 24)
+  release(collapse, collapseRow, 40)
+  await collapse.settle()
+  assert.equal(collapse.panel.currentView(), 'list', 'the 76->75 straddle never opens Details')
+  const collapseFresh = rowOf(collapse, '> @vendor/foo')
+  press(collapse, collapseFresh, 6)
+  release(collapse, collapseFresh, 6)
+  await collapse.settle()
+  assert.equal(collapse.panel.currentView(), 'details', 'the settled 75 frame admits the click')
+  collapse.app.dispose()
+})
+
 test('T09 resize, focus yield, filter edit and external disposal refuse the old release', async () => {
   // Press -> resize (120x8 -> 120x7 keeps the child grant but moves the box
   // top) -> release.
@@ -831,7 +933,173 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   disposed.app.dispose()
 })
 
+test('T03 a 75-column production page mounts lazily from the Categories rail', async () => {
+  // §8.1 T03: below 76 columns the Settings lease opens on the rail; merely
+  // SELECTING Plugins must not build the page or read the Host inventory. The
+  // FIRST production-page mount happens when the content takes the keyboard.
+  const harness = await open({ columns: 75, rows: 20, startOn: 'rail' })
+  assert.equal(harness.panelInstance(), undefined, 'the rail selection mounts no page')
+  assert.equal(harness.snapshotCalls(), 0, 'the rail selection reads no inventory')
+  assert.doesNotMatch(harness.view(), /Search: \//u, 'the narrow rail paints no plugin content')
+
+  // Walk the rail to Plugins with the real keys: the category is now selected,
+  // and the content column still does not exist at this width.
+  for (let step = 0; step < 12; step += 1) {
+    if (/^> Plugins\b/mu.test(harness.view())) break
+    harness.vt.sendInput('\x1b[B')
+    await harness.settle()
+  }
+  assert.match(harness.view(), /^> Plugins\b/mu, 'the rail selects Plugins')
+  assert.equal(harness.panelInstance(), undefined, 'selecting the category still mounts nothing')
+  assert.equal(harness.snapshotCalls(), 0, 'selecting the category still reads nothing')
+
+  // Enter takes the content: the page is built ONCE and reads the inventory once.
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.ok(harness.panelInstance() !== undefined, 'the first focus transfer mounts the page')
+  assert.equal(harness.snapshotCalls(), 1, 'the mount reads the inventory exactly once')
+  assert.match(harness.view(), /Search: \//u, 'the narrow content paints its local Search row')
+  assert.match(bar(harness), /Esc back/u)
+
+  // Esc yields back to the rail and keeps the SAME page (no re-read, no dispose).
+  const page = harness.panel
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  assert.equal(harness.panelInstance(), page, 'the yield keeps the one page instance')
+  assert.equal(harness.snapshotCalls(), 1, 'the yield never re-reads the inventory')
+  assert.match(harness.view(), /> Plugins/u, 'the rail owns the frame again')
+
+  // Re-entering reuses the page: still ONE instance and ONE read.
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panelInstance(), page, 're-entering reuses the page')
+  assert.equal(harness.snapshotCalls(), 1)
+  harness.app.dispose()
+})
+
+test('T07 Tab never crosses levels from Confirm, Install or Diagnostics', async () => {
+  // §3.3: every non-List sub-state keeps its own local keys; Tab/Shift+Tab must
+  // never climb back to the Categories rail.
+  const confirm = await open({ columns: 120, rows: 24 })
+  await openRemoveConfirm(confirm)
+  confirm.vt.sendInput('\t')
+  await confirm.settle()
+  assert.equal(confirm.panel.currentView(), 'confirm', 'Tab inside the confirmation never leaves it')
+  assert.equal(confirm.panel.focused, true, 'the confirmation keeps the ONE input owner')
+  confirm.vt.sendInput('\x1b[Z')
+  await confirm.settle()
+  assert.equal(confirm.panel.currentView(), 'confirm', 'Shift+Tab inside the confirmation never leaves it')
+  assert.match(bar(confirm), /Esc cancel/u, 'the confirmation keeps its own bar')
+  confirm.app.dispose()
+
+  const install = await open({ columns: 120, rows: 24 })
+  await openInstall(install)
+  const installBar = bar(install)
+  install.vt.sendInput('\t')
+  await install.settle()
+  assert.equal(install.panel.currentView(), 'install', 'Tab inside the install view never leaves it')
+  assert.equal(install.panel.focused, true)
+  install.vt.sendInput('\x1b[Z')
+  await install.settle()
+  assert.equal(install.panel.currentView(), 'install', 'Shift+Tab inside the install view never leaves it')
+  assert.equal(install.panel.focused, true)
+  assert.equal(bar(install), installBar, 'the install bar is unchanged by the region keys')
+  install.app.dispose()
+
+  const diagnostics = await open({ columns: 120, rows: 24 })
+  diagnostics.vt.sendInput('d')
+  await diagnostics.settle()
+  assert.equal(diagnostics.panel.currentView(), 'diagnostics')
+  diagnostics.vt.sendInput('\t')
+  await diagnostics.settle()
+  diagnostics.vt.sendInput('\x1b[Z')
+  await diagnostics.settle()
+  assert.equal(diagnostics.panel.currentView(), 'diagnostics', 'neither region key leaves Diagnostics')
+  assert.equal(diagnostics.panel.focused, true, 'Diagnostics keeps the ONE input owner')
+  assert.match(bar(diagnostics), /Esc back/u, 'Diagnostics keeps its own Esc')
+  diagnostics.app.dispose()
+})
+
+test('T08 the 76..119 Categories+List preview reprojects the mouse after the focus switch', async () => {
+  // §3.3/§3.4: with the rail focused at 76..119 the projection is
+  // Categories | List and the content starts at x=24. Enter/Tab/a preview click
+  // move the keyboard into the List, and the NEXT frame is List | Details with
+  // the content at x=0 — so the same screen cell changes meaning.
+  const harness = await open({ columns: 100, rows: 24 })
+  await yieldToRail(harness)
+  assert.match(harness.view(), /Categories \(8\)/u, 'the rail-focused medium frame paints the Categories column')
+  assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, 'the preview starts after the rail')
+  const previewCard = rowOf(harness, '@vendor/foo')
+  assert.ok(previewCard >= 0, `the preview paints the third-party card:
+${harness.view()}`)
+  const before = harness.panel.selectedCardValue()
+
+  // A preview click selects the card and transfers the keyboard — it must never
+  // dispatch a Host mutation or open Details.
+  click(harness, previewCard, 30)
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list', 'a preview click only selects; it never opens Details')
+  assert.equal(harness.panel.focused, true, 'the preview click transferred the keyboard into the List')
+  assert.equal(harness.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the clicked card became the selection')
+  assert.notEqual(before, harness.panel.selectedCardValue(), 'the click really changed the selection')
+  assert.deepEqual(harness.setBundle, [], 'a preview click never writes the Host')
+  assert.deepEqual(harness.removeBundle, [])
+
+  // The focus switch changed the projection: the content column is now x=0.
+  assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 0, 'the content took the leading column')
+  assert.doesNotMatch(harness.view(), /Categories \(8\)/u, 'the rail is gone while the content owns the keys')
+
+  // A click at the NEW coordinate on the SELECTED card opens Details.
+  const reprojected = rowOf(harness, '> @vendor/foo')
+  click(harness, reprojected, 6)
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'details', 'the reprojected cell opens Details on the focused card')
+  harness.app.dispose()
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
+
+test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {
+  // §8.3 T15: the REAL Settings lease is closed while the official install is
+  // still in flight; the late settlement must not repaint the disposed page.
+  let settleInstall!: (fact: PluginChangeFact) => void
+  const harness = await open({
+    columns: 120,
+    rows: 24,
+    installImpl: () => new Promise<PluginChangeFact>(resolve => { settleInstall = resolve }),
+    waitImpl: async () => null,
+  })
+  const page = harness.panel
+  await openInstall(harness)
+  // Drive the explicit Inspect -> Install path until the Host dispatch is in flight.
+  for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  assert.equal(harness.installCalls.length, 1, 'the official install was dispatched exactly once')
+  assert.equal(harness.controller.installView()?.phase, 'starting', 'the Host operation is still in flight')
+
+  // Recorder on the PRODUCTION page instance: after the parent close it must
+  // never be asked to paint again.
+  let renders = 0
+  const originalRender = page.render.bind(page)
+  page.render = (width: number): string[] => { renders += 1; return originalRender(width) }
+
+  // The REAL Settings lease closes (the same external teardown a blocking owner
+  // or a screen replacement performs).
+  harness.settings.close()
+  await harness.settle()
+  assert.doesNotMatch(harness.view(), /Settings · /u, 'the Settings parent really closed')
+  const rendersAtClose = renders
+
+  // The late Host settlement arrives after the close.
+  settleInstall({ changed: true, application: 'applied', stage: 'install', target: 'pkg', version: '1.0.0' })
+  await harness.settle()
+  assert.equal(renders, rendersAtClose, 'the late settlement never repaints the disposed page')
+  assert.doesNotMatch(harness.view(), /Settings · /u, 'the closed workspace stays closed')
+  assert.equal(harness.installCalls.length, 1, 'the settlement never dispatches a second install')
+  harness.app.dispose()
+})
 
 test('T10 the plugin Host notice and the ONE root App notice never overwrite each other', async () => {
   const harness = await open({ columns: 120, rows: 24 })

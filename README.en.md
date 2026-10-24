@@ -231,8 +231,10 @@ promoted to the background after a foreground timeout) remain visible in
 Settings fullscreen lease and the SAME Plugin Manager page — there is no
 separate plugin screen and no Session create/switch. The catalog is grouped as
 TUI & Extensions / Official DSH / Third-party / Experimental (the Experimental
-group is always last). At >=120 columns the frame shows
-`Categories | Plugin List | Details`; at 76-119 columns it shows
+group is always last). At >=120 columns, and only while the frame can grant six
+real business-body rows, the frame shows
+`Categories | Plugin List | Details`; a shorter frame degrades to the pair or one
+column instead of squeezing the body. At 76-119 columns it shows
 `Categories | List` or `List | Details` depending on the keyboard owner; below
 76 columns it is one column. Install, dangerous confirmations and Diagnostics
 always take the full width so risk text is never squeezed. Settings paints the

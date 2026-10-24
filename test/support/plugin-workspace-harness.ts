@@ -95,6 +95,10 @@ export interface WorkspaceHarnessOptions {
   /** A REAL Host-backed port (an L6 source->sink test supplies it); the
    *  default fake catalog below is never used in that case. */
   readonly port?: PluginManagerPort
+  /** Where the Settings lease opens. `'rail'` starts on the About home with the
+   *  keyboard on the Categories rail, so the Plugins category is only SELECTED
+   *  and the plugin page is not mounted until the content takes the focus. */
+  readonly startOn?: 'plugins' | 'rail'
 }
 
 export interface WorkspaceHarness {
@@ -103,7 +107,10 @@ export interface WorkspaceHarness {
   /** The live Settings workspace handle (the ONE screen lease). */
   readonly settings: { close(): void }
   readonly controller: PluginManagerController
+  /** The mounted page; throws when the lazy policy has not mounted it yet. */
   readonly panel: PluginManagerWorkspacePanel
+  /** The page instance, or `undefined` while the lazy policy keeps it unmounted. */
+  readonly panelInstance: () => PluginManagerWorkspacePanel | undefined
   readonly copied: string[]
   /** How many official inventory snapshots the controller requested. */
   readonly snapshotCalls: () => number
@@ -216,7 +223,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
       aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
       onOpenLegacy: () => {},
       onClose: () => {},
-      initialCategory: 'plugins',
+      initialCategory: options.startOn === 'rail' ? 'about' : 'plugins',
       onOpenPlugins: (onYieldNavigation) => {
         panel = new PluginManagerWorkspacePanel(controller, {
           requestRender: () => app.requestRender(),
@@ -235,13 +242,21 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     await vt.waitForRender()
   }
   await settle()
-  assert.ok(panel !== undefined, 'the Settings root must mount the Plugin page on its first visible paint')
+  if (options.startOn !== 'rail') {
+    assert.ok(panel !== undefined, 'the Settings root must mount the Plugin page on its first visible paint')
+  } else {
+    assert.equal(panel, undefined, 'a narrow rail that merely selects Plugins mounts nothing')
+  }
   return {
     vt,
     app,
     settings,
     controller,
-    panel,
+    get panel(): PluginManagerWorkspacePanel {
+      assert.ok(panel !== undefined, 'the Plugin page is not mounted in this scenario')
+      return panel
+    },
+    panelInstance: () => panel,
     copied,
     snapshotCalls: () => snapshotCalls,
     installCalls,

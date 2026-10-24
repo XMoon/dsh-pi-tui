@@ -19,7 +19,11 @@ import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../../src/tui-app.ts'
-import type { EmbeddedPluginPage } from '../../src/tui/plugin-manager/workspace.ts'
+import { createPluginManagerWorkspacePanel, type EmbeddedPluginPage } from '../../src/tui/plugin-manager/workspace.ts'
+import { createPluginManagerRuntime } from '../../src/app/surface/plugin-manager-runtime.ts'
+import type { PluginManagerPort } from '../../src/runtime/plugin-manager-port.ts'
+import { bundle } from '../support/plugin-workspace-harness.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 
@@ -223,6 +227,123 @@ test('/plugins is registered by the real registrar and dispatches success into t
   const view = plain(vt.getViewport())
   assert.match(view, /Settings · Plugins/, 'the ONE lease lands with the Plugin List focused')
   assert.match(view, /PLUGIN PAGE/, 'the embedded page is painted by the Settings content column')
+})
+
+test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inventory exactly once', async () => {
+  // §8.1 T01: the REAL Client command registry -> the REAL Settings lease ->
+  // the REAL `createPluginManagerWorkspacePanel` over a real Controller and the
+  // semantic PluginManagerPort. Only the Host port is a fixture; the page,
+  // Controller and grant composition are production code.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeCommands()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
+  const clientCommands = createClientCommandRegistry(parseCommand)
+
+  let snapshotCalls = 0
+  let pages = 0
+  const port: PluginManagerPort = {
+    snapshot: async () => {
+      snapshotCalls += 1
+      return {
+        bundles: [bundle({ name: '@vendor/foo', source: 'file:/tmp/foo', enabled: false })],
+        plugins: [],
+        registries: { registry: null, fallbackRegistries: [], resolved: null },
+        exemptions: [],
+        exemptionWarnings: [],
+      }
+    },
+    inspect: async (spec: string) => ({ status: 'accepted', kind: 'registry', name: spec.split('@')[0] ?? spec, version: '1.0.0', bundle: true, registry: null }),
+    setBundleEnabled: async () => ({ changed: true, application: 'applied', stage: 'enable', target: 'x' }),
+    setPluginEnabled: async () => ({ changed: true, application: 'applied', stage: 'enable', target: 'x' }),
+    removeBundle: async () => ({ changed: true, application: 'applied', stage: 'remove', target: 'x' }),
+    startInstall: async () => ({ changed: true, application: 'applied', stage: 'install', target: 'x' }),
+    waitForInstall: async () => null,
+    cancelInstall: async () => ({ status: 'not-running' }),
+    subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
+  }
+  // The PRODUCTION surface owner: ONE controller + the token-owned host claim +
+  // the page factory, exactly what bootstrap attaches.
+  const runtime = createPluginManagerRuntime({
+    mounted: () => app,
+    service: () => undefined,
+    // The SAME factory bootstrap injects.
+    createPanel: createPluginManagerWorkspacePanel,
+  })
+  const surface = runtime.attach({ port, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+
+  const counts: CommandCounts = { pages: 0, disposed: 0, sessions: 0, aboutEntries: 0 }
+  const base: Record<string, unknown> = {
+    ctx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    cwd: '/ws',
+    signal: new AbortController().signal,
+    commandRegistry: services.commands,
+    clientCommands,
+    recordExtensionError: () => {},
+    clearExtensionError: () => {},
+    captureExtensionHealthRef: () => () => {},
+    currentSessionId: undefined,
+    captureLiveSessionScope: () => undefined,
+    isSessionScopeCurrent: () => false,
+    currentSessionStats: async () => undefined,
+    sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    backendKind: 'direct' as const,
+    subscribeSessionScopeInvalidation: () => () => {},
+    listScopedCommands: () => [],
+    tuiSettings: undefined,
+    extensions: undefined,
+    // The PRODUCTION composition factory (the same one bootstrap injects).
+    createPluginManagerPage: (onYieldNavigation: () => void) => {
+      pages += 1
+      counts.pages += 1
+      const page = surface.page(onYieldNavigation)
+      return page as EmbeddedPluginPage | undefined
+    },
+    config: settingsDirectPageConfig({
+      configReadiness: () => 'ready' as const,
+      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
+      subagentModelSelection: { available: () => false },
+      web: { available: () => false },
+      credentials: { available: () => false },
+    }),
+    catalog: { models: { available: () => false } },
+  }
+  const runner = new Proxy(base, {
+    get: (target, property) => property in target ? target[property as string] : () => undefined,
+  }) as unknown as TuiCommandRunner
+  registerTuiCommandsWithDirectSeams(runner)
+
+  const execution = await clientCommands.execute({ line: '/plugins', signal: new AbortController().signal })
+  assert.ok(execution !== undefined, '/plugins must be a registered Client command')
+  assert.equal(execution.result.kind, 'success')
+  await vt.waitForRender()
+
+  assert.equal(pages, 1, 'the deep link mounts exactly ONE production page')
+  assert.equal(snapshotCalls, 1, 'the Controller opened the semantic port exactly once')
+  const view = plain(vt.getViewport())
+  assert.match(view, /Settings · Plugins/u, 'the ONE Settings lease owns the frame')
+  assert.match(view, /Search: \//u, 'the REAL embedded list paints its local Search row')
+  assert.match(view, /@vendor\/foo/u, 'the REAL inventory facts reach the painted list')
+  assert.match(view, /Enter details/u, 'the keyboard starts on the plugin List')
+  assert.equal(counts.aboutEntries, 0, 'the deep link never admits an About read')
+  assert.equal(counts.sessions, 0, 'the deep link creates no Session')
+
+  // `i` enters the original install view through the REAL page keys.
+  vt.sendInput('i')
+  await vt.waitForRender()
+  assert.match(view.length > 0 ? plain(vt.getViewport()) : '', /Plugins · Install/u, 'i opens the install view')
+  assert.equal(pages, 1, 'the install view never builds a second page')
+  assert.equal(snapshotCalls, 1, 'opening the install view never re-reads the inventory')
+  app.dispose()
+  runtime.dispose()
 })
 
 test('/settings renders lazily (no embedded Plugin page build, no plugin inventory read)', async () => {
