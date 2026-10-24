@@ -644,10 +644,13 @@ owns only the lease, focus and write-lifecycle mechanics.
   can move/shrink a direct page's content box and child grant without a terminal
   resize, so the root re-derives the live box from the live chrome before each
   pointer gesture and a release must still match the box and grant its press was
-  admitted against. The same holds for a focus transfer that changes the direct
-  page's projection (narrow paints one region at a time): until the destination
-  frame paints, only the real Esc is admitted, in both directions of the
-  Categories/content swap. Wheel events are the panel's own `handleMouse` and scroll only the painted
+  admitted against. The same holds for a focus transfer that changes the
+  Plugin Manager child's projection: whenever that transfer changes the rail /
+  content layout — at 76..119 columns, where the pair follows the keyboard, as
+  well as at narrow widths, where one region is painted at a time — only the real
+  Esc is admitted, in both directions of the Categories/content swap, until the
+  destination frame paints. This guard is specific to the embedded Plugin
+  Manager child; About/Models/Account own their own gates. Wheel events are the panel's own `handleMouse` and scroll only the painted
   region under the pointer (facts and candidates have independent wheel regions;
   a hidden pane owns no wheel). A wheel-scrolled list keeps its viewport (only a
   selection or viewport change rebases it, so a shrink still reveals the

@@ -1098,6 +1098,39 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   disposed.app.dispose()
 })
 
+test('T03 the narrow Plugins Right path mounts the page once (44 and 75 columns)', async () => {
+  // §8.1 T03 also names `Right`: on a narrow frame a rail selection mounts
+  // nothing, and the FIRST Right mounts the page once and reads the inventory
+  // once. The existing 72-column case covers the Models page, which is a different
+  // path, so this drives Plugins itself.
+  for (const columns of [44, 75] as const) {
+    const harness = await open({ columns, rows: 20, startOn: 'rail' })
+    for (let step = 0; step < 12; step += 1) {
+      if (/^> Plugins\b/mu.test(harness.view())) break
+      harness.vt.sendInput('\x1b[B')
+      await harness.settle()
+    }
+    assert.match(harness.view(), /^> Plugins\b/mu, `${columns}: the rail selects Plugins`)
+    assert.equal(harness.panelInstance(), undefined, `${columns}: selecting the category mounts nothing`)
+    assert.equal(harness.snapshotCalls(), 0, `${columns}: selecting the category reads nothing`)
+
+    // Right: the first focus transfer mounts ONCE and reads ONCE.
+    harness.vt.sendInput('\x1b[C')
+    await harness.settle()
+    const page = harness.panelInstance()
+    assert.ok(page !== undefined, `${columns}: Right mounts the page`)
+    assert.equal(harness.snapshotCalls(), 1, `${columns}: Right reads the inventory exactly once`)
+    assert.match(harness.view(), /Search: \//u, `${columns}: the narrow content paints its Search row`)
+    assert.equal(page!.currentView(), 'list', `${columns}: the page starts on the List`)
+    // Esc yields to the rail keeping the SAME instance and the ONE read.
+    harness.vt.sendInput('\x1b')
+    await harness.settle()
+    assert.equal(harness.panelInstance(), page, `${columns}: the yield keeps the instance`)
+    assert.equal(harness.snapshotCalls(), 1, `${columns}: the yield never re-reads`)
+    harness.app.dispose()
+  }
+})
+
 test('T03 a 75-column production page mounts lazily from the Categories rail', async () => {
   // §8.1 T03: below 76 columns the Settings lease opens on the rail; merely
   // SELECTING Plugins must not build the page or read the Host inventory. The
@@ -1865,6 +1898,7 @@ test('T02 the rail preview on the PRODUCTION page: Enter, Right and Tab only tra
         `${columns} ${JSON.stringify(key)}: no second inventory read`)
       assert.deepEqual(harness.setBundle, [], `${columns} ${JSON.stringify(key)}: no Host mutation`)
       assert.deepEqual(harness.removeBundle, [], `${columns} ${JSON.stringify(key)}: no Host removal`)
+      assert.deepEqual(harness.setPlugin, [], `${columns} ${JSON.stringify(key)}: no standalone-entry mutation`)
       assert.equal(harness.installCalls.length, 0, `${columns} ${JSON.stringify(key)}: no install dispatched`)
       harness.app.dispose()
     }
