@@ -2687,9 +2687,7 @@ export class SettingsWorkspacePanel implements Component {
     // same body budget): the previous frame's physical last row can already be
     // outside the new viewport while its action/copy/navigation authorization is
     // still live. Only the back keys may pass until the resize frame paints.
-    if (this.terminalGeometryStale()
-      && !matchesKey(data, 'escape')
-      && !matchesKey(data, 'backspace')) return
+    if (this.terminalGeometryStale() && !matchesKey(data, 'escape')) return
     // The CONTENT focus belongs to the direct page: the root never forwards a
     // navigation key to it, and the page never receives a key the root owns.
     if (this.focus === 'content') {

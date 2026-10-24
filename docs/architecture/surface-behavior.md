@@ -170,7 +170,8 @@ the `/footer` alias and never enters this workspace.
   rows above it. A terminal resize revokes the previous frame's action/copy
   grants before the next paint, even when the effective child body grant value
   is unchanged; until that frame paints, and whenever the frame shows only the
-  Esc fallback, only the back keys are admitted. With no granted body row (the
+  Esc fallback, only Esc is admitted (Backspace is not a portable back key: a
+  page may bind it to an editable query). With no granted body row (the
   shortest frames) the Esc action the frame names for that state runs: a real
   back, a state-named cancel such as clearing an editable filter, or an
   explicit wait while a Host mutation is still pending. No unreachable page
