@@ -1,16 +1,16 @@
 {
-  "digest": "ff60c0ec7b1656d075b58b0fba4dd7b19007c8cbacce6089f3f6000ddde87d23",
+  "digest": "9f1d09e1efc5cd41d338fb1d66ec82ccbcadb5269ec760895c230d05ac2eaba0",
   "inputs": [
     {
       "path": "package.json",
       "present": true,
-      "sha256": "b9cbae7468dfd44f43df562b70008e590849a11c50fd8162359bfea8bea51870",
+      "sha256": "caa6e0d82170569c9fc2771872f442b85c7aed8ca56f3ce62e3a3cb9c2f4f8a9",
       "why": "the manifest decides what is packed and how it is rewritten"
     },
     {
       "path": "tsdown.config.ts",
       "present": true,
-      "sha256": "da73e93945855305ce865c916343b3e5d3aef0ce848895195c7b1589137edb18",
+      "sha256": "b407469012a125a235f9bf9dab9041f6cda9b3aa7a963dad3f58b6e12cf8d932",
       "why": "the bundle build decides the payload files"
     },
     {
@@ -28,13 +28,13 @@
     {
       "path": "pnpm-lock.yaml",
       "present": true,
-      "sha256": "5f599de953b01bc019ea3599918ff9a4fd22a70b1629c896f4fc1f9b26bbc4f7",
+      "sha256": "35b6c4a7f7643ea3cf13296964632ebac5b02bcc8e4a7dad31bfe3f36f0f5b43",
       "why": "the lockfile pins the build toolchain that produces the payload"
     },
     {
       "path": "pnpm-workspace.yaml",
       "present": true,
-      "sha256": "f4bcbac66f3b809cb86e1fc0990eb6441b39f978e2840d73fd4e94397b139125",
+      "sha256": "6b9c1557f49b91010b0841987bc28dba0e35ebb0b0c8b5bd5d7f8f492bab1828",
       "why": "the workspace layout decides how pnpm resolves and packs"
     },
     {
@@ -55,11 +55,11 @@
     "mode": "npm",
     "node": "24",
     "platform": "Linux",
-    "entryCount": 37,
+    "entryCount": 40,
     "differingFiles": [],
     "manifestDifferences": [],
-    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39723746339",
-    "commit": "287b32c61fc2aa7f72f2d880e0a3332b6487f281",
-    "note": "Recorded on the integration branch: a REAL ordinary-vs-lifecycle-free comparison of the exact inputs digested above (37 entries each, no differing file, no manifest difference). Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
+    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40048155158",
+    "commit": "db889aa9bc2a71e7b46da649365cec40cd505d03",
+    "note": "Recorded from the PR #397 CI comparison: a REAL ordinary-vs-lifecycle-free pack of the exact inputs digested above (40 entries each, no differing file, no manifest difference). Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
   }
 }
