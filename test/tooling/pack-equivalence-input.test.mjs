@@ -295,30 +295,40 @@ test('each pack is produced into the directory its operand names', () => {
 // ---------------------------------------------------------------------------
 
 test('every digested packaging input, and the whole proof machinery, is evidence-sensitive', () => {
-  const watched = packagingEvidenceSensitivePaths([
+  // EXHAUSTIVE in both directions: each file that can move the proof must hit,
+  // and the result must be exactly that set. A one-way assertion passed while
+  // the Source Mode identity files were missing, which is how that gap survived.
+  const required = [
+    // The digested packaging inputs.
     'package.json',
-    'pnpm-lock.yaml',
     'tsdown.config.ts',
     'scripts/generate-dsh-presets.mjs',
-    'pnpm-workspace.yaml',
-    'scripts/compare-tarballs.mjs',
-    'scripts/pack-equivalence-protocol.json',
-    'scripts/pack-equivalence-input.mjs',
-    'scripts/pack-equivalence-baseline.json',
-    '.github/workflows/ci.yml',
-  ])
-  assert.deepEqual(watched, [
-    '.github/workflows/ci.yml',
-    'package.json',
     'pnpm-lock.yaml',
     'pnpm-workspace.yaml',
     'scripts/compare-tarballs.mjs',
-    'scripts/generate-dsh-presets.mjs',
+    'scripts/pack-equivalence-protocol.json',
+    // The proof machinery: editing it must not ride an old proof.
     'scripts/pack-equivalence-baseline.json',
     'scripts/pack-equivalence-input.mjs',
-    'scripts/pack-equivalence-protocol.json',
-    'tsdown.config.ts',
-  ])
+    '.github/workflows/ci.yml',
+    // The Source Mode identity: switching modes or moving the source pin is the
+    // change that needs a FIRST source proof.
+    'test/compat/dsh-mode.json',
+    'test/compat/dsh-source.json',
+  ]
+  assert.deepEqual(packagingEvidenceSensitivePaths(required), [...required].sort(),
+    'every file that can move the proof must be evidence-sensitive')
+})
+
+test('the Source Mode identity files force a real proof, so a mode switch is never stranded', () => {
+  // The scenario this closes: a branch switches `dsh-mode.json` from npm to
+  // source. The baseline has no source proof, so records=false. Without these
+  // entries the PR looked untouched -> sync=stale -> fast FAIL, and the FIRST
+  // source proof could never be produced.
+  for (const path of ['test/compat/dsh-mode.json', 'test/compat/dsh-source.json']) {
+    assert.deepEqual(packagingEvidenceSensitivePaths([path]), [path],
+      `${path} must be sensitive, or the change that needs the first source proof fails fast`)
+  }
 })
 
 test('a PR that touches no packaging input owes no comparison', () => {

@@ -396,6 +396,12 @@ export function packagingEvidenceSensitivePaths(changedPaths) {
     'scripts/compare-tarballs.mjs',
     // The workflow decides whether the comparison runs at all.
     '.github/workflows/ci.yml',
+    // The Source Mode identity. Switching a branch to Source Mode, or moving the
+    // pinned DSH source, changes what a source proof must be bound to: without
+    // these, the very change that needs a FIRST source proof looks like an
+    // unrelated PR and would fail fast instead of producing one.
+    'test/compat/dsh-mode.json',
+    'test/compat/dsh-source.json',
   ]
   const watched = new Set([...INPUTS.map(input => input.path), ...fixed])
   return [...new Set(changedPaths.filter(path => watched.has(path)))].sort()
