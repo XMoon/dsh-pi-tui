@@ -427,27 +427,19 @@ bracketed text paste remains the editor's atomic text edit and is a different
 key. The existing hydration fence, modal seat and pre-bind held-key replay apply
 unchanged, so a paste during those windows reaches nothing.
 
-Reproducible runs (a real Tern client; not part of `pnpm test`/CI):
+The headless lane mounts the production projections over one official inline
+surface and asks the client's own layout; the GUI lane adds the real window, the
+client's own theme, the accessibility tree and a real pointer into the client's
+own image viewer. Which script drives which lane, and every observation a run
+produced, belong to the PR/CI record and to
+[the real-pane harness guide](../guides/tern-pane-testing.md) — not here.
 
-```sh
-node scripts/tern-pane-drive.mjs scripts/tern-pane-tool-result-image.mjs
-node scripts/tern-pane-drive.mjs scripts/tern-pane-draft-and-transcript-images.mjs
-DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image.mjs
-DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-tool-result-image-scroll.mjs
-DISPLAY=:0 node scripts/tern-gui-drive.mjs scripts/tern-gui-draft-and-transcript-images.mjs
-```
-
-The headless lanes mount the production projections over one official inline
-surface and measure the client's own layout across real width bands (the GUI
-client clamps its window, so the narrow bands are a headless question); the GUI
-lanes add the real window, the client's own theme, the accessibility tree, a
-real pointer into the client's own image viewer, and the long-transcript
-reachability. Sibling navigation between two images of ONE message is NOT
-specified by the SDK: the GUI lane MEASURES the client's own affordances and
-reports them, and a build that offers none is a measured result, never a
-failure of the projection. Containment claims go through the visibility
-oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect. See
-[the real-pane harness guide](../guides/tern-pane-testing.md) and
+Two obligations follow from the client owning the picture. Sibling navigation
+between two images of ONE message is NOT specified by the SDK, so the run
+MEASURES the client's affordances: a build that offers none is a measured
+result, never a failure of the projection. Containment claims go through the
+visibility oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect —
+and an unclipped node is still not a VISIBLE node on a scrolling document. See
 [the real-GUI guide](../guides/tern-gui-testing.md) for the run preconditions
 and the evidence rules.
 

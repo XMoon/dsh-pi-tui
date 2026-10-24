@@ -132,6 +132,16 @@ const DRAFT_ENTRIES: readonly DockDraftImageEntry[] = PNGS.map((bytes, index) =>
   state: { state: 'ready', blobId: blobIds[index]! },
 }))
 
+/**
+ * The controlled editor's OWN draft state. The GUI lane must be able to prove
+ * the seat is real and TYPABLE with previews above it, so a delivered key is
+ * applied here and the next frame carries the new text/cursor — the same
+ * controlled shape the production renderer uses (`text` + `cursor`, no native
+ * editing).
+ */
+let draft = 'see attached '
+let cursor = draft.length
+
 function render(): void {
   const main = transcriptView(projectTranscriptStructure([userRow, toolRow]), new TranscriptNodeKeys(), {
     imageStates: states,
@@ -140,18 +150,28 @@ function render(): void {
     { key: 'dock' },
     ui.text({ key: 'status', text: 'DSH TSP renderer · experimental composer' }),
     ...dockDraftImageNodes(DRAFT_ENTRIES, session!.caps.cols, true),
-    ui.editor({ key: 'composer', text: 'see attached ', cursor: 13, maxLines: 8, placeholder: 'Message', prompt: '> ' }),
+    ui.editor({ key: 'composer', text: draft, cursor, maxLines: 8, placeholder: 'Message', prompt: '> ' }),
   )
   surface.render({ main, dock })
-  note({ frame: { cols: session!.caps.cols } })
+  note({ frame: { cols: session!.caps.cols, draft } })
 }
 
 render()
-note({ ready: true, blobIds, cols: session.caps.cols })
+note({ ready: true, blobIds, cols: session.caps.cols, draft })
 
 for await (const input of session) {
   if (input.type === 'key') {
-    if (input.key.name === 'f10') break
+    const key = input.key
+    if (key.name === 'f10') break
+    // A printable key is the ONLY edit this subject accepts: it proves a real
+    // delivered key reaches the controlled editor (the GUI lane's typability
+    // witness) without re-implementing the production reducer.
+    if (typeof key.text === 'string' && key.text !== '' && key.ctrl !== true && key.alt !== true && key.meta !== true) {
+      draft = draft.slice(0, cursor) + key.text + draft.slice(cursor)
+      cursor += key.text.length
+      note({ typed: key.text, draft })
+      render()
+    }
     continue
   }
   if (input.event.ev === 'resize' && input.event.sf === surface.id) render()
