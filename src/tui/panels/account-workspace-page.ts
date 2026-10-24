@@ -109,6 +109,11 @@ export class AccountWorkspacePage implements Component {
   private lastWidth = 0
   private lastHeight = 0
   private bodyHeight = 1
+  /** A height change since the last painted frame: every body key is
+   *  fail-closed until that frame repaints the new grant. */
+  private bodyHeightStale = false
+  /** The last painted frame could not fit its complete Action rows. */
+  private fallbackActive = false
   private initializing = true
   private watcherStarted = false
   /** Latest-read serials: an older profile/balance read can never overwrite a
@@ -368,17 +373,29 @@ export class AccountWorkspacePage implements Component {
   // ── rendering ────────────────────────────────────────────────────────────
 
   setBodyHeight(rows: number): void {
-    this.bodyHeight = Math.max(1, rows)
+    const next = Math.max(1, rows)
+    if (next === this.bodyHeight) return
+    this.bodyHeight = next
+    // A resize invalidates the OLD frame's action authorization before the new
+    // frame paints: a straddling Enter must not dispatch an action the new
+    // height no longer displays.
+    if (this.lastHeight > 0) this.bodyHeightStale = true
+    this.paintedActionIds.clear()
+    this.paintedTargets = []
+    this.paintedRowOrder = []
+    this.paintedCopy = false
   }
 
   render(width: number): string[] {
     if (this.disposed) return []
     this.lastWidth = width
     this.lastHeight = this.bodyHeight
+    this.bodyHeightStale = false
     const height = Math.max(1, this.bodyHeight)
     const projection = this.project(width)
     const rowOrder = this.rowOrder.slice()
     if (projection.actions.length >= height) {
+      this.fallbackActive = true
       this.paintedActionIds.clear()
       this.paintedCopy = false
       this.paintedTargets = []
@@ -394,6 +411,7 @@ export class AccountWorkspacePage implements Component {
       out.push(color.textMuted(renderActionBarRow([{ text: this.escHint(), priority: 8 }], width)))
       return out.slice(0, height)
     }
+    this.fallbackActive = false
     this.paintedActionIds.clear()
     const actionLines = projection.actions.map((action, index) => this.paintAction(action, rowOrder.length + index))
     const contentRows = Math.max(0, height - 1 - actionLines.length)
@@ -621,6 +639,9 @@ export class AccountWorkspacePage implements Component {
 
   handleInput(data: string): 'handled' | 'exit' {
     if (this.disposed) return 'handled'
+    // The last painted frame either has not adopted this height yet or showed
+    // only the Esc fallback. No other key may run an invisible body action.
+    if ((this.bodyHeightStale || this.fallbackActive) && !matchesKey(data, 'escape')) return 'handled'
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) {
       if (this.busy !== undefined) {
         this.notice = 'an account operation is still in flight — wait for the Host outcome'

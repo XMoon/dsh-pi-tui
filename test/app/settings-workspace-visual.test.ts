@@ -4850,6 +4850,17 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   await key(models, 'c')
   await key(models, '\r')
   assert.equal(models.hostReads(), modelReads, 'the hidden Models refresh/copy/action ran no Host read')
+
+  // A bodyFloor=1 fallback (120x3) must also reject the hidden refresh, both
+  // before and after the fallback frame is painted.
+  const shortModelReads = models.hostReads()
+  models.vt.resize(120, 3)
+  models.vt.sendInput('r') // before the resize frame: the old action grant is stale
+  await models.vt.waitForRender()
+  assert.match(models.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.equal(models.hostReads(), shortModelReads, 'the shrink-before-repaint r ran no Host read')
+  await key(models, 'r')
+  assert.equal(models.hostReads(), shortModelReads, 'the painted short fallback r ran no Host read')
   await key(models, '\u001b')
   assert.match(models.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
   models.dispose()
@@ -4864,6 +4875,15 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   await key(account, 'r')
   await key(account, '\r')
   assert.equal(account.hostReads(), accountReads, 'the hidden Account refresh/action ran no Host read')
+
+  const shortAccountReads = account.hostReads()
+  account.vt.resize(120, 3)
+  account.vt.sendInput('r') // before the resize frame: the old action grant is stale
+  await account.vt.waitForRender()
+  assert.match(account.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.equal(account.hostReads(), shortAccountReads, 'the shrink-before-repaint Account r ran no Host read')
+  await key(account, 'r')
+  assert.equal(account.hostReads(), shortAccountReads, 'the painted short Account fallback r ran no Host read')
   await key(account, '\u001b')
   assert.match(account.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
   account.dispose()
