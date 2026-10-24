@@ -14,16 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   triggered: the second clipboard read only starts once the first one has been read AND written,
   and a failing first paste never blocks the second. Pasted text is inserted at the live caret
   without submitting and without overwriting what was typed; a clipboard holding no image stays
-  silent instead of reporting an error. Images keep their trigger order and get the canonical placeholder; a
-  deployment limit reports one real error and never leaves an orphan placeholder. If the session
-  switched, the same session id came back under a new owner, or the editor seat was replaced while
-  the read was in flight, the stale result neither writes the new draft nor publishes the old
-  session's notice. `/attach` and `/image` use that same editor seat, the same draft stores and the
-  same Client cwd/file limits: images take the image path, other regular files the file path, and
-  success is announced only after the bytes were read and the placeholder inserted. With no usable
-  editor the command fails immediately instead of reading a file or claiming success. The
-  experimental TSP renderer can now run `/attach` and `/image` too, with the result landing in its
-  own editor (Ctrl+V and native image display remain later work).
+  silent instead of reporting an error. Images keep their trigger order and get the canonical
+  placeholder; a deployment limit reports one real error and never leaves an orphan placeholder.
+  If the session switched, the same session id came back under a new owner, or the editor seat was
+  replaced while the read was in flight, the stale result neither writes the new draft nor
+  publishes the old session's notice. `/attach` and `/image` use that same editor seat, the same
+  draft stores and the same Client cwd/file limits: images take the image path (their bytes are read
+  at attach time), other regular files the metadata path (only the signature prefix is inspected;
+  the bytes are streamed when the message is sent), and success is announced only after that intake
+  succeeded and the placeholder was inserted. With no usable editor the command fails immediately
+  instead of reading a file or claiming success. The experimental TSP renderer can now run
+  `/attach` and `/image` too, with the result landing in its own editor (Ctrl+V and native image
+  display remain later work).
 
 - **Transcript images can now be viewed at full size; the fullscreen info row gained its own fold control.**
   The rightmost 3 cells of every fullscreen image info row are an ASCII `[-]` / `[+]` control that
