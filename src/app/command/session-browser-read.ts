@@ -454,6 +454,15 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         if (!presentationHandle.isDisposed()) presentationHandle.close()
         return handle
       }
+      // A presenter may legitimately REFUSE this panel: the renderer's own
+      // four-way presenter exclusivity returns an inert, already-disposed
+      // handle when a newer presenter won a reentrant open. This owner must
+      // then retire ITS panel and start NO read — a hidden listing behind an
+      // inert presentation is a read for a surface nobody can see.
+      if (presentationHandle.isDisposed()) {
+        retire(panel, false)
+        return handle
+      }
       panel.handle.setSnapshot(snapshotOf(panel))
       if (!isActive(panel)) return handle
       startList(panel)
