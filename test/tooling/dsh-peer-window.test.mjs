@@ -106,16 +106,21 @@ test('the package version reserves one consistent release identity across manife
   assert.equal(currentRows[0].tui, version, 'the current compatibility row must carry the package version as its TUI identity')
 })
 
-test('the pi2dsh compatibility manifest targets the DSH version this checkout ships against', () => {
-  // The pi2dsh manifest is version-coupled with the DSH target: the ecosystem
-  // gate installs exactly `manifest.dshVersion` and proves the published
-  // pi2dsh bridge against it, so a stale pin silently validates the wrong
-  // pairing (or fails the peer preflight for the wrong reason). The DSH
-  // target moves with the development pin, so it moves here atomically.
+test('the pi2dsh compatibility manifest targets a DSH version this TUI line supports', () => {
+  // The ecosystem gate installs exactly `manifest.dshVersion` and proves the
+  // PUBLISHED pi2dsh bridge against it, so the pin answers one question: does
+  // our latest code keep the published bridge working on a DSH version we
+  // both support? The published consumer's own peer declaration owns how far
+  // that bridge can be claimed, which is why this pin is NOT the development
+  // target — it may legitimately trail `current.upgradeDsh` until the consumer
+  // widens its peers. It must still name a REAL pairing this line ships, so a
+  // stale pin can never silently validate a DSH version we do not support.
   const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
-  assert.equal(manifest.dshVersion, expectedDevVersion,
-    'the pi2dsh manifest must target the exact DSH version this checkout develops against')
-  assert.equal(manifest.dshVersion, COMPAT_MATRIX.current.upgradeDsh,
-    'the pi2dsh manifest must target the recommended published DSH target')
+  const claimedRows = COMPAT_MATRIX.matrix.filter(row => row.versions.includes(manifest.dshVersion))
+  assert.equal(claimedRows.length, 1, 'the pi2dsh manifest must name exactly one published matrix row')
+  assert.equal(claimedRows[0].tui, packageJson.version,
+    'the claimed DSH version must be a pairing this TUI line ships')
+  assert.equal(semver.satisfies(manifest.dshVersion, expectedWindow), true,
+    'the claimed DSH version must stay inside this package support floor')
   assert.equal(manifest.consumer, 'pi2dsh', 'the pi2dsh manifest must name the pi2dsh consumer')
 })
