@@ -4868,6 +4868,29 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   assert.match(account.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
   account.dispose()
 
+  // Add Provider catalog owns an editable filter: Backspace edits that query
+  // when a body exists, so it must be dropped at the zero body grant.
+  const catalog = setup({ columns: 120, rows: 24, providerOptions: SETTINGS_PROVIDERS })
+  await catalog.open('Models')
+  await key(catalog, '\t') // rail -> Models content
+  const addRow = rowOf(catalog, 'Add Provider…')
+  const addCol = cellIndexOf(catalog, addRow, 'Add Provider…')
+  press(catalog, addRow, addCol)
+  release(catalog, addRow, addCol)
+  await settle(catalog)
+  assert.match(catalog.view(), /Type to narrow the list\./u, 'the Add Provider catalog is open')
+  for (const character of 'acme') await key(catalog, character)
+  assert.match(catalog.view(), /Filter: acme/u, 'the visible filter holds the typed query')
+  catalog.vt.resize(120, 2)
+  await catalog.vt.waitForRender()
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u)
+  await key(catalog, '\u007f')
+  catalog.vt.resize(120, 24)
+  await catalog.vt.waitForRender()
+  assert.match(catalog.view(), /Filter: acme/u, 'the hidden Backspace did not edit the invisible query')
+  assert.match(catalog.view(), /Add Provider/u, 'the catalog page stayed mounted')
+  catalog.dispose()
+
   const about = setup({ columns: 44, rows: 20 })
   await about.openHome()
   about.vt.resize(44, 2)
