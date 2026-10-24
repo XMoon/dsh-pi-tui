@@ -400,6 +400,13 @@ projection window is:
 - The width authority is the SDK's `caps.cols` ONLY. The protocol publishes no
   pane-rows fact, so no height-driven degradation is designed or claimed here;
   a short pane's clipping is a client behaviour measured in a real run.
+- The dock is ONE scrolling document, not a pinned footer. Because the native
+  previews carry the staging image's own pixel size and the protocol offers no
+  pane-rows fact, a SHORT pane can lay the controlled editor below the visible
+  viewport once previews sit above it. That is a measured client-layout outcome
+  and an OPEN owner decision; it is never reported as a pass, and the fix is
+  neither a height probe (no protocol authority) nor a fixed preview size (a
+  forbidden pane-pixel budget).
 - The canonical `[image #N (W×H)]` token parser is the ONE source of WHICH
   occurrences a draft references, so the preview and the submission expansion
   cannot disagree. A staged image that no live token references is not a
@@ -434,9 +441,11 @@ The headless lanes mount the production projections over one official inline
 surface and measure the client's own layout across real width bands (the GUI
 client clamps its window, so the narrow bands are a headless question); the GUI
 lanes add the real window, the client's own theme, the accessibility tree, a
-real pointer into the client's own image viewer — including the sibling
-navigation between two images of ONE message, which the SDK does not describe —
-and the long-transcript reachability. Containment claims go through the visibility
+real pointer into the client's own image viewer, and the long-transcript
+reachability. Sibling navigation between two images of ONE message is NOT
+specified by the SDK: the GUI lane MEASURES the client's own affordances and
+reports them, and a build that offers none is a measured result, never a
+failure of the projection. Containment claims go through the visibility
 oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect. See
 [the real-pane harness guide](../guides/tern-pane-testing.md) and
 [the real-GUI guide](../guides/tern-gui-testing.md) for the run preconditions
