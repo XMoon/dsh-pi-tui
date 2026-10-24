@@ -386,8 +386,10 @@ test('the Hub paints the read action only while a Reader can really be admitted,
     .map(action => String(action.id).replace(/#\d+$/u, ''))
   assert.deepEqual(actions(), ['close', 'details'], 'a readable pane offers the action')
 
-  // While the Reader is OPEN the base surface is still a real client tab, so an
-  // action painted there would be clickable and refused. It must be withdrawn…
+  // While the Reader is OPEN the base frame must not advertise a read action the
+  // renderer would refuse. Whether the client shows that frame is its own
+  // presentation decision (a measured build covers it), so the requirement is on
+  // the painted frame, not on an assumed user-visible tab…
   const reader = await enterReader(h)
   const settle = new Promise<void>(resolve => { setTimeout(resolve, 0) })
   await settle

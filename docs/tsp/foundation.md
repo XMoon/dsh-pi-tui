@@ -106,11 +106,15 @@ reduction; a search hit or "two variables" is not proof of entropy.
    *rendering container*, not a second UI application: it carries no business
    authority, its only side effect is closing itself, and it is never a place to
    route selection, stop, answer or any other write. The renderer stays the
-   single owner of both surfaces, and the base surface stays resident — the
-   screen is an addition, never a replacement and never a place to migrate state
-   into. Anything that would need a second concurrent screen, its own input
-   loop, its own business presenter or its own lifecycle authority is outside
-   this exception.
+   single owner of both surfaces, and the base surface stays RESIDENT — its SDK
+   surface, frame ownership and state are never handed to the reading, and the
+   reading is never a place to migrate state into. Being resident is an
+   ownership fact, not a visibility promise: the client decides whether the base
+   is shown, covered or titled away while the reading is up, so no renderer
+   logic may assume the base is on screen, clickable or read by the user. Any
+   behaviour that would need a second concurrent screen, its own input loop, its
+   own business presenter or its own lifecycle authority is outside this
+   exception.
 2. Live `layer` producers return a `ui.col` region root; overlays/pickers are
    children of that root. This is a verified project shape, not an SDK type law
    mandating `col` everywhere. A bare overlay as a region root does not acquire
@@ -323,12 +327,16 @@ does not become a second data surface.
 - Reading is scroll-driven and scoped: the scroll target is the document's own
   region on the reading surface, the anchor is established once per reading, and
   a resize or a background repaint must not reset it. HOW the client presents
-  the screen is the client's own decision and varies by build: a measured client
-  keeps one surface tab and retitles it (`dsh` → `Work details` → `dsh`) while
-  the resident session tab stays untouched, so the base surface remains
-  reachable and its frame stays visible. Do not describe the reading as adding a
-  tab, a window or a pane from the SDK call alone, and do not assume the base is
-  hidden — a claim about presentation needs real-client evidence.
+  the screen — its own tab, a retitled tab, a window, an overlay — is the
+  client's decision, is not specified by this contract, and is not inferable
+  from the SDK call. Do not claim from code that a reading adds (or does not
+  add) a tab, and do not assume the base surface is either visible or hidden
+  while the reading is up: a client may cover it, and a covered node is not a
+  reachable one. A statement about that presentation needs real-client evidence
+  for the specific build, and belongs with that evidence, not in this contract.
+  Because presentation varies, the renderer must not depend on it: the base
+  frame stays correct when covered, the reading carries its own only control,
+  and every base node is fenced off for input while a reading exists.
 - The Back path is a real native control bound to the same dismissal as the
   reading keys' Escape, and it is admitted only for the current reading; the
   base surface's own row selection is not re-run by returning.
