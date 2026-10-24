@@ -621,9 +621,9 @@ owns only the lease, focus and write-lifecycle mechanics.
   `rows + details` otherwise); narrow paints the current level alone. A direct
   content category paints the category rail and its content column (the About
   projection or the real page) and no configuration pane — except the Plugins
-  page, whose 76..119 content focus gives the frame to `List | Details` and lets
-  the rail step aside (see [surface-behavior.md](./surface-behavior.md) § Plugin
-  Manager). No second
+  page, whose 76..119 content focus gives the frame to `List | Details` (also
+  subject to the six-real-body-row floor) and lets the rail step aside (see
+  [surface-behavior.md](./surface-behavior.md) § Plugin Manager). No second
   "visible window" state is stored, hidden panes are neither painted nor
   addressable, and row text is laid out against the pane width it is actually
   painted in.

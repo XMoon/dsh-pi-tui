@@ -167,7 +167,9 @@ the `/footer` alias and never enters this workspace.
   the rail at ≥120 columns regardless of which side owns the keyboard; at 76..119
   the pair moves with the keyboard instead, so the rail is painted only while the
   Categories rail owns the keys and steps aside for `List | Details` once the
-  plugin content does (see the Plugin Manager section). The full-width
+  plugin content does — subject to the same six-real-body-row floor as the wide
+  frame, below which either projection falls back to ONE business column (see the
+  Plugin Manager section). The full-width
   `install`/`confirm`/`diagnostics` views hide the rail at every width. The legacy medium
   projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
   L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
@@ -268,9 +270,10 @@ the `/footer` alias and never enters this workspace.
   while the root keeps the single Header/Metadata/rule/pane-header/last-row
   bar. At ≥120 columns the frame is `Categories | List | Details` — provided the
   frame can still grant six real business body rows (a shorter frame degrades to
-  one business column); at 76–119
-  the rail focus paints `Categories | List` and the plugin content focus paints
-  `List | Details`; below 76 columns it is one column, and the page is not
+  one business column); at 76–119 the rail focus paints `Categories | List` and the
+  plugin content focus paints `List | Details` under the SAME six-row floor, so a
+  shorter frame keeps one business column; below 76 columns it is one column, and
+  the page is not
   mounted while the rail is focused there. `install`/`confirm`/`diagnostics`
   always take the full width (no rail) so risk text is never squeezed. `Tab`
   and `Enter`/`Right` only hand the keyboard to the plugin List (no action);
@@ -507,8 +510,8 @@ the plugin content owns the keyboard. At ≥120 columns the frame is
 `Categories | List | Details` when the frame can still grant six real business body
 rows; at 76..119 it is `Categories | List` while the
 rail owns the keys and `List | Details` once the plugin content does, so the rail
-is not painted in that second case. The adjacent `List | Details` pair needs
-`allowDual`, a local width ≥76 and SIX real business body rows, so a shorter
+is not painted in that second case. That pair needs `allowDual`, a local width ≥76
+and SIX real business body rows, so a shorter
 frame degrades to ONE business column rather than squeezing the body; the split is
 `min(42, max(30, floor((width−2)×0.42))` for the list and the remainder for
 Details. A narrower or risk-starved frame degrades to ONE business column and
