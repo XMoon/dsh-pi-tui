@@ -164,9 +164,11 @@ the `/footer` alias and never enters this workspace.
   ONE display-only pane header whose focused `[Label]` names the live keyboard
   owner; the page's own semantic hint line is moved unchanged to the frame's
   last row instead of being regenerated at a wider width. The Plugins page keeps
-  the rail only at ≥120 columns and while it is a rail preview: at 76..119 the
-  pair moves with the keyboard, so the rail steps aside for `List | Details`
-  once the plugin content owns the keys (see the Plugin Manager section). The legacy medium
+  the rail at ≥120 columns regardless of which side owns the keyboard; at 76..119
+  the pair moves with the keyboard instead, so the rail is painted only while the
+  Categories rail owns the keys and steps aside for `List | Details` once the
+  plugin content does (see the Plugin Manager section). The full-width
+  `install`/`confirm`/`diagnostics` views hide the rail at every width. The legacy medium
   projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
   L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
   the frame's first column, and every child page keeps its own body and action
@@ -264,7 +266,9 @@ the `/footer` alias and never enters this workspace.
 - `Plugins` is a DIRECT page inside the same lease (see Plugin Manager): the
   embedded `PluginManagerWorkspacePanel` paints only its own business body,
   while the root keeps the single Header/Metadata/rule/pane-header/last-row
-  bar. At ≥120 columns the frame is `Categories | List | Details`; at 76–119
+  bar. At ≥120 columns the frame is `Categories | List | Details` — provided the
+  frame can still grant six real business body rows (a shorter frame degrades to
+  one business column); at 76–119
   the rail focus paints `Categories | List` and the plugin content focus paints
   `List | Details`; below 76 columns it is one column, and the page is not
   mounted while the rail is focused there. `install`/`confirm`/`diagnostics`
@@ -500,7 +504,8 @@ its Search/Filters row (list/details, when admitted), its OWN Host
 notice/read-error/exemption row, its business body and ONE semantic bar as its
 local last row; the root installs that line as the physical last row only while
 the plugin content owns the keyboard. At ≥120 columns the frame is
-`Categories | List | Details`; at 76..119 it is `Categories | List` while the
+`Categories | List | Details` when the frame can still grant six real business body
+rows; at 76..119 it is `Categories | List` while the
 rail owns the keys and `List | Details` once the plugin content does, so the rail
 is not painted in that second case. The adjacent `List | Details` pair needs
 `allowDual`, a local width ≥76 and SIX real business body rows, so a shorter
