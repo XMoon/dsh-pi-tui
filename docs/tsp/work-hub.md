@@ -45,8 +45,16 @@ and the mounted renderer's capability:
 | The winner is a TUI-owned client command (`client-command` + `source: 'tui'`) | in scope |
 | A genuine Host command of the same spelling won the line | not the TUI builtin; the Host handler runs |
 | A Client-extension command or a skill invocation | not the TUI builtin; its own owner runs |
+| A Client extension tries to register a name these commands already own | the extension service refuses the contribution as a conflict, so no competing winner can exist |
 | The mounted pane negotiated `picker`, `col`, `row`, `text` and the `scroll` feature | the command is admitted |
 | Any of those is missing | the command is refused before the opener runs |
+
+The live Session prerequisite stays the original one: the registered handler
+runs `requireLiveSessionScope()`, which creates the first Session through the
+existing deferred-start path when the composition has none. The Hub therefore
+opens on a Session the normal submission path produced — never on a
+no-session fallback, and never silently, because the opener mounts nothing
+while no Session is owned.
 
 `supportsTaskCenter` reports the renderer's structural negotiated capability
 only. It does not report transient interaction state: a mounted but unbound
@@ -109,7 +117,10 @@ currentness rules rather than silently replaced by a neighbour.
 - A modal arriving while the Reader is open retires the Reader through the
   existing modal-priority path before the modal becomes the visible seat; a
   Session switch or surface disposal retires both, and no stale row, callback
-  or read from the outgoing subject can revive them.
+  or read from the outgoing subject can revive them. Reopening after a switch
+  reads the NEW subject only: its own roster appears, the previous subject's
+  rows do not, and the interim hydration fence drops ordinary keys until the
+  new subject is the visible one.
 
 The client decides how a `mode:'screen'` surface is physically presented (a
 covered base, a separate tab, or another client mechanism). That is a client
