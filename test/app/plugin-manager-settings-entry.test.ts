@@ -62,6 +62,8 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   readonly clicks: [number, number][] = []
   disposed = false
   focused = false
+  /** Bumps on every fake-local state change (see gestureRevision()). */
+  private viewRevision = 0
   private view: PluginWorkspaceView = 'list'
   private readonly yieldNavigation: () => void
   private readonly onDispose: () => void
@@ -80,6 +82,9 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   }
   pendingMutation(): boolean {
     return false
+  }
+  gestureRevision(): number {
+    return this.viewRevision
   }
   cancelPointer(): void {}
   contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number } {

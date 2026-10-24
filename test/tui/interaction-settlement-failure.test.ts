@@ -79,6 +79,7 @@ test('a throwing plugin page dispose still fires the one-shot Settings lease not
     currentView: () => 'list',
     canYieldFocusToNavigation: () => true,
     pendingMutation: () => false,
+    gestureRevision: () => 0,
     cancelPointer: () => {},
     handleInput: () => {},
     handleMouse: () => undefined,

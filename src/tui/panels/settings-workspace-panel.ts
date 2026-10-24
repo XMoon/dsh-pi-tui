@@ -3758,7 +3758,12 @@ export class SettingsWorkspacePanel implements Component {
   private childGestureIdentity(): string {
     const page = this.pluginPage
     if (page === undefined) return 'none'
-    return `${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
+    // The page's OWN gesture revision is the authority: it bumps on every local
+    // change that can move a painted target or its meaning (view, filter, query,
+    // selected card, install phase, scroll, painted action set). The view/yield
+    // triple alone misses a filter or selection change inside the SAME view, so
+    // both parts are required.
+    return `${page.gestureRevision()}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
   }
 
   /** Whether one panel cell belongs to the painted content column. */

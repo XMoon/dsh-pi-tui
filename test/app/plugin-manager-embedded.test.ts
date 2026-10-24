@@ -818,6 +818,39 @@ test('T09 a plugin sub-view change under a held rail press refuses the old relea
   harness.app.dispose()
 })
 
+test('T09 a same-view filter or selection change under a held rail press refuses the old release', async () => {
+  // §3.4: the fence must cover child changes INSIDE the same view — the page
+  // stays `list`, keeps its yield status, and its projection/rail targets do not
+  // move, but its filter and selection (and therefore its own hit map) changed.
+  for (const change of ['filter', 'selection'] as const) {
+    const harness = await open({ columns: 120, rows: 24 })
+    await selectCard(harness, 'bundle:@vendor/foo')
+    assert.equal(harness.panel.currentView(), 'list')
+    const before = harness.panel.gestureRevision()
+
+    const aboutRow = railRow(harness, 'About')
+    press(harness, aboutRow, 3)
+    // A key the ROOT forwards into the page: Tab cycles the status filter, Down
+    // moves the selected card. Both keep view/yield unchanged.
+    harness.vt.sendInput(change === 'filter' ? '\t' : '\x1b[B')
+    await harness.settle()
+    assert.equal(harness.panel.currentView(), 'list', `${change}: the page stayed on the List view`)
+    assert.ok(harness.panel.gestureRevision() > before, `${change}: the page's own gesture revision advanced`)
+
+    release(harness, aboutRow, 3)
+    await harness.settle()
+    assert.match(harness.view(), /Settings · Plugins/u, `${change}: the stale rail release never switches category`)
+    assert.doesNotMatch(harness.view(), /Scope: About/u)
+    assert.equal(harness.panel.currentView(), 'list', `${change}: the plugin page survives the stale release`)
+
+    // Positive control on a fresh rail row: the settled frame still switches.
+    click(harness, railRow(harness, 'Models'), 3)
+    await harness.settle()
+    assert.match(harness.view(), /^> Models\b/mu, `${change}: the fresh rail click still switches category`)
+    harness.app.dispose()
+  }
+})
+
 test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture', async () => {
   // 119 -> 120: the rail APPEARS, so the plugin content starts at x=24 instead
   // of x=0 while the pressed screen cell keeps the same number.
