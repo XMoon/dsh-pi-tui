@@ -635,9 +635,12 @@ test('/logout with an unresolvable target reports the real unknown-target error'
 test('every remaining PiTui-only builtin stays refused with the draft restored', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A13'] })
+  // `/attach` and `/image` are deliberately NOT here: they are Client-local
+  // intake commands that the mounted composer can complete without any PiTui
+  // chrome, so the capability gate admits them (their own case is below).
   const refused = [
     '/settings', '/help', '/status', '/rewind', '/tasks', '/subagents', '/plugins', '/reload',
-    '/export', '/transcript', '/attach some-file', '/image some-file',
+    '/export', '/transcript',
     '/login', '/skill', '/display', '/focus', '/footer', '/statusline', '/keybindings',
   ]
   try {
@@ -653,6 +656,52 @@ test('every remaining PiTui-only builtin stays refused with the draft restored',
     }
     assert.deepEqual(welcomeSessionIds(fixture), [], 'no refused builtin created a Session')
     assert.equal(fixture.modelCalls(), 0, 'no refused builtin reached the model')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+// ── The Client-local attachment intake on the mounted composer ──────────────
+
+test('a real /attach of a regular file stages metadata and inserts the canonical token into the mounted composer', async (t) => {
+  const { writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ATTACH-INTAKE'] })
+  const file = join(fixture.workRoot, 'report.pdf')
+  writeFileSync(file, Buffer.from('%PDF-1.7 report'))
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, `/attach ${file}`)
+    // The success notice is published by the INTAKE, after the metadata draft
+    // exists and its token was inserted — never by the synchronous command
+    // result (the card-less result scope is error-only).
+    await waitFor('the attach success notice', () =>
+      dockNotices(fixture).some(text => text.includes('attached [file #1')), 25_000)
+    // The token is in the MOUNTED composer: the TSP renderer's own draft seat,
+    // which is the whole point of the composer seam.
+    await waitFor('the canonical file token in the composer', () =>
+      (composerText(fixture) ?? '').includes('[file #1 ('), 25_000)
+    assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
+      'the Client-local intake is admitted instead of refused')
+    assert.deepEqual(welcomeSessionIds(fixture), [], 'the intake created no Session')
+    assert.equal(fixture.modelCalls(), 0, 'the intake never reached the model')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('a real /attach of a missing path reports the real Client-local error and stages nothing', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['ATTACH-MISSING'] })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, '/attach no-such-file-here.bin')
+    await waitFor('the not-found notice', () =>
+      dockNotices(fixture).some(text => text.includes('File not found: no-such-file-here.bin')), 25_000)
+    assert.equal(composerText(fixture), '', 'no canonical token was inserted for a failed probe')
+    assert.deepEqual(welcomeSessionIds(fixture), [], 'a failed intake created no Session')
+    assert.equal(fixture.modelCalls(), 0)
   } finally {
     await fixture.settle()
   }
