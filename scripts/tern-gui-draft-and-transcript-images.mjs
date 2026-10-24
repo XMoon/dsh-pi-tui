@@ -80,7 +80,14 @@ export default async function (h) {
     h.texts(snap).join(' | '))
 
   // ── The controlled editor: present, unclipped, typable ──
+  // The client's tree carries no wire id: the controlled editor is found by the
+  // stable prefix of its controlled text. A key assertion compares the WHOLE
+  // text — a node that merely still exists proves nothing about typability.
   const composerOf = snapshot => snapshot.nodes.find(node => String(node.text ?? '').includes('see attached'))
+  const composerTextOf = snapshot => {
+    const node = composerOf(snapshot)
+    return node === undefined ? undefined : String(node.text ?? '')
+  }
   const composer = composerOf(snap)
   h.check('the controlled dock composer is painted with previews above it', composer !== undefined,
     JSON.stringify({ found: composer !== undefined }))
@@ -93,9 +100,15 @@ export default async function (h) {
   // A REAL key into the editor: with the previews up, the seat must still take
   // input. The subject loops on the SDK session, so a delivered key proves the
   // seat is live rather than a painted still.
-  await h.key('a', 600)
-  h.check('the controlled editor still receives real keys with previews up',
-    composerOf(h.snapshot()) !== undefined, h.texts(h.snapshot()).join(' | '))
+  const textBeforeKey = composerTextOf(h.snapshot())
+  await h.key('a', 700)
+  const textAfterKey = composerTextOf(h.snapshot())
+  h.check('a REAL key with previews up changes the controlled editor text',
+    textBeforeKey !== undefined && textAfterKey !== undefined && textAfterKey !== textBeforeKey,
+    `before=${JSON.stringify(textBeforeKey)} after=${JSON.stringify(textAfterKey)}`)
+  h.check('the applied key lands at the controlled cursor',
+    typeof textAfterKey === 'string' && textAfterKey.startsWith('see attached a'),
+    `after=${JSON.stringify(textAfterKey)}`)
 
   const images = snap.nodes.filter(node => node.tag === 'img')
   h.check('the client drew native image elements for the transcript AND the dock',
@@ -222,9 +235,12 @@ export default async function (h) {
       insideViewport,
       `composer=${JSON.stringify(box)} viewportHeight=${shortH} contained=${containedXY(shortSnap.chains, shortComposer)}`)
   }
-  await h.key('b', 600)
-  h.check('the controlled editor still accepts keys at the short window',
-    composerOf(h.snapshot()) !== undefined, h.texts(h.snapshot()).join(' | '))
+  const shortBefore = composerTextOf(h.snapshot())
+  await h.key('b', 700)
+  const shortAfter = composerTextOf(h.snapshot())
+  h.check('a REAL key at the short window changes the controlled editor text',
+    shortBefore !== undefined && shortAfter !== undefined && shortAfter !== shortBefore,
+    `before=${JSON.stringify(shortBefore)} after=${JSON.stringify(shortAfter)}`)
   h.capture('pr4-gui-short-window', 'the short window: measured, never an automatic degradation')
 
   writeFileSync(join(h.root, 'a11y-final.json'), JSON.stringify(h.ctl('a11y'), null, 1))
