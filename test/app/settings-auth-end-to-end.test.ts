@@ -1087,3 +1087,31 @@ test('a shrink before repaint revokes a selected sign-out action; the short fall
   assert.doesNotMatch(h.view(), /Sign out confirmation/u, 'Esc really cancelled the confirmation')
   h.close()
 })
+
+
+test('a resize to 120x7 rejects a mouse press/release on the old sign-out row', async () => {
+  const h = open(120, 8)
+  h.setAccountView({
+    status: 'credential-stored',
+    links: { usageUrl: 'https://platform.example/usage', topUpUrl: 'https://platform.example/topup' },
+    attempt: null,
+  })
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/logout deepseek-account')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /> Sign out/u, 'the 8-row confirmation paints its selected action')
+  const oldSignOutRow = h.rows().findIndex(line => line.includes('> Sign out'))
+  assert.equal(oldSignOutRow, 4, 'the selected Sign out action is the old y=4 row')
+  const oldSignOutCol = h.rows()[oldSignOutRow]!.indexOf('Sign out')
+
+  h.vt.resize(120, 7)
+  press(h, oldSignOutRow, oldSignOutCol)
+  release(h, oldSignOutRow, oldSignOutCol)
+  await h.vt.waitForRender()
+  for (let index = 0; index < 10; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.calls.filter(call => call === 'signOut').length, 0,
+    'the stale old-frame mouse gesture never signs out')
+  assert.match(h.view(), /> Sign out/u, 'the confirmation is still open after the rejected gesture')
+  await key(h, '\u001b')
+  h.close()
+})
