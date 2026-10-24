@@ -38,6 +38,7 @@ import type { SessionRuntime as ApplicationSessionRuntime } from '../session/run
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
+import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
 import { titleRefusalNoticeOwner, titleSuccessNoticeVisible } from './tsp-capability.ts'
@@ -221,6 +222,14 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     openJobView(jobId: string): void
     /** B4-B: the Full Task Center only — the quick modal is retired. */
     openTasksBrowser(viewMode: 'full'): void
+    /**
+     * Image UX PR3-B: the LIVE mounted composer of the current renderer (the
+     * draft seat the `/attach` `/image` intake commits into). Read at call
+     * time — the mount happens after registration, so this is a getter. On the
+     * PiTui branch it is the mounted `TuiApp`; a non-PiTui renderer supplies
+     * its own port.
+     */
+    composer(): SubmissionComposerPort
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
@@ -714,6 +723,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             pituiPresentation: deps.app() !== undefined,
             backendKind: deps.backend.kind,
           }),
+          // Image UX PR3-B: the LIVE composer getter of the mounted renderer.
+          // Deliberately not cached — the mount (and any seat replacement) is
+          // read at command time, exactly like `deps.app`.
+          composer: () => deps.surface.composer(),
         },
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the

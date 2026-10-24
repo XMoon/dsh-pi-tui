@@ -48,6 +48,11 @@ import type { CommandLineClassification } from '../../domain/command/policy.ts'
 export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
   'exit', 'quit',
   'new', 'fork', 'title', 'rename', 'copy', 'yolo',
+  // Image UX PR3-B2: the Client-local attachment intake. Both commands are
+  // fully executable on the TSP renderer — they read the Client cwd, stage into
+  // the existing draft stores and commit the canonical token into the mounted
+  // composer, which the TSP renderer supplies. No PiTui pane is involved.
+  'attach', 'image',
 ])
 
 /**
@@ -58,9 +63,16 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
  * visible owner there. This set is the B2-A notice scope: it is derived from the
  * admitted set above plus the argument-shaped `/logout`, and it is deliberately
  * NOT a routing authority — the classifier and the gate above own that.
+ *
+ * Image UX PR3-B2: `/attach` and `/image` are EXCLUDED. Their handler returns
+ * `{ kind: 'success' }` as soon as one asynchronous intake intent was accepted —
+ * not when the file was read, staged and its token inserted. The ONLY success
+ * message is the composer notice the intake publishes after the token is
+ * committed, so a generic result notice here would announce a false success
+ * before the bytes exist (and would then duplicate the real one).
  */
 export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
-  ...TSP_SUPPORTED_TUI_BUILTINS,
+  ...[...TSP_SUPPORTED_TUI_BUILTINS].filter(name => name !== 'attach' && name !== 'image'),
   'logout',
 ])
 

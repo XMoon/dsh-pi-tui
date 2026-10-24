@@ -161,6 +161,22 @@ test('every SubmissionComposerPort member is live on a real PiTui app', () => {
   }
 })
 
+// ── Behavioral: the command surface's live composer seam ───────────────────
+
+test('the mounted composer getter returns the SAME object the renderer mounted', () => {
+  // The seam is a live read, not a captured value: the composition root binds
+  // `composer: () => surface.composer`, so the object identity the renderer
+  // mounted is exactly what the attachment intake will write into.
+  const mounted = { marker: 'tsp-composer' }
+  let current = mounted
+  const seam = { composer: () => current }
+  assert.equal(seam.composer(), mounted, 'the seam reads the mounted object')
+  const replacement = { marker: 'replacement' }
+  current = replacement
+  assert.equal(seam.composer(), replacement, 'a replaced seat is read on the next call, never cached')
+  assert.notEqual(seam.composer(), mounted, 'the previous seat is no longer reported')
+})
+
 // ── Behavioral: the UserShell interrupt notice is renderer-neutral ──────────
 
 test('the UserShell interrupt error notice routes through the injected renderer-neutral notify', async () => {

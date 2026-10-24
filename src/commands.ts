@@ -67,6 +67,7 @@ import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
+import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
 import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
@@ -857,6 +858,14 @@ export interface TuiCommandPresentation {
    *  this mount (only the card-less TSP path — see
    *  `titleSuccessNoticeVisible`). */
   readonly titleSuccessNoticeVisible: boolean
+  /**
+   * Image UX PR3-B: the LIVE mounted composer (the renderer's draft seat).
+   * The `/attach` `/image` intake reads the current draft and commits its
+   * token through it, so a non-PiTui renderer's own composer — never a PiTui
+   * app masquerading as the TSP one — receives the result. Optional for the
+   * historical direct-test call sites; every production assembly supplies it.
+   */
+  readonly composer?: () => SubmissionComposerPort | undefined
 }
 
 export function registerTuiCommands(
@@ -2171,7 +2180,18 @@ export function registerTuiCommands(
 
   sessionCommands.registerTitle()
 
-  const artifactCommands = createArtifactsCommands({ runner, app: app as TuiApp, registerOne, registerTuiCommand, detach, notifyOutcome })
+  const artifactCommands = createArtifactsCommands({
+    runner,
+    app,
+    // Image UX PR3-B: the renderer-neutral live composer seam. The historical
+    // PiTui/headless call sites (no presentation object) keep the mounted app
+    // as their composer; a production TSP assembly must supply the real one.
+    composer: presentation?.composer ?? (() => app),
+    registerOne,
+    registerTuiCommand,
+    detach,
+    notifyOutcome,
+  })
   artifactCommands.registerCopy()
 
 

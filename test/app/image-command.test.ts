@@ -26,6 +26,12 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import type { SubmissionComposerPort } from '../../src/app/submission/composer-port.ts'
+import type { ClientCommandExecution } from '../../src/app/command/client-command-registry.ts'
+import { checkImageLimits } from '../../src/client/media/image/intake.ts'
+import { TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../../src/app/command/tsp-capability.ts'
+import { classifyCommandLine } from '../../src/domain/command/policy.ts'
+import { prepareUserMessage } from '../../src/app/submission/direct-message-preparation.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -419,4 +425,396 @@ test('command fallback FAILURE: restore keeps the draft; the pin releases; prune
   app.setEditorText('')
   pruneUnreferencedDraftAttachments('', imageStore)
   assert.equal(imageStore.get(draft.id), undefined, 'the released draft is prunable after the placeholder leaves')
+})
+
+// ── The mounted-composer (no PiTui app) route ──────────────────────────────
+
+/** A minimal renderer composer: the port the TSP renderer supplies in place of
+ *  a `TuiApp`. It records every notice and holds a REAL caret. */
+function mountedComposer(initial = ''): SubmissionComposerPort & {
+  readonly notices: { text: string; kind: 'info' | 'error' | undefined }[]
+  caretAt(index: number): void
+} {
+  let text = initial
+  let caret = initial.length
+  const notices: { text: string; kind: 'info' | 'error' | undefined }[] = []
+  return {
+    notices,
+    getDraft: () => text,
+    setDraft: (next) => { text = next; caret = next.length },
+    setEditorText: (next) => { text = next; caret = next.length },
+    insertIntoEditor: (value) => {
+      text = `${text.slice(0, caret)}${value}${text.slice(caret)}`
+      caret += value.length
+    },
+    notify: (message, kind) => { notices.push({ text: message, kind }) },
+    setSubmitPending: () => {},
+    clearSettledLocalMessages: () => {},
+    caretAt: (index) => { caret = index },
+  }
+}
+
+interface MountedHarness {
+  /** The REAL Client command registry the submission owner executes from. */
+  readonly clientCommands: ReturnType<typeof createClientCommandRegistry>
+  readonly composer: ReturnType<typeof mountedComposer>
+  readonly imageStore: DraftImageStore
+  readonly fileStore: DraftFileStore
+  readonly notices: { text: string; kind: 'info' | 'error' | undefined }[]
+  readonly reads: string[]
+  bumpGeneration(): void
+  replaceComposer(next: ReturnType<typeof mountedComposer>): void
+  setImageLimits(limits: Parameters<typeof checkImageLimits>[2] | undefined): void
+  /** Execute one line through the REAL Client registry (the TSP route). */
+  execute(line: string): Promise<ClientCommandExecution | undefined>
+}
+
+/**
+ * The mounted TSP-shaped composition: a REAL `registerTuiCommands` pass with
+ * `app: undefined` (no PiTui surface) and the internal composer presentation
+ * seam the production `createCommandSurface` supplies. Commands execute through
+ * the SAME Client registry object the submission owner consumes.
+ */
+function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: ReturnType<typeof mountedComposer> }): MountedHarness {
+  const ctx = new Context()
+  const services = fakeCommands()
+  ctx.provide('commands', services.commands as never)
+  const imageStore = new DraftImageStore()
+  const fileStore = new DraftFileStore()
+  const notices: { text: string; kind: 'info' | 'error' | undefined }[] = []
+  const reads: string[] = []
+  const seat: { current: ReturnType<typeof mountedComposer> } = { current: options.composer ?? mountedComposer() }
+  let generation = 0
+  let limits: Parameters<typeof checkImageLimits>[2] | undefined
+  const runner: TuiCommandRunner = {
+    ctx,
+    // The TSP renderer mounts no TuiApp: every PiTui-only member is absent.
+    app: undefined,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    ...sessionScopeFacts(() => undefined, () => generation),
+    currentSessionId: undefined,
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+    tuiSettings: undefined,
+    applyFooterSettings: () => {},
+    agents: {} as never,
+    sessionReader: {
+      list: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
+    },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
+    hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: false,
+    transcriptExportAvailable: false,
+    interaction: {
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => true,
+    },
+    sessionWriter: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
+      refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
+    },
+    cwd: options.cwd,
+    sessionCwd: () => options.sessionCwd ?? options.cwd,
+    fileStore,
+    imageStore,
+    copyToClipboard: async () => true,
+    imageLimits: () => limits,
+    // The PiTui-only legacy insertion seam: it must stay UNREACHED on this
+    // renderer (its no-op is exactly the bug the composer seam replaces).
+    insertIntoEditor: (text) => { reads.push(`legacy-insert:${text}`) },
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    pendingPreset: undefined,
+    effectivePresetId: undefined,
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
+    refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
+    focusEnabled: () => false,
+    setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
+    updateWelcomeCard: () => {},
+    openJobView: () => {},
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {},
+    requestExit: () => {},
+    extensions: undefined,
+    exit: () => {},
+  }
+  // The REAL registration pass with the internal presentation seams the
+  // production `createCommandSurface` supplies. The fake Host service holds no
+  // global-layer commands, so the Direct catalog seam is empty.
+  registerTuiCommands(runner, undefined, { listGlobalCommands: () => [] }, undefined, undefined, {
+    notify: (text, kind) => { notices.push({ text, kind }) },
+    titleRefusalNoticeOwner: 'result-card',
+    titleSuccessNoticeVisible: false,
+    composer: () => seat.current,
+  })
+  return {
+    clientCommands: runner.clientCommands,
+    composer: seat.current,
+    imageStore,
+    fileStore,
+    notices,
+    reads,
+    bumpGeneration: () => { generation += 1 },
+    replaceComposer: (next) => { seat.current = next },
+    setImageLimits: (next) => { limits = next },
+    execute: line => runner.clientCommands.execute({ line, signal: new AbortController().signal }),
+  }
+}
+
+test('a TSP-mounted image command stages bytes and inserts the canonical image token into its composer', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-image-')
+  const file = join(dir, 'shot.png')
+  writeFileSync(file, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+
+  const execution = await h.execute(`/image ${file}`)
+  assert.deepEqual(execution?.result, { kind: 'success' }, 'the real Client registry accepted and ran /image')
+  await waitFor(() => h.imageStore.size() === 1)
+  const draft = h.imageStore.values()[0]!
+  assert.equal(draft.placeholder, '[image #1 (1×1)]')
+  assert.equal(draft.source.type, 'path')
+  assert.equal(h.composer.getDraft(), `${draft.placeholder} `, 'the canonical token is in the mounted composer')
+  // One IO, one success message: the message comes from the composer AFTER the
+  // bytes and the token were committed — never from the command result.
+  await waitFor(() => h.composer.notices.length === 1)
+  assert.deepEqual(h.composer.notices, [{ text: `attached ${draft.placeholder} — Enter to send`, kind: undefined }],
+    'exactly one success notice, published by the composer')
+  assert.deepEqual(h.notices, [], 'the PiTui command-card notice sink stayed silent on this renderer')
+  assert.deepEqual(h.reads, [], 'the PiTui-only insertIntoEditor seam was never used')
+})
+
+test('a TSP-mounted attach command stages a regular file into the file store and inserts its canonical token', async (t) => {
+  const life = testLifecycle(t)
+  const client = life.tempDir('dsh-tsp-attach-client-')
+  const session = life.tempDir('dsh-tsp-attach-session-')
+  writeFileSync(join(client, 'report.pdf'), Buffer.from('%PDF-1.7 report'))
+  const h = mountedHarness({ cwd: client, sessionCwd: session })
+
+  const execution = await h.execute('/attach report.pdf')
+  assert.deepEqual(execution?.result, { kind: 'success' })
+  await waitFor(() => h.fileStore.values().length === 1)
+  const draft = h.fileStore.values()[0]!
+  assert.equal(draft.name, 'report.pdf')
+  assert.equal(h.imageStore.size(), 0, 'a generic file never enters the image store')
+  assert.equal(h.composer.getDraft(), `${draft.placeholder} `, 'the file token is in the mounted composer')
+  await waitFor(() => h.composer.notices.length === 1)
+  assert.deepEqual(h.composer.notices, [{ text: `attached ${draft.placeholder} — Enter to send`, kind: undefined }])
+})
+
+test('a TSP-mounted attach command accepts an image through the same image intake path', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-attach-image-')
+  const file = join(dir, 'photo.png')
+  writeFileSync(file, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+
+  const execution = await h.execute(`/attach ${file}`)
+  assert.deepEqual(execution?.result, { kind: 'success' })
+  await waitFor(() => h.imageStore.size() === 1)
+  const draft = h.imageStore.values()[0]!
+  assert.equal(draft.source.type, 'path')
+  assert.equal(h.fileStore.values().length, 0, 'an image never enters the generic file store')
+  assert.equal(h.composer.getDraft(), `${draft.placeholder} `, 'the image branch of /attach uses the ONE image intake')
+})
+
+test('an absent composer refuses image and attach before any filesystem read or draft mutation', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-no-composer-')
+  writeFileSync(join(dir, 'shot.png'), pngBytes())
+  writeFileSync(join(dir, 'report.pdf'), Buffer.from('%PDF-1.7 report'))
+  const h = mountedHarness({ cwd: dir })
+  h.replaceComposer(undefined as never)
+
+  for (const line of [`/image ${join(dir, 'shot.png')}`, '/attach report.pdf']) {
+    const execution = await h.clientCommands.execute({ line, signal: new AbortController().signal })
+    assert.equal(execution?.result.kind, 'error', `${line} is refused synchronously without a composer`)
+    assert.equal((execution?.result as { text: string }).text, 'the draft composer is unavailable on this renderer')
+  }
+  // Nothing was read, staged or inserted.
+  assert.equal(h.imageStore.size(), 0)
+  assert.equal(h.fileStore.values().length, 0)
+  assert.deepEqual(h.reads, [])
+})
+
+test('a command intake completing after a session generation change never writes the replacement composer', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-stale-intake-')
+  const file = join(dir, 'shot.png')
+  writeFileSync(file, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+  const execution = await h.execute(`/image ${file}`)
+  assert.deepEqual(execution?.result, { kind: 'success' }, 'the intent was accepted before the switch')
+  // The surface moves on while the async read is in flight: the test resumes
+  // from the command settle (a microtask) before the file I/O can complete.
+  const replacement = mountedComposer()
+  h.replaceComposer(replacement)
+  h.bumpGeneration()
+
+  // The captured composer's session-fence notice is the intake's authoritative
+  // settle signal (no timer).
+  await waitFor(() => h.composer.notices.length === 1)
+  assert.equal(h.composer.notices[0]!.text, 'the session changed while reading the image — try again')
+  assert.equal(h.imageStore.size(), 0, 'the stale intake stages no bytes')
+  assert.equal(replacement.getDraft(), '', 'no stale token is written into the replacement composer')
+  assert.deepEqual(replacement.notices, [], 'no stale notice is published to the replacement composer')
+})
+
+test('an invalid path or rejected image limit leaves both stores and the composer draft unchanged', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-bad-intake-')
+  writeFileSync(join(dir, 'shot.png'), pngBytes())
+  const h = mountedHarness({ cwd: dir })
+  h.setImageLimits({
+    maxImageBytes: 8,
+    maxImagesPerMessage: 4,
+    maxMessageImageBytes: 1024,
+    maxImagePixels: 64,
+    maxImageDimension: 32,
+    mediaTypes: ['image/png'],
+  })
+
+  await h.execute(`/image ${join(dir, 'shot.png')}`)
+  await waitFor(() => h.composer.notices.length === 1)
+  assert.equal(h.composer.notices[0]!.kind, 'error', 'the byte-limit rejection is reported as an error')
+  await h.execute('/image /nonexistent/path.png')
+  await waitFor(() => h.composer.notices.length === 2)
+  assert.equal(h.composer.notices[1]!.kind, 'error')
+  assert.equal(h.imageStore.size(), 0, 'neither rejection staged an image')
+  assert.equal(h.fileStore.values().length, 0)
+  assert.equal(h.composer.getDraft(), '', 'no false placeholder reached the draft')
+})
+
+test('an asynchronously staged attachment reports success only after bytes and its token are committed', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-order-')
+  const file = join(dir, 'shot.png')
+  writeFileSync(file, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+
+  // The result-notice scope excludes this command, so the returned
+  // `CommandResult.success` announces nothing on the card-less route.
+  assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('image'))
+  const execution = await h.execute(`/image ${file}`)
+  assert.deepEqual(execution?.result, { kind: 'success' }, 'the synchronous result only accepts the intent')
+  assert.deepEqual(h.composer.notices, [], 'the accepted intent alone publishes nothing')
+  assert.equal(h.composer.getDraft(), '', 'no token exists before the bytes are staged')
+
+  await waitFor(() => h.imageStore.size() === 1)
+  const draft = h.imageStore.values()[0]!
+  assert.ok(h.composer.getDraft().includes(draft.placeholder), 'the token exists once the bytes are staged')
+  await waitFor(() => h.composer.notices.length === 1)
+  assert.equal(h.composer.notices.length, 1, 'exactly one success message, after the commit')
+})
+
+
+// ── The cross-layer source→decision→sink chain ─────────────────────────────
+
+test('the authoritative classifier, the TSP capability gate and the real handler carry one /image line to a staged token', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-chain-')
+  const file = join(dir, 'shot.png')
+  writeFileSync(file, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+  const line = `/image ${file}`
+  const parsed = parseCommand(line)
+  assert.ok(parsed !== undefined, 'the official parser accepts the line')
+
+  // 1. The LIVE Client registration claims the exact line (the classifier's
+  //    ownership source — never a static name list).
+  const claims = h.clientCommands.claimsLine(parsed)
+  assert.equal(claims, true, 'the registered /image claims its argued line')
+
+  // 2. The authoritative classifier turns those live facts into the winner.
+  const classification = classifyCommandLine({
+    hostOriginClaim: undefined,
+    tuiCommand: claims,
+    extensionCommand: false,
+    skillInvocation: false,
+  })
+  assert.deepEqual(classification, { kind: 'client-command', source: 'tui' })
+
+  // 3. The renderer-capability gate ADMITS the winner on the TSP mount.
+  assert.deepEqual(tspBuiltinAvailability(classification, parsed.name, {}, parsed.rawInput), { kind: 'available' })
+
+  // 4. The REAL handler runs through the same Client registry ownership uses.
+  const execution = await h.clientCommands.execute({ line, signal: new AbortController().signal })
+  assert.deepEqual(execution?.result, { kind: 'success' })
+  await waitFor(() => h.imageStore.size() === 1)
+  const draft = h.imageStore.values()[0]!
+
+  // 5. The canonical placeholder is in the mounted composer and an ordinary
+  //    submission preparation consumes exactly that store + token.
+  const composerDraft = h.composer.getDraft()
+  assert.equal(composerDraft, `${draft.placeholder} `)
+  const message = await prepareUserMessage(composerDraft, h.imageStore, {
+    attachments: {
+      imageLimits: {
+        maxImageBytes: 20 * 1024 * 1024,
+        maxImagesPerMessage: 4,
+        maxMessageImageBytes: 200 * 1024 * 1024,
+        maxImagePixels: 64_000_000,
+        maxImageDimension: 8192,
+        mediaTypes: ['image/png'],
+      },
+      saveImages: async inputs => inputs.map((input, index) => ({
+        attachmentId: `att-${index + 1}`,
+        mediaType: input.mediaType,
+        bytes: input.data.byteLength,
+        width: 1,
+        height: 1,
+        name: input.name,
+      })),
+    },
+    llm: { resolveModelInfo: async () => ({ inputModalities: ['text', 'image'] }) } as never,
+    currentModel: () => ({ provider: 'provider', model: 'model' }),
+    canonicalizeMentions: async text => text,
+  })
+  const imageBlocks = message.content.filter(block => block.type === 'image')
+  assert.equal(imageBlocks.length, 1, 'the submission preparation consumes exactly the staged image')
+  assert.equal((imageBlocks[0] as { attachment: { bytes: number } }).attachment.bytes, 33,
+    'the admitted block carries the SAME bytes the clipboard/file intake staged')
+  assert.ok(!message.content.some(block => block.type === 'text' && block.text.includes(draft.placeholder)),
+    'the canonical token is resolved into the image block, never sent as literal text')
 })
