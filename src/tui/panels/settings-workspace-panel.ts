@@ -2630,6 +2630,14 @@ export class SettingsWorkspacePanel implements Component {
     return this.chrome?.width ?? this.intents.columns()
   }
 
+  /** Whether the live terminal geometry has outrun the last painted frame. The
+   *  child grant value can stay identical across two heights (8→7 rows keeps
+   *  the same body budget), so the root owns this per-terminal-frame fence. */
+  private terminalGeometryStale(): boolean {
+    return this.lastRenderWidth >= 0
+      && (this.lastRenderWidth !== this.intents.columns() || this.lastRenderRows !== this.intents.rows())
+  }
+
   /** The current projection (see {@link projectionWidth}). */
   private currentLayout(): SettingsLayout {
     return layoutForWidth(this.projectionWidth())
@@ -2674,6 +2682,14 @@ export class SettingsWorkspacePanel implements Component {
       this.pluginPage.handleInput?.(data)
       return
     }
+    // A terminal resize is a fail-closed boundary for EVERY Settings pane even
+    // when the effective child grant value is unchanged (8→7 rows keeps the
+    // same body budget): the previous frame's physical last row can already be
+    // outside the new viewport while its action/copy/navigation authorization is
+    // still live. Only the back keys may pass until the resize frame paints.
+    if (this.terminalGeometryStale()
+      && !matchesKey(data, 'escape')
+      && !matchesKey(data, 'backspace')) return
     // The CONTENT focus belongs to the direct page: the root never forwards a
     // navigation key to it, and the page never receives a key the root owns.
     if (this.focus === 'content') {

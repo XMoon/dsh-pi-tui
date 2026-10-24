@@ -127,7 +127,7 @@ interface Harness {
   readonly copied: string[]
   /** The live settings document the projection reads. */
   readonly doc: TuiSettingsDoc
-  readonly invoke: (name?: string) => unknown
+  readonly invoke: (name?: string, rawInput?: string) => unknown
   /** Open the workspace and walk the category rail to one category. */
   readonly open: (category?: string) => Promise<void>
   /** Walk the category rail to one category (the workspace is already open). */
@@ -266,6 +266,12 @@ function setup(options: HarnessOptions = {}): Harness {
       calls.push(`setDisplayPreset:${preset}`)
       return { kind: 'unchanged', preset }
     },
+    // The direct Models/Account pages copy through the runner's clipboard seam;
+    // record it on the same sink the About copy intents use.
+    copyToClipboard: async (text: string) => {
+      copied.push(text)
+      return true
+    },
     refreshStatus: () => { calls.push('refreshStatus') },
     tuiSettings: options.settingsService === false
       ? undefined
@@ -386,10 +392,10 @@ function setup(options: HarnessOptions = {}): Harness {
     get: (target, property) => property in target ? target[property as string] : () => undefined,
   }) as unknown as TuiCommandRunner
   registerTuiCommandsWithDirectSeams(runner)
-  const invoke = (name = 'settings'): unknown => {
+  const invoke = (name = 'settings', rawInput = ''): unknown => {
     const definition = defs.find(candidate => candidate.name === name)
     assert.ok(definition?.handler !== undefined, `/${name} must be registered`)
-    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
+    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput })
   }
   /** Open the workspace at its REAL entry: the About home. */
   const openHome = async (): Promise<void> => {
@@ -4241,10 +4247,10 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
     get: (target, property) => property in target ? target[property as string] : () => undefined,
   }) as unknown as TuiCommandRunner
   registerTuiCommandsWithDirectSeams(runner)
-  const invoke = (name = 'settings'): unknown => {
+  const invoke = (name = 'settings', rawInput = ''): unknown => {
     const definition = defs.find(candidate => candidate.name === name)
     assert.ok(definition?.handler !== undefined, `/${name} must be registered`)
-    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
+    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput })
   }
   try {
     // Open the workspace on a NARROW terminal: the About home owns the
@@ -4947,4 +4953,62 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   await key(about, '\u001b')
   assert.match(about.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
   about.dispose()
+})
+
+
+test('a resize that keeps the child grant still fails closed until the new terminal frame paints', async () => {
+  // Legacy root: r re-reads the settings document. At 120×8 and 120×7 the
+  // body budget is 4 both times, so only the terminal frame changed.
+  const legacy = setup({ columns: 120, rows: 8 })
+  await legacy.open('Appearance')
+  const legacyReads = legacy.reads()
+  legacy.vt.resize(120, 7)
+  legacy.vt.sendInput('r') // before the resize frame: the old bar row is clipped
+  await legacy.vt.waitForRender()
+  assert.equal(legacy.reads(), legacyReads, 'the same-grant legacy resize rejects r before repaint')
+  await key(legacy, 'r') // after repaint the visible bar authorizes it again
+  assert.ok(legacy.reads() > legacyReads, 'the repainted frame really reads again')
+  legacy.dispose()
+
+  // Models list: the child grant is 4 at both heights; r would start a Host
+  // catalog read from the clipped old bar row.
+  const models = setup({ columns: 120, rows: 8, providerOptions: SETTINGS_PROVIDERS })
+  await models.open('Models')
+  await key(models, '\t') // rail -> Models content
+  assert.match(models.rowsPlain().at(-1) ?? '', /r refresh/u)
+  const modelReads = models.hostReads()
+  models.vt.resize(120, 7)
+  models.vt.sendInput('r')
+  await models.vt.waitForRender()
+  assert.equal(models.hostReads(), modelReads, 'the same-grant Models resize rejects the clipped r before repaint')
+  await key(models, 'r')
+  assert.ok(models.hostReads() > modelReads, 'the repainted Models bar authorizes the real refresh')
+  models.dispose()
+
+  // Models reference: the c-copy grant came from the old physical last row.
+  const reference = setup({ columns: 120, rows: 8, providerOptions: SETTINGS_PROVIDERS })
+  reference.invoke('login', 'ACME_API_KEY')
+  await reference.vt.waitForRender()
+  assert.match(reference.view(), /API Key Reference/u)
+  assert.match(reference.rowsPlain().at(-1) ?? '', /c copy/u, 'the full-height frame advertises copy')
+  const copied = reference.copied.length
+  reference.vt.resize(120, 7)
+  reference.vt.sendInput('c')
+  await reference.vt.waitForRender()
+  assert.equal(reference.copied.length, copied, 'the same-grant resize rejects the clipped copy grant before repaint')
+  await key(reference, 'c')
+  assert.equal(reference.copied.length, copied + 1, 'the repainted frame authorizes the real copy')
+  reference.dispose()
+
+  // Account uses the same root fence: its r refresh is not admitted before the
+  // new terminal frame paints.
+  const account = setup({ columns: 120, rows: 8 })
+  await account.open('Account')
+  await key(account, '\t') // rail -> Account content
+  const accountReads = account.hostReads()
+  account.vt.resize(120, 7)
+  account.vt.sendInput('r')
+  await account.vt.waitForRender()
+  assert.equal(account.hostReads(), accountReads, 'the same-grant Account resize rejects the clipped r before repaint')
+  account.dispose()
 })

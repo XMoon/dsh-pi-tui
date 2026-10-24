@@ -167,11 +167,12 @@ the `/footer` alias and never enters this workspace.
   projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
   L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
   the frame's first column, and every child page keeps its own body and action
-  rows above it. A height change revokes the previous frame's action/copy
-  grants before the next paint; until that frame paints, and whenever the
-  frame shows only the Esc fallback, only Esc is admitted. With no granted body
-  row (the shortest frames) the Esc action the frame names for that state runs:
-  a real back, a state-named cancel such as clearing an editable filter, or an
+  rows above it. A terminal resize revokes the previous frame's action/copy
+  grants before the next paint, even when the effective child body grant value
+  is unchanged; until that frame paints, and whenever the frame shows only the
+  Esc fallback, only the back keys are admitted. With no granted body row (the
+  shortest frames) the Esc action the frame names for that state runs: a real
+  back, a state-named cancel such as clearing an editable filter, or an
   explicit wait while a Host mutation is still pending. No unreachable page
   refresh, copy or action runs from an invisible body.
 
