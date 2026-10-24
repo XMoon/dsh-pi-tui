@@ -356,6 +356,9 @@ function fakeRunnerDeps(options: {
       setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
       openJobView: () => {},
       openTasksBrowser: () => {},
+      // Image UX PR3-B: the CommandSurface's live composer seam. This harness
+      // mounts the real PiTui app, which is its own composer port.
+      composer: () => app,
     },
     backend: {
       kind: options.remoteSource === undefined ? 'direct' : 'remote',

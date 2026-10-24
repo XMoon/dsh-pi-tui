@@ -1699,6 +1699,10 @@ export function applyRunnerWithRuntime(
         setTerminalProgressMode: (mode) => surface.setTerminalProgressMode(mode),
         openJobView: (jobId) => surface.openJobView(jobId),
         openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),
+        // Image UX PR3-B: the LIVE composer of the mounted renderer. Command
+        // registration runs AFTER the mount, so this getter (never an eagerly
+        // captured value) is what the attachment intake reads.
+        composer: () => surface.composer,
       },
       backend: {
         kind: selectedRuntime.kind,

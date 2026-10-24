@@ -10,6 +10,7 @@
 
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { TuiApp } from '../../tui-app.ts'
+import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
 import { isCancellation, runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
@@ -31,7 +32,6 @@ type ArtifactsCommandRunner = Pick<
   | 'fileStore'
   | 'imageLimits'
   | 'imageStore'
-  | 'insertIntoEditor'
   | 'isSessionScopeCurrent'
   | 'lastAssistantText'
   | 'requireLiveSessionScope'
@@ -42,7 +42,17 @@ type ArtifactsCommandRunner = Pick<
 
 export interface ArtifactsCommandDeps {
   runner: ArtifactsCommandRunner
-  app: TuiApp
+  /** The mounted PiTui app, when there is one: `/view-image` needs it and the
+   *  attachment-intake notices keep their PiTui route there. `undefined` on a
+   *  non-PiTui renderer, where the live composer owns the intake. */
+  app: TuiApp | undefined
+  /**
+   * Image UX PR3-B: the LIVE draft composer of the mounted renderer. The
+   * attachment intake reads the current draft and commits its token here; a
+   * non-PiTui renderer has no `TuiApp`, so `app` cannot serve this. Read at
+   * call time — never a first captured value.
+   */
+  composer: () => SubmissionComposerPort | undefined
   registerOne: RegisterOne
   registerTuiCommand: RegisterTuiCommand
   detach: DetachTaskLike
@@ -76,7 +86,7 @@ export interface ArtifactsCommandRegistrars {
  * checks and the currentness re-check after the async read are unchanged.
  */
 export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCommandRegistrars {
-  const { runner, app, registerOne, registerTuiCommand, detach, notifyOutcome } = deps
+  const { runner, app, composer: composerGetter, registerOne, registerTuiCommand, detach, notifyOutcome } = deps
 
   const stageAttachmentCommand = (
     invocation: CommandInvocation,
@@ -87,11 +97,30 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
       return { kind: 'error', text: `Usage: /${intent} <path>` }
     }
     const raw = words[0]!
+    // Image UX PR3-B1: the intake commits into the composer that is mounted
+    // NOW. Without one there is no draft seat to write, so the command refuses
+    // SYNCHRONOUSLY — before any file read, store mutation or success.
+    const composer = composerGetter()
+    if (composer === undefined) {
+      return { kind: 'error', text: 'the draft composer is unavailable on this renderer' }
+    }
+    // The composer-seat fence runs BESIDE the existing session-scope and
+    // transition gates: a replaced seat must never receive this intake's token
+    // or notice, even when the session itself did not move.
+    const composerCurrent = (): boolean => composerGetter() === composer
     // A sessionless-capable capture taken BEFORE the file IO: it stays current
     // only while the surface still has the same owner/generation — a first
     // Session appearing mid-read (including the publish-before-bump window)
     // makes it stale.
     const intakeScope = runner.captureSessionScope()
+    /**
+     * Whether a LATE outcome of this intake may still be shown: the seat it was
+     * started for is the live one AND the session owner did not move. A stale
+     * failure/success notice from the previous session is never popped onto the
+     * replacement surface. The explicit session-changed fence notices use
+     * {@link composerCurrent} alone — they exist because the session moved.
+     */
+    const outcomeCurrent = (): boolean => composerCurrent() && runner.isSessionScopeCurrent(intakeScope)
     // The command registry supplies the runner-owned lifecycle signal. The
     // fallback keeps direct headless handler calls honest without weakening
     // teardown cancellation in the real dispatch path.
@@ -102,7 +131,10 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
       runDetached('attachment intake', task, {
         diag: runner.diag,
         sessionId: () => runner.currentSessionId,
-        notify: (message) => app.notify(message, 'error'),
+        notify: (message) => {
+          if (!outcomeCurrent()) return
+          composer.notify(message, 'error')
+        },
         recoverable: () => true,
       })
     }
@@ -110,23 +142,27 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
       runOwned('attachment intake', async () => {
         intakeSignal.throwIfAborted()
         if (runner.sessionTransitionPending()) {
-          app.notify('a session transition is in progress — try again in a moment', 'error')
+          composer.notify('a session transition is in progress — try again in a moment', 'error')
           return
         }
-        pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+        pruneUnreferencedDraftAttachments(composer.getDraft(), runner.imageStore, runner.fileStore)
         const stageImage = async (path: string): Promise<void> => {
           intakeSignal.throwIfAborted()
           const resolved = await readImageFile(path, runner.cwd, runner.imageLimits(), runner.imageStore.remainingBytes())
           intakeSignal.throwIfAborted()
           if (!runner.isSessionScopeCurrent(intakeScope)) {
-            app.notify(`the session changed while reading the ${intent} — try again`, 'error')
+            composer.notify(`the session changed while reading the ${intent} — try again`, 'error')
             return
           }
           if (runner.sessionTransitionPending()) {
-            app.notify(`a session transition is in progress while reading the ${intent} — try again`, 'error')
+            composer.notify(`a session transition is in progress while reading the ${intent} — try again`, 'error')
             return
           }
-          pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+          if (!composerCurrent()) return
+          // The commit segment is SYNCHRONOUS: the prune, the store add and the
+          // editor insert share this one currency read, so a seat replaced
+          // between them cannot end up with a token it never asked for.
+          pruneUnreferencedDraftAttachments(composer.getDraft(), runner.imageStore, runner.fileStore)
           const draft = runner.imageStore.add({
             bytes: resolved.bytes,
             mediaType: resolved.mediaType,
@@ -135,8 +171,16 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
             source: { type: 'path', path: resolved.path },
             name: resolved.name,
           })
-          runner.insertIntoEditor(`${draft.placeholder} `)
-          app.notify(`attached ${draft.placeholder} — Enter to send`)
+          try {
+            composer.insertIntoEditor(`${draft.placeholder} `)
+          } catch (error) {
+            // Only an item whose token never reached the live draft is dropped;
+            // a visible placeholder keeps its bytes. The failure keeps its
+            // ordinary owned-task classification.
+            if (!composer.getDraft().includes(draft.placeholder)) runner.imageStore.remove(draft.id)
+            throw error
+          }
+          composer.notify(`attached ${draft.placeholder} — Enter to send`)
         }
 
         if (intent === 'image') {
@@ -146,18 +190,19 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
         const probe = await probeAttachment(raw, runner.cwd, intakeSignal)
         intakeSignal.throwIfAborted()
         if (!runner.isSessionScopeCurrent(intakeScope)) {
-          app.notify('the session changed while reading the attachment — try again', 'error')
+          composer.notify('the session changed while reading the attachment — try again', 'error')
           return
         }
         if (runner.sessionTransitionPending()) {
-          app.notify('a session transition is in progress while reading the attachment — try again', 'error')
+          composer.notify('a session transition is in progress while reading the attachment — try again', 'error')
           return
         }
         if (probe.kind === 'image') {
           await stageImage(probe.path)
           return
         }
-        pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+        if (!composerCurrent()) return
+        pruneUnreferencedDraftAttachments(composer.getDraft(), runner.imageStore, runner.fileStore)
         const fileStore = runner.fileStore
         if (fileStore === undefined) throw new FileInputError('File draft storage is unavailable.')
         const draft = fileStore.add({
@@ -165,14 +210,20 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
           byteLength: probe.byteLength,
           source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
         })
-        runner.insertIntoEditor(`${draft.placeholder} `)
-        app.notify(`attached ${draft.placeholder} — Enter to send`)
+        try {
+          composer.insertIntoEditor(`${draft.placeholder} `)
+        } catch (error) {
+          if (!composer.getDraft().includes(draft.placeholder)) fileStore.remove(draft.id)
+          throw error
+        }
+        composer.notify(`attached ${draft.placeholder} — Enter to send`)
       }, {
         diag: runner.diag,
         sessionId: () => runner.currentSessionId,
         isCancellation: () => intakeSignal.aborted,
         onError: (error) => {
-          app.notify(safeErrorMessage(error), 'error')
+          if (!outcomeCurrent()) return
+          composer.notify(safeErrorMessage(error), 'error')
         },
       })
     })
@@ -292,7 +343,11 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
         // `SessionArchivePort`, not the Session).
         if (runner.transcriptExportAvailable !== true) {
           const text = 'transcript export is unavailable on this backend'
-          app.notify(text, 'error')
+          // Unchanged PiTui route: with a PiTui app mounted this is the
+          // long-standing inline notice beside the command card. A renderer
+          // without one refuses `/transcript` in the admission gate before this
+          // handler runs, so its returned error text keeps its own owner there.
+          app?.notify(text, 'error')
           return { kind: 'error', text }
         }
         return { kind: 'success', text: 'Transcript export requested.' }

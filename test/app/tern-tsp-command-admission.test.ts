@@ -44,17 +44,31 @@ function bare(classification: CommandLineClassification, name: string, pickers: 
 
 test('the TSP builtin capability unconditionally admits the exit pair and the B2-A business builtins', () => {
   assert.deepEqual([...TSP_SUPPORTED_TUI_BUILTINS].sort(),
-    ['copy', 'exit', 'fork', 'new', 'quit', 'rename', 'title', 'yolo'])
+    ['attach', 'copy', 'exit', 'fork', 'image', 'new', 'quit', 'rename', 'title', 'yolo'])
   for (const name of ['exit', 'quit', 'new', 'fork', 'title', 'rename', 'copy', 'yolo']) {
     assert.deepEqual(bare(classify({ tuiCommand: true }), name), { kind: 'available' },
       `/${name} is available on the TSP renderer`)
   }
   for (const name of [
     'settings', 'help', 'status', 'tasks', 'model', 'preset', 'footer', 'focus', 'display',
-    'attach', 'image', 'export', 'transcript', 'rewind', 'plugins', 'keybindings', 'login',
+    'export', 'transcript', 'rewind', 'plugins', 'keybindings', 'login',
   ]) {
     assert.deepEqual(bare(classify({ tuiCommand: true }), name), { kind: 'unsupported' },
       `/${name} needs PiTui UI and is refused on the TSP renderer`)
+  }
+})
+
+test('the Client-local attachment intake is available on the TSP renderer with its argument', () => {
+  const tui = classify({ tuiCommand: true })
+  // The REAL argued line: the handler reads the path from `rawInput`.
+  assert.deepEqual(tspBuiltinAvailability(tui, 'image', {}, '<path>'), { kind: 'available' },
+    '/image <path> stages into the mounted composer, so it is admitted')
+  assert.deepEqual(tspBuiltinAvailability(tui, 'attach', {}, '<path>'), { kind: 'available' },
+    '/attach <path> stages into the mounted composer, so it is admitted')
+  // The PiTui-only chrome beside them stays refused.
+  for (const name of ['view-image', 'export', 'transcript']) {
+    assert.deepEqual(tspBuiltinAvailability(tui, name, {}, '<path>'), { kind: 'unsupported' },
+      `/${name} still needs a PiTui surface and is never admitted by the intake decision`)
   }
 })
 
@@ -181,9 +195,16 @@ test('a confirmed title write publishes its own notice only on the card-less TSP
 test('the card-less result-notice scope is the admitted set plus /logout', () => {
   // The scope is derived from the ONE admission set (not a second routing list).
   assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
-    [...TSP_SUPPORTED_TUI_BUILTINS, 'logout'].sort())
+    [...TSP_SUPPORTED_TUI_BUILTINS, 'logout'].filter(name => name !== 'attach' && name !== 'image').sort())
   for (const name of ['new', 'fork', 'title', 'rename', 'copy', 'yolo', 'logout']) {
     assert.ok(TSP_B2A_RESULT_NOTICE_COMMANDS.has(name), `/${name} needs an owner on the card-less route`)
+  }
+  // Image UX PR3-B2: the attachment intake reports success only AFTER its async
+  // read+store+token commit, so the generic result notice must never announce it.
+  for (const name of ['attach', 'image']) {
+    assert.ok(TSP_SUPPORTED_TUI_BUILTINS.has(name), `/${name} is admitted on the TSP renderer`)
+    assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has(name),
+      `/${name} must not be announced from its synchronous CommandResult.success`)
   }
   assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('preset'), 'sibling commands keep their own refusal notices')
   assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('model'))

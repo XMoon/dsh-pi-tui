@@ -604,6 +604,23 @@ Attachment completion and intake are Client-local:
   through `ctx.attachments.saveFileStream()` only when an agent-bound submission
   is admitted. `/image` stays image-only compatibility. Neither reads the file
   eagerly or routes through the Host filesystem.
+- The attachment intake and the Ctrl+V paste intent share ONE active composer
+  and the existing draft stores; there is no second draft copy. `/attach` and
+  `/image` read the current draft and insert the canonical placeholder through
+  the mounted composer of the active renderer, and announce success only AFTER
+  the bytes are staged and the placeholder inserted; with no mounted composer —
+  or with the renderer's own builtin admission refusing the command — they fail
+  instead of staging. A pending intake never writes a replaced composer seat or
+  a newer ownership generation/session, and a late failure/notice is published
+  only while its own seat and session are still current. Clipboard intents are
+  queued as ONE per-surface FIFO of accepted triggers: each accepted trigger
+  probes the OS clipboard at most once, a later trigger's probe starts only
+  after the previous one settled (read + commit or failure), and a failed intent
+  never blocks the following one. Paste text inserts at the live caret and never
+  submits; an empty or unsupported clipboard is not an error, and an
+  unreferenced-draft prune runs against the live draft before a new image is
+  staged. The platform probe, deployment image policy, Host attachment
+  admission and Direct/Remote submission paths stay their own authorities.
 - The attachment marker is always `🖼️ ` (U+1F5BC + U+FE0F + space), so its
   visible width is three cells; a font without an emoji face may show a gap
   (accepted).
@@ -720,6 +737,10 @@ Authority: `src/commands.ts` (`PATH_ARGUMENT_COMMANDS`),
 `src/client/media/image/placeholder.ts`,
 `src/client/media/image/draft-store.ts`,
 `src/client/media/image/types.ts`,
+`src/app/submission/composer-port.ts`,
+`src/app/surface/application-events.ts`,
+`src/tui/commands/artifacts.ts`,
+`src/app/command/tsp-capability.ts`,
 `src/app/submission/submit-flow.ts`.
 
 ## Session `@` completion routing
