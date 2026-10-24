@@ -22,7 +22,7 @@
 import { Image, getCapabilities, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { formatBytes } from '../../../domain/media/format.ts'
-import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
+import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { color } from '../../theme/runtime.ts'
@@ -190,9 +190,10 @@ export class ImageViewerPanel implements Component {
       // visible and the state is truthful.
       return [this.status(width, 'Preview unavailable')]
     }
-    if (this.ref.mediaType !== 'image/png') {
-      // Kitty accepts PNG only and this repo installs no transcoder; never
-      // build an Image that would silently degrade.
+    if (!imagePixelsSupported(protocol, this.ref.mediaType)) {
+      // The shared protocol/MIME admission: Kitty accepts PNG only and this
+      // repo installs no transcoder, so any other raster would build an Image
+      // that silently degrades to a text fallback.
       return [this.status(width, 'Preview unavailable')]
     }
     const state = this.loader.get(this.ref, this.scope)

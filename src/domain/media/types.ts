@@ -55,12 +55,17 @@ export type InlineImageProtocol = 'kitty' | 'iterm2' | null
 /**
  * Whether a surface with `protocol` paints REAL PIXELS for `mediaType`.
  *
- * This is the hit-model authority for the transcript viewer: it decides whether
- * an image row carries a clickable pixel body at all (and the Viewer panel uses
- * it for the same question). It does NOT absorb a surface's own extra admission
- * rules — a caller with additional constraints (the composer draft preview's
- * byte budget) combines them with this answer rather than re-deriving the
- * protocol/MIME rule:
+ * This answers ONE question: may this surface paint `mediaType` as pixels? It
+ * does not absorb a surface's own extra admission rules, and it does not decide
+ * a surface's protocol SCOPE.
+ *
+ * Consumers compose it with their own constraints rather than repeating the
+ * protocol/MIME table: the transcript thumbnail and `ImageViewerPanel` both call
+ * it (the panel additionally restricts the workspace to Kitty, which is a scope
+ * decision, not a MIME one), and a surface with a byte budget — the composer
+ * draft preview — combines its budget with this answer. Where a caller still
+ * duplicates the table, that duplication is pre-existing rather than implied to
+ * be unified here:
  *
  * - `null` (no inline graphics) — never.
  * - Kitty accepts PNG only. This bundle installs no transcoder, so another

@@ -50,20 +50,26 @@ import { color } from '../../theme/runtime.ts'
  * width can never widen a hit beyond the image.
  */
 function paintedImageColumns(body: readonly string[], protocol: 'kitty' | 'iterm2'): number | undefined {
-  for (const line of body) {
-    if (protocol === 'kitty') {
-      // Kitty APC: `\x1b_G<key=value,...>;<payload>\x1b\\` — `c=` is the column count.
-      const header = /\x1b_G([^;\x1b]*)[;\x1b]/.exec(line)
-      const columns = header === null ? null : /(?:^|,)c=(\d+)/.exec(header[1]!)
-      if (columns !== null) return Number(columns[1])
-      continue
-    }
-    // iTerm2 OSC 1337: `\x1b]1337;File=<key=value;...>:<base64>\x07` — `width=`.
-    const header = /\x1b\]1337;File=([^:]*):/.exec(line)
-    const columns = header === null ? null : /(?:^|;)width=(\d+)/.exec(header[1]!)
-    if (columns !== null) return Number(columns[1])
+  // A pixel render STARTS with its placement sequence: the fork returns
+  // `[sequence, ...blankRows]` for Kitty and allocates blank rows ABOVE the
+  // sequence for iTerm2. The anchor is required — matching a sequence ANYWHERE
+  // in the row would accept the fork's text fallback, whose `[Image: <name> …]`
+  // body carries the attachment NAME, and an untrusted name containing a
+  // crafted APC/OSC would then declare a pixel body over a line of text.
+  if (protocol === 'kitty') {
+    // Kitty APC: `\x1b_G<key=value,...>;<payload>\x1b\\` — `c=` is the column count.
+    const anchored = /^\x1b_G([^;\x1b]*)[;\x1b]/.exec(body[0] ?? '')
+    if (anchored === null) return undefined
+    const columns = /(?:^|,)c=(\d+)/.exec(anchored[1]!)
+    return columns === null ? undefined : Number(columns[1])
   }
-  return undefined
+  // iTerm2 OSC 1337: `\x1b]1337;File=<key=value;...>:<base64>\x07` — `width=`.
+  // It is the LAST returned line (the fork pads blank rows above it), prefixed
+  // by a cursor-up so its cursor accounting stays inside the scroll area.
+  const anchored = /^(?:\x1b\[\d*A)?\x1b\]1337;File=([^:]*):/.exec(body[body.length - 1] ?? '')
+  if (anchored === null) return undefined
+  const columns = /(?:^|;)width=(\d+)/.exec(anchored[1]!)
+  return columns === null ? undefined : Number(columns[1])
 }
 
 /** The thumbnail sizing constants (kimi parity, §17). */

@@ -751,3 +751,38 @@ test('a click between the painted footprint and the max-width ceiling is inert (
   app.setFullscreen(false)
   app.stop()
 })
+
+test('a fallback row carrying a crafted protocol sequence in the attachment name is NOT a pixel body', async () => {
+  // The parser reads the placement width from `Image.render()`'s output, so it
+  // must accept only a REAL placement sequence — never a sequence-shaped string
+  // that arrived inside the fallback TEXT. The fallback prints the attachment
+  // name, which is untrusted data; a name containing a crafted APC/OSC must not
+  // be able to declare a clickable pixel body over a line of text.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp(new ImageLoader(async () => ({ ref: {}, data: new Uint8Array(0) })))
+  app.setFullscreen(true)
+  const crafted = 'evil\u001b_Ga=T,f=100,c=99;\u001b\\'
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'crafted' },
+      { type: 'image', attachment: { ...IMAGE_REF, attachmentId: 'att-crafted', bytes: 0, name: crafted } },
+    ], 1),
+    userMessage([{ type: 'text', text: 'NEXT' }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  const view = await viewport(vt)
+  const nextBefore = rowOfNth(view, 'NEXT', 0)
+  assert.ok(nextBefore > 0, `the transcript is painted:\n${view}`)
+  // The zero-byte read yields the fallback text row; clicking it must be inert.
+  const infoRow = view.split('\n').findIndex(line => line.includes('[Image:')) + 1
+  assert.ok(infoRow > 0, `the fallback text row is really painted (the premise):\n${view}`)
+  await clickCell(vt, 10, infoRow)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Image ·'),
+    `a crafted sequence in the name opens no Viewer:\n${after}`)
+  assert.equal(rowOfNth(after, 'NEXT', 0), nextBefore, `the layout is unchanged:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
