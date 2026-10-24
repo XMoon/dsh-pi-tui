@@ -30,6 +30,11 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { createSubmissionController, type SubmissionControllerDeps } from '../../src/app/submission/controller.ts'
+import { bindSubmissionRuntime } from '../../src/app/submission/runtime.ts'
+import { mergeDraft } from '../../src/app/submission/steer.ts'
+import { createSessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
+import { createSessionScopeAuthority } from '../../src/app/session/scope.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -340,5 +345,287 @@ test('a list candidate that left the mounted window is refused with a notice (ne
   const after = await viewport(vt)
   assert.ok(!after.includes('Images · current transcript'), `the stale candidate closed the workspace:\n${after}`)
   assert.ok(after.includes('the image left the current transcript window'), `the owner reported the stale candidate:\n${after}`)
+  app.stop()
+})
+
+/**
+ * RFL-001: the `/view-image` line must reach the picker through the REAL
+ * submission controller, not only through a direct registry call.
+ *
+ * The static policy sets (LOCAL_COMMANDS / SESSIONLESS_COMMANDS) and the live
+ * registry claim are only INPUTS. The routing decision lives in
+ * `createSubmissionController`, whose sessionless local branch also requires
+ * `classification.kind === 'client-command'` from the LIVE claim. A regression
+ * there (an argued-line claim change, a missing sessionless set entry, a
+ * classification that drops to `ordinary-submission`) would leave a direct
+ * `registry.execute()` test green while the product path broke: it would either
+ * create a Session or deliver `/view-image` to the model.
+ *
+ * This test therefore drives the production user entry — `TuiApp` Enter →
+ * `onSubmit` → `controller.submit` — and asserts the CONSEQUENCE (the picker
+ * painted, no Session created) plus the negative control (the line never
+ * reaches the agent-facing sink).
+ */
+test('a user Enter on /view-image routes through the REAL controller into the picker without creating a Session', async () => {
+  const loader = new ImageLoader(async () => ({ ref: {}, data: pngBytes() }))
+  const vt = new VirtualTerminal(100, 24)
+  const draftImages = new DraftImageStore()
+  const draftFiles = new DraftFileStore()
+  const notices: string[] = []
+  const sessionsCreated: string[] = []
+  const agentFacing: string[] = []
+
+  let app!: TuiApp
+  const composer = {
+    getDraft: () => app.getDraft(),
+    setDraft: (text: string) => { app.setDraft(text) },
+    setEditorText: (text: string) => { app.setEditorText(text) },
+    insertIntoEditor: (text: string) => { app.insertIntoEditor(text) },
+    notify: (message: string) => { notices.push(message) },
+    setSubmitPending: () => {},
+    clearSettledLocalMessages: () => {},
+  }
+
+  interface AgentLike {
+    readonly status: string
+    readonly session: { readonly id: string }
+    readonly options: Record<string, unknown>
+    readonly inbox: Record<string, unknown>
+  }
+  // NO live Agent: the deferred-start (first-boot) window. This is the case the
+  // sessionless contract actually governs — with a live Agent the controller
+  // dispatches a sessionless command THROUGH the session command service, which
+  // is the pre-existing design for every sessionless builtin and not this
+  // command's to change.
+  const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  core.setCurrentOwner({} as never, 'session-live')
+  const scopeAuthority = createSessionScopeAuthority({
+    current: () => {
+      const subject = core.subject()
+      if (subject === undefined) throw new Error('fixture: the owner is not published')
+      return { sessionId: 'session-live', generation: core.generation(), subject }
+    },
+    isSubjectCurrent: (subject) => core.isSubjectCurrent(subject),
+  })
+
+  // The REAL Client registry: `/view-image` is registered into it below by the
+  // production `registerTuiCommands`, so the controller's LIVE claim is real.
+  const clientCommands = createClientCommandRegistry(parseCommand)
+  const command = {
+    wasAdvertisedClaim: () => false,
+    hostClaimOf: () => undefined,
+    hostOriginClaimOf: () => undefined,
+    hostCatalogResolves: () => false,
+    clientClaimsLine: (parsed: { name: string; rawInput?: string } | undefined) => clientCommands.claimsLine(parsed),
+    isSkillWrapperName: () => false,
+    isSkillInvocation: () => false,
+    withCommandDelivery: <T>(_delivery: unknown, run: () => T): T => run(),
+    takeCommandDraftDisposition: () => undefined,
+    clientCommands,
+  }
+
+  const runtimeSurface = {
+    withWriter: async <T>(_scope: unknown, task: () => Promise<T> | T) => task(),
+    withPromptAdmission: async <T>(_line: string, task: () => Promise<T> | T) => task(),
+    isDisposed: () => false,
+    isScopeCurrent: () => true,
+    mergeDraftIntoEditor: (text: string) => { app.setEditorText(mergeDraft(app.getDraft(), text)); return true },
+    restoreStaleDraftIntoEditor: () => 'merged-verbatim' as const,
+    consumeDraftAttachments: () => {},
+    markDispatch: () => {},
+    beginLocalSubmission: () => {},
+    settleLocalSubmission: () => {},
+    settleSubmitAck: () => {},
+    notify: (message: string) => { notices.push(message) },
+    refuseByTransitionFence: () => {},
+    prepareMessage: async () => ({ message: {}, attachments: [] }),
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  const submissionRuntime = bindSubmissionRuntime({ surface: runtimeSurface as never })
+
+  const deps: SubmissionControllerDeps<AgentLike> = {
+    app: () => composer,
+    diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+    signal: new AbortController().signal,
+    isCleanedUp: () => false,
+    logError: () => {},
+    liveAgent: () => undefined,
+    ownership: {
+      generation: () => core.generation(),
+      captureSubject: () => core.subject(),
+      transitionPending: () => false,
+    },
+    scope: {
+      captureLive: () => scopeAuthority.captureLive(),
+      isCurrent: (scope) => scopeAuthority.isCurrent(scope),
+      requireLive: () => {
+        const live = scopeAuthority.captureLive()
+        if (live === undefined) throw new Error('fixture: the owner is not live')
+        return live
+      },
+    },
+    session: {
+      // The Sessionless contract: this MUST stay uncalled for /view-image.
+      ensureSession: async () => { sessionsCreated.push('created') },
+      beginCommandSettlement: () => {},
+      abortCommandSettlement: () => {},
+      settleCommandSettlement: () => {},
+      trackSettlementWork: () => {},
+    },
+    submissionRuntime,
+    command: command as unknown as SubmissionControllerDeps<AgentLike>['command'],
+    commandPlane: { available: () => false, execute: async () => undefined, findHandler: () => undefined },
+    backendKind: 'direct',
+    backend: {
+      hostFile: { canonicalizeMentions: async (_scope: unknown, text: string) => text } as never,
+      pendingInputReader: { snapshot: () => undefined },
+      sessionWriter: { prompt: async () => ({ kind: 'committed', value: undefined }) } as never,
+      hostCommand: { execute: async () => ({ kind: 'committed', matched: false }) } as never,
+    },
+    drafts: { images: draftImages, files: draftFiles },
+    status: { sessionCwd: () => '/ws' },
+    surface: { refreshPendingInput: () => {} },
+    history: {
+      persist: () => {},
+      persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+    },
+    viewer: { isViewing: () => false },
+    extensions: {
+      findContribution: () => undefined,
+      handlerFor: () => undefined,
+      commandIdFor: () => undefined,
+      recordHealthRef: () => undefined,
+      recordError: () => {},
+      clearError: () => {},
+    },
+    artifacts: { start: () => {} },
+    shell: {
+      // The agent-facing sink: a `/view-image` line must never land here.
+      run: (text) => { agentFacing.push(text) },
+      interrupt: () => {},
+    },
+    supportsLocalShellCards: true,
+    supportsTuiBuiltinUi: true,
+    retainsStaleDraftRestore: true,
+    model: { selected: { get current() { return undefined } } },
+    image: { attachments: () => undefined as never, llm: () => undefined as never },
+    tuiSettings: undefined,
+    captureMatches: (subject) => core.isSubjectCurrent(subject as never),
+    ownerWasReplaced: () => false,
+    direct: { withPromptAdmission: async (_agent, _hasImages, task) => task() },
+    requestExit: () => {},
+    isPlanActive: () => false,
+  }
+  const controller = createSubmissionController<AgentLike>(deps)
+
+  app = new TuiApp(vt, {
+    onSubmit: (text, request, scopeToken) => { controller.submit(text, request, scopeToken) },
+    onExit: () => {},
+  }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  app.start()
+  startedApps.add(app)
+
+  // The production command coordinator registers /view-image into the registry
+  // the controller above reads (the LIVE claim source).
+  // The runner's own Cordis context, captured BEFORE the literal so the
+  // self-referential Direct ports can read it without a forward reference.
+  const runnerCtx = new Context()
+  const runner: Record<string, unknown> = {
+    ctx: runnerCtx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: 'session-live',
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+    tuiSettings: undefined,
+    applyFooterSettings: () => {},
+    agents: {} as never,
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined, turnOutline: () => undefined, sessionStatus: () => undefined },
+    catalog: new DirectCatalogPort(runnerCtx as never, () => undefined),
+    config: new DirectConfigPort(runnerCtx as never, undefined, () => undefined),
+    commandRegistry: undefined,
+    clientCommands,
+    hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
+    interaction: {
+      questions: { onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const },
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => true,
+    },
+    sessionWriter: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
+      refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
+    },
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    fileStore: draftFiles,
+    imageStore: draftImages,
+    copyToClipboard: async () => true,
+    imageLimits: () => undefined,
+    insertIntoEditor: (text: string) => app.insertIntoEditor(text),
+    prepareDraftMessage: async (text: string) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true as const, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    pendingPreset: undefined,
+    effectivePresetId: undefined,
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
+    refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
+    focusEnabled: () => false,
+    setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
+    updateWelcomeCard: () => {},
+    openJobView: () => {},
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {},
+    requestExit: () => {},
+    extensions: undefined,
+    exit: () => {},
+  }
+  registerTuiCommandsWithDirectSeams(runner as never)
+  assert.ok(clientCommands.get('view-image') !== undefined, 'the production coordinator registered /view-image')
+
+  mountImages(app)
+  app.setDraft('/view-image')
+  await vt.waitForRender()
+  // The production user gesture (Enter in the editor), never a direct call.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+
+  assert.deepEqual(sessionsCreated, [], 'the sessionless command must not create a Session')
+  assert.deepEqual(agentFacing, [], 'the line must never reach the agent-facing sink')
+  const painted = await viewport(vt)
+  assert.ok(painted.includes('Images · current transcript'), `the controller reached the picker:\n${painted}`)
+  assert.ok(painted.includes('#1 · first.png'), `the mounted window is listed:\n${painted}`)
+  assert.match(app.getDraft(), /^$/, 'the submitted draft was consumed')
   app.stop()
 })

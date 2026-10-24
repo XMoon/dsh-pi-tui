@@ -118,8 +118,17 @@ async function clickCell(vt: VirtualTerminal, x: number, row: number): Promise<v
   await settleClick(vt)
 }
 
-/** The alt screen treats a fast repeat at the same cell as a double click. */
+/**
+ * Wait out the alt screen's DOUBLE_CLICK window before the next pointer cell.
+ *
+ * The fork treats a fast repeat at the same cell as a double click (word
+ * selection), so two consecutive disclosure clicks on one cell need the window
+ * to elapse first; this is the contract under test, not a blind sleep. The
+ * bound is the fork's own `DOUBLE_CLICK_INTERVAL_MS` (500) with one frame of
+ * slack.
+ */
 async function settleClick(vt: VirtualTerminal): Promise<void> {
+  // The bounded window IS the contract (fork DOUBLE_CLICK_INTERVAL_MS = 500).
   await new Promise(resolve => setTimeout(resolve, 600))
   await vt.waitForRender()
 }
@@ -176,6 +185,49 @@ test('the info control folds only its own occurrence; the body opens the Viewer 
   assert.equal(renderAfter.structuralCommits, renderBefore.structuralCommits, 'no structural rebuild for the Viewer')
   assert.equal(renderAfter.contentCommits, renderBefore.contentCommits, 'no content rebuild for the Viewer')
   assert.equal(renderAfter.structuralFallbacks, renderBefore.structuralFallbacks, 'no structural fallback for the Viewer')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the info metadata columns are inert: no fold, no Viewer, no card disclosure', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'inert' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], 1),
+    userMessage([{ type: 'text', text: 'NEXT' }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  const before = await viewport(vt)
+  const nextBefore = rowOfNth(before, 'NEXT', 0)
+  assert.ok(nextBefore > 0, `the message is painted:\n${before}`)
+  const infoRow = rowOfNth(before, '🖼️ shot.png · 800×100', 0)
+  assert.ok(infoRow > 0, `the info row is painted:\n${before}`)
+  const infoLine = before.split('\n')[infoRow - 1]!
+  assert.ok(infoLine.includes('[-]'), `the control is painted on this row:\n${infoLine}`)
+  const diagnosticsBefore = app.transcriptPresentationDiagnosticsForTest()
+  // The identity text's first cell — well LEFT of the right-edge 3-cell
+  // control — is read-only: it must fold nothing, open no Viewer and never
+  // fall through to the card/message disclosure ladder.
+  await clickCell(vt, 2, infoRow)
+  const afterMetaClick = await viewport(vt)
+  const diagnostics = app.transcriptPresentationDiagnosticsForTest()
+  assert.ok(!afterMetaClick.includes('Image · shot.png'), `the metadata click opens no Viewer:\n${afterMetaClick}`)
+  assert.ok(afterMetaClick.includes('[-]'), `the occurrence did not fold (the control still reads [-]):\n${afterMetaClick}`)
+  assert.equal(rowOfNth(afterMetaClick, 'NEXT', 0), nextBefore, `the layout is unchanged by the inert click:\n${afterMetaClick}`)
+  assert.equal(diagnostics.structuralCommits, diagnosticsBefore.structuralCommits,
+    'an inert metadata click performs no structural rebuild')
+  // Control: the RIGHT-EDGE span of the SAME row still folds the occurrence,
+  // so the inert result above is the column policy and not a dead row.
+  await clickControl(vt, '🖼️ shot.png · 800×100', 0)
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('[+]'), `the same row's control still folds:\n${folded}`)
+  assert.ok(rowOfNth(folded, 'NEXT', 0) < nextBefore, 'the control click really collapsed the image body')
   app.setFullscreen(false)
   app.stop()
 })
@@ -309,6 +361,54 @@ test('a Question modal refuses the image body Viewer but keeps the occurrence fo
   vt.sendInput('1')
   vt.sendInput('\r')
   assert.deepEqual(await question, [{ id: 'q1', selected: ['Continue'] }])
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('an Approval modal refuses the image body Viewer but keeps the occurrence fold inspectable', async () => {
+  // The Approval action sheet has its OWN pointer admission branch
+  // (`handleFullscreenPress`) separate from the Question branch, so the
+  // Question-only regression above cannot prove this one. The sheet occupies
+  // the editor seat at the bottom of the screen; the transcript above it stays
+  // reachable ONLY through the modal-safe inspection plane.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'inspect' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], 1),
+    userMessage([{ type: 'text', text: 'NEXT' }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a shell command' })
+  decision.catch(() => {})
+  await vt.waitForRender()
+  const view = await viewport(vt)
+  assert.ok(app.approvalFrameForTest() !== undefined, `the Approval sheet is presented:\n${view}`)
+  const infoRow = rowOfNth(view, '🖼️ shot.png · 800×100', 0)
+  assert.ok(infoRow > 0, `the image is mounted behind the sheet:\n${view}`)
+  const nextBefore = rowOfNth(view, 'NEXT', 0)
+  // The image BODY click must NOT open the workspace screen while the Approval
+  // owns the seat: `attachment:view:` is deliberately outside the modal-safe
+  // whitelist.
+  await clickCell(vt, 4, infoRow + 1)
+  const afterBody = await viewport(vt)
+  assert.ok(!afterBody.includes('Image · shot.png'), `no Viewer opens under an Approval:\n${afterBody}`)
+  assert.ok(app.approvalFrameForTest() !== undefined, 'the Approval still owns the response')
+  assert.equal(rowOfNth(afterBody, 'NEXT', 0), nextBefore, 'the refused body click changed no layout')
+  // The info control stays a READ-ONLY fold in the Approval inspection plane.
+  await clickControl(vt, '🖼️ shot.png · 800×100', 0)
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('[+]'), `the Approval-safe fold still works:\n${folded}`)
+  assert.ok(rowOfNth(folded, 'NEXT', 0) < nextBefore, 'the fold really collapsed the image body')
+  assert.ok(app.approvalFrameForTest() !== undefined, 'the Approval survived the inspection fold')
+  // The sheet still settles through its own keyboard path (Escape = cancel).
+  vt.sendInput('\x1b')
+  assert.equal(await decision, 'cancelled', 'the Approval still owns its decision')
   app.setFullscreen(false)
   app.stop()
 })
