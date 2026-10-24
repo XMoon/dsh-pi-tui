@@ -59,13 +59,18 @@ export type InlineImageProtocol = 'kitty' | 'iterm2' | null
  * does not absorb a surface's own extra admission rules, and it does not decide
  * a surface's protocol SCOPE.
  *
- * Consumers compose it with their own constraints rather than repeating the
- * protocol/MIME table: the transcript thumbnail and `ImageViewerPanel` both call
- * it (the panel additionally restricts the workspace to Kitty, which is a scope
- * decision, not a MIME one), and a surface with a byte budget — the composer
- * draft preview — combines its budget with this answer. Where a caller still
- * duplicates the table, that duplication is pre-existing rather than implied to
- * be unified here:
+ * Current consumers compose it with their own constraints instead of repeating
+ * the protocol/MIME table: the transcript thumbnail and `ImageViewerPanel` both
+ * call it (the panel additionally restricts the workspace to Kitty, which is a
+ * scope decision, not a MIME one).
+ *
+ * KNOWN EXCEPTION, not implied to be unified here: `DraftImagePreview` keeps its
+ * own copy of the protocol/MIME check inside `canRenderPixels()` alongside its
+ * byte budget. That duplication predates this helper and is deliberately out of
+ * this change's scope; a future cleanup should have it compose this answer with
+ * its budget.
+ *
+ * The table this answers:
  *
  * - `null` (no inline graphics) — never.
  * - Kitty accepts PNG only. This bundle installs no transcoder, so another
