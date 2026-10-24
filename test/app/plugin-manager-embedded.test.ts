@@ -21,7 +21,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth, type TuiMouseEvent } from '@xmoon76/pi-tui'
 import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import type { PluginChangeFact } from '../../src/runtime/plugin-manager-port.ts'
 import { bundle, openWorkspace, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
@@ -1332,6 +1332,75 @@ test('T09 a wheel at the END of a scroll window never cancels a legal rail click
   release(harness, aboutRow, 3)
   await harness.settle()
   assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives a wheel past the List end')
+  harness.app.dispose()
+})
+
+test('T09 a catch-up repaint of state that was already live keeps a held rail press valid', async () => {
+  // RFL-011 follow-up: the identity must be SEMANTIC. A repaint that only catches
+  // up with a change made BEFORE the press must not invalidate it, or the user's
+  // legitimate rail click is lost for no visible reason.
+  const harness = await open({ columns: 120, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  // Change the page's own state (filter) and DO NOT let the frame catch up.
+  harness.vt.sendInput('\t')
+  const identityBeforePress = harness.panel.liveIdentity()
+  const aboutRow = railRow(harness, 'About')
+  press(harness, aboutRow, 3)
+  // The pending repaint now catches up with state that was ALREADY live at press.
+  await harness.settle()
+  assert.equal(harness.panel.liveIdentity(), identityBeforePress,
+    'the catch-up repaint of pre-press state leaves the semantic identity unchanged')
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives the catch-up repaint')
+  harness.app.dispose()
+})
+
+test('T09 the Detail wheel reaches the real bottom produced by the painter', async () => {
+  // RFL-013: the wheel bound must come from the SAME painter the frame uses, or
+  // the last facts/actions can never be scrolled into view. Drive the page's own
+  // pointer entry directly so the assertion is about the bound, not about which
+  // column an SGR cell happens to map to.
+  const harness = await open({ columns: 120, rows: 24 })
+  await openDetails(harness)
+  const layout = harness.panel.contentLayout()
+  assert.equal(layout.dual, true, 'the wide Details view keeps the pair')
+  const wheelDown: TuiMouseEvent = {
+    type: 'wheel',
+    button: 'none',
+    x: layout.leftWidth + 4,
+    y: 3,
+    screenX: layout.leftWidth + 4,
+    screenY: 3,
+    width: layout.rightWidth,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: 3,
+  }
+  // Scroll far past the end.
+  for (let step = 0; step < 40; step += 1) harness.panel.handleMouse(wheelDown)
+  await harness.settle()
+  // The bound is where the offset stops moving: wheel until the offset is
+  // unchanged across a settled frame, then assert one MORE wheel is a no-op.
+  let previousIdentity = harness.panel.liveIdentity()
+  for (let step = 0; step < 10; step += 1) {
+    harness.panel.handleMouse(wheelDown)
+    await harness.settle()
+    const current = harness.panel.liveIdentity()
+    if (current === previousIdentity) break
+    previousIdentity = current
+  }
+  const atEnd = harness.panel.liveIdentity()
+  harness.panel.handleMouse(wheelDown)
+  await harness.settle()
+  assert.equal(harness.panel.liveIdentity(), atEnd, 'a wheel past the real bottom does not move or bump')
+  // And the real bottom includes the LAST painter line (the final action row).
+  const rows = frameRows(harness)
+  const detailColumn = rows.map(line => line.slice(24 + layout.leftWidth + 2))
+  assert.ok(detailColumn.some(line => /Remove…/u.test(line)),
+    `the final Detail action is reachable:\n${detailColumn.join('\n')}`)
   harness.app.dispose()
 })
 

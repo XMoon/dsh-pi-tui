@@ -540,7 +540,24 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return Math.max(1, this.paintedChrome?.bodyRows ?? 1)
   }
 
-  /** The same bound for the Detail pane (its painted line count). */
+  /** The Detail pane's total painted line count, produced by the SAME painter
+   *  the frame uses (title/wrapped name/Official row/groups/actions included), so
+   *  the wheel bound can never drift from what is really painted. */
+  private detailLineCount(): number {
+    const card = this.selectedCard()
+    if (card === undefined) return 0
+    const plan = this.paintedChrome
+    const width = plan === undefined
+      ? this.viewport.width
+      : plan.dual ? plan.rightWidth : plan.width
+    if (width <= 0) return 0
+    // The line count must be INDEPENDENT of the scroll position and of which
+    // action is focused (both only restyle lines that always exist), otherwise
+    // the bound would move as the user scrolls.
+    return detailLines(this.detailView(card), width, false, 0).lines.length
+  }
+
+  /** The same bound for the Detail pane (its painted window height). */
   private detailWindowRows(): number {
     return Math.max(1, this.paintedChrome?.bodyRows ?? 1)
   }
@@ -560,10 +577,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private scrollDetail(delta: number): void {
-    const card = this.selectedCard()
-    const total = card === undefined ? 0 : this.detailView(card).groups.reduce((sum, group) => sum + group.facts.length + 2, 0)
-    const viewport = this.detailWindowRows()
-    const max = Math.max(0, total - viewport)
+    const max = Math.max(0, this.detailLineCount() - this.detailWindowRows())
     const next = Math.min(Math.max(0, this.detailOffset + delta), max)
     if (next !== this.detailOffset) {
       this.detailOffset = next
@@ -834,21 +848,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'pageUp')) {
-      this.detailOffset = Math.max(0, this.detailOffset - this.detailPageStep())
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.scrollDetail(-this.detailPageStep())
       return
     }
     if (matchesKey(data, 'pageDown')) {
-      this.detailOffset += this.detailPageStep()
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.scrollDetail(this.detailPageStep())
       return
     }
     if (matchesKey(data, 'home')) {
-      this.detailOffset = 0
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.setDetailOffset(0)
       return
     }
     if (matchesKey(data, 'enter')) {
@@ -1111,6 +1119,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.intents.requestRender()
   }
 
+  /** Move the Detail window to an ABSOLUTE offset, clamped to the painted bound;
+   *  a no-op never bumps (see {@link scrollDetail}). */
+  private setDetailOffset(offset: number): void {
+    const max = Math.max(0, this.detailLineCount() - this.detailWindowRows())
+    const next = Math.min(Math.max(0, offset), max)
+    if (next !== this.detailOffset) {
+      this.detailOffset = next
+      this.bumpRevision()
+    }
+    this.intents.requestRender()
+  }
+
   private leaveDetails(): void {
     this.view = 'list'
     this.focus = 'list'
@@ -1336,6 +1356,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return Math.max(0, this.diagnosticsLineCount - Math.max(1, viewport - stickyRowsFor(probe)))
     })()
     const next = Math.min(Math.max(0, this.diagnosticsOffset + direction * step), max)
+    // Capture the pre-scroll presentation so a scroll that changes NOTHING (a
+    // page press at either end with the selection already visible) does not bump
+    // the gesture revision — a no-op must not revoke a held pointer action.
+    const beforeOffset = this.diagnosticsOffset
+    const beforeSelection = this.diagnosticsSelection
+    const beforeReveal = this.diagnosticsReveal
     this.diagnosticsOffset = next
     // Keep the SELECTED fact visible: if the current selection no longer
     // intersects the new page, select the first fact that does. This is the
@@ -1357,7 +1383,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }
     }
     this.diagnosticsReveal = false
-    this.bumpRevision()
+    if (next !== beforeOffset || this.diagnosticsSelection !== beforeSelection || this.diagnosticsReveal !== beforeReveal) {
+      this.bumpRevision()
+    }
     this.intents.requestRender()
   }
 
@@ -2884,9 +2912,27 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   /** See {@link EmbeddedPluginPage.liveIdentity}. Pure: reads local state and
    *  the Controller's CURRENT facts; never starts a read or a mutation. */
   liveIdentity(): string {
+    // SEMANTIC facts only. The paint-time revision is deliberately excluded: a
+    // catch-up repaint that merely reflects state the page already had before the
+    // press must keep the identity comparable, while any real state change
+    // (view/filter/query/selection/scroll/install/notice/model+read generation/
+    // grant) is represented by the terms below.
     return JSON.stringify([
-      this.paintedRevision,
-      this.revision,
+      this.view,
+      this.focus,
+      this.searchEditing,
+      this.query,
+      this.filter,
+      this.selectedValue,
+      this.listOffset,
+      this.detailOffset,
+      this.installOffset,
+      this.installSelection,
+      this.confirmSelection,
+      this.confirmOffset,
+      this.diagnosticsSelection,
+      this.diagnosticsOffset,
+      this.diagnosticsReveal,
       this.viewport.width,
       this.viewport.rows,
       this.viewport.allowDual,
