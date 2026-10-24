@@ -244,7 +244,11 @@ export class ImageViewerPanel implements Component {
         {
           maxWidthCells: Math.max(1, width),
           maxHeightCells: Math.max(1, bodyRows),
-          filename: this.ref.name ?? 'image',
+          // The fork's text fallback interpolates this name into a painted row
+          // (`[Image: <name> [mime] WxH]`) and does NOT strip terminal controls.
+          // Project it at this boundary like every other external label, so a
+          // hostile name can never reach the terminal through the fallback path.
+          filename: sanitizedPhysicalLine(this.ref.name ?? 'image'),
         },
         { widthPx: this.ref.width, heightPx: this.ref.height },
       )
