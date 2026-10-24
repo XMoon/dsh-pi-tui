@@ -1458,6 +1458,103 @@ test('T09 a Confirmation selection key at either end never bumps', async () => {
   harness.app.dispose()
 })
 
+test('T09 a background install phase round-trip under a held rail press refuses the release', async () => {
+  // RFL-011 follow-up: an ASYNC Controller transition that RETURNS to the same
+  // phase value must still fence the gesture. No local key was pressed, so the
+  // Controller's monotonic transition count is the only term that can see it.
+  const harness = await open({ columns: 120, rows: 24 })
+  // The OFFICIAL catalog card is the one whose install really dispatches (a
+  // manual `i` editor has no requestId, so Host events would be ignored).
+  harness.vt.sendInput('\x1b[F')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  assert.equal(harness.installCalls.length, 1, 'the official install was really dispatched')
+  const requestId = harness.controller.installView()!.requestId
+  assert.ok(requestId !== undefined, 'the dispatched attempt has a real request id')
+  // Esc hides the running install and returns to the List, which may yield.
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list')
+  assert.equal(harness.panel.canYieldFocusToNavigation(), true, 'the background install lets the List yield')
+
+  // Round-trip between two REAL Host phases and back: `installing -> applying ->
+  // installing` leaves the phase VALUE exactly where it started.
+  harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
+  await harness.settle()
+  const settledPhase = harness.controller.installView()?.phase
+  assert.equal(settledPhase, 'installing', 'the attempt settled on installing')
+  const aboutRow = railRow(harness, 'About')
+  press(harness, aboutRow, 3)
+  const identityAtPress = harness.panel.liveIdentity()
+  const transitionsAtPress = harness.controller.semanticTransitionsCount()
+  harness.emit({ kind: 'phase', phase: { requestId, phase: 'applying' } })
+  await harness.settle()
+  harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
+  await harness.settle()
+  assert.equal(harness.controller.installView()?.phase, settledPhase,
+    'the phase really returned to the value it had at press time')
+  assert.ok(harness.controller.semanticTransitionsCount() > transitionsAtPress,
+    'the Controller transition count advanced across the round trip')
+  assert.notEqual(harness.panel.liveIdentity(), identityAtPress,
+    'the identity changed even though every compared VALUE is back to its press-time state')
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
+  assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives')
+  harness.app.dispose()
+})
+
+test('T09 editing the install spec revokes the page\'s own held Inspect action', async () => {
+  // RFL-014: the editor field values decide what Inspect dispatches, so an edit
+  // under a held press must invalidate that press for the PAGE's own gate too.
+  const harness = await open({ columns: 120, rows: 24 })
+  // Open the editor through its OWN entry (`i`) and type BEFORE any Inspect, so
+  // the phase is `editing` for the whole sequence.
+  for (let step = 0; step < 30 && harness.panel.selectedCardValue() === undefined; step += 1) {
+    harness.vt.sendInput('\x1b[B')
+    await harness.settle()
+  }
+  harness.vt.sendInput('i')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'install', 'i opens the install editor')
+  assert.equal(harness.controller.installView()?.phase, 'editing', 'the editor is in its editing phase')
+  for (let character of 'pkg') harness.vt.sendInput(character)
+  await harness.settle()
+  assert.equal(harness.controller.installView()?.phase, 'editing', 'typing never leaves the editing phase')
+  // The page's own gate must see the edit: an edit is a semantic change.
+  const generationBefore = harness.panel.semanticGeneration()
+  const identityBefore = harness.panel.liveIdentity()
+  harness.vt.sendInput('x')
+  await harness.settle()
+  assert.ok(harness.panel.semanticGeneration() > generationBefore,
+    'a real edit advances the page semantic generation')
+  assert.notEqual(harness.panel.liveIdentity(), identityBefore,
+    'the editor values are part of the semantic identity')
+  assert.equal(harness.controller.installView()?.phase, 'editing', 'the edit itself dispatches nothing')
+  harness.app.dispose()
+})
+
+test('T09 an immaterial install wheel never advances the semantic generation', async () => {
+  // RFL-012: the install wheel bump must depend on the window really moving.
+  const harness = await open({ columns: 120, rows: 24 })
+  // The editor's own body row (Spec/Registry form) is the wheel target; an UP
+  // wheel at the top of an already-at-top editor cannot move anything.
+  harness.vt.sendInput('i')
+  await harness.settle()
+  assert.equal(harness.controller.installView()?.phase, 'editing', 'the editor is in its editing phase')
+  const before = harness.panel.semanticGeneration()
+  const bodyRow = rowOf(harness, 'Spec')
+  wheel(harness, bodyRow, 5, false)
+  await harness.settle()
+  assert.equal(harness.panel.semanticGeneration(), before, 'an immaterial install wheel does not advance the generation')
+  harness.app.dispose()
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
 test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {
