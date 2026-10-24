@@ -32,6 +32,7 @@ import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
+import { runOwned } from '../../src/runtime/process/tasks.ts'
 import {
   layerNodes,
   pickerNode,
@@ -40,6 +41,7 @@ import {
   sendResize,
   sendActivate,
   sendSelect,
+  wireNodes,
   type WireNode,
 } from '../support/tsp-picker-wire.ts'
 
@@ -576,4 +578,112 @@ test('real Task Runtime task facts commit through the TSP presentation port to t
     'the presenter shows the exact Task Runtime projection, in its order')
   assert.equal(h.renderer.display.supportsTaskCenter, false,
     'the real TSP display seam still declares no production Task Center (A1)')
+})
+
+// ── Plan §10.2: the FOUR non-blocking presenters are mutually exclusive ─────
+
+/** The pane's mounted layer must show exactly ONE of the four presenters. */
+const mountedPickerKeys = (pane: TspPane): string[] =>
+  wireNodes(pane)
+    .filter(node => node.k === 'picker' || node.k === 'overlay')
+    .map(node => String(node.p.key ?? ''))
+    .filter(key => key !== '')
+
+test('opening the Work Hub retires the Model, Preset and Session Browser presenters', async (t) => {
+  const h = await mount(t)
+  // A live Model presenter, then a Work Hub open straight through the
+  // production presentation port.
+  const model = h.renderer.modelPresentation
+  assert.ok(model, 'the pane advertises the Model picker kinds')
+  const modelHandle = model.open({
+    subject: { sessionless: false },
+    isCurrent: () => true,
+    retry: () => {},
+    apply: () => 'committed',
+    runOwned: (label, task, runOptions) =>
+      runOwned(label, task, { ...runOptions, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  modelHandle.setDirectory({
+    current: { provider: 'a', model: 'same' },
+    directory: {
+      default: { provider: 'a', model: 'same' },
+      routableProviders: ['a'],
+      groups: [{ id: 'a', name: 'A', models: [{ id: 'same', name: 'Twin' }] }],
+      failures: [],
+    },
+  })
+  await waitUntil('the Model presenter is mounted', () => mountedPickerKeys(h.pane).some(key => key.startsWith('model-')))
+  h.open([row('job:j1', { label: 'build' })])
+  await waitForSinglePicker(h.pane)
+  await waitUntil('the Model picker is no longer mounted',
+    () => !mountedPickerKeys(h.pane).some(key => key.startsWith('model-')))
+  assert.equal(modelHandle.isDisposed(), true, 'the Model handle is retired, not merely hidden')
+  // A late Model key must not reach the retired presenter: Tab now belongs to
+  // the Work Hub action zone.
+  h.pane.key('\t')
+  await waitUntil('Tab still drives the Work Hub', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  assert.deepEqual(mountedPickerKeys(h.pane), ['work-hub-picker-1'], 'exactly ONE presenter owns the layer')
+})
+
+test('opening a Session Browser retires the open Work Hub, and closing it returns to the composer', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:j1', { label: 'build' })])
+  await waitForSinglePicker(h.pane)
+  const browserPresentation = h.renderer.sessionBrowserPresentation
+  assert.ok(browserPresentation, 'the pane advertises the Session Browser kinds')
+  let closes = 0
+  const subject = { currentSessionId: 'session-current', currentCwd: '/workspace/project', isCurrent: () => true }
+  const handle = browserPresentation.open({
+    subject,
+    onQueryChange: () => {},
+    onResumeIntent: () => {},
+    onClose: () => { closes += 1 },
+  })
+  await waitUntil('the Session Browser replaces the Work Hub',
+    () => mountedPickerKeys(h.pane).some(key => key.startsWith('session-browser-'))
+      && !mountedPickerKeys(h.pane).some(key => key.startsWith('work-hub-')))
+  assert.deepEqual(h.retires, ['external'], 'the Work Hub was retired by the sibling open (not a user close)')
+  assert.equal(h.closes.length, 0, 'a sibling retirement never fabricates a user Close')
+  // Esc closes the Browser; focus returns to the composer, NOT to the old Hub.
+  h.pane.key('\u001b')
+  await waitUntil('Esc closes the Session Browser', () => closes === 1)
+  const framesBefore = h.pane.frameCount()
+  h.renderer.display.notify('post-browser barrier', 'info')
+  await waitUntil('the barrier frame lands', () => h.pane.frameCount() > framesBefore)
+  assert.deepEqual(mountedPickerKeys(h.pane), [], 'the retired Work Hub does not reappear')
+  assert.equal(focusTargets(h.pane).at(-1), 'dock.composer', 'focus returns to the composer')
+  handle.close()
+})
+
+test('a newer Hub opened by a sibling retirement callback beats the earlier open', async (t) => {
+  const h = await mount(t)
+  // The Session Browser's own close callback fires on PROGRAMMATIC retirement
+  // (the read owner's release) and synchronously opens a newer Work Hub while
+  // an OUTER Work Hub open is still retiring the siblings. That newer open owns
+  // the seat, so the outer open must come back inert.
+  const browserPresentation = h.renderer.sessionBrowserPresentation
+  assert.ok(browserPresentation)
+  const subject = { currentSessionId: 'session-current', currentCwd: '/workspace/project', isCurrent: () => true }
+  const browserHandle = browserPresentation.open({
+    subject,
+    onQueryChange: () => {},
+    onResumeIntent: () => {},
+    onClose: () => { h.open([row('job:inner', { label: 'inner' })]) },
+  })
+  await waitUntil('the Session Browser is mounted',
+    () => mountedPickerKeys(h.pane).some(key => key.startsWith('session-browser-')))
+  const outer = h.open([row('job:outer', { label: 'outer' })])
+  await waitUntil('the callback-opened inner Hub owns the layer',
+    () => hubItems(h.pane).map(item => item.id).join(',') === 'job:inner')
+  outer.setItems([row('job:outer2', { label: 'outer2' })])
+  outer.setRefreshState('loading')
+  outer.close()
+  const framesBefore = h.pane.frameCount()
+  h.renderer.display.notify('sibling generation barrier', 'info')
+  await waitUntil('the barrier frame lands', () => h.pane.frameCount() > framesBefore)
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:inner'],
+    'the earlier open is inert and never replaces the callback-opened panel')
+  assert.equal(mountedPickerKeys(h.pane).filter(key => key.startsWith('work-hub-')).length, 1,
+    'exactly ONE Hub panel is displayed')
+  browserHandle.close()
 })

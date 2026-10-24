@@ -405,9 +405,10 @@ export class TspWorkHub {
     // A retirement callback may synchronously open — and even close again — a
     // NEWER panel while this earlier open retires the displayed one. The
     // monotonic `serial` is the operation-generation witness: an increment
-    // during `retire()` proves that a newer presenter lifetime exists and owns
-    // the seat, so this earlier open must stay inert. A plain `this.panel`
-    // check would miss the newer open-then-close case (§9.8/§9.9).
+    // during retirement proves that a newer presenter lifetime owns the seat,
+    // so this earlier open stays inert. A plain `this.panel` check would miss
+    // the newer open-then-close case (§9.8/§9.9). Sibling presenters are
+    // retired by the seat wrapper before this call (plan §10.2).
     const serialBefore = this.serial
     this.retire()
     if (this.serial !== serialBefore) {

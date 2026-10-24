@@ -428,35 +428,99 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     paneWidth: () => session.caps.cols * session.caps.cell.w,
   })
   /**
-   * The ONE layer and its mutually-exclusive presenters. Opening one retires
-   * the other three before the next committed frame.
+   * The ONE seat's FOUR-WAY presenter exclusivity (plan §10.2).
+   *
+   * `presenterOpenGeneration` is the seat's operation witness. A retirement
+   * callback may synchronously open a NEWER presenter while an earlier open is
+   * still retiring its siblings (a Session Browser's `onClose` can open
+   * another panel). The newer lifetime owns the seat, so the earlier open must
+   * come back inert instead of overwriting it. Render priority is NOT a
+   * substitute: a merely hidden sibling keeps its input owner alive.
    */
+  let presenterOpenGeneration = 0
+  /** Commit one presenter open after retiring the three siblings, or stay inert. */
+  const openExclusively = <Handle>(
+    retireSiblings: () => void,
+    open: () => Handle,
+    inert: Handle,
+  ): Handle => {
+    const generation = ++presenterOpenGeneration
+    retireSiblings()
+    if (generation !== presenterOpenGeneration) return inert
+    return open()
+  }
   const modelPresentation: ModelPresentation = {
-    open: (request) => {
-      sessionBrowser?.retire()
-      presetPicker?.retire()
-      workHub?.retire()
-      return modelPicker!.presentation.open(request)
-    },
+    open: (request) => openExclusively(
+      () => {
+        sessionBrowser?.retire()
+        presetPicker?.retire()
+        workHub?.retire()
+      },
+      () => modelPicker!.presentation.open(request),
+      // A superseded open never minted a panel; its handle is inert and the
+      // command's own read owner retires its presentation token.
+      {
+        setLoading: () => {},
+        setDirectory: () => {},
+        setLoadError: () => {},
+        isDisposed: () => true,
+        close: () => {},
+      },
+    ),
     notify: (message, kind) => modelPicker!.presentation.notify(message, kind),
   }
   const presetPresentation: PresetPresentation = {
-    open: (request) => {
-      sessionBrowser?.retire()
-      modelPicker?.retire()
-      workHub?.retire()
-      return presetPicker!.presentation.open(request)
-    },
+    open: (request) => openExclusively(
+      () => {
+        sessionBrowser?.retire()
+        modelPicker?.retire()
+        workHub?.retire()
+      },
+      () => presetPicker!.presentation.open(request),
+      {
+        setLoading: () => {},
+        setRoster: () => {},
+        setLoadError: () => {},
+        isDisposed: () => true,
+        close: () => {},
+      },
+    ),
     notify: (message, kind) => presetPicker!.presentation.notify(message, kind),
   }
   const sessionBrowserPresentation: SessionBrowserPresentation = {
-    open: (request) => {
-      presetPicker?.retire()
-      modelPicker?.retire()
-      workHub?.retire()
-      return sessionBrowser!.presentation.open(request)
-    },
+    open: (request) => openExclusively(
+      () => {
+        presetPicker?.retire()
+        modelPicker?.retire()
+        workHub?.retire()
+      },
+      () => sessionBrowser!.presentation.open(request),
+      { isDisposed: () => true, setSnapshot: () => {}, close: () => {} },
+    ),
     notify: (message, kind) => sessionBrowser!.presentation.notify(message, kind),
+  }
+  /**
+   * The Task Center presentation sink the surface installs is a SEAT WRAPPER,
+   * not the hub's own port: the Work Hub open retires the three sibling
+   * non-blocking presenters in the SAME synchronous stack. Every other member
+   * is the hub's own passive sink (A1 keeps no second roster/summary/Quick
+   * projection).
+   */
+  const taskPresentation: TaskCenterPresentationPort = {
+    openBrowser: (items, onSelect, onClose, openOptions) => openExclusively(
+      () => {
+        sessionBrowser?.retire()
+        presetPicker?.retire()
+        modelPicker?.retire()
+      },
+      () => workHub!.taskPresentation.openBrowser(items, onSelect, onClose, openOptions),
+      { close: () => {}, setItems: () => {}, setRefreshState: () => {} },
+    ),
+    setQuickTaskItems: items => workHub!.taskPresentation.setQuickTaskItems(items),
+    setAgents: agents => workHub!.taskPresentation.setAgents(agents),
+    setTasks: jobs => workHub!.taskPresentation.setTasks(jobs),
+    setQuestionAttention: count => workHub!.taskPresentation.setQuestionAttention(count),
+    setTaskSummary: summary => workHub!.taskPresentation.setTaskSummary(summary),
   }
   /**
    * PR3-A supports NO viewer, so this read is the explicit UNSUPPORTED capability
@@ -1400,10 +1464,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the B0 inert one. It is installed with the mount, but the surface only
     // opts into modals once `bindInput` has committed the application wiring.
     interaction: seat.presenter,
-    // B3-A1: the internal native Work Hub presentation sink. It is always
-    // supplied with the mount; the display seam's `supportsTaskCenter:false`
-    // stays the ONE production reachability truth until A3.
-    taskPresentation: workHub!.taskPresentation,
+    // B3-A1: the internal native Work Hub presentation sink, wrapped by the
+    // seat's four-way presenter exclusivity. It is always supplied with the
+    // mount; the display seam's `supportsTaskCenter:false` stays the ONE
+    // production reachability truth until A3.
+    taskPresentation,
     // PR-C: the ONE image binding. It is installed before the first tool
     // projection (the mount does it) and never twice.
     bindImages: (binding) => {
