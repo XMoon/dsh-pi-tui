@@ -264,6 +264,17 @@ export class PluginManagerController {
     return this.modelValue.cards.find(candidate => candidate.value === value)
   }
 
+  /**
+   * The monotonic inventory-read generation. It advances when ANY read starts
+   * (an explicit refresh or a Host invalidation), before the new facts land, so
+   * a painted action can tell "the Host asked me to re-read" from "the re-read
+   * returned the same facts" — §3.4 requires a press held across a Host
+   * invalidate to be refused even when the inventory is byte-identical.
+   */
+  readGeneration(): number {
+    return this.readEpoch
+  }
+
   /** The load/error state for the panel's empty frame. */
   status(): { readonly state: 'loading' | 'ready' | 'error'; readonly error?: string } {
     return { state: this.state, ...(this.error === undefined ? {} : { error: this.error }) }

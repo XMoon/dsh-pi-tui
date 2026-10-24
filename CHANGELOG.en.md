@@ -167,8 +167,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   category previews the real plugin list in place, so the intermediate
   `Open Plugin Manager` row is gone. Settings paints the shared header/metadata/
   rule/pane header and the single last-row action bar; the plugin page
-  contributes only its business body. At >=120 columns the frame shows
-  `Categories | Plugin List | Details`; at 76-119 columns it shows
+  contributes only its business body. At >=120 columns (and only while the
+  frame can grant six real business-body rows) the frame shows
+  `Categories | Plugin List | Details`; a shorter frame degrades to the pair or
+  one column instead of squeezing the body. At 76-119 columns it shows
   `Categories | List` with the rail focused and `List | Details` with the plugin
   content focused; below 76 columns it is one column. Install, dangerous
   confirmations and Diagnostics always take the full width. `Esc` from the List

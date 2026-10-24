@@ -2817,7 +2817,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    * returns identical facts cannot invalidate an already-painted action; any
    * fact that could change a pixel or an action changes the key. */
   private modelStateKey(): string {
-    return JSON.stringify(this.controller.model())
+    // The Host READ GENERATION is part of the presentation key, not only the
+    // facts: a Host invalidation that returns byte-identical inventory still
+    // starts a new read, and §3.4 requires a press held across it to be refused.
+    return JSON.stringify([this.controller.readGeneration(), this.controller.model()])
   }
 
   /** True only while the live semantic facts AND the LOCAL viewport grant still
