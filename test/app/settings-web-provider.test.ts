@@ -310,7 +310,12 @@ async function openWebSection(h: Harness): Promise<void> {
   // Both the Workspace row and the section start PENDING and settle with the
   // authoritative read; every assertion below is about the settled facts (the
   // transient frames have their own tests, which hold the read themselves).
-  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
+  // `Loading…` disappearing is not enough: the rows can be painted before the
+  // section's Current facts arrive. Wait for the settled section fact as well,
+  // so key sequences never run against a half-loaded editor under suite load.
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const view = h.view()
+    if (!view.includes('Loading…') && /Current: |\[unavailable\]/u.test(view)) return
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
