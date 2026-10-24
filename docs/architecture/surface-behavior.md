@@ -523,7 +523,10 @@ contribution count, and `api().capabilities`. Contributions with a PROVEN
 `Unassociated extension contributions`. Each record shows the exact
 `extensionPoint:id`, its state and the whole `lastError` (wrapped, scrollable,
 never silently truncated), and `c` copies its exact block while `C` copies the
-whole stable report. `r` rereads this projection only; it never refreshes the
+whole stable report. Both payloads pass the SAME shared terminal-control guard
+as About: ESC/CSI/OSC/DCS/C1 sequences and non-whitespace controls are removed,
+TAB/LF/CR become visible escapes, and only the report's generated line breaks
+remain structural. `r` rereads this projection only; it never refreshes the
 official package inventory, and a ledger failure/recovery is reflected on the
 next painted read. With no extension service attached the page says
 `Unavailable`. Host package state, install logs and the Host inventory's

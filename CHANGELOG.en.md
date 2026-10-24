@@ -61,7 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both commands open exactly the same fullscreen Settings/About workspace (same
   handler, initial focus and reads; a sessionless open creates no session and
   reads no statistics), while `/statusline` remains the `/footer` alias. About
-  supports per-fact copy and exact Copy All; extension health (failed/shadowed
+  supports per-fact copy and exact Copy All; both copies pass the shared
+  terminal-control guard; extension health (failed/shadowed
   plus the full `lastError`), registry counts, the actual capabilities, and
   contributions without a proven Loader-entry owner now live in the Plugin
   Manager's `Diagnostics` page (`/plugins` or `Settings → Plugins`, press `d`),

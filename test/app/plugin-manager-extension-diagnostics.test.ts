@@ -232,6 +232,38 @@ test('diagnostics exact copy carries the full owner/entry/contribution/state/err
   )
 })
 
+test('diagnostics copy strips hostile terminal controls and preserves report line structure', () => {
+  const hostile: TuiContributionDiagnostic = {
+    owner: 'uid:owner\u0001',
+    entryId: 'entry\tid',
+    extensionPoint: 'slot\u009b31m',
+    id: 'id\nline',
+    state: 'failed\u001b]52;c;evil\u0007',
+    lastError: 'failed \u001b[31mRED\u001b[0m \u009b31mC1\u009b0m \u001b]52;c;evil\u0007\nnext\trow\r',
+  }
+  const block = formatTuiContributionDiagnostic(hostile)
+  assert.equal(block, [
+    'Owner: uid:owner',
+    'Entry: entry\\tid',
+    'Contribution: slot:id\\nline',
+    'State: failed',
+    'Error: failed RED C1 \\nnext\\trow\\r',
+  ].join('\n'))
+  // Structural LF separators are generator-owned; every OTHER control is gone.
+  assert.doesNotMatch(block.replace(/\n/g, ''), /[\u0000-\u001f\u007f-\u009f]/u)
+
+  const view = diagnosticsView({
+    entries: [hostile],
+    contributionTotals: { total: 1, active: 0, failed: 1, shadowed: 0, other: 0 },
+    healthSummary: '1 failed · 0 shadowed',
+  })
+  const report = serializeTuiExtensionDiagnostics(view)
+  assert.match(report, /Owner: uid:owner/u)
+  assert.match(report, /Error: failed RED C1 \\nnext\\trow\\r/u)
+  assert.ok(report.includes('\n'), 'the report keeps its generated newlines')
+  assert.doesNotMatch(report.replace(/\n/g, ''), /[\u0000-\u001f\u007f-\u009f]/u)
+})
+
 test('diagnostics recovery clears lastError and the health summary', () => {
   let records = [failedEntry()]
   const source: TuiExtensionObservationSource = {
@@ -372,6 +404,40 @@ test('the diagnostics page paints the unassociated group and copies a shadowed r
     harness.vt.sendInput('c')
     await settleHarness(harness)
     assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(orphan))
+  } finally {
+    harness.close()
+    harness.app.dispose()
+  }
+})
+
+test('the diagnostics page copies only control-safe payloads', async () => {
+  const hostile: TuiContributionDiagnostic = {
+    owner: 'uid:owner\u0001',
+    entryId: 'entry\tid',
+    extensionPoint: 'slot\u009b31m',
+    id: 'id\nline',
+    state: 'failed\u001b]52;c;evil\u0007',
+    lastError: 'failed \u001b[31mRED\u001b[0m\nnext\trow\r',
+  }
+  const view = diagnosticsView({
+    entries: [hostile],
+    contributionTotals: { total: 1, active: 0, failed: 1, shadowed: 0, other: 0 },
+    healthSummary: '1 failed · 0 shadowed',
+  })
+  const harness = await openDiagnosticsPage(() => view)
+  try {
+    for (let step = 0; step < 3; step += 1) {
+      harness.vt.sendInput('\x1b[B')
+      await settleHarness(harness)
+    }
+    harness.vt.sendInput('c')
+    await settleHarness(harness)
+    assert.equal(harness.copied.at(-1), formatTuiContributionDiagnostic(hostile))
+    harness.vt.sendInput('C')
+    await settleHarness(harness)
+    assert.equal(harness.copied.at(-1), serializeTuiExtensionDiagnostics(view))
+    const copied = harness.copied.at(-1)!.replace(/\n/g, '')
+    assert.doesNotMatch(copied, /[\u0000-\u001f\u007f-\u009f]/u, 'no raw terminal control rides the clipboard payload')
   } finally {
     harness.close()
     harness.app.dispose()
@@ -676,7 +742,7 @@ test('a real renderer failure reaches the Plugin Manager diagnostics and recover
   // inventory port, `runOwned`, `copySelection` and the renderer error/
   // recovery sinks stand in for host wiring; production `attachSeams` is not
   // exercised here.
-  const message = `renderer failed: ${'鲸'.repeat(40)}`
+  const message = `renderer failed: \u001b[31mRED\u001b[0m ${'鲸'.repeat(20)} \u009b31mC1\u009b0m`
   let broken = true
   const page = await mountProductionPage({
     prepare: (service) => {
@@ -720,11 +786,14 @@ test('a real renderer failure reaches the Plugin Manager diagnostics and recover
     const frame = plain(vt.getViewport())
     assert.match(frame, /c4-broken-renderer/)
     assert.match(frame, /\[failed\]/)
-    assert.match(frame, /renderer failed: 鲸/)
+    assert.match(frame, /renderer failed: RED/)
+    assert.doesNotMatch(frame, /\u001b|\u009b/u, 'the page display is sanitized')
 
     vt.sendInput('C')
     await settlePage(vt)
     assert.equal(copied.at(-1), serializeTuiExtensionDiagnostics(expected), 'Copy All uses the production projection')
+    assert.doesNotMatch(copied.at(-1) ?? '', /\u001b|\u009b/u, 'Copy All carries no raw ESC/C1 control')
+    assert.match(copied.at(-1) ?? '', /renderer failed: RED .*C1/u)
 
     const facts = [...expected.entries, ...expected.unmappedEntries]
     const down = 3 + facts.findIndex(entry => entry.id === 'c4-broken-renderer')
@@ -733,6 +802,8 @@ test('a real renderer failure reaches the Plugin Manager diagnostics and recover
     vt.sendInput('c')
     await settlePage(vt)
     assert.equal(copied.at(-1), formatTuiContributionDiagnostic(contribution), 'per-fact copy uses the production projection')
+    assert.doesNotMatch(copied.at(-1) ?? '', /\u001b|\u009b/u, 'per-fact copy carries no raw ESC/C1 control')
+    assert.match(copied.at(-1) ?? '', /RED .*C1/u)
 
     broken = false
     const recovered = app.messageCacheEntryForTest?.({ ...tool, turn: 1 }, 0)
