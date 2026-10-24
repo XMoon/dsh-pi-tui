@@ -402,10 +402,17 @@ export class TspWorkHub {
     onClose: () => void,
     options: TaskBrowserPresentationOpen,
   ): TaskBrowserPresentationHandle {
-    // A newer explicit open supersedes the displayed panel; the old owner is
-    // notified after its identity is retired so its close tail cannot
-    // overwrite this new panel.
+    // A retirement callback may synchronously open — and even close again — a
+    // NEWER panel while this earlier open retires the displayed one. The
+    // monotonic `serial` is the operation-generation witness: an increment
+    // during `retire()` proves that a newer presenter lifetime exists and owns
+    // the seat, so this earlier open must stay inert. A plain `this.panel`
+    // check would miss the newer open-then-close case (§9.8/§9.9).
+    const serialBefore = this.serial
     this.retire()
+    if (this.serial !== serialBefore) {
+      return { close: () => {}, setItems: () => {}, setRefreshState: () => {} }
+    }
     const panel: WorkHubPanel = {
       serial: ++this.serial,
       revision: 0,

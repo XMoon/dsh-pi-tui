@@ -439,6 +439,45 @@ test('a newer panel survives the older panel\'s late event and handle close', as
   assert.equal(h.closes.length, 0, 'a programmatic handle close never fakes a user close')
 })
 
+test('a synchronous re-open from a retirement callback wins over the earlier open', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:a', { label: 'a' })], {
+    onRetired: () => { h.open([row('job:c', { label: 'c' })]) },
+  })
+  await waitForSinglePicker(h.pane)
+  const earlier = h.open([row('job:b', { label: 'b' })])
+  await waitUntil('the callback-opened C panel stays displayed',
+    () => hubItems(h.pane).map(item => item.id).join(',') === 'job:c')
+  earlier.setItems([row('job:b2', { label: 'b2' })])
+  earlier.setRefreshState('stale', 'must not paint')
+  earlier.close()
+  // A lockstep barrier: this frame is queued AFTER any frame the earlier
+  // handle could have caused, so the observation covers its whole effect.
+  const framesBefore = h.pane.frameCount()
+  h.renderer.display.notify('reentrant open barrier', 'info')
+  await waitUntil('the barrier frame lands', () => h.pane.frameCount() > framesBefore)
+  assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:c'], 'the earlier handle is fully inert')
+  assert.equal(h.closes.length, 0, 'the inert close is not a user close')
+})
+
+test('a newer open synchronously closed in a retirement callback still beats the earlier open', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:a', { label: 'a' })], {
+    onRetired: () => { h.open([row('job:c', { label: 'c' })]).close() },
+  })
+  await waitForSinglePicker(h.pane)
+  const earlier = h.open([row('job:b', { label: 'b' })])
+  await waitUntil('the callback panel opened and closed again', () => pickers(h.pane).length === 0)
+  earlier.setItems([row('job:b2', { label: 'b2' })])
+  earlier.setRefreshState('loading')
+  earlier.close()
+  const framesBefore = h.pane.frameCount()
+  h.renderer.display.notify('nested close barrier', 'info')
+  await waitUntil('the barrier frame lands', () => h.pane.frameCount() > framesBefore)
+  assert.equal(pickers(h.pane).length, 0, 'the earlier open must not resurrect a panel')
+  assert.equal(h.closes.length, 0)
+})
+
 test('only a frame-registered node can act: a fabricated target is ignored', async (t) => {
   const h = await mount(t)
   h.open([row('job:j1')])
