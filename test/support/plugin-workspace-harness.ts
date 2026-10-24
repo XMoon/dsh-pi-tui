@@ -127,7 +127,11 @@ export interface WorkspaceHarness {
    *  been released; a phantom claim makes the production factory return
    *  `undefined` and this throws instead of faking a success. */
   reopen(options?: { readonly startOn?: 'plugins' | 'rail' }): Promise<void>
-  /** Drain the pending microtasks and wait for the AUTHORITATIVE rendered frame.
+  /** Drain a bounded number of microtask turns, then let the renderer settle via
+   *  `VirtualTerminal.waitForRender()` (which itself yields a short timer before
+   *  flushing the terminal write). This is NOT a frame-identity signal — it is a
+   *  bounded wait for the render pipeline to settle after a redraw was already
+   *  requested; use it only after driving such a request.
    *  (Named `waitForFrame`, not `settle`: a same-named fixed-wait helper in
    *  `test/support` would make the New Test Policy guard read every call as a
    *  blind sleep.) */
