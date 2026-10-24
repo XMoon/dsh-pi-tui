@@ -1009,6 +1009,10 @@ export class SettingsWorkspacePanel implements Component {
       this.cancelPointerOwners()
     }
     this.chrome = plan
+    // Snapshot what THIS frame really shows, so the root can tell whether a later
+    // focus/layout change has painted yet (narrow paints one region at a time).
+    this.paintedLayout = plan.layout
+    this.paintedFocus = this.focus
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
     this.paintedChoiceCopy = false
@@ -2663,6 +2667,29 @@ export class SettingsWorkspacePanel implements Component {
     return this.chrome?.width ?? this.intents.columns()
   }
 
+  /** The layout the last painted frame used (recorded beside `chrome`). */
+  private paintedLayout: SettingsLayout | undefined
+  /** The focus the last painted frame was produced under. A narrow frame paints
+   *  ONE region, so a focus transfer changes what it shows even when the row plan
+   *  is identical. */
+  private paintedFocus: SettingsWorkspaceFocus | undefined
+
+  /** Whether the ROOT's own destination frame has not painted yet. This covers
+   *  the case the page-owned query cannot: at narrow widths a yield leaves no
+   *  page grant to arm, yet the Categories frame has not been painted either. */
+  private rootProjectionAwaitingPaint(): boolean {
+    // Scope: ONLY the embedded plugin page. It is the one direct page whose keys
+    // the ROOT also intercepts (Shift+Tab) and whose yield swaps the narrow
+    // projection; About/Models/Account own their gates and re-render synchronously,
+    // and fencing them broke legitimate drill-down paths.
+    if (this.categoryId !== 'plugins') return false
+    if (this.paintedLayout === undefined) return false
+    // A transfer AWAY from the content is the one whose destination frame (the
+    // Categories rail) has not painted yet.
+    return this.paintedFocus === 'content' && this.focus !== 'content'
+  }
+
+
   /** Whether the live terminal geometry has outrun the last painted frame. The
    *  child grant value can stay identical across two heights (8→7 rows keeps
    *  the same body budget), so the root owns this per-terminal-frame fence. */
@@ -2997,11 +3024,20 @@ export class SettingsWorkspacePanel implements Component {
       this.handleContentInput(data)
       return
     }
-    if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) return this.goBack()
+    if (matchesKey(data, 'escape')) return this.goBack()
+    // §4.2 admits only the REAL Esc while the destination frame is stale (Backspace
+    // is not a portable back key), so it must not act in that window.
+    if (matchesKey(data, 'backspace')) {
+      if (this.rootProjectionAwaitingPaint() || this.pluginPage?.grantAwaitingPaint() === true) return
+      return this.goBack()
+    }
     // Below the body floor every navigation/action target is invisible; only the
     // lifecycle/back key remains available. Read the live geometry because input
     // may arrive before a resize-triggered frame has painted.
     if (this.bodyFloor() < 1) return
+    // §4.2 covers the ROOT's own destination frame too: at narrow widths a yield
+    // leaves no page grant to arm, yet the Categories frame has not painted.
+    if (this.rootProjectionAwaitingPaint()) return
     // §4.2: while the plugin page still awaits the paint for a grant the ROOT
     // installed (a yield out of the content changes the projection at 76..119),
     // a rail key must not move or activate a category the new frame does not show
