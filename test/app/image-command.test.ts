@@ -26,6 +26,11 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { createSubmissionController, type SubmissionControllerDeps } from '../../src/app/submission/controller.ts'
+import { bindSubmissionRuntime } from '../../src/app/submission/runtime.ts'
+import { createSessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
+import { createSessionScopeAuthority } from '../../src/app/session/scope.ts'
+import { mergeDraft } from '../../src/app/submission/steer.ts'
 import type { SubmissionComposerPort } from '../../src/app/submission/composer-port.ts'
 import type { ClientCommandExecution } from '../../src/app/command/client-command-registry.ts'
 import { checkImageLimits } from '../../src/client/media/image/intake.ts'
@@ -467,6 +472,13 @@ interface MountedHarness {
   setImageLimits(limits: Parameters<typeof checkImageLimits>[2] | undefined): void
   /** Execute one line through the REAL Client registry (the TSP route). */
   execute(line: string): Promise<ClientCommandExecution | undefined>
+  /**
+   * Resolves when the intake reached its POST-READ session-scope fence. The
+   * fence is a real production call issued only after the file read settled,
+   * so this is an authoritative "the read finished" signal — needed where the
+   * seat is deliberately silent and no notice can be observed.
+   */
+  postRead(): Promise<void>
 }
 
 /**
@@ -486,12 +498,22 @@ function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: 
   const seat: { current: ReturnType<typeof mountedComposer> } = { current: options.composer ?? mountedComposer() }
   let generation = 0
   let limits: Parameters<typeof checkImageLimits>[2] | undefined
+  let markPostRead!: () => void
+  const postRead = new Promise<void>(resolve => { markPostRead = resolve })
+  const scopeFacts = sessionScopeFacts(() => undefined, () => generation)
   const runner: TuiCommandRunner = {
     ctx,
     // The TSP renderer mounts no TuiApp: every PiTui-only member is absent.
     app: undefined,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    ...sessionScopeFacts(() => undefined, () => generation),
+    ...scopeFacts,
+    // The recorder wraps the REAL scope authority: the intake's post-read
+    // fence still decides exactly as production does, and its occurrence is
+    // the deterministic "the file read settled" signal.
+    isSessionScopeCurrent: (scope) => {
+      markPostRead()
+      return scopeFacts.isSessionScopeCurrent(scope)
+    },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -599,6 +621,7 @@ function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: 
     replaceComposer: (next) => { seat.current = next },
     setImageLimits: (next) => { limits = next },
     execute: line => runner.clientCommands.execute({ line, signal: new AbortController().signal }),
+    postRead: () => postRead,
   }
 }
 
@@ -659,23 +682,40 @@ test('a TSP-mounted attach command accepts an image through the same image intak
   assert.equal(h.composer.getDraft(), `${draft.placeholder} `, 'the image branch of /attach uses the ONE image intake')
 })
 
-test('an absent composer refuses image and attach before any filesystem read or draft mutation', async (t) => {
+test('an absent composer refuses image and attach before any intake, staging or token', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('dsh-tsp-no-composer-')
-  writeFileSync(join(dir, 'shot.png'), pngBytes())
+  const png = join(dir, 'shot.png')
+  writeFileSync(png, pngBytes())
   writeFileSync(join(dir, 'report.pdf'), Buffer.from('%PDF-1.7 report'))
+
+  // CONTROL: with a composer mounted, the very same inputs are readable and DO
+  // stage. That proves the refusal below is not an artifact of an unreadable
+  // file: had an intake been accepted, these bytes would have reached the store.
+  const control = mountedHarness({ cwd: dir })
+  assert.deepEqual((await control.execute(`/image ${png}`))?.result, { kind: 'success' })
+  await waitFor(() => control.imageStore.size() === 1)
+  assert.deepEqual((await control.execute('/attach report.pdf'))?.result, { kind: 'success' })
+  await waitFor(() => control.fileStore.values().length === 1)
+
   const h = mountedHarness({ cwd: dir })
   h.replaceComposer(undefined as never)
-
-  for (const line of [`/image ${join(dir, 'shot.png')}`, '/attach report.pdf']) {
+  for (const line of [`/image ${png}`, '/attach report.pdf']) {
     const execution = await h.clientCommands.execute({ line, signal: new AbortController().signal })
+    // `{kind:'error'}` (never `success`) is the discriminating fact: accepting
+    // an intake is the ONLY way this handler reads a file, so a refusal proves
+    // no read was started.
     assert.equal(execution?.result.kind, 'error', `${line} is refused synchronously without a composer`)
     assert.equal((execution?.result as { text: string }).text, 'the draft composer is unavailable on this renderer')
   }
-  // Nothing was read, staged or inserted.
+  // Nothing was staged and no notice can exist: there is no seat to carry one.
   assert.equal(h.imageStore.size(), 0)
   assert.equal(h.fileStore.values().length, 0)
-  assert.deepEqual(h.reads, [])
+  assert.deepEqual(h.reads, [], 'the PiTui-only insertIntoEditor seam was never used')
+  // Give any detached task a chance to run before the empty-store assertion is
+  // trusted; the sync refusal above means none exists.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.imageStore.size(), 0, 'no late intake staged after the refusal')
 })
 
 test('a command intake completing after a session generation change never writes the replacement composer', async (t) => {
@@ -692,13 +732,33 @@ test('a command intake completing after a session generation change never writes
   h.replaceComposer(replacement)
   h.bumpGeneration()
 
-  // The captured composer's session-fence notice is the intake's authoritative
-  // settle signal (no timer).
-  await waitFor(() => h.composer.notices.length === 1)
-  assert.equal(h.composer.notices[0]!.text, 'the session changed while reading the image — try again')
+  // The CAPTURED seat is no longer the live seat, so it receives NOTHING —
+  // not even the explanatory session-fence refusal (a retired renderer's dock
+  // is not a place to publish). The control below shows the same fence DOES
+  // report when only the session moved and the seat is still live.
+  await h.postRead()
+  assert.deepEqual(h.composer.notices, [], 'a replaced seat never receives the stale intake notice')
   assert.equal(h.imageStore.size(), 0, 'the stale intake stages no bytes')
   assert.equal(replacement.getDraft(), '', 'no stale token is written into the replacement composer')
   assert.deepEqual(replacement.notices, [], 'no stale notice is published to the replacement composer')
+})
+
+test('a session change on the SAME seat still explains the refusal to the user', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-tsp-same-seat-stale-')
+  const file = join(dir, 'shot.png')
+  writeFileSync(file, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+  assert.deepEqual((await h.execute(`/image ${file}`))?.result, { kind: 'success' })
+  // Only the ownership generation moves: the mounted seat is untouched, so the
+  // user must learn why nothing was attached.
+  h.bumpGeneration()
+
+  await waitFor(() => h.composer.notices.length === 1)
+  assert.deepEqual(h.composer.notices, [{ text: 'the session changed while reading the image — try again', kind: 'error' }],
+    'the live seat explains the session fence exactly once')
+  assert.equal(h.imageStore.size(), 0)
+  assert.equal(h.composer.getDraft(), '')
 })
 
 test('an invalid path or rejected image limit leaves both stores and the composer draft unchanged', async (t) => {
@@ -733,9 +793,11 @@ test('an asynchronously staged attachment reports success only after bytes and i
   writeFileSync(file, pngBytes())
   const h = mountedHarness({ cwd: dir })
 
-  // The result-notice scope excludes this command, so the returned
-  // `CommandResult.success` announces nothing on the card-less route.
-  assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('image'))
+  // The result-notice scope is ERROR-ONLY, so the returned
+  // `CommandResult.success` announces nothing on the card-less route even
+  // though `/image` is a member of that scope.
+  assert.ok(TSP_B2A_RESULT_NOTICE_COMMANDS.has('image'),
+    'the command keeps its synchronous error visible on the card-less route')
   const execution = await h.execute(`/image ${file}`)
   assert.deepEqual(execution?.result, { kind: 'success' }, 'the synchronous result only accepts the intent')
   assert.deepEqual(h.composer.notices, [], 'the accepted intent alone publishes nothing')
@@ -817,4 +879,233 @@ test('the authoritative classifier, the TSP capability gate and the real handler
     'the admitted block carries the SAME bytes the clipboard/file intake staged')
   assert.ok(!message.content.some(block => block.type === 'text' && block.text.includes(draft.placeholder)),
     'the canonical token is resolved into the image block, never sent as literal text')
+})
+
+// ── The REAL card-less submission route (Remote, no command card) ───────────
+
+/**
+ * A REMOTE-shaped controller: `liveAgent()` returns the transport-neutral
+ * projection (no `inbox`), which is what makes the TUI-owned route execute
+ * through the Client registry — the card-less branch whose ONLY visible
+ * owner is the error-result notice scope. The composer is the mounted
+ * renderer seat; the command registry is the REAL one the production
+ * `registerTuiCommands` pass filled.
+ */
+function cardlessController(options: {
+  readonly composer: ReturnType<typeof mountedComposer>
+  readonly clientCommands: ReturnType<typeof createClientCommandRegistry>
+  readonly images: DraftImageStore
+  readonly files: DraftFileStore
+}) {
+  const notices: { text: string; kind: 'info' | 'error' | undefined }[] = []
+  const modelPrompts: string[] = []
+  const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  core.setCurrentOwner({} as never, 'session-remote')
+  const scopeAuthority = createSessionScopeAuthority({
+    current: () => {
+      const subject = core.subject()
+      if (subject === undefined) throw new Error('fixture: the owner is not published')
+      return { sessionId: 'session-remote', generation: core.generation(), subject }
+    },
+    isSubjectCurrent: (subject) => core.isSubjectCurrent(subject),
+  })
+  const command = {
+    wasAdvertisedClaim: () => false,
+    hostClaimOf: () => undefined,
+    hostOriginClaimOf: () => undefined,
+    hostCatalogResolves: () => false,
+    clientClaimsLine: (parsed: { name: string; rawInput?: string } | undefined) => options.clientCommands.claimsLine(parsed),
+    isSkillWrapperName: () => false,
+    isSkillInvocation: () => false,
+    withCommandDelivery: <T>(_delivery: unknown, run: () => T): T => run(),
+    takeCommandDraftDisposition: () => undefined,
+    clientCommands: options.clientCommands,
+  }
+  const submissionRuntime = bindSubmissionRuntime({
+    surface: {
+      withWriter: async <T>(_scope: unknown, task: () => Promise<T> | T) => task(),
+      withPromptAdmission: async <T>(_line: string, task: () => Promise<T> | T) => task(),
+      isDisposed: () => false,
+      isScopeCurrent: () => true,
+      mergeDraftIntoEditor: (text: string) => { options.composer.setEditorText(mergeDraft(options.composer.getDraft(), text)); return true },
+      restoreStaleDraftIntoEditor: () => 'merged-verbatim' as const,
+      consumeDraftAttachments: () => {},
+      markDispatch: () => {},
+      beginLocalSubmission: () => {},
+      settleLocalSubmission: () => {},
+      settleSubmitAck: () => {},
+      notify: (message: string, kind?: 'info' | 'error') => { notices.push({ text: message, kind }) },
+      refuseByTransitionFence: () => {},
+      prepareMessage: async () => ({ message: {}, attachments: [] }),
+      prompt: async (_sessionId: string, message: unknown) => {
+        modelPrompts.push(JSON.stringify(message))
+        return { kind: 'committed' as const, value: undefined }
+      },
+    } as never,
+  })
+  interface AgentLike {
+    readonly status: string
+    readonly session: { readonly id: string }
+    readonly options: Record<string, unknown>
+    readonly inbox: Record<string, unknown>
+  }
+  // Deliberately NO `inbox`-bearing graph at the COMPILE level? The Remote
+  // projection carries one structurally-typed object here so the generic
+  // constraint is satisfied; the RUNTIME discriminator (`'inbox' in agent`) is
+  // what selects the card-less Client-registry branch, so this value must NOT
+  // carry an `inbox` property.
+  const agent = { status: 'idle', session: { id: 'session-remote' } } as unknown as AgentLike
+  const controller = createSubmissionController<AgentLike>({
+    app: () => options.composer,
+    diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+    signal: new AbortController().signal,
+    isCleanedUp: () => false,
+    logError: () => {},
+    liveAgent: () => agent,
+    ownership: {
+      generation: () => core.generation(),
+      captureSubject: () => core.subject(),
+      transitionPending: () => false,
+    },
+    scope: {
+      captureLive: () => scopeAuthority.captureLive(),
+      isCurrent: (scope) => scopeAuthority.isCurrent(scope),
+      requireLive: () => {
+        const live = scopeAuthority.captureLive()
+        if (live === undefined) throw new Error('fixture: the owner is not live')
+        return live
+      },
+    },
+    session: {
+      ensureSession: async () => {},
+      beginCommandSettlement: () => {},
+      abortCommandSettlement: () => {},
+      settleCommandSettlement: () => {},
+      trackSettlementWork: () => {},
+    },
+    submissionRuntime,
+    command: command as unknown as SubmissionControllerDeps<AgentLike>['command'],
+    commandPlane: { available: () => false, execute: async () => undefined, findHandler: () => undefined },
+    // REMOTE: the TUI-owned route executes through the Client registry.
+    backendKind: 'remote',
+    backend: {
+      hostFile: { canonicalizeMentions: async (_scope: unknown, text: string) => text } as never,
+      pendingInputReader: { snapshot: () => undefined },
+      sessionWriter: { prompt: async () => ({ kind: 'committed', value: undefined }) } as never,
+      hostCommand: { execute: async () => ({ kind: 'committed', matched: false }) } as never,
+    },
+    drafts: { images: options.images, files: options.files },
+    status: { sessionCwd: () => '/ws' },
+    surface: { refreshPendingInput: () => {} },
+    history: {
+      persist: () => {},
+      persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+    },
+    viewer: { isViewing: () => false },
+    extensions: {
+      findContribution: () => undefined,
+      handlerFor: () => undefined,
+      commandIdFor: () => undefined,
+      recordHealthRef: () => undefined,
+      recordError: () => {},
+      clearError: () => {},
+    },
+    artifacts: { start: () => {} },
+    shell: { run: () => {}, interrupt: () => {} },
+    supportsLocalShellCards: false,
+    // The TSP renderer: no PiTui builtin UI.
+    supportsTuiBuiltinUi: false,
+    retainsStaleDraftRestore: false,
+    model: { selected: { get current() { return undefined } } },
+    image: { attachments: () => undefined as never, llm: () => undefined as never },
+    tuiSettings: undefined,
+    captureMatches: (subject) => core.isSubjectCurrent(subject as never),
+    ownerWasReplaced: () => false,
+    direct: { withPromptAdmission: async (_agent, _hasImages, task) => task() },
+    requestExit: () => {},
+    isPlanActive: () => false,
+  })
+  return { controller, notices, modelPrompts }
+}
+
+test('a card-less Remote /image with no argument publishes exactly one Usage error and starts no intake', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-cardless-usage-')
+  const png = join(dir, 'shot.png')
+  writeFileSync(png, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+  const { controller, notices, modelPrompts } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+  })
+
+  // The user types the bare command (no path): the handler refuses BEFORE any
+  // read, and this route has no command card — the composer notice below is
+  // the ONLY place the refusal can become visible.
+  controller.submit('/image', 'enter')
+  await waitFor(() => h.composer.notices.length === 1)
+
+  assert.deepEqual(h.composer.notices, [{ text: 'Usage: /image <path>', kind: 'error' }],
+    'the synchronous refusal is published exactly once on the card-less route')
+  assert.equal(h.imageStore.size(), 0, 'no intake was accepted, so nothing was staged')
+  // The existing refusal contract hands the line back so the user can fix it;
+  // what matters here is that it is still PLAIN TEXT, not a staged token.
+  assert.equal(h.composer.getDraft(), '/image', 'the refused line returns to the editor, never a token')
+  assert.deepEqual(notices, [], 'no second (submission-level) notice duplicates the refusal')
+  assert.deepEqual(modelPrompts, [], 'the line never reached the model as a prompt')
+})
+
+test('a card-less Remote /attach with no argument publishes exactly one Usage error and starts no intake', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-cardless-attach-usage-')
+  writeFileSync(join(dir, 'report.pdf'), Buffer.from('%PDF-1.7 report'))
+  const h = mountedHarness({ cwd: dir })
+  const { controller, notices, modelPrompts } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+  })
+
+  controller.submit('/attach', 'enter')
+  await waitFor(() => h.composer.notices.length === 1)
+
+  assert.deepEqual(h.composer.notices, [{ text: 'Usage: /attach <path>', kind: 'error' }],
+    'the synchronous refusal is published exactly once on the card-less route')
+  assert.equal(h.fileStore.values().length, 0)
+  assert.equal(h.imageStore.size(), 0)
+  assert.equal(h.composer.getDraft(), '/attach', 'the refused line returns to the editor, never a token')
+  assert.deepEqual(notices, [], 'no second (submission-level) notice duplicates the refusal')
+  assert.deepEqual(modelPrompts, [])
+})
+
+test('a card-less Remote /image with a real path reaches the mounted composer through the REAL controller', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-cardless-intake-')
+  const png = join(dir, 'shot.png')
+  writeFileSync(png, pngBytes())
+  const h = mountedHarness({ cwd: dir })
+  const { controller, notices, modelPrompts } = cardlessController({
+    composer: h.composer,
+    clientCommands: h.clientCommands,
+    images: h.imageStore,
+    files: h.fileStore,
+  })
+
+  controller.submit(`/image ${png}`, 'enter')
+  await waitFor(() => h.imageStore.size() === 1)
+  const draft = h.imageStore.values()[0]!
+  await waitFor(() => h.composer.notices.length === 1)
+
+  // The whole chain, through the production consumer: the sync result
+  // announces NOTHING (the scope is error-only), the composer publishes the
+  // single success AFTER the bytes and the token exist, and the line never
+  // becomes a model prompt.
+  assert.deepEqual(h.composer.notices, [{ text: `attached ${draft.placeholder} — Enter to send`, kind: undefined }],
+    'the ONLY success message is the composer notice published after the commit')
+  assert.equal(h.composer.getDraft(), `${draft.placeholder} `)
+  assert.deepEqual(notices, [], 'the error-only result scope published nothing for a successful intake')
+  assert.deepEqual(modelPrompts, [], 'the line never reached the model as a prompt')
 })

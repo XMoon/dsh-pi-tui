@@ -195,16 +195,21 @@ test('a confirmed title write publishes its own notice only on the card-less TSP
 test('the card-less result-notice scope is the admitted set plus /logout', () => {
   // The scope is derived from the ONE admission set (not a second routing list).
   assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
-    [...TSP_SUPPORTED_TUI_BUILTINS, 'logout'].filter(name => name !== 'attach' && name !== 'image').sort())
+    [...TSP_SUPPORTED_TUI_BUILTINS, 'logout'].sort())
   for (const name of ['new', 'fork', 'title', 'rename', 'copy', 'yolo', 'logout']) {
     assert.ok(TSP_B2A_RESULT_NOTICE_COMMANDS.has(name), `/${name} needs an owner on the card-less route`)
   }
-  // Image UX PR3-B2: the attachment intake reports success only AFTER its async
-  // read+store+token commit, so the generic result notice must never announce it.
+  // The attachment intake's SYNCHRONOUS refusal (a bare command, a malformed
+  // argument, an unavailable draft composer) returns `CommandResult.error`
+  // before any intake starts. On a renderer without a command card this
+  // result notice is the ONLY visible owner of that refusal, so the two names
+  // must stay in the scope. The scope never publishes a success result, which
+  // is why the intake's asynchronous success message can still come from the
+  // composer alone.
   for (const name of ['attach', 'image']) {
     assert.ok(TSP_SUPPORTED_TUI_BUILTINS.has(name), `/${name} is admitted on the TSP renderer`)
-    assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has(name),
-      `/${name} must not be announced from its synchronous CommandResult.success`)
+    assert.ok(TSP_B2A_RESULT_NOTICE_COMMANDS.has(name),
+      `/${name} keeps its synchronous error visible on the card-less route`)
   }
   assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('preset'), 'sibling commands keep their own refusal notices')
   assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('model'))

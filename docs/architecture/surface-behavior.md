@@ -611,9 +611,14 @@ Attachment completion and intake are Client-local:
   the bytes are staged and the placeholder inserted; with no mounted composer —
   or with the renderer's own builtin admission refusing the command — they fail
   instead of staging. A pending intake never writes a replaced composer seat or
-  a newer ownership generation/session, and a late failure/notice is published
-  only while its own seat and session are still current. Clipboard intents are
-  queued as ONE per-surface FIFO of accepted triggers: each accepted trigger
+  a newer ownership generation/session; its late outcomes are published only
+  while both its own seat and its session are still current, and the explicit
+  session-changed/transition refusal is published only while its own seat is
+  still current (it exists precisely because the session moved). On a renderer
+  without a command card the synchronous `CommandResult.error` of these commands
+  keeps its one result-notice owner; that scope never publishes a success, so
+  the async intake's single message stays with the composer. Clipboard intents
+  are queued as ONE per-surface FIFO of accepted triggers: each accepted trigger
   probes the OS clipboard at most once, a later trigger's probe starts only
   after the previous one settled (read + commit or failure), and a failed intent
   never blocks the following one. Paste text inserts at the live caret and never

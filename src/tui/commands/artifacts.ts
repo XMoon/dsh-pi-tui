@@ -117,8 +117,10 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
      * Whether a LATE outcome of this intake may still be shown: the seat it was
      * started for is the live one AND the session owner did not move. A stale
      * failure/success notice from the previous session is never popped onto the
-     * replacement surface. The explicit session-changed fence notices use
-     * {@link composerCurrent} alone — they exist because the session moved.
+     * replacement surface. The explicit session-changed/transition fence
+     * notices use {@link composerCurrent} alone — they exist because the
+     * session moved, so requiring session currentness there would suppress
+     * exactly the explanation the user needs.
      */
     const outcomeCurrent = (): boolean => composerCurrent() && runner.isSessionScopeCurrent(intakeScope)
     // The command registry supplies the runner-owned lifecycle signal. The
@@ -151,11 +153,11 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
           const resolved = await readImageFile(path, runner.cwd, runner.imageLimits(), runner.imageStore.remainingBytes())
           intakeSignal.throwIfAborted()
           if (!runner.isSessionScopeCurrent(intakeScope)) {
-            composer.notify(`the session changed while reading the ${intent} — try again`, 'error')
+            if (composerCurrent()) composer.notify(`the session changed while reading the ${intent} — try again`, 'error')
             return
           }
           if (runner.sessionTransitionPending()) {
-            composer.notify(`a session transition is in progress while reading the ${intent} — try again`, 'error')
+            if (composerCurrent()) composer.notify(`a session transition is in progress while reading the ${intent} — try again`, 'error')
             return
           }
           if (!composerCurrent()) return
@@ -190,11 +192,11 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
         const probe = await probeAttachment(raw, runner.cwd, intakeSignal)
         intakeSignal.throwIfAborted()
         if (!runner.isSessionScopeCurrent(intakeScope)) {
-          composer.notify('the session changed while reading the attachment — try again', 'error')
+          if (composerCurrent()) composer.notify('the session changed while reading the attachment — try again', 'error')
           return
         }
         if (runner.sessionTransitionPending()) {
-          composer.notify('a session transition is in progress while reading the attachment — try again', 'error')
+          if (composerCurrent()) composer.notify('a session transition is in progress while reading the attachment — try again', 'error')
           return
         }
         if (probe.kind === 'image') {
