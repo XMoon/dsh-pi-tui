@@ -189,7 +189,10 @@ test('the info control folds only its own occurrence; the body opens the Viewer 
   app.stop()
 })
 
-test('the info metadata columns are inert: no fold, no Viewer, no card disclosure', async () => {
+// The CARD-delegation half of this contract is proven separately, on a
+// genuinely foldable Tool card: `a tool-card image info row's metadata text is
+// inert and never delegates to the card disclosure`.
+test('a user message image info metadata text is inert: no fold, no Viewer, no reflow', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const { vt, app } = startApp()
@@ -212,8 +215,9 @@ test('the info metadata columns are inert: no fold, no Viewer, no card disclosur
   assert.ok(infoLine.includes('[-]'), `the control is painted on this row:\n${infoLine}`)
   const diagnosticsBefore = app.transcriptPresentationDiagnosticsForTest()
   // The identity text's first cell — well LEFT of the right-edge 3-cell
-  // control — is read-only: it must fold nothing, open no Viewer and never
-  // fall through to the card/message disclosure ladder.
+  // control — is read-only: it must fold nothing, open no Viewer and reflow
+  // nothing. (A plain user bubble has no foldable card to delegate to; the
+  // card-ladder half is asserted on a Tool card in the next case.)
   await clickCell(vt, 2, infoRow)
   const afterMetaClick = await viewport(vt)
   const diagnostics = app.transcriptPresentationDiagnosticsForTest()
@@ -280,6 +284,84 @@ test('a tool-card image body opens the Viewer without folding the card; a non-im
   await clickCell(vt, 4, captionRow)
   const folded = await viewport(vt)
   assert.ok(!folded.includes('🖼️ shot.png · 800×100'), `the caption row folded the card:\n${folded}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test("a tool-card image info row's metadata text is inert and never delegates to the card disclosure", async () => {
+  // The card-delegation sibling of the user-message case: a Tool card IS a
+  // foldable disclosure (isFoldableMessageDisclosure), so this is where the
+  // "never falls through to the card/message ladder" claim can actually fail.
+  // The info row's metadata columns must be inert (no Viewer, no image fold,
+  // no CARD fold); only its right-edge control folds the occurrence.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
+    {
+      type: 'tool/result',
+      seq: 2,
+      time: 2,
+      data: {
+        turn: 0,
+        step: 0,
+        message: createToolResultMessage({
+          callId: ToolCallId('call-1'),
+          content: [
+            { type: 'text', text: 'caption' },
+            { type: 'image', attachment: IMAGE_REF },
+          ] as unknown as ContentBlock[],
+          isError: false,
+        }),
+      },
+    } as never,
+  ])
+  app.setTranscript(folder.messages())
+  // Expand the card through its header so the image info row is mounted.
+  const header = rowOfNth(await viewport(vt), 'screenshot_tool', 0)
+  assert.ok(header > 0, 'the tool card header is painted')
+  await clickCell(vt, 4, header)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('caption'), `the card body expanded:\n${expanded}`)
+  assert.ok(expanded.includes('🖼️ shot.png · 800×100 · 33 B'), `the tool image is mounted:\n${expanded}`)
+  const infoRow = rowOfNth(expanded, '🖼️ shot.png · 800×100', 0)
+  assert.ok(infoRow > 0, `the tool image info row is painted:\n${expanded}`)
+  const infoLine = expanded.split('\n')[infoRow - 1]!
+  assert.ok(infoLine.includes('[-]'), `the occurrence control is painted on that row:\n${infoLine}`)
+  const captionRow = rowOfNth(expanded, 'caption', 0)
+  assert.ok(captionRow > 0, 'the caption row is painted')
+  const diagnosticsBefore = app.transcriptPresentationDiagnosticsForTest()
+  // Click the info row's LEFT metadata cell (far from the right-edge control).
+  await clickCell(vt, 2, infoRow)
+  const afterMetadata = await viewport(vt)
+  const diagnostics = app.transcriptPresentationDiagnosticsForTest()
+  // 1. No Viewer.
+  assert.ok(!afterMetadata.includes('Image · shot.png'), `the metadata click opens no Viewer:\n${afterMetadata}`)
+  // 2. The CARD stayed expanded: the caption and the image identity row are
+  //    both still mounted (a card fold would remove them).
+  assert.ok(afterMetadata.includes('caption'), `the metadata click must not fold the card:\n${afterMetadata}`)
+  assert.ok(afterMetadata.includes('🖼️ shot.png · 800×100 · 33 B'), `the image identity row stays mounted:\n${afterMetadata}`)
+  // 3. The IMAGE occurrence stayed expanded: its control still reads `[-]`.
+  assert.ok(afterMetadata.includes('[-]'), `the image body did not fold:\n${afterMetadata}`)
+  // 4. No layout change at all: the caption row is where it was.
+  assert.equal(rowOfNth(afterMetadata, 'caption', 0), captionRow, `the layout is unchanged:\n${afterMetadata}`)
+  assert.equal(diagnostics.structuralCommits, diagnosticsBefore.structuralCommits,
+    'an inert metadata click performs no structural rebuild (neither card nor image fold)')
+  // Control A: the SAME row's right-edge control folds ONLY the image body —
+  // the card body (caption) survives.
+  await clickControl(vt, '🖼️ shot.png · 800×100', 0)
+  const imageFolded = await viewport(vt)
+  assert.ok(imageFolded.includes('[+]'), `the occurrence folded:\n${imageFolded}`)
+  assert.ok(imageFolded.includes('caption'), `the card body survived the image fold:\n${imageFolded}`)
+  // Control B: a NON-image card row still folds the card, so the "card did not
+  // fold" assertion above is the column policy and not a dead card.
+  const captionAfter = rowOfNth(imageFolded, 'caption', 0)
+  await clickCell(vt, 4, captionAfter)
+  const cardFolded = await viewport(vt)
+  assert.ok(!cardFolded.includes('🖼️ shot.png · 800×100'), `the caption row folded the card:\n${cardFolded}`)
   app.setFullscreen(false)
   app.stop()
 })

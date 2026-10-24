@@ -373,7 +373,14 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
   const draftFiles = new DraftFileStore()
   const notices: string[] = []
   const sessionsCreated: string[] = []
-  const agentFacing: string[] = []
+  /** The REAL model-facing sink: `SubmissionRuntimeSurface.prompt`. A
+   * `/view-image` line must never reach it (it is a client-local command, not
+   * a prompt). This is the sink the assertion below is about; the shell
+   * recorder further down is a SEPARATE route with its own meaning. */
+  const modelPrompts: string[] = []
+  /** The user-shell sink. Distinct from the model prompt: `/view-image` must
+   * reach neither. */
+  const shellRuns: string[] = []
 
   let app!: TuiApp
   const composer = {
@@ -439,7 +446,10 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     notify: (message: string) => { notices.push(message) },
     refuseByTransitionFence: () => {},
     prepareMessage: async () => ({ message: {}, attachments: [] }),
-    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    prompt: async (_sessionId: string, message: unknown) => {
+      modelPrompts.push(JSON.stringify(message))
+      return { kind: 'committed' as const, value: undefined }
+    },
   }
   const submissionRuntime = bindSubmissionRuntime({ surface: runtimeSurface as never })
 
@@ -500,8 +510,9 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     },
     artifacts: { start: () => {} },
     shell: {
-      // The agent-facing sink: a `/view-image` line must never land here.
-      run: (text) => { agentFacing.push(text) },
+      // The user-shell sink (a `!`/`!!` line). A different route from the
+      // model prompt above; `/view-image` must reach neither.
+      run: (text) => { shellRuns.push(text) },
       interrupt: () => {},
     },
     supportsLocalShellCards: true,
@@ -622,7 +633,8 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
   await vt.waitForRender()
 
   assert.deepEqual(sessionsCreated, [], 'the sessionless command must not create a Session')
-  assert.deepEqual(agentFacing, [], 'the line must never reach the agent-facing sink')
+  assert.deepEqual(modelPrompts, [], 'the line must never reach the model prompt sink')
+  assert.deepEqual(shellRuns, [], 'the line must never reach the user-shell sink')
   const painted = await viewport(vt)
   assert.ok(painted.includes('Images · current transcript'), `the controller reached the picker:\n${painted}`)
   assert.ok(painted.includes('#1 · first.png'), `the mounted window is listed:\n${painted}`)
