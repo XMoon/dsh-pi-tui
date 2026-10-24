@@ -51,6 +51,12 @@ function dockNotices(fixture: DirectTspFixture): string[] {
     .map(node => (typeof node.p.text === 'string' ? node.p.text : ''))
 }
 
+/** The Session ids the dock welcome card currently carries (the hydration signal). */
+function welcomeSessionIds(fixture: DirectTspFixture): string[] {
+  const prefix = 'dock.welcome-'
+  return wireNodes(fixture.pane).filter(node => node.id.startsWith(prefix)).map(node => node.id.slice(prefix.length))
+}
+
 /** Type one `/` line into the REAL composer and submit it with Enter. */
 async function submitLine(fixture: DirectTspFixture, line: string): Promise<void> {
   await waitForInputDelivery(fixture.pane)
@@ -462,6 +468,198 @@ test('E12: reading every real row never stops a Job, interrupts a subagent or ca
     } finally {
       registry.kill = originalKill
     }
+  } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
+    await fixture.settle()
+  }
+})
+
+// ── E07: a genuinely sessionless submission creates the Session it needs ────
+
+test('E07: /tasks with NO Session follows the original ensureSession path and then opens the Hub', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  // NO persisted Session and NO `startup.sessionId`: the runner boots
+  // sessionless (deferred start), which is exactly the state E07 describes.
+  const fixture = await createDirectTspFixture(life, {
+    sessionBrowser: true,
+    workingDirectory: true,
+    officialServices: { subagentRuntime: true },
+  })
+  const sessions = fixture.ctx.get('sessions') as unknown as { list(): readonly unknown[] }
+  const agents = fixture.ctx.get('agents') as unknown as { list(): readonly unknown[] }
+  try {
+    assert.equal(sessions.list().length, 0, 'the composition really starts with NO Session')
+    assert.equal(agents.list().length, 0, 'and therefore no live Agent')
+    // The negative control is the state itself: with NO Session the Task
+    // Runtime's opener returns before mounting anything (`browserSessionId ===
+    // undefined`), so a Hub can only appear because the composed submission
+    // created the Session first. Proving the Hub really appears below therefore
+    // proves the deferred-start path — a no-session fallback would leave the
+    // picker absent and fail here.
+    await submitLine(fixture, '/tasks')
+    // The composed path must create the Session and then open the Hub on it.
+    await waitFor('the Hub opens on the Session the submission created',
+      () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
+    assert.equal(sessions.list().length, 1, 'exactly ONE Session was created by the submission path')
+    assert.equal(agents.list().length, 1, 'and its live Agent exists')
+    assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
+      'the capability gate admitted the command (no refusal was needed)')
+    assert.equal(screens(fixture), 0, 'opening the Hub acquires no Reader')
+    // The Hub is the REAL empty roster of the Session that was just created.
+    assert.deepEqual(hubIds(fixture), [], 'the fresh Session has no work to list yet')
+    const props = pickerProps(fixture.pane, HUB)
+    assert.equal(props.loading, undefined, 'the real read settled (no stuck loading state)')
+  } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
+    await fixture.settle()
+  }
+})
+
+// ── An extension contribution cannot claim a TUI builtin's name at all ──────
+
+test('E06c: the REAL extension service REFUSES a contribution named tasks, so no extension winner can exist', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  // The name conflict is rejected by the extension service itself (it returns a
+  // `conflict` outcome and the registration throws), so an extension cannot
+  // become the winner for an already-registered TUI builtin. That is why the
+  // admission cannot "capture" an extension `/tasks`: the situation is
+  // unrepresentable rather than merely unhandled.
+  await assert.rejects(
+    createDirectTspFixture(life, {
+      sessionBrowser: true,
+      extensionCommands: [{
+        id: 'ext-tasks',
+        name: 'tasks',
+        description: 'Extension-owned tasks',
+        handler: () => ({ kind: 'success', text: 'extension tasks ran' }),
+      }],
+    }),
+    /command contribution "tasks" conflicts/,
+    'the extension service refuses the conflicting registration',
+  )
+})
+
+test('E06d: the same conflict rule covers the /subagents alias spelling', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  await assert.rejects(
+    createDirectTspFixture(life, {
+      sessionBrowser: true,
+      extensionCommands: [{
+        id: 'ext-subagents',
+        name: 'subagents',
+        description: 'Extension-owned subagents',
+        handler: () => ({ kind: 'success', text: 'extension subagents ran' }),
+      }],
+    }),
+    /command contribution "subagents" conflicts/,
+    'the registered alias is equally protected from an extension takeover',
+  )
+})
+
+test('E06e: with the conflicting registration refused, the builtin /tasks still opens the real Hub', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    sessionBrowser: true,
+    workingDirectory: true,
+    officialServices: { subagentRuntime: true },
+    persistedBlankSession: { id: PARENT },
+    startup: { sessionId: PARENT },
+  })
+  try {
+    await liveSession(fixture, PARENT)
+    await submitLine(fixture, '/tasks')
+    await waitFor('the builtin /tasks still owns the name', () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
+    assert.deepEqual(hubIds(fixture), [], 'the real empty roster of the resumed Session')
+  } finally {
+    // reason: fixture teardown — waits for the real SDK to release the tty and
+    // every mounted fiber to settle; it is not an observation window.
+    await fixture.settle()
+  }
+})
+
+// ── E09: a real Session switch through the production Session Browser ───────
+
+test('E09: switching Session A→B through the real Browser leaves B with only B rows', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const A = 'a3-switch-a'
+  const B = 'a3-switch-b'
+  const fixture = await createDirectTspFixture(life, {
+    sessionBrowser: true,
+    workingDirectory: true,
+    officialServices: { subagentRuntime: true },
+    persistedBlankSession: { id: A },
+    persistedBlankSessions: [{ id: B }],
+    startup: { sessionId: A },
+  })
+  try {
+    await liveSession(fixture, A)
+    // One real Job owned by A: A's roster must be non-empty BEFORE the switch.
+    const jobs = fixture.ctx.get('jobs') as unknown as { start(spec: unknown): string }
+    const jobA = jobs.start({
+      kind: 'bash',
+      label: 'A-only build',
+      owner: SessionId(A),
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'running' }) }),
+    })
+    await submitLine(fixture, '/tasks')
+    await waitFor('A\'s Hub shows A\'s real Job', () => hubIds(fixture).includes(`job:${jobA}`), 25_000)
+    // Close the Hub so the composer is editable again, then switch through the
+    // PRODUCTION Session Browser (`/sessions` → select B → Resume).
+    fixture.pane.key('\u001b')
+    await waitFor('the Hub closed', () => pickerNode(fixture.pane, HUB) === undefined, 25_000)
+    await submitLine(fixture, '/sessions')
+    const BROWSER = 'session-browser-'
+    await waitFor('the real Session Browser opened', () => pickerNode(fixture.pane, BROWSER) !== undefined, 25_000)
+    const rowId = (() => {
+      const items = (pickerProps(fixture.pane, BROWSER).items ?? []) as Array<{ readonly id: string }>
+      return items.find(item => item.id.includes(B))?.id
+    })()
+    assert.ok(rowId !== undefined, 'the real Browser lists Session B')
+    fixture.pane.event({
+      ev: 'select',
+      sf: fixture.pane.frames().at(-1)!.sf,
+      id: pickerNode(fixture.pane, BROWSER)!.id,
+      item: rowId,
+    })
+    await waitFor('B is the Browser selection', () => pickerProps(fixture.pane, BROWSER).selected === rowId, 25_000)
+    // A confirmed pointer/action Resume is the production switch intent.
+    const resume = ((pickerProps(fixture.pane, BROWSER).actions ?? []) as Array<{ readonly id: string; readonly disabled?: boolean }>)
+      .find(action => action.id.startsWith('resume'))
+    assert.ok(resume !== undefined && resume.disabled !== true, 'Resume is offered for the persisted B')
+    fixture.pane.event({ ev: 'action', sf: fixture.pane.frames().at(-1)!.sf, id: pickerNode(fixture.pane, BROWSER)!.id, act: String(resume!.id) })
+    await waitFor('the Browser retired after the switch', () => pickerNode(fixture.pane, BROWSER) === undefined, 25_000)
+    // The switch really moved the live owner to B.
+    const agents = fixture.ctx.get('agents') as unknown as { get(id: unknown): { session: { id: string } } | undefined }
+    await waitFor('B owns the live Agent', () => agents.get(SessionId(B)) !== undefined, 25_000)
+
+    // Reopen /tasks. The renderer's hydration fence drops ordinary keys while
+    // the new subject is applied, so the dock naming B is the authoritative
+    // "B is live" gate for typing.
+    await waitFor('the dock names the switched Session B',
+      () => welcomeSessionIds(fixture).includes(B), 25_000)
+    // Give B its OWN work BEFORE reopening: a roster that merely happens to be
+    // empty cannot distinguish "read B" from "kept reading A's stale subject",
+    // so the proof needs a positive B row AND the absence of A's row.
+    const jobB = jobs.start({
+      kind: 'bash',
+      label: 'B-only build',
+      owner: SessionId(B),
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'running' }) }),
+    })
+    await submitLine(fixture, '/tasks')
+    await waitFor('B\'s OWN Job reaches the Hub', () => hubIds(fixture).includes(`job:${jobB}`), 25_000)
+    const idsB = hubIds(fixture)
+    assert.ok(idsB.includes(`job:${jobB}`), `B's own Job is listed (got ${idsB.join(',')})`)
+    assert.ok(!idsB.includes(`job:${jobA}`), `A's Job never appears in B's Hub (got ${idsB.join(',')})`)
+    assert.deepEqual(idsB, [`job:${jobB}`], 'B lists exactly B\'s own work')
+    assert.equal(screens(fixture), 0, 'the switch left no Reader Screen behind')
   } finally {
     // reason: fixture teardown — waits for the real SDK to release the tty and
     // every mounted fiber to settle; it is not an observation window.
