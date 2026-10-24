@@ -29,7 +29,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-workspace
  */
 
-import { getKeybindings } from '@xmoon76/pi-tui'
+import { Key, getKeybindings, matchesKey } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { SearchablePicker } from '../../pickers/searchable-picker.ts'
 import { color, selectListTheme } from '../../theme/runtime.ts'
@@ -132,6 +132,16 @@ export class ImageWorkspacePanel implements Component {
 
   handleInput(data: string): void {
     if (this.mode === 'list') {
+      // A FIXED Esc fallback, not an alternative binding: `KeybindingsManager`
+      // accepts an EMPTY key list, so `tui.select.cancel` can legally resolve to
+      // no keys at all. The picker only calls `onCancel` when its binding
+      // matches, so without this the workspace would have NO close route while
+      // the bar advertised one. A user's own cancel binding keeps priority —
+      // this fires only when no cancel key is bound.
+      if (!this.cancelBound() && matchesKey(data, Key.escape)) {
+        this.input.onClose()
+        return
+      }
       this.picker?.handleInput(data)
       return
     }
@@ -159,6 +169,14 @@ export class ImageWorkspacePanel implements Component {
     return panel.render(width).slice(0, rows)
   }
 
+  /** Whether the list's cancel action has ANY live key. `KeybindingsManager`
+   * accepts an empty list, so this is a reachable state, not a defensive check:
+   * the handler and the bar read this ONE predicate, so the advertisement can
+   * never disagree with what actually closes the workspace. */
+  private cancelBound(): boolean {
+    return getKeybindings().getKeys('tui.select.cancel').length > 0
+  }
+
   /**
    * The list state's pinned action bar.
    *
@@ -183,12 +201,14 @@ export class ImageWorkspacePanel implements Component {
     const down = primary('tui.select.down')
     const navigate = vertical === '' || down === '' ? '' : `${vertical}/${down}`
     const confirm = primary('tui.select.confirm')
-    const cancel = primary('tui.select.cancel')
+    // When the cancel action has no key at all, the FIXED Esc fallback in
+    // `handleInput` is what closes the workspace — so that is what the bar
+    // advertises. Both sides read `cancelBound()`, so the hint cannot promise a
+    // key that does nothing (and cannot hide a route that does work).
+    const cancel = this.cancelBound() ? primary('tui.select.cancel') : ''
     const segments: ActionBarSegment[] = []
     if (navigate !== '') segments.push({ text: `${navigate} navigate`, short: navigate, priority: 4 })
     if (confirm !== '') segments.push({ text: `${confirm} view`, short: confirm, priority: 6 })
-    // A binding that vanished entirely must still leave an operable close hint;
-    // the panel's own Esc handling is the fallback when no key is configured.
     segments.push({
       text: cancel === '' ? 'Esc close' : `${cancel} close`,
       short: cancel === '' ? 'Esc' : cancel,
