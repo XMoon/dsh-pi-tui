@@ -128,6 +128,63 @@ export function readSourceIdentity(directory) {
   return { sourceSha, version }
 }
 
+/** The repository identity a proof must carry, derived from `package.json` so
+ * nobody has to hardcode an owner slug in two places. */
+function repositorySlug() {
+  const url = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).repository?.url
+  const match = typeof url === 'string' ? url.match(/github\.com[/:]([^/]+)\/([^/.]+)/u) : null
+  if (match === null) throw new Error('package.json repository.url must identify a GitHub repository')
+  return `${match[1]}/${match[2]}`
+}
+
+/**
+ * Whether a recorded proof is EVIDENCE or just a matching digest.
+ *
+ * Two different questions, and the weaker one must not answer the stronger:
+ *
+ *   - digest match: the record describes the CURRENT inputs.
+ *   - evidence:      the record's numbers came from a real comparison run by CI
+ *                    for this repository, so the numbers are not hand-typed.
+ *
+ * The second is what stops a developer (or an agent) from writing
+ * `equivalent: true` by hand and skipping the proof forever. It checks the
+ * PROVENANCE the workflow stamps onto every candidate: a run URL inside this
+ * repository, a full commit SHA, the platform scope, and the exact fields a
+ * real comparison produces. It cannot re-query the run: that would need a token
+ * and network in a step whose job is to read a file. It therefore proves
+ * provenance SHAPE, and the genuine guarantee stays structural - a candidate is
+ * authored only from `packs/pack-equivalence.json`, and cannot be written by a
+ * run whose comparison did not pass.
+ *
+ * @param {object|undefined} proof - the mode's proof.
+ * @returns {{trusted: boolean, reason: string}} the verdict.
+ */
+export function proofEvidenceVerdict(proof) {
+  if (proof === undefined || proof === null) return { trusted: false, reason: 'no proof' }
+  if (proof.equivalent !== true) return { trusted: false, reason: 'the proof does not assert equivalence' }
+  if (!Number.isInteger(proof.entryCount) || proof.entryCount <= 0) {
+    return { trusted: false, reason: 'the proof records no entry count' }
+  }
+  for (const key of ['differingFiles', 'manifestDifferences']) {
+    if (!Array.isArray(proof[key])) {
+      return { trusted: false, reason: `the proof does not record ${key}, so it did not come from a comparison` }
+    }
+    if (proof[key].length > 0) return { trusted: false, reason: `the proof records a non-empty ${key}` }
+  }
+  const run = proof.run
+  if (typeof run !== 'string' || !/^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+$/u.test(run)) {
+    return { trusted: false, reason: 'the proof carries no CI run URL' }
+  }
+  const slug = repositorySlug()
+  if (!run.includes(`/${slug}/`)) {
+    return { trusted: false, reason: `the proof's run URL is not a ${slug} workflow run` }
+  }
+  if (typeof proof.commit !== 'string' || !/^[0-9a-f]{40}$/u.test(proof.commit)) {
+    return { trusted: false, reason: 'the proof carries no full commit SHA' }
+  }
+  return { trusted: true, reason: 'the proof carries CI provenance for this repository' }
+}
+
 /**
  * The identity a proof must be REPLAYED against for one mode.
  *
@@ -250,6 +307,12 @@ export function evaluateBaseline(recorded, scope = {}) {
   if (proof.equivalent !== true) {
     // The record exists for this mode but does not prove a passing comparison.
     return { valid: false, reason: `the record carries no PASSING equivalence proof for mode '${mode}'` }
+  }
+  // A matching digest is not evidence: a hand-written `equivalent: true` must
+  // never be able to skip the proof permanently.
+  const evidence = proofEvidenceVerdict(proof)
+  if (!evidence.trusted) {
+    return { valid: false, reason: `mode '${mode}' proof is not trustworthy evidence: ${evidence.reason}` }
   }
   // The proof's SCOPE is part of the gate. An npm proof says nothing about a
   // source run, and a Node 24 proof says nothing about another runtime.

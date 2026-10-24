@@ -993,6 +993,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # The sensitivity decision is a BASE...HEAD diff, which needs a merge
+          # base. A shallow clone cannot produce one, and the resulting diff
+          # failure must never be read as "this PR touched nothing".
+          fetch-depth: 0
 
       - name: Setup pnpm and Node.js
         uses: pnpm/setup@v2
@@ -1037,45 +1041,77 @@ jobs:
             records=false
           fi
 
-          # Compare against the PR BASE, never the working tree: a file that is
-          # already stale in `main` is not this PR's debt, while a file this PR
-          # changed is its debt even if the resulting bytes match the baseline.
+          # Compare against the event's BASE, never the working tree: a file that
+          # is already stale in `main` is not this PR's debt, while a file this
+          # PR changed is its debt even if the resulting bytes match the baseline.
+          #
+          # `fetch-depth: 0` above is what makes a merge base available. For a
+          # push, `github.event.before` may be absent (a new branch) or not be in
+          # the clone; both are handled below without guessing.
           base=''
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-            base="origin/${{ github.base_ref }}"
-          else
-            before="${{ github.event.before || '' }}"
-            if [ -n "$before" ] && git rev-parse --verify --quiet "$before^{commit}" >/dev/null; then
-              base="$before"
-            fi
-          fi
+          case "${{ github.event_name }}" in
+            pull_request)
+              base="origin/${{ github.base_ref }}"
+              ;;
+            push)
+              before="${{ github.event.before }}"
+              if [ -n "$before" ] && ! printf '%s' "$before" | grep -qE '^0+$'; then
+                if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+                  # Only paid for when the commit is genuinely absent.
+                  git fetch --no-tags origin "$before" || true
+                fi
+                if git cat-file -e "${before}^{commit}" 2>/dev/null; then
+                  base="$before"
+                fi
+              fi
+              ;;
+          esac
 
+          # FAIL CLOSED. "We could not compare against the base" is not evidence
+          # that nothing changed, so any failure to produce a diff must assume
+          # the expensive, safe answer.
+          sensitive=true
           if [ -z "$base" ]; then
-            # An unknown base is not evidence of "untouched".
             echo 'sensitive: base commit unknown, assuming this run owes a real comparison'
-            sensitive=true
-          elif node scripts/pack-equivalence-input.mjs --sensitive --base "$base" | tee sensitive.txt \
-                 && grep -q 'changes packaging evidence inputs' sensitive.txt; then
-            sensitive=true
+          elif node scripts/pack-equivalence-input.mjs --sensitive --base "$base" > sensitive.txt 2>&1; then
+            cat sensitive.txt
+            if grep -q 'changes no packaging evidence input' sensitive.txt; then
+              sensitive=false
+            fi
           else
-            sensitive=false
+            cat sensitive.txt || true
+            echo 'sensitive: the base diff failed, assuming this run owes a real comparison'
           fi
 
-          if [ "$sensitive" = "true" ] || [ "$records" = "false" ]; then
+          # THREE outcomes, and `sensitive` is NO LONGER the trigger by itself.
+          #
+          # Re-running the comparison just because a PR touched a packaging file
+          # would make the owner pay twice: once to produce the evidence, and
+          # again on the push that records it. What matters is whether the
+          # committed record is trustworthy EVIDENCE for these exact inputs
+          # (`records`, which `--check` now answers by verifying provenance, not
+          # merely a matching digest).
+          #
+          #   trusted evidence        -> skip, PASS            (sensitive or not)
+          #   no evidence, sensitive  -> full comparison, then the sync gate
+          #   no evidence, untouched  -> fast FAIL, never pack
+          if [ "$records" = "true" ]; then
+            needed=false
+            sync=ok
+          elif [ "$sensitive" = "true" ]; then
             needed=true
-            enforce=true
+            sync=required
           else
             needed=false
-            enforce=true
+            sync=stale
           fi
 
-          echo "records=$records sensitive=$sensitive"
+          echo "records=$records sensitive=$sensitive needed=$needed sync=$sync"
           {
             echo "needed=$needed"
             echo "records=$records"
             echo "sensitive=$sensitive"
-            echo "enforce=$enforce"
+            echo "sync=$sync"
           } >> "$GITHUB_OUTPUT"
 
       - name: Report this run's packaging input digest
@@ -1164,22 +1200,46 @@ jobs:
           retention-days: 7
 
       # The gate that makes "update the baseline in the SAME PR" enforceable.
-      # It runs only after the comparison and its artifact are complete, so a
-      # failing gate never costs a developer the evidence.
+      # It runs only after the comparison and its artifacts are complete, so a
+      # failure never costs a developer the evidence.
+      #
+      # Two distinct failures, with distinct fixes:
+      #   sync=required - this change owns the proof and did not update the
+      #                   record: take the candidate artifact from THIS run.
+      #   sync=stale    - this change touches nothing packaging-related, but the
+      #                   record it inherited is stale: the PR that made it stale
+      #                   owns the fix. Fail fast; do not pack twice.
       - name: Does the committed baseline describe THIS tree?
-        if: ${{ steps.trigger.outputs.enforce == 'true' && steps.trigger.outputs.records == 'false' }}
+        if: ${{ steps.trigger.outputs.sync == 'stale' || (steps.trigger.outputs.sync == 'required' && steps.trigger.outputs.records == 'false') }}
+        env:
+          MODE: ${{ needs.dsh-context.outputs.mode }}
+          SYNC: ${{ steps.trigger.outputs.sync }}
+          SENSITIVE: ${{ steps.trigger.outputs.sensitive }}
         run: |
           set -euo pipefail
-          echo '::error title=pack-equivalence baseline is stale::This change alters packaging inputs, so the comparison had to run again.'
+          check_args=(--check scripts/pack-equivalence-baseline.json --mode "$MODE" --node 24 --platform "${{ runner.os }}")
+          if [ "$MODE" = "source" ]; then
+            check_args+=(--source-distribution "$RUNNER_TEMP/dsh-source-pack")
+          fi
+
           echo 'The committed scripts/pack-equivalence-baseline.json does not describe this tree:'
-          node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json \
-            --mode "${{ needs.dsh-context.outputs.mode }}" --node 24 --platform "${{ runner.os }}" || true
+          node scripts/pack-equivalence-input.mjs "${check_args[@]}" || true
           echo ''
-          echo 'A passing comparison already produced the record you need: download the'
-          echo '"dsh-pi-tui-pack-equivalence-candidate" artifact from this run and commit it as'
-          echo 'scripts/pack-equivalence-baseline.json (do not hand-edit hashes). Push again:'
-          echo 'this run will still re-prove equivalence, because that real comparison is the'
-          echo 'evidence, not the recorded file.'
+
+          if [ "$SENSITIVE" = "true" ]; then
+            echo '::error title=pack-equivalence baseline is stale::This change alters packaging evidence inputs, so it owes its own proof and must record it in the same PR.'
+            echo "A passing comparison already produced the record you need: download the"
+            echo "\"dsh-pi-tui-pack-equivalence-candidate-${MODE}\" artifact from this run and commit it as"
+            echo 'scripts/pack-equivalence-baseline.json (do not hand-edit hashes). Push again:'
+            echo 'this run will still re-prove equivalence, because that real comparison is the'
+            echo 'evidence, not the recorded file.'
+          else
+            echo '::error title=pack-equivalence baseline is stale::This change touches no packaging evidence input, but the recorded proof no longer covers the current inputs.'
+            echo 'This PR does not owe a comparison, and it will NOT run one. The proof owner is'
+            echo 'the change that moved a packaging input without refreshing'
+            echo 'scripts/pack-equivalence-baseline.json; that change must commit the record it'
+            echo 'produced. Once it does, this PR passes without paying for a duplicated pack.'
+          fi
           exit 1
 
   # ---------------------------------------------------------------------------

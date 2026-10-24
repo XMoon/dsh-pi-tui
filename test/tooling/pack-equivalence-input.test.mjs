@@ -41,6 +41,24 @@ function scratch(t) {
   return testLifecycle(t).tempDir('dsh-pack-eq-')
 }
 
+
+/** A proof that carries the provenance a real CI run stamps, so the validity
+ *  checks below are about INPUTS/SCOPE rather than failing on provenance. */
+function trustedProof(overrides = {}) {
+  return {
+    equivalent: true,
+    mode: 'npm',
+    node: '24',
+    platform: 'linux',
+    entryCount: 40,
+    differingFiles: [],
+    manifestDifferences: [],
+    run: 'https://github.com/XMoon/dsh-pi-tui/actions/runs/40048155158',
+    commit: 'db889aa9bc2a71e7b46da649365cec40cd505d03',
+    ...overrides,
+  }
+}
+
 test('the digest names the inputs the equality depends on', () => {
   const identity = packagingInputDigest()
   const paths = identity.inputs.map(input => input.path)
@@ -74,7 +92,7 @@ test('a proof that says equivalent: false triggers the proof', (t) => {
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proofs = { npm: { equivalent: false, mode: 'npm', node: '24' } }
+  recorded.proofs = { npm: trustedProof({ equivalent: false }) }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file])
   assert.equal(check.status, 1)
@@ -85,7 +103,7 @@ test('a recorded proof covers the inputs it was taken at, in ITS scope', (t) => 
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proofs = { npm: { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0], platform: process.platform } }
+  recorded.proofs = { npm: trustedProof({ node: process.versions.node.split('.')[0], platform: process.platform }) }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file])
   assert.equal(check.status, 0, check.stdout + check.stderr)
@@ -98,7 +116,7 @@ test('a proof from ANOTHER mode does not cover this run', (t) => {
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proofs = { npm: { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0], platform: process.platform } }
+  recorded.proofs = { npm: trustedProof({ node: process.versions.node.split('.')[0], platform: process.platform }) }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file, '--mode', 'source'])
   assert.equal(check.status, 1)
@@ -110,7 +128,7 @@ test('a proof from ANOTHER Node major does not cover this run', (t) => {
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proofs = { npm: { equivalent: true, mode: 'npm', node: '24', platform: process.platform } }
+  recorded.proofs = { npm: trustedProof({ platform: process.platform }) }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file, '--node', '26'])
   assert.equal(check.status, 1)
@@ -140,7 +158,7 @@ test('a record for OTHER inputs TRIGGERS the proof and names what differs', (t) 
   const recorded = JSON.parse(readFileSync((cli(['--write', file]), file), 'utf8'))
   // A valid proof, so the check proceeds to the digest comparison this case
   // is about.
-  recorded.proofs = { npm: { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0], platform: process.platform } }
+  recorded.proofs = { npm: trustedProof({ node: process.versions.node.split('.')[0], platform: process.platform }) }
   // Pretend the manifest changed since the proof was taken.
   recorded.digest = '0'.repeat(64)
   recorded.inputs = recorded.inputs.map(input =>
@@ -203,7 +221,7 @@ test('a proof from ANOTHER platform does not cover this run', (t) => {
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proofs = { npm: { equivalent: true, mode: 'npm', node: '24', platform: 'linux' } }
+  recorded.proofs = { npm: trustedProof() }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file, '--platform', 'win32'])
   assert.equal(check.status, 1)
@@ -343,8 +361,49 @@ test('a baseline candidate is authored ONLY from a comparison that proved equiva
   assert.equal(candidate.proofs.npm.commit, 'deadbeef')
   assert.equal(candidate.digest, packagingInputDigest().digest,
     'the authored baseline must describe the inputs the comparison actually ran on')
-  // The authored record must satisfy the same checker a hand-written one does.
-  assert.equal(cli(['--check', out, '--mode', 'npm', '--node', '24', '--platform', 'Linux']).status, 0)
+
+  // Provenance SHAPE is enforced: a made-up run URL or a short SHA records a
+  // digest but not trustworthy evidence, so it must not satisfy the checker.
+  const weak = cli(['--check', out, '--mode', 'npm', '--node', '24', '--platform', 'Linux'])
+  assert.equal(weak.status, 1, 'a fabricated run URL must not count as evidence')
+  assert.match(weak.stdout, /not trustworthy evidence/u)
+
+  // The same comparison authored with real provenance DOES satisfy it.
+  const good = join(dir, 'good.json')
+  const stamped = cli([
+    '--baseline', join(dir, 'absent.json'), '--comparison', comparison, '--out', good,
+    '--run', 'https://github.com/XMoon/dsh-pi-tui/actions/runs/40048155158',
+    '--commit', 'db889aa9bc2a71e7b46da649365cec40cd505d03',
+    '--mode', 'npm', '--node', '24', '--platform', 'Linux',
+  ])
+  assert.equal(stamped.status, 0, stamped.stderr)
+  assert.equal(cli(['--check', good, '--mode', 'npm', '--node', '24', '--platform', 'Linux']).status, 0)
+})
+
+test('a hand-written equivalent:true is not evidence and must not skip the proof', (t) => {
+  // The whole point of separating "digest matches" from "evidence exists": a
+  // developer (or an agent) can type a matching digest and this flag, but
+  // cannot fabricate the provenance a real comparison stamps.
+  const file = join(scratch(t), 'baseline.json')
+  cli(['--write', file])
+  const recorded = JSON.parse(readFileSync(file, 'utf8'))
+  recorded.proofs = { npm: trustedProof() }
+  const cases = [
+    { label: 'no run URL', override: { run: undefined } },
+    { label: 'not this repository', override: { run: 'https://github.com/someone/else/actions/runs/1' } },
+    { label: 'not a run URL', override: { run: 'https://example.test/run/1' } },
+    { label: 'short commit', override: { commit: 'deadbeef' } },
+    { label: 'no entry count', override: { entryCount: undefined } },
+    { label: 'claims a differing file', override: { differingFiles: ['CHANGELOG.md'] } },
+    { label: 'no manifestDifferences field', override: { manifestDifferences: undefined } },
+  ]
+  for (const { label, override } of cases) {
+    recorded.proofs.npm = trustedProof(override)
+    writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
+    const check = cli(['--check', file, '--mode', 'npm', '--node', '24', '--platform', 'Linux'])
+    assert.equal(check.status, 1, `${label}: a non-evidence proof must not satisfy the checker`)
+    assert.match(check.stdout, /not trustworthy evidence/u, label)
+  }
 })
 
 test('an unequal comparison authors NO candidate, so it cannot become a PASS', (t) => {
@@ -403,7 +462,7 @@ test('the workflow decides sensitivity from the PR BASE, not from the working tr
   assert.match(decide.run, /needed=true/u)
   // Source Mode participates in the SAME gate, bound to the verified
   // distribution; its proof is never the npm one.
-  assert.match(decide.run, /mode" = "source"/u)
+  assert.match(decide.run, /"\$mode" = "source"/u)
   assert.match(decide.run, /--source-distribution/u)
 })
 
@@ -435,15 +494,12 @@ function sourceBaseline(t, sourceDir, proofOverrides = {}) {
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
   recorded.proofs = {
-    source: {
-      equivalent: true,
+    source: trustedProof({
       mode: 'source',
-      node: '24',
-      platform: 'linux',
       sourceSha: readSourceIdentity(sourceDir).sourceSha,
       sourceVersion: readSourceIdentity(sourceDir).version,
       ...proofOverrides,
-    },
+    }),
   }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   return file
@@ -471,10 +527,7 @@ test('a source proof only covers the DSH identity it was taken at', (t) => {
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
   recorded.proofs = {
-    source: {
-      equivalent: true, mode: 'source', node: '24', platform: 'linux',
-      sourceSha: 'a'.repeat(40), sourceVersion: '0.2.1-rc.3',
-    },
+    source: trustedProof({ mode: 'source', sourceSha: 'a'.repeat(40), sourceVersion: '0.2.1-rc.3' }),
   }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const matching = cli(['--check', file, '--mode', 'source', '--node', '24', '--platform', 'linux',
@@ -503,7 +556,7 @@ test('an npm proof never satisfies Source Mode and a source proof never satisfie
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proofs = { npm: { equivalent: true, mode: 'npm', node: '24', platform: 'linux' } }
+  recorded.proofs = { npm: trustedProof() }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
 
   const asSource = cli(['--check', file, '--mode', 'source', '--node', '24', '--platform', 'linux',
@@ -511,8 +564,7 @@ test('an npm proof never satisfies Source Mode and a source proof never satisfie
   assert.equal(asSource.status, 1)
   assert.match(asSource.stdout, /no recorded equivalence proof exists for mode 'source'/u)
 
-  recorded.proofs = { source: { equivalent: true, mode: 'source', node: '24', platform: 'linux',
-    sourceSha: 'a'.repeat(40), sourceVersion: '0.2.1-rc.3' } }
+  recorded.proofs = { source: trustedProof({ mode: 'source', sourceSha: 'a'.repeat(40), sourceVersion: '0.2.1-rc.3' }) }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const asNpm = cli(['--check', file, '--mode', 'npm', '--node', '24', '--platform', 'linux'])
   assert.equal(asNpm.status, 1)
@@ -564,8 +616,7 @@ test('authoring one mode preserves the other mode record only while it still app
   const recordedFile = join(dir, 'recorded.json')
   cli(['--write', recordedFile])
   const recorded = JSON.parse(readFileSync(recordedFile, 'utf8'))
-  recorded.proofs = { source: { equivalent: true, mode: 'source', node: '24', platform: 'linux',
-    sourceSha: 'a'.repeat(40), sourceVersion: '0.2.1-rc.3' } }
+  recorded.proofs = { source: trustedProof({ mode: 'source', sourceSha: 'a'.repeat(40), sourceVersion: '0.2.1-rc.3' }) }
   writeFileSync(recordedFile, `${JSON.stringify(recorded, null, 2)}\n`)
 
   const out = join(dir, 'out.json')
@@ -582,4 +633,102 @@ test('authoring one mode preserves the other mode record only while it still app
   const check = cli(['--check', out, '--mode', 'source', '--node', '24', '--platform', 'linux',
     '--source-distribution', sourceDir])
   assert.equal(check.status, 0, check.stdout)
+})
+
+test('a base-diff failure makes the run owe a comparison instead of skipping it', () => {
+  // Observed in real CI run 40051144234: `actions/checkout` was shallow, so
+  // `origin/main...HEAD` had no merge base, the diff failed, and the shell read
+  // that failure as "not sensitive" and skipped the comparison a sensitive PR
+  // owed. A failure to LOOK is not evidence that nothing changed.
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  const steps = workflow.jobs.equivalence.steps
+
+  const checkout = steps.find(step => step.uses === 'actions/checkout@v7')
+  assert.ok(checkout, 'the job must check out the repository')
+  assert.equal(checkout.with['fetch-depth'], 0,
+    'a BASE...HEAD diff needs a merge base, so the clone cannot be shallow')
+
+  const decide = steps.find(step => step.id === 'trigger').run
+  // The safe value must be the DEFAULT, not something a later branch can forget.
+  const failClosed = /sensitive=true\n\s+if \[ -z "\$base" \]|sensitive=true\s*\n\s*if \[/.test(decide)
+  assert.ok(failClosed, 'the decision must default to sensitive and only narrow it on proof')
+  // The narrowing must require the EXPLICIT "changes no packaging input" text,
+  // so an error message can never be mistaken for the negative answer.
+  assert.match(decide, /grep -q 'changes no packaging evidence input'/u)
+  // A failed diff must not fall through to `sensitive=false`.
+  assert.match(decide, /the base diff failed, assuming this run owes a real comparison/u)
+})
+
+test('the sensitive probe reports its negative answer explicitly', () => {
+  // The workflow narrows to `sensitive=false` only on this exact sentence, so it
+  // must exist and must not be a substring of the positive one.
+  const negative = 'sensitive: this branch changes no packaging evidence input'
+  const positive = 'sensitive: this branch changes packaging evidence inputs ('
+  assert.equal(positive.includes(negative), false)
+  assert.match(negative, /changes no packaging evidence input/u)
+})
+
+// ---------------------------------------------------------------------------
+// The THREE-outcome decision. The earlier version collapsed "the PR touches
+// nothing" with "the baseline is stale" into one expensive answer, so an
+// unrelated PR paid for a comparison it did not owe.
+// ---------------------------------------------------------------------------
+
+function decisionScript() {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  return workflow.jobs.equivalence.steps.find(step => step.id === 'trigger').run
+}
+
+test('the decision trusts recorded evidence first, not the sensitive flag', () => {
+  const script = decisionScript()
+  // Trusted evidence wins even when the PR touched a packaging input: the
+  // owner should not pay for the same comparison twice.
+  assert.match(script, /if \[ "\$records" = "true" \]; then\n\s+needed=false\n\s+sync=ok/u)
+  // No evidence + sensitive -> the real comparison, then the sync gate.
+  assert.match(script, /elif \[ "\$sensitive" = "true" \]; then\n\s+needed=true\n\s+sync=required/u)
+  // No evidence + untouched -> fast FAIL, never another pack.
+  assert.match(script, /else\n\s+needed=false\n\s+sync=stale/u)
+  // The bug this replaced: `sensitive` alone bought a comparison even when the
+  // record was already trustworthy.
+  assert.doesNotMatch(script, /\[ "\$sensitive" = "true" \] \|\| \[ "\$records" = "false" \]/u)
+})
+
+test('the stale-baseline fast failure does not build either package', () => {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  const steps = workflow.jobs.equivalence.steps
+  const gate = steps.find(step => String(step.name ?? '').includes('Does the committed baseline describe THIS tree'))
+  assert.ok(gate, 'the sync gate must exist')
+  assert.match(gate.if, /sync == 'stale'/u, 'the gate must fire for a stale inherited baseline')
+  for (const name of ['Build the ordinary package', 'Build the CI-only package']) {
+    const step = steps.find(candidate => candidate.name === name)
+    assert.ok(step, `${name} must exist`)
+    assert.match(step.if, /steps\.trigger\.outputs\.needed == 'true'/u,
+      `${name} must be gated on the decision, so sync=stale skips it`)
+  }
+})
+
+test('the two failure modes give different, actionable diagnostics', () => {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  const gate = workflow.jobs.equivalence.steps.find(step => String(step.name ?? '').includes('Does the committed baseline describe THIS tree'))
+  // The proof owner is told to take ITS OWN artifact...
+  assert.match(gate.run, /pack-equivalence-candidate-\$\{MODE\}/u,
+    'the diagnostic must name the mode-suffixed artifact that actually exists')
+  // ...while an unrelated PR is explicitly told it is not the owner.
+  assert.match(gate.run, /This PR does not owe a comparison, and it will NOT run one/u)
+  assert.match(gate.run, /does not owe a comparison/u)
+  // The source-mode re-check must carry its identity argument or it reports a
+  // misleading "source directory missing".
+  assert.match(gate.run, /--source-distribution "\$RUNNER_TEMP\/dsh-source-pack"/u)
+})
+
+test('a push event resolves its own base instead of assuming an expensive run', () => {
+  const script = decisionScript()
+  // A push must try its own `before` commit, fetching only when absent.
+  assert.match(script, /push\)/u)
+  assert.match(script, /printf '%s' "\$before" \| grep -qE '\^0\+\$'/u,
+    'an all-zero `before` (new branch) must not be treated as a real base')
+  assert.match(script, /git cat-file -e "\$\{before\}\^\{commit\}"/u)
+  assert.match(script, /git fetch --no-tags origin "\$before"/u)
+  // Missing base is still fail-closed.
+  assert.match(script, /base commit unknown, assuming this run owes a real comparison/u)
 })
