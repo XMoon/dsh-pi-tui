@@ -123,7 +123,10 @@ import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
-import { createPluginManagerWorkspacePanel } from '../tui/plugin-manager/workspace.ts'
+import {
+  createPluginManagerWorkspacePanel,
+  type EmbeddedPluginPage,
+} from '../tui/plugin-manager/workspace.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { type WorkingDirectoryServiceLike } from '../runtime/direct/working-directory-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
@@ -1780,8 +1783,12 @@ export function applyRunnerWithRuntime(
         clearError: (ref) => extensionService?._clearRegistryError(ref),
       },
       pluginManager: {
-        open: () => pluginManager.open(),
-        page: (done) => pluginManager.page(done),
+        // The composition zone KNOWS the concrete panel it injected below
+        // (`createPluginManagerWorkspacePanel`): this is the ONE narrowing from
+        // the UI-neutral `Component` the surface runtime hands back to the
+        // Settings-only page contract. The application layer stays UI-neutral.
+        page: (onYieldNavigation) =>
+          pluginManager.page(onYieldNavigation) as EmbeddedPluginPage | undefined,
       },
       client: {
         get runCopyCommand() { return clientActions.runCopyCommand },

@@ -133,6 +133,12 @@ export interface SettingsCommandRegistrars {
    *  destination and open the Settings workspace at it. It never executes a
    *  credential operation itself. */
   openAuthWorkspace(destination: AuthDestination): CommandResult
+  /**
+   * `/plugins`: the canonical sessionless entry into `Settings → Plugins`.
+   * It takes the SAME Settings workspace lease (no second screen, no Session
+   * create/switch) and lands on the Plugin List with the keyboard on it.
+   */
+  openPluginsWorkspace(): CommandResult
 }
 
 /**
@@ -849,7 +855,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
       {
         onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
-        onOpenPlugins: (done) => runner.createPluginManagerPage(done),
+        onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
         onCommit: commitSettingsWorkspaceField,
         createModelsPage,
         createAccountPage,
@@ -3090,6 +3096,30 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The ONE `/login` / `/logout` navigation entry. It maps the shared
    *  semantic destination onto the Settings workspace; no credential write is
    *  performed here. */
+  /**
+   * `/plugins` deep link: the ONE Settings lease, `Plugins` selected and the
+   * keyboard on the Plugin List. No About read is started here (the panel's
+   * About entry hook owns the real entry when the user browses About later) and
+   * no separate Plugin screen is ever leased.
+   */
+  const openPluginsWorkspace = (): CommandResult => {
+    if ((app as unknown as import('../../tui-app.ts').TuiApp | undefined) === undefined) {
+      return {
+        kind: 'error',
+        text: 'the Settings Plugins workspace is not available in this renderer',
+      }
+    }
+    try {
+      openSettingsWorkspaceWith({ initialCategory: 'plugins' })
+    } catch (error) {
+      return {
+        kind: 'error',
+        text: `could not open the settings workspace: ${safeErrorMessage(error)}`,
+      }
+    }
+    return { kind: 'success' }
+  }
+
   const openAuthWorkspace = (destination: AuthDestination): CommandResult => {
     if (destination.kind === 'error') return { kind: 'error', text: destination.message }
     if ((app as unknown as import('../../tui-app.ts').TuiApp | undefined) === undefined) {
@@ -3119,7 +3149,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return { kind: 'success' }
   }
 
-  return { registerSettings, registerFooter, registerDisplay, registerFocus, registerKeybindings, openAuthWorkspace }
+  return {
+    registerSettings,
+    registerFooter,
+    registerDisplay,
+    registerFocus,
+    registerKeybindings,
+    openAuthWorkspace,
+    openPluginsWorkspace,
+  }
 }
 
 /** Map one resolved Models destination onto the page's initial view. */

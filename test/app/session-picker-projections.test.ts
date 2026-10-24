@@ -188,7 +188,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

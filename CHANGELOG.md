@@ -115,6 +115,15 @@
 
 ### 变更
 
+- **`/plugins` 并入 Settings，成为 `Settings → Plugins` 的深链。** 两者现在使用同一个
+  Settings 全屏 lease 和同一个插件页面，不再有独立的插件全屏界面，也不会新建或切换
+  Session；`Settings` 的 `Plugins` 分类在本分类取得焦点时直接预览真实插件列表，不再需要
+  `Open Plugin Manager` 中转行。顶部身份/元数据/分隔线/面栏与最后一行操作栏由 Settings
+  统一绘制，插件只占业务正文。≥120 列时同屏显示 `类别 | 插件列表 | 详情`，76–119 列在
+  分类焦点下显示 `类别 | 列表`、在插件焦点下显示 `列表 | 详情`，<76 列单栏；安装、危险
+  确认与 Diagnostics 始终占满整宽。列表 Esc 回到 Settings 分类（同一页面实例、查询/选择/
+  滚动与后台安装请求保持不变），再按一次 Esc 关闭；`/plugins` 首次进入直接落在插件列表。
+  插件页始终以列表开始，按 `i` 才恢复同一个安装请求，不会自动落进安装视图。
 - **Models 首页只列出已配置的 provider，新增页变成可选目录。** 首页按 Host 里的
   profile 是否存在来分组，已接入的 provider 与 DeepSeek Account 各占一行，Key 是否存在
   另行独立显示（`Configured` / `Key missing` / `Signed in` / `Not signed in`，读取失败

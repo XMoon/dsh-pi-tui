@@ -150,7 +150,7 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

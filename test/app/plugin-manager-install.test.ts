@@ -69,7 +69,6 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -79,12 +78,21 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
 
 function installPage(controller: PluginManagerController): PluginManagerWorkspacePanel {
   return new PluginManagerWorkspacePanel(controller, {
-    rows: () => 40,
-    columns: () => 120,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
+}
+
+/** Plan the page at ONE local viewport, then paint that exact frame. */
+function renderAt(
+  page: PluginManagerWorkspacePanel,
+  width: number,
+  rows: number,
+  allowDual = false,
+): string[] {
+  page.setViewport({ width, rows, allowDual })
+  return page.render(width)
 }
 
 test('install events are correlated by request id and unrelated events are ignored', async () => {
@@ -187,7 +195,6 @@ function recoveryHarness(options: {
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -251,7 +258,7 @@ test('a whole-panel teardown then reopen preserves the in-flight install and nev
   const gate = deferred<PluginChangeFact>()
   const harness = recoveryHarness({ startInstall: () => gate.promise })
   // The first surface: open the install dialog, inspect and dispatch.
-  const firstPanel = new PluginManagerWorkspacePanel(harness.controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, {})
+  const firstPanel = new PluginManagerWorkspacePanel(harness.controller, { requestRender: () => {}, onCopy: () => {}, onYieldNavigation: () => {} })
   harness.controller.beginManualInstall()
   harness.controller.inspect('pkg', null)
   await tick()
@@ -264,21 +271,28 @@ test('a whole-panel teardown then reopen preserves the in-flight install and nev
   // hidden): the panel releases its owner exactly once while the controller —
   // and therefore the official operation — survives.
   const released: number[] = []
-  const ownedPanel = new PluginManagerWorkspacePanel(harness.controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, { onDispose: () => released.push(1) })
+  const ownedPanel = new PluginManagerWorkspacePanel(harness.controller, { requestRender: () => {}, onCopy: () => {}, onYieldNavigation: () => {} }, { onDispose: () => released.push(1) })
   firstPanel.dispose()
   ownedPanel.dispose()
   assert.deepEqual(released, [1], 'the panel teardown releases its surface owner exactly once')
 
   // Reopen the surface through the panel-open entry: a NEW panel over the SAME
-  // controller resumes the dispatched install with the same request id.
-  harness.controller.open('direct-command')
-  const reopened = new PluginManagerWorkspacePanel(harness.controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, {})
+  // controller starts on the list and `i` resumes the dispatched install with
+  // the same request id.
+  harness.controller.open()
+  const reopened = new PluginManagerWorkspacePanel(harness.controller, { requestRender: () => {}, onCopy: () => {}, onYieldNavigation: () => {} }, {})
   await tick()
+  assert.equal(reopened.currentView(), 'list', 'a reopened page starts on the list; the attempt is never auto-opened')
   assert.equal(harness.installCalls.length, 1, 'reopening the surface must not dispatch a second installBundle')
+  reopened.handleInput('i')
+  assert.equal(reopened.currentView(), 'install', 'i opens the resumed install view')
+  assert.equal(harness.installCalls.length, 1, 'i on an existing attempt never dispatches a second installBundle')
   assert.equal(harness.controller.installView()?.requestId, requestId, 'the same request id is preserved')
   assert.equal(harness.controller.installView()?.phase, 'starting',
     'a dispatched install reopens as the same install view, never a fresh dialog')
-  assert.ok(reopened.render(60).length > 0, 'the reopened panel renders the resumed install view')
+  const resumed = renderAt(reopened, 60, 24)
+  assert.equal(resumed.length, 24, 'the reopened panel renders its granted local viewport')
+  assert.match(resumed.join('\n'), /starting/, 'the reopened panel paints the resumed install view')
   reopened.dispose()
   gate.resolve(change())
   await tick()
@@ -324,17 +338,14 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => [] })
   const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 40,
-    columns: () => 160,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
   const assertPhysicalRows = (rendered: readonly string[], where: string): string => {
     const text = rendered.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
@@ -351,7 +362,7 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
   controller.inspect('pkg', null)
   await tick()
   assert.equal(controller.installView()?.phase, 'confirm')
-  const confirmText = assertPhysicalRows(panel.render(160), 'confirm')
+  const confirmText = assertPhysicalRows(renderAt(panel, 160, 40), 'confirm')
   assert.ok(confirmText.includes(collapsed), `the collapsed inspection metadata survives:\n${confirmText}`)
 
   controller.confirmInstall()
@@ -360,7 +371,7 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
   const emit = (event: PluginInstallEvent): void => { for (const listener of listeners) listener(event) }
   emit({ kind: 'phase', phase: { requestId, phase: 'installing', attempt: { registry: hostile, index: 1, total: 2 } } })
   emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: `progress\r\n\t${hostile}` } })
-  const runningText = assertPhysicalRows(panel.render(160), 'running')
+  const runningText = assertPhysicalRows(renderAt(panel, 160, 40), 'running')
   // The phase message carries the attempt registry on ONE row; the log is
   // line-oriented (the controller splits LF), so its own hostile TAB/OSC/C1
   // element must also stay on one row.
@@ -388,20 +399,26 @@ test('a failed install reopens with the same request id and New install is expli
   assert.equal(controller.installView()?.requestId, requestId)
 
   const page = installPage(controller)
-  assert.equal(page.currentView(), 'install', 'a new page restores the failed attempt')
-  const failedFrame = page.render(120).join('\n')
+  assert.equal(page.currentView(), 'list', 'a new page always starts on the list')
+  page.handleInput('i')
+  assert.equal(page.currentView(), 'install', 'i reopens the failed attempt')
+  assert.equal(controller.installView()?.requestId, requestId, 'i reopens the SAME failed request')
+  assert.equal(installCalls.length, 1, 'reopening a failed attempt never dispatches a second install')
+  const failedFrame = renderAt(page, 120, 40).join('\n')
   assert.match(failedFrame, /Approve and retry evil-pkg/)
   assert.match(failedFrame, /New install/, 'the explicit new-install action is visible')
 
   const short = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 10,
-    columns: () => 80,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
-  const shortFrame = short.render(80).join('\n')
-  assert.match(shortFrame, /Build scripts blocked/, 'the risk names remain visible at 80x10')
+  short.handleInput('i')
+  // The embedded page no longer plans the retired full-screen Header/Meta/Rule
+  // rows (4), so the old 80x10 full-screen frame is the same body budget at a
+  // 80x6 LOCAL viewport.
+  const shortFrame = renderAt(short, 80, 6).join('\n')
+  assert.match(shortFrame, /Build scripts blocked/, 'the risk names remain visible in the short local frame')
   assert.doesNotMatch(shortFrame, /Approve/, 'approval is not offered when its risk cannot be fully shown')
   short.handleInput('\r')
   await tick()
@@ -409,13 +426,12 @@ test('a failed install reopens with the same request id and New install is expli
   short.dispose()
 
   const tall = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 24,
-    columns: () => 80,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
-  const tallFrame = tall.render(80).join('\n')
+  tall.handleInput('i')
+  const tallFrame = renderAt(tall, 80, 24).join('\n')
   assert.match(tallFrame, /Approve and retry evil-pkg/)
   assert.match(tallFrame, /execute scripts with your user privileges/, 'both risk facts and approval are visible at 80x24')
   tall.dispose()
@@ -456,12 +472,20 @@ test('a recently completed install also reopens without a new request', async ()
   assert.equal(controller.installView()?.phase, 'done')
 
   const page = installPage(controller)
-  assert.equal(page.currentView(), 'install')
+  assert.equal(page.currentView(), 'list', 'a new page always starts on the list')
+  page.handleInput('i')
+  await tick()
+  assert.equal(page.currentView(), 'install', 'i reopens the recently completed attempt')
+  assert.equal(controller.installView()?.requestId, requestId, 'i reopens the SAME request id')
+  assert.equal(installCalls.length, 1, 'reopening a done result never dispatches another install')
   page.handleInput('\x1b')
+  await tick()
+  assert.equal(page.currentView(), 'list')
   page.handleInput('i')
   await tick()
   assert.equal(page.currentView(), 'install')
   assert.equal(controller.installView()?.requestId, requestId)
+  assert.equal(installCalls.length, 1)
   page.dispose()
 })
 
@@ -477,13 +501,12 @@ test('every pending package name must be fully visible before Approve is admitte
   await tick()
 
   const tall = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 24,
-    columns: () => 80,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
-  const tallFrame = tall.render(80).join('\n')
+  tall.handleInput('i')
+  const tallFrame = renderAt(tall, 80, 24).join('\n')
   for (const name of pending) {
     assert.ok(tallFrame.includes(`- ${name}`), `the full pending name is visible: ${name}`)
   }
@@ -492,13 +515,13 @@ test('every pending package name must be fully visible before Approve is admitte
   tall.dispose()
 
   const short = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 10,
-    columns: () => 80,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
-  const shortFrame = short.render(80).join('\n')
+  short.handleInput('i')
+  // Same body budget as the retired 80x10 full-screen frame (see above).
+  const shortFrame = renderAt(short, 80, 6).join('\n')
   assert.doesNotMatch(shortFrame, /Approve/, 'a truncated package list removes Approve')
   short.handleInput('\r')
   await tick()
@@ -520,7 +543,6 @@ test('an unknown install reopens with its request id and reconciliation action',
     subscribeInvalidation: () => () => {},
   }, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -533,13 +555,19 @@ test('an unknown install reopens with its request id and reconciliation action',
   const unknownId = rejected.installView()?.requestId
   assert.equal(rejected.installView()?.phase, 'unknown')
   const page = installPage(rejected)
-  assert.equal(page.currentView(), 'install')
-  const unknownFrame = page.render(120).join('\n')
+  assert.equal(page.currentView(), 'list', 'a new page always starts on the list')
+  page.handleInput('i')
+  assert.equal(page.currentView(), 'install', 'i reopens the unknown attempt')
+  assert.equal(rejected.installView()?.requestId, unknownId, 'i reopens the SAME unknown request')
+  const unknownFrame = renderAt(page, 120, 40).join('\n')
   assert.match(unknownFrame, /Check installation status/)
   assert.doesNotMatch(unknownFrame, /New install/, 'unknown must not offer a replacement request')
   page.handleInput('\x1b')
+  await tick()
+  assert.equal(page.currentView(), 'list')
   page.handleInput('i')
   await tick()
+  assert.equal(page.currentView(), 'install')
   assert.equal(rejected.installView()?.requestId, unknownId)
   assert.equal(rejected.installView()?.phase, 'unknown')
   page.handleInput('n')
@@ -565,29 +593,30 @@ test('a zero-row body revokes build-script approval until an explicit re-selecti
 
   let rows = 24
   const page = new PluginManagerWorkspacePanel(controller, {
-    rows: () => rows,
-    columns: () => 80,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
-  assert.match(page.render(80).join('\n'), /Approve and retry evil-pkg/)
-  rows = 2
-  page.render(80)
+  page.handleInput('i')
+  assert.match(renderAt(page, 80, rows).join('\n'), /Approve and retry evil-pkg/)
+  // A 1-row LOCAL viewport is the semantic bar alone: the business body is
+  // zero rows (the retired full-screen 2-row frame left no body either).
+  rows = 1
+  renderAt(page, 80, rows)
   page.handleInput('\r')
   await tick()
   assert.equal(installCalls.length, 1, 'Enter on a zero-row install frame cannot approve')
   assert.equal(controller.installView()?.phase, 'failed')
 
   rows = 24
-  const restored = page.render(80).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  const restored = renderAt(page, 80, rows).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(restored, /Approve and retry evil-pkg/)
   assert.match(restored, /^> Back\s*$/mu, 'the restored selection is the safe last action, not Approve')
   assert.equal(installCalls.length, 1)
   page.handleInput('\x1b[A') // Back -> New install
   page.handleInput('\x1b[A') // New install -> Check installation status
   page.handleInput('\x1b[A') // Check -> Approve
-  page.render(80)
+  renderAt(page, 80, rows)
   page.handleInput('\r')
   await tick()
   assert.equal(installCalls.length, 2, 'only the explicit re-selection approves')
@@ -674,13 +703,12 @@ async function startRealInstallFixture(
   const port = options.portFactory?.(host) ?? new DirectPluginManagerPort(host.ctx)
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => [] })
   life.defer(() => controller.dispose())
-  controller.open('direct-command')
+  controller.open()
   await waitForState('the real Host inventory', () => controller.status().state === 'ready')
   return {
     host,
@@ -689,12 +717,14 @@ async function startRealInstallFixture(
     defer: cleanup => { life.defer(cleanup) },
     panelAt(rows: number, width = 80, testContext?: import('node:test').TestContext): PluginManagerWorkspacePanel {
       const panel = new PluginManagerWorkspacePanel(controller, {
-        rows: () => rows,
-        columns: () => width,
         requestRender: () => {},
-        notice: () => undefined,
         onCopy: () => {},
+        onYieldNavigation: () => {},
       })
+      // The page plans against the LOCAL viewport the Settings root grants it;
+      // this fixture grants that viewport directly (there is no TuiApp root
+      // here), so the local frame width/rows are the requested ones.
+      panel.setViewport({ width, rows, allowDual: false })
       if (testContext !== undefined) testContext.after(() => panel.dispose())
       return panel
     },
@@ -803,19 +833,20 @@ test('the real Host cancel terminates the real pnpm install, restores the profil
   assert.ok(requestPhases.includes('installing'), `the real Host announced installing: ${JSON.stringify(requestPhases)}`)
   assert.ok(requestPhases.includes('cancelling'), `the real Host announced cancelling: ${JSON.stringify(requestPhases)}`)
 
-  // Re-entering the surface resumes the SAME request id; only an explicit
-  // New install may replace it.
+  // Re-entering the surface starts on the list and `i` resumes the SAME request
+  // id without a second dispatch; only an explicit New install may replace it.
   const reopened = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 24,
-    columns: () => 80,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
   t.after(() => reopened.dispose())
-  assert.equal(reopened.currentView(), 'install')
+  assert.equal(reopened.currentView(), 'list', 'a reopened page always starts on the list')
+  reopened.handleInput('i')
+  assert.equal(reopened.currentView(), 'install', 'i reopens the settled install view')
   assert.equal(controller.installView()?.requestId, requestId)
   assert.equal(controller.installView()?.phase, 'done')
+  assert.equal(dispatches, 1, 'reopening the surface never dispatches a second installBundle')
 })
 
 test('the controller renders the real Host too-late response and the one install settles', async (t) => {
@@ -979,22 +1010,23 @@ test('real pnpm blocked builds become pendingBuilds; only an explicit approval r
   const panel = fixture.panelAt(24, 80, t)
 
   // The short/zero-body frames never admit the approval action: Enter on a
-  // frame that does not paint the full risk writes nothing to the Host.
+  // frame that does not paint the full risk writes nothing to the Host. The
+  // rows are LOCAL viewports; the old full-screen 80x10 / 80x2 budgets become
+  // 80x6 / 80x1 now that the page no longer plans Header/Meta/Rule rows.
   const sizes = [
-    { rows: 10, width: 80, label: '80x10', approvalExpected: false },
+    { rows: 6, width: 80, label: '80x6', approvalExpected: false },
     { rows: 20, width: 44, label: '44x20', approvalExpected: true },
-    { rows: 2, width: 80, label: '80x2', approvalExpected: false },
+    { rows: 1, width: 80, label: '80x1', approvalExpected: false },
   ] as const
   for (const size of sizes) {
-    // Re-create the panel at the requested live height for this frame.
+    // Re-create the page at the requested live viewport for this frame.
     const sized = new PluginManagerWorkspacePanel(controller, {
-      rows: () => size.rows,
-      columns: () => size.width,
       requestRender: () => {},
-      notice: () => undefined,
       onCopy: () => {},
+      onYieldNavigation: () => {},
     })
-    const frame = plainFrame(sized.render(size.width))
+    sized.handleInput('i') // the list key opens the SAME failed attempt
+    const frame = plainFrame(renderAt(sized, size.width, size.rows))
     const riskFullyVisible = /execute scripts with your[\s\S]*user privileges/.test(frame)
     if (!size.approvalExpected) {
       // The gate admits approval ONLY together with its fully painted risk.
@@ -1013,6 +1045,7 @@ test('real pnpm blocked builds become pendingBuilds; only an explicit approval r
   }
 
   // The 80x24 frame shows BOTH risk facts and the explicit approval action.
+  panel.handleInput('i')
   const tall = plainFrame(panel.render(80))
   assert.match(tall, /Approve and retry @s5-fixture\/build-consent@0\.0\.1/)
   assert.match(tall, /execute scripts with your user privileges/)

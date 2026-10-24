@@ -197,7 +197,6 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
       ? undefined
       : { get: () => doc, replace: () => undefined },
     extensions: options.themes === undefined ? undefined : { themes: options.themes, settings: new SettingsRegistry() },
-    openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
     config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,

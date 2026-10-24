@@ -64,10 +64,10 @@ function installAppProbe(): { apps: TuiApp[]; restore: () => void } {
   return { apps, restore: () => { TuiApp.prototype.start = originalStart } }
 }
 
-function invokeCommand(harness: ReturnType<typeof makeHarness>, name: string): void {
+function invokeCommand(harness: ReturnType<typeof makeHarness>, name: string): unknown {
   const handler = (harness.commands as { handler: (command: string) => ((invocation: unknown) => unknown) | undefined }).handler(name)
   assert.ok(handler !== undefined, `/${name} must be registered by the real runner`)
-  handler({
+  return handler({
     commandId: `cmd-${name}`,
     agent: undefined,
     rawInput: '',
@@ -114,16 +114,21 @@ async function mountPluginRunner(
   return { vt, harness, app }
 }
 
-test('the real /plugins entry opens the fullscreen page and Escape closes back to the editor', async (t) => {
+test('the real /plugins entry opens the Settings page on the plugin List; two Escs close to the editor', async (t) => {
   const { vt, harness } = await mountPluginRunner(t)
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
   const view = plain(vt.getViewport())
-  assert.match(view, /Plugins · All/, 'the direct entry mounts the fullscreen page')
+  assert.match(view, /Settings · Plugins/, 'the direct entry leases the ONE Settings workspace')
+  assert.doesNotMatch(view, /Settings · Categories/, 'the deep link lands on Plugins, not on About')
   assert.match(view, /No plugins/, 'the empty inventory paints an honest empty state')
+  // Esc yields to the Categories rail; a second Esc closes the ONE lease.
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/, 'Escape closes the page')
+  assert.match(plain(vt.getViewport()), /Settings · Categories/, 'the first Esc yields to the rail')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.doesNotMatch(plain(vt.getViewport()), /Settings · /, 'the second Esc closes the workspace')
 })
 
 test('closing /plugins restores transcript-fullscreen mode and the live editor draft', async (t) => {
@@ -135,28 +140,38 @@ test('closing /plugins restores transcript-fullscreen mode and the live editor d
 
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugins · All/)
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/)
 
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(app.isFullscreen(), true, 'the transcript-fullscreen mode is restored')
   assert.equal(app.getDraft(), draft, 'the live editor draft is untouched')
 })
 
-test('a second /plugins while open is a no-op, and a later open still mounts (owner released)', async (t) => {
+test('a second /plugins is refused by the live Settings lease, and a later open still mounts', async (t) => {
   const { vt, harness } = await mountPluginRunner(t)
-  invokeCommand(harness, 'plugins')
+  const first = invokeCommand(harness, 'plugins') as { kind: string }
+  assert.equal(first.kind, 'success')
   await vt.waitForRender()
-  // A second open must not stack a second page/owner.
-  invokeCommand(harness, 'plugins')
+  // A second open must not stack a second Settings screen or a second page: the
+  // lease refusal is a REAL error result, never a phantom success.
+  const second = await (invokeCommand(harness, 'plugins') as Promise<{ kind: string }> | { kind: string })
+  assert.equal(second.kind, 'error', 'the live lease refuses the second open')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugins · All/)
+  assert.equal(plain(vt.getViewport()).split('Settings · ').length - 1, 1, 'exactly ONE Settings workspace is painted')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('\x1b')
   await vt.waitForRender()
   // The owner was released: the direct entry mounts again.
-  invokeCommand(harness, 'plugins')
+  const third = invokeCommand(harness, 'plugins') as { kind: string }
+  assert.equal(third.kind, 'success', 'a later /plugins mounts normally')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugins · All/, 'a later /plugins mounts normally')
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/, 'a later /plugins mounts normally')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
@@ -171,15 +186,17 @@ test('the real Settings → Plugins category hosts the same page in place and Ba
   // presses reach Plugins.
   for (let step = 0; step < 6; step += 1) vt.sendInput('\x1b[B')
   await vt.waitForRender()
+  // The rail selection already previews the page; Enter only moves the keys.
+  assert.match(plain(vt.getViewport()), /Settings · Categories/)
+  assert.match(plain(vt.getViewport()), /No plugins/, 'the rail preview paints the real plugin page')
   vt.sendInput('\r')
   await vt.waitForRender()
   const pluginView = plain(vt.getViewport())
-  assert.match(pluginView, /Plugins · All/, 'the Settings entry hosts the same fullscreen page')
+  assert.match(pluginView, /Settings · Plugins/, 'the Settings entry hosts the same page')
   // Back (Escape) returns to the SAME Settings surface, not to the editor.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   const backView = plain(vt.getViewport())
-  assert.doesNotMatch(backView, /Plugins · All/)
   assert.match(backView, /Settings · Categories/)
   assert.match(backView, /> Plugins/, 'Plugins remains selected at L0')
   // Closing Settings returns to the editor.
@@ -192,11 +209,11 @@ test('a blocking owner arriving over /plugins closes the workspace and releases 
   const { vt, harness, app } = await mountPluginRunner(t)
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugins · All/)
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/)
 
   const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'blocking-owner probe' })
   await vt.waitForRender()
-  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/, 'the blocking owner pre-empts the workspace')
+  assert.doesNotMatch(plain(vt.getViewport()), /Settings · Plugins/, 'the blocking owner pre-empts the workspace')
   vt.sendInput('\x1b')
   await approval.catch(() => {})
 
@@ -204,7 +221,9 @@ test('a blocking owner arriving over /plugins closes the workspace and releases 
   // mounts normally instead of reporting a phantom lease.
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugins · All/)
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
@@ -217,13 +236,13 @@ test('an external surface teardown releases the Manager owner so a later /plugin
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugins · All/, 'the Settings entry hosts the shared page')
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/, 'the Settings entry hosts the shared page')
 
   // External teardown through the surface lifecycle: the whole screen (and the
   // hosted page) is released WITHOUT the page's normal close path.
   app.stop()
   await vt.waitForRender()
-  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/, 'the external teardown hides the hosted page')
+  assert.doesNotMatch(plain(vt.getViewport()), /Settings · Plugins/, 'the external teardown hides the hosted page')
   app.start()
   await vt.waitForRender()
 
@@ -231,10 +250,12 @@ test('an external surface teardown releases the Manager owner so a later /plugin
   // (no phantom active host) and closes cleanly.
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugins · All/, 'a later /plugins opens after the external teardown')
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/, 'a later /plugins opens after the external teardown')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.doesNotMatch(plain(vt.getViewport()), /Settings · Plugins/)
 })
 
 test('hostile plugin metadata never reaches the mounted panel TTY raw', async (t) => {
@@ -443,7 +464,7 @@ async function startMountedInstall(
   spec: string,
 ): Promise<void> {
   invokeCommand(fixture.harness, 'plugins')
-  await waitForFrame(fixture.vt, /Plugins · All/u, 'the Plugin Manager page')
+  await waitForFrame(fixture.vt, /Settings · Plugins/u, 'the Plugin Manager page')
   fixture.vt.sendInput('i')
   await waitForFrame(fixture.vt, /Spec\s+/u, 'the install spec editor')
   fixture.vt.sendInput(spec)
@@ -483,7 +504,7 @@ test('mounted TuiApp: hide while installing, re-enter the same attempt, Stop, an
   const requestId = requestIds[0]!
   await registry.waitForTarballRequest()
   fixture.vt.sendInput('\x1b') // hide the install view while the real install runs
-  await waitForFrame(fixture.vt, /Plugins · All/u, 'the list after hide')
+  await waitForFrame(fixture.vt, /Settings · Plugins/u, 'the list after hide')
   fixture.vt.sendInput('i') // re-enter the SAME attempt
   const resumed = await waitForFrame(fixture.vt, /Stop installation|installing/u, 'the resumed install view')
   assert.match(resumed, /installing · @s5-fixture\/mounted-cancel/u, 'the resumed view keeps the same running attempt')

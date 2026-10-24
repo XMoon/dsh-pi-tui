@@ -1,19 +1,22 @@
 /**
- * The fullscreen Plugin Manager workspace (S4-D1): a PURE PiTui renderer and
- * input owner for the profile-wide official inventory. It paints the four
- * frozen sections (`TUI & Extensions → Official DSH → Third-party →
- * Experimental`), the package Detail, the official install view and the
- * removal confirmation.
+ * The embedded Plugin Manager page (S4-D1 / PR2): a PURE PiTui renderer and
+ * input owner for the profile-wide official inventory. It paints the frozen
+ * sections (`TUI & Extensions → Official DSH → Third-party → Experimental`),
+ * the package Detail, the official install view, the removal confirmation and
+ * the extension diagnostics page.
  *
  * It owns NO Host read, NO install request id and NO package execution: the
  * ONE `PluginManagerController` owns the official port and the install
  * lifecycle; this component only paints its facts and forwards explicit user
  * intents. Selection, search/filter, focus, scroll offsets, the painted hit
- * map and its revision are per-open state of THIS page (plan §3).
+ * map and its revision are per-page state of THIS page.
  *
- * It is the layout root of the SAME `TuiAltScreen` lease the Settings workspace
- * uses (both in-place Settings embedding and the direct `/plugins` root), so it
- * never creates a second screen/focus owner.
+ * The page is a CHILD of the Settings workspace panel: it paints only inside
+ * the local viewport the root grants it (`setViewport`), never the shared
+ * Settings Header/Metadata/Rules/Action Bar, and it derives its own local
+ * Chrome (Search/Filters, Host notice, business body, one semantic bar) from
+ * that grant. Esc/Left/Shift+Tab at the list root report a navigation YIELD to
+ * the root — they never close the page or release the Host claim.
  *
  * @module @xmoon76/dsh-pi-tui/tui/plugin-manager/workspace
  */
@@ -58,12 +61,10 @@ import {
   type PluginDetailView,
 } from '../../app/plugin-manager/model.ts'
 
-/** The frozen width breakpoint: `>=96` two columns, `<96` one column. */
-export const PLUGIN_WORKSPACE_WIDE_MIN_COLUMNS = 96
+/** The minimum local content width of the adjacent List|Details pair. */
+const DUAL_MIN_COLUMNS = 76
 /** The 2-cell gutter between the two columns (design language §6.3). */
 const COLUMN_GAP = 2
-/** The right pane keeps at least this many cells in the wide projection. */
-const MIN_DETAIL_WIDTH = 24
 /** The bounded log tail kept by the controller; the view only windows it. */
 const LOG_TAIL_LINES = 40
 
@@ -114,7 +115,45 @@ const DIAGNOSTICS_ACTION = {
 } as const
 
 /** Which page-local view is showing. */
-type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm' | 'diagnostics'
+export type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm' | 'diagnostics'
+
+/**
+ * The local viewport the Settings root grants the embedded page for ONE frame.
+ * It is the ONLY size authority the page plans against: `width` are the real
+ * local cells (excluding any Categories rail), `rows` the real local rows
+ * INCLUDING the single semantic bar row, and `allowDual` states whether the
+ * root's projection has room for the adjacent `List | Details` pair.
+ */
+export interface PluginContentViewport {
+  readonly width: number
+  readonly rows: number
+  readonly allowDual: boolean
+}
+
+/**
+ * The narrow page contract the Settings root consumes. It is TUI-only: the
+ * application layer keeps seeing a plain `Component`.
+ */
+export interface EmbeddedPluginPage extends Component {
+  focused: boolean
+  /** Release this page and the Host claim it owns, exactly once. */
+  dispose(): void
+  setViewport(viewport: PluginContentViewport): void
+  currentView(): PluginWorkspaceView
+  canYieldFocusToNavigation(): boolean
+  pendingMutation(): boolean
+  cancelPointer(): void
+  handleInput(data: string): void
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined
+  onCellPress(x: number, y: number): void
+  onCellClick(x: number, y: number): void
+  /**
+   * The List|Details split of the LAST local plan. The Settings root paints the
+   * shared pane-header labels with these EXACT widths, so the header can never
+   * drift from the columns the page really painted.
+   */
+  contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number }
+}
 
 /** One painted hit target of the LAST frame (never a screen-index authority). */
 interface HitTarget {
@@ -130,8 +169,10 @@ interface PressedGesture {
   readonly revision: number
   readonly view: PluginWorkspaceView
   readonly selectedValue: string | undefined
-  readonly columns: number
+  /** The LOCAL viewport triple of the frame the press was admitted against. */
+  readonly width: number
   readonly rows: number
+  readonly allowDual: boolean
 }
 
 /** One line of the list projection. */
@@ -142,17 +183,20 @@ interface ListEntry {
   readonly card?: PluginCardView
 }
 
-/** The per-frame chrome budget (design language §8). */
+/**
+ * The per-frame LOCAL chrome budget of the embedded page (design language §8):
+ * one optional Search/Filters row, one optional Host-notice row, the business
+ * body and the single semantic bar. The shared Settings Header/Metadata/Rules
+ * belong to the ROOT and are never planned here.
+ */
 interface ChromePlan {
   readonly width: number
   readonly rows: number
-  readonly wide: boolean
-  readonly headerRows: number
-  readonly metaRows: number
-  readonly ruleRows: number
-  readonly noticeRows: number
-  readonly actionRows: number
+  readonly searchRows: 0 | 1
+  readonly noticeRows: 0 | 1
+  readonly actionRows: 1
   readonly bodyRows: number
+  readonly dual: boolean
   readonly leftWidth: number
   readonly rightWidth: number
 }
@@ -263,13 +307,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    *  (risk not fully visible) cannot leave Enter pointing at it. */
   private paintedConfirmActionValues: readonly string[] = []
   private pressedGesture: PressedGesture | undefined
+  /** The LOCAL viewport granted by the Settings root. The page never reads the
+   *  physical terminal: its layout (and dual admission) lives entirely here. */
+  private viewport: PluginContentViewport = { width: 0, rows: 0, allowDual: false }
   private lastRenderWidth = -1
   private lastRenderRows = -1
+  private lastRenderAllowDual: boolean | undefined
   private lastModelKey: string | undefined
   private lastView: PluginWorkspaceView | undefined
   private lastPhase: string | undefined
   private lastNotice: string | undefined
-  private lastAppNotice: string | undefined
   private lastStatusState: 'loading' | 'ready' | 'error' | undefined
   private lastSelectedValue: string | undefined
   private lastFocus: 'list' | 'details' | undefined
@@ -286,9 +333,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.controller = controller
     this.intents = intents
     this.onDispose = options.onDispose
-    // A dispatched/failed/unknown/done attempt reopens on the SAME request
-    // id/controller; only the explicit New-install action may replace it.
-    if (controller.hasResumableInstall()) this.view = 'install'
+    // Every page starts on the Plugin List. A previous attempt (running or
+    // terminal) is NOT auto-opened: the Controller keeps its request id/log and
+    // the explicit `i` reopens the SAME attempt from the list.
   }
 
   get focused(): boolean {
@@ -298,6 +345,59 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   set focused(value: boolean) {
     this._focused = value
     this.syncInputFocus()
+  }
+
+  /**
+   * Install the local viewport the Settings root grants this frame. An
+   * identical grant keeps every selection/filter/scroll offset AND the painted
+   * action grants; ANY change (width, rows or dual admission) revokes the old
+   * painted actions/confirm/scroll authority and marks the frame stale until
+   * the next paint. It never reads the Host and never re-plans business state.
+   */
+  setViewport(viewport: PluginContentViewport): void {
+    if (this.disposed) return
+    const width = Math.max(1, Math.floor(viewport.width))
+    const rows = Math.max(1, Math.floor(viewport.rows))
+    const allowDual = viewport.allowDual === true
+    if (width === this.viewport.width && rows === this.viewport.rows && allowDual === this.viewport.allowDual) return
+    this.viewport = { width, rows, allowDual }
+    // A viewport change revokes the GRANTS of the previous frame, but it is not
+    // a zero-body frame: the selected install/confirm index survives so a
+    // resize round trip restores the SAME action the user was on.
+    this.revokePaintedGrants()
+    this.pressedGesture = undefined
+    this.bumpRevision()
+  }
+
+  /**
+   * Whether the page may hand the keyboard back to the Settings Categories
+   * rail. Pure query: only the untouched List root qualifies — never an edit,
+   * never a pending mutation, and never a background install (Esc hiding an
+   * install must be able to leave the page).
+   */
+  canYieldFocusToNavigation(): boolean {
+    return this.view === 'list' && !this.searchEditing && this.controller.busy() === undefined
+  }
+
+  /**
+   * Whether a User navigation may not abandon this page right now. The
+   * Controller's own mutation guard is the authority; a dispatched Host install
+   * is deliberately NOT included (Esc hide leaves it running).
+   */
+  pendingMutation(): boolean {
+    return this.controller.busy() !== undefined
+  }
+
+  /** Revoke one in-flight press (never a Host operation). */
+  cancelPointer(): void {
+    this.pressedGesture = undefined
+  }
+
+  /** The List|Details split of the last local plan (see the interface). */
+  contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number } {
+    const plan = this.paintedChrome
+    if (plan === undefined) return { dual: false, leftWidth: this.viewport.width, rightWidth: this.viewport.width }
+    return { dual: plan.dual, leftWidth: plan.leftWidth, rightWidth: plan.rightWidth }
   }
 
   invalidate(): void {
@@ -359,8 +459,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.handleListInput(data)
   }
 
-  /** The panel is the layout root: wheel events route to the pane under the
-   * pointer; press/click arrive through the alt screen's cell path. */
+  /** The embedded page: the wheel routes to the pane under the LOCAL pointer;
+   *  the Settings root translates press/click into this page's coordinates. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (event.type !== 'wheel') return undefined
@@ -395,7 +495,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.intents.requestRender()
       return { handled: true }
     }
-    if (plan.wide && event.x >= plan.leftWidth + COLUMN_GAP) {
+    if (plan.dual && event.x >= plan.leftWidth + COLUMN_GAP) {
       this.detailOffset = Math.max(0, this.detailOffset + delta)
       this.bumpRevision()
       this.intents.requestRender()
@@ -425,8 +525,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         revision: this.revision,
         view: this.view,
         selectedValue: this.selectedValue,
-        columns: this.intents.columns(),
-        rows: this.intents.rows(),
+        width: this.viewport.width,
+        rows: this.viewport.rows,
+        allowDual: this.viewport.allowDual,
       }
   }
 
@@ -442,14 +543,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const target = this.targetAt(x, y)
     if (pressed === undefined || target === undefined) return
     // The gesture must still resolve to the SAME painted target AND the same
-    // revision/view/selection/geometry: a refresh, filter/search change, page
-    // switch OR a resize (even before its repaint) refuses the click.
+    // revision/view/selection/LOCAL viewport: a refresh, filter/search change,
+    // page switch OR a local viewport change (even before its repaint) refuses
+    // the click.
     if (
       this.revision !== pressed.revision
       || this.view !== pressed.view
       || this.selectedValue !== pressed.selectedValue
-      || this.intents.columns() !== pressed.columns
-      || this.intents.rows() !== pressed.rows
+      || this.viewport.width !== pressed.width
+      || this.viewport.rows !== pressed.rows
+      || this.viewport.allowDual !== pressed.allowDual
       || target.kind !== pressed.target.kind
       || target.value !== pressed.target.value
       || target.row !== pressed.target.row
@@ -464,6 +567,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   // ── list navigation ──────────────────────────────────────────────────────
 
   private handleListInput(data: string): void {
+    // Left at the List root is the plugin page's OWN "back to Categories"
+    // verb (the Settings root only commits the focus change). It never closes
+    // Settings and never runs while an edit or a mutation owns the page.
+    if (matchesKey(data, 'left')) {
+      if (this.canYieldFocusToNavigation()) this.intents.onYieldNavigation()
+      return
+    }
     if (matchesKey(data, 'up') || matchesKey(data, 'ctrl+p')) {
       this.moveSelection(-1)
       return
@@ -911,7 +1021,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.leaveDetails()
       return
     }
-    this.controller.requestClose()
+    // The untouched List root yields the keyboard back to the Settings
+    // Categories rail: it never closes the page or releases the Host claim.
+    if (this.canYieldFocusToNavigation()) this.intents.onYieldNavigation()
   }
 
   // ── view transitions ─────────────────────────────────────────────────────
@@ -1145,7 +1257,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const capacity = this.diagnosticsScrollCapacity()
     const step = Math.min(Math.max(1, requestedLines ?? capacity), capacity)
     const viewport = this.diagnosticsViewport
-    const max = Math.max(0, this.diagnosticsLineCount - viewport)
+    const fact = this.diagnosticsFacts()[this.diagnosticsSelection]
+    const span = fact === undefined ? undefined : this.diagnosticsSpans.get(fact.id)
+    const stickyRowsFor = (offset: number): number => span !== undefined
+      && span.start < offset
+      && span.start + span.count > offset
+      ? Math.min(span.headRows, Math.max(0, viewport - 1))
+      : 0
+    // The sticky identity rows reserve body space, exactly like the paint; the
+    // scroll bound must therefore leave the final continuation row reachable.
+    const max = (() => {
+      const probe = Math.max(0, this.diagnosticsOffset + direction * step)
+      return Math.max(0, this.diagnosticsLineCount - Math.max(1, viewport - stickyRowsFor(probe)))
+    })()
     const next = Math.min(Math.max(0, this.diagnosticsOffset + direction * step), max)
     this.diagnosticsOffset = next
     // Keep the SELECTED fact visible: if the current selection no longer
@@ -1390,12 +1514,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.diagnosticsOffset = span.start + span.count - viewport
       }
     }
-    this.diagnosticsOffset = clampOffset(this.diagnosticsOffset, built.lines.length, viewport)
-    const stickyRows = span !== undefined
-      && span.start < this.diagnosticsOffset
-      && span.start + span.count > this.diagnosticsOffset
+    const stickyRowsFor = (offset: number): number => span !== undefined
+      && span.start < offset
+      && span.start + span.count > offset
       ? Math.min(span.headRows, Math.max(0, viewport - 1))
       : 0
+    // The sticky identity rows consume part of the body, so the offset window
+    // is not `viewport` rows tall at the end: clamping with the plain
+    // `count - viewport` bound would leave the last continuation rows
+    // unreachable. The clamp therefore keeps room for the real painted rows.
+    const maxOffset = Math.max(0, built.lines.length - Math.max(1, viewport - stickyRowsFor(this.diagnosticsOffset)))
+    this.diagnosticsOffset = Math.min(Math.max(0, this.diagnosticsOffset), maxOffset)
+    const stickyRows = stickyRowsFor(this.diagnosticsOffset)
     this.diagnosticsSelectionVisible = span !== undefined
       && (stickyRows > 0
         || (span.start >= this.diagnosticsOffset && span.start < this.diagnosticsOffset + viewport))
@@ -1873,28 +2003,29 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   render(width: number): string[] {
     if (this.disposed) return []
-    const safeWidth = Math.max(1, width)
-    const liveRows = Math.max(1, Math.floor(this.intents.rows()))
+    if (width !== this.viewport.width) {
+      throw new Error(
+        `the embedded Plugin Manager page must be rendered at its granted viewport width (${this.viewport.width}), not ${width}`,
+      )
+    }
     this.syncInputFocus()
-    this.syncFrameState(safeWidth, liveRows)
+    this.syncFrameState()
     this.ensureSelection()
     this.ensureDetailSelection()
     this.ensureDiagnosticsSelection(this.diagnosticsFacts().length)
     const hostNoticeLive = this.controller.notice() !== undefined
       || this.controller.status().state === 'error'
       || this.controller.model().exemptionWarnings.length > 0
-    // Diagnostics paints extension health only: a Host inventory notice
-    // must not dominate a freshly read extension projection.
-    const noticeLive = this.view === 'diagnostics'
-      ? this.intents.notice?.() !== undefined
-      : hostNoticeLive || this.intents.notice?.() !== undefined
-    const plan = planChrome(safeWidth, liveRows, noticeLive)
+    // Diagnostics paints extension health only: a Host inventory notice must
+    // not dominate a freshly read extension projection, and the shared App
+    // notice is painted ONCE by the Settings root (never here).
+    const noticeLive = this.view !== 'diagnostics' && hostNoticeLive
+    const plan = planChrome(this.viewport, this.view, noticeLive)
     this.paintedChrome = plan
     const lines: string[] = []
     const targets: HitTarget[] = []
-    if (plan.headerRows === 1) lines.push(this.renderHeader(plan))
-    if (plan.metaRows === 1) lines.push(...this.renderMeta(plan, plan.headerRows, targets))
-    if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(plan.width)))
+    if (plan.searchRows === 1) lines.push(this.renderSearchRow(plan, 0, targets))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     const bodyTop = this.bodyTop(plan)
     if (plan.bodyRows > 0) {
       lines.push(...this.renderBody(plan, bodyTop, targets))
@@ -1903,36 +2034,51 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       // this frame. Revoke every painted permission and force a fresh visible
       // selection when the body returns; `frameIsCurrent()` alone must not
       // resurrect an old Approve/Disable/Remove from the previous frame.
-      this.paintedDetailSelectionVisible = false
-      this.paintedInstallActions = new Set()
-      this.paintedConfirmActions = new Set()
-      this.paintedConfirmActionValues = []
-      this.paintedConfirmScrollMax = 0
-      this.installSelection = Number.MAX_SAFE_INTEGER
-      this.diagnosticsScrollable = false
-      this.diagnosticsSelectionVisible = false
+      this.revokePaintedActions()
     }
-    if (plan.ruleRows >= 2) lines.push(color.border('─'.repeat(plan.width)))
-    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
-    if (plan.actionRows === 1) lines.push(this.renderActionBar(plan))
+    // The semantic bar is ALWAYS the local last row: the Settings root moves it
+    // to the frame's physical last row unless the Categories rail owns the keys.
+    lines.push(this.renderActionBar(plan))
     this.paintedTargets = targets
     this.paintedRevision = this.revision
-    this.lastRenderWidth = safeWidth
-    this.lastRenderRows = liveRows
+    this.lastRenderWidth = this.viewport.width
+    this.lastRenderRows = this.viewport.rows
+    this.lastRenderAllowDual = this.viewport.allowDual
     return lines.slice(0, plan.rows)
   }
 
+  /** Revoke every body-derived permission a previous frame granted. */
+  private revokePaintedGrants(): void {
+    this.paintedDetailSelectionVisible = false
+    this.paintedInstallActions = new Set()
+    this.paintedConfirmActions = new Set()
+    this.paintedConfirmActionValues = []
+    this.paintedConfirmScrollMax = 0
+    this.diagnosticsScrollable = false
+    this.diagnosticsSelectionVisible = false
+  }
+
+  /** A ZERO-BODY frame additionally forces a fresh visible selection when the
+   *  body returns: a stale index could otherwise point at a dangerous action
+   *  that the short frame never painted. */
+  private revokePaintedActions(): void {
+    this.revokePaintedGrants()
+    this.installSelection = Number.MAX_SAFE_INTEGER
+  }
+
   /** Bump the gesture revision whenever the NEXT frame could move a painted
-   * target: model identity, view, install phase, notice, selection/focus,
-   * filter/query or terminal geometry. */
-  private syncFrameState(width: number, rows: number): void {
+   * target: model identity, view, install phase, Host notice, selection/focus,
+   * filter/query or the LOCAL viewport grant. */
+  private syncFrameState(): void {
     const modelKey = this.modelStateKey()
     const install = this.controller.installView()
     const notice = this.controller.notice()
-    const appNoticeKey = this.appNoticeKey()
     const statusState = this.controller.status().state
     let changed = false
-    if (this.lastRenderWidth >= 0 && (this.lastRenderWidth !== width || this.lastRenderRows !== rows)) changed = true
+    if (this.lastRenderWidth >= 0
+      && (this.lastRenderWidth !== this.viewport.width
+        || this.lastRenderRows !== this.viewport.rows
+        || this.lastRenderAllowDual !== this.viewport.allowDual)) changed = true
     if (this.lastModelKey !== modelKey) { this.lastModelKey = modelKey; changed = true }
     if (this.lastView !== this.view) { this.lastView = this.view; changed = true }
     if (this.lastPhase !== install?.phase) {
@@ -1945,7 +2091,6 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       changed = true
     }
     if (this.lastNotice !== notice) { this.lastNotice = notice; changed = true }
-    if (this.lastAppNotice !== appNoticeKey) { this.lastAppNotice = appNoticeKey; changed = true }
     if (this.lastStatusState !== statusState) { this.lastStatusState = statusState; changed = true }
     if (this.lastSelectedValue !== this.selectedValue) { this.lastSelectedValue = this.selectedValue; changed = true }
     if (this.lastFocus !== this.focus) { this.lastFocus = this.focus; changed = true }
@@ -1978,99 +2123,42 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
   }
 
+  /** The first local row of the business body: the admitted chrome above it. */
   private bodyTop(plan: ChromePlan): number {
-    return plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0)
+    return plan.searchRows + plan.noticeRows
   }
 
-  private renderHeader(plan: ChromePlan): string {
-    const card = this.selectedCard()
-    const trail = this.view === 'list'
-      ? FILTER_LABELS[this.filter]
-      : this.view === 'details'
-        ? (card?.title ?? card?.name ?? 'Details')
-        : this.view === 'install'
-          ? 'Install'
-          : this.view === 'diagnostics'
-            ? 'Diagnostics'
-            : this.controller.confirmationKind() === 'remove' ? 'Remove' : 'Auto Review'
-    const lead = `${color.textStrong('Plugins')}${color.textDim(` · ${sanitizedPhysicalLine(trail)}`)}`
-    const model = this.controller.model()
-    const enabled = model.cards.filter(entry => entry.enabled).length
-    const diagnostics = this.diagnosticsSnapshot
-    const counts = this.view === 'diagnostics'
-      ? diagnostics === undefined
-        ? 'Unavailable'
-        : `${diagnostics.contributionTotals.total} contributions · ${diagnostics.contributionTotals.failed} failed · ${diagnostics.contributionTotals.shadowed} shadowed`
-      : plan.wide
-        ? `${model.cards.length} plugins · ${enabled} enabled`
-        : `${enabled}/${model.cards.length} enabled`
-    // A failed refresh keeps the last good HOST inventory visible but must not
-    // look current. Diagnostics is a different truth source: its counts were
-    // just read, so the Host inventory's Stale state never prefixes them.
-    const stale = this.view !== 'diagnostics' && this.controller.status().state === 'error'
-      ? `${color.warning('Stale')} · `
-      : ''
-    return composeEdge(lead, `${stale}${color.textMuted(counts)}`, plan.width)
-  }
-
-  private renderMeta(plan: ChromePlan, metaRow: number, targets: HitTarget[]): string[] {
-    if (this.view === 'diagnostics') {
-      // The narrow Action Bar drops the paging hint before the required copy
-      // keys; carry a compact paging cue in the diagnostic row at those widths
-      // so the only way to reveal a long error is still discoverable.
-      const facts = this.diagnosticsFacts()
-      const selectedId = facts[this.diagnosticsSelection]?.id
-      const narrowScrollable = plan.width < 80
-        && this.diagnosticsSnapshot !== undefined
-        && this.buildDiagnosticsLayout(plan.width, selectedId).lines.length > plan.bodyRows
-      const hint = narrowScrollable ? 'PgUp/PgDn scroll · ' : ''
-      return [fit(color.textDim(
-        hint + (this.diagnosticsSnapshot === undefined
-          ? 'Live extension diagnostics are unavailable until the extension service is attached'
-          : 'Live TUI extension contributions — read-only; the Host package state is unchanged'),
-      ), plan.width)]
-    }
-    if (this.view !== 'list' && this.view !== 'details') {
-      const context = this.view === 'install'
-        ? 'Official install — inspect, confirm, then observe the Host result'
-        : this.controller.confirmationKind() === 'remove'
-          ? 'Removal confirmation — the exact package and consequence are shown below'
-          : 'Auto Review safety confirmation — no Host change happens before the explicit choice'
-      return [fit(color.textDim(context), plan.width)]
-    }
+  /** The ONE admitted Search/Filters row of the list and details views. */
+  private renderSearchRow(plan: ChromePlan, row: number, targets: HitTarget[]): string {
     const filterWidth = FILTERS.reduce((sum, filter) => sum + visibleWidth(FILTER_LABELS[filter]) + 3, 0)
     const searchWidth = Math.max(1, plan.width - filterWidth - 2)
-    const lines: string[] = []
     if (this.searchEditing) {
       const input = this.searchInput.render(Math.max(1, searchWidth))
-      lines.push(`${color.textDim('Search: ')}${input[0] ?? ''}`)
-      targets.push({ kind: 'search', value: 'search', row: metaRow, startCol: 0, endCol: plan.width })
-    } else {
-      const query = this.query === '' ? '/' : sanitizedPhysicalLine(this.query)
-      lines.push(composeEdge(
-        `${color.textDim('Search: ')}${color.text(query)}`,
-        this.filterChips(),
-        plan.width,
-      ))
-      const text = this.query === '' ? 'Search: /' : `Search: ${query}`
-      targets.push({ kind: 'search', value: 'search', row: metaRow, startCol: 0, endCol: visibleWidth(text) })
+      targets.push({ kind: 'search', value: 'search', row, startCol: 0, endCol: plan.width })
+      return `${color.textDim('Search: ')}${input[0] ?? ''}`
     }
+    const query = this.query === '' ? '/' : sanitizedPhysicalLine(this.query)
+    const painted = composeEdge(
+      `${color.textDim('Search: ')}${color.text(query)}`,
+      this.filterChips(),
+      plan.width,
+    )
+    const text = this.query === '' ? 'Search: /' : `Search: ${query}`
+    targets.push({ kind: 'search', value: 'search', row, startCol: 0, endCol: visibleWidth(text) })
     // The chips are painted only when the whole row fits beside the search
     // field; their hit targets are computed from the REAL painted columns.
-    if (!this.searchEditing) {
-      const rendered = this.filterChips()
-      const start = plan.width - visibleWidth(rendered)
-      if (start >= visibleWidth(this.query === '' ? 'Search: /' : `Search: ${this.query}`) + 1) {
-        let column = start
-        for (const filter of FILTERS) {
-          const label = FILTER_LABELS[filter]
-          const width = visibleWidth(label)
-          targets.push({ kind: 'filter', value: filter, row: metaRow, startCol: column, endCol: column + width })
-          column += width + 3
-        }
+    const rendered = this.filterChips()
+    const start = plan.width - visibleWidth(rendered)
+    if (start >= visibleWidth(text) + 1) {
+      let column = start
+      for (const filter of FILTERS) {
+        const label = FILTER_LABELS[filter]
+        const width = visibleWidth(label)
+        targets.push({ kind: 'filter', value: filter, row, startCol: column, endCol: column + width })
+        column += width + 3
       }
     }
-    return lines
+    return painted
   }
 
   private filterChips(): string {
@@ -2081,29 +2169,27 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }).join(color.textMuted(' · '))
   }
 
+  /** The page's OWN Host notice row: a settled/refused operation message, a
+   *  failed inventory read or a version-exemption warning. The shared App
+   *  notice is NOT a second source here — the Settings root paints it once. */
   private renderNotice(plan: ChromePlan): string {
-    const appNotice = this.intents.notice?.()
     const model = this.controller.model()
     const exemptionWarning = model.exemptionWarnings.length === 0
       ? undefined
       : `version exemptions: ${model.exemptionWarnings.join(' · ')}`
-    const message = this.view === 'diagnostics'
-      // The Host inventory's transient error/exemption is not extension
-      // diagnostics; only the app-wide notice is shared chrome.
-      ? appNotice?.text
-      : this.controller.notice()
-        ?? (this.controller.status().state === 'error' ? this.controller.status().error : undefined)
-        ?? exemptionWarning
-        ?? appNotice?.text
+    const message = this.controller.notice()
+      ?? (this.controller.status().state === 'error' ? this.controller.status().error : undefined)
+      ?? exemptionWarning
     if (message === undefined) return fit('', plan.width)
-    const kind = (this.view !== 'diagnostics' && this.controller.status().state === 'error')
-      || appNotice?.kind === 'error'
-      || /failed|unknown|refused|cannot|error/i.test(message)
-      ? 'error'
-      : 'info'
+    const failed = this.controller.status().state === 'error'
+    const kind = failed || /failed|unknown|refused|cannot|error/i.test(message) ? 'error' : 'info'
     const text = sanitizedPhysicalLine(message)
+    // A failed inventory read keeps the last good data visible but must not
+    // look current: the page's OWN notice row states the Stale fact (the
+    // retired fullscreen header used to carry it).
+    const stale = failed ? color.warning('Stale · ') : ''
     const prefix = kind === 'error' ? color.error('✗ ') : color.textMuted('ℹ ')
-    return fit(prefix + (kind === 'error' ? color.error(text) : color.textMuted(text)), plan.width)
+    return fit(`${stale}${prefix}${kind === 'error' ? color.error(text) : color.textMuted(text)}`, plan.width)
   }
 
   private renderActionBar(plan: ChromePlan): string {
@@ -2125,7 +2211,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private frameActionBarSegments(): ActionBarSegment[] {
-    const back = this.controller.host() === 'settings-entry' ? 'Esc back' : 'Esc close'
+    // The page is ALWAYS embedded in the Settings lease: Esc at the list root
+    // yields to the Categories rail and never closes the screen.
+    const back = 'Esc back'
     if (this.searchEditing) {
       return [
         { text: 'Enter apply', priority: 80 },
@@ -2219,7 +2307,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.view === 'install') return this.renderInstallBody(plan, bodyTop, targets)
     if (this.view === 'confirm') return this.renderConfirmBody(plan, bodyTop, targets)
     if (this.view === 'diagnostics') return this.renderDiagnosticsBody(plan, bodyTop, targets)
-    if (!plan.wide) {
+    if (!plan.dual) {
+      // The single column paints the CURRENTLY visible view: Details while the
+      // keyboard is in Details, the List everywhere else (a narrow or
+      // risk-starved frame never fabricates a hidden second column).
       if (this.view === 'details') {
         const card = this.selectedCard()
         if (card === undefined) return padBody([color.textDim('Select a plugin first')], plan.bodyRows, plan.width)
@@ -2227,26 +2318,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }
       return this.renderListPane(plan.width, plan.bodyRows, bodyTop, 0, targets, true)
     }
-    // Wide: left list always, right Detail preview/actions.
-    const showPaneHeader = plan.bodyRows >= 2
-    const headerRows = showPaneHeader ? 1 : 0
-    const contentTop = bodyTop + headerRows
-    const viewport = Math.max(0, plan.bodyRows - headerRows)
-    const left = this.renderListPane(plan.leftWidth, viewport, contentTop, 0, targets, true)
+    // The adjacent List|Details pair. Its identity labels belong to the
+    // Settings root's ONE shared pane header, never to this page.
+    const left = this.renderListPane(plan.leftWidth, plan.bodyRows, bodyTop, 0, targets, true)
     const rightX = plan.leftWidth + COLUMN_GAP
     const card = this.selectedCard()
     const right = card === undefined
-      ? padBody([color.textDim('No plugin selected')], viewport, plan.rightWidth)
-      : this.renderDetailPane(card, plan.rightWidth, viewport, this.focus === 'details', contentTop, rightX, targets, true)
-    for (let i = 0; i < viewport; i += 1) {
-      targets.push({ kind: 'pane', value: 'list', row: contentTop + i, startCol: 0, endCol: plan.leftWidth })
-      targets.push({ kind: 'pane', value: 'details', row: contentTop + i, startCol: rightX, endCol: plan.width })
-    }
-    if (showPaneHeader) {
-      const leftLabel = this.focus === 'list' ? color.textStrong('[Plugins]', 'primary') : color.textDim('Plugins')
-      const rightLabel = this.focus === 'details' ? color.textStrong('[Details]', 'primary') : color.textDim('Details')
-      const header = `${fit(leftLabel, plan.leftWidth)}${' '.repeat(COLUMN_GAP)}${fit(rightLabel, plan.rightWidth)}`
-      return [header, ...joinPanes(left, right, plan.leftWidth, plan.rightWidth)]
+      ? padBody([color.textDim('No plugin selected')], plan.bodyRows, plan.rightWidth)
+      : this.renderDetailPane(card, plan.rightWidth, plan.bodyRows, this.focus === 'details', bodyTop, rightX, targets, true)
+    for (let i = 0; i < plan.bodyRows; i += 1) {
+      targets.push({ kind: 'pane', value: 'list', row: bodyTop + i, startCol: 0, endCol: plan.leftWidth })
+      targets.push({ kind: 'pane', value: 'details', row: bodyTop + i, startCol: rightX, endCol: plan.width })
     }
     return joinPanes(left, right, plan.leftWidth, plan.rightWidth)
   }
@@ -2712,23 +2794,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return JSON.stringify(this.controller.model())
   }
 
-  private appNoticeKey(): string | undefined {
-    const notice = this.intents.notice?.()
-    return notice === undefined ? undefined : `${notice.kind}:${notice.text}`
-  }
-
-  /** True only while the live semantic facts AND terminal geometry still match
-   * the frame whose hit map is installed in `paintedTargets`. Comparing only
-   * the panel revision would miss an async controller model/phase/notice update
-   * whose queued repaint has not run yet. */
+  /** True only while the live semantic facts AND the LOCAL viewport grant still
+   * match the frame whose hit map is installed in `paintedTargets`. Comparing
+   * only the panel revision would miss an async controller model/phase/notice
+   * update whose queued repaint has not run yet. */
   private frameIsCurrent(): boolean {
     return this.paintedRevision === this.revision
-      && this.lastRenderWidth === this.intents.columns()
-      && this.lastRenderRows === this.intents.rows()
+      && this.lastRenderWidth === this.viewport.width
+      && this.lastRenderRows === this.viewport.rows
+      && this.lastRenderAllowDual === this.viewport.allowDual
       && this.modelStateKey() === this.lastModelKey
       && this.controller.installView()?.phase === this.lastPhase
       && this.controller.notice() === this.lastNotice
-      && this.appNoticeKey() === this.lastAppNotice
       && this.controller.status().state === this.lastStatusState
   }
 
@@ -2737,21 +2814,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 }
 
-/** The intents the app composition wires into the workspace page. */
+/** The intents the app composition wires into the embedded page. */
 export interface PluginManagerWorkspacePanelIntents {
-  /** The live terminal row budget. */
-  readonly rows: () => number
-  /** The live terminal column budget. */
-  readonly columns: () => number
   /** Repaint the hosting screen. */
   readonly requestRender: () => void
-  /** The ONE app-owned notice (never a second notice store). */
-  readonly notice?: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
   /** Copy exact text through the app's Client-local clipboard owner. */
   readonly onCopy: (text: string) => void
   /** The current extension diagnostics read. Absent = no extension service
    *  (the page states Unavailable and never paints an empty healthy report). */
   readonly diagnostics?: () => TuiExtensionDiagnostics | undefined
+  /** The Settings root's navigation yield (Esc/Left/Shift+Tab at the list
+   * root). The page only reports the intent; the ROOT commits the focus. */
+  readonly onYieldNavigation: () => void
 }
 
 /**
@@ -2770,66 +2844,46 @@ export function createPluginManagerWorkspacePanel(
 
 // ── pure rendering helpers ─────────────────────────────────────────────────
 
-function planChrome(width: number, rows: number, noticeLive: boolean): ChromePlan {
-  const safeRows = Math.max(1, Math.floor(rows))
-  const headerRows = safeRows >= 2 ? 1 : 0
+/**
+ * The ONE local chrome plan of the embedded page (§3.2 priority order): the
+ * semantic bar is always the last row, the business body keeps at least one
+ * real row, then the Host notice (only with two free rows) and the
+ * Search/Filters row (list/details only, with two free rows) may claim one.
+ * The adjacent List|Details pair additionally requires a dual-allowing root
+ * grant, 76 local columns AND six real business body rows.
+ */
+function planChrome(viewport: PluginContentViewport, view: PluginWorkspaceView, noticeLive: boolean): ChromePlan {
+  const width = Math.max(1, Math.floor(viewport.width))
+  const rows = Math.max(1, Math.floor(viewport.rows))
   const actionRows = 1
-  const base = Math.max(0, safeRows - headerRows - actionRows)
-  const metaRows = safeRows >= 7 && base - 1 >= 3 ? 1 : 0
-  const noticeRows = safeRows >= 6 && noticeLive && base - metaRows - 1 >= 2 ? 1 : 0
-  const bodyWithoutRules = Math.max(0, base - metaRows - noticeRows)
-  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
-  const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
-  const wide = width >= PLUGIN_WORKSPACE_WIDE_MIN_COLUMNS
-  let leftWidth = width
-  let rightWidth = width
-  if (wide) {
-    leftWidth = Math.min(42, Math.max(30, Math.floor((width - COLUMN_GAP) * 0.42)))
-    rightWidth = Math.max(MIN_DETAIL_WIDTH, width - leftWidth - COLUMN_GAP)
-    // Keep the sum exact; a terminal width that cannot carry the minimum right
-    // pane falls back to the one-column projection.
-    if (leftWidth + COLUMN_GAP + rightWidth > width) {
-      return planSingleColumn(width, safeRows)
-    }
-  }
+  let free = Math.max(0, rows - actionRows)
+  const noticeRows: 0 | 1 = free >= 2 && noticeLive ? 1 : 0
+  if (noticeRows === 1) free -= 1
+  const searchRows: 0 | 1 = free >= 2 && (view === 'list' || view === 'details') ? 1 : 0
+  if (searchRows === 1) free -= 1
+  const bodyRows = free
+  const dual = viewport.allowDual
+    && (view === 'list' || view === 'details')
+    && width >= DUAL_MIN_COLUMNS
+    && bodyRows >= 6
+  // The fixed split (§3.2): 42% of the pair, clamped to 30..42 columns. The
+  // 76-column floor above keeps the right pane at >= 24 columns by
+  // construction, so no second admission test is needed.
+  const leftWidth = dual ? Math.min(42, Math.max(30, Math.floor((width - COLUMN_GAP) * 0.42))) : width
+  const rightWidth = dual ? width - leftWidth - COLUMN_GAP : width
   return {
     width,
-    rows: safeRows,
-    wide,
-    headerRows,
-    metaRows,
-    ruleRows,
+    rows,
+    searchRows,
     noticeRows,
     actionRows,
     bodyRows,
+    dual,
     leftWidth,
     rightWidth,
   }
 }
 
-function planSingleColumn(width: number, safeRows: number): ChromePlan {
-  const headerRows = safeRows >= 2 ? 1 : 0
-  const actionRows = 1
-  const base = Math.max(0, safeRows - headerRows - actionRows)
-  const metaRows = safeRows >= 7 && base - 1 >= 3 ? 1 : 0
-  const noticeRows = 0
-  const bodyWithoutRules = Math.max(0, base - metaRows)
-  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
-  const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
-  return {
-    width,
-    rows: safeRows,
-    wide: false,
-    headerRows,
-    metaRows,
-    ruleRows,
-    noticeRows,
-    actionRows,
-    bodyRows,
-    leftWidth: width,
-    rightWidth: width,
-  }
-}
 
 function composeEdge(left: string, right: string, width: number): string {
   if (right === '') return fit(left, width)

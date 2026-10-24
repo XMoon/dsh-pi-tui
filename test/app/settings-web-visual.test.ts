@@ -154,7 +154,6 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
     refreshStatus: () => {},
     tuiSettings: { get: () => doc, replace: (next: TuiSettingsDoc) => { Object.assign(doc, next) } },
     extensions: undefined,
-    openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
     progressUpdatesState: { mode: 'milestones' },
     responseStyleState: { style: 'default' },

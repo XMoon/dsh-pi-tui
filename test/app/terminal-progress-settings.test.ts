@@ -175,7 +175,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     setTerminalProgressMode: (mode) => { appliedModes.push(mode) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

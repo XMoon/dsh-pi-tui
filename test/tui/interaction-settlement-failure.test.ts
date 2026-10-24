@@ -1,13 +1,14 @@
 /**
  * M3-6 PR3 interaction-settlement failure regressions (external review P2):
  * a TuiApp-owned presentation cleanup failure must never strand an interaction
- * promise the surface still holds, and the ResponsiveOverlayFrame's one-shot
- * close notification must not be skipped by a throwing child dispose.
+ * promise the surface still holds, and the Settings workspace lease's one-shot
+ * close notification must not be skipped by a throwing embedded Plugin page
+ * dispose.
  *
  * Faults are injected into the REAL owners (private methods shadowed on the
  * instance / the real component). The FIRST three tests drive a non-dispose
- * settlement path (stop() / the overlay closer) so the process live-TUI slot
- * stays releasable; the LAST test is the TERMINAL fail-closed approval case
+ * settlement path (stop() / the Settings lease closer) so the process live-TUI
+ * slot stays releasable; the LAST test is the TERMINAL fail-closed approval case
  * (a failed final `dispose()` keeps the slot claimed) and must therefore stay
  * last — node:test runs each file in its own process, so nothing after it is
  * poisoned.
@@ -17,8 +18,8 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
-import type { Component } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
+import type { EmbeddedPluginPage } from '../../src/tui/plugin-manager/workspace.ts'
 import { liveTuiCountForTest } from '../../src/tui/process-slot.ts'
 import type { SaveLocationDeps } from '../../src/tui/interaction/save-location.ts'
 import { SaveLocationPrompt } from '../../src/tui/interaction/save-location.ts'
@@ -60,30 +61,59 @@ async function settleOutcome<T>(
   ])
 }
 
-test('a throwing workspace panel dispose still fires the one-shot close notification', () => {
-  const app = startApp()
-  const failure = new Error('panel dispose failed')
+test('a throwing plugin page dispose still fires the one-shot Settings lease notification', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const failure = new Error('plugin page dispose failed')
   let closed = 0
-  let threw = false
-  // A plain Component whose FIRST dispose throws (later disposals are no-ops so
-  // the afterEach sweep can still dispose the surface cleanly).
-  const panel: Component = {
-    render: () => ['panel'],
+  let disposeCalls = 0
+  // The Settings lease hosts the ONE embedded Plugin page; its teardown owner
+  // is the SettingsWorkspacePanel, which drops the child BEFORE disposing it.
+  const page: EmbeddedPluginPage = {
+    focused: false,
+    render: () => ['plugin page'],
     invalidate: () => {},
+    setViewport: () => {},
+    currentView: () => 'list',
+    canYieldFocusToNavigation: () => true,
+    pendingMutation: () => false,
+    cancelPointer: () => {},
+    handleInput: () => {},
+    handleMouse: () => undefined,
+    onCellPress: () => {},
+    onCellClick: () => {},
+    contentLayout: () => ({ dual: false, leftWidth: 1, rightWidth: 1 }),
     dispose: () => {
-      if (threw) return
-      threw = true
+      disposeCalls += 1
       throw failure
     },
-  } as unknown as Component
-  const closer = app.openPluginManagerWorkspace(panel, () => { closed += 1 })
+  }
+  const settings = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
+    {
+      aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
+      onOpenLegacy: () => {},
+      onClose: () => { closed += 1 },
+      initialCategory: 'plugins',
+      onOpenPlugins: () => page,
+    },
+  )
+  // The page is built by the first real Settings frame (the lazy mount).
+  await vt.waitForRender()
+  assert.equal(disposeCalls, 0, 'the page is mounted, not disposed')
 
-  assert.throws(() => closer(), (error: unknown) => error === failure,
+  assert.throws(() => settings.close(), (error: unknown) => error === failure,
     'the child dispose failure stays observable')
-  assert.equal(closed, 1, 'the one-shot close notification still fired exactly once')
+  assert.equal(closed, 1, 'the one-shot Settings lease notification still fired exactly once')
+  assert.equal(disposeCalls, 1, 'the throwing teardown is not retried by the lease closer')
 
-  closer()
+  // No ghost owner: the Settings root already dropped the page reference before
+  // its throwing dispose, so a repeated close never reaches it again.
+  settings.close()
   assert.equal(closed, 1, 'a repeated close does not re-notify')
+  assert.equal(disposeCalls, 1, 'a repeated close does not re-dispose the child')
 })
 
 test('a throwing question presentation cleanup still rejects the question promise', async (t) => {

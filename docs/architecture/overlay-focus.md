@@ -577,18 +577,24 @@ owns only the lease, focus and write-lifecycle mechanics.
   that opened the workspace is stopped with `preserveScreen: true`, its object
   tree, overlay graph, focus, draft and scroll state survive, and closing restarts
   the SAME instance.
-- **The first-level Settings Plugins page and the direct `/plugins` root use
-this ONE lease.** The Plugins category is a direct page entry,
-  not an empty Rows level: the app lazily builds the one
-  `PluginManagerWorkspacePanel` only when the category is activated, and that
-  page owns paint/keys/mouse INSIDE the already-leased Settings screen;
-  returning restores the Settings panel's L0 selection and scroll state. The
-  direct `/plugins` root calls the same `TuiApp` lease primitive
-  (`openPluginManagerWorkspace`), so there is never a nested Alt Screen, a
-  second focus owner or an overlay fallback. The page's selection/search/filter/
-  scroll and painted-hit-map revision are per-open; the one
-  `PluginManagerController` outlives the page, and leaving the page never
-  cancels an in-flight Host install.
+- **The Settings Plugins page is a CHILD of this ONE lease.** The Plugins
+  category is a direct page entry, not an empty Rows level: the composition
+  lazily builds the one `PluginManagerWorkspacePanel` only when the category's
+  content column is first really painted (never on `/settings` alone, never
+  while a narrow rail merely selects it), and that page paints only its
+  business body inside a local viewport the root grants every frame.
+  `/plugins` is only a deep link into the SAME lease
+  (`TuiApp.openSettingsWorkspace` with the Plugins category selected); there is
+  no second plugin screen primitive, nested Alt Screen, second focus owner or
+  overlay fallback. The page's selection/search/filter/scroll and
+  painted-hit-map revision are per-page; the one `PluginManagerController`
+  outlives the page, and leaving the page (a focus yield back to the rail)
+  never closes it, never releases its Host claim and never cancels an in-flight
+  Host install. Only a real category change or the Settings teardown disposes
+  the page once and releases the ONE token-owned claim; a late/stale token
+  cannot release a newer claim. The root owns the shared pane header and the
+  ONE physical last-row bar, moving the page's own semantic line there only
+  while the plugin content holds the keyboard.
 - **The workspace has ONE focus state and ONE input owner.** The category rail
   is the selection owner and the direct content page (About, Models, Account) is
   the content owner; the panel routes every key to the owner that currently

@@ -1,8 +1,9 @@
 /**
- * Fullscreen Plugin Manager workspace visual suite (S4-D1 D1-A07/A13):
- * REAL `TuiAltScreen` frames over the production controller/panel at the
- * frozen terminal matrix, section order, truthful state chips, the atomic
- * Experimental section, search/filter, mouse selection and CJK truncation.
+ * Embedded Plugin Manager visual suite (S4-D1 D1-A07/A13 + PR2): REAL
+ * `TuiAltScreen` frames of the Settings workspace lease over the production
+ * controller/panel at the frozen terminal matrix, section order, truthful
+ * state chips, the atomic Experimental section, search/filter, mouse
+ * selection and CJK truncation.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-workspace-visual.test
  */
 
@@ -42,23 +43,29 @@ const release = (harness: WorkspaceHarness, row: number, col: number): void => {
   harness.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
 }
 
-test('the frozen matrix keeps the fullscreen skeleton and a reachable last-row Action Bar', async () => {
+test('the embedded page keeps ONE Settings skeleton and a reachable last-row Action Bar', async () => {
   for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [96, 40], [95, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
     const harness = await open({ columns, rows })
     const view = harness.viewport()
-    assert.ok(view[0]!.includes('Plugins · All'), `${columns}x${rows} header`)
-    assert.match(plain([view.at(-1)!]), /Esc close/, `${columns}x${rows} keeps Esc on the last row`)
+    // ONE shared root chrome: header, metadata, one rule, then the plugin body.
+    assert.match(plain([view[0]!]), /Settings · Plugins/u, `${columns}x${rows} header`)
+    assert.match(plain([view[1]!]), /Scope: Host plugins & TUI extensions/u, `${columns}x${rows} metadata`)
+    assert.match(plain([view[2]!]), /^─+$/u, `${columns}x${rows} one top rule`)
+    assert.match(plain([view.at(-1)!]), /Esc back/u, `${columns}x${rows} keeps the plugin Esc on the last row`)
     for (const [index, line] of view.entries()) {
       assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} line ${index} exceeds the width: ${JSON.stringify(line)}`)
     }
-    if (columns >= 96) {
-      assert.match(harness.view(), /\[Plugins\]/, `${columns}x${rows} paints the focused left pane label`)
-      assert.match(harness.view(), /Details/, `${columns}x${rows} paints the right pane label`)
+    const paneHeader = view.map(line => plain([line])).find(line => line.includes('[Plugins]'))
+    if (columns >= 76) {
+      assert.ok(paneHeader !== undefined, `${columns}x${rows} paints the shared focused pane label`)
+      const split = harness.panel.contentLayout()
+      if (split.dual) assert.match(paneHeader!, /Details/u, `${columns}x${rows} paints the Details label`)
+      else assert.doesNotMatch(paneHeader!, /Details/u, `${columns}x${rows} is the single-column projection`)
     } else {
-      assert.doesNotMatch(harness.view(), /\[Plugins\]/, `${columns}x${rows} is the one-column projection`)
+      assert.equal(paneHeader, undefined, `${columns}x${rows} paints no pane header`)
     }
     if (rows >= 10) {
-      assert.ok(view.some(line => plain([line]).startsWith('> ')), `${columns}x${rows} keeps a real selected body row`)
+      assert.ok(view.some(line => plain([line]).includes('> ')), `${columns}x${rows} keeps a real selected body row`)
     }
     started.delete(harness)
     harness.app.dispose()
@@ -132,16 +139,22 @@ test('search and the Tab status filter are local projections that keep identity'
   await harness.settle()
   assert.match(harness.view(), /@vendor\/foo/, 'Esc clears the query')
 
+  // Select an ENABLED card first: a filter keeps the selected identity while it
+  // survives, and re-anchors on the nearest surviving card otherwise.
+  harness.vt.sendInput('\x1b[H') // Home: the first card (self bundle, enabled)
+  await harness.settle()
+  const selected = harness.panel.selectedCardValue()
+  assert.ok(selected !== undefined, 'the list has a selected identity')
   harness.vt.sendInput('\t') // All -> Enabled
   await harness.settle()
-  assert.match(harness.view(), /Plugins · Enabled/)
   assert.doesNotMatch(harness.view(), /\[disabled\]/, 'the Enabled projection excludes disabled cards')
   assert.match(harness.view(), /\[enabled\]/)
+  assert.equal(harness.panel.selectedCardValue(), selected, 'the filter keeps the surviving identity selected')
+  assert.equal(harness.snapshotCalls(), 1, 'filters are local projections, never a new inventory read')
   harness.vt.sendInput('\t') // Enabled -> Installed
   harness.vt.sendInput('\t') // Installed -> Available
   await harness.settle()
-  assert.match(harness.view(), /Plugins · Available/)
-  assert.match(harness.view(), /\[available\]/)
+  assert.match(harness.view(), /\[available\]/, 'the Available projection keeps the catalog entries')
 })
 
 const hexToRgb = (hex: string): number =>
@@ -186,16 +199,20 @@ test('the page paints the live palette tokens in dark, light and custom themes',
 test('reader exemption warnings are visible on the page', async () => {
   const harness = await open({ columns: 120, rows: 30, exemptionWarnings: ['unreadable exemption record'] })
   assert.match(harness.view(), /version exemptions: unreadable exemption record/,
-    'the model reader warning reaches the notice row')
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc close/, 'the warning never displaces the last-row Action Bar')
+    'the model reader warning reaches the plugin notice row')
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/u, 'the warning never displaces the last-row Action Bar')
 })
 
 test('mouse selection is not an action; a second click enters Details and actions dispatch', async () => {
   const harness = await open({ columns: 140, rows: 40 })
   const targetRow = rowOf(harness, '@vendor/foo')
   assert.ok(targetRow >= 0)
-  press(harness, targetRow, 3)
-  release(harness, targetRow, 3)
+  // The click must land on the REAL painted cell of the plugin content (the
+  // >=120 projection keeps the Categories rail, so the list starts at x=24).
+  const targetColumn = plain([harness.viewport()[targetRow]!]).indexOf('@vendor/foo')
+  assert.ok(targetColumn >= 24, `the card is painted inside the plugin content:\n${harness.view()}`)
+  press(harness, targetRow, targetColumn)
+  release(harness, targetRow, targetColumn)
   await harness.settle()
   assert.match(harness.view(), /> @vendor\/foo/, 'a single click selects only')
   assert.equal(harness.setBundle.length, 0, 'a single click never toggles')
@@ -207,8 +224,9 @@ test('mouse selection is not an action; a second click enters Details and action
   // A click on the painted action line dispatches the SAME intent as Enter.
   const enableRow = rowOf(harness, 'Enable…')
   assert.ok(enableRow >= 0)
-  press(harness, enableRow, 50)
-  release(harness, enableRow, 50)
+  const enableColumn = plain([harness.viewport()[enableRow]!]).indexOf('Enable…')
+  press(harness, enableRow, enableColumn)
+  release(harness, enableRow, enableColumn)
   await harness.settle()
   assert.deepEqual(harness.setBundle, [{ name: '@vendor/foo', enabled: true }])
 })
@@ -250,25 +268,27 @@ test('a model refresh whose repaint has NOT run refuses a click on the old Enabl
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   })
   const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 40,
-    columns: () => 120,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   })
-  const paint = (): string[] => panel.render(120)
+  const paint = (): string[] => {
+    // The embedded page only paints inside its granted local viewport.
+    panel.setViewport({ width: 120, rows: 40, allowDual: true })
+    return panel.render(120)
+  }
   const settle = async (rounds = 8): Promise<void> => {
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
   }
 
-  controller.open('direct-command')
+  controller.open()
   await settle()
+  paint() // the frame must exist before any body-based admission
   panel.handleInput('\r') // Details
   const painted = paint().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
   const actionRow = painted.findIndex(line => line.includes('Enable…'))

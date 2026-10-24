@@ -170,12 +170,11 @@ test('a live tool-registry change through the production Plugin Manager seam rea
   const port = new DirectPluginManagerPort(ctx as never)
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => [] })
-  controller.open('direct-command')
+  controller.open()
   await tick()
   controller.toggleCard(bundleValue('probe-bundle'))
   await tick()

@@ -160,8 +160,8 @@ the `/footer` alias and never enters this workspace.
   one top rule, optional app notice, optional pane header, body, and the single
   physical last-row Action Bar. The app notice is the ONE root-level notice;
   a page's own business notices stay inside that page's body. At ≥76 columns a
-  direct About/Models/Account page keeps the category rail and paints its own
-  display-only pane header whose focused `[Label]` names the live keyboard
+  direct About/Models/Account/Plugins page keeps the category rail and shares
+  ONE display-only pane header whose focused `[Label]` names the live keyboard
   owner; the page's own semantic hint line is moved unchanged to the frame's
   last row instead of being regenerated at a wider width. The legacy medium
   projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
@@ -245,8 +245,21 @@ the `/footer` alias and never enters this workspace.
   outcomes are attributed from a fresh read, never guessed. A refused write is
   reported as `Not saved`/unknown, never as success.
 - Theme auto is fenced on the runtime selection intent.
-- `Plugins` is a direct page entry inside the same lease (see Plugin Manager);
-  the legacy complete editor stays reachable through `Other settings`.
+- `Plugins` is a DIRECT page inside the same lease (see Plugin Manager): the
+  embedded `PluginManagerWorkspacePanel` paints only its own business body,
+  while the root keeps the single Header/Metadata/rule/pane-header/last-row
+  bar. At ≥120 columns the frame is `Categories | List | Details`; at 76–119
+  the rail focus paints `Categories | List` and the plugin content focus paints
+  `List | Details`; below 76 columns it is one column, and the page is not
+  mounted while the rail is focused there. `install`/`confirm`/`diagnostics`
+  always take the full width (no rail) so risk text is never squeezed. `Tab`
+  and `Enter`/`Right` only hand the keyboard to the plugin List (no action);
+  `Tab` inside the List keeps its filter cycle, `Shift+Tab` from the untouched
+  List root returns to the rail, and `Esc` from the List root returns to the
+  rail with the page instance, its view/query/selection/scroll and the
+  controller's install request id intact. Only a real category change or the
+  Settings teardown disposes the page and releases its Host claim. The legacy
+  complete editor stays reachable through `Other settings`.
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 
@@ -456,12 +469,36 @@ keeps the retained snapshot; passive paint/refresh/wheel never acknowledge.
 
 ### One controller, one workspace lease
 
-`/plugins` and `Settings → Plugins` open the SAME `PluginManagerWorkspacePanel`
-and `PluginManagerController` inside the existing workspace Alt-Screen lease.
-Settings keeps its L0/L1/L2 state while the page is on top; Esc returns to
-Settings L0 with Plugins selected, while direct entry returns to the untouched
-conversation. The controller outlives the page; a second open is a no-op; a
-refused lease leaves no phantom claim.
+`/plugins` and `Settings → Plugins` are the SAME composition: ONE
+`PluginManagerController` per surface and ONE embedded
+`PluginManagerWorkspacePanel` inside the existing Settings workspace Alt-Screen
+lease. `/plugins` is only a deep link: it takes that lease with the Plugins
+category selected and the keyboard on the Plugin List (sessionless, no Session
+create/switch, no second screen). The controller outlives the page; a second
+page while one still owns the controller returns nothing instead of nesting an
+owner; a refused Settings lease leaves no phantom claim.
+
+The page never paints root chrome: it receives a local
+`{ width, rows, allowDual }` viewport from the root every frame and paints only
+its Search/Filters row (list/details, when admitted), its OWN Host
+notice/read-error/exemption row, its business body and ONE semantic bar as its
+local last row; the root installs that line as the physical last row only while
+the plugin content owns the keyboard. The adjacent `List | Details` pair needs
+`allowDual`, a local width ≥76 and six real body rows; the split is
+`min(42, max(30, floor((width−2)×0.42))` for the list and the remainder for
+Details. A narrower or risk-starved frame degrades to ONE business column and
+never to a permanent Categories rail.
+
+Esc is a two-level gradient: the untouched List root yields to the Categories
+rail (keeping the page and its state), a second Esc closes the Settings lease;
+Details returns to the List, confirmation returns to Details, Diagnostics
+returns to the List, and a running install's Esc hides the view without
+cancelling the Host operation. The rail's `Tab`/`Enter`/`Right` only transfer
+the keyboard into the List. `Esc` in the install gradient and the details
+sub-state never cross levels. A page factory failure releases the claim and
+disposes anything half-built instead of faking success; a page that starts
+after an earlier attempt ALWAYS starts on the List, and `i` reopens the same
+in-flight/failed/unknown request id without dispatching a second install.
 
 ### Host authority is owned elsewhere
 
@@ -514,9 +551,11 @@ normal successor of `applying`.
   Host-reported `pendingBuilds` under a NEW request id.
 - `installEpoch` fences stale inspect results; `mutationToken` enforces one
   mutation in flight.
-- Leaving/hiding the page never cancels a Host operation. `i` reopens the SAME
-  controller state (in-flight request, failed/unknown requestId, or a recent
-  result); `hasResumableInstall` is the reopen predicate.
+- Leaving/hiding the page never cancels a Host operation. Every new page starts
+  on the Plugin List; `i` reopens the SAME controller state (in-flight request,
+  failed/unknown requestId, or a recent result) under the SAME request id and
+  never dispatches a second install. `hasResumableInstall` is the reopen
+  predicate for the list's hint only, never the initial view.
 - A Remote reply superseded by a Connection generation change is an
   indeterminate `PluginManagerStaleResultError`, never a new-Host success or
   refusal.
@@ -538,8 +577,11 @@ only hazard statement.
 ### Diagnostics page
 
 The Plugin Manager list opens a read-only Diagnostics page with `d`; it is a
-view of the SAME page/controller/workspace lease (never a Settings category, a
-second controller or a second screen owner). One immutable read produces its
+FULL-WIDTH business view of the SAME embedded page/controller/Settings lease
+(never a Settings category, a second controller or a second screen owner). The
+root keeps its single Header/Metadata/rule/pane-header row; the shared app
+notice is painted by the root, and the page's own Host inventory notice is not
+painted on this view. One immutable read produces its
 facts: the extension ledger's contribution health records, each live registry's
 contribution count, and `api().capabilities`. Contributions with a PROVEN
 `ownerEntryIds` association are grouped by owner; all others stay visible under

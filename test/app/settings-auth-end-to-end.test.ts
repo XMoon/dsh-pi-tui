@@ -148,7 +148,6 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       replace: () => {},
     },
     extensions: undefined,
-    openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
     config: {
       configReadiness: () => 'ready',

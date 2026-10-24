@@ -60,8 +60,14 @@ test('Esc hides a running install without cancelling it and `i` reopens the SAME
   await harness.settle()
   harness.vt.sendInput('\r')
   await harness.settle()
-  harness.vt.sendInput('\r')
-  await harness.settle()
+  // A Detail action that the first frame could not paint is revealed first and
+  // admitted on the NEXT frame; the loop keeps pressing only while we are
+  // still on the Details page.
+  for (let attempt = 0; attempt < 3 && harness.panel.currentView() === 'details'; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  assert.equal(harness.panel.currentView(), 'install', 'the explicit Install action opened the editor')
   assert.match(harness.view(), /offered version 0.2.1-rc.2/)
   harness.vt.sendInput('\r') // explicit install confirm
   await harness.settle()
@@ -78,7 +84,8 @@ test('Esc hides a running install without cancelling it and `i` reopens the SAME
   harness.vt.sendInput('\x1b')
   await harness.settle()
   assert.equal(harness.panel.currentView(), 'list')
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc close/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+    'hiding the running install returns to the embedded List, whose Esc yields to Categories')
 
   harness.vt.sendInput('i')
   await harness.settle()
@@ -102,7 +109,7 @@ test('the removal confirmation defaults to Cancel and an explicit Remove is requ
   await harness.settle()
   harness.vt.sendInput('\r')
   await harness.settle()
-  assert.match(harness.view(), /Removal confirmation/)
+  assert.match(harness.view(), /Plugins · Confirm/u, 'the shared pane header names the full-width Confirm page')
   assert.match(harness.view(), new RegExp(`Remove ${vendor.replace('/', '\\/')}\\?`))
   // The default focus is Cancel: Enter never removes.
   harness.vt.sendInput('\r')
@@ -189,29 +196,29 @@ test('a running install copies its retained log byte-exact while the display sta
   await harness.settle()
 })
 
-test('Esc advertises the real destination per entry host', async () => {
-  const direct = await open({ columns: 120, rows: 30 })
-  assert.match(plain([direct.viewport().at(-1)!]), /Esc close/)
-  direct.vt.sendInput('i')
-  await direct.settle()
-  assert.match(plain([direct.viewport().at(-1)!]), /Esc back/,
-    'the direct install editor returns to the LIST, so it must not claim Esc close')
-  direct.vt.sendInput('\t') // spec -> registry focus
-  await direct.settle()
-  const editor = plain(direct.viewport())
+test('the embedded page always names its real Esc destination', async () => {
+  const harness = await open({ columns: 120, rows: 30 })
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+    'the List root yields to Categories, it never closes the Settings lease')
+  harness.vt.sendInput('i')
+  await harness.settle()
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+    'the install editor returns to the LIST, so it must not claim Esc close')
+  harness.vt.sendInput('\t') // spec -> registry focus
+  await harness.settle()
+  const editor = plain(harness.viewport())
   assert.match(editor, /Reg\s+> /, 'registry focus uses the existing > selection device')
   assert.doesNotMatch(editor, /‹/, 'no third focus glyph is introduced')
-  direct.vt.sendInput('\x1b')
-  await direct.settle()
-  assert.equal(direct.panel.currentView(), 'list')
-  direct.app.dispose()
-  started.delete(direct)
-
-  const settings = await open({ columns: 120, rows: 30, entryHost: 'settings-entry' })
-  assert.match(plain([settings.viewport().at(-1)!]), /Esc back/)
-  settings.vt.sendInput('i')
-  await settings.settle()
-  assert.match(plain([settings.viewport().at(-1)!]), /Esc back/)
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list')
+  assert.equal(harness.snapshotCalls(), 1, 'hiding the install view never re-reads the inventory')
+  // The List root yields to the rail, whose ONE bar names the real close.
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc close/,
+    'the rail owns the physical last row after the yield')
+  assert.equal(harness.panel.focused, false, 'the rail owns the input focus')
 })
 
 test('80x10 keeps the removal consequence and both choices reachable', async () => {
@@ -276,8 +283,12 @@ test('a resize mid-install keeps the same request and a truthful last-row bar', 
 
 test('a second workspace lease is refused; an external disposal notifies exactly once', async () => {
   const harness = await open({ columns: 100, rows: 30 })
-  const dummy: Component = { render: () => [], invalidate: () => {} }
-  assert.throws(() => harness.app.openPluginManagerWorkspace(dummy), /already leased/)
+  // The Plugin Manager never leases a screen of its own: a second Settings
+  // lease (which is what an independent plugin screen used to be) is refused.
+  assert.throws(() => harness.app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
+    { aboutVersionFacts: { tui: 'test', dsh: undefined }, onOpenLegacy: () => {} },
+  ), /already leased/)
 
   const controller = new PluginManagerController({
     snapshot: async () => ({
@@ -298,18 +309,15 @@ test('a second workspace lease is refused; an external disposal notifies exactly
     subscribeInvalidation: () => () => {},
   }, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   })
   let disposals = 0
   const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => 24,
-    columns: () => 80,
     requestRender: () => {},
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   }, { onDispose: () => { disposals += 1 } })
   panel.dispose()
   panel.dispose()
@@ -630,7 +638,7 @@ test('a zero-row list frame advertises no Enter invite and keeps the real Esc', 
   await harness.settle()
   const bar = plain([harness.viewport().at(-1)!])
   assert.doesNotMatch(bar, /Enter/u, 'the zero-row list cannot open Details with Enter')
-  assert.match(bar, /Esc close/u, 'the real Esc destination stays advertised')
+  assert.match(bar, /Esc back/u, 'the real Esc destination stays advertised')
   // The hidden row is not just a missing hint: the navigation admission must
   // agree with it (Enter and Right cannot enter an invisible card's Details).
   harness.vt.sendInput('\r')

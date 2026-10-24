@@ -227,16 +227,24 @@ Transcript's tool card. Explicit `run_in_background: true` jobs (and jobs
 promoted to the background after a foreground timeout) remain visible in
 `TRACKED` after completion as long as the Job Registry keeps their record.
 
-`/plugins` opens the active profile's fullscreen Plugin Manager: the catalog is
-grouped as TUI & Extensions / Official DSH / Third-party / Experimental (the
-Experimental group is always last), with a two-column wide layout and a
-one-column narrow layout. Search, status filters, provenance/status facts,
-official catalog installs, enablement and removal are available from the page;
-the actual Host-reported version, restart requirement and errors are shown
-verbatim. The `dsh-pi-tui` bundle currently providing the surface is read-only
-and cannot be disabled or removed from its own screen. The first-level
-`Settings → Plugins` category opens the same page in place, and returning
-preserves the Settings category, scroll and selection. Press `d` inside the page
+`/plugins` is a deep link into `/settings → Plugins`: both take the SAME
+Settings fullscreen lease and the SAME Plugin Manager page — there is no
+separate plugin screen and no Session create/switch. The catalog is grouped as
+TUI & Extensions / Official DSH / Third-party / Experimental (the Experimental
+group is always last). At >=120 columns the frame shows
+`Categories | Plugin List | Details`; at 76-119 columns it shows
+`Categories | List` or `List | Details` depending on the keyboard owner; below
+76 columns it is one column. Install, dangerous confirmations and Diagnostics
+always take the full width so risk text is never squeezed. Settings paints the
+shared header/metadata/rule/pane header and the single last-row action bar; the
+plugin page contributes only its business body. Search, status filters,
+provenance/status facts, official catalog installs, enablement and removal are
+available from the page; the actual Host-reported version, restart requirement
+and errors are shown verbatim. The `dsh-pi-tui` bundle currently providing the
+surface is read-only and cannot be disabled or removed from its own screen. The
+category preview and `/plugins` share one page instance and one background
+install request: `Esc` from the List returns to the Settings category and a
+second `Esc` closes the workspace. Press `d` inside the page
 for the read-only **Diagnostics** view: extension contribution health grouped by
 owner (`active/failed/shadowed` with the full `lastError`), live registry counts,
 the actual advertised capabilities, and contributions with no proven Loader-entry

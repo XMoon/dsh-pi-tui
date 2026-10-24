@@ -41,6 +41,7 @@ import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { Component } from '@xmoon76/pi-tui'
+import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft } from './app/submission/steer.ts'
 import type { DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
@@ -682,17 +683,17 @@ export interface TuiCommandRunner {
    */
   openTasksBrowser(): void
   /**
-   * Open the shared Plugin Manager surface directly (`/plugins`, P1-A). It is
-   * profile-wide and sessionless: it never creates or switches a Session.
+   * Build the ONE embedded Plugin Manager page as a lazy `Settings → Plugins`
+   * child of the Settings workspace lease. The single surface-owned controller
+   * owns operation state; `onYieldNavigation` is the Settings root's navigation
+   * yield (the page never closes itself). Opening `/settings` alone never calls
+   * this, so it never reads the plugin inventory.
+   *
+   * The narrow page contract is TUI-only: the application owner keeps seeing a
+   * plain `Component`, and this composition-only signature is where the
+   * concrete page type is named.
    */
-  openPluginManager(): void
-  /**
-   * Build the SAME Plugin Manager page as a lazy `Settings → Plugins` inline
-   * page. The single runner-owned controller owns operation state; `done`
-   * returns to Settings. Opening `/settings` alone never calls this (no eager
-   * inventory read).
-   */
-  createPluginManagerPage(done: () => void): Component | undefined
+  createPluginManagerPage(onYieldNavigation: () => void): EmbeddedPluginPage | undefined
   /**
    * Open the conversation rewind picker (plan: the ONE entry shared by the
    * idle empty-editor double-Esc and `/rewind`). The runner decides what
@@ -2160,9 +2161,10 @@ export function registerTuiCommands(
 
   registerTasksCommand({ runner, registerTuiCommand })
 
-  // `/plugins` (P1-A): the canonical sessionless entry into the shared
-  // profile-wide Plugin Manager surface (see `src/tui/commands/tasks.ts`).
-  registerPluginsCommand({ runner, registerTuiCommand })
+  // `/plugins` (P1-A / PR2): the canonical sessionless deep link into
+  // `Settings → Plugins` (see `src/tui/commands/tasks.ts`). It takes the SAME
+  // Settings workspace lease; no second Plugin screen exists.
+  registerPluginsCommand({ openPluginsWorkspace: settingsCommands.openPluginsWorkspace, registerTuiCommand })
 
   // `/permission` is NOT registered here: dsh-permission-presets in the
   // base layer already registers it (text form: `/permission` shows the

@@ -1,8 +1,12 @@
 /**
- * Owner-integration tests for the Plugin Manager host registry (P1-A): the
- * exact chain that matters across the two entries — a normal close runs the
- * user close path, while an EXTERNAL Settings parent teardown releases the
- * owner only, so a later `/plugins` still opens.
+ * Owner-integration tests for the Plugin Manager host registry (PR2): the ONE
+ * embedded `Settings → Plugins` page claims the ONE controller and releases the
+ * claim only on a REAL teardown (the page's `onDispose`). A focus yield back to
+ * the Categories rail keeps the claim; a duplicate claim is a synchronous
+ * programming error; a stale token can never release a newer owner.
+ *
+ * There is exactly ONE host entry (the Settings lease), so the retired
+ * "nested previous owner" / normal-close-callback model is deliberately absent.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-host-registry.test
  */
 
@@ -14,111 +18,98 @@ import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/worksp
 import type { PluginManagerPort } from '../../src/runtime/plugin-manager-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 
-function port(): PluginManagerPort {
-  return {
-    snapshot: async () => ({
-      bundles: [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }],
-      plugins: [],
-      registries: { registry: null, fallbackRegistries: [], resolved: null },
-      exemptions: [],
-      exemptionWarnings: [],
-    }),
-    inspect: async () => ({ status: 'refused', problem: 'unknown', reason: 'x' }),
-    setBundleEnabled: async () => ({ changed: true, application: 'applied', stage: 'enable', target: '' }),
-    setPluginEnabled: async () => ({ changed: true, application: 'applied', stage: 'enable', target: '' }),
-    removeBundle: async () => ({ changed: true, application: 'applied', stage: 'remove', target: '' }),
-    startInstall: async () => ({ changed: true, application: 'applied', stage: 'install', target: '' }),
-    waitForInstall: async () => null,
-    cancelInstall: async () => ({ status: 'not-running' }),
-    subscribeInstall: () => () => {},
-    subscribeInvalidation: () => () => {},
-  }
+const PORT: PluginManagerPort = {
+  snapshot: async () => ({
+    bundles: [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }],
+    plugins: [],
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: [],
+    exemptionWarnings: [],
+  }),
+  inspect: async () => ({ status: 'refused', problem: 'unknown', reason: 'x' }),
+  setBundleEnabled: async () => ({ changed: true, application: 'applied', stage: 'enable', target: '' }),
+  setPluginEnabled: async () => ({ changed: true, application: 'applied', stage: 'enable', target: '' }),
+  removeBundle: async () => ({ changed: true, application: 'applied', stage: 'remove', target: '' }),
+  startInstall: async () => ({ changed: true, application: 'applied', stage: 'install', target: '' }),
+  waitForInstall: async () => null,
+  cancelInstall: async () => ({ status: 'not-running' }),
+  subscribeInstall: () => () => {},
+  subscribeInvalidation: () => () => {},
 }
 
-/** Mirrors the src/index.ts wiring of both entries over one registry. */
-function wiring(): {
-  registry: PluginManagerHostRegistry
-  openDirect: () => { panel: PluginManagerWorkspacePanel } | undefined
-  createPage: (done: () => void) => PluginManagerWorkspacePanel
-} {
-  const registry = new PluginManagerHostRegistry()
-  const controller = new PluginManagerController(port(), {
+/** Mirrors the surface runtime/`settingsCommands` wiring over one registry. */
+function controller(registry: PluginManagerHostRegistry): PluginManagerController {
+  return new PluginManagerController(PORT, {
     requestRender: () => {},
-    requestClose: () => registry.closeActive(),
     notify: () => {},
     isOpen: () => registry.isOpen(),
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => [] })
-  return {
-    registry,
-    openDirect: () => {
-      if (registry.isOpen()) return undefined
-      let closeSurface: () => void = () => {}
-      const claim = registry.claim(() => closeSurface())
-      const panel = new PluginManagerWorkspacePanel(controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, { onDispose: () => claim.releaseExternally() })
-      // Simulate the overlay: hiding it disposes the panel (its onDispose runs).
-      closeSurface = () => panel.dispose()
-      controller.open('direct-command')
-      return { panel }
-    },
-    createPage: (done) => {
-      let claim: ReturnType<PluginManagerHostRegistry['claim']> | undefined
-      const panel = new PluginManagerWorkspacePanel(controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, { onDispose: () => claim?.releaseExternally() })
-      claim = registry.claim(() => claim?.closeNormally(), done)
-      controller.open('settings-entry')
-      return panel
-    },
-  }
 }
 
-test('an external Settings teardown releases the owner without a user close, and /plugins then opens', () => {
-  const { registry, openDirect, createPage } = wiring()
-  let doneCalls = 0
-  const submenu = createPage(() => { doneCalls += 1 })
-  assert.equal(registry.isOpen(), true)
-
-  // The Settings parent is hidden: it disposes the submenu WITHOUT calling done().
-  submenu.dispose()
-  assert.equal(registry.isOpen(), false, 'the owner must be released')
-  assert.equal(doneCalls, 0, 'an external teardown must not fake a user close')
-
-  const direct = openDirect()
-  assert.ok(direct !== undefined, '/plugins must open after the external teardown')
-  assert.equal(registry.isOpen(), true)
-})
-
-test('a normal close runs the user close path exactly once and releases the owner', () => {
-  const { registry, createPage } = wiring()
-  let doneCalls = 0
-  const submenu = createPage(() => { doneCalls += 1 })
-  registry.closeActive()
-  assert.equal(doneCalls, 1)
-  assert.equal(registry.isOpen(), false)
-  // The subsequent external dispose of the already-closed panel is a no-op.
-  submenu.dispose()
-  assert.equal(doneCalls, 1)
-})
-
-test('a stale claim can never release a newer owner', () => {
+test('a duplicate claim throws synchronously and a released owner can be claimed again', () => {
   const registry = new PluginManagerHostRegistry()
-  const first = registry.claim(() => {})
-  first.releaseExternally()
   assert.equal(registry.isOpen(), false)
-  const second = registry.claim(() => {})
+  const claim = registry.claim()
   assert.equal(registry.isOpen(), true)
-  // A late external teardown of the OLD claim must not clear the new owner.
-  first.releaseExternally()
-  assert.equal(registry.isOpen(), true)
-  second.releaseExternally()
+  // The Settings root itself never builds a second page: a second claim is a
+  // programming error, never a nested owner.
+  assert.throws(() => registry.claim(), /already has an owning page/)
+  assert.equal(registry.isOpen(), true, 'the refused claim never replaces the live owner')
+
+  claim.release()
+  assert.equal(registry.isOpen(), false)
+  const next = registry.claim()
+  assert.equal(registry.isOpen(), true, 'after release a new claim is accepted')
+  next.release()
   assert.equal(registry.isOpen(), false)
 })
 
-test('the direct host releases its owner on an external overlay teardown', () => {
-  const { registry, openDirect } = wiring()
-  const direct = openDirect()
-  assert.ok(direct !== undefined)
+test('release() is idempotent and a stale claim can never release a newer owner', () => {
+  const registry = new PluginManagerHostRegistry()
+  const first = registry.claim()
+  first.release()
+  first.release()
+  assert.equal(registry.isOpen(), false, 'a repeated release is inert')
+
+  const second = registry.claim()
   assert.equal(registry.isOpen(), true)
-  direct.panel.dispose()
+  // A late teardown of the OLD page must not clear the newer owner.
+  first.release()
+  assert.equal(registry.isOpen(), true)
+  second.release()
   assert.equal(registry.isOpen(), false)
-  assert.ok(openDirect() !== undefined)
+})
+
+test('a real page teardown releases the owner exactly once; a navigation yield never does', () => {
+  const registry = new PluginManagerHostRegistry()
+  const manager = controller(registry)
+  const claim = registry.claim()
+  let releases = 0
+  let yields = 0
+  // The embedded page takes ONLY the new intents (no rows/columns/notice) and
+  // releases its claim from the teardown hook, never from a navigation intent.
+  const page = new PluginManagerWorkspacePanel(manager, {
+    requestRender: () => {},
+    onCopy: () => {},
+    onYieldNavigation: () => { yields += 1 },
+  }, { onDispose: () => { releases += 1; claim.release() } })
+  try {
+    // Esc at the untouched List root reports a YIELD: the page keeps the claim.
+    page.handleInput('\x1b')
+    assert.equal(yields, 1, 'the page reported the navigation yield to the Settings root')
+    assert.equal(releases, 0, 'a focus yield must not release the owner')
+    assert.equal(registry.isOpen(), true, 'the page still owns the controller after yielding')
+
+    // The REAL Settings teardown disposes the page (and only then releases).
+    page.dispose()
+    page.dispose()
+    assert.equal(releases, 1, 'the teardown hook runs exactly once even on a repeated dispose')
+    assert.equal(registry.isOpen(), false, 'the real teardown released the owner')
+    const reopened = registry.claim()
+    assert.equal(registry.isOpen(), true, 'a later Settings → Plugins open can claim again')
+    reopened.release()
+  } finally {
+    manager.dispose()
+  }
 })

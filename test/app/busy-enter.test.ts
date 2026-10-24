@@ -246,7 +246,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

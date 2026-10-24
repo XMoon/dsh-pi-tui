@@ -25,7 +25,7 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
-import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
+import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
@@ -34,6 +34,11 @@ import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
 import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import type {
+  EmbeddedPluginPage,
+  PluginContentViewport,
+  PluginWorkspaceView,
+} from '../../src/tui/plugin-manager/workspace.ts'
 import {
   assertBarIsLastRow,
   assertBodyFloor,
@@ -121,6 +126,72 @@ interface HarnessOptions {
   visualToolsExternalChange?: boolean
 }
 
+/** The embedded Plugin Manager page the composition factory hands the Settings
+ *  root. It applies the SAME frozen local rule as the production page (one
+ *  semantic bar as the local LAST line; the List|Details pair only when the
+ *  grant allows it, the local width is >= 76 and six real body rows survive)
+ *  and paints a deterministic body inside the granted viewport, so a visual
+ *  case can prove the shared chrome, the exact column split and the physical
+ *  last-row hand-off without a second TuiApp. */
+class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
+  readonly viewports: PluginContentViewport[] = []
+  disposed = false
+  focused = false
+  private view: PluginWorkspaceView = 'list'
+  private readonly yieldNavigation: () => void
+  constructor(yieldNavigation: () => void) {
+    this.yieldNavigation = yieldNavigation
+  }
+  setViewport(viewport: PluginContentViewport): void {
+    this.viewports.push({ ...viewport })
+  }
+  currentView(): PluginWorkspaceView {
+    return this.view
+  }
+  canYieldFocusToNavigation(): boolean {
+    return this.view === 'list'
+  }
+  pendingMutation(): boolean {
+    return false
+  }
+  cancelPointer(): void {}
+  private layout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number; readonly body: number } {
+    const viewport = this.viewports[this.viewports.length - 1] ?? { width: 1, rows: 1, allowDual: false }
+    const body = Math.max(0, viewport.rows - 1)
+    const dual = viewport.allowDual && viewport.width >= 76 && body >= 6
+    const leftWidth = dual ? Math.min(42, Math.max(30, Math.floor((viewport.width - 2) * 0.42))) : viewport.width
+    return { dual, leftWidth, rightWidth: dual ? viewport.width - leftWidth - 2 : viewport.width, body }
+  }
+  contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number } {
+    const { dual, leftWidth, rightWidth } = this.layout()
+    return { dual, leftWidth, rightWidth }
+  }
+  render(width: number): string[] {
+    const viewport = this.viewports[this.viewports.length - 1] ?? { width: Math.max(1, width), rows: 1, allowDual: false }
+    const { dual, leftWidth, rightWidth, body } = this.layout()
+    const lines: string[] = []
+    for (let index = 0; index < body; index += 1) {
+      if (dual) {
+        const left = index === 0 ? 'PLUGIN PAGE LIST'.padEnd(leftWidth) : ' '.repeat(leftWidth)
+        const right = index === 0 ? 'PLUGIN DETAIL'.padEnd(rightWidth) : ' '.repeat(rightWidth)
+        lines.push(`${left}  ${right}`)
+      } else {
+        lines.push((index === 0 ? 'PLUGIN PAGE' : '').padEnd(Math.max(1, width)))
+      }
+    }
+    lines.push(color.textMuted('PLUGIN BAR'.padEnd(Math.max(1, viewport.width))))
+    return lines
+  }
+  invalidate(): void {}
+  handleInput(data: string): void {
+    if (data === '\u001b' && this.canYieldFocusToNavigation()) this.yieldNavigation()
+  }
+  handleMouse(): undefined { return undefined }
+  onCellPress(): void {}
+  onCellClick(): void {}
+  dispose(): void { this.disposed = true }
+}
+
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
@@ -154,8 +225,10 @@ interface Harness {
   readonly writes: () => readonly string[]
   /** Run every owned task the harness is holding (`holdOwned`). */
   readonly releaseOwned: () => void
-  /** How many times the Settings Plugins entry built its page (D2-0). */
+  /** How many times the Settings Plugins entry built its page. */
   readonly pluginPages: () => number
+  /** The page instances the composition factory handed the root. */
+  readonly pluginPageInstances: () => readonly FakeEmbeddedPluginPage[]
   /** Host/provider/account reads in the fake seams (the hidden-action witness). */
   readonly hostReads: () => number
   readonly dispose: () => void
@@ -185,6 +258,7 @@ function setup(options: HarnessOptions = {}): Harness {
   let hostReads = 0
   let replacements = 0
   let pluginPages = 0
+  const pluginPageInstances: FakeEmbeddedPluginPage[] = []
   const visualWrites: boolean[] = []
   let externalVisualChange = options.visualToolsExternalChange
   let visualState: VisualToolsState | undefined = options.visualToolsUnavailable === true
@@ -289,16 +363,12 @@ function setup(options: HarnessOptions = {}): Harness {
           },
         },
     extensions: options.themes === undefined ? undefined : { themes: options.themes },
-    openPluginManager: () => {},
-    createPluginManagerPage: () => {
+    createPluginManagerPage: (onYieldNavigation: () => void) => {
       if (options.pluginPage !== true) return undefined
       pluginPages += 1
-      return {
-        render: (width: number) => ['PLUGIN PAGE'.padEnd(Math.max(1, width))],
-        invalidate: () => {},
-        handleInput: () => {},
-        dispose: () => {},
-      }
+      const page = new FakeEmbeddedPluginPage(onYieldNavigation)
+      pluginPageInstances.push(page)
+      return page
     },
     config: {
       configReadiness: () => options.readiness ?? 'ready',
@@ -455,6 +525,7 @@ function setup(options: HarnessOptions = {}): Harness {
     visualState: () => visualState,
     writes: () => writes,
     pluginPages: () => pluginPages,
+    pluginPageInstances: () => pluginPageInstances,
     hostReads: () => hostReads,
     releaseOwned: () => {
       const list = held.splice(0)
@@ -3678,7 +3749,7 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
   }
 })
 
-// ── D2-0: the UI-only Plugins direct entry in the Rows pane ───────────────
+// ── PR2: the embedded Plugin Manager inside the ONE Settings chrome ───────
 
 /** Move the L0 selection from Appearance to Plugins (three categories down). */
 const toPlugins = async (h: Harness): Promise<void> => {
@@ -3687,83 +3758,87 @@ const toPlugins = async (h: Harness): Promise<void> => {
   await key(h, '\x1b[B')
 }
 
-test('120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
-  for (const [columns, rows] of [[120, 40], [80, 24]] as const) {
+test('selecting Plugins previews the live plugin list inside ONE Settings chrome', async () => {
+  for (const [columns, rows, dual] of [[120, 40, true], [80, 24, false]] as const) {
     const h = setup({ columns, rows, pluginPage: true })
     await h.open()
     await toPlugins(h)
+    assert.equal(h.pluginPages(), 1, 'selecting the category mounts the ONE page')
     const frame = h.rowsPlain()
-    const headerRow = rowOf(h, 'Rows (1)')
-    const entryRow = rowOf(h, 'Open Plugin Manager')
-    // The Rows pane begins after the 22-cell categories column and its 2-cell
-    // gutter at BOTH widths; the action keeps the list's two-cell indent.
-    assert.equal(cellIndexOf(h, headerRow, 'Rows (1)'), 24, `the Rows pane starts at cell 24:\n${h.view()}`)
-    assert.equal(cellIndexOf(h, entryRow, 'Open Plugin Manager'), 26, `the action starts at cell 26:\n${h.view()}`)
-    assert.equal(frame[entryRow]!.slice(24, 26), '  ', 'the affordance is indented like a list row')
-    assert.ok(!frame[entryRow]!.slice(24).includes('>'),
-      'the second column paints no second strong selection cursor')
-    assert.match(frame[entryRow]!, /Open Plugin Manager  Enter \/ Right/,
-      'the complete action name and its weak hint are painted')
-    // The live palette roles: the action name is `textStrong` and the hint is
-    // the weakest readable ink (`textMuted`); neither is `primary`.
-    assert.equal(h.vt.getCellFgRgb(entryRow, 26), hexToRgb(currentPalette.textStrong),
-      'the action name uses textStrong')
-    assert.equal(h.vt.getCellFgRgb(entryRow, cellIndexOf(h, entryRow, 'Enter / Right')), hexToRgb(currentPalette.textMuted),
-      'the Enter / Right hint uses textMuted')
-    assert.notEqual(h.vt.getCellFgRgb(entryRow, 26), hexToRgb(currentPalette.primary),
-      'the entry is not the primary cursor')
-    assert.ok(h.view().includes('[Categories (8)]'), 'L0 keeps its ONE active pane device')
-    assert.ok(!h.view().includes('[Rows'), 'the rows column is not a second focus owner')
-    assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+    // ONE shared pane header: the rail label plus the plugin column labels.
+    // header0 / metadata1 / rule2 / pane header3 at both widths.
+    assert.match(frame[3]!, /^\[Categories \(8\)\]/, `the rail label owns the header:\n${h.view()}`)
+    assert.equal(cellIndexOf(h, 3, 'Plugins'), 24, `the plugin label starts the content column:\n${h.view()}`)
+    if (dual) {
+      assert.ok(frame[3]!.includes('Details'), `the >=120 preview also paints the Details column:\n${h.view()}`)
+    } else {
+      assert.doesNotMatch(frame[3]!, /Details/, 'the 76..119 rail projection paints no Details column')
+    }
+    // The real list preview starts at cell 24 while the keyboard stays on the rail.
+    const bodyRow = rowOf(h, dual ? 'PLUGIN PAGE LIST' : 'PLUGIN PAGE')
+    assert.equal(cellIndexOf(h, bodyRow, dual ? 'PLUGIN PAGE LIST' : 'PLUGIN PAGE'), 24, 'the preview starts at cell 24')
+    if (dual) {
+      // The dual column split the page really painted drives the shared header.
+      const split = h.pluginPageInstances()[0]!.contentLayout()
+      assert.equal(split.dual, true)
+      assert.equal(split.leftWidth, 39, '42% of the 94-cell pair, clamped')
+      assert.equal(split.rightWidth, 55)
+      assert.equal(cellIndexOf(h, bodyRow, 'PLUGIN DETAIL'), 24 + 39 + 2, 'the Details column starts after the gutter')
+      assert.equal(cellIndexOf(h, 3, 'Details'), 24 + 39 + 2, 'the shared header label sits on the same column')
+    }
+    assert.match(frame[3]!, /\[Categories \(8\)\]/, 'the rail keeps the ONE active device')
+    assert.doesNotMatch(frame[3]!, /\[Plugins\]/, 'an unfocused preview is never the active device')
+    assertBarIsLastRow(frame, (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+    assert.match(frame[frame.length - 1]!, /Tab focus/, 'the rail advertises the real Tab focus key')
     h.dispose()
   }
 })
 
-test('80×10 keeps the visible direct entry above the pinned bar', async () => {
+test('80×10 keeps the visible plugin preview and Enter moves the keys without a second page', async () => {
   const h = setup({ columns: 80, rows: 10, pluginPage: true })
   await h.open()
   await toPlugins(h)
-  assert.match(h.view(), /Rows \(1\)/, 'the short screen still paints the rows header')
-  assert.match(h.view(), /Open Plugin Manager/, 'and the visible direct entry')
+  assert.equal(h.pluginPages(), 1, 'the visible preview built the ONE page')
+  assert.match(h.view(), /PLUGIN PAGE/, 'the short screen still paints the list preview')
   assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
   await key(h, '\r')
-  assert.equal(h.pluginPages(), 1, 'the visible entry remains operable at 80×10')
+  assert.equal(h.pluginPages(), 1, 'Enter only moves the focus: no second page')
+  // The plugin content now owns the keys, so ITS semantic bar is the last row.
+  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'PLUGIN BAR')
   h.dispose()
 })
 
-test('44×20 narrow paints no second-column affordance and keeps the direct key entry', async () => {
+test('44×20 keeps the single category list until Enter, then mounts the page once', async () => {
   const h = setup({ columns: 44, rows: 20, pluginPage: true })
   await h.open()
   await toPlugins(h)
-  assert.doesNotMatch(h.view(), /Rows \(/, 'the narrow projection paints no pane header')
-  assert.doesNotMatch(h.view(), /Open Plugin Manager/, 'no second-column affordance exists at 44×20')
+  assert.doesNotMatch(h.view(), /PLUGIN PAGE/, 'no invisible plugin page is painted')
+  assert.equal(h.pluginPages(), 0, 'a narrow rail selection alone never mounts the page')
   assert.match(h.view(), /> Plugins/, 'Plugins stays selected in the single column')
   assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
   await key(h, '\r')
-  assert.equal(h.pluginPages(), 1, 'Enter still opens the direct page from the narrow list')
+  assert.equal(h.pluginPages(), 1, 'Enter mounts the page once from the narrow list')
+  assert.match(h.view(), /PLUGIN PAGE/)
+  assert.equal(h.pluginPageInstances()[0]!.viewports.at(-1)?.width, 44, 'the narrow content owns the full width')
   h.dispose()
 })
 
-test('below the body floor the entry is not painted and every input is fail-closed', async () => {
+test('below the body floor no content is painted and every input is fail-closed', async () => {
   const h = setup({ columns: 120, rows: 40, pluginPage: true })
   await h.open()
   await toPlugins(h)
-  const navRow = rowOf(h, 'Open Plugin Manager')
-  const navCol = cellIndexOf(h, navRow, 'Open Plugin Manager')
   // 2 terminal rows leave the header and the pinned bar but ZERO body rows.
   h.vt.resize(120, 2)
   await h.vt.waitForRender()
   const short = h.rowsPlain()
   assert.equal(short.length, 2, `the short frame keeps only the mandatory chrome:\n${h.view()}`)
-  assert.doesNotMatch(short.join('\n'), /Open Plugin Manager/, 'no invisible affordance may be painted')
+  assert.doesNotMatch(short.join('\n'), /PLUGIN PAGE/, 'no invisible content may be painted')
   // Neither key nor a stale click coordinate can dispatch what the frame no
-  // longer paints: the body floor refuses both.
+  // longer paints: the body floor refuses both, and no page is rebuilt.
   await key(h, '\r')
   await key(h, '\x1b[C')
-  press(h, navRow, navCol)
-  release(h, navRow, navCol)
   await h.vt.waitForRender()
-  assert.equal(h.pluginPages(), 0)
+  assert.equal(h.pluginPages(), 1, 'the earlier visible page is the ONLY page')
   h.dispose()
 })
 
