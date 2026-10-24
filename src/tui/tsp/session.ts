@@ -858,9 +858,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             detailsCloseTask = undefined
           }
           if (disposed) return
-          // The physically visible base frame is re-evaluated only now: the
-          // current seat (modal, the same Hub, or a newer sibling presenter)
-          // owns the caret, never the Screen that just went away.
+          // The base frame is re-evaluated only now that the Screen is really
+          // gone: the current seat (modal, the same Hub, or a newer sibling
+          // presenter) owns the caret, never the Screen that just went away.
           lastAppliedFocusId = undefined
           render()
         } catch (error) {
@@ -1749,8 +1749,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         }
         return false
       }
-      // B3-A2 §7.3: the temporary Screen is frontmost, so its admission comes
-      // BEFORE every base event branch (the base is physically covered).
+      // B3-A2 §7.3: while a temporary Screen exists its admission comes BEFORE
+      // every base event branch. The fence does not depend on the client's
+      // presentation: even a client that leaves the base on screen must not let
+      // a base node act behind a reading, so every base event is dropped here
+      // regardless of whether the base is painted, covered or titled away.
       const details = detailsSlot
       if (details !== undefined) {
         // A resize addressed at the CURRENT Screen is that Screen's own
