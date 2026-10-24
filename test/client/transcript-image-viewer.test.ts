@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
+import { Image, resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { ImageViewerPanel } from '../../src/tui/components/media/image-viewer.ts'
 import { Frame } from '../../src/tui/components/frame.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
@@ -438,4 +438,44 @@ test('Esc closes; every other key is consumed locally and never forwarded', () =
   panel.handleInput('\x1b[A')
   assert.equal(closes, 1, 'other keys never close')
   assert.equal(requested, 0, 'input handling never requests a frame')
+})
+
+test('the viewer never hands an unsanitized attachment name to the fork fallback', async () => {
+  // `Image`'s text fallback interpolates `filename` into a painted row and the
+  // fork does NOT strip terminal controls. Under the CURRENT admission this
+  // branch is unreachable (only kitty/PNG/non-empty bytes reach `Image`, and
+  // those always place a real sequence), but the name is untrusted data crossing
+  // into a renderer that can paint it, so the projection is asserted directly by
+  // inspecting what the panel hands the fork.
+  capabilities('kitty')
+  const hostile = 'evil\u001b]0;pwned\u0007photo.png'
+  const seen: (string | undefined)[] = []
+  const original = Image.prototype.render
+  Image.prototype.render = function patched(this: Image, width: number): string[] {
+    const options = (this as unknown as { options?: { filename?: string } }).options
+    if (options?.filename !== undefined) seen.push(options.filename)
+    return original.call(this, width)
+  }
+  try {
+    const panel = new ImageViewerPanel({
+      ref: { attachmentId: 'att-viewer', mediaType: 'image/png', bytes: 16, width: 100, height: 100, name: hostile },
+      scope: {},
+      loader: loaderOf(new Uint8Array([0x89, 0x50, 0x4e, 0x47])),
+      theme: THEME,
+      requestRender: () => {},
+      onClose: () => {},
+    })
+    panel.setMaxRows(8)
+    panel.render(60)
+    await drainLoaderSettle()
+    panel.render(60)
+    panel.dispose()
+  } finally {
+    Image.prototype.render = original
+  }
+  assert.ok(seen.length > 0, 'the panel built an Image (the premise)')
+  for (const name of seen) {
+    assert.ok(!name!.includes('\u001b]0;'), `no OSC survives into the fork filename: ${JSON.stringify(name)}`)
+    assert.ok(!name!.includes('pwned'), `no OSC payload survives: ${JSON.stringify(name)}`)
+  }
 })
