@@ -3637,6 +3637,20 @@ export class SettingsWorkspacePanel implements Component {
 
   // ── mouse ────────────────────────────────────────────────────────────────
 
+  /**
+   * Revoke EVERY pending pointer owner of this workspace: the root's category
+   * and content presses plus both direct pages' own presses. A gesture that may
+   * no longer resolve against the current frame is dropped whole — a stale
+   * wheel must not leave a press alive that its own release could complete
+   * against the NEXT frame's identical-looking geometry.
+   */
+  private cancelPointerOwners(): void {
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.authPage?.cancelPointer?.()
+    this.pluginPage?.cancelPointer()
+  }
+
   /** Wheel only: the pane under the pointer scrolls; everything else falls
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -3644,12 +3658,18 @@ export class SettingsWorkspacePanel implements Component {
     // A resize that has not repainted makes every painted pane box stale: a
     // wheel over the old geometry could scroll a pane the new frame does not
     // paint at that cell.
-    if (this.terminalGeometryStale()) return undefined
+    if (this.terminalGeometryStale()) {
+      this.cancelPointerOwners()
+      return undefined
+    }
     // An App notice (or any chrome change) moves/shrinks EVERY painted hit
     // region — rail, legacy panes, direct content box and child grant — not only
     // the plugin child. Until the frame repaints, no wheel may resolve against
-    // the previous geometry: fail closed and let the pending paint restore it.
+    // the previous geometry. The refused wheel also revokes any pending press:
+    // a repaint can restore an identical-looking target whose later release
+    // would otherwise complete a gesture from the previous frame.
     if (this.chromeGeometryStale()) {
+      this.cancelPointerOwners()
       this.intents.requestRender()
       return undefined
     }
@@ -3714,26 +3734,24 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
-    // A new press always supersedes the other owner's press state.
-    this.pressedGesture = undefined
-    this.contentPressed = undefined
     // The pointer boxes still describe the previous terminal frame. Refuse the
-    // press entirely and revoke any child pointer state; the release must not
-    // resurrect an old hit at a cell that the new layout paints differently.
+    // press entirely and revoke every pending pointer owner; the release must
+    // not resurrect an old hit at a cell the new layout paints differently.
     if (this.terminalGeometryStale()) {
-      this.authPage?.cancelPointer?.()
-      this.pluginPage?.cancelPointer()
+      this.cancelPointerOwners()
       return
     }
     // The live chrome can move EVERY painted hit region (rail, panes, direct box)
     // between the App notice and its repaint. Refuse the whole gesture instead of
     // resolving it against the previous frame's maps.
     if (this.chromeGeometryStale()) {
-      this.authPage?.cancelPointer?.()
-      this.pluginPage?.cancelPointer()
+      this.cancelPointerOwners()
       this.intents.requestRender()
       return
     }
+    // A new press always supersedes the other owner's press state.
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
       const live = page === undefined ? undefined : this.syncPluginFrame()
@@ -3813,19 +3831,13 @@ export class SettingsWorkspacePanel implements Component {
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
     if (this.terminalGeometryStale()) {
-      this.pressedGesture = undefined
-      this.contentPressed = undefined
-      this.authPage?.cancelPointer?.()
-      this.pluginPage?.cancelPointer()
+      this.cancelPointerOwners()
       return
     }
     // A release in the unrepainted chrome window must resolve against neither
     // the old content box nor the old rail/pane hit map.
     if (this.chromeGeometryStale()) {
-      this.pressedGesture = undefined
-      this.contentPressed = undefined
-      this.authPage?.cancelPointer?.()
-      this.pluginPage?.cancelPointer()
+      this.cancelPointerOwners()
       this.intents.requestRender()
       return
     }
