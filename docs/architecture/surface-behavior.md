@@ -167,9 +167,10 @@ the `/footer` alias and never enters this workspace.
   projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
   L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
   the frame's first column, and every child page keeps its own body and action
-  rows above it. With no granted body row (the shortest frames) the content
-  focus keeps only the genuine Esc back path: no hidden page refresh, copy,
-  filter edit or action runs from an invisible body.
+  rows above it. With no granted body row (the shortest frames) only the Esc
+  action the frame names for that state runs: a real back, or a state-named
+  cancel such as clearing an editable filter. No unreachable page refresh,
+  copy or action runs from an invisible body.
 
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
   facts (the bundle's own version, the installed DSH version — `Unknown` when

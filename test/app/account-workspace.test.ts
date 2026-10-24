@@ -509,3 +509,15 @@ test('the page-actions fallback keeps the truthful Esc bar on the physical last 
   assert.match(one[0]!, /^Esc back/u, 'a one-row page paints only its real Esc action')
   assert.doesNotMatch(one[0]!, /Resize|Enter/u, 'no hidden business action is advertised')
 })
+
+
+test('the zero-body fallback names the real Esc cancel of the open sign-out confirmation', async () => {
+  const { page, state } = open({ view: 'signout' })
+  state.view = stored()
+  await flush()
+  text(page) // paint the confirmation and its real action rows
+  page.setBodyHeight(2)
+  const rows = text(page).split('\n')
+  assert.equal(rows.length, 2)
+  assert.match(rows.at(-1)!, /Esc cancel/u, 'Esc cancels the confirmation, so the last row must say cancel')
+})

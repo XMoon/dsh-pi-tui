@@ -390,7 +390,10 @@ export class AccountWorkspacePage implements Component {
         ? [fit(color.warning('Resize the terminal to show the page actions.'), width)]
         : []
       while (out.length < bodyRows) out.push(fit('', width))
-      out.push(color.textMuted(renderActionBarRow([{ text: 'Esc back', priority: 8 }], width)))
+      // Esc cancels the open sign-out confirmation before it can leave the
+      // page; the fallback hint must name that real effect.
+      const esc = this.signOutConfirm ? 'Esc cancel' : 'Esc back'
+      out.push(color.textMuted(renderActionBarRow([{ text: esc, priority: 8 }], width)))
       return out.slice(0, height)
     }
     this.paintedActionIds.clear()

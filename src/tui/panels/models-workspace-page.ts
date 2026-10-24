@@ -1740,11 +1740,19 @@ export class ModelsWorkspacePage implements Component {
       } else {
         body.push(fit(color.warning('Resize the terminal: the full form and its confirm hint need at least 8 rows. Enter is disabled.'), width))
       }
-      const bar = color.textMuted(renderActionBarRow([
-        { text: 'type to edit', priority: 5 },
-        { text: usable ? 'Enter continue' : 'Enter disabled', priority: 6 },
-        { text: 'Esc back', priority: 8 },
-      ], width))
+      // Below its 8-row gate the question does not accept edits or Enter: the
+      // ONLY real key is Esc, which cancels the embedded question. Do not
+      // advertise editing/submit hints that this frame cannot honour.
+      const bar = color.textMuted(renderActionBarRow(
+        usable
+          ? [
+              { text: 'type to edit', priority: 5 },
+              { text: 'Enter continue', priority: 6 },
+              { text: 'Esc back', priority: 8 },
+            ]
+          : [{ text: 'Esc cancel', priority: 8 }],
+        width,
+      ))
       this.paintedCopy = false
       this.copyValue = undefined
       this.paintedTargets = []
@@ -1816,7 +1824,7 @@ export class ModelsWorkspacePage implements Component {
       this.paintedActionIds.clear()
       this.paintedCopy = false
       this.paintedTargets = []
-      const bar = color.textMuted(renderActionBarRow([{ text: 'Esc back', priority: 8 }], width))
+      const bar = color.textMuted(renderActionBarRow([{ text: this.fallbackEscHint(), priority: 8 }], width))
       const body = [fit(color.warning('Resize the terminal to show the page actions.'), width)]
       return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
@@ -1867,6 +1875,16 @@ export class ModelsWorkspacePage implements Component {
     const out = lines.slice(0, height)
     while (out.length < height) out.push(fit('', width))
     return out
+  }
+
+  /** The one truthful Esc action when no Action row fits. The Add Provider
+   *  catalog binds a non-empty filter to Esc BEFORE it can leave the page, so
+   *  the fallback hint names that real effect instead of claiming a back the
+   *  key will not perform. */
+  private fallbackEscHint(): string {
+    return this.view.kind === 'add-catalog' && this.catalogFilter !== ''
+      ? 'Esc clear filter'
+      : 'Esc back'
   }
 
   /** Keep the page's semantic bar on the physical last row: the body is
