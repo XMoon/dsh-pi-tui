@@ -632,3 +632,32 @@ test('captured subject retirement cancels its reader before it can publish', asy
   await waitUntil('captured panel retired', () => presentation.closed[0] === true)
   assert.equal(listSignal?.aborted, true)
 })
+
+test('an already-disposed presentation handle starts NO listing and leaves the owner inactive', async (t) => {
+  const diag = DIAG()
+  let listCalls = 0
+  const owner = createSessionBrowserReadOwner({
+    reader: reader({ list: async () => { listCalls += 1; return [] } }),
+    presentation: {
+      // The renderer's own four-way presenter exclusivity returns this shape
+      // when a newer presenter won a reentrant open: an inert handle that is
+      // disposed from the first instant.
+      open: () => ({ isDisposed: () => true, setSnapshot() {}, close() {} }),
+      notify() {},
+    },
+    captureSubject: () => captured(),
+    diag,
+  })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open()
+  assert.deepEqual(await handle.settlement, { kind: 'cancelled' },
+    'the refused panel settles as cancelled instead of hanging')
+  await new Promise<void>(resolve => setTimeout(resolve, 20))
+  assert.equal(listCalls, 0, 'a hidden listing must never run behind an inert presentation')
+  // The owner is inactive: a second open starts its OWN fresh read.
+  const second = new PresentationProbe()
+  const secondOwner = ownerFor(second, reader({ list: async () => [] }))
+  t.after(() => { secondOwner.owner.dispose(); secondOwner.diag.dispose() })
+  secondOwner.owner.open()
+  await waitUntil('the independent owner lists normally', () => second.latest()?.listState === 'empty')
+})

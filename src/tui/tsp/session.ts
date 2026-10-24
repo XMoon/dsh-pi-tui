@@ -438,27 +438,44 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * substitute: a merely hidden sibling keeps its input owner alive.
    */
   let presenterOpenGeneration = 0
-  /** Commit one presenter open after retiring the three siblings, or stay inert. */
+  /**
+   * Commit one presenter open after retiring the three siblings, or stay inert.
+   *
+   * The sibling sweep is a LIST of retirement steps and the generation is
+   * re-checked BETWEEN them: a retirement callback may synchronously open a
+   * newer presenter, and a stale outer open must then stop sweeping — running
+   * the remaining `retire()` calls would dispose the newer presenter the
+   * callback just opened.
+   */
   const openExclusively = <Handle>(
-    retireSiblings: () => void,
+    retireSteps: readonly (() => void)[],
     open: () => Handle,
     inert: Handle,
   ): Handle => {
     const generation = ++presenterOpenGeneration
-    retireSiblings()
+    for (const retire of retireSteps) {
+      // A previously retired presenter's callback may have taken the seat.
+      if (generation !== presenterOpenGeneration) return inert
+      retire()
+    }
     if (generation !== presenterOpenGeneration) return inert
     return open()
   }
+  /** The three sibling presenters, in the fixed retirement order. */
+  const siblingRetirements = (...excluded: readonly ('model' | 'preset' | 'browser' | 'hub')[]): Array<() => void> => {
+    const steps: Array<() => void> = []
+    if (!excluded.includes('model')) steps.push(() => modelPicker?.retire())
+    if (!excluded.includes('preset')) steps.push(() => presetPicker?.retire())
+    if (!excluded.includes('browser')) steps.push(() => sessionBrowser?.retire())
+    if (!excluded.includes('hub')) steps.push(() => workHub?.retire())
+    return steps
+  }
   const modelPresentation: ModelPresentation = {
     open: (request) => openExclusively(
-      () => {
-        sessionBrowser?.retire()
-        presetPicker?.retire()
-        workHub?.retire()
-      },
+      siblingRetirements('model'),
       () => modelPicker!.presentation.open(request),
       // A superseded open never minted a panel; its handle is inert and the
-      // command's own read owner retires its presentation token.
+      // command's own read owner checks `isDisposed()` before every read.
       {
         setLoading: () => {},
         setDirectory: () => {},
@@ -471,11 +488,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
   const presetPresentation: PresetPresentation = {
     open: (request) => openExclusively(
-      () => {
-        sessionBrowser?.retire()
-        modelPicker?.retire()
-        workHub?.retire()
-      },
+      siblingRetirements('preset'),
       () => presetPicker!.presentation.open(request),
       {
         setLoading: () => {},
@@ -489,12 +502,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
   const sessionBrowserPresentation: SessionBrowserPresentation = {
     open: (request) => openExclusively(
-      () => {
-        presetPicker?.retire()
-        modelPicker?.retire()
-        workHub?.retire()
-      },
+      siblingRetirements('browser'),
       () => sessionBrowser!.presentation.open(request),
+      // The read owner retires its OWN panel and starts no read for this inert
+      // handle (it is `isDisposed()` from the first instant).
       { isDisposed: () => true, setSnapshot: () => {}, close: () => {} },
     ),
     notify: (message, kind) => sessionBrowser!.presentation.notify(message, kind),
@@ -508,11 +519,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   const taskPresentation: TaskCenterPresentationPort = {
     openBrowser: (items, onSelect, onClose, openOptions) => openExclusively(
-      () => {
-        sessionBrowser?.retire()
-        presetPicker?.retire()
-        modelPicker?.retire()
-      },
+      siblingRetirements('hub'),
       () => workHub!.taskPresentation.openBrowser(items, onSelect, onClose, openOptions),
       { close: () => {}, setItems: () => {}, setRefreshState: () => {} },
     ),

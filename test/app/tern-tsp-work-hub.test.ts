@@ -731,3 +731,46 @@ test('the Preset presenter and the Work Hub retire each other in both directions
   assert.equal(h.closes.length, 0, 'a sibling retirement is never a user Close')
   reopened.close()
 })
+
+test('a stale sibling sweep stops when a retirement callback opens a still-to-be-retired presenter', async (t) => {
+  const h = await mount(t)
+  const browserPresentation = h.renderer.sessionBrowserPresentation
+  const modelPresentation = h.renderer.modelPresentation
+  assert.ok(browserPresentation)
+  assert.ok(modelPresentation)
+  const subject = { currentSessionId: 'session-current', currentCwd: '/workspace/project', isCurrent: () => true }
+  let nestedHub: TaskBrowserPresentationHandle | undefined
+  // The OUTER open is the Model presenter: its sibling sweep is
+  // Preset -> Session Browser -> Work Hub. Retiring the Session Browser runs
+  // this `onClose`, which opens the Work Hub — a presenter that is STILL LATER
+  // in that stale sweep. The sweep must stop, never retire the newer Hub.
+  const browserHandle = browserPresentation.open({
+    subject,
+    onQueryChange: () => {},
+    onResumeIntent: () => {},
+    onClose: () => { nestedHub = h.open([row('job:inner', { label: 'inner' })]) },
+  })
+  await waitUntil('the Session Browser is mounted',
+    () => mountedPickerKeys(h.pane).some(key => key.startsWith('session-browser-')))
+  const outer = modelPresentation.open({
+    subject: { sessionless: false },
+    isCurrent: () => true,
+    retry: () => {},
+    apply: () => 'committed',
+    runOwned: (label, task, runOptions) =>
+      runOwned(label, task, { ...runOptions, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  await waitUntil('the callback-opened Hub owns the layer',
+    () => hubItems(h.pane).map(item => item.id).join(',') === 'job:inner')
+  assert.ok(nestedHub !== undefined, 'the Session Browser retirement opened the newer Hub')
+  assert.equal(outer.isDisposed(), true, 'the superseded outer Model open returned an inert handle')
+  assert.deepEqual(mountedPickerKeys(h.pane).filter(key => key.startsWith('work-hub-')).length, 1,
+    'the newer Hub survives the stale sweep')
+  assert.equal(mountedPickerKeys(h.pane).some(key => key.startsWith('model-')), false,
+    'the superseded outer Model presenter never mounted')
+  // The newer Hub's OWN handle is live: it still receives commits.
+  nestedHub.setItems([row('job:inner2', { label: 'inner2' })])
+  await waitUntil('the newer Hub handle still drives the panel',
+    () => hubItems(h.pane).map(item => item.id).join(',') === 'job:inner2')
+  browserHandle.close()
+})
