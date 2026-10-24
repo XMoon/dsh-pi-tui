@@ -174,11 +174,12 @@ the `/footer` alias and never enters this workspace.
   effective child body grant value is unchanged; until that frame paints, and
   whenever the frame shows only the Esc fallback, only Esc is admitted
   (Backspace is not a portable back key: a page may bind it to an editable
-  query). A FOCUS TRANSFER that changes the direct page's projection is the same
-  boundary: on a narrow terminal one region is painted at a time, so moving the
-  keyboard between the Categories rail and the plugin content (in EITHER
-  direction) leaves the previous frame on screen; until the destination frame
-  paints, the root refuses every key except the real Esc — including the
+  query). A FOCUS TRANSFER that changes the Plugins content projection is the same
+  boundary: at 76..119 columns the adjacent pair follows the keyboard, and on a
+  narrow terminal one region is painted at a time, so moving the keyboard between
+  the Categories rail and the plugin content (in EITHER direction) leaves the
+  previous frame on screen; until the destination frame paints, the root refuses
+  every key except the real Esc — including the
   Shift+Tab it intercepts itself and the rail keys it would otherwise act on —
   and a Backspace is refused as well. Mouse presses, releases and wheel gestures
   from the previous frame
