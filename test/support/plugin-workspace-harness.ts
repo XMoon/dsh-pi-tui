@@ -1,10 +1,15 @@
 /**
- * Shared real-TuiApp harness for the fullscreen Plugin Manager workspace
- * (S4-D1 L6): a REAL TuiAltScreen lease, the production controller and the
- * workspace panel over a fixture semantic port.
+ * Shared real-TuiApp harness for the EMBEDDED Plugin Manager page (PR2 L6):
+ * a REAL Settings workspace lease (the ONE alt screen), the production
+ * controller and the production page over a fixture semantic port. The page is
+ * created by the real `Settings → Plugins` composition path (the Settings root
+ * factory), so every suite drives the actual root layout, focus transition,
+ * mouse translation and local viewport grant — never a second TuiApp or a
+ * hand-built screen owner.
  * @module @xmoon76/dsh-pi-tui/test/support/plugin-workspace-harness
  */
 
+import assert from 'node:assert/strict'
 import { TuiApp } from '../../src/tui-app.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
@@ -87,8 +92,6 @@ export interface WorkspaceHarnessOptions {
   readonly waitImpl?: (requestId: string) => Promise<PluginChangeFact | null>
   readonly cancelImpl?: (requestId: string) => Promise<{ status: 'cancelled' | 'too-late' | 'not-running' }>
   readonly inspectImpl?: (spec: string) => Promise<PluginSpecInspectionFact>
-  /** The entry host the controller reports (Esc wording only). */
-  readonly entryHost?: 'direct-command' | 'settings-entry'
   /** A REAL Host-backed port (an L6 source->sink test supplies it); the
    *  default fake catalog below is never used in that case. */
   readonly port?: PluginManagerPort
@@ -97,6 +100,8 @@ export interface WorkspaceHarnessOptions {
 export interface WorkspaceHarness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
+  /** The live Settings workspace handle (the ONE screen lease). */
+  readonly settings: { close(): void }
   readonly controller: PluginManagerController
   readonly panel: PluginManagerWorkspacePanel
   readonly copied: string[]
@@ -188,34 +193,53 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     subscribeInvalidation: (listener) => { invalidateListeners.add(listener); return () => invalidateListeners.delete(listener) },
   }
   const port = options.port ?? fixturePort
-  let closeSurface: () => void = () => {}
   const copied: string[] = []
   const controller = new PluginManagerController(port, {
     requestRender: () => app.requestRender(),
-    requestClose: () => closeSurface(),
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => options.observations ?? [] })
-  const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => vt.rows,
-    columns: () => vt.columns,
-    requestRender: () => app.requestRender(),
-    notice: () => undefined,
-    onCopy: (text) => { copied.push(text) },
-    ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
-  }, { onDispose: () => {} })
-  closeSurface = app.openPluginManagerWorkspace(panel, () => {})
-  controller.open(options.entryHost ?? 'direct-command')
+  // The page is created by the REAL Settings → Plugins factory on the first
+  // visible paint of the plugin content column; the harness never builds a
+  // second screen or a second owner.
+  let panel: PluginManagerWorkspacePanel | undefined
+  const settings = app.openSettingsWorkspace(
+    {
+      readSnapshot: () => ({
+        configReadiness: 'ready',
+        rows: [],
+        capturedAt: Date.now(),
+      }),
+    },
+    {
+      aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
+      onOpenLegacy: () => {},
+      onClose: () => {},
+      initialCategory: 'plugins',
+      onOpenPlugins: (onYieldNavigation) => {
+        panel = new PluginManagerWorkspacePanel(controller, {
+          requestRender: () => app.requestRender(),
+          onCopy: (text) => { copied.push(text) },
+          ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+          onYieldNavigation,
+        }, { onDispose: () => {} })
+        controller.open()
+        return panel
+      },
+    },
+  )
 
   const settle = async (rounds = 8): Promise<void> => {
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
     await vt.waitForRender()
   }
   await settle()
+  assert.ok(panel !== undefined, 'the Settings root must mount the Plugin page on its first visible paint')
   return {
     vt,
     app,
+    settings,
     controller,
     panel,
     copied,
@@ -226,7 +250,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     removeBundle,
     invalidate: () => { for (const listener of [...invalidateListeners]) listener() },
     emit: event => { for (const listener of [...installListeners]) listener(event) },
-    close: () => closeSurface(),
+    close: () => settings.close(),
     settle,
     view: () => plain(vt.getViewport()),
     viewport: () => vt.getViewport(),

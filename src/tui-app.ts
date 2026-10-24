@@ -1640,13 +1640,16 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly onCommit?: (request: SettingsWorkspaceCommitRequest) => Promise<SettingsWorkspaceCommitOutcome>
   /**
-   * The lazy factory of the ONE Plugin Manager page hosted INSIDE this
+   * The lazy factory of the ONE embedded Plugin Manager page hosted INSIDE this
    * Settings workspace (`Settings → Plugins`). The app owner supplies it from
    * the shared surface Plugin Manager runtime; it is invoked only when the
-   * Plugins category is activated. `done` is the page's normal close path back
-   * to Settings.
+   * Plugins content column is first really painted. `onYieldNavigation` is THIS
+   * root's navigation yield: the page reports the intent and the root commits
+   * the focus change.
    */
-  readonly onOpenPlugins?: (done: () => void) => import('@xmoon76/pi-tui').Component | undefined
+  readonly onOpenPlugins?: (
+    onYieldNavigation: () => void,
+  ) => import('./tui/plugin-manager/workspace.ts').EmbeddedPluginPage | undefined
   /** Fired once when the workspace is torn down by ANY path. */
   readonly onClose?: () => void
   /** The row this open selects first (the Web Settings return path,
@@ -1705,7 +1708,7 @@ export interface SettingsWorkspaceHandle {
  * it is MUTUALLY EXCLUSIVE with the Job lease: at most one workspace owns the
  * terminal at any time.
  */
-/** The layout-root panel a workspace lease hosts (Settings or Plugin page). */
+/** The layout-root panel a workspace lease hosts (the Settings workspace). */
 type WorkspaceLeasePanel = Component & {
   dispose?(): void
   onCellPress?(x: number, y: number): void
@@ -1713,10 +1716,11 @@ type WorkspaceLeasePanel = Component & {
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
 }
 
-/** The ONE temporary fullscreen workspace lease (Settings, Plugin or the
- * Image UX PR2 picker/Viewer screen). */
+/** The ONE temporary fullscreen workspace lease (the Settings workspace or the
+ *  Image UX PR2 picker/Viewer screen). The Plugin Manager is a CHILD of the
+ *  Settings lease and never takes a workspace screen of its own. */
 interface WorkspaceLeaseRecord {
-  readonly kind: 'settings' | 'plugin' | 'image'
+  readonly kind: 'settings' | 'image'
   readonly token: object
   readonly screen: TuiAltScreen
   readonly panel: WorkspaceLeasePanel
@@ -23009,18 +23013,21 @@ export class TuiApp {
   }
 
   /**
+  /**
    * The ONE temporary fullscreen lease primitive shared by the Settings
-   * workspace and the direct `/plugins` root: same Alt Screen start/stop,
+   * workspace and the Image UX picker/Viewer: same Alt Screen start/stop,
    * return-focus restore, re-entrant cleanup and mutual exclusion. It commits
    * the record to `this.workspaceLease` BEFORE the physical switch, so every
    * render request, input route and closer observes the same current owner.
+   * The Plugin Manager is a CHILD of the Settings lease and never takes a
+   * workspace screen of its own.
    */
   private leaseWorkspaceScreen(
-    kind: 'settings' | 'plugin' | 'image',
+    kind: 'settings' | 'image',
     panel: WorkspaceLeasePanel,
     onClose?: () => void,
   ): WorkspaceLeaseRecord {
-    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : kind === 'plugin' ? 'Plugin Manager' : 'Image')
+    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : 'Image')
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()
     const token: object = {}
@@ -23049,7 +23056,7 @@ export class TuiApp {
     }
     const close = (): void => {
       if (finalized) return
-      runSyncDisposalSteps(`${kind} workspace close`, [
+      runSyncDisposalSteps('settings workspace close', [
         finalizeOnce,
         () => screen.stop({ preserveScreen: true }),
         () => panel.dispose?.(),
@@ -23098,18 +23105,6 @@ export class TuiApp {
       throw error
     }
     return record
-  }
-
-  /**
-   * Host the fullscreen Plugin Manager page from the direct `/plugins` root
-   * through the SAME workspace lease (`Esc close` restores the physical
-   * surface, focus, draft and scroll exactly as Settings does). Returns the
-   * closer the owner uses on a normal close.
-   */
-  openPluginManagerWorkspace(panel: Component, onClosed?: () => void): () => void {
-    if (this.disposed) throw new Error('cannot lease a Plugin Manager workspace screen on a disposed surface')
-    const record = this.leaseWorkspaceScreen('plugin', panel, onClosed)
-    return () => record.close()
   }
 
   /** The live terminal row budget for a fullscreen workspace panel. */

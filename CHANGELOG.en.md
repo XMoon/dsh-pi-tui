@@ -161,6 +161,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`/plugins` is now part of Settings, as a deep link into `Settings → Plugins`.**
+  Both take the SAME Settings fullscreen lease and the SAME plugin page — there is
+  no separate plugin screen and no Session create/switch. Selecting the `Plugins`
+  category previews the real plugin list in place, so the intermediate
+  `Open Plugin Manager` row is gone. Settings paints the shared header/metadata/
+  rule/pane header and the single last-row action bar; the plugin page
+  contributes only its business body. At >=120 columns the frame shows
+  `Categories | Plugin List | Details`; at 76-119 columns it shows
+  `Categories | List` with the rail focused and `List | Details` with the plugin
+  content focused; below 76 columns it is one column. Install, dangerous
+  confirmations and Diagnostics always take the full width. `Esc` from the List
+  returns to the Settings category (same page instance, query/selection/scroll
+  and background install request preserved) and a second `Esc` closes; `/plugins`
+  lands directly on the plugin list. The page always starts on the list, and `i`
+  reopens the same install request instead of auto-opening the install view.
 - **The Models home lists only the configured providers, and adding one is now a
   catalog.** The home groups by the Host's own profile-presence fact: the
   connected providers and the DeepSeek Account each get a row, and the key

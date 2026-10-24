@@ -22,6 +22,11 @@ import {
 } from '../../src/tui/panels/settings-workspace-panel.ts'
 import type { AboutStatusController } from '../../src/app/command/about-status.ts'
 import type { AboutStatusView } from '../../src/domain/status/about.ts'
+import type {
+  EmbeddedPluginPage,
+  PluginContentViewport,
+  PluginWorkspaceView,
+} from '../../src/tui/plugin-manager/workspace.ts'
 
 const SNAPSHOT: SettingsWorkspaceSnapshot = {
   configReadiness: 'ready',
@@ -108,18 +113,51 @@ class FakePage implements SettingsAuthPage {
   dispose(): void { this.disposed = true }
 }
 
-/** The in-place Plugin Manager page: it owns its own Tab. */
-class FakePluginPage {
+/** A fake embedded Plugin Manager page: it paints only inside its granted
+ *  viewport and reports the navigation yield instead of closing. */
+class FakePluginPage implements EmbeddedPluginPage {
   readonly inputs: string[] = []
+  readonly viewports: PluginContentViewport[] = []
   disposed = false
   focused = false
+  private view: PluginWorkspaceView = 'list'
+  private readonly yieldNavigation: () => void
+  constructor(yieldNavigation: () => void) {
+    this.yieldNavigation = yieldNavigation
+  }
+  setViewport(viewport: PluginContentViewport): void {
+    this.viewports.push({ ...viewport })
+  }
+  currentView(): PluginWorkspaceView {
+    return this.view
+  }
+  canYieldFocusToNavigation(): boolean {
+    return this.view === 'list'
+  }
+  pendingMutation(): boolean {
+    return false
+  }
+  cancelPointer(): void {}
+  contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number } {
+    const viewport = this.viewports[this.viewports.length - 1] ?? { width: 1, rows: 1, allowDual: false }
+    return { dual: false, leftWidth: viewport.width, rightWidth: viewport.width }
+  }
   render(width: number): string[] {
-    return ['plugin page'.padEnd(Math.max(1, width))]
+    const rows = Math.max(1, this.viewports[this.viewports.length - 1]?.rows ?? 1)
+    const blank = ' '.repeat(Math.max(1, width))
+    const lines = Array.from({ length: rows }, (_, index) => index === 0 ? 'plugin page'.padEnd(Math.max(1, width)) : blank)
+    lines[rows - 1] = 'plugin bar'.padEnd(Math.max(1, width))
+    return lines
   }
   invalidate(): void {}
   handleInput(data: string): void {
     this.inputs.push(data)
+    // The List root's Esc reports the yield; the ROOT commits the focus change.
+    if (data === '\u001b' && this.canYieldFocusToNavigation()) this.yieldNavigation()
   }
+  handleMouse(): undefined { return undefined }
+  onCellPress(): void {}
+  onCellClick(): void {}
   dispose(): void { this.disposed = true }
 }
 
@@ -177,8 +215,8 @@ function setup(options: {
       settlements.push(settle)
     },
     onOpenPlugins: options.pluginPage === true
-      ? () => {
-          const page = new FakePluginPage()
+      ? (onYieldNavigation) => {
+          const page = new FakePluginPage(onYieldNavigation)
           pluginPages.push(page)
           return page
         }
@@ -570,16 +608,52 @@ test('a Tab focus change revokes a pointer press recorded on the previous pane',
   assert.match(header(h), /Settings · Appearance · Rows/u, 'the Tab focus is not overwritten by the old press')
 })
 
-test('the in-place Plugin Manager keeps its own Tab and is never intercepted', () => {
+test('the embedded Plugin Manager owns the content keys while the rail keeps the cross-region ones', () => {
   const h = setup({ columns: 120, pluginPage: true })
   plain(h)
   for (let index = 0; index < 6; index += 1) h.panel.handleInput('\u001b[B') // About -> Plugins
-  h.panel.handleInput('\r')
-  assert.equal(h.pluginPages.length, 1, 'the Plugins entry opened the page once')
+  // Selecting Plugins on the rail paints the live preview and keeps the keys on
+  // the rail: it never builds a page twice.
+  assert.equal(h.pluginPages.length, 1, 'the Plugins category mounted the page once')
+  assert.deepEqual(h.pluginPages[0]!.inputs, [], 'the rail focus never forwards a key to the preview')
+  // Tab only moves the keyboard into the plugin List (no page action). The
+  // focus OWNER is installed by the frame that paints the new projection.
   h.panel.handleInput('\t')
+  plain(h)
+  assert.equal(h.pluginPages[0]!.focused, true, 'Tab focused the plugin content')
+  h.panel.handleInput('\t')
+  assert.deepEqual(h.pluginPages[0]!.inputs, ['\t'], 'the content focus forwards its own Tab to the page')
+  // Shift+Tab from the untouched List root returns to the rail; it is never
+  // forwarded to the page and never closes the workspace.
   h.panel.handleInput('\u001b[Z')
-  assert.deepEqual(h.pluginPages[0]!.inputs, ['\t', '\u001b[Z'], 'the Plugin Manager owned both Tab presses')
+  assert.deepEqual(h.pluginPages[0]!.inputs, ['\t'], 'Shift+Tab is the root cross-region key, not a page key')
+  assert.equal(h.pluginPages[0]!.focused, false, 'the yielded page stopped owning the input focus')
   assert.equal(h.closes(), 0, 'the workspace stayed open')
+  const frame = plain(h)
+  assert.match(frame, /Categories \(8\)/u, 'the rail is painted after the yield')
+  assert.match(frame, /Esc close/u, 'the rail bar owns the last row after the yield')
+  // Esc on the rail closes the Settings lease.
+  h.panel.handleInput('\u001b')
+  assert.equal(h.closes(), 1, 'the second Esc closes the workspace')
+})
+
+test('a real category change disposes the plugin page once; a focus yield never does', () => {
+  const h = setup({ columns: 120, pluginPage: true })
+  plain(h)
+  for (let index = 0; index < 6; index += 1) h.panel.handleInput('\u001b[B') // About -> Plugins
+  plain(h) // the visible preview mounts the ONE page
+  assert.equal(h.pluginPages.length, 1)
+  h.panel.handleInput('\t') // focus the plugin content
+  plain(h)
+  h.panel.handleInput('\u001b[Z') // Shift+Tab at the List root yields
+  plain(h)
+  assert.equal(h.pluginPages[0]!.disposed, false, 'a yield keeps the page instance alive')
+  assert.equal(h.closes(), 0)
+  // A REAL category change disposes it exactly once and never builds another.
+  h.panel.handleInput('\u001b[B') // Plugins -> Other settings
+  plain(h)
+  assert.equal(h.pluginPages[0]!.disposed, true, 'the real category change disposes the page')
+  assert.equal(h.pluginPages.length, 1, 'the category change builds no second page')
 })
 
 test('a pending legacy write never advertises the direct rail Tab until it settles', () => {

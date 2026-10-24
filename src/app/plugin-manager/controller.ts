@@ -45,9 +45,6 @@ import {
   type PluginManagerSectionView,
 } from './model.ts'
 
-/** Which host opened the shared surface (navigation wording differs only). */
-export type PluginManagerEntryHost = 'direct-command' | 'settings-entry'
-
 /** The exact confirmation target classes. `remove` keeps the D1 behavior; the
  *  two Auto kinds are the B03 safety gate (no other overlay/manager). */
 export type PluginConfirmationKind = 'remove' | 'auto-disable-bundle' | 'auto-disable-row'
@@ -86,8 +83,6 @@ export interface PluginInstallView {
 export interface PluginManagerControllerHooks {
   /** Repaint an open panel (no-op when closed). */
   requestRender(): void
-  /** Ask the owning host to close the surface (`/plugins` root or Settings). */
-  requestClose(): void
   /** Report an out-of-panel notice (a settled install while closed). */
   notify(message: string, kind: 'info' | 'error'): void
   /** Whether the panel is currently open. */
@@ -179,7 +174,6 @@ export class PluginManagerController {
   /** The exact notice text of the last failed inventory read, so a later
    * successful read can clear it without clobbering an operation message. */
   private refreshErrorMessage: string | undefined
-  private entryHost: PluginManagerEntryHost = 'direct-command'
   private confirming: PluginConfirmation | undefined
   private busyValue: string | undefined
   private message: string | undefined
@@ -212,10 +206,9 @@ export class PluginManagerController {
     runDetached(label, task, { diag: this.hooks.diag })
   }
 
-  /** Open the shared surface from one host: read once. */
-  open(host: PluginManagerEntryHost): void {
+  /** Mount the ONE embedded page: read the official inventory once. */
+  open(): void {
     if (this.disposed) return
-    this.entryHost = host
     this.confirming = undefined
     this.message = undefined
     this.run('plugin manager read', () => this.read())
@@ -287,19 +280,9 @@ export class PluginManagerController {
     this.hooks.requestRender()
   }
 
-  /** The host that opened the surface. */
-  host(): PluginManagerEntryHost {
-    return this.entryHost
-  }
-
   /** The card currently marked busy by an in-flight mutation. */
   busy(): string | undefined {
     return this.busyValue
-  }
-
-  /** Ask the owning host to close the surface (normal user close). */
-  requestClose(): void {
-    this.hooks.requestClose()
   }
 
   // ── install view ─────────────────────────────────────────────────────────

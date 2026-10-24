@@ -119,24 +119,32 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
-  let close: () => void = () => {}
   const controller = new PluginManagerController(port, {
     requestRender: () => app.requestRender(),
-    requestClose: () => close(),
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   })
   const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => vt.rows,
-    columns: () => vt.columns,
     requestRender: () => app.requestRender(),
-    notice: () => undefined,
     onCopy: () => {},
+    onYieldNavigation: () => {},
   }, { onDispose: () => {} })
-  close = app.openPluginManagerWorkspace(panel, () => {})
-  life.defer(() => { try { app.dispose() } catch {} controller.dispose() })
-  controller.open('direct-command')
+  // The Plugin Manager is a CHILD of the ONE Settings workspace lease: the
+  // real deep link selects Plugins and the real page factory mounts the page.
+  const settings = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
+    {
+      aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
+      onOpenLegacy: () => {},
+      initialCategory: 'plugins',
+      onOpenPlugins: () => {
+        controller.open()
+        return panel
+      },
+    },
+  )
+  life.defer(() => { try { settings.close() } catch {} try { app.dispose() } catch {} controller.dispose() })
   const settle = async (rounds = 10): Promise<void> => {
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
     await vt.waitForRender()
@@ -151,7 +159,18 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
     throw new Error(`timed out waiting for ${label}: ${plain(vt.getViewport())}`)
   }
   await settle()
-  assert.match(plain(vt.getViewport()), /Plugins · All/u)
+  assert.match(plain(vt.getViewport()), /Settings · Plugins/u, 'the deep link uses the ONE Settings workspace')
+
+  /** The DETAIL column of the embedded dual frame, whitespace-normalized. In a
+   *  dual frame a plain row-wise flatten would interleave the List column with
+   *  the Details column, so the pane is sliced from its real split. */
+  const detailFrame = (): string => {
+    const split = panel.contentLayout()
+    const lines = vt.getViewport().map(line => plain([line]))
+    if (!split.dual) return lines.join('\n').replace(/\s+/gu, ' ')
+    const start = split.leftWidth + 2
+    return lines.map(line => line.slice(start)).join('\n').replace(/\s+/gu, ' ')
+  }
   await waitFor(() => controller.model().cards.length === 14, 'the real Host catalog read')
   assert.deepEqual(controller.model().sections.at(-1)!.cards.map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS])
 
@@ -163,28 +182,39 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
     const name = EXPERIMENTAL_BUNDLE_IDS[index]!
     vt.sendInput('\r')
     await waitFor(() => plain(vt.getViewport()).includes('Official DSH catalog entry'), `the ${name} Detail`)
-    // 80 columns is the ONE-column projection: the Detail wraps cleanly, and
-    // the existing PgUp/PgDn scroll reveals the full bounded copy.
-    for (let page = 0; page < 10 && !plain(vt.getViewport()).includes('TUI surface'); page += 1) {
+    // The Detail column wraps cleanly; the existing PgUp/PgDn scroll reveals
+    // the full bounded copy of the SAME painted pane. Every painted frame is
+    // accumulated: an affordance is proven by a frame that really painted it.
+    let paintedUnion = detailFrame()
+    for (let page = 0; page < 10 && !paintedUnion.includes('TUI surface'); page += 1) {
       vt.sendInput('\x1b[6~')
       await settle()
+      paintedUnion += `\n${detailFrame()}`
     }
-    for (let page = 0; page < 10 && !SURFACE_HINTS[name]!.test(plain(vt.getViewport()).replace(/\s+/gu, ' ')); page += 1) {
+    for (let page = 0; page < 10 && !SURFACE_HINTS[name]!.test(paintedUnion); page += 1) {
       vt.sendInput('\x1b[6~')
       await settle()
+      paintedUnion += `\n${detailFrame()}`
     }
-    const frame = plain(vt.getViewport()).replace(/\s+/gu, ' ')
+    const frame = detailFrame()
     assert.match(frame, SURFACE_HINTS[name]!, `${name} surfaces its exact boundary:\n${frame}`)
     if (ON_DEMAND.includes(name)) {
-      for (let page = 0; page < 10 && !/no Continue\/Resume/u.test(plain(vt.getViewport()).replace(/\s+/gu, ' ')); page += 1) {
+      for (let page = 0; page < 10 && !/no Continue\/Resume/u.test(detailFrame()); page += 1) {
         vt.sendInput('\x1b[6~')
         await settle()
       }
-      const external = plain(vt.getViewport()).replace(/\s+/gu, ' ')
+      const external = paintedUnion
       assert.match(external, /no Continue\/Resume/u, `${name} states its verified one-shot boundary`)
       assert.doesNotMatch(external, /EXTERNAL_UNVERIFIED/u, `${name} no longer claims an unqualified native start`)
-      assert.match(external, /Install…/u, `${name} offers the official Install action`)
-      assert.doesNotMatch(external, /> Enable…/u, `${name} is missing and never offers Enable`)
+      // The Action block sits below the bounded facts: page until the frame
+      // really paints it (it must be reachable, never merely claimable).
+      for (let page = 0; page < 10 && !paintedUnion.includes('Install…'); page += 1) {
+        vt.sendInput('\x1b[6~')
+        await settle()
+        paintedUnion += `\n${detailFrame()}`
+      }
+      assert.match(paintedUnion, /Install…/u, `${name} offers the official Install action`)
+      assert.doesNotMatch(paintedUnion, /> Enable…/u, `${name} is missing and never offers Enable`)
     } else {
       assert.doesNotMatch(frame, /no Continue\/Resume/u, `${name} is not an external subagent`)
     }

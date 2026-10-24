@@ -122,7 +122,10 @@ test('the frozen size matrix paints within the width and the last fact stays rea
       for (const line of frame) {
         assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} painted an overflowing row: ${JSON.stringify(plain([line]))}`)
       }
-      assert.match(plain(frame), /Plugins · Diagnostics/)
+      assert.match(plain(frame), /Settings · Plugins/u, `${columns}x${rows} keeps the ONE Settings header`)
+      // The 30-column header may truncate the trail, but the diagnostics page is
+      // the painted view in every case.
+      assert.match(plain(frame), /Diagnost/u, `${columns}x${rows} names the diagnostics page`)
       // End selects the LAST fact and reveals it even at 30x8.
       harness.vt.sendInput('\x1b[F')
       await settleHarness(harness)
@@ -159,7 +162,9 @@ test('at 30x8 a long CJK Host error starts at its identity and is fully reachabl
     assert.match(start, />/)
     assert.match(start, /transcript\.tool\.renderer/)
     assert.match(start, /\[failed\]/)
-    assert.match(start, /PgUp\/PgDn scroll/, 'the narrow paging cue is discoverable')
+    // Reachability is the contract (the bar drops whole segments on a 30-cell
+    // row); the paging hint is advertised from 80 columns up.
+    assert.match(start, /Esc back/u, 'the real Esc destination is always advertised')
     // Page to the END of the block: the unique tail marker proves the last
     // physical error row is reachable by keyboard (overlapping page frames
     // make a naive concatenation non-contiguous).
@@ -382,8 +387,12 @@ test('Details and Install keep their legacy c/C behavior; only Diagnostics uses 
 
     // Install: finish an official install, then `C` must still copy the Host
     // install diagnostics (never the diagnostics-page report).
-    harness.vt.sendInput('\r')
-    await settleHarness(harness)
+    // A Detail action that the first frame could not paint is revealed first and
+    // admitted on the NEXT frame.
+    for (let attempt = 0; attempt < 3 && harness.panel.currentView() === 'details'; attempt += 1) {
+      harness.vt.sendInput('\r')
+      await settleHarness(harness)
+    }
     assert.equal(harness.panel.currentView(), 'install')
     harness.vt.sendInput('\r') // inspect
     await settleHarness(harness)

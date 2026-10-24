@@ -248,7 +248,6 @@ function setupProof(options: ProofOptions): SinkHarness {
       replace: () => {},
     },
     extensions: undefined,
-    openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
     config: {
       configReadiness: () => 'ready',

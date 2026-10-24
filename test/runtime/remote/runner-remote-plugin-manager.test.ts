@@ -264,7 +264,7 @@ test('the real Remote /plugins reads the real Host PluginManager through the gen
     plain(fixture.vt.getViewport()).includes(bundle), 20_000)
 
   const view = plain(fixture.vt.getViewport())
-  assert.match(view, /Plugins · All/)
+  assert.match(view, /Settings · Plugins/)
   assert.match(view, /Current TUI/)
   assert.match(view, /@xmoon76\/dsh-pi-tui/)
   // A distinctive bundle that exists ONLY in the fixture's managed profile:
@@ -427,8 +427,8 @@ test('the Settings → Plugins entry hosts the SAME Remote controller/panel and 
   for (let step = 0; step < 6; step += 1) fixture.vt.sendInput('\x1b[B')
   await fixture.vt.waitForRender()
   fixture.vt.sendInput('\r')
-  await waitFor('the Plugin Manager page opens from Settings', () =>
-    /Plugins · All/.test(plain(fixture.vt.getViewport())), 20_000)
+  await waitFor('the Plugin Manager page is hosted by Settings', () =>
+    /Settings · Plugins/.test(plain(fixture.vt.getViewport())), 20_000)
   // Same owner: the Remote inventory read is live on this entry too.
   await waitFor('the same Remote inventory renders', () =>
     plain(fixture.vt.getViewport()).includes(fixture.host.pluginManager!.bundleName), 20_000)
@@ -436,7 +436,7 @@ test('the Settings → Plugins entry hosts the SAME Remote controller/panel and 
   fixture.vt.sendInput('\x1b')
   await waitFor('Back returns to the SAME Settings surface', () =>
     /Settings · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
-  assert.doesNotMatch(plain(fixture.vt.getViewport()), /Plugins · All/)
+  assert.doesNotMatch(plain(fixture.vt.getViewport()), /Settings · Plugins/)
 
   fixture.vt.sendInput('\x1b')
   await waitFor('closing Settings returns to the editor', () =>

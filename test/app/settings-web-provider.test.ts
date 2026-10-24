@@ -232,7 +232,6 @@ function setup(options: {
     // Explicitly ABSENT: the Proxy fallback would otherwise hand the legacy
     // editor a truthy function for a missing optional owner.
     extensions: undefined,
-    openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
     progressUpdatesState: { mode: 'milestones' },
     responseStyleState: { style: 'default' },

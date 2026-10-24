@@ -25,6 +25,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { bundle, openWorkspace, plain, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 import { mountRealService } from '../support/extension-lifecycle-helpers.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
+import type { EmbeddedPluginPage } from '../../src/tui/plugin-manager/workspace.ts'
 import {
   PluginManagerWorkspacePanel,
   createPluginManagerWorkspacePanel,
@@ -306,8 +307,8 @@ test('the diagnostics page paints the grouped facts and every state/error withou
   try {
     assert.equal(harness.panel.currentView(), 'diagnostics')
     const frame = harness.view()
-    assert.match(frame, /Plugins · Diagnostics/)
-    assert.match(frame, /1 contributions · 1 failed · 0 shadowed/)
+    assert.match(frame, /\[Plugins · Diagnostics\]/u, 'the ONE shared pane header names the full-width business page')
+    assert.doesNotMatch(frame, /contributions ·/u, 'the retired fullscreen count row is not painted')
     assert.match(frame, /Health\s+1 failed/)
     assert.match(frame, /Registries\s+cmd 3 · theme 0 · .* ren 2/)
     assert.match(frame, /Capabilities\s+surface\.snapshot · slot\.input\.widget/)
@@ -469,7 +470,7 @@ test('an absent extension service paints Unavailable and copies nothing', async 
   }
 })
 
-test('both Plugin Manager entries share the same controller and reach the same Diagnostics page', () => {
+test('the ONE embedded page reaches Diagnostics over the shared controller; a second owner is refused', () => {
   const panels: { panel: PluginManagerWorkspacePanel; controller: PluginManagerController; diagnostics: () => TuiExtensionDiagnostics | undefined }[] = []
   let service: SurfaceExtensionService | undefined
   const fakeService = {
@@ -486,50 +487,43 @@ test('both Plugin Manager entries share the same controller and reach the same D
     editors: { snapshot: () => ({ editors: [] }) },
     api: () => ({ apiVersion: 2, hostVersion: 'test', capabilities: new Set(['surface.snapshot']), deprecations: new Map() }),
   } as unknown as SurfaceExtensionService
-  const hosted: Component[] = []
   const mounted = {
-    workspaceRows: () => 40,
-    workspaceColumns: () => 120,
     requestRender: () => {},
-    workspaceNotice: () => undefined,
     copyWorkspaceText: () => {},
     notify: () => {},
-    openPluginManagerWorkspace: (panel: Component) => {
-      hosted.push(panel)
-      return () => {}
-    },
   } as unknown as TuiApp
   const runtime = createPluginManagerRuntime({
     mounted: () => mounted,
     service: () => service,
     createPanel: (controller, deps) => {
-      const panel = new PluginManagerWorkspacePanel(controller, {
-        rows: deps.rows,
-        columns: deps.columns,
-        requestRender: deps.requestRender,
-        notice: deps.notice,
-        onCopy: deps.onCopy,
-        diagnostics: deps.diagnostics,
-      }, { onDispose: deps.onDispose })
+      const panel = createPluginManagerWorkspacePanel(controller, deps)
       panels.push({ panel, controller, diagnostics: deps.diagnostics })
       return panel
     },
   })
   const owner = runtime.attach({ port: memoryPort(), diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
   try {
-    owner.open()
+    const firstComponent = owner.page(() => {})
+    assert.ok(firstComponent !== undefined, 'the first Settings page owns the controller')
     const first = panels[0]!
+    first.panel.setViewport({ width: 120, rows: 40, allowDual: true })
     assert.equal(first.diagnostics(), undefined, 'no attached service means the page states Unavailable')
     first.panel.render(120)
     first.panel.handleInput('d')
     assert.equal(first.panel.currentView(), 'diagnostics')
     first.panel.render(120)
+    assert.equal(first.panel.currentView(), 'diagnostics')
 
     service = fakeService
+    // ONE page owns the controller: a second request is refused instead of
+    // nesting a second owner. The real teardown releases it exactly once.
+    assert.equal(owner.page(() => {}), undefined, 'a second page is refused while the first owns the controller')
+    first.panel.dispose()
     const secondComponent = owner.page(() => {})
-    assert.ok(secondComponent !== undefined)
+    assert.ok(secondComponent !== undefined, 'a released owner can be claimed by the next Settings page')
     const second = panels[1]!.panel
-    assert.equal(panels[1]!.controller, first.controller, 'both entries own exactly ONE controller')
+    assert.equal(panels[1]!.controller, first.controller, 'one controller lifetime per surface')
+    second.setViewport({ width: 120, rows: 40, allowDual: true })
     second.render(120)
     second.handleInput('d')
     assert.equal(second.currentView(), 'diagnostics')
@@ -650,7 +644,19 @@ async function mountProductionPage(options: {
     }),
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   })
-  owner.open()
+  // `/plugins` is the SAME Settings lease with the Plugins category selected:
+  // the page factory is the production runtime owner.
+  const settings = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
+    {
+      aboutVersionFacts: { tui: 'test', dsh: undefined },
+      onOpenLegacy: () => {},
+      initialCategory: 'plugins',
+      // The composition zone knows the concrete page the runtime factory was
+      // created with; this is the same ONE narrowing production bootstrap does.
+      onOpenPlugins: (onYieldNavigation) => owner.page(onYieldNavigation) as EmbeddedPluginPage | undefined,
+    },
+  )
   await settlePage(vt)
   const panel = panels[0]
   assert.ok(panel !== undefined, 'the production runtime must build the Plugin Manager page')
@@ -662,6 +668,7 @@ async function mountProductionPage(options: {
     copied,
     async dispose() {
       runtime.dispose()
+      try { settings.close() } catch {}
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
       await disposeService()
@@ -676,8 +683,8 @@ test('a failing Host inventory does not contaminate the real extension diagnosti
   const page = await mountProductionPage({ snapshotFailure: 'Host inventory failed: 包' })
   try {
     const list = plain(page.vt.getViewport())
-    assert.match(list, /Stale/)
-    assert.match(list, /Host inventory failed/)
+    assert.match(list, /Stale/u, 'a failed inventory read is stated as Stale on the page notice row')
+    assert.match(list, /Host inventory failed/u)
     page.vt.sendInput('d')
     await settlePage(page.vt)
     assert.equal(page.panel.currentView(), 'diagnostics')

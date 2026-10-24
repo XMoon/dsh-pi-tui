@@ -568,7 +568,6 @@ async function mountSettingsWorkspace(
       credentials: config.credentials,
     }),
     extensions: undefined,
-    openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
     catalog: { models: { available: () => false } },
   }

@@ -38,11 +38,8 @@ import { buildPluginDetailView, buildPluginManagerModel, bundleValue } from '../
 import { detachPluginManagerSnapshot } from '../../src/runtime/plugin-manager-mapping.ts'
 import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../../src/runtime/direct/plugin-manager-direct.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { TuiApp } from '../../src/tui-app.ts'
-import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
-import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { openWorkspace, plain } from '../support/plugin-workspace-harness.ts'
 import { disposeContext } from '../support/runner-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
@@ -50,6 +47,19 @@ const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
  *  derives every install target and exemption grant from this same value, so
  *  the fixture must never hardcode a released version of it. */
 const RUNTIME_VERSION = getDshRuntimeVersion()
+
+/** Render the embedded page at ONE explicit local grant: the Settings root
+ *  always calls `setViewport` before `render(width)`, and `render` throws
+ *  unless the width matches the granted viewport. */
+function renderAt(
+  page: PluginManagerWorkspacePanel,
+  width: number,
+  rows: number,
+  allowDual = false,
+): string[] {
+  page.setViewport({ width, rows, allowDual })
+  return page.render(width)
+}
 
 function seedProfile(workRoot: string): {
   profileContext: Record<string, unknown>
@@ -380,32 +390,21 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
   const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
 
-  const vt = new VirtualTerminal(120, 40)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  let close: () => void = () => {}
-  const controller = new PluginManagerController(port, {
-    requestRender: () => app.requestRender(),
-    requestClose: () => close(),
-    notify: () => {},
-    isOpen: () => true,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  // The ONE real Settings lease hosts the embedded page through the REAL
+  // `Settings → Plugins` factory; it owns the controller's claim and grants the
+  // page's local viewport per frame (no second TuiApp, no hand-built owner).
+  const harness = await openWorkspace({ port })
+  life.defer(() => {
+    try { harness.close() } catch {}
+    try { harness.controller.dispose() } catch {}
+    try { harness.app.dispose() } catch {}
   })
-  const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => vt.rows,
-    columns: () => vt.columns,
-    requestRender: () => app.requestRender(),
-    notice: () => undefined,
-    onCopy: () => {},
-  }, { onDispose: () => {} })
-  close = app.openPluginManagerWorkspace(panel, () => {})
-  life.defer(() => { try { app.dispose() } catch {} controller.dispose() })
-  controller.open('direct-command')
+  const { vt, controller, panel } = harness
 
   const settle = async (rounds = 10): Promise<void> => {
-    for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
-    await vt.waitForRender()
+    await harness.settle(rounds)
   }
+  const frame = (): string => plain(vt.getViewport())
   const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
@@ -413,11 +412,11 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
       await new Promise<void>(resolve => setTimeout(resolve, 10))
       await vt.waitForRender()
     }
-    throw new Error(`timed out waiting for ${label}: ${vt.getViewport().join('\n')}`)
+    throw new Error(`timed out waiting for ${label}: ${frame()}`)
   }
 
   await settle()
-  assert.match(vt.getViewport().join('\n'), /Plugins · All/)
+  assert.match(frame(), /Settings · Plugins/)
 
   vt.sendInput('i')
   await settle()
@@ -430,17 +429,17 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   // The Install key is refused in that window (the workspace requires the
   // install action to be PAINTED), so the confirmation is waited for as a
   // FRAME, not as controller state.
-  await waitFor(() => /offered version 1\.0\.0/u.test(vt.getViewport().join('\n')),
+  await waitFor(() => /offered version 1\.0\.0/u.test(frame()),
     'the confirmation frame is painted')
-  assert.match(vt.getViewport().join('\n'), /offered version 1\.0\.0/)
+  assert.match(frame(), /offered version 1\.0\.0/)
   vt.sendInput('\r') // Install
   await waitFor(() => controller.installView()?.phase === 'done', 'the real Host local install')
   await waitFor(() => controller.status().state === 'ready', 'the authoritative install reread')
   // The controller's state leads the repaint, so the result is waited for as
   // a FRAME: the outcome summary is what the case actually asserts.
-  await waitFor(() => /installed version 1\.0\.0/u.test(vt.getViewport().join('\n')),
+  await waitFor(() => /installed version 1\.0\.0/u.test(frame()),
     'the install outcome frame is painted')
-  const view = vt.getViewport().join('\n')
+  const view = frame()
   assert.match(view, /installed version 1\.0\.0/)
   assert.equal((view.match(/Done in/g) ?? []).length, 1, 'the Host package output is shown once, not twice')
   assert.equal((view.match(/enable (applied|restart-required)/g) ?? []).length, 1, 'the outcome summary is shown once, not twice')
@@ -460,23 +459,23 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   vt.sendInput('\r') // apply search
   await settle()
   vt.sendInput('\r') // Details
-  await waitFor(() => vt.getViewport().join('\n').includes('[Details]'), 'the Details focus frame')
+  await waitFor(() => frame().includes('[Details]'), 'the Details focus frame')
   // Re-anchor the painted frame with the current authoritative model before the
   // action key: an invalidation read may have settled after the last queued paint.
   // Keep the rendered frame as evidence that the action is actually visible.
-  const disableFrame = panel.render(120).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  const disableFrame = plain(renderAt(panel, 96, 36, true))
   assert.match(disableFrame, /> Disable…/, 'the toggle action is painted before it is invoked')
   await vt.waitForRender()
-  assert.match(vt.getViewport().join('\n').replace(/\x1b\[[0-9;]*m/g, ''), /> Disable…/,
+  assert.match(frame(), /> Disable…/,
     'the mounted VirtualTerminal viewport shows the toggle action before the key')
   vt.sendInput('\r') // Disable…
   await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
     'the real Host disable + authoritative reread')
   // The controller's state leads the repaint: the toggled row is waited for
   // as a FRAME, so the case never reads a frame painted before the change.
-  await waitFor(() => /Enabled\s+No/u.test(vt.getViewport().join('\n')),
+  await waitFor(() => /Enabled\s+No/u.test(frame()),
     'the toggled row is painted')
-  assert.match(vt.getViewport().join('\n'), /Enabled\s+No/)
+  assert.match(frame(), /Enabled\s+No/)
 
   vt.sendInput('\x1b[B') // Enable… -> Remove…
   await settle()
@@ -484,19 +483,19 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await settle()
   vt.sendInput('\x1b[A') // Cancel -> Remove
   await settle()
-  const confirmFrame = panel.render(120).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  const confirmFrame = plain(renderAt(panel, 120, 36))
   assert.match(confirmFrame, /> Remove/, 'the selected Remove action is painted before confirmation')
   await vt.waitForRender()
-  assert.match(vt.getViewport().join('\n').replace(/\x1b\[[0-9;]*m/g, ''), /> Remove/,
+  assert.match(frame(), /> Remove/,
     'the mounted VirtualTerminal viewport shows the selected Remove action')
   vt.sendInput('\r') // confirm
   await waitFor(() => controller.model().cards.every(card => card.name !== seeded.bundleName),
     'the real Host removal + authoritative reread')
   // The controller's state leads the repaint: the emptied list is waited for
   // as a FRAME, so the case never reads a frame painted before the removal.
-  await waitFor(() => /No matching plugins|No plugins/u.test(vt.getViewport().join('\n')),
+  await waitFor(() => /No matching plugins|No plugins/u.test(frame()),
     'the emptied plugin list is painted')
-  assert.match(vt.getViewport().join('\n'), /No matching plugins|No plugins/)
+  assert.match(frame(), /No matching plugins|No plugins/)
   assert.equal((await port.snapshot()).bundles.find(candidate => candidate.name === seeded.bundleName), undefined)
 })
 

@@ -292,7 +292,7 @@ function fakeRunnerDeps(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -413,7 +413,6 @@ function fakeRunnerDeps(options: {
       clearError: () => {},
     },
     pluginManager: {
-      open: () => {},
       page: () => undefined,
     },
     client: {

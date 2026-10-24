@@ -40,6 +40,7 @@ import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH }
 import { aboutFactRows, serializeAboutStatus as serializeAboutStatusOf, type AboutFact, type AboutStatusView } from '../../domain/status/about.ts'
 import type { ModelsInitialView, ModelsPageExit, ModelsWorkspacePage } from './models-workspace-page.ts'
 import type { AccountInitialView, AccountWorkspacePage } from './account-workspace-page.ts'
+import type { EmbeddedPluginPage, PluginWorkspaceView } from '../plugin-manager/workspace.ts'
 
 /** The frozen Settings categories, in the visible order. `About` is the
  * default home of the workspace; `Models` and `Account` are direct content
@@ -60,8 +61,9 @@ export type SettingsWorkspacePage = 'categories' | 'rows' | 'detail'
 export type SettingsWorkspaceFocus = SettingsWorkspacePage | 'content'
 
 /** The categories whose RIGHT column is a real page instead of the legacy
- *  L0/L1/L2 configuration panes. */
-export type SettingsWorkspaceDirectCategoryId = 'about' | 'models' | 'account'
+ *  L0/L1/L2 configuration panes. `plugins` is the embedded Plugin Manager page:
+ *  it paints inside this SAME workspace lease and shares its ONE chrome. */
+export type SettingsWorkspaceDirectCategoryId = 'about' | 'models' | 'account' | 'plugins'
 
 /** The stable identity of one readonly pilot row. */
 export type SettingsWorkspaceRowId =
@@ -235,11 +237,12 @@ export interface SettingsWorkspacePanelIntents {
   readonly onAboutLeave?: () => void
   /**
    * The Plugins category is a DIRECT page entry, not an empty Rows level: the
-   * app owner builds the ONE PluginManagerWorkspacePanel lazily and returns it.
-   * `done` is the page's normal close path (it returns to Settings); an external
-   * teardown disposes the returned component instead and never calls `done`.
+   * app owner builds the ONE embedded Plugin Manager page lazily and returns
+   * it. `onYieldNavigation` is THIS root's navigation yield: the page reports
+   * the intent (Esc/Left/Shift+Tab at its list root) and the root commits the
+   * focus change; it never closes the page by itself.
    */
-  readonly onOpenPlugins?: (done: () => void) => Component | undefined
+  readonly onOpenPlugins?: (onYieldNavigation: () => void) => EmbeddedPluginPage | undefined
   /** The lazily built Models direct page (the Settings category keeps the
    * same screen lease). `openAccount` switches this workspace to the Account
    * page when the Models list's account entry is activated. */
@@ -371,7 +374,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'plugin-launch' | 'copy' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel' | 'about-action'
+  readonly kind: 'category' | 'row' | 'copy' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel' | 'about-action'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -428,7 +431,7 @@ const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
 
 /** Whether one category is a direct content page. */
 function isDirectCategory(category: SettingsWorkspaceCategoryId): category is SettingsWorkspaceDirectCategoryId {
-  return category === 'about' || category === 'models' || category === 'account'
+  return category === 'about' || category === 'models' || category === 'account' || category === 'plugins'
 }
 
 /** The typed guard for a painted category id (a hit target never casts). */
@@ -733,14 +736,10 @@ export class SettingsWorkspacePanel implements Component {
   /** The per-open commit identity: a settlement that does not match the live
    *  request is refused (a superseded or post-close result can never repaint). */
   private editRequestId = 0
-  /** The lazily built Plugin Manager page currently hosting this screen. */
-  private pluginPage: (Component & {
-    focused?: boolean
-    dispose?(): void
-    onCellPress?(x: number, y: number): void
-    onCellClick?(x: number, y: number): void
-    handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
-  }) | undefined
+  /** The lazily built embedded Plugin Manager page (ONE instance per open,
+   *  kept across Categories/content focus changes until the category really
+   *  changes or this workspace is disposed). */
+  private pluginPage: EmbeddedPluginPage | undefined
   /** The candidate viewport offset of the choice projection. */
   private choiceOffset = 0
   /** The candidate index/viewport/WIDTH the choice list was last rebased against. */
@@ -792,7 +791,10 @@ export class SettingsWorkspacePanel implements Component {
       }
     } else if (options?.initialCategory !== undefined) {
       this.categoryId = options.initialCategory
-      this.focus = 'categories'
+      // The `/plugins` deep link lands with the keyboard on the Plugin List
+      // (not on the rail): its ONE Settings lease paints the page on the first
+      // real frame and starts on the list, never on a resumed install.
+      this.focus = options.initialCategory === 'plugins' ? 'content' : 'categories'
     } else if (options?.initialModelsView !== undefined) {
       // A Models deeplink IS the Models category.
       this.categoryId = 'models'
@@ -933,7 +935,6 @@ export class SettingsWorkspacePanel implements Component {
   // ── rendering ────────────────────────────────────────────────────────────
 
   render(width: number): string[] {
-    if (this.pluginPage !== undefined) return this.pluginPage.render(width)
     const liveRows = this.intents.rows()
     // A terminal resize is a gesture boundary: a press recorded against the old
     // geometry must not resolve against the new one, even when the target's own
@@ -959,11 +960,16 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedChoiceFactScroll = false
     if (direct) {
       // The content column is on screen: the SELECTED page must exist. A page
-      // the narrow rail selected without creating it is created now — once,
-      // and only now that its column is really painted.
-      if (!this.directContentPainted) this.ensureDirectPageMounted()
-      this.directContentPainted = true
-      return this.renderDirectPage(plan)
+      // the rail selected without creating it is created now — once, and only
+      // on a frame that really paints at least one content row (an invisible
+      // column never starts a Host page/read).
+      const contentVisible = chromeGeometry(plan).contentRows > 0
+      if (contentVisible && !this.directContentPainted) this.ensureDirectPageMounted()
+      this.directContentPainted = contentVisible
+      // The Plugin Manager projects its OWN responsive column set inside this
+      // workspace; every other direct category keeps the shared rail + content
+      // projection.
+      return this.categoryId === 'plugins' ? this.renderPluginDirectPage(plan) : this.renderDirectPage(plan)
     }
     // The legacy projection paints no content column: the content box and its
     // press map belong to the direct layout alone.
@@ -1013,6 +1019,10 @@ export class SettingsWorkspacePanel implements Component {
    * on screen.
    */
   private ensureDirectPageMounted(): void {
+    if (this.categoryId === 'plugins') {
+      this.ensurePluginPageMounted()
+      return
+    }
     if (this.authPageCategory === this.categoryId) return
     if (this.categoryId === 'models') this.mountModelsPage({ view: 'list' })
     else if (this.categoryId === 'account') this.mountAccountPage({ view: 'page' })
@@ -1624,9 +1634,6 @@ export class SettingsWorkspacePanel implements Component {
    */
   private regionActionBarHints(forward: 'focus' | 'panes', backward: boolean): ActionBarSegment[] {
     if (layoutForWidth(this.intents.columns()) === 'narrow') return []
-    // The Plugin Manager's page owns its own Tab; the rail never advertises a
-    // key this category ignores.
-    if (this.categoryId === 'plugins') return []
     // Priority 0 is the LOWEST drop priority in the workspace: on a tight
     // bar the region keys always yield first, so they can never crowd out an
     // existing semantic action hint (`c copy fact`, `C copy all`, `r refresh`,
@@ -1678,7 +1685,9 @@ export class SettingsWorkspacePanel implements Component {
     const breadcrumb = this.focus === 'categories'
       ? 'Categories'
       : this.focus === 'content'
-        ? CATEGORY_LABELS[this.categoryId]
+        ? (this.categoryId === 'plugins' && this.pluginPage !== undefined
+            ? this.pluginBreadcrumb(this.pluginPage.currentView())
+            : CATEGORY_LABELS[this.categoryId])
         : this.focus === 'rows'
           ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
           : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
@@ -1702,14 +1711,16 @@ export class SettingsWorkspacePanel implements Component {
    *  ink: the calm default is `textMuted`, a stale document is `warning` and an
    *  unavailable one is `error` (design language §3.2 corrections). */
   private renderMetadata(plan: SettingsChromePlan): string {
-    const row = this.authPage !== undefined ? undefined : this.selectedRow()
+    const row = this.authPage !== undefined || this.pluginPage !== undefined ? undefined : this.selectedRow()
     const scope = this.categoryId === 'about'
       ? 'About'
-      : this.authPageCategory === 'models'
-        ? 'Host provider & credential configuration'
-        : this.authPageCategory === 'account'
-          ? 'DeepSeek Account · Host'
-          : row?.scope ?? 'TUI preferences'
+      : this.categoryId === 'plugins'
+        ? 'Host plugins & TUI extensions'
+        : this.authPageCategory === 'models'
+          ? 'Host provider & credential configuration'
+          : this.authPageCategory === 'account'
+            ? 'DeepSeek Account · Host'
+            : row?.scope ?? 'TUI preferences'
     const captured = new Date(this.snapshot.capturedAt)
     const hh = String(captured.getHours()).padStart(2, '0')
     const mm = String(captured.getMinutes()).padStart(2, '0')
@@ -1812,23 +1823,6 @@ export class SettingsWorkspacePanel implements Component {
         continue
       }
       if (pane.page === 'rows') {
-        if (this.categoryId === 'plugins') {
-          // S4-D2 / D2-0: the Plugins category paints ONE UI-only direct-page
-          // affordance instead of a fabricated Settings row. It is not part of
-          // the snapshot, owns no row id/writable field and publishes the hit
-          // target of exactly the cells this pane really painted.
-          if (contentRows > 0) {
-            itemHits.push({
-              kind: 'plugin-launch',
-              id: 'plugins',
-              row: contentTop,
-              startCol: pane.x,
-              endCol: pane.x + pane.width,
-            })
-            paneLines.set('rows', [this.pluginLaunchLine(pane.width)])
-          }
-          continue
-        }
         const rows = this.currentRows()
         const selected = this.indexOfRow(rows)
         if (selected !== this.lastRowIndex || contentRows !== this.lastRowViewport) {
@@ -2064,13 +2058,11 @@ export class SettingsWorkspacePanel implements Component {
     const buttons = row === undefined ? [] : this.detailButtons(row)
     const pinned = buttons.length > 0 && viewport >= 2 ? 1 : 0
     const scrollViewport = Math.max(0, viewport - pinned)
-    const directPage = this.categoryId === 'plugins'
-      ? 'Plugin Manager'
-      : this.categoryId === 'models'
-        ? 'Models'
-        : this.categoryId === 'account'
-          ? 'Account'
-          : 'this page'
+    const directPage = this.categoryId === 'models'
+      ? 'Models'
+      : this.categoryId === 'account'
+        ? 'Account'
+        : 'this page'
     const content = row === undefined
       ? [color.textDim(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`)]
       : this.detailContent(row, width, includeTitle)
@@ -2522,25 +2514,10 @@ export class SettingsWorkspacePanel implements Component {
     return this.snapshot.rows.filter(row => row.category === this.categoryId)
   }
 
-  /** The count the Rows pane header states: the ONE visible direct-page
-   *  affordance for Plugins, the real snapshot rows for every other category.
-   *  It counts painted rows, never Host settings rows. */
+  /** The count the Rows pane header states: the real snapshot rows of the
+   *  selected legacy configuration category. */
   private rowsPaneCount(): number {
-    return this.categoryId === 'plugins' ? 1 : this.currentRows().length
-  }
-
-  /** The UI-only Plugins entry affordance (S4-D2 / D2-0): a plain action name
-   *  with a weak `Enter / Right` hint, deliberately WITHOUT the `> ` selection
-   *  cursor — L0 keeps exactly one active signal, and this row is never a
-   *  configurable Settings row. The hint drops WHOLE when it cannot fit. */
-  private pluginLaunchLine(width: number): string {
-    const label = `  ${color.textStrong('Open Plugin Manager')}`
-    const hint = 'Enter / Right'
-    const room = width - visibleWidth(label)
-    const painted = room >= hint.length + 2
-      ? `${label}  ${color.textMuted(hint)}`
-      : label
-    return fit(painted, width)
+    return this.currentRows().length
   }
 
   /** The first row of ONE legacy configuration category. A direct page
@@ -2643,45 +2620,281 @@ export class SettingsWorkspacePanel implements Component {
     return layoutForWidth(this.projectionWidth())
   }
 
-  // ── the inline Plugin Manager page (S4-D1) ────────────────────────────────
+  // ── the embedded Plugin Manager page (PR2) ────────────────────────────────
 
   /**
-   * Enter the ONE Plugin Manager page INSIDE this already-leased workspace.
-   * The page owns paint/keys/mouse while open; this panel keeps its L0/L1/L2
-   * selection and scroll state and restores it on return.
+   * §3.1: the FIXED projection of the plugin page inside this workspace. Pure
+   * layout: it reads the real width, the root focus and the page's current
+   * view only — never Controller/business state.
    */
-  private openPluginsPage(): void {
+  private pluginProjection(
+    plan: SettingsChromePlan,
+    view: PluginWorkspaceView,
+    focus: SettingsWorkspaceFocus,
+  ): {
+    readonly showCategories: boolean
+    readonly contentX: number
+    readonly contentWidth: number
+    readonly allowDual: boolean
+  } {
+    const width = plan.width
+    // A business page (install/confirm/diagnostics) owns the FULL width: its
+    // risk text and actions are never squeezed beside the Categories rail.
+    if (view === 'install' || view === 'confirm' || view === 'diagnostics') {
+      return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
+    }
+    if (width >= 120) {
+      // `Categories(22) · List · Details preview`: the rail always stays.
+      const contentX = WIDE_CATEGORY_WIDTH + COLUMN_GAP
+      return { showCategories: true, contentX, contentWidth: Math.max(1, width - contentX), allowDual: true }
+    }
+    if (width >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS) {
+      // 76..119: the adjacent pair moves with the owning focus.
+      if (focus === 'categories') {
+        const contentX = MEDIUM_CATEGORY_WIDTH + COLUMN_GAP
+        return { showCategories: true, contentX, contentWidth: Math.max(1, width - contentX), allowDual: false }
+      }
+      return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: true }
+    }
+    // Narrow: ONE column. The root paints the Categories list alone until the
+    // content takes the keyboard, so the page is never mounted there.
+    return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
+  }
+
+  /** The local viewport the plugin page is granted for THIS frame. */
+  private pluginViewport(plan: SettingsChromePlan, view: PluginWorkspaceView): import('../plugin-manager/workspace.ts').PluginContentViewport {
+    const projection = this.pluginProjection(plan, view, this.focus)
+    const rows = Math.max(1, chromeGeometry(plan).contentRows + plan.actionRows)
+    return { width: projection.contentWidth, rows, allowDual: projection.allowDual }
+  }
+
+  /**
+   * Create the ONE plugin page when its content column is about to be painted
+   * (the lazy policy Models/Account share). A narrow rail that merely SELECTED
+   * the category mounts nothing and reads no inventory.
+   */
+  private ensurePluginPageMounted(): void {
     if (this.pluginPage !== undefined || this.disposed) return
-    const page = this.intents.onOpenPlugins?.(() => this.leavePluginsPage())
+    const page = this.intents.onOpenPlugins?.(() => this.yieldPluginNavigation())
     if (page === undefined) return
-    if ('focused' in page) (page as Component & { focused?: boolean }).focused = true
     this.pluginPage = page
+    this.bumpRevision()
+  }
+
+  /**
+   * Drop the page and release its Host claim exactly once. Only a REAL category
+   * change or a Settings teardown reaches here; a focus yield never does.
+   */
+  private closePluginPage(): void {
+    const page = this.pluginPage
+    if (page === undefined) return
+    this.pluginPage = undefined
+    page.focused = false
+    page.cancelPointer()
+    this.paintedContentBox = undefined
+    this.contentPressed = undefined
+    this.pressedGesture = undefined
+    page.dispose()
+  }
+
+  private pluginPageHasPendingMutation(): boolean {
+    return this.pluginPage?.pendingMutation() === true
+  }
+
+  /**
+   * Whether a category change / close may abandon the plugin page right now.
+   * The Controller's mutation guard is authoritative; Details/Confirm/Install
+   * own their own Esc gradient and are never discarded from a rail click.
+   */
+  private pluginBlocksLeave(): boolean {
+    const page = this.pluginPage
+    if (page === undefined) return false
+    if (page.pendingMutation()) return true
+    return page.currentView() !== 'list'
+  }
+
+  /**
+   * Hand the keyboard back to the Categories rail WITHOUT closing the page:
+   * the page keeps its instance, query/selection/scroll and the Controller
+   * keeps its install request id. Only the untouched List root may yield.
+   */
+  private yieldPluginNavigation(): void {
+    const page = this.pluginPage
+    if (page === undefined) return
+    if (!page.canYieldFocusToNavigation()) return
+    page.focused = false
+    page.cancelPointer()
+    this.focus = 'categories'
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
   }
 
-  /** The page's NORMAL close path: drop the page and land on L0 with Plugins
-   * selected. The page itself already released its Host claim. */
-  private leavePluginsPage(): void {
+  /**
+   * Recompute the plugin page's grant and focus owner BEFORE input is
+   * forwarded: a resize may arrive before its repaint frame, and no key may act
+   * on a viewport the page no longer has.
+   */
+  private syncPluginPage(): void {
     const page = this.pluginPage
     if (page === undefined) return
-    this.pluginPage = undefined
-    if ('focused' in page) (page as Component & { focused?: boolean }).focused = false
-    page.dispose?.()
-    this.categoryId = 'plugins'
-    this.focus = 'categories'
-    this.bumpRevision()
-    this.intents.requestRender()
+    const plan = planSettingsChrome(
+      this.intents.columns(),
+      this.intents.rows(),
+      this.intents.notice() !== undefined,
+    )
+    page.setViewport(this.pluginViewport(plan, page.currentView()))
+    page.focused = this.focus === 'content'
+  }
+
+  /**
+   * Paint the plugin category inside the SHARED Settings chrome: the root draws
+   * the one Header/Metadata/Rule/Notice, the ONE shared pane header and the ONE
+   * physical last-row bar; the page contributes only its business body.
+   */
+  private renderPluginDirectPage(plan: SettingsChromePlan): string[] {
+    const lines: string[] = []
+    const targets: HitTarget[] = []
+    if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
+    if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
+    if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    const geometry = chromeGeometry(plan)
+    const page = this.pluginPage
+    if (page === undefined) {
+      // No composition seam supplied the page: paint an honest empty content
+      // column instead of a fabricated plugin list.
+      for (let index = 0; index < geometry.contentRows; index += 1) {
+        lines.push(fit(index === 0 ? color.textDim('The Plugin Manager is unavailable in this composition.') : '', plan.width))
+      }
+      lines.push(fit(this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : color.textMuted('Esc back'), plan.width))
+      this.paintedTargets = []
+      this.paintedPanes = {}
+      this.paintedContentBox = undefined
+      this.paintedRevision = this.revision
+      return lines.slice(0, plan.rows)
+    }
+    const view = page.currentView()
+    const projection = this.pluginProjection(plan, view, this.focus)
+    const childRows = Math.max(1, geometry.contentRows + plan.actionRows)
+    page.setViewport({ width: projection.contentWidth, rows: childRows, allowDual: projection.allowDual })
+    page.focused = this.focus === 'content'
+    const child = page.render(projection.contentWidth)
+    const layout = page.contentLayout()
+    const contentTop = geometry.contentTop
+    const contentRows = geometry.contentRows
+    if (plan.paneHeaderRows === 1) lines.push(this.renderPluginPaneHeader(plan, projection, layout, view))
+    const visible = projection.showCategories ? this.visibleCategories(contentRows) : []
+    for (let index = 0; index < contentRows; index += 1) {
+      const content = fit(child[index] ?? '', projection.contentWidth)
+      if (!projection.showCategories) {
+        lines.push(content)
+        continue
+      }
+      const id = visible[index]
+      const rail = fit(id === undefined ? '' : this.categoryLine(id), WIDE_CATEGORY_WIDTH)
+      lines.push(`${rail}${' '.repeat(COLUMN_GAP)}${content}`)
+      if (id !== undefined) {
+        targets.push({ kind: 'category', id, row: contentTop + index, startCol: 0, endCol: WIDE_CATEGORY_WIDTH })
+      }
+    }
+    // The page's semantic bar is its LOCAL last row; while the rail owns the
+    // keyboard the root's navigation bar takes the physical last row instead.
+    const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : (child[childRows - 1] ?? '')
+    lines.push(fit(bar, plan.width))
+    this.paintedContentBox = { x: projection.contentX, top: contentTop, width: projection.contentWidth, rows: contentRows }
+    this.paintedPanes = projection.showCategories
+      ? {
+          categories: {
+            x: 0,
+            width: WIDE_CATEGORY_WIDTH,
+            contentTop,
+            contentRows: Math.min(CATEGORY_ORDER.length, contentRows),
+            maxOffset: Math.max(0, CATEGORY_ORDER.length - contentRows),
+          },
+        }
+      : {}
+    this.paintedTargets = targets
+    this.paintedRevision = this.revision
+    return lines.slice(0, plan.rows)
+  }
+
+  /**
+   * The ONE shared pane header of a plugin frame: the Categories label plus,
+   * with the EXACT split the page just painted, the `Plugins` / `Details`
+   * identity labels. Display-only (no hit target, no focus of its own) and the
+   * same height as every other direct page.
+   */
+  /** The plugin page's own trail inside the shared Header breadcrumb. */
+  private pluginBreadcrumb(view: PluginWorkspaceView): string {
+    switch (view) {
+      case 'details': return 'Plugins · Details'
+      case 'install': return 'Plugins · Install'
+      case 'confirm': return 'Plugins · Confirm'
+      case 'diagnostics': return 'Plugins · Diagnostics'
+      default: return 'Plugins'
+    }
+  }
+
+  private renderPluginPaneHeader(
+    plan: SettingsChromePlan,
+    projection: { readonly showCategories: boolean; readonly contentWidth: number },
+    layout: { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number },
+    view: PluginWorkspaceView,
+  ): string {
+    const parts: string[] = []
+    if (projection.showCategories) {
+      parts.push(fit(this.paneHeader(`Categories (${CATEGORY_ORDER.length})`, this.focus === 'categories'), WIDE_CATEGORY_WIDTH))
+      parts.push(' '.repeat(COLUMN_GAP))
+    }
+    if (layout.dual) {
+      const contentOwnsKeys = this.focus === 'content'
+      parts.push(fit(this.paneHeader('Plugins', contentOwnsKeys && view === 'list'), layout.leftWidth))
+      parts.push(' '.repeat(COLUMN_GAP))
+      parts.push(fit(this.paneHeader('Details', contentOwnsKeys && view === 'details'), layout.rightWidth))
+    } else {
+      parts.push(fit(this.paneHeader(this.pluginPaneLabel(view), this.focus === 'content'), projection.contentWidth))
+    }
+    return parts.join('')
+  }
+
+  /** The one label of a non-dual plugin content column. */
+  private pluginPaneLabel(view: PluginWorkspaceView): string {
+    switch (view) {
+      case 'details': return 'Details'
+      case 'install': return 'Plugins · Install'
+      case 'confirm': return 'Plugins · Confirm'
+      case 'diagnostics': return 'Plugins · Diagnostics'
+      default: return 'Plugins'
+    }
+  }
+
+  /**
+   * The plugin content focus. The embedded page owns its local keys; the root
+   * only intercepts the ONE cross-region key (Shift+Tab from the untouched List
+   * root) and never answers for a page that is not mounted.
+   */
+  private handlePluginContentInput(data: string): void {
+    const page = this.pluginPage
+    if (page === undefined) {
+      if (matchesKey(data, 'escape') || matchesKey(data, 'backspace') || matchesKey(data, 'left')) this.returnToNavigation()
+      return
+    }
+    if (layoutForWidth(this.intents.columns()) !== 'narrow'
+      && matchesKey(data, 'shift+tab')
+      && page.canYieldFocusToNavigation()) {
+      this.yieldPluginNavigation()
+      return
+    }
+    this.syncPluginPage()
+    page.handleInput(data)
   }
 
   // ── keyboard ─────────────────────────────────────────────────────────────
 
   handleInput(data: string): void {
     if (this.disposed) return
-    if (this.pluginPage !== undefined) {
-      this.pluginPage.handleInput?.(data)
-      return
-    }
     // A terminal resize is a fail-closed boundary for EVERY Settings pane even
     // when the effective child grant value is unchanged (8→7 rows keeps the
     // same body budget): the previous frame's physical last row can already be
@@ -2800,9 +3013,6 @@ export class SettingsWorkspacePanel implements Component {
     // move the keyboard to an invisible pane, so the existing Enter/Right (in)
     // and Esc/Left (back) navigation stays the only way in and out.
     if (layoutForWidth(this.intents.columns()) === 'narrow') return
-    // The Plugin Manager owns its own Tab; the rail's Plugins entry only opens
-    // it, and the opened page is dispatched before this method is reached.
-    if (this.categoryId === 'plugins') return
     // A transient choice or an in-flight write owns the keys it can complete:
     // Tab must never become a way around either guard.
     if (this.choiceField() !== undefined || this.editPhase.kind === 'pending') return
@@ -2833,6 +3043,13 @@ export class SettingsWorkspacePanel implements Component {
    */
   private handleContentInput(data: string): void {
     const page = this.authPage
+    // The plugin page owns its own body-floor policy: every frame it paints
+    // advertises only the actions it really admits, so the root forwards its
+    // keys unchanged (it never makes a painted hint a no-op).
+    if (this.categoryId === 'plugins') {
+      this.handlePluginContentInput(data)
+      return
+    }
     // Below the body floor NO body action is visible: the frame paints only the
     // truthful Esc bar. Only Esc may reach the page, because a page can bind
     // other back-looking keys to a HIDDEN edit (the Models catalog filter binds
@@ -2951,6 +3168,13 @@ export class SettingsWorkspacePanel implements Component {
   private returnToNavigation(): void {
     if (this.focus === 'categories') return
     if (this.authPageHasPendingMutation()) return
+    if (this.pluginPageHasPendingMutation()) return
+    // The plugin page KEEPS its instance and state: only its input focus and
+    // any in-flight pointer gesture are released here.
+    if (this.pluginPage !== undefined) {
+      this.pluginPage.focused = false
+      this.pluginPage.cancelPointer()
+    }
     this.focus = 'categories'
     this.pressedGesture = undefined
     this.contentPressed = undefined
@@ -2970,8 +3194,13 @@ export class SettingsWorkspacePanel implements Component {
     // whose Host operation is still in flight, so the rail can never become a
     // way around the page's own refusal (and around the workspace close).
     if (this.authPageHasPendingMutation() && (changed || focus !== 'content')) return
+    // A category change abandons the plugin page; it is refused while the page
+    // owns a mutation or a Details/Confirm/Install sub-state (the page's own Esc
+    // gradient must run first).
+    if (changed && this.pluginPage !== undefined && this.pluginBlocksLeave()) return
     if (changed) {
       if (this.authPageCategory !== undefined && this.authPageCategory !== category) this.closeAuthPage()
+      if (this.categoryId === 'plugins' && category !== 'plugins') this.closePluginPage()
       // C3: an About→other-category change is one semantic About leave.
       if (this.categoryId === 'about' && category !== 'about') this.intents.onAboutLeave?.()
       this.categoryId = category
@@ -2996,6 +3225,7 @@ export class SettingsWorkspacePanel implements Component {
     if (this.paintsDirectContent()) {
       if (category === 'models') this.mountModelsPage({ view: 'list' })
       else if (category === 'account') this.mountAccountPage({ view: 'page' })
+      else if (category === 'plugins') this.ensurePluginPageMounted()
     }
     this.pressedGesture = undefined
     this.contentPressed = undefined
@@ -3021,6 +3251,7 @@ export class SettingsWorkspacePanel implements Component {
     const category = this.categoryId
     if (category === 'models') this.mountModelsPage({ view: 'list' })
     else if (category === 'account') this.mountAccountPage({ view: 'page' })
+    else if (category === 'plugins') this.ensurePluginPageMounted()
     // C3: re-entering About from another category (Enter/Right on the rail,
     // or a click) is one semantic About entry — exactly one scoped refresh.
     if (category === 'about') this.intents.onAboutEnter?.()
@@ -3045,6 +3276,7 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (this.authPageHasPendingMutation()) return
+    if (this.pluginPageHasPendingMutation()) return
     this.intents.onClose()
   }
 
@@ -3124,10 +3356,6 @@ export class SettingsWorkspacePanel implements Component {
       return this.beginChoice()
     }
     if (this.focus === 'categories') {
-      if (this.categoryId === 'plugins') {
-        this.openPluginsPage()
-        return
-      }
       if (isDirectCategory(this.categoryId)) {
         this.enterContent()
         return
@@ -3343,11 +3571,26 @@ export class SettingsWorkspacePanel implements Component {
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
-    if (this.pluginPage !== undefined) return this.pluginPage.handleMouse?.(event)
     // A resize that has not repainted makes every painted pane box stale: a
     // wheel over the old geometry could scroll a pane the new frame does not
     // paint at that cell.
     if (this.terminalGeometryStale()) return undefined
+    if (this.categoryId === 'plugins') {
+      const box = this.paintedContentBox
+      const page = this.pluginPage
+      if (page !== undefined && box !== undefined
+        && event.x >= box.x && event.x < box.x + box.width
+        && event.y >= box.top && event.y < box.top + box.rows) {
+        return page.handleMouse(this.translateMouseEvent(event))
+      }
+      if (event.type !== 'wheel') return undefined
+      const delta = event.wheelDelta ?? 0
+      if (delta === 0) return undefined
+      // Only the Categories rail is a scroll owner outside the plugin content.
+      if (this.paneAt(event.x, event.y) !== 'categories') return undefined
+      this.scrollCategories(delta)
+      return { handled: true }
+    }
     const inContent = this.contentAt(event.x, event.y)
     if (this.authPage !== undefined && inContent) {
       return this.authPage.handleMouse?.(this.translateMouseEvent(event))
@@ -3388,15 +3631,41 @@ export class SettingsWorkspacePanel implements Component {
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
     this.contentPressed = undefined
-    if (this.pluginPage !== undefined) {
-      this.pluginPage.onCellPress?.(x, y)
-      return
-    }
     // The pointer boxes still describe the previous terminal frame. Refuse the
     // press entirely and revoke any child pointer state; the release must not
     // resurrect an old hit at a cell that the new layout paints differently.
     if (this.terminalGeometryStale()) {
       this.authPage?.cancelPointer?.()
+      this.pluginPage?.cancelPointer()
+      return
+    }
+    if (this.categoryId === 'plugins') {
+      const page = this.pluginPage
+      const box = this.paintedContentBox
+      if (page !== undefined && box !== undefined
+        && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+        this.contentPressed = {
+          x,
+          y,
+          columns: this.intents.columns(),
+          rows: this.intents.rows(),
+          revision: this.revision,
+        }
+        page.onCellPress(x - box.x, y - box.top)
+        return
+      }
+      page?.cancelPointer()
+      const target = this.targetAt(x, y)
+      this.pressedGesture = target === undefined
+        ? undefined
+        : {
+            target,
+            revision: this.revision,
+            focus: this.focus,
+            categoryId: this.categoryId,
+            columns: this.intents.columns(),
+            rows: this.intents.rows(),
+          }
       return
     }
     if (this.authPage !== undefined) {
@@ -3433,16 +3702,61 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
-    if (this.pluginPage !== undefined) {
-      this.pressedGesture = undefined
-      this.contentPressed = undefined
-      this.pluginPage.onCellClick?.(x, y)
-      return
-    }
     if (this.terminalGeometryStale()) {
       this.pressedGesture = undefined
       this.contentPressed = undefined
       this.authPage?.cancelPointer?.()
+      this.pluginPage?.cancelPointer()
+      return
+    }
+    if (this.categoryId === 'plugins') {
+      const page = this.pluginPage
+      const box = this.paintedContentBox
+      if (page !== undefined && box !== undefined
+        && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+        // A release inside the content consumes the gesture: any root press from
+        // before it is stale and must never fire the category rail.
+        this.pressedGesture = undefined
+        const pressed = this.contentPressed
+        this.contentPressed = undefined
+        if (pressed === undefined
+          || pressed.columns !== this.intents.columns()
+          || pressed.rows !== this.intents.rows()
+          || pressed.revision !== this.revision) return
+        // The press is proven and the content owns the keyboard from now on;
+        // the page runs its OWN painted action against the grant it really
+        // painted. The new projection is installed by the NEXT paint, so a
+        // preview click that moves the rail out of the way is never refused by
+        // a viewport the page did not paint. Its painted action set was created
+        // while only the preview was on screen, so a preview click can
+        // select/focus but never dispatch a Detail-only mutation.
+        this.focus = 'content'
+        page.onCellClick(x - box.x, y - box.top)
+        this.bumpRevision()
+        this.intents.requestRender()
+        return
+      }
+      this.contentPressed = undefined
+      page?.cancelPointer()
+      const pressed = this.pressedGesture
+      this.pressedGesture = undefined
+      const target = this.targetAt(x, y)
+      if (pressed === undefined || target === undefined) return
+      if (
+        this.revision !== pressed.revision
+        || this.focus !== pressed.focus
+        || this.categoryId !== pressed.categoryId
+        || this.intents.columns() !== pressed.columns
+        || this.intents.rows() !== pressed.rows
+        || target.kind !== pressed.target.kind
+        || target.id !== pressed.target.id
+        || target.row !== pressed.target.row
+        || target.startCol !== pressed.target.startCol
+        || target.endCol !== pressed.target.endCol
+      ) {
+        return
+      }
+      this.activate(target)
       return
     }
     if (this.authPage !== undefined) {
@@ -3510,19 +3824,10 @@ export class SettingsWorkspacePanel implements Component {
   private activate(target: HitTarget): void {
     switch (target.kind) {
       case 'category': {
-        if (target.id === 'plugins' && this.categoryId === 'plugins') {
-          this.openPluginsPage()
-          return
-        }
         if (!isCategoryId(target.id)) return
         this.selectCategory(target.id, 'categories')
         return
       }
-      case 'plugin-launch':
-        // The painted affordance is the SAME direct entry Enter/Right take: no
-        // L1 transition, no row selection and no second page factory.
-        this.openPluginsPage()
-        return
       case 'row': {
         if (!isWorkspaceRowId(target.id)) return
         this.selectRow(target.id, 'rows')
@@ -3690,13 +3995,8 @@ export class SettingsWorkspacePanel implements Component {
     this.aboutUnsubscribe = undefined
     this.closeAuthPage()
     // An external Settings teardown releases the hosted Plugin page's owner
-    // exactly once; its own normal close path never runs for this case.
-    const page = this.pluginPage
-    this.pluginPage = undefined
-    if (page !== undefined) {
-      if ('focused' in page) (page as Component & { focused?: boolean }).focused = false
-      page.dispose?.()
-    }
+    // exactly once; a focus yield never reaches this path.
+    this.closePluginPage()
     // The edit phase dies with the panel: a settlement that arrives after the
     // teardown finds no live request and can never repaint a newer surface.
     this.editPhase = { kind: 'browsing' }

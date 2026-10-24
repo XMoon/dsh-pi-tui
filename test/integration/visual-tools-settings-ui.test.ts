@@ -188,7 +188,6 @@ function mountSettingsUi(port: DirectConfigPort): UiHarness {
     copyToClipboard: async () => true,
     tuiSettings: undefined,
     extensions: undefined,
-    openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
     config: port,
     catalog: { models: { available: () => false } },

@@ -9,13 +9,11 @@
  * @module @xmoon76/dsh-pi-tui/commands/tasks
  */
 
+import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 
 /** The runner operations the task entry commands consume. */
-type TasksCommandRunner = Pick<
-  TuiCommandRunner,
-  'requireLiveSessionScope' | 'openTasksBrowser' | 'openPluginManager'
->
+type TasksCommandRunner = Pick<TuiCommandRunner, 'requireLiveSessionScope' | 'openTasksBrowser'>
 
 export interface TasksCommandDeps {
   runner: Pick<TasksCommandRunner, 'requireLiveSessionScope' | 'openTasksBrowser'>
@@ -23,7 +21,9 @@ export interface TasksCommandDeps {
 }
 
 export interface PluginsCommandDeps {
-  runner: Pick<TasksCommandRunner, 'openPluginManager'>
+  /** The `/plugins` entry: the SAME Settings workspace lease, landing on the
+   *  Plugin List. It never creates or switches a Session. */
+  openPluginsWorkspace: () => CommandResult
   registerTuiCommand: RegisterTuiCommand
 }
 
@@ -51,16 +51,13 @@ export function registerTasksCommand({ runner, registerTuiCommand }: TasksComman
   })
 }
 
-/** `/plugins` (P1-A): the canonical sessionless entry into the shared
- *  profile-wide Plugin Manager surface. It never creates or switches a
- *  Session; the runner facade owns the controller/panel. */
-export function registerPluginsCommand({ runner, registerTuiCommand }: PluginsCommandDeps): void {
+/** `/plugins` (P1-A / PR2): the canonical sessionless deep link into
+ *  `Settings → Plugins`. It leases the ONE Settings workspace screen (never a
+ *  second Plugin screen) and lands on the Plugin List. */
+export function registerPluginsCommand({ openPluginsWorkspace, registerTuiCommand }: PluginsCommandDeps): void {
   registerTuiCommand({
     name: 'plugins',
     description: 'Inspect and manage DSH plugins and TUI extensions for this profile',
-    handler: () => {
-      runner.openPluginManager()
-      return { kind: 'success' }
-    },
+    handler: () => openPluginsWorkspace(),
   })
 }

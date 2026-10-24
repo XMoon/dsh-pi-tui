@@ -151,7 +151,6 @@ function controllerOf(port: PluginManagerPort): { controller: PluginManagerContr
   let renders = 0
   const controller = new PluginManagerController(port, {
     requestRender: () => { renders += 1 },
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -167,7 +166,7 @@ test('opening reads once; a failed refresh keeps the last good snapshot', async 
   let fail = false
   const { port, state } = fakePort({ snapshotImpl: async () => { if (fail) throw new Error('boom'); return snapshot([bundle()]) } })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.equal(state.snapshotCalls, 1)
   assert.equal(controller.status().state, 'ready')
@@ -192,7 +191,7 @@ test('the four sections are exposed in frozen order (Experimental last)', async 
     ]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.deepEqual(controller.sections().map(section => section.id), ['tui', 'official', 'third-party', 'experimental'])
   assert.deepEqual(controller.sections().at(-1)!.cards.map(entry => entry.name), ['@deepseek-ai/dsh-experimental-auto-review'])
@@ -201,7 +200,7 @@ test('the four sections are exposed in frozen order (Experimental last)', async 
 test('Current-TUI self-protection rejects disable/remove at dispatch with zero Host mutation', async () => {
   const { port, state } = fakePort()
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
 
   await controller.toggleCard(bundleValue(SELF_BUNDLE))
@@ -222,7 +221,7 @@ test('Current-TUI self-protection rejects disable/remove at dispatch with zero H
 test('an ordinary bundle toggles through the official port and then re-reads', async () => {
   const { port, state } = fakePort()
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
 
   controller.toggleCard(bundleValue('ordinary'))
@@ -238,7 +237,7 @@ test('a stale remove confirmation never mutates', async () => {
     snapshotImpl: async () => snapshot(dropOrdinary ? [] : [bundle()]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
 
   assert.equal(controller.requestRemove(bundleValue('ordinary')), true)
@@ -257,7 +256,7 @@ test('a stale remove confirmation never mutates', async () => {
 test('remove success goes through the official service and refreshes', async () => {
   const { port, state } = fakePort()
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.equal(controller.requestRemove(bundleValue('ordinary')), true)
   controller.confirmRemove()
@@ -313,7 +312,7 @@ test('official missing card install starts from the Host installTarget, never a 
     ]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
 
   // A direct toggle of a missing bundle is refused and never dispatches.
@@ -346,7 +345,7 @@ test('editing an official install spec drops the official catalog context', asyn
     ]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.equal(controller.beginOfficialInstall(bundleValue('@deepseek-ai/dsh-experimental-auto-review')), true)
   await tick()
@@ -542,7 +541,7 @@ test('standalone entry toggle uses the official plugin-entry mutation', async ()
     }),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   controller.toggleCard(entryValue('e-free'))
   await tick()
@@ -558,7 +557,7 @@ test('an ordinary read-only bundle exposes no enabled mutation affordance and re
     })]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   const managed = card(controller, bundleValue('managed'))!
   const detail = buildPluginDetailView(managed)
@@ -580,7 +579,7 @@ test('a late old mutation cannot overwrite a newer refresh', async () => {
     snapshotImpl: async () => snapshot(drop ? [] : [bundle()]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   controller.toggleCard(bundleValue('ordinary')) // dispatch the slow mutation
   await tick()
@@ -597,7 +596,7 @@ test('a second mutation is refused while the first is still in flight (no lost f
   const gate = deferred<PluginChangeFact>()
   const { port, state } = fakePort({ setBundleImpl: () => gate.promise })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
 
   controller.toggleCard(bundleValue('ordinary'))
@@ -633,7 +632,7 @@ test('toggle admission is held until the authoritative reread completes (deferre
     setBundleImpl: async (_name, next) => { enabled = next; return change() },
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.equal(controller.card(bundleValue('ordinary'))?.enabled, false)
 
@@ -680,7 +679,7 @@ test('row toggle admission is held through the authoritative reread too', async 
     },
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   controller.toggleRow(bundleValue('row-owner'), 'e-row')
   await tick()
@@ -707,7 +706,7 @@ test('a failed post-write reread blocks further writes until a successful refres
     setBundleImpl: async (_name, next) => { enabled = next; return change() },
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
 
   controller.toggleCard(bundleValue('ordinary'))
@@ -740,7 +739,7 @@ test('remove admission is held through its authoritative reread as well', async 
     },
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.equal(controller.requestRemove(bundleValue('ordinary')), true)
   controller.confirmRemove()
@@ -769,7 +768,7 @@ test('row-level self protection never offers a toggle row action', async () => {
     }),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   const self = card(controller, bundleValue(SELF_BUNDLE))!
   const detail = buildPluginDetailView(self)
@@ -789,7 +788,6 @@ test('a settlement-side hook throw never misclassifies a successful install', as
   })
   const controller = new PluginManagerController(port, {
     requestRender: () => { if (settleThrow) throw new Error('render boom') },
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -811,7 +809,7 @@ test('the Refresh action clears a stale read-failure notice', async () => {
     },
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.match(controller.notice() ?? '', /refresh failed/)
   fail = false
@@ -824,7 +822,7 @@ test('the Refresh action clears a stale read-failure notice', async () => {
 test('an operation outcome message survives an explicit refresh', async () => {
   const { port } = fakePort()
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   controller.toggleCard(bundleValue('ordinary'))
   await tick()
@@ -850,7 +848,7 @@ test('a protected TUI-module entry is refused with the module wording and never 
     }),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   controller.toggleCard(entryValue('include:builtins'))
   await tick()
@@ -870,7 +868,7 @@ test('latest-started read wins: a newer read start invalidates every older in-fl
   const queue = [older, newer]
   const { port, state } = fakePort({ snapshotImpl: () => queue.shift()!.promise })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   controller.refresh()
   await tick()
@@ -898,7 +896,7 @@ test('a newest read failure keeps the last good snapshot; a stale older success 
     },
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.ok(controller.card(bundleValue('good')) !== undefined)
 
@@ -922,7 +920,6 @@ test('invalidation reads only while a surface is showing the inventory', async (
   const { port, state, invalidate } = fakePort()
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
-    requestClose: () => {},
     notify: () => {},
     isOpen: () => open,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -933,7 +930,7 @@ test('invalidation reads only while a surface is showing the inventory', async (
   assert.equal(state.snapshotCalls, 0, 'a never-opened controller must not start a background read')
 
   open = true
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.equal(state.snapshotCalls, 1)
 
@@ -947,7 +944,7 @@ test('invalidation reads only while a surface is showing the inventory', async (
   assert.equal(state.snapshotCalls, 2, 'a closed panel must not start a background read')
 
   open = true
-  controller.open('direct-command')
+  controller.open()
   await tick()
   assert.equal(state.snapshotCalls, 3, 'reopening always performs a fresh read')
 })
@@ -1010,7 +1007,7 @@ test('a held inventory read settled after dispose never commits nor repaints (su
     const readGate = deferred<PluginManagerSnapshot>()
     const { port, state } = fakePort({ snapshotImpl: () => readGate.promise })
     const { controller, renders } = controllerOf(port)
-    controller.open('direct-command')
+    controller.open()
     await tick()
     assert.equal(state.snapshotCalls, 1)
     const rendersAtDispose = renders()
@@ -1122,7 +1119,7 @@ test('shipped bundles guide a DSH upgrade and never expose an in-place update/Re
     ]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   const target = card(controller, bundleValue('@deepseek-ai/dsh-base'))!
   const detail = buildPluginDetailView(target)
@@ -1148,7 +1145,7 @@ test('profile-owned bundles guide Remove-then-explicit-Install and never assume 
     ]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   const removed = buildPluginDetailView(card(controller, bundleValue('profile-owned'))!)
   assert.match(upgradeText(removed) ?? '', /Upgrade: Profile-owned\. Remove the current bundle first, then explicitly install the desired package version\. No in-place update\.$/u)
@@ -1185,7 +1182,7 @@ test('missing catalog entries use the official offered target or state that none
     ]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   const offered = buildPluginDetailView(card(controller, bundleValue('offered'))!)
   assert.match(upgradeText(offered) ?? '', /^Install: Use the official offered target offered@0\.2\.1-rc\.2 \(version 0\.2\.1-rc\.2\); this is not an in-place update\.$/u)
@@ -1208,7 +1205,7 @@ test('the Current TUI bundle states external ownership and a standalone entry ca
     }),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   const self = buildPluginDetailView(card(controller, bundleValue(SELF_BUNDLE))!)
   assert.equal(upgradeText(self), 'The Current TUI bundle is managed outside this screen.')
@@ -1244,7 +1241,7 @@ test('version difference, equal version and masked sources never leak credential
     ]),
   })
   const { controller } = controllerOf(port)
-  controller.open('direct-command')
+  controller.open()
   await tick()
   const different = buildPluginDetailView(card(controller, bundleValue('different'))!)
   assert.equal(detailFact(different, 'Version difference')?.value, 'Current 0.2.0-rc.2 · offered 0.2.1-rc.2.')
