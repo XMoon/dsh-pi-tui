@@ -640,7 +640,11 @@ owns only the lease, focus and write-lifecycle mechanics.
   kind, id, painted row, cell range, state version, level AND category. Refresh,
   selection, level, category AND terminal geometry all bump that version — a
   resize refuses a straddling gesture even when the target's own cells did not
-  move. Wheel events are the panel's own `handleMouse` and scroll only the painted
+  move. An unrepainted root chrome change is the same boundary: the App notice
+  can move/shrink a direct page's content box and child grant without a terminal
+  resize, so the root re-derives the live box from the live chrome before each
+  pointer gesture and a release must still match the box and grant its press was
+  admitted against. Wheel events are the panel's own `handleMouse` and scroll only the painted
   region under the pointer (facts and candidates have independent wheel regions;
   a hidden pane owns no wheel). A wheel-scrolled list keeps its viewport (only a
   selection or viewport change rebases it, so a shrink still reveals the

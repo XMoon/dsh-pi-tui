@@ -637,8 +637,7 @@ test('a zero-row list frame advertises no Enter invite and keeps the real Esc', 
   harness.vt.resize(80, 2)
   await harness.settle()
   const bar = plain([harness.viewport().at(-1)!])
-  assert.doesNotMatch(bar, /Enter/u, 'the zero-row list cannot open Details with Enter')
-  assert.match(bar, /Esc back/u, 'the real Esc destination stays advertised')
+  assert.equal(bar.trim(), 'Esc back', 'the zero-row list bar advertises ONLY the real Esc destination')
   // The hidden row is not just a missing hint: the navigation admission must
   // agree with it (Enter and Right cannot enter an invisible card's Details).
   harness.vt.sendInput('\r')
@@ -649,7 +648,7 @@ test('a zero-row list frame advertises no Enter invite and keeps the real Esc', 
   assert.equal(harness.panel.currentView(), 'list', 'Right on a zero-row list cannot enter Details')
 })
 
-test('search editing keeps its EXECUTABLE Enter apply hint on a zero-row frame', async t => {
+test('a zero-row search edit advertises only the real Esc and refuses the apply', async t => {
   const harness = await open({ columns: 140, rows: 40 })
   t.after(() => { try { harness.app.dispose() } catch {} })
   harness.vt.sendInput('/')
@@ -659,12 +658,29 @@ test('search editing keeps its EXECUTABLE Enter apply hint on a zero-row frame',
   harness.vt.resize(80, 2)
   await harness.settle()
   const bar = plain([harness.viewport().at(-1)!])
-  assert.match(bar, /Enter apply/u, 'the executable search Enter keeps its hint')
-  assert.match(bar, /Esc clear search/u)
+  assert.doesNotMatch(bar, /Enter apply/u, 'the frozen short-screen rule drops the invisible apply hint')
+  assert.match(bar, /Esc clear search/u, 'the real Esc effect stays advertised')
+  // The hint is truthful: the zero-row Enter cannot apply an input whose body
+  // cell is not painted. Enter and ordinary typing are both dropped.
+  harness.vt.sendInput('x')
+  await harness.settle()
   harness.vt.sendInput('\r')
   await harness.settle()
   assert.equal(harness.panel.currentView(), 'list')
-  assert.doesNotMatch(plain([harness.viewport().at(-1)!]), /Enter apply/u, 'Enter really applied the search')
+  harness.vt.resize(140, 40)
+  await harness.settle()
+  assert.match(harness.view(), /Search: foo/u, 'the zero-row typing never reached the input')
+  assert.match(plain([harness.viewport().at(-1)!]), /Enter apply/u,
+    'the zero-row Enter did not apply the search; the editor is still open')
+  // The advertised real Esc still works on the zero-row frame.
+  harness.vt.resize(80, 2)
+  await harness.settle()
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  harness.vt.resize(140, 40)
+  await harness.settle()
+  assert.doesNotMatch(harness.view(), /Search: foo/u, 'Esc cleared the search')
+  assert.doesNotMatch(plain([harness.viewport().at(-1)!]), /Enter apply/u, 'Esc left the search editor')
 })
 
 test('a resize before the repaint cannot enter invisible Details via Enter/Right', async t => {

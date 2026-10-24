@@ -167,13 +167,18 @@ the `/footer` alias and never enters this workspace.
   projection keeps its adjacent Categories+Rows at L0 and Rows+Details at
   L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
   the frame's first column, and every child page keeps its own body and action
-  rows above it. A terminal resize revokes the previous frame's action/copy
-  grants before the next paint, even when the effective child body grant value
-  is unchanged; until that frame paints, and whenever the frame shows only the
-  Esc fallback, only Esc is admitted (Backspace is not a portable back key: a
-  page may bind it to an editable query). Mouse presses, releases and wheel
-  gestures from the previous terminal frame are rejected and any pending
-  pointer state is revoked. With no granted body row (the
+  rows above it. A terminal resize or any other unrepainted chrome change (the
+  root App notice is the same boundary: it moves/shrinks the direct page's
+  content box and grant without changing the terminal size) revokes the
+  previous frame's action/copy grants before the next paint, even when the
+  effective child body grant value is unchanged; until that frame paints, and
+  whenever the frame shows only the Esc fallback, only Esc is admitted
+  (Backspace is not a portable back key: a page may bind it to an editable
+  query). Mouse presses, releases and wheel gestures from the previous frame
+  are rejected: the root re-derives the live content box and child grant from
+  the live chrome before each pointer gesture, and a release must still match
+  the box its press was admitted against. Any pending pointer state is revoked
+  when the two disagree. With no granted body row (the
   shortest frames) the Esc action the frame names for that state runs: a real
   back, a state-named cancel such as clearing an editable filter, or an
   explicit wait while a Host mutation is still pending. No unreachable page
@@ -487,7 +492,10 @@ the plugin content owns the keyboard. The adjacent `List | Details` pair needs
 `allowDual`, a local width ≥76 and six real body rows; the split is
 `min(42, max(30, floor((width−2)×0.42))` for the list and the remainder for
 Details. A narrower or risk-starved frame degrades to ONE business column and
-never to a permanent Categories rail.
+never to a permanent Categories rail. A wheel is routed by the column the local
+pointer is really over: the List column scrolls the List and the Details column
+scrolls the Details, in the List view and the Details view alike; the 2-cell
+pair gutter belongs to neither pane and is inert.
 
 Esc is a two-level gradient: the untouched List root yields to the Categories
 rail (keeping the page and its state), a second Esc closes the Settings lease;

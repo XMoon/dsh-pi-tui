@@ -436,6 +436,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.handleEscape()
       return
     }
+    // §4.2: below the body floor the frame paints ONLY its real Esc
+    // destination, so every other key (body action, copy, filter, search edit)
+    // is a hidden action and must not run. The floor is read from the CURRENT
+    // grant: `setViewport` may have shrunk it after the last paint.
+    if (this.bodyFloor() <= 0) return
     if (this.searchEditing) {
       this.handleSearchInput(data)
       return
@@ -479,32 +484,41 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.scrollDiagnostics(delta > 0 ? 1 : -1, Math.abs(delta))
       return { handled: true }
     }
-    if (this.view === 'details' || this.view === 'confirm' || this.view === 'install') {
-      if (this.view === 'install') {
-        this.scrollInstall(delta, plan)
-        this.bumpRevision()
-        this.intents.requestRender()
-        return { handled: true }
-      }
-      if (this.view === 'confirm') {
-        this.scrollConfirm(delta > 0 ? 1 : -1)
-        return { handled: true }
-      }
-      this.detailOffset = Math.max(0, this.detailOffset + delta)
+    if (this.view === 'install') {
+      this.scrollInstall(delta, plan)
       this.bumpRevision()
       this.intents.requestRender()
       return { handled: true }
     }
-    if (plan.dual && event.x >= plan.leftWidth + COLUMN_GAP) {
-      this.detailOffset = Math.max(0, this.detailOffset + delta)
-      this.bumpRevision()
-      this.intents.requestRender()
+    if (this.view === 'confirm') {
+      this.scrollConfirm(delta > 0 ? 1 : -1)
       return { handled: true }
     }
+    // The List|Details pair routes by the column the pointer is REALLY over:
+    // the List column scrolls the list, the Details column scrolls the details,
+    // and the 2-cell pair gutter belongs to neither pane (§3.4: inert). A
+    // single-column frame scrolls the ONE view it paints.
+    if (!plan.dual) {
+      if (this.view === 'details') this.scrollDetail(delta)
+      else this.scrollList(delta)
+      return { handled: true }
+    }
+    if (event.x >= plan.leftWidth && event.x < plan.leftWidth + COLUMN_GAP) return { handled: true }
+    if (event.x >= plan.leftWidth + COLUMN_GAP) this.scrollDetail(delta)
+    else this.scrollList(delta)
+    return { handled: true }
+  }
+
+  private scrollList(delta: number): void {
     this.listOffset = Math.max(0, this.listOffset + delta)
     this.bumpRevision()
     this.intents.requestRender()
-    return { handled: true }
+  }
+
+  private scrollDetail(delta: number): void {
+    this.detailOffset = Math.max(0, this.detailOffset + delta)
+    this.bumpRevision()
+    this.intents.requestRender()
   }
 
   onCellPress(x: number, y: number): void {
@@ -2013,14 +2027,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.ensureSelection()
     this.ensureDetailSelection()
     this.ensureDiagnosticsSelection(this.diagnosticsFacts().length)
-    const hostNoticeLive = this.controller.notice() !== undefined
-      || this.controller.status().state === 'error'
-      || this.controller.model().exemptionWarnings.length > 0
     // Diagnostics paints extension health only: a Host inventory notice must
     // not dominate a freshly read extension projection, and the shared App
     // notice is painted ONCE by the Settings root (never here).
-    const noticeLive = this.view !== 'diagnostics' && hostNoticeLive
-    const plan = planChrome(this.viewport, this.view, noticeLive)
+    const plan = this.livePlan()
     this.paintedChrome = plan
     const lines: string[] = []
     const targets: HitTarget[] = []
@@ -2128,6 +2138,24 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return plan.searchRows + plan.noticeRows
   }
 
+  /** The local chrome plan the CURRENT grant implies: the same pure function
+   *  {@link render} paints, evaluated from the live grant and controller facts.
+   *  Input admission must agree with the frame the bar describes. */
+  private livePlan(): ChromePlan {
+    const hostNoticeLive = this.controller.notice() !== undefined
+      || this.controller.status().state === 'error'
+      || this.controller.model().exemptionWarnings.length > 0
+    // Diagnostics paints extension health only: the shared App notice belongs
+    // to the Settings root and a Host inventory notice never dominates it.
+    return planChrome(this.viewport, this.view, this.view !== 'diagnostics' && hostNoticeLive)
+  }
+
+  /** The business-body floor of the CURRENT grant (never the last paint's):
+   *  `setViewport` may shrink it before the repaint that installs it. */
+  private bodyFloor(): number {
+    return this.livePlan().bodyRows
+  }
+
   /** The ONE admitted Search/Filters row of the list and details views. */
   private renderSearchRow(plan: ChromePlan, row: number, targets: HitTarget[]): string {
     const filterWidth = FILTERS.reduce((sum, filter) => sum + visibleWidth(FILTER_LABELS[filter]) + 3, 0)
@@ -2193,20 +2221,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private renderActionBar(plan: ChromePlan): string {
-    const segments = this.actionBarSegments()
+    const segments = this.actionBarSegments(plan)
     return color.textMuted(renderActionBarRow(segments, plan.width))
   }
 
-  private actionBarSegments(): ActionBarSegment[] {
+  private actionBarSegments(plan: ChromePlan): ActionBarSegment[] {
     const segments = this.frameActionBarSegments()
-    // A zero-row body paints no body-derived action/choice. Advertising Enter
-    // would promise an activation the CURRENT frame cannot perform (the D2
-    // revoke path already makes it a no-op); keep the real Esc destination and
-    // drop only the fake Enter invitation.
-    // Search editing is the exception: its Enter apply remains executable
-    // even when the input's body cell is not painted, so its hint stays true.
-    return (this.paintedChrome?.bodyRows ?? 0) <= 0 && !this.searchEditing
-      ? segments.filter(segment => !segment.text.startsWith('Enter'))
+    // §4.2: a zero-body frame paints no body-derived action, choice, copy or
+    // edit. Only the REAL Esc destination stays advertised — exactly the key
+    // the input gate admits — so the bar can never promise an invisible action
+    // (a hidden Enter/search/filter/refresh must not look executable).
+    return plan.bodyRows <= 0
+      ? segments.filter(segment => segment.text.startsWith('Esc '))
       : segments
   }
 
