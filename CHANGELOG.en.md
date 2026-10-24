@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two quick Ctrl+V presses are read and committed one after the other, in the order they were
   triggered: the second clipboard read only starts once the first one has been read AND written,
   and a failing first paste never blocks the second. Pasted text is inserted at the live caret
-  without submitting and without overwriting what was typed, and a clipboard holding no image no
-  longer reports anything. Images keep their trigger order and get the canonical placeholder; a
+  without submitting and without overwriting what was typed; a clipboard holding no image stays
+  silent instead of reporting an error. Images keep their trigger order and get the canonical placeholder; a
   deployment limit reports one real error and never leaves an orphan placeholder. If the session
   switched, the same session id came back under a new owner, or the editor seat was replaced while
   the read was in flight, the stale result neither writes the new draft nor publishes the old
