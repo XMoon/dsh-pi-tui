@@ -1396,10 +1396,10 @@ jobs:
   # real Pi component in a real pseudo-terminal. This is intentionally outside
   # postpack: local packing stays offline and non-interactive. The published
   # ecosystem is evaluated in BOTH modes: the smoke installs the published DSH
-  # and pi2dsh from the registry (pi2dsh@0.27.0 declares DSH 0.2.1-rc.2
-  # support, the exact target of this checkout), so Source Mode does not skip
-  # it. A failing pi2dsh peer declaration is an ECOSYSTEM_CONTRACT_BLOCKER,
-  # never a forced install.
+  # and pi2dsh from the registry, at the pairing the ecosystem manifest
+  # declares — an external consumer pairing, not this checkout's DSH target — so
+  # Source Mode does not skip it. A failing pi2dsh peer declaration is an
+  # ECOSYSTEM_CONTRACT_BLOCKER, never a forced install.
   # ---------------------------------------------------------------------------
   ecosystem-compat:
     name: External compatibility / pi2dsh

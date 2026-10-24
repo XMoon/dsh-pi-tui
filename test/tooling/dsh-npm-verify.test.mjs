@@ -167,10 +167,11 @@ test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2d
 
   const officialStart = workflow.indexOf('  official-preset-assembly:')
   const ecosystem = workflow.slice(ecosystemStart, officialStart)
-  // The published pi2dsh bridge declares the exact DSH target of this
-  // checkout, so the gate runs in BOTH modes: the smoke installs the
-  // published DSH and pi2dsh from the registry, and a failing peer
-  // declaration stays an ECOSYSTEM_CONTRACT_BLOCKER.
+  // The published pi2dsh bridge is validated at the pairing the ecosystem
+  // manifest declares — an external consumer pairing, not this checkout's DSH
+  // target — so the gate runs in BOTH modes: the smoke installs the published
+  // DSH and pi2dsh from the registry, and a failing peer declaration stays an
+  // ECOSYSTEM_CONTRACT_BLOCKER.
   assert.match(ecosystem, /if: \$\{\{ always\(\) && needs\.dsh-context\.result == 'success' && needs\.qualify\.result == 'success' && \(needs\.dsh-context\.outputs\.mode == 'npm' \|\| needs\.prepare-dsh-source\.result == 'success'\) \}\}/u)
   assert.doesNotMatch(ecosystem, /if: \$\{\{ false \}\}/u)
   assert.doesNotMatch(ecosystem, /DISABLED/u)
