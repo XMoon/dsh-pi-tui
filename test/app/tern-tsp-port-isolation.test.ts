@@ -161,12 +161,44 @@ test('every SubmissionComposerPort member is live on a real PiTui app', () => {
   }
 })
 
-// ── Behavioral: the command surface's live composer seam ───────────────────
+// ── The attachment intake's live composer bridge ───────────────────────────
 
-test('the mounted composer getter returns the SAME object the renderer mounted', () => {
-  // The seam is a live read, not a captured value: the composition root binds
-  // `composer: () => surface.composer`, so the object identity the renderer
-  // mounted is exactly what the attachment intake will write into.
+/**
+ * The THREE production hops between the mounted renderer's composer and the
+ * `/attach` `/image` registrar. Each is a separate module, so a hop can be
+ * dropped while every runtime suite stays green (the registrar is exercised
+ * directly by its own tests, and the surface's own suite supplies its deps by
+ * hand). This is a STATIC lock — it proves the wiring exists, not that a frame
+ * was painted; the behavioural half below proves the seam carries a live
+ * object rather than a captured one.
+ */
+test('the mounted composer is bridged from the composition root through the command surface into the attachment registrar', () => {
+  const root = readFileSync(fileURLToPath(new URL('../../src/app/bootstrap.ts', import.meta.url)), 'utf8')
+  const surface = readFileSync(fileURLToPath(new URL('../../src/app/command/surface.ts', import.meta.url)), 'utf8')
+  const commands = readFileSync(fileURLToPath(new URL('../../src/commands.ts', import.meta.url)), 'utf8')
+  const artifacts = readFileSync(fileURLToPath(new URL('../../src/tui/commands/artifacts.ts', import.meta.url)), 'utf8')
+
+  // 1. The composition root hands the LIVE surface read into createCommandSurface.
+  assert.ok(root.includes('composer: () => surface.composer,'),
+    'bootstrap must pass the live `surface.composer` read into the command surface')
+  // 2. The command surface exposes it to the registrar through the presentation seam.
+  assert.ok(surface.includes('composer: () => deps.surface.composer(),'),
+    'the command surface must pass its live composer read into registerTuiCommands')
+  // 3. The registrar receives it as the live getter (never the PiTui app alone).
+  assert.ok(commands.includes('composer: presentation?.composer ?? (() => app),'),
+    'the artifact registrar must receive the presentation composer, falling back only for legacy call sites')
+  // 4. And the intake actually resolves it per command instead of using a
+  //    cached value or the PiTui-only runner member.
+  assert.ok(artifacts.includes('const composer = composerGetter()'),
+    'the intake must read the composer at command time')
+  assert.equal(artifacts.includes('runner.insertIntoEditor('), false,
+    'the intake must never reach the PiTui-only insertIntoEditor no-op')
+})
+
+test('the live composer getter reports the CURRENT seat, never a cached one', () => {
+  // The seam shape the composition root binds: a live read, so the object the
+  // renderer mounted is what the intake writes into, and a replaced seat is
+  // reported on the next command.
   const mounted = { marker: 'tsp-composer' }
   let current = mounted
   const seam = { composer: () => current }
