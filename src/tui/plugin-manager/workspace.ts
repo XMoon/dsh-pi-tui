@@ -151,13 +151,17 @@ export interface EmbeddedPluginPage extends Component {
    */
   gestureRevision(): number
   /**
-   * Whether the LAST painted frame is still CURRENT: its revision, local grant,
-   * live Controller model/read generation, install phase, notice and status all
-   * still match. Unlike {@link gestureRevision} this catches a Controller change
-   * whose queued repaint has not run yet, so a root gesture recorded before that
-   * change is refused instead of resolving against the stale hit map.
+   * The page's LIVE currentness identity: the local painted revision, the local
+   * viewport grant and every Controller fact `frameIsCurrent()` compares
+   * (model + Host read generation, install phase, notice, status).
+   *
+   * It is a comparable VALUE, not a boolean: a boolean cannot tell two different
+   * stale states apart, so a gesture held across a SECOND Host invalidation (both
+   * "stale") would look unchanged, while a repaint that simply catches up with
+   * facts that were ALREADY live before the press would look like a change. The
+   * root stores this string at press time and requires the same value at release.
    */
-  frameIsCurrent(): boolean
+  liveIdentity(): string
   cancelPointer(): void
   handleInput(data: string): void
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined
@@ -529,11 +533,25 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return { handled: true }
   }
 
+  /** The painted window height of the List, used to bound a wheel the same way
+   *  the paint will (otherwise a wheel past the end bumps a revision the next
+   *  frame clamps away, revoking a press the user still holds). */
+  private listWindowRows(): number {
+    return Math.max(1, this.paintedChrome?.bodyRows ?? 1)
+  }
+
+  /** The same bound for the Detail pane (its painted line count). */
+  private detailWindowRows(): number {
+    return Math.max(1, this.paintedChrome?.bodyRows ?? 1)
+  }
+
   /** A wheel that cannot move the painted window is NOT a gesture boundary: a
    *  no-op bump would revoke a legitimate press the user still holds (the
    *  Settings root fences its rail presses by this page's revision). */
   private scrollList(delta: number): void {
-    const next = Math.max(0, this.listOffset + delta)
+    const entries = this.listEntries(this.controller.model())
+    const max = Math.max(0, entries.length - this.listWindowRows())
+    const next = Math.min(Math.max(0, this.listOffset + delta), max)
     if (next !== this.listOffset) {
       this.listOffset = next
       this.bumpRevision()
@@ -542,7 +560,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private scrollDetail(delta: number): void {
-    const next = Math.max(0, this.detailOffset + delta)
+    const card = this.selectedCard()
+    const total = card === undefined ? 0 : this.detailView(card).groups.reduce((sum, group) => sum + group.facts.length + 2, 0)
+    const viewport = this.detailWindowRows()
+    const max = Math.max(0, total - viewport)
+    const next = Math.min(Math.max(0, this.detailOffset + delta), max)
     if (next !== this.detailOffset) {
       this.detailOffset = next
       this.bumpRevision()
@@ -2859,7 +2881,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    * match the frame whose hit map is installed in `paintedTargets`. Comparing
    * only the panel revision would miss an async controller model/phase/notice
    * update whose queued repaint has not run yet. */
-  frameIsCurrent(): boolean {
+  /** See {@link EmbeddedPluginPage.liveIdentity}. Pure: reads local state and
+   *  the Controller's CURRENT facts; never starts a read or a mutation. */
+  liveIdentity(): string {
+    return JSON.stringify([
+      this.paintedRevision,
+      this.revision,
+      this.viewport.width,
+      this.viewport.rows,
+      this.viewport.allowDual,
+      this.modelStateKey(),
+      this.controller.installView()?.phase,
+      this.controller.notice(),
+      this.controller.status().state,
+    ])
+  }
+
+  private frameIsCurrent(): boolean {
     return this.paintedRevision === this.revision
       && this.lastRenderWidth === this.viewport.width
       && this.lastRenderRows === this.viewport.rows

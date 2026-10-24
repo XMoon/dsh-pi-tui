@@ -1242,7 +1242,9 @@ test('T09 a Host invalidation before the repaint refuses the held rail press', a
   press(harness, aboutRow, 3)
   harness.invalidate()
   // NO settle: the page has not repainted, and `gestureRevision()` may be old.
-  assert.equal(harness.panel.frameIsCurrent(), false, 'the page reports itself stale before the repaint')
+  // The invalidation really moved the LIVE Controller state (a re-read is in
+  // flight), which is what a boolean currentness could not distinguish.
+  assert.match(harness.panel.liveIdentity(), /loading/, 'the invalidation moved the live Controller state')
   release(harness, aboutRow, 3)
   await harness.settle()
   assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
@@ -1275,6 +1277,61 @@ test('T09 a no-op wheel never cancels a legal rail click', async () => {
   release(harness, aboutRow, 3)
   await harness.settle()
   assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives an immaterial wheel')
+  harness.app.dispose()
+})
+
+test('T09 a SECOND invalidation while already stale still refuses the held rail press', async () => {
+  // RFL-011 follow-up: a boolean "is the frame current?" cannot tell two stale
+  // states apart. The comparable live identity must change with each read.
+  const harness = await open({ columns: 120, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  // Make the page stale FIRST, then press, then invalidate AGAIN.
+  harness.invalidate()
+  const staleBefore = harness.panel.liveIdentity()
+  const aboutRow = railRow(harness, 'About')
+  press(harness, aboutRow, 3)
+  harness.invalidate()
+  assert.notEqual(harness.panel.liveIdentity(), staleBefore,
+    'the second invalidation changed the live identity even though both states are stale')
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /Settings · Plugins/u, 'the stale-then-invalidated rail release never switches category')
+  assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives')
+  // Positive control once the frame is current again.
+  click(harness, railRow(harness, 'Models'), 3)
+  await harness.settle()
+  assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click still switches category')
+  harness.app.dispose()
+})
+
+test('T09 a wheel at the END of a scroll window never cancels a legal rail click', async () => {
+  // RFL-012 follow-up: the lower bound was guarded, but the END of the window
+  // still bumped (the paint clamps the offset back), so a held rail click was
+  // refused with no visible movement.
+  const harness = await open({ columns: 120, rows: 12 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  const listRow = rowOf(harness, 'Search: /')
+  // Walk the List to its END with Down until the view stops changing.
+  let previous = harness.view()
+  for (let step = 0; step < 60; step += 1) {
+    harness.vt.sendInput('\x1b[F') // End: the last painted card
+    await harness.settle()
+    if (harness.view() === previous) break
+    previous = harness.view()
+  }
+  const before = harness.panel.gestureRevision()
+  wheel(harness, listRow + 1, 30, true) // further DOWN at the end of the window
+  await harness.settle()
+  assert.equal(harness.panel.gestureRevision(), before, 'a wheel past the end of the List does not bump')
+
+  // A rail press held across that immaterial wheel must still be admitted.
+  const aboutRow = railRow(harness, 'About')
+  press(harness, aboutRow, 3)
+  wheel(harness, listRow + 1, 30, true)
+  await harness.settle()
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives a wheel past the List end')
   harness.app.dispose()
 })
 
