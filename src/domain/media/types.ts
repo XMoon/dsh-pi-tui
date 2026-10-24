@@ -47,3 +47,32 @@ export interface ImageLimitsLike {
   readonly maxImageDimension: number
   readonly mediaTypes: readonly ImageMediaType[]
 }
+
+/** The graphics protocol a surface currently reports, as the terminal
+ * capability source describes it. `null` means no inline graphics at all. */
+export type InlineImageProtocol = 'kitty' | 'iterm2' | null
+
+/**
+ * Whether a surface with `protocol` paints REAL PIXELS for `mediaType`.
+ *
+ * This is the ONE answer to "does this row carry a pixel body?", consumed by
+ * every surface that must distinguish painted pixels from a text fallback:
+ *
+ * - `null` (no inline graphics) — never.
+ * - Kitty accepts PNG only. This bundle installs no transcoder, so another
+ *   raster format renders as the fork's `imageFallback` TEXT row, which must
+ *   never be treated as a clickable pixel body.
+ * - iTerm2 carries the original MIME capability, so every accepted raster type
+ *   is a real pixel render.
+ *
+ * A caller that paints a fallback TEXT row must therefore report no pixel body
+ * for it (see `ImageThumbnail.paintedImageBody`).
+ */
+export function imagePixelsSupported(
+  protocol: InlineImageProtocol,
+  mediaType: ImageMediaType,
+): boolean {
+  if (protocol === null) return false
+  if (protocol === 'kitty') return mediaType === 'image/png'
+  return true
+}

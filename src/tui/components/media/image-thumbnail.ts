@@ -31,7 +31,7 @@
 import { Image, getCapabilities, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { formatBytes } from '../../../domain/media/format.ts'
-import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
+import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import { color } from '../../theme/runtime.ts'
 
@@ -87,6 +87,19 @@ export class ImageThumbnail implements Component {
   /** The control span the LAST painted info row actually carried, keyed by
    * the render width it was painted at. */
   private paintedControl: { width: number; startCol: number; endCol: number } | undefined
+  /** The REAL PIXEL body the LAST render at each width painted, or undefined
+   * when this render carried no pixels (loading, error, collapsed, narrow,
+   * no graphics protocol, or a raster format the protocol cannot display —
+   * whose text fallback is NOT a pixel body). The host row mapper reads this
+   * right after measuring the same render, so a click can only target pixels
+   * the user actually saw. */
+  private paintedBody: {
+    width: number
+    rows: number
+    /** The widest cell this painted body can occupy (the component's own
+     * painted-width ceiling). A body hit never claims cells beyond it. */
+    endCol: number
+  } | undefined
 
   constructor(
     ref: ImageAttachmentRefLike,
@@ -207,11 +220,28 @@ export class ImageThumbnail implements Component {
     return { startCol: painted.startCol, endCol: painted.endCol }
   }
 
+  /**
+   * The REAL PIXEL body rows the LAST render at `width` painted, or undefined
+   * when that render carried no pixels at all.
+   *
+   * This is the authoritative answer to "may a click on these rows open the
+   * Viewer?" — deliberately NOT "the component is taller than one row". A
+   * raster format the current protocol cannot display still paints the fork's
+   * `imageFallback` TEXT row, and that row is information, not an image body;
+   * treating it as pixels would open a Viewer from a line of plain text.
+   */
+  paintedImageBody(width: number): { rows: number; endCol: number } | undefined {
+    const painted = this.paintedBody
+    if (painted === undefined || painted.width !== width) return undefined
+    return { rows: painted.rows, endCol: painted.endCol }
+  }
+
   invalidate(): void {
     this.instance = undefined
     this.cachedLines = undefined
     this.cachedKey = undefined
     this.paintedControl = undefined
+    this.paintedBody = undefined
   }
 
   render(width: number): string[] {
@@ -233,6 +263,10 @@ export class ImageThumbnail implements Component {
   }
 
   private renderLines(width: number): string[] {
+    // Every non-pixel branch below returns an info-only row; clearing here
+    // keeps a previous render's body from surviving a state change that reuses
+    // the same width (collapse, protocol flip, read failure).
+    this.paintedBody = undefined
     // Narrow terminals fall back BEFORE any load (round-2 finding 4).
     if (width < NARROW_WIDTH_THRESHOLD) {
       return [this.infoRow(width, this.infoLine())]
@@ -275,6 +309,20 @@ export class ImageThumbnail implements Component {
         { widthPx: this.ref.width, heightPx: this.ref.height },
       )
     }
-    return [this.infoRow(width, this.infoLine()), ...this.instance.render(width)]
+    const body = this.instance.render(width)
+    // Whether those rows are REAL PIXELS is a property of the surface: a raster
+    // format this protocol cannot display renders the fork's text fallback,
+    // which keeps its informational row but must not become a clickable body.
+    this.paintedBody = imagePixelsSupported(getCapabilities().images ?? null, this.ref.mediaType)
+      ? {
+          width,
+          rows: body.length,
+          // The thumbnail never paints wider than this ceiling (the same value
+          // it hands the fork as `maxWidthCells`), so a body hit can never
+          // claim cells the image does not occupy.
+          endCol: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+        }
+      : undefined
+    return [this.infoRow(width, this.infoLine()), ...body]
   }
 }

@@ -2464,6 +2464,10 @@ type TranscriptImageHit = {
   readonly bodyStart: number
   /** One past the last body row (exclusive). */
   readonly bodyEnd: number
+  /** The cells the painted PIXEL body can occupy: `[0, bodyEndCol)`. A click
+   * beyond it is inside the row but outside the image, so it is NOT a viewer
+   * target (the thumbnail never paints wider than this ceiling). */
+  readonly bodyEndCol: number
   /** The info row's painted control span [startCol, endCol); zero width when
    * no control was painted (regular surface / narrow). */
   readonly controlStartCol: number
@@ -11592,13 +11596,18 @@ export class TuiApp {
       const occurrence = this.thumbnailOccurrence.get(component)
       if (occurrence !== undefined && occurrence.message === message) {
         const control = component.collapseControlRange(width)
+        // The info row is ALWAYS the thumbnail's first rendered row. The body
+        // rows below it are a viewer target ONLY when that render painted REAL
+        // PIXELS: a protocol-unsupported raster format paints the fork's text
+        // fallback, which stays informational and clickable nowhere.
+        const body = component.paintedImageBody(width)
+        const bodyStart = rowOffset + 1
         hits.push({
           occurrence,
-          // The info row is ALWAYS the thumbnail's first rendered row; the
-          // body starts right below it and is empty when height === 1.
           infoRow: rowOffset,
-          bodyStart: rowOffset + 1,
-          bodyEnd: rowOffset + height,
+          bodyStart,
+          bodyEnd: body === undefined ? bodyStart : bodyStart + body.rows,
+          bodyEndCol: body?.endCol ?? 0,
           controlStartCol: control?.startCol ?? 0,
           controlEndCol: control?.endCol ?? 0,
         })
@@ -12411,7 +12420,9 @@ export class TuiApp {
           row,
           kind: 'body',
           controlStartCol: 0,
-          controlEndCol: 0,
+          // Same painted-cells ceiling the live classifier uses: the painted
+          // snapshot must describe the geometry the user actually saw.
+          controlEndCol: hit.bodyEndCol,
           hitId: `attachment:view:${token}:${ordinal}`,
         })
       }
@@ -12431,7 +12442,9 @@ export class TuiApp {
     const hit = imageHits?.find(candidate => candidate.row === inMessage)
     if (hit === undefined) return undefined
     if (hit.kind === 'body') {
-      return { hitId: hit.hitId, span: { startCol: 0, endCol: this.transcriptRenderWidth() } }
+      const bodySpan = { startCol: 0, endCol: hit.controlEndCol }
+      if (hit.controlEndCol <= 0 || x >= hit.controlEndCol) return { hitId: 'inert', span: bodySpan }
+      return { hitId: hit.hitId, span: bodySpan }
     }
     const span = { startCol: hit.controlStartCol, endCol: hit.controlEndCol }
     if (span.endCol > span.startCol && x >= span.startCol && x < span.endCol) {
@@ -12467,11 +12480,19 @@ export class TuiApp {
         return { hitId: 'inert', kind: 'inert', occurrence: hit.occurrence, span }
       }
       if (inMessage >= hit.bodyStart && inMessage < hit.bodyEnd) {
+        // Only the cells the painted image actually occupies are a viewer
+        // target: the thumbnail caps its own painted width, so the empty space
+        // to the right of a narrow image is INERT — consumed here so it can
+        // never fall through to the card/container disclosure ladder.
+        const span = { startCol: 0, endCol: hit.bodyEndCol }
+        if (hit.bodyEndCol <= 0 || x >= hit.bodyEndCol) {
+          return { hitId: 'inert', kind: 'inert', occurrence: hit.occurrence, span }
+        }
         return {
           hitId: `attachment:view:${token}:${ordinal}`,
           kind: 'view',
           occurrence: hit.occurrence,
-          span: { startCol: 0, endCol: this.transcriptRenderWidth() },
+          span,
         }
       }
     }

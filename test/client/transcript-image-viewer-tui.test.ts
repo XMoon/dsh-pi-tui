@@ -494,3 +494,219 @@ test('an Approval modal refuses the image body Viewer but keeps the occurrence f
   app.setFullscreen(false)
   app.stop()
 })
+
+test('a click RIGHT of the painted image body is inert: no Viewer, no fold, no card disclose', async () => {
+  // The thumbnail paints at most `MAX_IMAGE_WIDTH` cells, so a click in the
+  // empty space to the right of a narrow image is inside the ROW but outside
+  // the IMAGE. It must neither open the Viewer nor fall through to the card
+  // disclosure ladder.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'wide terminal' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], 1),
+    userMessage([{ type: 'text', text: 'NEXT' }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  const before = await viewport(vt)
+  const infoRow = rowOfNth(before, '🖼️ shot.png · 800×100', 0)
+  assert.ok(infoRow > 0, `the image is painted:\n${before}`)
+  const bodyRow = infoRow + 1
+  const nextBefore = rowOfNth(before, 'NEXT', 0)
+  // Well to the RIGHT of the widest possible thumbnail (MAX_IMAGE_WIDTH = 40).
+  await clickCell(vt, 90, bodyRow)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Image · shot.png'), `a click right of the image opens no Viewer:\n${after}`)
+  assert.ok(after.includes('[-]'), `the occurrence did not fold:\n${after}`)
+  assert.equal(rowOfNth(after, 'NEXT', 0), nextBefore, `the layout is unchanged:\n${after}`)
+  // Control: the SAME body row inside the painted cells DOES open the Viewer.
+  await clickCell(vt, 10, bodyRow)
+  const opened = await viewport(vt)
+  assert.ok(opened.includes('Image · shot.png'), `the painted cells still open the Viewer:\n${opened}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a protocol-unsupported raster paints a text fallback that is NOT a clickable image body', async () => {
+  // Kitty accepts PNG only and this bundle installs no transcoder, so a JPEG
+  // renders the fork's `imageFallback` TEXT row. That row is information: it
+  // must not become a Viewer target (it would open a screen from plain text).
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'fallback' },
+      { type: 'image', attachment: { ...IMAGE_REF, attachmentId: 'att-jpeg', mediaType: 'image/jpeg', name: 'photo.jpg' } },
+    ], 1),
+    userMessage([{ type: 'text', text: 'NEXT' }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  const view = await viewport(vt)
+  const infoRow = rowOfNth(view, '🖼️ photo.jpg · 800×100', 0)
+  assert.ok(infoRow > 0, `the fallback info row is painted:\n${view}`)
+  const nextBefore = rowOfNth(view, 'NEXT', 0)
+  // The fallback TEXT row sits directly under the info row. Clicking it must do
+  // nothing — previously it was registered as the image's pixel body.
+  const fallbackRow = infoRow + 1
+  const fallbackLine = view.split('\n')[fallbackRow - 1] ?? ''
+  assert.ok(fallbackLine.includes('Image:') || fallbackLine.includes('[image/jpeg]'),
+    `the text fallback really is painted on that row:\n${fallbackLine}`)
+  await clickCell(vt, 10, fallbackRow)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Image · photo.jpg'), `a text fallback opens no Viewer:\n${after}`)
+  assert.equal(rowOfNth(after, 'NEXT', 0), nextBefore, `the layout is unchanged:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the workspace pins its action bar to the LAST physical row in BOTH states', async () => {
+  // Real frame assertion, not "the text exists somewhere": the bar must be the
+  // bottom row of the viewport. A short image (and a two-candidate list) would
+  // otherwise leave `Esc close` floating directly under the content with dead
+  // space below — the physical row is the contract.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([
+      { type: 'text', text: 'short image' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], 1),
+    userMessage([
+      { type: 'text', text: 'second' },
+      { type: 'image', attachment: IMAGE_REF_2 },
+    ], 2),
+  ])
+  app.setTranscript(folder.messages())
+  vt.resize(100, 40)
+  await vt.waitForRender()
+
+  // LIST state: two candidates only.
+  const internals = app as unknown as { openTranscriptImagePicker(): void }
+  internals.openTranscriptImagePicker()
+  const listView = await viewport(vt)
+  const listRows = listView.split('\n')
+  const listLast = listRows[listRows.length - 1] ?? ''
+  assert.ok(listLast.includes('Esc close'), `the LIST bar is the last physical row:\n${listLast}`)
+  assert.ok(listLast.includes('Enter view'), `the LIST bar advertises Enter view:\n${listLast}`)
+  const candidates = listRows.filter(line => /#\d+ · /.test(line))
+  assert.equal(candidates.length, 2, `both candidates are listed:\n${listView}`)
+  assert.ok(listRows.findIndex(line => line.includes('Images · current transcript')) < listRows.length - 1,
+    'the header is above the bar')
+
+  // VIEWER state: Enter the first candidate; the image is much shorter than the
+  // 40-row grant, so the bar must still be the LAST row.
+  vt.sendInput('\r')
+  const viewerView = await viewport(vt)
+  const viewerRows = viewerView.split('\n')
+  const viewerLast = viewerRows[viewerRows.length - 1] ?? ''
+  assert.ok(viewerView.includes('Image · shot.png'), `the Viewer opened:\n${viewerView}`)
+  // Opened FROM the list, so Esc really goes back (D13: the verb names the
+  // real effect) — and it is still the bar on the LAST physical row.
+  assert.ok(viewerLast.includes('Esc back'), `the VIEWER bar is the last physical row:\n${viewerLast}`)
+  assert.ok(visibleWidth(viewerLast) === 100, `the bar fills the row width (${visibleWidth(viewerLast)})`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('an OPEN opaque assistant image block reserves its rank, so a later image keeps its own occurrence', async () => {
+  // Plan §4.4 / P2-02: an open opaque image block occupies a SOURCE ordinal
+  // even though it has no bytes yet. The later, closed image must therefore be
+  // occurrence #1 (not #0), and the list must show exactly one candidate — the
+  // opaque one has no attachment to view.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as never,
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } } as never,
+  ])
+  // Block 0 opens as an opaque image (rank 0 reserved), block 1 is a real image.
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 'test', attemptId: 'a', turn: 0, step: 0, time: 3,
+    chunk: { type: 'block-start', index: 0, blockType: 'image' } } as never)
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 'test', attemptId: 'a', turn: 0, step: 0, time: 4,
+    chunk: { type: 'block-start', index: 1, blockType: 'image' } } as never)
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 'test', attemptId: 'a', turn: 0, step: 0, time: 5,
+    chunk: { type: 'block-end', index: 1, block: { type: 'image', attachment: IMAGE_REF } } } as never)
+  app.setTranscript(folder.messages())
+
+  const internals = app as unknown as {
+    mountedImageOccurrences(): { imageIndex: number; ref: { name?: string } }[]
+  }
+  const occurrences = internals.mountedImageOccurrences()
+  assert.equal(occurrences.length, 1, `only the CLOSED image is a candidate:\n${JSON.stringify(occurrences)}`)
+  assert.equal(occurrences[0]!.imageIndex, 1,
+    'the open opaque image block reserved ordinal 0, so the real image is occurrence 1')
+  assert.equal(occurrences[0]!.ref.name, 'shot.png')
+
+  // Open the list through the REAL app entry, after the mounted batch settled.
+  const listInternals = app as unknown as { openTranscriptImagePicker(): void }
+  listInternals.openTranscriptImagePicker()
+  const listView = await viewport(vt)
+  assert.ok(listView.includes('#1 · shot.png'), `the picker lists the closed image as #1:\n${listView}`)
+  assert.ok(!listView.includes('#2 ·'), `the opaque block is never a candidate:\n${listView}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a Tool card generic-presenter image reaches the Viewer and the picker by its source ordinal', async () => {
+  // P2-03: the generic presenter's `resultView.content` is one of the two Tool
+  // image paths (the fallback `resultBlocks` path is covered separately). Its
+  // images must be REAL occurrences — clickable and listed — not a dead row.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-9', name: 'screenshot_tool', arguments: [] } } as never,
+    {
+      type: 'tool/result',
+      seq: 2,
+      time: 2,
+      data: {
+        turn: 0,
+        step: 0,
+        message: createToolResultMessage({
+          callId: ToolCallId('call-9'),
+          content: [
+            { type: 'text', text: 'caption' },
+            { type: 'image', attachment: IMAGE_REF_2 },
+          ] as unknown as ContentBlock[],
+          isError: false,
+        }),
+      },
+    } as never,
+  ])
+  app.setTranscript(folder.messages())
+  const internals = app as unknown as {
+    mountedImageOccurrences(): { imageIndex: number; ref: { name?: string } }[]
+  }
+  // Expand the card so the body is mounted, then inspect the occurrence set.
+  const header = rowOfNth(await viewport(vt), 'screenshot_tool', 0)
+  await clickCell(vt, 4, header)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('🖼️ second.png'), `the tool image is mounted:\n${expanded}`)
+  const occurrences = internals.mountedImageOccurrences()
+  assert.ok(occurrences.some(o => o.ref.name === 'second.png' && o.imageIndex === 0),
+    `the tool image is a real occurrence at its source ordinal:\n${JSON.stringify(occurrences)}`)
+  // The picker lists it.
+  const listInternals = app as unknown as { openTranscriptImagePicker(): void }
+  listInternals.openTranscriptImagePicker()
+  const listView = await viewport(vt)
+  assert.ok(listView.includes('second.png'), `the picker lists the tool image:\n${listView}`)
+  app.setFullscreen(false)
+  app.stop()
+})
