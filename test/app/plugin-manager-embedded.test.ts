@@ -596,6 +596,79 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   await toggleFresh.settle()
   assert.deepEqual(toggleFresh.setBundle, [{ name: '@vendor/foo', enabled: true }], 'the same painted Enable button really dispatches')
   toggleFresh.app.dispose()
+
+  // A rail wheel in the unrepainted window must not scroll with the old pane
+  // geometry; after the repaint the same wheel really scrolls the rail. 120x8
+  // keeps the rail viewport at three rows before AND after the notice, so the
+  // only variable is whether the stale wheel was admitted.
+  const railWheel = await open({ columns: 120, rows: 8 })
+  await yieldToRail(railWheel)
+  const railLabels = ['About', 'Models', 'Account', 'Appearance', 'Display', 'Tools', 'Plugins', 'Other settings']
+  const visibleRail = (): string[] => frameRows(railWheel)
+    .map(line => line.slice(0, 22).trim())
+    .map(cell => cell.replace(/^> /u, ''))
+    .filter(cell => railLabels.includes(cell))
+  const railBefore = visibleRail()
+  assert.ok(railBefore.length > 0, `the rail must be painted:\n${railWheel.view()}`)
+  railWheel.app.notify('notice moves the rail geometry', 'error')
+  wheel(railWheel, 6, 2)
+  await railWheel.settle()
+  assert.deepEqual(visibleRail(), railBefore, 'a rail wheel in the unrepainted chrome window owns no scroll')
+  wheel(railWheel, 6, 2)
+  await railWheel.settle()
+  assert.notDeepEqual(visibleRail(), railBefore, 'the repainted rail still scrolls under the pointer')
+  railWheel.app.dispose()
+  // The same notice moves the ROOT-owned rail hit map. A press on the old About
+  // row must not become a category change (which would dispose the List page)
+  // after the notice took a row.
+  const railCase = await open({ columns: 120, rows: 24 })
+  await selectCard(railCase, 'bundle:@vendor/foo')
+  const aboutRow = railRow(railCase, 'About')
+  press(railCase, aboutRow, 3)
+  railCase.app.notify('notice moves the rail hit map', 'error')
+  release(railCase, aboutRow, 3)
+  await railCase.settle()
+  assert.match(railCase.view(), /Settings · Plugins/u, 'the stale rail release never changes the category')
+  assert.equal(railCase.panel.currentView(), 'list', 'the stale rail release never disposes the plugin page')
+  // Positive control: the repainted frame promotes the SAME rail target at its
+  // NEW row (one row lower) and really switches category.
+  click(railCase, railRow(railCase, 'About'), 3)
+  await railCase.settle()
+  assert.match(railCase.view(), /Scope: About/u, 'the fresh rail frame still switches category')
+  railCase.app.dispose()
+})
+
+test('T09 a Controller install-phase change between press and release refuses the old action', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 24,
+    installImpl: async () => ({
+      changed: true,
+      application: 'failed',
+      stage: 'install',
+      target: 'x',
+      pendingBuilds: ['evil-pkg'],
+    }),
+  })
+  await openInstall(harness)
+  // Drive the explicit Inspect -> Install path through the page keys until the
+  // attempt settles as failed with its approval risk painted.
+  for (let attempt = 0; attempt < 3 && harness.controller.installView()?.phase !== 'failed'; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  assert.equal(harness.controller.installView()?.phase, 'failed')
+  assert.equal(harness.installCalls.length, 1)
+  const approveRow = rowOf(harness, 'Approve and retry')
+  press(harness, approveRow, 5)
+  // A Controller phase change under the press (a new manual attempt) must
+  // invalidate the old approve target before its release.
+  assert.equal(harness.controller.beginManualInstall(), true, 'a new manual attempt is admitted')
+  release(harness, approveRow, 5)
+  await harness.settle()
+  assert.equal(harness.installCalls.length, 1, 'the stale approve release never dispatches a second install')
+  assert.equal(harness.controller.installView()?.phase, 'editing', 'the new attempt stays in its own phase')
+  harness.app.dispose()
 })
 
 test('T09 resize, focus yield, filter edit and external disposal refuse the old release', async () => {

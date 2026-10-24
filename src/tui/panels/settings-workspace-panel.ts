@@ -2640,6 +2640,33 @@ export class SettingsWorkspacePanel implements Component {
       && (this.lastRenderWidth !== this.intents.columns() || this.lastRenderRows !== this.intents.rows())
   }
 
+  /**
+   * Whether the LIVE root chrome would paint a different row allocation than the
+   * last painted frame. The App notice is a chrome input that moves/shrinks the
+   * rail, the legacy panes, the direct content box AND the child grant without
+   * changing the terminal size, so no pointer gesture may resolve against the
+   * previous frame's hit maps until that frame repaints.
+   */
+  private chromeGeometryStale(): boolean {
+    const painted = this.chrome
+    if (painted === undefined) return true
+    const live = planSettingsChrome(
+      this.intents.columns(),
+      this.intents.rows(),
+      this.intents.notice() !== undefined,
+      this.choiceField() !== undefined,
+    )
+    return live.width !== painted.width
+      || live.rows !== painted.rows
+      || live.headerRows !== painted.headerRows
+      || live.metaRows !== painted.metaRows
+      || live.ruleRows !== painted.ruleRows
+      || live.noticeRows !== painted.noticeRows
+      || live.paneHeaderRows !== painted.paneHeaderRows
+      || live.actionRows !== painted.actionRows
+      || live.bodyRows !== painted.bodyRows
+  }
+
   /** The current projection (see {@link projectionWidth}). */
   private currentLayout(): SettingsLayout {
     return layoutForWidth(this.projectionWidth())
@@ -3618,6 +3645,14 @@ export class SettingsWorkspacePanel implements Component {
     // wheel over the old geometry could scroll a pane the new frame does not
     // paint at that cell.
     if (this.terminalGeometryStale()) return undefined
+    // An App notice (or any chrome change) moves/shrinks EVERY painted hit
+    // region — rail, legacy panes, direct content box and child grant — not only
+    // the plugin child. Until the frame repaints, no wheel may resolve against
+    // the previous geometry: fail closed and let the pending paint restore it.
+    if (this.chromeGeometryStale()) {
+      this.intents.requestRender()
+      return undefined
+    }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
       const live = page === undefined ? undefined : this.syncPluginFrame()
@@ -3688,6 +3723,15 @@ export class SettingsWorkspacePanel implements Component {
     if (this.terminalGeometryStale()) {
       this.authPage?.cancelPointer?.()
       this.pluginPage?.cancelPointer()
+      return
+    }
+    // The live chrome can move EVERY painted hit region (rail, panes, direct box)
+    // between the App notice and its repaint. Refuse the whole gesture instead of
+    // resolving it against the previous frame's maps.
+    if (this.chromeGeometryStale()) {
+      this.authPage?.cancelPointer?.()
+      this.pluginPage?.cancelPointer()
+      this.intents.requestRender()
       return
     }
     if (this.categoryId === 'plugins') {
@@ -3773,6 +3817,16 @@ export class SettingsWorkspacePanel implements Component {
       this.contentPressed = undefined
       this.authPage?.cancelPointer?.()
       this.pluginPage?.cancelPointer()
+      return
+    }
+    // A release in the unrepainted chrome window must resolve against neither
+    // the old content box nor the old rail/pane hit map.
+    if (this.chromeGeometryStale()) {
+      this.pressedGesture = undefined
+      this.contentPressed = undefined
+      this.authPage?.cancelPointer?.()
+      this.pluginPage?.cancelPointer()
+      this.intents.requestRender()
       return
     }
     if (this.categoryId === 'plugins') {
