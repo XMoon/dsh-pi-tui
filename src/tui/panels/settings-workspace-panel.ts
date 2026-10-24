@@ -56,7 +56,7 @@ export type SettingsWorkspaceCategoryId =
 export type SettingsWorkspacePage = 'categories' | 'rows' | 'detail'
 
 /** The ONE navigation focus state of the workspace. The three legacy levels
- * plus `content`: the direct page (About/Models/Account) that the category
+ * plus `content`: the direct page (About/Models/Account/Plugins) that the category
  * rail previews and hands the keyboard to. */
 export type SettingsWorkspaceFocus = SettingsWorkspacePage | 'content'
 
@@ -677,7 +677,7 @@ export class SettingsWorkspacePanel implements Component {
   /** The ONE selected category. `About` is the default home of the workspace. */
   private categoryId: SettingsWorkspaceCategoryId = 'about'
   /** The selected row of the LEGACY configuration categories; a direct page
-   *  (About/Models/Account) has no row at all. */
+   *  (About/Models/Account/Plugins) has no row at all. */
   private rowId: SettingsWorkspaceRowId | undefined
   /** The ONE navigation focus state: the three legacy levels plus the direct
    *  page content. A new open starts on the category rail (or on the About
@@ -1085,7 +1085,7 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /**
-   * Render the direct content page (About, Models, Account) inside the
+   * Render the direct content page (About, Models, Account, Plugins) inside the
    * workspace chrome: the category rail stays visible on wide/medium, the
    * pane header states who owns the keyboard, and the content owns the rest of
    * the body. The ONE physical action bar is always the last row, starting at
@@ -2577,7 +2577,7 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** The first row of ONE legacy configuration category. A direct page
-   *  (About/Models/Account) has NO row: the panel never borrows another
+   *  (About/Models/Account/Plugins) has NO row: the panel never borrows another
    *  category's row for it. */
   private firstRowOf(category: SettingsWorkspaceCategoryId): SettingsWorkspaceRowId | undefined {
     return this.snapshot.rows.find(row => row.category === category)?.id
