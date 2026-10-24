@@ -29,10 +29,12 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-workspace
  */
 
-import { truncateToWidth } from '@xmoon76/pi-tui'
+import { getKeybindings } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { SearchablePicker } from '../../pickers/searchable-picker.ts'
 import { color, selectListTheme } from '../../theme/runtime.ts'
+import { formatKeyId } from '../../keybindings/hints.ts'
+import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import { ImageViewerPanel } from './image-viewer.ts'
@@ -157,10 +159,42 @@ export class ImageWorkspacePanel implements Component {
     return panel.render(width).slice(0, rows)
   }
 
-  /** The list state's pinned action bar: the REAL keys of this surface, with
-   * `Esc` naming its actual effect (close the workspace, D13). */
+  /**
+   * The list state's pinned action bar.
+   *
+   * Two rules from design-language §7 govern this row and neither is optional:
+   *
+   * - **The advertised keys are the LIVE ones.** `SearchablePicker` matches
+   *   `tui.select.*` through `getKeybindings()`, so the bar reads the SAME
+   *   binding source. A hard-coded `Enter`/`Esc` would start lying the moment a
+   *   user remaps the action.
+   * - **Degradation is whole-segment** (§7.2). `renderActionBarRow` compacts a
+   *   segment that declares a `short` form, then drops whole segments by
+   *   ascending priority — never a mid-word cut. `Esc` closes the workspace, so
+   *   it carries the highest priority and survives to the narrowest width.
+   */
   private listBar(width: number): string {
-    return color.textDim(truncateToWidth('  ↑↓ navigate · Enter view · Esc close', width, '…', true))
+    const keybindings = getKeybindings()
+    const primary = (action: 'tui.select.up' | 'tui.select.down' | 'tui.select.confirm' | 'tui.select.cancel'): string => {
+      const key = keybindings.getKeys(action)[0]
+      return key === undefined ? '' : formatKeyId(key)
+    }
+    const vertical = primary('tui.select.up')
+    const down = primary('tui.select.down')
+    const navigate = vertical === '' || down === '' ? '' : `${vertical}/${down}`
+    const confirm = primary('tui.select.confirm')
+    const cancel = primary('tui.select.cancel')
+    const segments: ActionBarSegment[] = []
+    if (navigate !== '') segments.push({ text: `${navigate} navigate`, short: navigate, priority: 4 })
+    if (confirm !== '') segments.push({ text: `${confirm} view`, short: confirm, priority: 6 })
+    // A binding that vanished entirely must still leave an operable close hint;
+    // the panel's own Esc handling is the fallback when no key is configured.
+    segments.push({
+      text: cancel === '' ? 'Esc close' : `${cancel} close`,
+      short: cancel === '' ? 'Esc' : cancel,
+      priority: 8,
+    })
+    return color.textDim(renderActionBarRow(segments, Math.max(1, width)))
   }
 
   /** Create the Viewer state. `fromList` keeps the list (and its selection)
