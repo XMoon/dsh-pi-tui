@@ -216,8 +216,6 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   // second screen or a second owner.
   let panel: PluginManagerWorkspacePanel | undefined
   let settings: { close(): void } | undefined
-  /** The ONE inventory read of this controller (a reopen reuses it). */
-  let opened = false
   /** Open ONE Settings lease on this app. The page factory is the SAME one the
    *  first lease used, so a re-open exercises the production owner release. */
   const openLease = (startOn: 'plugins' | 'rail'): { close(): void } => app.openSettingsWorkspace(
@@ -240,11 +238,13 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
           onYieldNavigation,
         }, { onDispose: () => {} })
-        // The inventory read happens exactly once, on the REAL first mount.
-        if (opened === false) {
-          opened = true
-          controller.open()
-        }
+        // PRODUCTION SEMANTICS: `PluginManagerRuntime.page()` opens the
+        // controller on EVERY successful page creation, so a re-mount after a
+        // dispose starts a NEW inventory read (and advances the read
+        // generation). The harness must not smooth that over with a "first
+        // mount only" flag, or a reopen would prove a path production never
+        // takes.
+        controller.open()
         return panel
       },
     },

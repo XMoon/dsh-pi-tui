@@ -996,8 +996,26 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
 
   // Control on the SAME app/runtime: the closed lease is re-opened and its page
   // admits a real pointer gesture (no phantom owner or stale claim survives).
+  // PRODUCTION SEMANTICS: `PluginManagerRuntime.page()` calls
+  // `controller.open()` on every successful page creation, so the re-mount
+  // starts a NEW inventory read (read generation advances) and the page must be
+  // current again before its hit map may act.
+  const readsBeforeReopen = disposed.snapshotCalls()
+  const generationBeforeReopen = disposed.controller.readGeneration()
   await disposed.reopen()
   assert.match(disposed.view(), /Settings · Plugins/u, 'the SAME app re-opened the Settings lease')
+  assert.equal(disposed.snapshotCalls(), readsBeforeReopen + 1,
+    'the re-mounted page started exactly ONE new inventory read')
+  assert.equal(disposed.controller.readGeneration(), generationBeforeReopen + 1,
+    'the re-mount advanced the read generation')
+  // The first frame after the re-open may still be loading; wait for the NEW
+  // authoritative inventory before the pointer control. (80x10 keeps a one-row
+  // list window, so the readiness witness is a visible card, not the target.)
+  for (let attempt = 0; attempt < 40 && !disposed.view().includes('Official DSH'); attempt += 1) {
+    await disposed.settle()
+  }
+  assert.match(disposed.view(), /@deepseek-ai\/dsh-base/u, 'the re-mounted page settled on the new inventory')
+  assert.doesNotMatch(disposed.view(), /Loading plugins/u, 'the re-mounted page left its loading state')
   // 80x10 keeps a one-row list window: select the target with the page's own keys
   // first, then prove the POINTER still hits the painted selection row.
   for (let step = 0; step < 30 && disposed.panel.selectedCardValue() !== 'bundle:@vendor/foo'; step += 1) {
