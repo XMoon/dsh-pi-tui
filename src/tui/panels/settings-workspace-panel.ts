@@ -2966,6 +2966,10 @@ export class SettingsWorkspacePanel implements Component {
     if (layoutForWidth(this.intents.columns()) !== 'narrow'
       && matchesKey(data, 'shift+tab')
       && page.canYieldFocusToNavigation()) {
+      // §4.2: the root intercepts this key itself, so it must apply the SAME rule
+      // the page applies to the keys it forwards — while a changed grant awaits
+      // its paint, only the real Esc may act.
+      if (page.grantAwaitingPaint()) return
       this.yieldPluginNavigation()
       return
     }

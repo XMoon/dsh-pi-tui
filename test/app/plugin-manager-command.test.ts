@@ -63,6 +63,7 @@ function embeddedPage(counts: CommandCounts): EmbeddedPluginPage {
     gestureRevision: () => 0,
     semanticGeneration: () => 0,
     liveIdentity: () => 'fake-live',
+    grantAwaitingPaint: () => false,
     cancelPointer: () => {},
     handleInput: () => {},
     handleMouse: () => undefined,
