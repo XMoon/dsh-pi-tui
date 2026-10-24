@@ -24,6 +24,66 @@ export function wireNodes(pane: TspPane): WireNode[] {
   return foldWireNodes(pane.frames())
 }
 
+/**
+ * The pane's frames addressed at ONE surface, in order. A renderer may own more
+ * than one surface at a time (the resident inline base plus a temporary
+ * `mode:'screen'` page) whose node ids both derive from `main`/`dock`/`layer`,
+ * so evidence about one surface must be read from ITS own frames.
+ */
+export function surfaceFrames(pane: TspPane, sf: string): Array<{ readonly sf: string; readonly s: number; readonly ops: readonly Op[] }> {
+  return pane.frames().filter(frame => frame.sf === sf)
+}
+
+/** The live node set of ONE surface. */
+export function surfaceNodes(pane: TspPane, sf: string): WireNode[] {
+  return foldWireNodes(surfaceFrames(pane, sf))
+}
+
+/** Every live text value of ONE surface (plain text and spans), in node order. */
+export function surfaceTexts(pane: TspPane, sf: string): string[] {
+  const out: string[] = []
+  for (const node of surfaceNodes(pane, sf)) {
+    if (typeof node.p.text === 'string' && node.p.text !== '') {
+      out.push(node.p.text)
+      continue
+    }
+    const spans = node.p.spans
+    if (!Array.isArray(spans)) continue
+    const text = spans.map(entry => {
+      if (typeof entry === 'string') return entry
+      if (entry !== null && typeof entry === 'object') {
+        const value = (entry as { readonly t?: unknown }).t
+        if (typeof value === 'string') return value
+      }
+      return ''
+    }).join('')
+    if (text !== '') out.push(text)
+  }
+  return out
+}
+
+/** The `scroll` ops ONE surface received, in order. */
+export function surfaceScrollOps(pane: TspPane, sf: string): Array<{ readonly id: string; readonly to: string }> {
+  const out: Array<{ readonly id: string; readonly to: string }> = []
+  for (const frame of surfaceFrames(pane, sf)) {
+    for (const op of frame.ops) {
+      if (op[0] === 'scroll') out.push({ id: String(op[1]), to: String(op[2]) })
+    }
+  }
+  return out
+}
+
+/** The `focus` ops ONE surface received, in order. */
+export function surfaceFocusOps(pane: TspPane, sf: string): Array<string | null> {
+  const out: Array<string | null> = []
+  for (const frame of surfaceFrames(pane, sf)) {
+    for (const op of frame.ops) {
+      if (op[0] === 'focus') out.push(op[1] === null ? null : String(op[1]))
+    }
+  }
+  return out
+}
+
 /** Fold a frame sequence into the live node set. */
 function foldWireNodes(frames: ReadonlyArray<{ readonly ops: readonly Op[] }>): WireNode[] {
   const live = new Map<string, WireNode>()

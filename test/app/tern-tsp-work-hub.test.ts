@@ -37,6 +37,7 @@ import {
   layerNodes,
   pickerNode,
   pickerProps,
+  sendAction,
   sendPickerAction,
   sendResize,
   sendActivate,
@@ -132,8 +133,19 @@ interface WorkHubHarness {
   open(items: readonly TaskPanelItem[], overrides?: Partial<TaskBrowserPresentationOpen>): TaskBrowserPresentationHandle
 }
 
-async function mount(t: { after(fn: () => unknown): void }): Promise<WorkHubHarness> {
-  const pane = installTspPane({ sessionBrowser: true })
+/**
+ * Mount the REAL renderer over the scripted pane. The default pane advertises
+ * the Session Browser's native kinds and `scroll`, which is ALSO exactly what
+ * the temporary Work Details Reader needs — so the default harness is a
+ * Reader-capable pane; a case that must prove the fail-closed capability
+ * decides its own advertised `kinds`/`features`, or opts into `workDetails`
+ * without the Session Browser.
+ */
+async function mount(
+  t: { after(fn: () => unknown): void },
+  paneOptions: { readonly workDetails?: boolean; readonly kinds?: readonly string[]; readonly features?: readonly string[] } = {},
+): Promise<WorkHubHarness> {
+  const pane = installTspPane({ sessionBrowser: true, ...paneOptions })
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session, 'the scripted pane must connect through the shipped SDK')
@@ -329,9 +341,9 @@ test('hostile label bytes are sanitized on the wire while the stable ID is untou
   assert.equal(hubItems(h.pane)[0]!.id, 'job:hostile', 'the row ID is never display-sanitized')
 })
 
-// ── A1-T11: no fabricated lifecycle verbs ─────────────────────────────────
+// ── A2: the local Read intent, never a fabricated lifecycle verb ───────────
 
-test('inactive one-shot and external rows stay truthful and expose no fake actions', async (t) => {
+test('a current row with the negotiated Reader capabilities exposes Close plus the primary View details action', async (t) => {
   const h = await mount(t)
   h.open([
     row('agent:child-1', { label: 'subagent · audit', status: 'inactive', source: 'subagent', mode: 'one-shot', suffix: 'one-shot', depth: 1, active: false }),
@@ -343,23 +355,94 @@ test('inactive one-shot and external rows stay truthful and expose no fake actio
     `the inactive child is never relabelled completed: ${details.join(' | ')}`)
   assert.ok(details.some(detail => detail.includes('External')), `the external leaf is named External: ${details.join(' | ')}`)
   const actions = (hubProps(h.pane).actions ?? []) as Array<Record<string, unknown>>
-  assert.deepEqual(actions.map(action => action.id), ['close'], 'A1 exposes ONLY the native Close action')
-  assert.ok(!JSON.stringify(hubProps(h.pane)).includes('View details'), 'no placeholder details action exists')
+  // The native footer is dismissal plus the ONE local read action, and the
+  // read action carries the revision of the frame that painted it.
+  assert.deepEqual(actions.map(action => String(action.id)).map(id => id.replace(/#\d+$/u, '')),
+    ['close', 'details'], 'the footer is Close plus View details')
+  assert.equal(actions[1]!.primary, true, 'View details is the primary action')
+  const body = JSON.stringify({ ...hubProps(h.pane), actions: [] })
+  assert.ok(!body.includes('Stop') && !body.includes('Interrupt') && !body.includes('Answer'),
+    'the Hub fabricates no lifecycle verb')
+  assert.equal(hubProps(h.pane).message, undefined, 'a capable pane states no unavailability')
 })
 
-// ── A1-T12/T13/T14: activate/close/Esc admission ───────────────────────────
+test('the current `View details` action opens the current target, and a stale revision does nothing', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:j1', { label: 'build' }), row('job:j2', { label: 'test' })])
+  await waitUntil('the failed-free first row is selected', () => hubProps(h.pane).selected === 'job:j1')
+  const actions = (hubProps(h.pane).actions ?? []) as Array<Record<string, unknown>>
+  const currentId = String(actions[1]!.id)
+  // The token is the revision that painted this frame, so an OLDER revision
+  // (and the bare intent id) can never act on a newer frame.
+  assert.equal(/^details#\d+$/u.test(currentId), true, `the read action is revision-tokened: ${currentId}`)
+  const pickerId = pickerNode(h.pane, HUB)!.id
+  const screens = (): number => h.pane.openSurfaces().filter(entry => entry.mode === 'screen').length
+  sendAction(h.pane, currentId.replace(/\d+$/u, '0'), undefined, pickerId)
+  sendAction(h.pane, 'details', undefined, pickerId)
+  await waitUntil('the stale tokens are settled as no-ops', () => screens() === 0)
+  assert.equal(screens(), 0, 'neither an older revision nor the bare intent id opens a Screen')
+  assert.deepEqual(h.selects, [], 'an ignored read action runs no business router')
 
-test('activate and Enter are consumed without a business action or panel change', async (t) => {
+  sendAction(h.pane, currentId, undefined, pickerId)
+  await waitUntil('the current action opens the Reader', () => screens() === 1)
+  assert.equal(screens(), 1, 'the current registered action opens exactly one Screen')
+  assert.deepEqual(h.selects, [], 'the read action never runs the business row router')
+})
+
+test('the footer action set follows the CURRENT selection, and a vanished target offers no read action', async (t) => {
+  const h = await mount(t)
+  const handle = h.open([row('job:j1', { label: 'build' }), row('job:j2', { label: 'test' })])
+  await waitUntil('the first row is selected', () => hubProps(h.pane).selected === 'job:j1')
+  sendSelect(h.pane, 'job:j2', pickerNode(h.pane, HUB)!.id)
+  await waitUntil('the second row is selected', () => hubProps(h.pane).selected === 'job:j2')
+  const ids = (): string[] => ((hubProps(h.pane).actions ?? []) as Array<Record<string, unknown>>)
+    .map(action => String(action.id).replace(/#\d+$/u, ''))
+  assert.deepEqual(ids(), ['close', 'details'], 'a current selection keeps the read action')
+
+  // An EMPTY dataset is the real "no target" state: dismissal stays, the read
+  // action does not (a dead button is not a read intent).
+  handle.setItems([])
+  await waitUntil('the empty dataset repaints the footer', () => ids().length === 1)
+  assert.deepEqual(ids(), ['close'], 'with no current row only Close remains')
+  assert.equal(h.pane.openSurfaces().filter(entry => entry.mode === 'screen').length, 0,
+    'no Screen was opened by the empty repaint')
+  assert.deepEqual(h.selects, [], 'the empty repaint is not a business selection')
+})
+
+test('a pane that negotiated no Reader kinds shows only Close plus the truthful unavailability line', async (t) => {
+  // The fail-closed negative: no `row`/`text` kinds, so no Screen can be built
+  // and NO action may be offered (a no-op button is not an unavailable state).
+  const h = await mount(t, { kinds: ['col', 'picker', 'overlay'], features: ['flow'] })
+  h.open([row('job:j1', { label: 'build' })])
+  await waitForSinglePicker(h.pane)
+  const actions = (hubProps(h.pane).actions ?? []) as Array<Record<string, unknown>>
+  assert.deepEqual(actions.map(action => action.id), ['close'],
+    'a pane without the Reader capabilities exposes ONLY the native Close action')
+  assert.equal(String(hubProps(h.pane).message), 'Work details unavailable in this pane.',
+    'the missing capability is stated truthfully instead of faking an action')
+  assert.ok(!JSON.stringify(hubProps(h.pane)).includes('View details'), 'no placeholder details action exists')
+  // Enter remains a consumed no-op: it neither opens anything nor touches the
+  // business router.
+  h.pane.key('\r')
+  h.pane.key('\t')
+  await waitUntil('the action zone is reached', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  assert.deepEqual(h.selects, [], 'a missing capability never falls back to the business router')
+  assert.equal(h.renderer.display.supportsTaskCenter, false, 'the capability never flips the seam')
+})
+
+// ── A1/A2-T12/T13/T14: activate/close/Esc admission ────────────────────────
+
+test('an activate of a row that is not the current selection opens nothing', async (t) => {
   const h = await mount(t)
   h.open([row('job:j1', { label: 'build' }), row('job:j2', { label: 'test' })])
   await waitUntil('the first job is selected', () => hubProps(h.pane).selected === 'job:j1')
+  const screensBefore = h.pane.frames().filter(frame => frame.sf !== 's1').length
   sendActivate(h.pane, 'job:j2', pickerNode(h.pane, HUB)!.id)
-  h.pane.key('\r')
-  // A subsequent Tab forces a committed frame: the ordered input loop has
-  // therefore consumed the activate/Enter before this observation.
   h.pane.key('\t')
-  await waitUntil('the Tab cue lands', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
-  assert.equal(hubProps(h.pane).selected, 'job:j1', 'activate/Enter never changes the panel selection')
+  await waitUntil('the Tab cue lands', () => JSON.stringify(hubProps(h.pane).actions).includes('[Enter]'))
+  assert.equal(hubProps(h.pane).selected, 'job:j1', 'a non-current activate never switches and opens')
+  assert.equal(h.pane.frames().filter(frame => frame.sf !== 's1').length, screensBefore,
+    'a non-current activate opens no temporary Screen')
   assert.deepEqual(h.selects, [], 'activate never runs the business router')
   assert.deepEqual(h.stops, [], 'activate never stops a Job')
   assert.deepEqual(h.refreshes, [], 'activate never refreshes')
@@ -496,17 +579,31 @@ test('only a frame-registered node can act: a fabricated target is ignored', asy
 
 // ── A1-T19/T20/T21: zones, responsive width and the narrow refusal ─────────
 
-test('Tab and Shift+Tab switch only the list/actions zone and never close', async (t) => {
+test('Tab enters the action zone on the primary View details action and Shift+Tab returns to the list', async (t) => {
   const h = await mount(t)
   h.open([row('job:j1')])
   await waitForSinglePicker(h.pane)
   h.pane.key('\t')
-  await waitUntil('Tab focuses the Close action', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  await waitUntil('Tab focuses the primary action', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
   assert.equal(h.closes.length, 0, 'Tab never closes')
   assert.equal(hubProps(h.pane).query, '', 'Tab is not query text')
   h.pane.key('\u001b[Z')
-  await waitUntil('Shift+Tab returns to the list', () => !JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  await waitUntil('Shift+Tab returns to the list', () => !JSON.stringify(hubProps(h.pane).actions).includes('[Enter]'))
   assert.equal(h.closes.length, 0, 'Shift+Tab never closes either')
+})
+
+test('left/right move the action focus between Close and View details without running either', async (t) => {
+  const h = await mount(t)
+  h.open([row('job:j1')])
+  await waitForSinglePicker(h.pane)
+  h.pane.key('\t')
+  await waitUntil('the primary action holds the focus', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
+  h.pane.key('\u001b[D')
+  await waitUntil('left moves the focus to Close', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  assert.equal(h.closes.length, 0, 'merely focusing Close never closes the Hub')
+  h.pane.key('\u001b[C')
+  await waitUntil('right moves the focus back to View details', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
+  assert.equal(h.closes.length, 0)
 })
 
 test('the side Inspector is requested only at/above 1120 pane pixels', async (t) => {
@@ -621,7 +718,7 @@ test('opening the Work Hub retires the Model, Preset and Session Browser present
   // A late Model key must not reach the retired presenter: Tab now belongs to
   // the Work Hub action zone.
   h.pane.key('\t')
-  await waitUntil('Tab still drives the Work Hub', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  await waitUntil('Tab still drives the Work Hub', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
   assert.deepEqual(mountedPickerKeys(h.pane), ['work-hub-picker-1'], 'exactly ONE presenter owns the layer')
 })
 
