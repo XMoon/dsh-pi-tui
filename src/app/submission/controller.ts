@@ -1361,7 +1361,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         if (deps.isCleanedUp()) return
         if (result !== undefined && result.kind === 'error') {
           if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, new Error(result.text))
-          deps.app().notify(result.text)
+          // A returned refusal IS an error: the renderer must classify it as
+          // one. The card-less Client-registry branch above has always passed
+          // `'error'`; without it the local route published the same refusal as
+          // an ordinary info notice, so a renderer that marks only errors (the
+          // TSP Dock's `!` prefix) showed a bare line for a real refusal.
+          deps.app().notify(result.text, 'error')
         } else if (bridgeCommandRef !== undefined) {
           deps.extensions.clearError(bridgeCommandRef)
         }

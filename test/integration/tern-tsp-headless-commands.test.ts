@@ -661,6 +661,42 @@ test('every remaining PiTui-only builtin stays refused with the draft restored',
   }
 })
 
+// ── Sessionless synchronous refusals are classified as errors ───────────────
+
+test('a sessionless /image with no argument shows ONE error-marked refusal and creates no Session', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['SESSIONLESS-IMAGE-REFUSAL'] })
+  await waitForInputDelivery(fixture.pane)
+  // NO Session exists yet: this line takes the SESSIONLESS local route, not the
+  // card-less Client-registry one, so it exercises the OTHER refusal owner.
+  await submitInput(fixture, '/image')
+  await waitFor('the usage refusal', () =>
+    dockNotices(fixture).some(text => text.includes('Usage: /image <path>')), 25_000)
+  // The Dock marks ONLY kind === 'error' with `!`, so the marker is the witness
+  // that the returned CommandResult.error kept its error classification.
+  const refusalLines = dockNotices(fixture).filter(text => text.includes('Usage: /image <path>'))
+  assert.equal(refusalLines.length, 1, 'exactly ONE refusal notice, never a duplicate')
+  assert.ok(refusalLines[0]!.startsWith('! '),
+    `the refusal is classified as an error: ${JSON.stringify(refusalLines)}`)
+  assert.deepEqual(welcomeSessionIds(fixture), [], 'the refused intake created no Session')
+  assert.equal(fixture.modelCalls(), 0, 'the refused intake never reached the model')
+})
+
+test('a sessionless /attach with no argument shows ONE error-marked refusal and creates no Session', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['SESSIONLESS-ATTACH-REFUSAL'] })
+  await waitForInputDelivery(fixture.pane)
+  await submitInput(fixture, '/attach')
+  await waitFor('the usage refusal', () =>
+    dockNotices(fixture).some(text => text.includes('Usage: /attach <path>')), 25_000)
+  const refusalLines = dockNotices(fixture).filter(text => text.includes('Usage: /attach <path>'))
+  assert.equal(refusalLines.length, 1, 'exactly ONE refusal notice, never a duplicate')
+  assert.ok(refusalLines[0]!.startsWith('! '),
+    `the refusal is classified as an error: ${JSON.stringify(refusalLines)}`)
+  assert.deepEqual(welcomeSessionIds(fixture), [], 'the refused intake created no Session')
+  assert.equal(fixture.modelCalls(), 0, 'the refused intake never reached the model')
+})
+
 // ── The Client-local attachment intake on the mounted composer ──────────────
 
 test('a real /attach of a regular file stages metadata and inserts the canonical token into the mounted composer', async (t) => {
