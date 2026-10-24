@@ -633,31 +633,44 @@ test('captured subject retirement cancels its reader before it can publish', asy
   assert.equal(listSignal?.aborted, true)
 })
 
-test('an already-disposed presentation handle starts NO listing and leaves the owner inactive', async (t) => {
+test('an already-disposed presentation handle starts NO listing and leaves the owner reopenable', async (t) => {
   const diag = DIAG()
   let listCalls = 0
+  // ONE owner, two sequenced presentations: the first refuses the panel with an
+  // inert handle, the second admits it. That proves the owner itself went
+  // inactive after the refusal instead of only proving another owner works.
+  const probe = new PresentationProbe()
+  const admitting: SessionBrowserPresentation = {
+    open: (request) => probe.open(request),
+    notify: (message) => probe.notify(message),
+  }
+  let refuse = true
+  const refusing: SessionBrowserPresentation = {
+    open: (request) => {
+      if (!refuse) return admitting.open(request)
+      probe.requests.push(request)
+      return { isDisposed: () => true, setSnapshot() {}, close() {} }
+    },
+    notify: (message) => probe.notify(message),
+  }
   const owner = createSessionBrowserReadOwner({
     reader: reader({ list: async () => { listCalls += 1; return [] } }),
-    presentation: {
-      // The renderer's own four-way presenter exclusivity returns this shape
-      // when a newer presenter won a reentrant open: an inert handle that is
-      // disposed from the first instant.
-      open: () => ({ isDisposed: () => true, setSnapshot() {}, close() {} }),
-      notify() {},
-    },
+    presentation: refusing,
     captureSubject: () => captured(),
     diag,
   })
   t.after(() => { owner.dispose(); diag.dispose() })
-  const handle = owner.open()
-  assert.deepEqual(await handle.settlement, { kind: 'cancelled' },
+  const refused = owner.open()
+  assert.deepEqual(await refused.settlement, { kind: 'cancelled' },
     'the refused panel settles as cancelled instead of hanging')
-  await new Promise<void>(resolve => setTimeout(resolve, 20))
+  // `startList` runs its reader through `runOwned`, which invokes the factory
+  // synchronously, so a zero call count is already a decisive fact here: no
+  // observation window is needed.
   assert.equal(listCalls, 0, 'a hidden listing must never run behind an inert presentation')
-  // The owner is inactive: a second open starts its OWN fresh read.
-  const second = new PresentationProbe()
-  const secondOwner = ownerFor(second, reader({ list: async () => [] }))
-  t.after(() => { secondOwner.owner.dispose(); secondOwner.diag.dispose() })
-  secondOwner.owner.open()
-  await waitUntil('the independent owner lists normally', () => second.latest()?.listState === 'empty')
+  refuse = false
+  const admitted = owner.open()
+  await waitUntil('the SAME owner lists after the refusal', () => probe.latest()?.listState === 'empty')
+  assert.equal(listCalls, 1, 'exactly the admitted panel read the listing')
+  assert.deepEqual(await admitted.settlement, { kind: 'ready' },
+    'the admitted panel settles its own listing outcome')
 })
