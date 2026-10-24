@@ -35,6 +35,37 @@ import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../doma
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import { color } from '../../theme/runtime.ts'
 
+/**
+ * The COLUMNS an inline-image sequence actually occupies, read from the
+ * sequence the fork just rendered.
+ *
+ * This is the only way to know the real footprint without re-deriving the
+ * fork's fit math (aspect ratio, cell metrics, the height cap) or changing the
+ * vendored fork: both encodings state their placement width explicitly. A
+ * ceiling (`maxWidthCells`) is NOT the footprint — a square image granted 40
+ * columns paints far fewer.
+ *
+ * `undefined` means the sequence did not carry a width, which for a real pixel
+ * render should not happen; the caller then registers NO body so a missing
+ * width can never widen a hit beyond the image.
+ */
+function paintedImageColumns(body: readonly string[], protocol: 'kitty' | 'iterm2'): number | undefined {
+  for (const line of body) {
+    if (protocol === 'kitty') {
+      // Kitty APC: `\x1b_G<key=value,...>;<payload>\x1b\\` — `c=` is the column count.
+      const header = /\x1b_G([^;\x1b]*)[;\x1b]/.exec(line)
+      const columns = header === null ? null : /(?:^|,)c=(\d+)/.exec(header[1]!)
+      if (columns !== null) return Number(columns[1])
+      continue
+    }
+    // iTerm2 OSC 1337: `\x1b]1337;File=<key=value;...>:<base64>\x07` — `width=`.
+    const header = /\x1b\]1337;File=([^:]*):/.exec(line)
+    const columns = header === null ? null : /(?:^|;)width=(\d+)/.exec(header[1]!)
+    if (columns !== null) return Number(columns[1])
+  }
+  return undefined
+}
+
 /** The thumbnail sizing constants (kimi parity, §17). */
 export const MAX_IMAGE_ROWS = 12
 export const MAX_IMAGE_WIDTH = 40
@@ -313,16 +344,20 @@ export class ImageThumbnail implements Component {
     // Whether those rows are REAL PIXELS is a property of the surface: a raster
     // format this protocol cannot display renders the fork's text fallback,
     // which keeps its informational row but must not become a clickable body.
-    this.paintedBody = imagePixelsSupported(getCapabilities().images ?? null, this.ref.mediaType)
-      ? {
-          width,
-          rows: body.length,
-          // The thumbnail never paints wider than this ceiling (the same value
-          // it hands the fork as `maxWidthCells`), so a body hit can never
-          // claim cells the image does not occupy.
-          endCol: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
-        }
-      : undefined
+    const protocol = getCapabilities().images ?? null
+    if (protocol !== null && imagePixelsSupported(protocol, this.ref.mediaType)) {
+      // The hit must cover exactly the cells the image OCCUPIES, which is the
+      // protocol's own placement width — NOT the `maxWidthCells` ceiling this
+      // component asked for. The fork shrinks a square or portrait image well
+      // inside that ceiling (a 100x100 ref paints 24 columns of the 40 granted),
+      // so a ceiling-based hit would open the Viewer over empty cells.
+      const columns = paintedImageColumns(body, protocol)
+      this.paintedBody = columns === undefined
+        ? undefined
+        : { width, rows: body.length, endCol: columns }
+    } else {
+      this.paintedBody = undefined
+    }
     return [this.infoRow(width, this.infoLine()), ...body]
   }
 }
