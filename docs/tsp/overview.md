@@ -119,7 +119,8 @@ frame, and `dispose()` releases the observer before the app dies.
   exists, used to make that one row readable. It is a rendering container, not a
   second UI application: no business authority, no second input iterator, no
   second transcript chain, no Host read, no state the base surface needs. At most
-  one exists, and the base surface stays resident
+  one exists, and the base surface stays resident — an ownership fact, not a
+  claim that the user still sees it, which is the client's own presentation
   ([foundation.md](./foundation.md#bounded-reader-surface-lifecycle)).
 - The live `layer` producers return a `ui.col` region root, with
   overlays/pickers as children. That is a verified project shape, not an SDK

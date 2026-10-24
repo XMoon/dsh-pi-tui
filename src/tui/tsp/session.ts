@@ -776,9 +776,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *
    * The Hub PAINTS its action from {@link canPresentWorkDetails} for the same
    * reason: while a Reader is open or still closing the action must not be
-   * offered at all. The base surface stays visible in its own client tab, so an
-   * action painted there would be a real thing a user could click — and it
-   * would be refused by this very predicate.
+   * offered at all. Whether the client also leaves the base surface on screen is
+   * the client's own presentation decision, and it is NOT inferable from this
+   * SDK call (a measured build covered the base; another may not). Painting an
+   * action that this very predicate would refuse is therefore wrong either way:
+   * it is a dead control if the base is visible and a misleading frame if it is
+   * not.
    */
   function supportsWorkDetails(): boolean {
     return canPresentWorkDetails() && workHub?.isOpen() === true
@@ -945,11 +948,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     } finally {
       openingDetails = false
     }
-    // RFL-002: the client keeps the base surface reachable while the Reader is
-    // open (the measured client switches its single surface tab's title rather
-    // than unmounting the base), so the base's retained frame can still be seen
-    // and clicked. Its painted read action must follow the admission that is now
-    // `busy`, otherwise that frame offers an action this renderer would refuse.
+    // RFL-002: the base frame painted while a reading is open must not advertise
+    // an action the renderer would refuse. Whether the client shows that frame
+    // during the reading is its own presentation decision and is not inferable
+    // here, so the read action simply follows the admission that is now `busy`.
     // The base `render()` is the ONE frame owner, so the repaint goes through it.
     //
     // The Hub is SUSPENDED first: that advances the panel revision, so the
@@ -1038,14 +1040,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // Modal-first, then the four mutually-exclusive non-blocking presenters
       // in their frozen priority order; the empty seat layer is the fallback.
       // B3-A2: while the temporary Reader still physically exists its close is
-      // in flight, and the client may still be painting it in front of this pane.
-      // The seat's logical activation has already happened, so publishing an
-      // OPERABLE form here would paint a form the user cannot see yet. The modal
-      // is therefore withheld until that close settles; the post-close `render()`
-      // in `retireWorkDetails` then paints the current seat (or whatever newer
-      // owner took it). This is a visibility hold, not a second modal queue: the
-      // slot, its promise and the seat's own admission are untouched, and the
-      // retained Hub keeps painting so returning still shows it.
+      // in flight, and the client may still be painting that Screen. The seat's
+      // logical activation has already happened, so publishing an OPERABLE form
+      // here would publish a form the user may not be able to see. The whole base
+      // layer is therefore held to the seat's empty root until that close
+      // settles — publishing a nonce "hub only" tree would be a second frame
+      // shape to justify for no gain, since base input is fenced off during the
+      // reading anyway. The post-close `render()` in `retireWorkDetails` paints
+      // the current seat (or whatever newer owner took it). This is a visibility
+      // hold, not a second modal queue: the slot, its promise and the seat's own
+      // admission are untouched.
       layer: detailsSlot !== undefined && seat.hasModalSeat()
         ? seat.renderEmptyLayer()
         : seat.hasModalSeat()
