@@ -60,11 +60,17 @@ DSH/TUI pairing is evaluated with npm/node-semver rules plus the official
    startup notice is best-effort because Loader rows mount concurrently; the
    matrix remains the authority for the recommended target.
 
-An unsupported published consumer declaration (for example a `pi2dsh` release
-whose peers predate the target family) is an `ECOSYSTEM_CONTRACT_BLOCKER`, not a
-reason to force-install or to rewrite the consumer manifest. The local driver
-may be run manually, but the blocking gate must stay blocking until a compatible
-consumer release exists.
+An unsupported published consumer declaration (for example one whose peers do
+not cover the DSH version the manifest declares) is an
+`ECOSYSTEM_CONTRACT_BLOCKER`, not a reason to force-install or to rewrite the
+consumer manifest. The blocking gate validates the pairing that
+`test/compat/pi2dsh.json` declares, so that pin answers one question: does the
+current code keep the published consumer working on a DSH version both sides
+support? It names an external consumer pairing and is NOT a CI target-version
+source, so it may trail the matrix's current DSH target while the published
+consumer still declares the older family. The declared version must remain a
+pairing this TUI line actually supports, and a declaration the gate cannot
+satisfy stays blocking until a compatible consumer release exists.
 
 ## Session and preset data compatibility
 
