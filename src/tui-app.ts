@@ -23330,7 +23330,13 @@ export class TuiApp {
     const candidates = occurrences.map((occurrence, index) => {
       const value = `${this.identityToken(occurrence.message)}:${occurrence.imageIndex}`
       byValue.set(value, occurrence)
-      const name = occurrence.ref.name ?? 'image'
+      // The attachment name is UNTRUSTED and it lands on a terminal row. The
+      // picker only folds line breaks (`singlePhysicalLine`) — it is NOT a
+      // terminal-control filter — so the projection belongs HERE, at the
+      // presentation boundary that owns this label
+      // (`docs/architecture/terminal-output.md`). The durable ref, scope,
+      // candidate identity and loader path keep the ORIGINAL name.
+      const name = sanitizedPhysicalLine(occurrence.ref.name ?? 'image')
       return {
         value,
         label: `#${index + 1} · ${name} · ${occurrence.ref.width}×${occurrence.ref.height} · ${occurrence.ref.mediaType}`,
