@@ -118,6 +118,8 @@ export interface WorkspaceHarness {
   readonly setBundle: Array<{ name: string; enabled: boolean }>
   readonly setPlugin: Array<{ entryId: string; enabled: boolean }>
   readonly removeBundle: string[]
+  /** Every Host `cancelInstall` call (empty proves no cancel was dispatched). */
+  readonly cancelInstallCalls: string[]
   readonly invalidate: () => void
   readonly emit: (event: PluginInstallEvent) => void
   close(): void
@@ -169,6 +171,8 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   const setBundle: Array<{ name: string; enabled: boolean }> = []
   const setPlugin: Array<{ entryId: string; enabled: boolean }> = []
   const removeBundle: string[] = []
+  /** Host `cancelInstall` calls (a WRITE-side operation on the port). */
+  const cancelCalls: string[] = []
   const fixturePort: PluginManagerPort = {
     snapshot: async () => { snapshotCalls += 1; return snapshot },
     inspect: options.inspectImpl ?? (async (spec: string) => ({
@@ -197,9 +201,12 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
       return { changed: true, application: 'applied', stage: 'install', target: request.spec, version: '0.2.1-rc.2' }
     },
     waitForInstall: async (requestId) => options.waitImpl === undefined ? null : options.waitImpl(requestId),
-    cancelInstall: async (requestId) => options.cancelImpl === undefined
-      ? { status: 'not-running' }
-      : options.cancelImpl(requestId),
+    cancelInstall: async (requestId) => {
+      cancelCalls.push(String(requestId))
+      return options.cancelImpl === undefined
+        ? { status: 'not-running' }
+        : options.cancelImpl(requestId)
+    },
     subscribeInstall: (listener) => { installListeners.add(listener); return () => installListeners.delete(listener) },
     subscribeInvalidation: (listener) => { invalidateListeners.add(listener); return () => invalidateListeners.delete(listener) },
   }
@@ -280,6 +287,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     setBundle,
     setPlugin,
     removeBundle,
+    cancelInstallCalls: cancelCalls,
     invalidate: () => { for (const listener of [...invalidateListeners]) listener() },
     emit: event => { for (const listener of [...installListeners]) listener(event) },
     close: () => settings!.close(),
