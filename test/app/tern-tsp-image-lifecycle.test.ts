@@ -159,6 +159,15 @@ interface Harness {
    * re-reads the composer text and the store on every call.
    */
   stageDrafts(text: string, images: readonly DraftImage[]): void
+  /**
+   * PR4: stage drafts through the COMPOSER ALONE — the real queue pull-back
+   * shape. It writes the draft text and the staged store and then lets the
+   * composer notify its own sink, exactly as `TspComposer.setDraft` does. It
+   * deliberately performs NO transcript commit: a test that committed would
+   * mask a renderer that only converges its image subscriptions on
+   * `setTranscript`.
+   */
+  stageDraftsViaComposer(text: string, images: readonly DraftImage[], notifyComposer: () => void): void
   /** The draft text the projection currently reads. */
   draftText(): string
   dispose(): Promise<void>
@@ -239,6 +248,11 @@ async function mountHarness(options: {
       draftText = text
       staged.splice(0, staged.length, ...images)
       commit(renderer, [], {})
+    },
+    stageDraftsViaComposer(text: string, images: readonly DraftImage[], notifyComposer: () => void): void {
+      draftText = text
+      staged.splice(0, staged.length, ...images)
+      notifyComposer()
     },
     draftText(): string {
       return draftText
@@ -912,5 +926,36 @@ test('a retired subject draws none of its body images on the new subject', async
   await until('the retired image to leave the tree', () => currentImageNodes(harness.tern).length === 0)
 
   assert.equal(harness.tern.blobIds().length, 1, 'the new subject sent no body blob')
+  await harness.dispose()
+})
+
+test('a recalled draft staged through the COMPOSER ALONE is read and painted (no transcript commit)', async () => {
+  // The real queue pull-back shape: the application writes the draft text and
+  // stages the recalled image, then the composer notifies its own sink. NO
+  // transcript commit happens, so a renderer that only converges its image
+  // subscriptions inside `setTranscript` leaves this ref unsubscribed and
+  // unread — the preview would stay on "Loading image…" forever.
+  const harness = await mountHarness()
+  // The production shape: the user is ALREADY in a committed subject (its
+  // immutable scope was sampled by that commit), and the queue pull-back then
+  // writes only the draft. A pull-back before any commit has no scope at all,
+  // which correctly shows `no-scope` instead of reading.
+  commit(harness.renderer, [{ kind: 'user', turn: 1, text: 'earlier turn' } as TranscriptMessage], {})
+  const recalled = recalledDraft(1, ATTACHMENT)
+  // Stage the store + text WITHOUT any further transcript commit, then drive the
+  // ONE render funnel the composer uses (`setDraft` → `onChanged` → `render()`).
+  harness.stageDraftsViaComposer(recalled.placeholder, [recalled], () => {})
+  harness.renderer.composer.setDraft(recalled.placeholder)
+  await until('the recalled ref to be read through the ONE loader',
+    () => harness.reads.length === 1, 5_000)
+
+  assert.deepEqual(harness.reads.map(read => read.id), ['att-1'],
+    'the draft-only path asked the ONE loader for the durable ref')
+  assert.equal(harness.reads[0]?.scope, harness.scopeValue(),
+    'the read carried the current immutable scope')
+  await until('the recalled preview to settle into a native node',
+    () => dockDraftRows(harness.tern).some(row => row.kind === 'image'), 5_000)
+  assert.equal(harness.tern.blobIds().length, 1,
+    'the read bytes reached the ONE SDK blob sender')
   await harness.dispose()
 })

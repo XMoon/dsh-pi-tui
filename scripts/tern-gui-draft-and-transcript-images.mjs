@@ -180,6 +180,31 @@ export default async function (h) {
     JSON.stringify(viewerImage))
   h.capture('pr4-gui-image-viewer', 'the client\'s own image viewer after a real click')
 
+  // ── The SIBLING question, measured WHILE the viewer is open ──
+  // Two images live under the ONE User message, so the sibling affordances only
+  // exist inside the open viewer. Measuring after Escape would observe the
+  // transcript, not the viewer, and prove nothing about sibling navigation.
+  const viewerButtons = elementsOf(viewer).filter(element => element.role === 'Button')
+  h.measure('the viewer buttons while it is open', JSON.stringify(viewerButtons))
+  const siblingControl = viewerButtons.find(element => /next|previous|back|forward|\u2039|\u203a/i.test(String(element.name ?? '')))
+  h.measure('the viewer sibling affordance (this client build)',
+    JSON.stringify({ found: siblingControl !== undefined, control: siblingControl ?? null }))
+  if (siblingControl?.bounds !== undefined) {
+    const [sx, sy, sw, sh] = siblingControl.bounds
+    const openedName = String(viewerImage?.name ?? '')
+    await h.clickAt(sx + sw / 2, sy + sh / 2, 900)
+    const afterSibling = viewerOf(h.ctl('a11y'))
+    const siblingImage = elementsOf(afterSibling).find(element => element.role === 'Image')
+    h.check('the sibling control moves the viewer to the OTHER image of the same message',
+      siblingImage !== undefined && String(siblingImage.name) !== openedName,
+      `opened=${JSON.stringify(openedName)} now=${JSON.stringify(String(siblingImage?.name ?? ''))}`)
+    h.capture('pr4-gui-viewer-sibling', 'the client viewer after using its sibling affordance')
+  } else {
+    // Recorded, never claimed as a pass: this build exposes no sibling control.
+    h.measure('the viewer sibling navigation is UNPROVEN on this client build',
+      'no next/previous control in the open viewer accessibility tree')
+  }
+
   // ── Escape is the client's own close path, asserted BEFORE any fallback ──
   await h.key('escape', 800)
   const afterEscape = viewerOf(h.ctl('a11y'))
@@ -199,12 +224,6 @@ export default async function (h) {
   h.check('the dock rows survived the viewer round-trip',
     h.has(afterClose, 'Draft images · 3 occurrences'), h.texts(afterClose).join(' | '))
 
-  // ── The SIBLING question: two images under the ONE User message ──
-  // The client's sibling behaviour is MEASURED, never assumed: the lane records
-  // whether the viewer offers a next/previous affordance for this shape.
-  const siblings = elementsOf(h.ctl('a11y')).filter(element =>
-    element.role === 'Button' && /Next|Previous|Zoom/i.test(String(element.name ?? '')))
-  h.measure('the viewer sibling/zoom affordances (this client build)', JSON.stringify(siblings))
   h.capture('pr4-gui-after-close', 'back in the transcript after the viewer closed')
 
   // ── Light/dark are BOTH captured, and a SHORT window is measured, not claimed ──

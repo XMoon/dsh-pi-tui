@@ -1060,6 +1060,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // send that failed already routed the fatal lifecycle, and the last
     // committed frame stands.
     if (imageProjectionAborted || visualProjectionAborted) return
+    // PR4: the subscription ledger converges HERE, not only on a transcript
+    // commit. A recalled draft arrives through the COMPOSER alone (a queue
+    // pull-back writes the draft and never mutates the transcript), so a
+    // commit-only sync would leave its durable ref unsubscribed and unread —
+    // the preview would sit in "Loading image…" forever.
+    //
+    // The HYDRATION window is excluded: `beginSessionHydration()` deliberately
+    // retires the outgoing subject's subscriptions, and re-subscribing here
+    // would resurrect reads for a subject the surface is replacing. The new
+    // subject's own commit re-enters through `syncImageSubscriptions` in
+    // `setTranscript` and rebuilds the ledger from scratch.
+    if (!hydrating) syncImageSubscriptions()
     const draftStates = prepareDockDraftImageStates()
     if (imageProjectionAborted) return
     const dockNode = dockView(draftStates)
