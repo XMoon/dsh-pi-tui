@@ -1232,6 +1232,52 @@ ${harness.view()}`)
   harness.app.dispose()
 })
 
+test('T09 a Host invalidation before the repaint refuses the held rail press', async () => {
+  // §3.4 Press -> Host invalidate: the Controller's read generation and state
+  // change BEFORE the queued repaint runs, so the page's synchronous revision is
+  // still old. The root fence must use the page's LIVE currentness.
+  const harness = await open({ columns: 120, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  const aboutRow = railRow(harness, 'About')
+  press(harness, aboutRow, 3)
+  harness.invalidate()
+  // NO settle: the page has not repainted, and `gestureRevision()` may be old.
+  assert.equal(harness.panel.frameIsCurrent(), false, 'the page reports itself stale before the repaint')
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /Settings · Plugins/u, 'the stale rail release never switches category')
+  assert.equal(harness.panel.currentView(), 'list', 'the plugin page survives the stale release')
+  // Positive control on a fresh rail row once the frame is current again.
+  click(harness, railRow(harness, 'Models'), 3)
+  await harness.settle()
+  assert.match(harness.view(), /^> Models\b/mu, 'the fresh rail click still switches category')
+  harness.app.dispose()
+})
+
+test('T09 a no-op wheel never cancels a legal rail click', async () => {
+  // RFL-012: a wheel that cannot move the window must not bump the page's
+  // gesture revision, or a legitimate rail press would be refused with no
+  // visible change to justify it.
+  const harness = await open({ columns: 120, rows: 12 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  const listRow = rowOf(harness, 'Search: /')
+  const before = harness.panel.gestureRevision()
+  // An UP wheel over the List at offset 0 cannot move it.
+  wheel(harness, listRow + 1, 30, false)
+  await harness.settle()
+  assert.equal(harness.panel.gestureRevision(), before, 'a no-op List wheel does not bump the revision')
+
+  // A rail press held across that no-op wheel must still be admitted.
+  const aboutRow = railRow(harness, 'About')
+  press(harness, aboutRow, 3)
+  wheel(harness, listRow + 1, 30, false)
+  await harness.settle()
+  release(harness, aboutRow, 3)
+  await harness.settle()
+  assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives an immaterial wheel')
+  harness.app.dispose()
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
 test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {

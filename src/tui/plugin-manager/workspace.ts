@@ -150,6 +150,14 @@ export interface EmbeddedPluginPage extends Component {
    * page: the same view and yield status can still hide a changed list.
    */
   gestureRevision(): number
+  /**
+   * Whether the LAST painted frame is still CURRENT: its revision, local grant,
+   * live Controller model/read generation, install phase, notice and status all
+   * still match. Unlike {@link gestureRevision} this catches a Controller change
+   * whose queued repaint has not run yet, so a root gesture recorded before that
+   * change is refused instead of resolving against the stale hit map.
+   */
+  frameIsCurrent(): boolean
   cancelPointer(): void
   handleInput(data: string): void
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined
@@ -498,8 +506,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return { handled: true }
     }
     if (this.view === 'install') {
-      this.scrollInstall(delta, plan)
-      this.bumpRevision()
+      if (this.scrollInstall(delta, plan)) this.bumpRevision()
       this.intents.requestRender()
       return { handled: true }
     }
@@ -522,15 +529,24 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return { handled: true }
   }
 
+  /** A wheel that cannot move the painted window is NOT a gesture boundary: a
+   *  no-op bump would revoke a legitimate press the user still holds (the
+   *  Settings root fences its rail presses by this page's revision). */
   private scrollList(delta: number): void {
-    this.listOffset = Math.max(0, this.listOffset + delta)
-    this.bumpRevision()
+    const next = Math.max(0, this.listOffset + delta)
+    if (next !== this.listOffset) {
+      this.listOffset = next
+      this.bumpRevision()
+    }
     this.intents.requestRender()
   }
 
   private scrollDetail(delta: number): void {
-    this.detailOffset = Math.max(0, this.detailOffset + delta)
-    this.bumpRevision()
+    const next = Math.max(0, this.detailOffset + delta)
+    if (next !== this.detailOffset) {
+      this.detailOffset = next
+      this.bumpRevision()
+    }
     this.intents.requestRender()
   }
 
@@ -2005,18 +2021,24 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return actions
   }
 
-  private scrollInstall(delta: number, plan: ChromePlan | undefined): void {
+  /** Returns whether the window really moved: a no-op wheel is not a gesture
+   *  boundary (see {@link scrollList}). */
+  private scrollInstall(delta: number, plan: ChromePlan | undefined): boolean {
     const install = this.controller.installView()
-    if (install === undefined) return
+    if (install === undefined) return false
     if (install.phase === 'starting' || install.phase === 'installing' || install.phase === 'applying' || install.phase === 'cancelling') {
       const visible = this.visibleLogLines(plan)
-      if (this.logsExpanded) {
-        const max = Math.max(0, install.log.length - visible)
-        this.logOffset = Math.min(Math.max(0, this.logOffset + delta), max)
-      }
-      return
+      if (!this.logsExpanded) return false
+      const max = Math.max(0, install.log.length - visible)
+      const next = Math.min(Math.max(0, this.logOffset + delta), max)
+      if (next === this.logOffset) return false
+      this.logOffset = next
+      return true
     }
-    this.installOffset = Math.max(0, this.installOffset + delta)
+    const next = Math.max(0, this.installOffset + delta)
+    if (next === this.installOffset) return false
+    this.installOffset = next
+    return true
   }
 
   private visibleLogLines(plan: ChromePlan | undefined): number {
@@ -2837,7 +2859,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    * match the frame whose hit map is installed in `paintedTargets`. Comparing
    * only the panel revision would miss an async controller model/phase/notice
    * update whose queued repaint has not run yet. */
-  private frameIsCurrent(): boolean {
+  frameIsCurrent(): boolean {
     return this.paintedRevision === this.revision
       && this.lastRenderWidth === this.viewport.width
       && this.lastRenderRows === this.viewport.rows

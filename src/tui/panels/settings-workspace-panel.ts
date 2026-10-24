@@ -3763,7 +3763,12 @@ export class SettingsWorkspacePanel implements Component {
     // selected card, install phase, scroll, painted action set). The view/yield
     // triple alone misses a filter or selection change inside the SAME view, so
     // both parts are required.
-    return `${page.gestureRevision()}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
+    // `frameIsCurrent()` is the live half: it compares the painted frame against
+    // the Controller's CURRENT model/read generation, install phase, notice and
+    // status, so a state change whose queued repaint has not run yet is a
+    // boundary too (§3.4 Press -> Host invalidate). `gestureRevision()` is the
+    // synchronous half (filter/selection/view changes the page already applied).
+    return `${page.gestureRevision()}:${page.frameIsCurrent() ? 'current' : 'stale'}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
   }
 
   /** Whether one panel cell belongs to the painted content column. */

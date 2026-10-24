@@ -61,6 +61,7 @@ function embeddedPage(counts: CommandCounts): EmbeddedPluginPage {
     canYieldFocusToNavigation: () => true,
     pendingMutation: () => false,
     gestureRevision: () => 0,
+    frameIsCurrent: () => true,
     cancelPointer: () => {},
     handleInput: () => {},
     handleMouse: () => undefined,
