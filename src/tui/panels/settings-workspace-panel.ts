@@ -2819,6 +2819,14 @@ export class SettingsWorkspacePanel implements Component {
    */
   private handleContentInput(data: string): void {
     const page = this.authPage
+    // Below the body floor NO body action is visible: the frame paints only the
+    // truthful Esc bar. Keep the genuine modal cancel/back keys (Esc/Backspace)
+    // and drop every hidden body key BEFORE it can reach the page, so a resize
+    // cannot turn an invisible refresh/action into a Host read or write. The
+    // legacy panes use the same floor gate below.
+    if (this.bodyFloor() < 1
+      && !matchesKey(data, 'escape')
+      && !matchesKey(data, 'backspace')) return
     // Tab / Shift+Tab leave a READ-ONLY direct region on a wide/medium frame:
     // About has no page key of its own, and a real page may only yield when its
     // own confirmation/pending state allows it. A narrow terminal has no second

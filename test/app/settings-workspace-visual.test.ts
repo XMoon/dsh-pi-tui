@@ -156,6 +156,8 @@ interface Harness {
   readonly releaseOwned: () => void
   /** How many times the Settings Plugins entry built its page (D2-0). */
   readonly pluginPages: () => number
+  /** Host/provider/account reads in the fake seams (the hidden-action witness). */
+  readonly hostReads: () => number
   readonly dispose: () => void
 }
 
@@ -180,6 +182,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const warnings: { message: string; fields?: Record<string, unknown> }[] = []
   const held: Array<() => void> = []
   let reads = 0
+  let hostReads = 0
   let replacements = 0
   let pluginPages = 0
   const visualWrites: boolean[] = []
@@ -337,9 +340,18 @@ function setup(options: HarnessOptions = {}): Harness {
       // empty, unavailable Host — no provider, no record, no account.
       providers: {
         available: () => options.providerOptions !== undefined,
-        listCredentialOptions: () => options.providerOptions ?? [],
-        readCatalog: () => ({ options: options.providerOptions ?? [], profiles: [] }),
-        readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] }),
+        listCredentialOptions: () => {
+          hostReads += 1
+          return options.providerOptions ?? []
+        },
+        readCatalog: () => {
+          hostReads += 1
+          return { options: options.providerOptions ?? [], profiles: [] }
+        },
+        readProfile: (route: string) => {
+          hostReads += 1
+          return { route, configured: false, displayName: route, models: [] }
+        },
         configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
         writeProfile: async () => {},
         writeKeylessProfile: async () => ({ kind: 'written' as const }),
@@ -354,7 +366,10 @@ function setup(options: HarnessOptions = {}): Harness {
       },
       account: {
         available: () => false,
-        getState: async () => { throw new Error('account unavailable') },
+        getState: async () => {
+          hostReads += 1
+          throw new Error('account unavailable')
+        },
         getProfile: async () => null,
         getBalance: async () => null,
         watch: async function* () {},
@@ -434,6 +449,7 @@ function setup(options: HarnessOptions = {}): Harness {
     visualState: () => visualState,
     writes: () => writes,
     pluginPages: () => pluginPages,
+    hostReads: () => hostReads,
     releaseOwned: () => {
       const list = held.splice(0)
       for (const run of list) run()
@@ -4819,4 +4835,50 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
   assert.equal(h.vt.getCellFgRgb(paneRow, cellIndexOf(h, paneRow, '[About]')), hexToRgb(currentPalette.primary),
     'the pane-header device follows the live light palette')
   h.dispose()
+})
+
+
+test('a content page below the body floor runs no hidden refresh and keeps its Esc back path', async () => {
+  const models = setup({ columns: 120, rows: 24, providerOptions: SETTINGS_PROVIDERS })
+  await models.open('Models')
+  await key(models, '\t') // rail -> Models content
+  models.vt.resize(120, 2)
+  await models.vt.waitForRender()
+  assert.match(models.rowsPlain().at(-1) ?? '', /Esc back/u)
+  const modelReads = models.hostReads()
+  await key(models, 'r')
+  await key(models, 'c')
+  await key(models, '\r')
+  assert.equal(models.hostReads(), modelReads, 'the hidden Models refresh/copy/action ran no Host read')
+  await key(models, '\u001b')
+  assert.match(models.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
+  models.dispose()
+
+  const account = setup({ columns: 120, rows: 24 })
+  await account.open('Account')
+  await key(account, '\t') // rail -> Account content
+  account.vt.resize(120, 2)
+  await account.vt.waitForRender()
+  assert.match(account.rowsPlain().at(-1) ?? '', /Esc back/u)
+  const accountReads = account.hostReads()
+  await key(account, 'r')
+  await key(account, '\r')
+  assert.equal(account.hostReads(), accountReads, 'the hidden Account refresh/action ran no Host read')
+  await key(account, '\u001b')
+  assert.match(account.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
+  account.dispose()
+
+  const about = setup({ columns: 44, rows: 20 })
+  await about.openHome()
+  about.vt.resize(44, 2)
+  await about.vt.waitForRender()
+  const aboutReads = about.reads()
+  await key(about, 'r')
+  await key(about, 'c')
+  await key(about, '\r')
+  assert.equal(about.reads(), aboutReads, 'the hidden About refresh performed no settings read')
+  assert.deepEqual(about.copied, [], 'the hidden copy keys are inert')
+  await key(about, '\u001b')
+  assert.match(about.rowsPlain()[0]!, /Settings · Categories/u, 'Esc still returns to the rail')
+  about.dispose()
 })

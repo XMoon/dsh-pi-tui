@@ -1101,3 +1101,53 @@ test('one- and two-row frames paint only the truthful bar and publish no body ta
     assert.equal(plain(h, 100), before, 'the bar is not an interactive body target')
   }
 })
+
+test('below the body floor the content focus forwards only Esc/Backspace, never a hidden page action', () => {
+  const h = setup({ columns: 120, rows: 40 })
+  plain(h, 120)
+  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\r') // the content takes the keyboard
+  const page = h.built[0]
+  assert.ok(page !== undefined)
+  h.resize(120, 2)
+  for (const data of ['r', 'R', 'c', 'C', '\r', '\t', '\u001b[B', '\u001b[6~', '\u001b[H', '\u001b[D']) {
+    h.panel.handleInput(data)
+  }
+  assert.deepEqual(page.inputs, [], 'no hidden body action or cursor key reaches the page')
+  page.exitOn = '\u001b'
+  h.panel.handleInput('\u001b')
+  assert.deepEqual(page.inputs, ['\u001b'], 'the real modal cancel still reaches the page')
+  assert.match(plain(h, 120), /Settings · Categories/u, 'the page Esc returned the keyboard to the rail')
+
+  // Backspace is the same genuine back path and survives the floor gate.
+  h.resize(120, 40)
+  plain(h, 120)
+  h.panel.handleInput('\r') // re-enter the same mounted page
+  h.resize(120, 2)
+  page.exitOn = '\u007f'
+  h.panel.handleInput('\u007f')
+  assert.deepEqual(page.inputs, ['\u001b', '\u007f'])
+  assert.match(plain(h, 120), /Settings · Categories/u)
+
+  // The narrow About content is the root-owned projection: a hidden refresh
+  // never reaches its owner below the body floor.
+  let refreshes = 0
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: { kind: 'ready', sessionId: 'sess-floor', title: 'floor proof', cwd: '/ws', context: 'fresh' },
+    epoch: 4,
+  }
+  const about = setup({
+    columns: 44,
+    rows: 20,
+    aboutStatusSource: staticAboutSource(view, () => { refreshes += 1 }),
+  })
+  about.panel.render(44) // the narrow About content owns the first frame
+  about.resize(44, 2)
+  about.panel.render(44)
+  for (const data of ['r', 'R', 'c', 'C', '\r', '\t', '\u001b[B']) about.panel.handleInput(data)
+  assert.equal(refreshes, 0, 'the hidden About refresh is gated below the body floor')
+  assert.equal(about.closes(), 0, 'the workspace never closes from a hidden key')
+  about.panel.handleInput('\u001b')
+  assert.match(plain(about, 44), /Settings · Categories/u)
+})
