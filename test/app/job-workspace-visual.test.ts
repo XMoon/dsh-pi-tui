@@ -24,6 +24,7 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { OwnedRunner, TuiAppEvents } from '../../src/tui-app.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
@@ -166,6 +167,7 @@ function startApp(columns = 120, rows = 40, jobIds: readonly string[] = ['job-a'
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub(),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
   })

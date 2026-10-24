@@ -30,6 +30,7 @@ import { SettingsWorkspacePanel, type SettingsWorkspaceSource } from '../../src/
 import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
 import { TaskBrowserPanel } from '../../src/tui/panels/task-panel.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import type { AdvancedInteractiveComponent } from '../../src/extension/advanced-types.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
@@ -191,6 +192,7 @@ function attachTasks(app: TuiApp, options: { jobIds?: readonly string[]; childId
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub(),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
   })

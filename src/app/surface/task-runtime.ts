@@ -28,8 +28,9 @@ import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRunti
 import { isTaskItemActive, projectTaskItems, rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPanelItem, type TaskScope } from './task-presentation.ts'
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-attention.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
-import type { JobInspectorHandle, TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
+import type { JobInspectorHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
 import type { SurfaceDisplaySeam } from './display-seam.ts'
+import type { TaskBrowserPresentationHandle, TaskCenterPresentationPort } from './task-presentation-port.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
@@ -172,14 +173,22 @@ export interface TaskBrowserViewState {
 /** The narrow inputs of the Task Center owner; one cohesive lifetime. */
 export interface TaskRuntimeOptions {
   /** The mounted app (throws before `start()`), read through the aggregate.
-   * PiTui-only sinks (browser/viewer/panel chrome, action receipts) read it;
-   * background-reachable roster commits go through {@link display}. */
+   * B3-A1 moved every Task Center browser/viewer/chrome commit onto
+   * {@link presentation}; this stays the PiTui-only workspace owner (the Job
+   * Inspector overlay mount), which the Task Center viewer routes to. */
   readonly mounted: () => TuiApp
   /** PR3-A: the renderer-facing display seam. Background roster/summary
    * commits and the attention reset are reachable while a read-only TSP
-   * renderer owns the terminal; they consult the seam's capability flags and
-   * are skipped (not faked) when the renderer presents no Task Center. */
+   * renderer owns the terminal; they consult the seam's capability flag, the
+   * ONE Task Center reachability truth (`supportsTaskCenter`), and are
+   * skipped/declined (not faked) when the renderer presents no Task Center.
+   * Notices also commit here: the existing notice sink is the ONE
+   * renderer-neutral projection, so no second notification port exists. */
   readonly display: () => SurfaceDisplaySeam
+  /** B3-A1: the Task Center presentation sink. Late-bound because the runtime
+   * is constructed before the renderer mounts; a read before the mount is an
+   * internal wiring failure, never a silent no-op port. */
+  readonly presentation: () => TaskCenterPresentationPort
   /** The runner's cleanup latch (the ORIGINAL `cleanedUp` fence). */
   readonly isCleanedUp: () => boolean
   /** The injected Question-attention read/subscription (never the controller). */
@@ -444,7 +453,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   let taskBrowserGlobalRows: TaskBrowserRow[] = []
   let taskRuntime: TaskBrowserRuntime | undefined
   let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
-  let activeTaskBrowser: TaskBrowserHandle | undefined
+  let activeTaskBrowser: TaskBrowserPresentationHandle | undefined
   let activeTaskBrowserToken: object | undefined
   /** The open browser's mode (always `'full'` when a browser is open — the
    *  Quick modal is retired; Full lists every actionable attention row).
@@ -602,7 +611,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   const publishQuickProjection = (): void => {
     if (options.isCleanedUp()) return
     if (!options.display().supportsTaskCenter) return
-    options.mounted().setQuickTaskItems(quickTaskProjection(taskBrowserGlobalRows, options.attention.rows()))
+    options.presentation().setQuickTaskItems(quickTaskProjection(taskBrowserGlobalRows, options.attention.rows()))
   }
 
   const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string, globalRows?: readonly TaskBrowserRow[]): void => {
@@ -627,7 +636,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // PR3-A: the roster badge is Task-Center chrome; a renderer without it
     // (read-only TSP) legitimately skips the commit — never a fake roster.
     if (!options.display().supportsTaskCenter) return
-    options.mounted().setAgents(running.map(entry => ({
+    options.presentation().setAgents(running.map(entry => ({
       id: entry.id,
       label: entry.label,
       activity: 'running',
@@ -641,7 +650,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     taskCatalogDescendants = summary.totalAgents
     if (options.isCleanedUp()) return
     if (!options.display().supportsTaskCenter) return
-    options.mounted().setTaskSummary(summary)
+    options.presentation().setTaskSummary(summary)
   }
   const commitRefreshState = (state: 'loading' | 'ready' | 'stale', error?: string): void => {
     if (options.isCleanedUp()) return
@@ -748,11 +757,11 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         onResult: (outcome) => {
           if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
           const notice = jobStopNotice(outcome, row.label)
-          options.mounted().notify(notice.message, notice.level)
+          options.display().notify(notice.message, notice.level)
         },
         onError: (error) => {
           if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
-          options.mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+          options.display().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
         },
       })
       // No optimistic local mutation: the official roster/observation streams
@@ -843,7 +852,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           sessionId: () => ownerSessionId,
           onError: (error) => {
             if (options.isCleanedUp()) return
-            options.mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+            options.display().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
           },
         })
         // The transcript viewer is a session surface, not a Job child
@@ -890,7 +899,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     if (row.kind === 'external') {
       // No local child Session exists for an external execution: the row is a
       // fact, never a viewer target (S2-B1 §4A.1).
-      options.mounted().notify('external subagent: no local session to open', 'info')
+      options.display().notify('external subagent: no local session to open', 'info')
       return 'keep-open'
     }
     if (row.kind === 'subagent') {
@@ -913,7 +922,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         sessionId: () => source.sessionId(),
         onError: (error) => {
           if (options.isCleanedUp()) return
-          options.mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+          options.display().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
         },
       })
       // The subagent transcript is a session/viewer surface, not a
@@ -942,6 +951,11 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
    */
   const openQuickTaskItem = (value: string): boolean => {
     if (options.isCleanedUp()) return false
+    // A1: a renderer without a Task Center presents no Quick window, so this
+    // typed Quick route must refuse before it can open ANY hidden surface or
+    // report a fabricated receipt. The capability check is the display
+    // seam's ONE `supportsTaskCenter` truth.
+    if (!options.display().supportsTaskCenter) return false
     const source = taskCenter()
     const sessionId = source.sessionId()
     if (sessionId === undefined) return false
@@ -977,6 +991,15 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void => {
+    // A1: the Task Center reachability truth is the display seam's ONE
+    // `supportsTaskCenter` flag. A renderer that presents no Task Center (the
+    // read-only TSP mount) declines at the REAL entry, before any catalog
+    // scope/attention/browser-token state is touched, and says so once —
+    // never a silent no-op and never a PiTui-only call on a missing app.
+    if (!options.display().supportsTaskCenter) {
+      options.display().notify('Work Hub is not available in this renderer yet.', 'info')
+      return
+    }
     const source = taskCenter()
     const browserSessionId = source.sessionId()
     if (options.isCleanedUp() || browserSessionId === undefined) return
@@ -1069,14 +1092,14 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           onResult: (outcome) => {
             if (options.isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
             if (outcome.kind === 'committed') {
-              options.mounted().notify(`stopping ${row.label}`, 'info')
+              options.display().notify(`stopping ${row.label}`, 'info')
               return
             }
             if (outcome.kind === 'indeterminate') {
               // A dispatched interrupt whose settlement is unknown must not
               // be reported as "not stopped"; the authoritative task/read
               // state decides and no automatic replay happens.
-              options.mounted().notify(`could not confirm stopping ${row.label} — the session state will decide`, 'error')
+              options.display().notify(`could not confirm stopping ${row.label} — the session state will decide`, 'error')
               return
             }
             const reason = outcome.reason.kind === 'error'
@@ -1084,11 +1107,11 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
               : outcome.reason.message ?? (outcome.reason.kind === 'unauthorized'
                 ? 'subagent interrupt unauthorized'
                 : 'subagent service unavailable')
-            options.mounted().notify(`could not stop ${row.label}: ${reason}`, 'error')
+            options.display().notify(`could not stop ${row.label}: ${reason}`, 'error')
           },
           onError: (error) => {
             if (options.isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
-            options.mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+            options.display().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
           },
         })
         return
@@ -1105,11 +1128,11 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         onResult: (outcome) => {
           if (options.isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
           const notice = jobStopNotice(outcome, row.label)
-          options.mounted().notify(notice.message, notice.level)
+          options.display().notify(notice.message, notice.level)
         },
         onError: (error) => {
           if (options.isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
-          options.mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+          options.display().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
         },
       })
     }
@@ -1122,7 +1145,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     options.attention.publish()
     const initialPreferred = taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
       ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
-    const handle = options.mounted().openTaskBrowser(
+    const handle = options.presentation().openBrowser(
       taskPanelItemsWithAttention(taskBrowserRows),
       // Selection disposition decides whether the browser survives: a Job
       // detail keeps it MOUNTED underneath (the overlay stack hides and
@@ -1285,7 +1308,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           sessionId: () => source.sessionId(),
           onError: (error) => {
             if (options.isCleanedUp()) return
-            options.mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+            options.display().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
           },
         })
         return
@@ -1296,6 +1319,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         // becomes the browser's dataset scope; the existing Task Center
         // provides search/filter/browse and the existing cold-view
         // semantics for terminal children (plan §10.7).
+        // A1: no browse capability = no scoped browser and no fake receipt.
+        // This refuses BEFORE the scope/header work, symmetrically with
+        // `openTasksBrowser`'s own gate.
+        if (!options.display().supportsTaskCenter) return
         if (taskRuntime === undefined) return
         const count = action.childIds.length
         const header = action.kind === 'open-phase-agents'
@@ -1344,7 +1371,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
             startedAt: job.startedAt,
             finishedAt: job.finishedAt,
           }))
-          if (options.display().supportsTaskCenter) options.mounted().setTasks(tasks)
+          if (options.display().supportsTaskCenter) options.presentation().setTasks(tasks)
           // A jobs-only session has no catalog coordinator, so this is the
           // ONLY refresh channel for the OPEN browser AND for the passive
           // accessory. The rows are kept in step with the registry even while
@@ -1430,7 +1457,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         refreshAgents = (): void => {
           if (options.isCleanedUp()) return
           if (source.sessionId() === undefined) {
-            if (options.display().supportsTaskCenter) options.mounted().setAgents([])
+            if (options.display().supportsTaskCenter) options.presentation().setAgents([])
             return
           }
           taskCatalogRefreshPendingInvalidations += 1
@@ -1443,7 +1470,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         refreshAgentRuntimeOnly = (): void => {
           if (options.isCleanedUp()) return
           if (source.sessionId() === undefined) {
-            if (options.display().supportsTaskCenter) options.mounted().setAgents([])
+            if (options.display().supportsTaskCenter) options.presentation().setAgents([])
             return
           }
           taskRuntime!.refreshRuntime()
@@ -1473,7 +1500,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // A session switch drops the old session's Question attention with the
       // rest of the Task Center state: its parked count must not arm the new
       // session's footer trigger.
-      if (options.display().supportsTaskCenter) options.mounted().setQuestionAttention(0)
+      if (options.display().supportsTaskCenter) options.presentation().setQuestionAttention(0)
       // Invalidate the coalescing gate BEFORE any close/dispose that can
       // synchronously run a callback: the old session's slow traversal must
       // neither hold the new session's refresh back (`inFlight`) nor clear the
@@ -1517,17 +1544,17 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         () => { taskBrowserScope = { kind: 'all' } },
         () => {
           if (options.display().supportsTaskCenter) {
-            options.mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
+            options.presentation().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
           }
         },
-        () => { if (options.display().supportsTaskCenter) options.mounted().setTasks([]) },
-        () => { if (options.display().supportsTaskCenter) options.mounted().setAgents([]) },
+        () => { if (options.display().supportsTaskCenter) options.presentation().setTasks([]) },
+        () => { if (options.display().supportsTaskCenter) options.presentation().setAgents([]) },
         () => { taskBrowserRows = [] },
         () => { taskBrowserGlobalRows = [] },
         // The passive below-editor window is session-scoped state like the
         // badge/summary mirrors: the new session must never paint the old
         // session's tasks. No acknowledgement is ever issued here.
-        () => { if (options.display().supportsTaskCenter) options.mounted().setQuickTaskItems([]) },
+        () => { if (options.display().supportsTaskCenter) options.presentation().setQuickTaskItems([]) },
       ])
     },
     openTasksBrowser(viewMode, scope, header) {

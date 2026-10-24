@@ -23,6 +23,7 @@ import { JobInspectorPanel } from '../../src/tui/panels/job-inspector-panel.ts'
 import { JobOutputScrollView } from '../../src/tui/panels/job-output-scroll-view.ts'
 import { rebaseRetainedAnchor } from '../../src/tui/panels/job-output-search.ts'
 import { createTaskRuntime, type JobInspectorState, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../../src/runtime/job-observation-port.ts'
@@ -185,6 +186,7 @@ function attachTasks(app: TuiApp, options: { jobIds?: readonly string[] } = {}):
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub(),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
   })

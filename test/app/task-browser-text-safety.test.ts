@@ -21,13 +21,14 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservationPort, JobStopOutcome } from '../../src/runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome, SubagentInterruptRequest } from '../../src/runtime/subagent-port.ts'
 import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { displaySeamStub } from '../support/display-seam-stub.ts'
+import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 /** The task's verified hostile fixture: an OSC 52 clipboard write (with a
@@ -164,7 +165,8 @@ function startHarness(options: HarnessOptions = {}): Harness {
   }
   const tasks = createTaskRuntime({
     mounted: () => app,
-    display: () => displaySeamStub(),
+    display: () => pituiDisplaySeam(app),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
   })

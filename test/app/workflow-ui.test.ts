@@ -17,6 +17,7 @@ import { TuiApp, type WorkflowAction } from '../../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type WorkflowMemberView, type WorkflowRunId, type WorkflowRunStatus } from '../../src/transcript.ts'
 import { workflowMemberViewerTarget, type TaskBrowserRow } from '../../src/domain/task/browser.ts'
 import { createTaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
@@ -532,6 +533,7 @@ test('Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open and r
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub(),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
   })

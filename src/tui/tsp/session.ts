@@ -59,9 +59,11 @@ import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
+import { TspWorkHub } from './work-hub.ts'
 import type { ModelPresentation } from '../../app/command/model-presentation.ts'
 import type { PresetPresentation } from '../../app/command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
+import type { TaskCenterPresentationPort } from '../../app/surface/task-presentation-port.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
@@ -199,6 +201,13 @@ export interface TspRenderer extends TspInputBinding {
   readonly presetPresentation: PresetPresentation | undefined
   /** Internal read-only Session Browser seam; absent unless all required kinds are negotiated. */
   readonly sessionBrowserPresentation: SessionBrowserPresentation | undefined
+  /**
+   * B3-A1: the Task Center presentation sink. It is ALWAYS present — the
+   * internal native Work Hub is the renderer's implementation — but the
+   * renderer's `display.supportsTaskCenter` stays false, so no production
+   * `/tasks` path reaches it in A1.
+   */
+  readonly taskPresentation: TaskCenterPresentationPort
   /**
    * PR3-B B1: the composer projection backed by the renderer's ONE
    * program-owned composer (`getDraft()` reads the VISIBLE editor, never a
@@ -343,6 +352,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let modelPicker: TspModelPicker | undefined
   let presetPicker: TspPresetPicker | undefined
   let sessionBrowser: TspSessionBrowser | undefined
+  /** B3-A1: the internal native Work Hub presenter (same ONE layer). */
+  let workHub: TspWorkHub | undefined
   const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
@@ -408,14 +419,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     scrollSupported: session.caps.features.includes('scroll'),
   })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
+  workHub = new TspWorkHub({
+    surfaceId: surface.id,
+    render: () => render(),
+    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
+    // The pane width is derived from the SDK's live geometry — NEVER from a
+    // desktop window width (a TSP pane can be a split of any window).
+    paneWidth: () => session.caps.cols * session.caps.cell.w,
+  })
   /**
    * The ONE layer and its mutually-exclusive presenters. Opening one retires
-   * the other two before the next committed frame.
+   * the other three before the next committed frame.
    */
   const modelPresentation: ModelPresentation = {
     open: (request) => {
       sessionBrowser?.retire()
       presetPicker?.retire()
+      workHub?.retire()
       return modelPicker!.presentation.open(request)
     },
     notify: (message, kind) => modelPicker!.presentation.notify(message, kind),
@@ -424,6 +444,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     open: (request) => {
       sessionBrowser?.retire()
       modelPicker?.retire()
+      workHub?.retire()
       return presetPicker!.presentation.open(request)
     },
     notify: (message, kind) => presetPicker!.presentation.notify(message, kind),
@@ -432,6 +453,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     open: (request) => {
       presetPicker?.retire()
       modelPicker?.retire()
+      workHub?.retire()
       return sessionBrowser!.presentation.open(request)
     },
     notify: (message, kind) => sessionBrowser!.presentation.notify(message, kind),
@@ -527,13 +549,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (disposed) return
     const desired = seat.hasModalSeat()
       ? seat.desiredFocusId()
-      : sessionBrowser?.isOpen() === true
-        ? sessionBrowser.desiredFocusId() ?? null
-        : presetPicker?.isOpen() === true
-          ? presetPicker.desiredFocusId() ?? null
-          : modelPicker?.isOpen() === true
-            ? modelPicker.desiredFocusId() ?? null
-            : 'dock.composer'
+      : workHub?.isOpen() === true
+        ? workHub.desiredFocusId() ?? null
+        : sessionBrowser?.isOpen() === true
+          ? sessionBrowser.desiredFocusId() ?? null
+          : presetPicker?.isOpen() === true
+            ? presetPicker.desiredFocusId() ?? null
+            : modelPicker?.isOpen() === true
+              ? modelPicker.desiredFocusId() ?? null
+              : 'dock.composer'
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
     composer.setFocused(desired === 'dock.composer')
@@ -549,15 +573,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       sessionBrowser?.suspend()
       modelPicker?.suspend()
       presetPicker?.suspend()
+      workHub?.suspend()
     }
     const dockNode = dockView()
     const mainNode = lastMain
     surface.render({
       ...(mainNode === undefined ? {} : { main: mainNode }),
       ...(dockNode === undefined ? {} : { dock: dockNode }),
+      // Modal-first, then the four mutually-exclusive non-blocking presenters
+      // in their frozen priority order; the empty seat layer is the fallback.
       layer: seat.hasModalSeat()
         ? seat.renderLayer()
-        : sessionBrowser?.renderLayer() ?? presetPicker?.renderLayer() ?? modelPicker?.renderLayer() ?? seat.renderLayer(),
+        : workHub?.renderLayer()
+          ?? sessionBrowser?.renderLayer()
+          ?? presetPicker?.renderLayer()
+          ?? modelPicker?.renderLayer()
+          ?? seat.renderLayer(),
     })
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.
@@ -990,6 +1021,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       sessionBrowser?.retire()
       modelPicker?.retire()
       presetPicker?.retire()
+      // B3-A1: the Work Hub belongs to the outgoing subject — a newly
+      // committed owner never inherits its panel.
+      workHub?.retire()
       // P3: the transient Alt+Q list belongs to the subject that opened it — a
       // newly committed owner must not inherit it (and its keys).
       seat.closeTransientList()
@@ -1143,6 +1177,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       handlers.cancel()
       return false
     }
+    if (workHub?.handleKey(key)) return false
     if (sessionBrowser?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
@@ -1250,10 +1285,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       if (seat.hasModalSeat()) { if (seat.handleEvent(input.event)) applyFocus(true); return false }
       if (!hydrating && inputBound && 'sf' in input.event && input.event.sf === surface.id) {
+        // B3-A1: the Work Hub is the highest non-modal native presenter. Its
+        // local SELECT/ACTIVATE/ACTION admission never reaches a business
+        // router (A1 has no details/stop/open path).
+        if (workHub?.handleEvent(input.event)) return false
         if (sessionBrowser?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
-        if ((sessionBrowser?.isOpen() === true || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
+        if ((workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
+          || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
           && input.event.ev === 'focus') applyFocus(true)
       }
       return false
@@ -1360,6 +1400,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the B0 inert one. It is installed with the mount, but the surface only
     // opts into modals once `bindInput` has committed the application wiring.
     interaction: seat.presenter,
+    // B3-A1: the internal native Work Hub presentation sink. It is always
+    // supplied with the mount; the display seam's `supportsTaskCenter:false`
+    // stays the ONE production reachability truth until A3.
+    taskPresentation: workHub!.taskPresentation,
     // PR-C: the ONE image binding. It is installed before the first tool
     // projection (the mount does it) and never twice.
     bindImages: (binding) => {
@@ -1398,6 +1442,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // cancellation error) before the surface/session close below, and the
       // call is idempotent with the interaction owner's own `withdrawPending`.
       seat.dispose()
+      // B3-A1: the Work Hub retires BEFORE the older presenters and before
+      // the surface/session close (A1 adds no second SDK resource).
+      workHub?.retire()
       sessionBrowser?.retire()
       modelPicker?.retire()
       presetPicker?.retire()

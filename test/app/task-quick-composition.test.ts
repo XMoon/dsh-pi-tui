@@ -32,6 +32,7 @@ import { afterEach, test } from 'node:test'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import { QuestionSurfaceController } from '../../src/app/surface/question-controller.ts'
 import type { QuestionInteractionPort, QuestionSurfaceSnapshot, QuestionWaitClaim } from '../../src/runtime/interaction-port.ts'
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
@@ -207,6 +208,7 @@ function startQuick(options: {
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub({ supportsTaskCenter: options.supportsTaskCenter ?? true }),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => attention, reconcile: () => {}, publish: () => {}, reopen: () => false },
   })
@@ -657,6 +659,7 @@ test('the production Question controller subscription reaches the painted window
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub(),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: {
       rows: () => controller.attentionRows(),

@@ -44,12 +44,13 @@ import {
   commandSelectionRange,
 } from '../../src/tui/panels/job-command-document.ts'
 import { createTaskRuntime, type JobInspectorState, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import { DirectJobObservationPort } from '../../src/runtime/direct/job-observation-direct.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../../src/runtime/job-observation-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { displaySeamStub } from '../support/display-seam-stub.ts'
+import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 /** Real DSH producer/registry path with process execution controlled, not bypassed. */
@@ -681,7 +682,8 @@ function attachTasks(
   }
   const tasks = createTaskRuntime({
     mounted: () => app,
-    display: () => displaySeamStub(),
+    display: () => pituiDisplaySeam(app),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
   })

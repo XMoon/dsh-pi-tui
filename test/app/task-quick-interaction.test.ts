@@ -38,6 +38,7 @@ import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
 import { HistoryPanel } from '../../src/tui/panels/history-panel.ts'
 import { planTaskQuickLayout } from '../../src/tui/panels/task-quick-accessory.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
+import { pituiTaskCenterPresentation } from '../../src/app/surface/task-presentation-pitui.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
@@ -209,6 +210,7 @@ async function startQuick(options: {
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub({ supportsTaskCenter: true }),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: {
       rows: () => attention.map(row => ({
@@ -784,6 +786,7 @@ test('a parked Question enters the projection; a refused reopen reports no surfa
   const tasks = createTaskRuntime({
     mounted: () => app,
     display: () => displaySeamStub({ supportsTaskCenter: true }),
+    presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: {
       rows: () => attentionRows.map(row => ({
