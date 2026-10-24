@@ -74,8 +74,11 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
  * argument, an unavailable draft composer) run no intake at all, so this notice
  * is their ONLY visible outcome on a renderer without a command card; dropping
  * them here would silently swallow a real refusal. Their asynchronous intake is
- * unaffected: the single success/error message comes from the mounted composer
- * after the bytes are staged and the canonical token inserted.
+ * unaffected: every outcome message (and every failure) is owned by the mounted
+ * composer. A success is announced only after the intake reached its own commit
+ * point — an image's bytes staged, or a generic regular file's metadata draft
+ * staged from a bounded signature probe (its content streams at submit time) —
+ * AND the canonical token was inserted.
  */
 export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
   ...TSP_SUPPORTED_TUI_BUILTINS,
