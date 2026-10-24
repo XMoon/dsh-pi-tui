@@ -2734,12 +2734,12 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   page.setBodyHeight(6)
   const question = viewText(page).split('\n')
   assert.equal(question.length, 6)
-  assert.match(question.at(-1)!, /Enter disabled · Esc back/u, 'the disabled-Enter hint is the last row')
+  assert.match(question.at(-1)!, /Esc cancel/u, 'the only real question key stays on the last row')
   assert.ok(question.some(line => line.includes('Resize the terminal: the full form')), 'the warning keeps a body row')
   page.setBodyHeight(1)
   const questionOne = viewText(page).split('\n')
   assert.equal(questionOne.length, 1)
-  assert.match(questionOne[0]!, /Enter disabled · Esc back/u, 'a one-row question advertises no hidden submit')
+  assert.match(questionOne[0]!, /Esc cancel/u, 'a one-row question advertises no hidden submit')
 
   // The endpoint-discovered model multi-select picker.
   const discovery = fakeSource()

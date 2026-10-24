@@ -4883,12 +4883,35 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   assert.match(catalog.view(), /Filter: acme/u, 'the visible filter holds the typed query')
   catalog.vt.resize(120, 2)
   await catalog.vt.waitForRender()
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc clear filter/u,
+    'the zero-body hint names the real Esc effect while the filter is non-empty')
   await key(catalog, '\u007f')
   catalog.vt.resize(120, 24)
   await catalog.vt.waitForRender()
   assert.match(catalog.view(), /Filter: acme/u, 'the hidden Backspace did not edit the invisible query')
   assert.match(catalog.view(), /Add Provider/u, 'the catalog page stayed mounted')
+
+  // The truthful zero-body Esc performs exactly what it names: first it
+  // clears the non-empty filter, then the same frame names the real back.
+  catalog.vt.resize(120, 2)
+  await catalog.vt.waitForRender()
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc clear filter/u)
+  await key(catalog, '\u001b')
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u,
+    'after the clear, the zero-body hint is the real back')
+  catalog.vt.resize(120, 24)
+  await catalog.vt.waitForRender()
+  assert.match(catalog.view(), /Add Provider/u, 'the catalog page stayed mounted after the clear')
+  assert.doesNotMatch(catalog.view(), /Filter: acme/u, 'the advertised Esc clear really cleared the filter')
+
+  // With an empty filter the zero-body Esc is a real back to the Models list.
+  catalog.vt.resize(120, 2)
+  await catalog.vt.waitForRender()
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u)
+  await key(catalog, '\u001b')
+  catalog.vt.resize(120, 24)
+  await catalog.vt.waitForRender()
+  assert.match(catalog.view(), /Models & Credentials/u, 'the advertised Esc back really left the catalog')
   catalog.dispose()
 
   const about = setup({ columns: 44, rows: 20 })
