@@ -26,3 +26,9 @@ allowBuilds:
 verifyDepsBeforeRun: warn
 minimumReleaseAgeExclude:
 - '@deepseek-ai/*'
+
+# Security: every dependency in this workspace uses the patched zod. DSH
+# 0.2.1-rc.2 pins 4.4.3 exactly; 4.6.7 stays within the same major and carries
+# the fix for GHSA-mrhx-c7xc-m3w5.
+overrides:
+  zod: 4.6.7
