@@ -1762,6 +1762,36 @@ test('T09 narrow rail keys and Backspace wait for the destination frame', async 
   bs.app.dispose()
 })
 
+test('T09 narrow rail -> content refuses page keys until the content frame paints', async () => {
+  // RFL-017 reverse direction: at narrow widths the page stays mounted while the
+  // rail has the focus, and its local grant can be IDENTICAL across the transfer,
+  // so the page's own query stays false. The root must fence the keys it would
+  // dispatch into the new focus until the content frame paints.
+  const harness = await open({ columns: 72, rows: 24 })
+  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
+    .settingsWorkspace!.panel
+  assert.equal(rootPanel['focus'], 'content', 'the deep link starts on the content')
+  harness.vt.sendInput('\x1b') // yield to the rail
+  await harness.settle()
+  assert.equal(rootPanel['focus'], 'categories')
+
+  // ONE burst: Enter takes the content, then a body key arrives before that frame.
+  const readsBefore = harness.snapshotCalls()
+  harness.vt.sendInput('\r')
+  harness.vt.sendInput('r')
+  await harness.settle()
+  assert.equal(harness.snapshotCalls(), readsBefore,
+    'the body key forwarded in the rail -> content window never read the Host')
+
+  // Positive control: on the painted content frame the same key really refreshes.
+  const afterPaint = harness.snapshotCalls()
+  harness.vt.sendInput('r')
+  await harness.settle()
+  assert.ok(harness.snapshotCalls() > afterPaint,
+    'the same key really refreshes once the content frame has painted')
+  harness.app.dispose()
+})
+
 test('T09 Shift+Tab does not yield while a changed grant awaits its paint', async () => {
   // §4.2 covers the key the ROOT intercepts itself, not only the keys it forwards:
   // the root's Shift+Tab handler runs before `syncPluginFrame()` and would
@@ -1771,14 +1801,19 @@ test('T09 Shift+Tab does not yield while a changed grant awaits its paint', asyn
   await yieldToRail(harness)
   const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
     .settingsWorkspace!.panel
-  // ONE burst. `r` is what synchronizes the changed grant (the root only calls
-  // `syncPluginFrame()` when it forwards a content key), so the sequence is:
-  // focus transfer -> body key that installs the new grant and is refused ->
-  // Shift+Tab arriving before the frame that renders that grant.
+  // ONE burst: focus transfer -> body key -> Shift+Tab, all before the frame that
+  // shows the new focus. The root's projection guard refuses the body key first
+  // (the page's grant is never even synchronized), so the observable property is
+  // that no Host read happened and the focus did not yield.
+  const readsBeforeBurst = harness.snapshotCalls()
   harness.vt.sendInput('\t')
   harness.vt.sendInput('r')
-  assert.equal(harness.panel.grantAwaitingPaint(), true, 'the changed grant awaits its paint')
   harness.vt.sendInput('\x1b[Z')
+  await harness.settle()
+  assert.equal(harness.snapshotCalls(), readsBeforeBurst,
+    'the body key in the prepaint window never read the Host')
+  assert.equal(rootPanel['focus'], 'content',
+    'Shift+Tab did not yield to the rail while the transfer frame was pending')
   assert.equal(rootPanel['focus'], 'content',
     'Shift+Tab did not yield to the rail while the grant awaited its paint')
   await harness.settle()

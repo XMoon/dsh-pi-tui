@@ -2684,9 +2684,12 @@ export class SettingsWorkspacePanel implements Component {
     // and fencing them broke legitimate drill-down paths.
     if (this.categoryId !== 'plugins') return false
     if (this.paintedLayout === undefined) return false
-    // A transfer AWAY from the content is the one whose destination frame (the
-    // Categories rail) has not painted yet.
-    return this.paintedFocus === 'content' && this.focus !== 'content'
+    // BOTH directions of the narrow focus swap leave the painted frame behind:
+    // content -> rail (the Categories frame has not painted) and rail -> content
+    // (the page's grant may be unchanged, but the painted frame still shows the
+    // rail). Until the destination frame paints, the root refuses the keys it
+    // would otherwise dispatch into the new focus.
+    return this.paintedFocus !== this.focus
   }
 
 
@@ -3021,6 +3024,9 @@ export class SettingsWorkspacePanel implements Component {
     // The CONTENT focus belongs to the direct page: the root never forwards a
     // navigation key to it, and the page never receives a key the root owns.
     if (this.focus === 'content') {
+      // §4.2: a narrow focus transfer into the content may leave the painted frame
+      // showing the rail. Until the content frame paints, only the real Esc may act.
+      if (this.rootProjectionAwaitingPaint() && !matchesKey(data, 'escape')) return
       this.handleContentInput(data)
       return
     }
