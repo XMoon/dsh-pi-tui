@@ -1159,21 +1159,29 @@ export class PluginManagerController {
       return
     }
     if (event.log.requestId !== active.requestId) return
-    this.appendLog(active, event.log.stream, event.log.text)
+    if (!this.appendLog(active, event.log.stream, event.log.text)) return
     this.notifyChanged()
   }
 
-  private appendLog(active: ActiveInstall, stream: 'stdout' | 'stderr', text: string): void {
-    if (text === '') return
+  /** Append one Host log chunk. Returns whether the bounded log really changed:
+   *  an empty/blank chunk is NOT a presentation change, so the caller must not
+   *  notify (a no-op notification would advance the monotonic transition count
+   *  and revoke a legitimate held gesture). */
+  private appendLog(active: ActiveInstall, stream: 'stdout' | 'stderr', text: string): boolean {
+    if (text === '') return false
+    let appended = false
     for (const line of text.split('\n')) {
       if (line === '') continue
       active.log.push(stream === 'stderr' ? `! ${line}` : line)
+      appended = true
     }
+    if (!appended) return false
     if (active.log.length > LOG_MAX_LINES) active.log.splice(0, active.log.length - LOG_MAX_LINES)
     let total = active.log.reduce((sum, line) => sum + line.length + 1, 0)
     while (total > LOG_MAX_CHARS && active.log.length > 1) {
       total -= (active.log.shift()!.length + 1)
     }
+    return true
   }
 }
 

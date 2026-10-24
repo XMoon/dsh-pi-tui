@@ -1509,12 +1509,13 @@ test('T09 a background install phase round-trip under a held rail press refuses 
   harness.app.dispose()
 })
 
-test('T09 editing the install spec revokes the page\'s own held Inspect action', async () => {
-  // RFL-014: the editor field values decide what Inspect dispatches, so an edit
-  // under a held press must invalidate that press for the PAGE's own gate too.
+test("T09 editing the install spec revokes the page's own held Inspect action", async () => {
+  // RFL-014/RFL-015: the editor field values decide what Inspect dispatches, so an
+  // edit under a held press must make the PAGE's own release gate refuse it. The
+  // witness really presses Inspect, edits, then releases, and asserts nothing was
+  // dispatched.
   const harness = await open({ columns: 120, rows: 24 })
-  // Open the editor through its OWN entry (`i`) and type BEFORE any Inspect, so
-  // the phase is `editing` for the whole sequence.
+  // Open the manual editor through its own entry and type BEFORE any Inspect.
   for (let step = 0; step < 30 && harness.panel.selectedCardValue() === undefined; step += 1) {
     harness.vt.sendInput('\x1b[B')
     await harness.settle()
@@ -1523,19 +1524,29 @@ test('T09 editing the install spec revokes the page\'s own held Inspect action',
   await harness.settle()
   assert.equal(harness.panel.currentView(), 'install', 'i opens the install editor')
   assert.equal(harness.controller.installView()?.phase, 'editing', 'the editor is in its editing phase')
-  for (let character of 'pkg') harness.vt.sendInput(character)
+  for (const character of 'pkg') harness.vt.sendInput(character)
   await harness.settle()
-  assert.equal(harness.controller.installView()?.phase, 'editing', 'typing never leaves the editing phase')
-  // The page's own gate must see the edit: an edit is a semantic change.
+
+  // Hold a press on the painted Inspect action, edit the spec, then release.
+  const inspectRow = rowOf(harness, 'Inspect')
   const generationBefore = harness.panel.semanticGeneration()
-  const identityBefore = harness.panel.liveIdentity()
+  press(harness, inspectRow, 5)
   harness.vt.sendInput('x')
   await harness.settle()
   assert.ok(harness.panel.semanticGeneration() > generationBefore,
     'a real edit advances the page semantic generation')
-  assert.notEqual(harness.panel.liveIdentity(), identityBefore,
-    'the editor values are part of the semantic identity')
-  assert.equal(harness.controller.installView()?.phase, 'editing', 'the edit itself dispatches nothing')
+  release(harness, inspectRow, 5)
+  await harness.settle()
+  assert.equal(harness.controller.installView()?.phase, 'editing',
+    'the stale Inspect release never dispatched with the newer spec')
+
+  // Positive control: the SAME painted action really can be activated on the
+  // settled frame. The keyboard is used because a same-cell click inside the
+  // fork's multi-click window becomes a word selection, not a click.
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.notEqual(harness.controller.installView()?.phase, 'editing',
+    'a fresh activation of the same action really inspects')
   harness.app.dispose()
 })
 
@@ -1552,6 +1563,38 @@ test('T09 an immaterial install wheel never advances the semantic generation', a
   wheel(harness, bodyRow, 5, false)
   await harness.settle()
   assert.equal(harness.panel.semanticGeneration(), before, 'an immaterial install wheel does not advance the generation')
+  harness.app.dispose()
+})
+
+test('T09 a blank Host log chunk never advances the Controller generation', async () => {
+  // RFL-012 follow-up: an empty/blank log chunk is not a presentation change, so
+  // it must not advance the monotonic transition count and revoke a held gesture.
+  const harness = await open({ columns: 120, rows: 24 })
+  harness.vt.sendInput('\x1b[F')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  for (let attempt = 0; attempt < 4 && harness.installCalls.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  assert.equal(harness.installCalls.length, 1, 'the official install was dispatched')
+  const requestId = harness.controller.installView()!.requestId
+  assert.ok(requestId !== undefined, 'the attempt has a real request id')
+
+  const before = harness.controller.semanticTransitionsCount()
+  harness.emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: '' } })
+  await harness.settle()
+  harness.emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: '\n\n' } })
+  await harness.settle()
+  assert.equal(harness.controller.semanticTransitionsCount(), before,
+    'blank log chunks never advance the transition count')
+
+  // A REAL chunk does advance it (positive control).
+  harness.emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: 'real output\n' } })
+  await harness.settle()
+  assert.ok(harness.controller.semanticTransitionsCount() > before,
+    'a real log chunk still advances it')
   harness.app.dispose()
 })
 
