@@ -1659,6 +1659,36 @@ test('T09 a phase round-trip under a held Install action refuses the page releas
   harness.app.dispose()
 })
 
+test('T09 a page action is refused until the changed grant really paints', async () => {
+  // RFL-017 / §4.2: `setViewport` revokes the previous frame's grants, so until
+  // the frame that installs the NEW grant paints, only the real Esc may act.
+  //
+  // The grant really changes in the MEDIUM band: with the rail focused the page is
+  // granted `Categories | List` (width 76, allowDual false); the focus transfer
+  // gives it `List | Details` (width 100, allowDual true). At >=120 the rail stays
+  // put and the grant is identical, so there is no such window there.
+  const harness = await open({ columns: 100, rows: 24 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  await yieldToRail(harness)
+  const readsBefore = harness.snapshotCalls()
+  // Two keys in ONE burst — the ordering a single stdin chunk produces, because
+  // the render is deferred to nextTick while the sequences are emitted in a
+  // synchronous loop.
+  harness.vt.sendInput('\t')
+  harness.vt.sendInput('r')
+  await harness.settle()
+  assert.equal(harness.snapshotCalls(), readsBefore,
+    'a body action forwarded before the changed grant paints never reads the Host')
+
+  // Positive control: once that frame has painted, the same key really refreshes.
+  const afterPaint = harness.snapshotCalls()
+  harness.vt.sendInput('r')
+  await harness.settle()
+  assert.ok(harness.snapshotCalls() > afterPaint,
+    'the same key really refreshes after the new grant paints')
+  harness.app.dispose()
+})
+
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
 test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {

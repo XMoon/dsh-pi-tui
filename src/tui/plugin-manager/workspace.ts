@@ -339,6 +339,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   /** The LOCAL viewport granted by the Settings root. The page never reads the
    *  physical terminal: its layout (and dual admission) lives entirely here. */
   private viewport: PluginContentViewport = { width: 0, rows: 0, allowDual: false }
+  /** Armed by `setViewport` when the grant really changed; cleared only by the
+   *  paint that installs the new grant. §4.2: until that paint, only the real Esc
+   *  may act — the previous frame does not describe what the user now sees. */
+  private grantAwaitingPaint = false
   private lastRenderWidth = -1
   private lastRenderRows = -1
   private lastRenderAllowDual: boolean | undefined
@@ -395,6 +399,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // resize round trip restores the SAME action the user was on.
     this.revokePaintedGrants()
     this.pressedGesture = undefined
+    this.grantAwaitingPaint = true
     this.bumpRevision(); this.bumpSemantic()
   }
 
@@ -479,6 +484,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // is a hidden action and must not run. The floor is read from the CURRENT
     // grant: `setViewport` may have shrunk it after the last paint.
     if (this.bodyFloor() <= 0) return
+    // §4.2: `setViewport` revokes the previous frame's grants; until the frame that
+    // installs the new grant paints, every body action/copy/edit is refused. A
+    // page that has never painted has no stale frame to protect.
+    if (this.grantAwaitingPaint && this.lastRenderWidth >= 0) return
     if (this.searchEditing) {
       this.handleSearchInput(data)
       return
@@ -2171,6 +2180,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     lines.push(this.renderActionBar(plan))
     this.paintedTargets = targets
     this.paintedRevision = this.revision
+    this.grantAwaitingPaint = false
     this.lastRenderWidth = this.viewport.width
     this.lastRenderRows = this.viewport.rows
     this.lastRenderAllowDual = this.viewport.allowDual

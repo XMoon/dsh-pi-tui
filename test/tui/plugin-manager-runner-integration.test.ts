@@ -504,9 +504,16 @@ test('mounted TuiApp: hide while installing, re-enter the same attempt, Stop, an
   const requestId = requestIds[0]!
   await registry.waitForTarballRequest()
   fixture.vt.sendInput('\x1b') // hide the install view while the real install runs
-  await waitForFrame(fixture.vt, /Settings · Plugins/u, 'the list after hide')
+  // Wait for the PAGE STATE, not for a title every sub-view shares: `/Settings ·
+  // Plugins/` matches the install frame that is still on screen, so it would
+  // return before the List frame ever painted. The List is the only sub-view that
+  // paints the Search/Filters row and the `Esc back` list bar.
+  await waitForFrame(fixture.vt, /Search: \/.*All · Enabled · Installed · Available/su, 'the LIST frame after hide')
+  assert.doesNotMatch(plain(fixture.vt.getViewport()), /Plugins · Install/u,
+    'the List frame really replaced the install frame')
   fixture.vt.sendInput('i') // re-enter the SAME attempt
-  const resumed = await waitForFrame(fixture.vt, /Stop installation|installing/u, 'the resumed install view')
+  // Likewise: wait for a line only the INSTALL sub-view paints (its pane header).
+  const resumed = await waitForFrame(fixture.vt, /\[Plugins · Install\]/u, 'the resumed INSTALL frame')
   assert.match(resumed, /installing · @s5-fixture\/mounted-cancel/u, 'the resumed view keeps the same running attempt')
   assert.match(resumed, /installing from https?:\/\/127\.0\.0\.1:\d+\/ \(1\/1\)/u,
     'the resumed view keeps the live Host progress (no reset to a blank attempt)')
