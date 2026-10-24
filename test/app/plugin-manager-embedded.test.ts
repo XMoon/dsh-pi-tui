@@ -1825,6 +1825,58 @@ test('T09 narrow rail -> content refuses page keys until the content frame paint
   harness.app.dispose()
 })
 
+test('T09 the stale rail refuses a NEW mouse gesture until the projection paints', async () => {
+  // RFL-024: the keyboard path checks `rootProjectionAwaitingPaint()`, the mouse did
+  // not. At 76..119 columns a rail -> content focus transfer changes the projection,
+  // and the OLD rail cells are still on screen when the transfer's key is consumed.
+  const harness = await open({ columns: 100, rows: 24, startOn: 'rail' })
+  const rootPanel = (harness.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
+    .settingsWorkspace!.panel
+  assert.equal(rootPanel['focus'], 'categories', 'the rail owns the keys')
+  // The transfer that changes the projection is Plugins' content focus, so select
+  // Plugins first (the rail still owns the keys at that point).
+  for (let step = 0; step < 12; step += 1) {
+    if (/^> Plugins\b/mu.test(harness.view())) break
+    harness.vt.sendInput('\x1b[B')
+    await harness.settle()
+  }
+  assert.match(harness.view(), /^> Plugins\b/mu, 'the rail selects Plugins')
+  const categoryBefore = rootPanel['categoryId']
+  const railOtherRow = 4 // About: a rail entry other than the selected Plugins
+
+  // ONE burst: Enter takes the content (the projection changes and has not painted),
+  // then a press+release lands on a rail cell the OLD frame still paints.
+  harness.vt.sendInput('\r')
+  press(harness, railOtherRow, 3)
+  release(harness, railOtherRow, 3)
+  await harness.settle()
+  assert.notEqual(rootPanel['focus'], 'categories', 'the transfer really moved the keyboard to the content')
+  assert.equal(rootPanel['categoryId'], categoryBefore,
+    'the stale rail click did not switch category before the projection painted')
+
+  // The same for a wheel in that window.
+  const afterFirst = rootPanel['categoryId']
+  harness.vt.sendInput('\x1b')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  wheel(harness, railOtherRow, 3, true)
+  await harness.settle()
+  assert.equal(rootPanel['categoryId'], afterFirst, 'the stale rail wheel changed nothing')
+  harness.app.dispose()
+
+  // Positive control on a fresh lease: once the rail frame is painted, a real rail
+  // click on a DIFFERENT category switches.
+  const control = await open({ columns: 100, rows: 24, startOn: 'rail' })
+  const controlRoot = (control.app as never as { settingsWorkspace?: { panel: Record<string, unknown> } })
+    .settingsWorkspace!.panel
+  const controlBefore = controlRoot['categoryId']
+  click(control, 5, 3)
+  await control.settle()
+  assert.notEqual(controlRoot['categoryId'], controlBefore,
+    'a fresh rail click on the painted frame really switches category')
+  control.app.dispose()
+})
+
 test('T09 Shift+Tab does not yield while a changed grant awaits its paint', async () => {
   // §4.2 covers the key the ROOT intercepts itself, not only the keys it forwards:
   // the root's Shift+Tab handler runs before `syncPluginFrame()` and would

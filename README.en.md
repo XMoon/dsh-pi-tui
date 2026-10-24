@@ -235,7 +235,8 @@ group is always last). At >=120 columns, and only while the frame can grant six
 real business-body rows, the frame shows
 `Categories | Plugin List | Details`; a shorter frame degrades to the pair or one
 column instead of squeezing the body. At 76-119 columns it shows
-`Categories | List` or `List | Details` depending on the keyboard owner; below
+`Categories | List` or `List | Details` depending on the keyboard owner — the pair
+again needs six real business-body rows, otherwise it degrades to one column; below
 76 columns it is one column. Install, dangerous confirmations and Diagnostics
 always take the full width so risk text is never squeezed. Settings paints the
 shared header/metadata/rule/pane header and the single last-row action bar; the
