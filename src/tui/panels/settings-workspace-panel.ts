@@ -3741,6 +3741,14 @@ export class SettingsWorkspacePanel implements Component {
       this.cancelPointerOwners()
       return undefined
     }
+    // A focus transfer that changes the Plugins projection leaves the previous
+    // frame on screen: a wheel over the old rail must not scroll a pane the next
+    // frame does not paint there (§4.2, same boundary as the keyboard gate).
+    if (this.rootProjectionAwaitingPaint()) {
+      this.cancelPointerOwners()
+      this.intents.requestRender()
+      return undefined
+    }
     // An App notice (or any chrome change) moves/shrinks EVERY painted hit
     // region — rail, legacy panes, direct content box and child grant — not only
     // the plugin child. Until the frame repaints, no wheel may resolve against
@@ -3847,6 +3855,13 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.requestRender()
       return
     }
+    // Same boundary for the focus transfer: the rail cells still on screen belong
+    // to the previous frame and must not receive a NEW gesture.
+    if (this.rootProjectionAwaitingPaint()) {
+      this.cancelPointerOwners()
+      this.intents.requestRender()
+      return
+    }
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
     this.contentPressed = undefined
@@ -3937,6 +3952,13 @@ export class SettingsWorkspacePanel implements Component {
     // A release in the unrepainted chrome window must resolve against neither
     // the old content box nor the old rail/pane hit map.
     if (this.chromeGeometryStale()) {
+      this.cancelPointerOwners()
+      this.intents.requestRender()
+      return
+    }
+    // A release in an unrepainted focus-transfer window is the same: the rail
+    // cells on screen belong to the previous frame.
+    if (this.rootProjectionAwaitingPaint()) {
       this.cancelPointerOwners()
       this.intents.requestRender()
       return
