@@ -687,3 +687,47 @@ test('a newer Hub opened by a sibling retirement callback beats the earlier open
     'exactly ONE Hub panel is displayed')
   browserHandle.close()
 })
+
+test('the Preset presenter and the Work Hub retire each other in both directions', async (t) => {
+  const h = await mount(t)
+  const preset = h.renderer.presetPresentation
+  assert.ok(preset, 'the pane advertises the Preset picker kinds')
+  const presetHandle = preset.open({
+    subject: { sessionless: true },
+    isCurrent: () => true,
+    retry: () => {},
+    apply: async () => ({ kind: 'superseded' }),
+    setDefault: async () => ({ kind: 'superseded' }),
+    runOwned: (label, task, runOptions) =>
+      runOwned(label, task, { ...runOptions, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  presetHandle.setRoster({
+    roster: { presets: [{ id: 'standard' }], defaultId: 'standard' },
+    currentId: undefined,
+    pendingId: undefined,
+    defaultId: 'standard',
+    canSetDefault: true,
+  })
+  await waitUntil('the Preset presenter is mounted',
+    () => mountedPickerKeys(h.pane).some(key => key.startsWith('preset-')))
+  h.open([row('job:j1', { label: 'build' })])
+  await waitForSinglePicker(h.pane)
+  await waitUntil('the Preset presenter is retired by the Hub open',
+    () => presetHandle.isDisposed() && !mountedPickerKeys(h.pane).some(key => key.startsWith('preset-')))
+  // The reverse direction: a Preset open retires the displayed Hub.
+  const reopened = preset.open({
+    subject: { sessionless: true },
+    isCurrent: () => true,
+    retry: () => {},
+    apply: async () => ({ kind: 'superseded' }),
+    setDefault: async () => ({ kind: 'superseded' }),
+    runOwned: (label, task, runOptions) =>
+      runOwned(label, task, { ...runOptions, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  await waitUntil('the Preset presenter replaces the Hub',
+    () => mountedPickerKeys(h.pane).some(key => key.startsWith('preset-'))
+      && !mountedPickerKeys(h.pane).some(key => key.startsWith('work-hub-')))
+  assert.deepEqual(h.retires, ['external'], 'the Hub was retired by the sibling open')
+  assert.equal(h.closes.length, 0, 'a sibling retirement is never a user Close')
+  reopened.close()
+})
