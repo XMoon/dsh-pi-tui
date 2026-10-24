@@ -615,6 +615,14 @@ test('a pending Account operation keeps the keyboard: the painted Back action do
   assert.match(h.rows()[0]!, /Settings · Account/u, 'the content still owns the keyboard')
   assert.match(h.view(), /still in flight/u, 'the page states that the operation is still in flight')
 
+  // The clipped fallback must name the same real effect: Esc waits for the
+  // Host, it neither leaves nor cancels the in-flight operation.
+  h.vt.resize(120, 2)
+  await h.vt.waitForRender()
+  assert.match(h.rows().at(-1) ?? '', /Esc wait/u, 'the zero-body fallback states that Esc waits')
+  await key(h, '\u001b')
+  assert.match(h.rows()[0]!, /Settings · Account/u, 'the pending operation still owns the content')
+
   releaseHost()
   for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   h.close()

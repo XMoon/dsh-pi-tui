@@ -2777,3 +2777,62 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   assert.equal(modelPickerOne.length, 1)
   assert.match(modelPickerOne[0]!, /^Esc cancel/u)
 })
+
+
+test('a pending reference write names Esc wait on the clipped fallback', async () => {
+  let resolveWrite: (() => void) | undefined
+  const { source } = fakeSource()
+  source.setReference = () => new Promise<void>(resolve => { resolveWrite = resolve })
+  source.describeReference = async () => ({ configured: true })
+  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  viewText(page)
+  for (const character of 'sk-wait') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+
+  page.setBodyHeight(2)
+  const rows = viewText(page).split('\n')
+  assert.equal(rows.length, 2)
+  assert.match(rows.at(-1)!, /Esc wait/u, 'the fallback names the pending write before the page can leave')
+  page.handleInput('\u001b')
+  assert.match(viewText(page), /API Key Reference/u, 'Esc did not leave the page under the pending write')
+  resolveWrite?.()
+  await flush()
+  page.setBodyHeight(24)
+  assert.match(viewText(page), /Verified/u, 'the held write still settles after the clipped frame')
+})
+
+test('a pending clear names Esc wait on the clipped fallback', async () => {
+  let resolveClear: (() => void) | undefined
+  let configured = true
+  const { source } = fakeSource()
+  source.describeReference = async () => ({ configured })
+  source.clearReference = () => new Promise<void>(resolve => { resolveClear = resolve })
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
+  }, () => {})
+  page.setBodyHeight(24)
+  page.render(100)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+
+  page.setBodyHeight(2)
+  const rows = viewText(page).split('\n')
+  assert.equal(rows.length, 2)
+  assert.match(rows.at(-1)!, /Esc wait/u, 'the fallback names the pending clear before the page can leave')
+  page.handleInput('\u001b')
+  assert.match(viewText(page), /Clear stored credential/u, 'Esc did not leave the page under the pending clear')
+  configured = false
+  resolveClear?.()
+  await flush()
+  page.setBodyHeight(24)
+  assert.match(viewText(page), /API key ACME_API_KEY cleared/u, 'the held clear still settles after the clipped frame')
+})

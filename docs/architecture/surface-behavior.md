@@ -168,9 +168,10 @@ the `/footer` alias and never enters this workspace.
   L1/L2 — the rail is never pinned as a fixed left column. The bar starts at
   the frame's first column, and every child page keeps its own body and action
   rows above it. With no granted body row (the shortest frames) only the Esc
-  action the frame names for that state runs: a real back, or a state-named
-  cancel such as clearing an editable filter. No unreachable page refresh,
-  copy or action runs from an invisible body.
+  action the frame names for that state runs: a real back, a state-named
+  cancel such as clearing an editable filter, or an explicit wait while a Host
+  mutation is still pending. No unreachable page refresh, copy or action runs
+  from an invisible body.
 
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
   facts (the bundle's own version, the installed DSH version — `Unknown` when

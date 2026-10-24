@@ -1881,10 +1881,24 @@ export class ModelsWorkspacePage implements Component {
    *  catalog binds a non-empty filter to Esc BEFORE it can leave the page, so
    *  the fallback hint names that real effect instead of claiming a back the
    *  key will not perform. */
+  /** The real Esc effect while a Host operation owns the page, or undefined
+   *  when the ordinary back semantics apply. A pending write only reports its
+   *  in-flight state (it never leaves); a pending provider authorization is
+   *  the opposite case and Esc explicitly cancels it. */
+  private pendingEscHint(): string | undefined {
+    if (this.referencePhase === 'pending') return 'Esc wait'
+    if (this.view.kind === 'review' && this.add?.creating === true) return 'Esc wait'
+    if (this.view.kind === 'logout' && this.clear?.phase === 'pending') return 'Esc wait'
+    if (this.view.kind === 'provider'
+      && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')) return 'Esc cancel'
+    return undefined
+  }
+
   private fallbackEscHint(): string {
-    return this.view.kind === 'add-catalog' && this.catalogFilter !== ''
-      ? 'Esc clear filter'
-      : 'Esc back'
+    const pending = this.pendingEscHint()
+    if (pending !== undefined) return pending
+    if (this.view.kind === 'add-catalog' && this.catalogFilter !== '') return 'Esc clear filter'
+    return 'Esc back'
   }
 
   /** Keep the page's semantic bar on the physical last row: the body is
@@ -2567,7 +2581,7 @@ export class ModelsWorkspacePage implements Component {
       && Math.max(1, this.bodyHeight) - 1 - actions.length >= 1) {
       segments.push({ text: 'Tab sections', priority: 0 })
     }
-    segments.push({ text: 'Esc back', priority: 8 })
+    segments.push({ text: this.pendingEscHint() ?? 'Esc back', priority: 8 })
     const rendered = renderActionBarRow(segments, width)
     this.paintedCopy = rendered.includes('c copy')
     return color.textMuted(rendered)
