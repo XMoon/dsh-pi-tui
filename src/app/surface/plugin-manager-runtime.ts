@@ -174,7 +174,10 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
           panel?.dispose?.()
           throw error
         }
-        // The inventory read happens exactly once, on the real first mount.
+        // ONE read per successful page creation. A re-mount (the Settings root
+        // disposes the page on a category change or a close) therefore starts a
+        // NEW read and advances the Controller's read generation, which the
+        // page's own currentness fence uses to refuse older gestures.
         controller.open()
         return panel
       }

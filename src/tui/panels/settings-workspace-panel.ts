@@ -745,6 +745,11 @@ export class SettingsWorkspacePanel implements Component {
      *  the resize, so a release arriving before it must still be refused. */
     readonly columns: number
     readonly rows: number
+    /** The hosted child page's own state identity at press time. The page can
+     *  change its view/target set from a KEY the root forwards without moving
+     *  the root's projection or content box (Details -> List at a wide width),
+     *  so the root revision alone cannot fence that gesture. */
+    readonly childIdentity: string
   } | undefined
   /** The last selection index AND viewport height each list was rebased
    *  against: the wheel may scroll a list so its selection leaves the viewport,
@@ -3744,6 +3749,18 @@ export class SettingsWorkspacePanel implements Component {
     return { handled: true }
   }
 
+  /**
+   * The hosted child page's own state identity: which sub-view it shows and
+   * whether it owns a pending pointer/mutation. A key the root forwards can
+   * change it without touching the root's projection, so every recorded root
+   * gesture carries it and a release must still match.
+   */
+  private childGestureIdentity(): string {
+    const page = this.pluginPage
+    if (page === undefined) return 'none'
+    return `${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
+  }
+
   /** Whether one panel cell belongs to the painted content column. */
   private contentAt(x: number, y: number): boolean {
     const box = this.paintedContentBox
@@ -3810,6 +3827,7 @@ export class SettingsWorkspacePanel implements Component {
             categoryId: this.categoryId,
             columns: this.intents.columns(),
             rows: this.intents.rows(),
+            childIdentity: this.childGestureIdentity(),
           }
       return
     }
@@ -3843,6 +3861,7 @@ export class SettingsWorkspacePanel implements Component {
           categoryId: this.categoryId,
           columns: this.intents.columns(),
           rows: this.intents.rows(),
+          childIdentity: this.childGestureIdentity(),
         }
   }
 
@@ -3912,6 +3931,7 @@ export class SettingsWorkspacePanel implements Component {
         || this.categoryId !== pressed.categoryId
         || this.intents.columns() !== pressed.columns
         || this.intents.rows() !== pressed.rows
+        || this.childGestureIdentity() !== pressed.childIdentity
         || target.kind !== pressed.target.kind
         || target.id !== pressed.target.id
         || target.row !== pressed.target.row
@@ -3974,6 +3994,7 @@ export class SettingsWorkspacePanel implements Component {
       this.categoryId !== pressed.categoryId ||
       this.intents.columns() !== pressed.columns ||
       this.intents.rows() !== pressed.rows ||
+      this.childGestureIdentity() !== pressed.childIdentity ||
       target.kind !== pressed.target.kind ||
       target.id !== pressed.target.id ||
       target.row !== pressed.target.row ||
