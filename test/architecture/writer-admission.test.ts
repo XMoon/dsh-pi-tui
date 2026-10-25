@@ -507,14 +507,43 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
   assert.equal(skill.includes('sessionTransitionPending()'), false,
     'the /skill writer section must not pre-check the transition gate')
   // The only remaining uses are the attachment-intake UX fence (a draft-stage
-  // gate, NOT a semantic session write).
+  // gate, NOT a semantic session write). The fence lives in ONE shared intake
+  // that BOTH the leading command and the inline completion route call, so the
+  // three checkpoints are counted SEMANTICALLY, not by literal occurrence:
+  //   1. the intake entry,
+  //   2. after an IMAGE read (shared by `/image` and `/attach`'s image path),
+  //   3. after the generic-file PROBE.
+  // A shared post-read helper is what lets both reads reuse one fence body
+  // without duplicating it; asserting its two CALL SITES keeps the per-read
+  // coverage a literal count used to express.
   const intake = span(
     artifacts,
-    'const stageAttachmentCommand = (',
+    'export async function runAttachmentIntake(',
     '\n  const registerCopy = (): void => {',
   )
-  const fenced = intake.match(/sessionTransitionPending\(\)/g) ?? []
-  assert.equal(fenced.length, 3, 'the attachment intake keeps its three UX checks')
+  const entryFence = (intake.match(/runner\.sessionTransitionPending\(\)/g) ?? []).length
+  assert.equal(entryFence, 2,
+    'the intake keeps the ENTRY transition fence and the post-read fence body')
+  // Per-read coverage, expressed structurally rather than by a helper's NAME:
+  // every read call in the intake must be followed by a fence guard before the
+  // next read, so neither a renamed helper nor an inlined body can silently
+  // drop one. `/image` reads directly; `/attach` probes first and may then read
+  // the same path as an image.
+  // TWO read CALLS, three read PATHS: `stageImage` performs the one image read
+  // and is reached by `/image` directly and by `/attach` whenever the probe
+  // reports an image. Each read must be followed by a fence guard IMMEDIATELY
+  // (only whitespace and a fence call may intervene) — an inlined body, a
+  // renamed helper or a dropped guard all fail, and a later guard elsewhere in
+  // the function cannot satisfy this.
+  const reads = Array.from(intake.matchAll(/await (readImageFile|probeAttachment)\([^\n]*\)\n/g))
+  assert.equal(reads.length, 2,
+    'the intake performs exactly two reads: the shared image read and the probe')
+  for (const read of reads) {
+    const from = (read.index ?? 0) + read[0].length
+    const following = intake.slice(from, from + 400)
+    assert.ok(/^\s*if \(!\(?[A-Za-z]+\(\)\)?\) return/m.test(following),
+      `the read at ${JSON.stringify(read[0].slice(0, 60))} must be followed immediately by a fence guard`)
+  }
   // The lock scans EVERY production source, not just commands.ts (A5b review
   // finding): deriving `all` from the same file as `fenced` made a second
   // caller in any other module invisible. Every occurrence across src/** must
@@ -525,7 +554,7 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
   )
   assert.deepEqual(
     sites,
-    ['src/commands.ts', ...Array.from({ length: fenced.length }, () => 'src/tui/commands/artifacts.ts')],
+    ['src/commands.ts', ...Array.from({ length: entryFence }, () => 'src/tui/commands/artifacts.ts')],
     'the only sessionTransitionPending() outside the intake fence is the interface declaration in src/commands.ts (whole-tree)',
   )
 })
