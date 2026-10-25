@@ -101,6 +101,13 @@ The human skill catalog feeds two independent consumers:
    `HumanSkillSummary[]`; it never loads a skill body, never authorizes an
    invocation, and is NOT part of command claims. Submission stays an ordinary
    user prompt; the Host `agent/pre-step` gesture is the invocation authority.
+   Two FIXED Client-local attachment actions (`image`, `attach`) share this
+   inline `/name` seat as their own rows, identified by a structural marker
+   rather than by name: a same-named catalog skill stays a DISTINCT row, and
+   only the marked action opens the attachment path argument (the skill row
+   only inserts text). The action rows bind no catalog authority at all — they
+   are a fixed two-entry list owned by the attachment plane, which is why the
+   catalog's transition/refresh semantics above apply to the skill rows only.
 
 Transition semantics (mirrors the wrapper rules):
 

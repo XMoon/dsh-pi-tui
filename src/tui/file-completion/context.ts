@@ -268,15 +268,25 @@ export function pathArgumentOf(
  *   (`/attach`, `/image`; never derived from `getArgumentCompletions`).
  * @param options.line - the cursor's logical line index; only the first
  *   line's leading command token is the legacy slash-command seat.
+ * @param options.shell - whether the position belongs to a SHELL document (a
+ *   `!`/`!!` input mode, or a prompt-mode buffer holding the literal wire
+ *   form). A shell command's own arguments are SHELL words: their text is
+ *   never a Client-local attachment site, even when it literally reads
+ *   `/image <path>`, because the attachment plane and the shell plane are
+ *   different authorities. `!`-prefixed lines therefore classify as `none`/
+ *   `mention` only, and the shell bridge keeps ownership.
  */
 export function classifyFileCompletionContext(
   textBeforeCursor: string,
   pathArgumentCommands: ReadonlySet<string>,
-  options: { readonly line?: number } = {},
+  options: { readonly line?: number; readonly shell?: boolean } = {},
 ): FileCompletionContext {
   // A declared command argument owns the position. In particular,
   // `/image @foo` is still a Client-local image path, not a Host mention.
-  const seat = pathArgumentSeat(textBeforeCursor, pathArgumentCommands, options.line ?? 0)
+  // A SHELL position never reaches the attachment seat (see `options.shell`).
+  const seat = options.shell === true
+    ? undefined
+    : pathArgumentSeat(textBeforeCursor, pathArgumentCommands, options.line ?? 0)
   if (seat !== undefined) return { kind: 'path-argument', query: seat.argument, ...seat }
   const atPrefix = extractAtPrefix(textBeforeCursor)
   if (atPrefix !== null) {

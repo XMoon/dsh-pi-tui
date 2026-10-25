@@ -299,3 +299,42 @@ test('an aborted request never spawns and variable/subcommand failures degrade',
     resetCommandCacheForTest()
   }
 })
+
+test('a shell word that LOOKS like /image <path> is never an attachment seat', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // A declared file-argument command must be installed in the catalog, so the
+  // ONLY thing that can keep the attachment plane closed is the shell fact.
+  const commands = [{ name: 'image', description: 'Attach an image file', getArgumentCompletions: () => [] }]
+  const { source } = modeSource('shell-context')
+  const provider = new MentionProvider(commands, root, null, source)
+
+  // `!echo /image sh` — the `/image` here is a shell WORD. It must not be
+  // classified as the attachment path argument, and no Client-local
+  // attachment candidates may be produced for it.
+  // `top` matches the fixture's real file, so the positive control below is a
+  // genuine candidate rather than an empty list.
+  const line = 'echo /image top'
+  const suggestions = await provider.getSuggestions([line], 0, line.length, {
+    signal: abort, force: true,
+  })
+  assert.ok(
+    suggestions === null || !suggestions.items.some(item => (item as { inlineAttachment?: string }).inlineAttachment !== undefined),
+    `a shell argument must never yield attachment candidates: ${JSON.stringify(suggestions?.items.slice(0, 5))}`,
+  )
+  // The SAME text in PROMPT mode is the attachment seat (the shell fact is the
+  // only difference) — this is the discriminating control.
+  const { source: promptSource } = modeSource('prompt')
+  const promptProvider = new MentionProvider(commands, root, null, promptSource)
+  const promptSuggestions = await promptProvider.getSuggestions([line], 0, line.length, {
+    signal: abort, force: true,
+  })
+  assert.ok(promptSuggestions !== null, 'prompt mode completes the same text as an attachment path')
+  assert.ok(
+    promptSuggestions.items.every(item => (item as { inlineAttachment?: string }).inlineAttachment === 'path'),
+    'every prompt-mode row is an attachment path row',
+  )
+  assert.ok(promptSuggestions.items.some(item => item.value.includes('top.txt')),
+    `the same text must complete in prompt mode: ${JSON.stringify(promptSuggestions.items.slice(0, 5))}`)
+  assert.equal(promptSuggestions.prefix, '', 'the inline seat binds no leading-command prefix')
+})
