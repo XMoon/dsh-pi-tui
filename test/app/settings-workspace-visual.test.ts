@@ -7451,7 +7451,7 @@ test('a Submit while busy confirm changes the very value the submit boundary rea
 // ── C2-R2 acceptance R2-14 / R2-12: the remaining failure and legacy cases ───
 
 // Regression: C2-R2 acceptance R2-14.
-test('an R2 persist-first write is held inside the ONE queue and Retry uses the same writer', async () => {
+test('a refused persist-first write keeps the stored fact and Retry uses the same writer', async () => {
   let refuse = true
   const h = setup({
     columns: 140,
