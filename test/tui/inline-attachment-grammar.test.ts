@@ -12,6 +12,7 @@ import { test } from 'node:test'
 import {
   INLINE_ATTACHMENT_ACTIONS,
   candidatePath,
+  splitTokenRemainder,
   applyInlineAttachmentAction,
   applyInlineAttachmentPath,
   isInlineAttachmentAction,
@@ -251,9 +252,58 @@ test('a candidate closing quote is consumed with the token it closes', () => {
   // The reported fragment is exactly what the canonical placeholder replaces.
   assert.equal(applied.line.slice(applied.span.start, applied.span.end), '/image "shot.png"')
   // An UNQUOTED candidate never eats a following quote (it did not open it).
-  // A quote sitting right after an UNQUOTED token is that token's own closing
-  // fragment (the user typed `"sho|" ` or `sho|"`), so it is consumed with it —
-  // otherwise the completion would strand exactly the `"` this rule removes.
-  const plain = applyInlineAttachmentPath('look /image sho" now', seat, 'look /image sho'.length, 0, 'shot.png')
-  assert.equal(plain.line, 'look /image shot.png now', 'a stray closing fragment is consumed with the token')
+  // An UNQUOTED token did not open that quote, so the quote is NOT its closing
+  // fragment: it may start a new quoted value or be part of a legal filename.
+  // Without lexical proof it is preserved as prose rather than deleted.
+  // The seat must genuinely be UNQUOTED for that claim (the quoted seat above
+  // owns a closing quote and consumes it).
+  const unquotedLine = 'look /image shot" now'
+  const unquotedCursor = 'look /image shot'.length
+  const unquotedSeat = pathArgumentSeat(unquotedLine.slice(0, unquotedCursor), COMMANDS)
+  assert.ok(unquotedSeat !== undefined)
+  assert.equal(unquotedSeat.argument, 'shot', 'the seat is unquoted')
+  const plain = applyInlineAttachmentPath(unquotedLine, unquotedSeat, unquotedCursor, 0, 'shot.png')
+  assert.equal(plain.line, 'look /image shot.png " now',
+    'a quote the token did not open is never consumed on lexical guesswork')
+})
+
+test('the token remainder follows the PATH grammar, not an ASCII allowlist', () => {
+  // A legal CJK basename with the cursor in the middle: `件.png` is still the
+  // SAME token, so it is consumed instead of duplicated after a space.
+  const cjk = '请看 /image 文件.png'
+  const cjkCursor = cjk.indexOf('文件.png') + 1
+  const cjkSeat = pathArgumentSeat(cjk.slice(0, cjkCursor), COMMANDS)
+  assert.ok(cjkSeat !== undefined)
+  const cjkApplied = applyInlineAttachmentPath(cjk, cjkSeat, cjkCursor, 0, '文件.png')
+  assert.equal(cjkApplied.line, '请看 /image 文件.png', 'the CJK remainder is consumed, not re-emitted')
+  // A quoted basename may contain spaces; the remainder runs to the quote.
+  const quoted = '请看 /image "my shot.png" 为什么失败'
+  const quotedCursor = quoted.indexOf('my shot') + 3
+  const quotedSeat = pathArgumentSeat(quoted.slice(0, quotedCursor), COMMANDS)
+  assert.ok(quotedSeat !== undefined)
+  const quotedApplied = applyInlineAttachmentPath(quoted, quotedSeat, quotedCursor, 0, '"my shot.png"')
+  assert.equal(quotedApplied.line, '请看 /image "my shot.png" 为什么失败',
+    'a quoted token keeps its spaces and closes exactly once')
+  // The pure helper, stated directly. An UNQUOTED boundary comes from the
+  // accepted value (a POSIX name may be any non-separator character), while a
+  // QUOTED one runs to its closing quote.
+  assert.deepEqual(splitTokenRemainder('件.png', false, '文件.png'), { consumed: '件.png', suffix: '' })
+  assert.deepEqual(splitTokenRemainder('为什么连接失败', false, 'shot.png'),
+    { consumed: '', suffix: '为什么连接失败' }, 'prose that completes no value is preserved')
+  assert.deepEqual(splitTokenRemainder('t" 为什么', true), { consumed: 't"', suffix: ' 为什么' })
+  assert.deepEqual(splitTokenRemainder(' name.png" 为什么', true),
+    { consumed: ' name.png"', suffix: ' 为什么' }, 'quoted spaces belong to the token')
+})
+
+test('an existing separator after the query tail is never doubled', () => {
+  // Cursor INSIDE the command token: `hi /im|age world`. The `age` is the query
+  // remainder and is consumed; the existing space after it is kept once.
+  assert.deepEqual(applyInlineAttachmentAction('hi /image world', 3, 'hi /im'.length, 'image'),
+    { line: 'hi /image world', cursorCol: 'hi /image '.length })
+  // Several existing separators keep their own count (never one more).
+  assert.deepEqual(applyInlineAttachmentAction('hi /im   world', 3, 'hi /im'.length, 'image'),
+    { line: 'hi /image   world', cursorCol: 'hi /image '.length })
+  // No separator after the token: exactly one is inserted.
+  assert.deepEqual(applyInlineAttachmentAction('hi /ima', 3, 'hi /ima'.length, 'image'),
+    { line: 'hi /image ', cursorCol: 'hi /image '.length })
 })

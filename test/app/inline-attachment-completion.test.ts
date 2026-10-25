@@ -114,8 +114,18 @@ function fixture(life: TestLifecycle): { root: string; image: string; plain: str
   return { root, image: join(root, 'shot.png'), plain: join(root, 'notes.txt') }
 }
 
-function setup(life: TestLifecycle, options: { attachFileStore?: boolean; onSubmitCapture?: (text: string) => void } = {}): Harness {
+function setup(
+  life: TestLifecycle,
+  options: {
+    attachFileStore?: boolean
+    onSubmitCapture?: (text: string) => void
+    /** Extra workspace files, written BEFORE the app boots so the real path
+     *  discovery sees them. */
+    files?: readonly string[]
+  } = {},
+): Harness {
   const { root, image } = fixture(life)
+  for (const name of options.files ?? []) writeFileSync(join(root, name), pngBytes())
   let markPostRead!: () => void
   const postRead = new Promise<void>(resolve => { markPostRead = resolve })
   // The UNINJECTED production read: the gate delegates to it, so the intake
@@ -900,11 +910,59 @@ test('completing INSIDE a quoted filename consumes the rest of that token', asyn
   const applied = applyInlineAttachmentPath(line, seat, cursorCol, 0, '"shot.png"')
   assert.equal(applied.line, '请看 /image "shot.png" 为什么失败',
     'the rest of the filename and its quote are consumed, the prose survives')
-  // And the whole chain reaches the draft store through the real UI.
-  type(vt, '请看 /image "sho')
-  await vt.waitForRender()
-  await waitForCandidate(vt, app, 'shot.png', 'the quoted path candidate')
-  type(vt, 't" 为什么失败')
-  await vt.waitForRender()
-  assert.equal(h.imageStore.size(), 0, 'typing alone reads nothing')
 })
+
+test('a CJK filename completed from the MIDDLE of the basename is not duplicated', async (t) => {
+  const life = testLifecycle(t)
+  // A real CJK-named image in the workspace: the path grammar must treat it as
+  // one token, not truncate it at the first non-ASCII character.
+  const h = setup(life, { files: ['文件.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  // Type the CJK query directly (a Tab would accept the default `pics/` row).
+  type(vt, '请看 /image 文')
+  await waitForDraft(app, draft => draft === '请看 /image 文', 'the partial CJK query')
+  await waitForOnlyRow(vt, app, '文件.png', 'the filtered CJK candidate')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder for the CJK file')
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+    'the whole CJK token is replaced — never duplicated after a space')
+  assert.equal(h.imageStore.size(), 1, 'the real CJK file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('a QUOTED filename with spaces completes from the middle end to end', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life, { files: ['my file name.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  // The user opens a quote and types only the first characters of a spaced name.
+  type(vt, '请看 /image "my fi')
+  await waitForDraft(app, draft => draft === '请看 /image "my fi', 'the quoted partial query')
+  await waitForOnlyRow(vt, app, 'my file name.png', 'the quoted spaced candidate')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder replaces the fragment')
+  // The whole quoted token (spaces included) is ONE fragment: the prose after
+  // it survives and no part of the filename is left behind.
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+    'the entire quoted token is replaced exactly once')
+  assert.equal(h.imageStore.size(), 1, 'the real spaced file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('a quoted CJK filename with an EMPTY tail (cursor at the end) also completes', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life, { files: ['错误截图.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, '请看 /image "错')
+  await waitForDraft(app, draft => draft === '请看 /image "错', 'the quoted CJK partial query')
+  await waitForOnlyRow(vt, app, '错误截图.png', 'the quoted CJK candidate')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands')
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+    'the quoted CJK token is replaced whole')
+  assert.equal(h.imageStore.size(), 1, 'the real CJK file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
