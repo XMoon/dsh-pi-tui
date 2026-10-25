@@ -6047,12 +6047,38 @@ test('R1-12 a refused write is attributed from a fresh read: base, expected and 
   assert.match(third.view(), /started from either/u)
   third.dispose()
 
-  // A rejection whose fresh read is UNAVAILABLE: the outcome cannot be read at
-  // all, so it is `Outcome unknown` with the real readback reason.
+  // A non-ready backend is refused BEFORE the write: the runtime still applies,
+  // and NO document write is dispatched (the readiness gate, not the classifier).
+  const staleGate = setup({
+    columns: 140,
+    rows: 40,
+    doc: { responseStyle: 'default' },
+  })
+  await staleGate.open('Conversation')
+  await key(staleGate, '\r')
+  for (let step = 0; step < 4; step += 1) await key(staleGate, '\x1b[B')
+  await key(staleGate, '\r')
+  staleGate.setReadiness('stale') // the gate refuses the persistence
+  await key(staleGate, '\x1b[B')
+  await key(staleGate, '\r')
+  await settle(staleGate)
+  assert.match(staleGate.view(), /Not saved · the response style is applied/u,
+    'the stale gate refuses the persistence BEFORE the write for the apply-first rows')
+  assert.equal(staleGate.replacements(), 0, 'the readiness gate dispatched no write')
+  staleGate.dispose()
+
+  // A rejection whose fresh read is UNAVAILABLE — the Remote-shaped case the
+  // plan's R1-12 names: the replace WAS attempted and threw, then the
+  // authoritative readback cannot be performed either. Neither acceptance nor
+  // refusal may be attributed, so it is `Outcome unknown`, never `Not saved`.
   const unreadable = setup({
     columns: 140,
     rows: 40,
     doc: { responseStyle: 'default' },
+    // `ready` at commit time (so the write really runs), `replace` throws, and
+    // every read AFTER that write fails: `classifyRejectedWrite` therefore takes
+    // its `unavailable` branch.
+    getFailureAfterWrite: true,
     applyReplace: () => {
       throw new Error('post-write describe failed')
     },
@@ -6061,13 +6087,19 @@ test('R1-12 a refused write is attributed from a fresh read: base, expected and 
   await key(unreadable, '\r')
   for (let step = 0; step < 4; step += 1) await key(unreadable, '\x1b[B')
   await key(unreadable, '\r')
-  unreadable.setReadiness('stale') // the re-read is refused by the readiness gate
   await key(unreadable, '\x1b[B')
   await key(unreadable, '\r')
   await settle(unreadable)
-  assert.match(unreadable.view(), /Not saved · the response style is applied/u,
-    'the stale gate refuses the persistence BEFORE the write for the apply-first rows')
-  assert.equal(unreadable.replacements(), 0)
+  assert.equal(unreadable.replacements(), 1, 'the rejected write really reached the document writer')
+  assert.equal(unreadable.responseStyleState.style, 'concise',
+    'the apply-first runtime fact stays live through the unreadable rejection')
+  assert.match(unreadable.view(), /Outcome unknown/u,
+    'a rejection whose readback is unavailable cannot be attributed to this commit')
+  assert.match(unreadable.view(), /post-write describe failed/u, 'the real failure reason is stated')
+  assert.match(unreadable.view(), /could not be re-read/u, 'the unavailable readback is named')
+  assert.ok(!unreadable.view().includes('Status  Verified'), 'an unattributable write is never Verified')
+  assert.doesNotMatch(unreadable.view(), /Status\s+Not saved/u,
+    'an unreadable authority is never reported as a refusal')
   unreadable.dispose()
 })
 
