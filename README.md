@@ -326,7 +326,8 @@ TUI 使用 DSH 提供的模型和设置服务。
 它展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好名称、
 Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
 态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取；浏览与选择本身都不写入配置。
-普通配置行不提供复制：需要精确保留某个值时请到 About 复制对应事实。
+普通配置详情只保留查看：它没有内置复制动作，也没有替代的复制入口。About 的 `c`/`C` 只
+复制 About 自己的事实（运行时、Session 身份、统计、性能与 Context），不会复制配置页字段。
 
 About 的复制入口只留在键盘上：选中一事实按 `c` 复制该事实的精确原始值（动作栏只在它真的
 画在屏幕上时提示 `c copy fact`），按 `C` 把整份 About 报告复制到剪贴板；正文里最多只有

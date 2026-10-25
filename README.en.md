@@ -410,9 +410,10 @@ Display facts: the theme's source-qualified raw value plus its friendly name,
 Icon style, the live Transcript display preset alongside the persisted preference,
 the live Thinking detail state, and each row's configuration Scope and backend
 readiness. `R`
-re-reads. Browsing and choosing never write configuration, and the ordinary
-configuration rows offer no copy at all: copy the matching About fact when you
-need an exact value.
+re-reads. Browsing and choosing never write configuration. The ordinary
+configuration detail is view-only: it offers no copy action and no replacement
+copy entry. About's `c`/`C` copy About's own facts (runtime, Session identity,
+statistics, performance and Context) and never a configuration field.
 
 About's copy actions live on the keyboard: with a fact selected, `c` copies that
 fact's exact raw value (the Action Bar advertises `c copy fact` only while the
