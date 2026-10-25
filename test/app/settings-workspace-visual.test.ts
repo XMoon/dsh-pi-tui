@@ -7672,23 +7672,16 @@ test('a Submit while busy confirm flows through SettingsRuntime.busyEnter into t
   h.dispose()
 })
 
-// Regression: C2-R2 acceptance R2-06 (the confirm reaches the keymap the
-// fullscreen viewport resolves).
-test('a Home/End confirm reaches the keymap pair the fullscreen viewport resolves', async () => {
-  // This case owns the CONFIRM -> keymap half: the workspace writes the preset
-  // through its ONE owner (`app.setHomeEndMode` -> `applyHomeEndKeyMode`), and
-  // the assertion reads the RESOLVED bindings the fullscreen viewport consumes
-  // (`getKeybindings()` is the same process-global resolver the alt screen
-  // uses), including the negative control that another user binding survives.
-  //
-  // The physical-key consequence is owned by `test/app/home-end-keys.test.ts`
-  // ("input mode: Home/End stay in the editor; Ctrl+Home/End scroll the
-  // viewport"), which already drives a real fullscreen TuiApp; duplicating that
-  // routing proof here would only add a second harness.
+// Regression: C2-R2 acceptance R2-06 (confirm -> real fullscreen key routing).
+test('a Home/End confirm changes what the real fullscreen Home key does', async () => {
+  // ONE joined case. The workspace Confirm writes the preset through its ONE
+  // owner, then the SAME `h.app` goes to fullscreen over a transcript that
+  // really OVERFLOWS the viewport (a transcript that fits cannot prove a scroll
+  // either way) and receives the physical Home key.
   setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS))
   getKeybindings().setUserBindings({ 'tui.altScreen.search': 'ctrl+f' })
-  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', homeEndKeys: 'input' } })
-  h.app.setHomeEndMode(h.doc.homeEndKeys)
+  // A SHORT terminal so the 60-line transcript overflows it.
+  const h = setup({ columns: 80, rows: 24, doc: { theme: 'dark', homeEndKeys: 'input' } })
   const resolve = (): { readonly top: unknown; readonly bottom: unknown; readonly search: unknown } => {
     const manager = getKeybindings()
     return {
@@ -7697,26 +7690,74 @@ test('a Home/End confirm reaches the keymap pair the fullscreen viewport resolve
       search: manager.getResolvedBindings()['tui.altScreen.search'],
     }
   }
-  const inputDefaults = resolve()
-  assert.equal(inputDefaults.search, 'ctrl+f', 'precondition: an unrelated user binding is present')
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'assistant/message',
+      surfaceOp: 'append',
+      seq: SessionSeq(0),
+      time: Date.now() - 60_000,
+      data: {
+        stream: [], turn: 0, step: 0,
+        message: {
+          id: MessageId('m1'), role: 'assistant',
+          source: { kind: 'model', provider: 'p', model: 'm' },
+          content: [{ type: 'text', text: Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n') }],
+        },
+      },
+    } as SessionEvent,
+  ])
+  const hasLine = (text: string): boolean => h.rowsPlain().some(line => line
+    .replace(/↓ Latest.*$/, '')
+    .replace(/[│┃█]$/, '')
+    .trim()
+    .endsWith(text))
 
+  // ── BEFORE the confirm: the persisted `input` preset (the call
+  // `applyBootDisplay` makes). Home must NOT scroll; Ctrl+Home must.
+  h.app.setHomeEndMode(h.doc.homeEndKeys)
+  h.app.setTranscript(folder.messages())
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  assert.ok(hasLine('line 60'), `precondition: the tail is visible:\n${h.view()}`)
+  assert.ok(!hasLine('line 1'), `precondition: the head is scrolled away:\n${h.view()}`)
+  h.vt.sendInput('\x1bOH') // Home
+  await h.vt.waitForRender()
+  assert.ok(!hasLine('line 1'), `in \`input\` mode Home does NOT scroll the viewport:\n${h.view()}`)
+  h.vt.sendInput('\x1b[7^') // Ctrl+Home
+  await h.vt.waitForRender()
+  assert.ok(hasLine('line 1'), `Ctrl+Home scrolls in \`input\` mode:\n${h.view()}`)
+  h.app.setFullscreen(false)
+  await h.vt.waitForRender()
+
+  // ── THE CONFIRM through the real workspace.
   await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Home/End keys')
   assert.match(h.view(), /> input\s+\[current\]/u, 'the live keymap fact owns the chip')
   await highlightCandidate(h, 'viewport')
   await key(h, '\r')
   await settle(h)
-
-  const viewport = resolve()
-  assert.equal(viewport.top, 'home', 'the confirm makes the viewport own Home')
-  assert.equal(viewport.bottom, 'end', 'and End')
-  assert.equal(viewport.search, 'ctrl+f', 'no other user binding was disturbed')
-  assert.notDeepEqual([viewport.top, viewport.bottom], [inputDefaults.top, inputDefaults.bottom],
-    'the pair really changed')
-  assert.match(h.view(), /Status\s+Verified/u, 'the confirm verified against the keymap')
-  // The row's live fact follows the change (runtime-primary row).
-  await key(h, '\x1b') // back to the settled Detail level
-  await settle(h)
+  assert.match(h.view(), /Status\s+Verified/u, 'the confirm was Verified by its persistence read-back')
+  const after = resolve()
+  assert.equal(after.top, 'home', 'the confirm makes the viewport own Home')
+  assert.equal(after.bottom, 'end', 'and End')
+  assert.equal(after.search, 'ctrl+f', 'no other user binding was disturbed')
   assert.match(h.view(), /Value\s+viewport/u, `the row reports the applied preset:\n${h.view()}`)
+
+  // ── AFTER the confirm: leave the workspace; the SAME physical Home now
+  // scrolls the SAME surface's viewport.
+  await key(h, '\x1b') // choice -> detail
+  await key(h, '\x1b') // detail -> rows
+  await key(h, '\x1b') // rows -> categories
+  await key(h, '\x1b') // close the workspace
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Settings · '), 'the workspace released the screen')
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  assert.ok(hasLine('line 60'), `precondition: the tail is visible again:\n${h.view()}`)
+  h.vt.sendInput('\x1bOH') // Home — now the viewport owns it
+  await h.vt.waitForRender()
+  assert.ok(hasLine('line 1'),
+    `after the confirm the same Home scrolls the viewport to the top:\n${h.view()}`)
   h.dispose()
 })
 

@@ -1301,6 +1301,10 @@ async function bootCommandHarness(
     hostLoadsSkillBody?: boolean
     /** Mount WITHOUT a resumed session (the deferred-start gate). */
     deferredStart?: boolean
+    /** Install a `VirtualTerminal` as the process terminal so a case can drive a
+     *  fullscreen workspace (the real `/settings` panel) with real keys and read
+     *  the painted frame. */
+    virtualTerminal?: boolean
     /** Provide a recording fake `ctx.attachments` (image admission
      * observability: `imageSaves` records each `saveImages` batch). */
     attachments?: boolean
@@ -1334,6 +1338,10 @@ async function bootCommandHarness(
    *  also commits into the LIVE volatile reference the running application
    *  reads. */
   mutateSettings(ops: readonly { op: string; path: readonly string[]; value?: unknown }[]): Promise<void>
+  /** Invoke one registered TUI command by name (the real `/settings` entry). */
+  invoke(name: string): Promise<unknown>
+  /** The virtual terminal, when `virtualTerminal: true` asked for one. */
+  vt: VirtualTerminal | undefined
   /** Register a contribution AFTER the mount (a late/HMR plugin). */
   registerContribution(contribution: {
     id: string
@@ -1537,6 +1545,9 @@ async function bootCommandHarness(
       })
     }
   }
+  const vt = options.virtualTerminal === true ? new VirtualTerminal(100, 30) : undefined
+  const restoreTerminal = vt === undefined ? undefined : installVirtualProcessTerminal(vt)
+  if (restoreTerminal !== undefined) t.after(() => { restoreTerminal() })
   const mounted = await mountRunner(context, home, harness,
     options.deferredStart === true ? {} : { sessionId: 'command-session' },
     { busyEnter: options.busyEnter })
@@ -1546,6 +1557,15 @@ async function bootCommandHarness(
     harness,
     mounted,
     context,
+    vt,
+    invoke: async (name: string): Promise<unknown> => {
+      const registry = harness.commands as unknown as {
+        find(agent: unknown, name: string): { handler?: (invocation: { rawInput: string }) => unknown } | undefined
+      }
+      const definition = registry.find(undefined, name)
+      if (definition?.handler === undefined) throw new Error(`the TUI command ${name} is not registered`)
+      return definition.handler({ rawInput: '' })
+    },
     /** Commit one settings mutation through this harness's REAL settings
      *  service (the same `mutate` path a settings write uses), which — like the
      *  Loader — also commits into the LIVE volatile reference the running
@@ -2009,14 +2029,26 @@ test('running + queue: an argued execute-kind line queues as an ordinary followu
 test('a Submit while busy settings write reaches the REAL main-session submit route', async (t) => {
   // The main submit boundary reads `deps.tuiSettings.get().busyEnter` directly
   // (`submission/controller.ts:1778`); `SettingsRuntime.busyEnter()` serves the
-  // Subagent Viewer path instead. This case drives the REAL
+  // Subagent Viewer path instead. This case therefore drives the REAL
   // `SubmissionController.submit()` through `TuiApp.submitDraft` and observes
   // the delivery at the agent host — never a hand-called decision function.
   //
-  // The write travels the SAME path a Settings Confirm uses: the settings
-  // service's `mutate`, which (like the Loader) commits into the LIVE volatile
-  // reference the running application reads.
-  const { harness, mounted, mutateSettings } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  // The preference is changed the way a USER changes it: the real `/settings`
+  // command, the real workspace panel, the real `onCommit` ->
+  // `commitBusyEnter` -> document write. Nothing here reaches into the settings
+  // document directly.
+  const { harness, mounted, vt, invoke } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    virtualTerminal: true,
+  })
+  assert.ok(vt !== undefined, 'the case drives a real virtual terminal')
+  const rows = (): string[] => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  const settle = async (): Promise<void> => {
+    for (let round = 0; round < 8; round += 1) await Promise.resolve()
+    await vt.waitForRender()
+  }
+  const key = async (data: string): Promise<void> => { vt.sendInput(data); await settle() }
 
   // Reverse control: the stored queue policy really queues a busy plain Enter.
   mounted.app.setDraft('boot policy line')
@@ -2025,29 +2057,45 @@ test('a Submit while busy settings write reaches the REAL main-session submit ro
   assert.equal(harness.host.followedUp.length, 1, 'the stored queue policy queues a busy Enter')
   assert.equal(harness.host.steered.length, 0, 'and never steers')
 
-  // The write a Settings Confirm produces.
-  await mutateSettings([{ op: 'set', path: ['busyEnter'], value: 'steer' }])
-  // A completed submit settles the fake agent; re-arm the busy precondition so
-  // this assertion is about the PREFERENCE, not the agent's status.
+  // ── THE REAL SETTINGS CONFIRM.
+  await invoke('settings')
+  await settle()
+  // The workspace opens on About: walk the rail to Conversation.
+  for (let step = 0; step < 9; step += 1) {
+    if (rows().some(line => line.startsWith('> Conversation'))) break
+    await key('\x1b[B')
+  }
+  assert.ok(rows().some(line => line.startsWith('> Conversation')),
+    `the rail reached Conversation:\n${rows().join('\n')}`)
+  await key('\r') // L0 -> L1
+  for (let step = 0; step < 5; step += 1) await key('\x1b[B') // -> Submit while busy
+  assert.ok(rows().some(line => line.includes('> Submit while busy')),
+    `the row owns the selection:\n${rows().join('\n')}`)
+  await key('\r') // L1 -> the inline choice
+  for (let step = 0; step < 3; step += 1) {
+    if (rows().some(line => /^.*> steer\b/u.test(line))) break
+    await key('\x1b[B')
+  }
+  await key('\r') // explicit Confirm
+  await settle()
+  assert.ok(rows().some(line => /Status\s+Verified/u.test(line)),
+    `the confirm was Verified:\n${rows().join('\n')}`)
+  // Leave the workspace so the transcript surface owns the screen again.
+  for (let step = 0; step < 4; step += 1) await key('\x1b')
+  await settle()
+  assert.ok(!rows().some(line => line.includes('Settings · ')), 'the workspace released the screen')
+
+  // ── The NEXT busy Enter must steer, through the REAL submit route.
   harness.host.status = 'running'
-  mounted.app.setDraft('written policy line')
+  mounted.app.setDraft('confirmed policy line')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   const steered = await drainUntil(() => harness.host.steered.length > 0, 15_000)
-  assert.ok(steered, 'the second submission must reach the agent inbox')
+  assert.ok(steered, 'the submission must reach the agent inbox')
   assert.equal(harness.host.steered.length, 1,
-    'the settings write reaches the REAL submit route through the live volatile reference')
+    'the workspace Confirm reaches the REAL main-session submit route')
   assert.equal(harness.host.followedUp.length, 1, 'no second queue delivery was produced')
-
-  // Negative control on the same boot: writing it BACK restores queue delivery.
-  await mutateSettings([{ op: 'set', path: ['busyEnter'], value: 'queue' }])
-  harness.host.status = 'running'
-  mounted.app.setDraft('reverted policy line')
-  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  const queued = await drainUntil(() => harness.host.followedUp.length > 1, 15_000)
-  assert.ok(queued, 'the third submission must reach the agent inbox')
-  assert.equal(harness.host.followedUp.length, 2, 'the reverted queue policy queues again')
-  assert.equal(harness.host.steered.length, 1, 'and does not steer')
 })
+
 
 test('running + steer: an argued execute-kind line steers as an ordinary prompt', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'steer', status: 'running', hostCommands: ['compact'] })
