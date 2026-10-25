@@ -1,7 +1,7 @@
 /**
  * S2/PR-B §3.3/§3.4 — the `/settings` Web Search / Fetch surface (L6).
  *
- * The user-visible chain: `/settings` → the `Other` category → `Web Search /
+ * The user-visible chain: `/settings` → the `Tools` category → `Web Search /
  * Fetch` → the EXISTING legacy editor focused on the Web section → a selector
  * commits through the ConfigPort → the row is reconciled from the authoritative
  * read-back → closing and reopening shows the committed value.
@@ -448,7 +448,7 @@ test('the workspace row reports the configured providers and opens the Web secti
   t.after(h.dispose)
   h.invoke('settings')
   await h.vt.waitForRender()
-  // The Other category's Web row carries the live configured summary. The
+  // The Tools category's Web row carries the live configured summary. The
   // workspace opens on the About home: walk the rail to Tools first.
   await selectSettingsCategory(h.vt, 'Tools')
   await key(h, ENTER)

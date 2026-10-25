@@ -4,7 +4,7 @@
  * Every case renders the REAL `TuiApp` on a `VirtualTerminal` and reads the
  * PHYSICAL frame plus the cell ink of the state chips:
  *
- * - the Workspace `Other` → `Web Search / Fetch` launcher is visible and
+ * - the Workspace `Tools` → `Web Search / Fetch` launcher is visible and
  *   reachable at 200×50, 120×40, 100×40, 80×24, 80×10, 72×24 and 44×20;
  * - the legacy Web section paints the value/`[current]`/`[default]` state
  *   facts whole (never `[defaul`), truncates the LABEL with `…` instead, and
