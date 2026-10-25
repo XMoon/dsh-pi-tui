@@ -623,6 +623,70 @@ test('C2-R3/F4: an UNREADABLE official section is never treated as off + empty',
     'the stored route was never erased by a fabricated default')
 })
 
+test('C2-R3/EXT-3: a section that becomes UNAVAILABLE reverts the toggle to its displayed value, not a fabricated off', async () => {
+  // The Direct adapter answers an ABSENT service with the shipped default
+  // instead of throwing. That default is NOT a readable state: it may not become
+  // the rollback target, or a user who had `on` would be left displaying `off`.
+  const harness = makeHarness({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  await openSettingsPanel(harness)
+  const rowsBefore = harness.settingsItems!.map(item => item.id)
+  assert.ok(rowsBefore.includes('subagent-model-selection'), 'the toggle row was built while the section was available')
+
+  // Replace the WHOLE section with the absent-service shape BEFORE the toggle:
+  // `available()` false, and `get()` answers the shipped default exactly like
+  // DirectSubagentModelSelectionConfig does with no service mounted.
+  const config = harness.runner.config as unknown as { subagentModelSelection: unknown }
+  const real = config.subagentModelSelection
+  config.subagentModelSelection = {
+    available: () => false,
+    get: () => ({ enabled: false, allowedModels: [] }),
+    set: async () => { throw new Error('settings service unavailable') },
+  }
+
+  const reverted: string[] = []
+  const change = harness.settingsChange!
+  change('subagent-model-selection', 'off', (previous) => { reverted.push(previous) })
+  await settle(harness, 0)
+  for (let i = 0; i < 12; i += 1) await Promise.resolve()
+  config.subagentModelSelection = real
+
+  assert.equal(harness.settings.writes.length, 0, 'an unavailable section dispatches ZERO writes')
+  // Reading the shipped default here would revert to `off`.
+  assert.deepEqual(reverted, ['on'], 'the row reverts to its DISPLAYED value (on), never a fabricated off')
+  const refusal = harness.notices.find(notice => /could not be read|not current|unavailable/u.test(notice.message))
+  assert.ok(refusal !== undefined, `the refusal reaches the user: ${JSON.stringify(harness.notices)}`)
+  assert.equal(refusal?.kind, 'error')
+})
+
+test('C2-R3/EXT-4: a picker that could not read the section never reports an invented summary', async () => {
+  // With an unreadable section the picker starts empty; an optimistic toggle is
+  // then refused by the queue. Closing must NOT report `1 route`/`0 routes` as if
+  // the Host stored that — the outer row keeps its own authoritative value.
+  const harness = makeHarness({ enabled: false, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  await openSettingsPanel(harness)
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
+
+  const selectionService = harness.runner.ctx.get('subagentModelSelection') as unknown as { current(): unknown }
+  const originalCurrent = selectionService.current
+  selectionService.current = () => { throw new Error('official section read failed') }
+
+  const dones: Array<string | undefined> = []
+  const menu = allowlistRow.submenu('1 route', (selected) => { dones.push(selected) }) as { handleInput(data: string): void }
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  menu.handleInput(ENTER) // optimistic toggle: refused by the unreadable guard
+  await settle(harness, 0)
+  for (let i = 0; i < 12; i += 1) await Promise.resolve()
+  menu.handleInput('\x1b') // close
+  selectionService.current = originalCurrent
+
+  assert.equal(harness.settings.writes.length, 0, 'the unreadable section dispatched zero writes')
+  assert.deepEqual(dones, [undefined],
+    'closing reports NO summary: an unread marker is never presented as stored fact')
+  assert.equal(allowlistRow.currentValue, '1 route',
+    'the outer row keeps its own authoritative value instead of an invented one')
+})
+
 test('closing the WHOLE settings panel disposes the allowlist submenu (no late toast, row converges)', async () => {
   // The outer-teardown scenario: the allowlist submenu is open with a write
   // pending, and the user closes the ENTIRE /settings panel. The submenu must

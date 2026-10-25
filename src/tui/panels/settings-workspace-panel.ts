@@ -2463,20 +2463,23 @@ export class SettingsWorkspacePanel implements Component {
     return `${marker}${selected ? color.textStrong(label) : color.text(label)}`
   }
 
+  /** The LONGEST of `wordings` that fits `width` WHOLE, or '' when none does.
+   *  A sentence is never truncated into a different claim. */
+  private fittedLine(preferred: string, width: number, shorter: readonly string[]): string {
+    return [preferred, ...shorter].find(text => visibleWidth(text) <= width) ?? ''
+  }
+
   /**
-   * The statement of an all-unavailable category, in the LONGEST wording that
-   * fits WHOLE. It is never truncated (a half-cut sentence reads as a different
-   * claim), and a pane too narrow for even the shortest wording still says
-   * nothing rather than something false.
+   * The statement of an all-unavailable category (the Rows level), in the
+   * LONGEST wording that fits WHOLE.
    */
   private emptyRowsLine(width: number): string {
-    const wordings = [
+    const text = this.fittedLine(
       'No setting is available in this category right now.',
-      'No setting is available.',
-      'None available.',
-    ]
-    const fitting = wordings.find(text => visibleWidth(text) <= width)
-    return fitting === undefined ? '' : color.textDim(fitting)
+      width,
+      ['No setting is available.', 'None available.'],
+    )
+    return text === '' ? '' : color.textDim(text)
   }
 
   private rowLine(row: SettingsWorkspaceRow | undefined, width: number): string {
@@ -2548,9 +2551,18 @@ export class SettingsWorkspacePanel implements Component {
       // Two DIFFERENT absences: a direct category has no Rows level at all, while
       // a configuration category whose rows are all unavailable has no
       // SELECTABLE row (never "press Enter to open a page" — it has none).
+      // BOTH go through the width-fitted wording so a narrow frame never paints
+      // a truncated sentence.
       ? [isDirectCategory(this.categoryId)
-          ? color.textDim(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`)
-          : color.textDim('No setting is available in this category right now.')]
+          ? color.textDim(this.fittedLine(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`, width, [
+            'Direct page. Press Enter to open.',
+            'Direct page.',
+          ]))
+          : color.textDim(this.fittedLine(
+            'No setting is available in this category right now.',
+            width,
+            ['No setting is available.', 'None available.'],
+          ))]
       : this.detailContent(row, width, includeTitle)
     const offset = Math.min(Math.max(0, this.detailOffset), Math.max(0, content.length - scrollViewport))
     this.detailOffset = offset
