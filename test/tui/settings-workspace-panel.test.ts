@@ -2825,5 +2825,13 @@ test('R3-C10 an unreadable official section withholds the delegation rows instea
     `a half-cut statement is never painted:\n${crampedFrame}`)
   assert.match(crampedFrame, /No setting is available\.|None available\./u,
     `a narrow pane still states the empty state with a SHORTER whole wording:\n${crampedFrame}`)
+  // The SAME absence is reachable from the empty Rows level by pressing Enter:
+  // the Detail must fit its sentence too, instead of painting a cut one.
+  cramped.panel.handleInput('\r')
+  const emptyDetail = plain(cramped)
+  assert.doesNotMatch(emptyDetail, /No setting is available in this category …/u,
+    `the empty Detail never paints a truncated sentence:\n${emptyDetail}`)
+  assert.match(emptyDetail, /No setting is available\.|None available\./u,
+    `the empty Detail states the same absence in a fitting wording:\n${emptyDetail}`)
   assert.ok(reads > 0, 'the projection really read its authority')
 })

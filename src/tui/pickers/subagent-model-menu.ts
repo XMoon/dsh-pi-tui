@@ -244,6 +244,8 @@ export function projectSubagentAllowlist(input: {
  */
 export class SubagentModelAllowlistPicker implements Component, Focusable, RowBudgetAware {
   private readonly deps: SubagentAllowlistPickerDeps
+  /** Whether this picker has ever read a REAL section (see the constructor). */
+  private sectionReadable = false
   private readonly enabled: boolean
   private allowed: readonly SubagentAllowedModelRoute[]
   /** The catalog authority state: `loading` until the one official read
@@ -290,10 +292,16 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     // first successful settle re-derives the real section.
     let current: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } | undefined
     try {
-      current = deps.selection.get()
+      // An UNAVAILABLE section answers with the shipped default instead of
+      // throwing; that default is not a readable state either.
+      current = deps.selection.available() ? deps.selection.get() : undefined
     } catch {
       current = undefined
     }
+    /** Whether this picker ever read a real section. While false, nothing may be
+     *  displayed as the committed allowlist: an optimistic marker on an unknown
+     *  section could otherwise be reported as a summary the Host never stored. */
+    this.sectionReadable = current !== undefined
     this.allowed = current === undefined ? [] : current.allowedModels.map(route => ({ ...route }))
     this.enabled = current?.enabled === true
     this.picker = new SearchablePicker([], 8, selectListTheme, {}, {
@@ -489,12 +497,6 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     return Promise.resolve(this.deps.selection.set({ enabled: this.enabled, allowedModels: [...payload] }))
   }
 
-  /** Re-read the committed section and re-derive the working copy plus every
-   *  visible marker. When the picker is already CLOSED, the outer /settings
-   *  row must still converge to the COMMITTED summary — the fork rejects a
-   *  `done` from a closed submenu, so the post-close convergence goes through
-   *  `summarize` (a row-display update, never navigation), and the late
-   *  failure keeps its no-toast contract. */
   /**
    * Re-read the committed section and re-derive the working copy plus every
    * visible marker. A settle after CLOSE still converges the outer row's
@@ -508,10 +510,14 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
   private syncFromSection(): void {
     let committed: readonly SubagentAllowedModelRoute[]
     try {
+      // An UNAVAILABLE section answers with the shipped default; that is not a
+      // committed value, so it may not overwrite the working copy.
+      if (!this.deps.selection.available()) return
       committed = this.deps.selection.get().allowedModels
     } catch {
       return
     }
+    this.sectionReadable = true
     this.allowed = committed.map(existing => ({ ...existing }))
     if (this.disposed) {
       this.deps.summarize(allowlistSummary(this.allowed))
@@ -521,10 +527,20 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     this.deps.requestRender()
   }
 
+  /** Whether a summary may be reported at all: a picker that never read a real
+   *  section has no committed allowlist to describe. */
+  private summaryOrNone(): string | undefined {
+    return this.sectionReadable ? allowlistSummary(this.allowed) : undefined
+  }
+
   private close(): void {
     if (this.disposed) return
     this.disposed = true
-    this.deps.done(allowlistSummary(this.allowed))
+    // A picker that never read a real section reports NO summary: the outer row
+    // must keep its own authoritative value instead of an invented `0 routes`
+    // derived from the shipped default plus an uncommitted optimistic marker.
+    const summary = this.summaryOrNone()
+    this.deps.done(summary)
   }
 
   /** Latch the picker as closed from OUTSIDE (the /settings overlay teardown

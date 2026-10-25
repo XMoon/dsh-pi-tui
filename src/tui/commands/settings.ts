@@ -2502,6 +2502,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * would erase routes the Host still stores.
    */
   const readSubagentSectionOrUndefined = (): OfficialSectionState | undefined => {
+    // An UNAVAILABLE section answers with the shipped default rather than
+    // throwing (the Direct adapter's absent-service shape), and that default is
+    // NOT a stored value: it may not become a rollback target, a write base or a
+    // saved summary.
+    if (!runner.config.subagentModelSelection.available()) return undefined
     try {
       const latest = runner.config.subagentModelSelection.get()
       return {
@@ -2714,6 +2719,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // attribute anything, so the outcome stays indeterminate.
         let readback: OfficialSectionState
         try {
+          if (!section.available()) throw new Error('the section is no longer available')
           readback = section.get()
         } catch {
           return {
@@ -2740,6 +2746,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // success, so the honest verdict is `unverified`, never `not-saved`.
       let readback: OfficialSectionState
       try {
+        if (!section.available()) throw new Error('the section is no longer available')
         readback = section.get()
       } catch (error) {
         return {
