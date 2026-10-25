@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/settings` Appearance and Conversation now edit more configuration in place, without the
+  existing editor.** Appearance gains an editable `Icon style` (`emoji` / `symbols` / `minimal`)
+  that changes the structural glyphs immediately and persists only that field. Conversation keeps
+  the fixed order Transcript display → Transcript detail → Thinking detail → Progress updates →
+  Response style → More conversation settings…, gains editable `Transcript detail`, `Progress
+  updates` and `Response style`, and makes the previously read-only `Thinking detail` editable.
+  `Transcript detail` shares the `Ctrl+O` switch and `Thinking detail` shares the `Alt+T` switch;
+  both are pure display state, are never persisted, and say `not applicable — runtime-only` in
+  their Detail. `Progress updates` and `Response style` mutate the same state objects the Agent's
+  prompt provider reads on its next assembly and persist independently, while Focus only
+  suppresses progress narration without changing the saved cadence. `More conversation settings…`
+  now names only the still-unmigrated `Submit while busy` and `Git attribution` and lands the
+  existing editor on `Submit while busy`. Browsing, moving a candidate, Tab, the wheel, a resize
+  and Esc write nothing; only an explicit Confirm commits, and the outcome still distinguishes
+  `Verified` / `Not saved` / `Commit accepted` / `Outcome unknown` while showing the live value
+  and the stored document value separately.
+
 - **Ctrl+V pastes and `/attach` / `/image` now commit into the editor that is really mounted.**
   Two quick Ctrl+V presses are read and committed one after the other, in the order they were
   triggered: the second clipboard read only starts once the first one has been read AND written,

@@ -150,6 +150,9 @@ interface HarnessOptions {
      *  republish/currentness seam). */
     readonly currentSessionStats?: () => Promise<{ lifetime: { turns: number; steps: number; llmMs: number } }>
   }
+  /** The icon style the REAL `TuiApp` starts with (the composition's persisted
+   *  read). Omitted = the app's own default. */
+  iconStyle?: 'emoji' | 'symbols' | 'minimal'
 }
 
 /** The embedded Plugin Manager page the composition factory hands the Settings
@@ -240,6 +243,9 @@ interface Harness {
   readonly copied: string[]
   /** The live settings document the projection reads. */
   readonly doc: TuiSettingsDoc
+  /** The runner's LIVE prompt policy objects (the same ones the providers read). */
+  readonly progressUpdatesState: { mode: 'off' | 'milestones' | 'frequent' }
+  readonly responseStyleState: { style: 'default' | 'concise' | 'explanatory' }
   readonly invoke: (name?: string, rawInput?: string) => unknown
   /** Open the workspace and walk the category rail to one category. */
   readonly open: (category?: string) => Promise<void>
@@ -273,6 +279,8 @@ interface Harness {
   readonly pluginPageInstances: () => readonly FakeEmbeddedPluginPage[]
   /** Host/provider/account reads in the fake seams (the hidden-action witness). */
   readonly hostReads: () => number
+  /** Move the LIVE backend readiness the ConfigPort answers. */
+  readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
   readonly dispose: () => void
 }
 
@@ -307,11 +315,17 @@ function setup(options: HarnessOptions = {}): Harness {
   let pluginPages = 0
   const pluginPageInstances: FakeEmbeddedPluginPage[] = []
   const visualWrites: boolean[] = []
+  /** The LIVE backend readiness the ConfigPort answers (a case can move it). */
+  let readiness = options.readiness ?? 'ready'
   let externalVisualChange = options.visualToolsExternalChange
   let visualState: VisualToolsState | undefined = options.visualToolsUnavailable === true
     ? undefined
     : options.visualTools ?? { enabled: true, revision: 1, userOverridden: false, applied: true }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
+  // The TWO live prompt-state objects the runner owns and the R1 writers mutate.
+  // They are the SAME objects the registered SystemPrompt providers read.
+  const progressUpdatesState = { mode: 'milestones' as const } as { mode: 'off' | 'milestones' | 'frequent' }
+  const responseStyleState = { style: 'default' as const } as { style: 'default' | 'concise' | 'explanatory' }
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
   const owned: OwnedRunner = (_label, task, runOptions) => {
@@ -331,6 +345,7 @@ function setup(options: HarnessOptions = {}): Harness {
   vt.write = (data: string): void => { writes.push(data); originalWrite(data) }
   const app = new TuiApp(vt, events, {
     copySelection: options.copySelection ?? (async (text: string) => { copied.push(text); return true }),
+    ...options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle },
   })
   app.start()
   if (options.displayPreset !== undefined && options.displayPreset !== app.displayPreset()) {
@@ -356,8 +371,8 @@ function setup(options: HarnessOptions = {}): Harness {
     })(),
     cwd: '/ws',
     sessionCwd: () => '/ws',
-    progressUpdatesState: { mode: 'milestones' },
-    responseStyleState: { style: 'default' },
+    progressUpdatesState,
+    responseStyleState,
     gitAttributionState: { mode: 'off' },
     signal: new AbortController().signal,
     commandRegistry: commands,
@@ -439,7 +454,7 @@ function setup(options: HarnessOptions = {}): Harness {
       return page
     },
     config: {
-      configReadiness: () => options.readiness ?? 'ready',
+      configReadiness: () => readiness,
       visualTools: {
         read: () => visualState,
         setEnabled: async (enabled: boolean, revision: number) => {
@@ -578,6 +593,8 @@ function setup(options: HarnessOptions = {}): Harness {
     app,
     copied,
     doc,
+    progressUpdatesState,
+    responseStyleState,
     invoke,
     open,
     openHome,
@@ -599,6 +616,7 @@ function setup(options: HarnessOptions = {}): Harness {
       const list = held.splice(0)
       for (const run of list) run()
     },
+    setReadiness: (next: 'ready' | 'stale' | 'unavailable') => { readiness = next },
     dispose,
   }
 }
@@ -2125,7 +2143,8 @@ test('changing category refreshes the row selection and the detail; browsing nev
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')))
   await key(h, '\r') // L1
   assert.ok(h.view().includes('Transcript display'), 'the Conversation rows replace the appearance rows')
-  await key(h, '\x1b[B') // display-preset -> thinking
+  await key(h, '\x1b[B') // display-preset -> expand (Transcript detail)
+  await key(h, '\x1b[B') // expand -> thinking
   await key(h, '\r') // L2
   assert.match(h.rowsPlain()[0]!, /Thinking detail/, 'the detail follows the new stable row id')
   await key(h, '\x1b') // L1
@@ -2621,25 +2640,33 @@ test('B-07 a stored theme whose source is gone is listed as unavailable and can 
   h.dispose()
 })
 
-test('B-08 the read-only rows keep their facts readable, lose the copy verb and gain no edit channel', async () => {
-  const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark', iconStyle: 'minimal' } })
-  await openSelectedRow(h, 'theme')
-  await key(h, '\x1b[B') // Configured theme -> Icon style
-  await key(h, '\r') // read-only Detail
-  assert.match(h.view(), /Icon style/)
-  assert.ok(!h.view().includes('Copy value [C]'), 'a read-only row paints no Legacy Copy action')
-  assert.ok(!h.view().includes('Change…'), 'a read-only row paints no edit verb')
-  assert.match(h.view(), /read-only here/)
-  const before = h.replacements()
-  await key(h, '\r')
-  assert.ok(!h.view().includes('Choose Icon style'), 'Enter on a read-only row opens no choice')
-  assert.equal(h.replacements(), before, 'and writes nothing')
-  for (const data of ['c', 'C']) {
-    await key(h, data)
-    await settle(h)
+test('B-08 the transition launcher keeps its facts readable and gains no edit channel', async () => {
+  // C2-R1 migrated every Appearance/Conversation configuration row, so the
+  // read-only launcher is now the ONLY non-edit row of those categories: it must
+  // keep stating its facts, paint no writer and expose no copy verb.
+  const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' } })
+  await h.open('Conversation')
+  await key(h, '\r') // L0 -> L1
+  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B') // ... -> More conversation settings…
+  assert.ok(h.view().includes('> More conversation settings…'),
+    `the launcher is the selected Conversation row:\n${h.view()}`)
+  // The FROZEN Conversation order, as painted in the ROWS column (the Detail
+  // repeats the selected row's label, so the order is read from the list).
+  const rowsColumn = h.rowsPlain().map((_, index) => rowsPaneText(h, index)).join('\n')
+  let previous = -1
+  for (const label of ['Transcript display', 'Transcript detail', 'Thinking detail', 'Progress updates', 'Response style', 'More conversation settings…']) {
+    const at = rowsColumn.indexOf(label)
+    assert.ok(at > previous, `${label} keeps the frozen Conversation order:\n${h.view()}`)
+    previous = at
   }
-  assert.deepEqual(h.copied, [], 'the copy keys carry nothing for a read-only row')
-  assert.equal(h.replacements(), before)
+  assert.match(h.view(), /Submit while busy and Git attribution are not yet editable in this workspace/u,
+    'the launcher advertises only the fields that were NOT migrated')
+  assert.ok(!h.view().includes('Copy value [C]'), 'a launcher row paints no Legacy Copy action')
+  await key(h, '\r') // the legacy handoff (a launcher owns no Detail level)
+  const legacy = h.view()
+  assert.match(legacy, /Type to search/, `the legacy editor is the physical owner:\n${legacy}`)
+  assert.match(legacy, />\s*Submit while busy/u, 'the handoff lands on the remaining row, never on a migrated field')
+  assert.equal(h.replacements(), 0, 'activating a launcher writes nothing')
   h.dispose()
 })
 
@@ -5556,5 +5583,427 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
     for (const runtime of [...ctx.registry.values()]) {
       for (const disposedFiber of runtime.fibers) await Promise.resolve(disposedFiber.dispose())
     }
+  }
+})
+
+// ── C2-R1: the five migrated Appearance / Conversation writers ─────────────
+//
+// Every case below drives the REAL composition: the registered `/settings`
+// command builds the snapshot, the panel owns the choice, the command's ONE
+// `commitSettingsWorkspaceField` applies the live owner and persists through
+// the serialized document queue, and the assertions read the SINK (the app's
+// live icon/disclosure state, the shared prompt-state objects, the document
+// the write really produced) — never a count of dispatched requests alone.
+
+/** The frozen Conversation row order (F-1: the launcher sits LAST). */
+const CONVERSATION_ROWS = [
+  'Transcript display', 'Transcript detail', 'Thinking detail',
+  'Progress updates', 'Response style', 'More conversation settings…',
+] as const
+
+/** Select one LEGACY row of a category at L1 with the real keys. */
+async function selectRow(h: Harness, category: string, row: string): Promise<void> {
+  await h.open(category)
+  await key(h, '\r') // L0 -> L1
+  const target = CONVERSATION_ROWS.indexOf(row as (typeof CONVERSATION_ROWS)[number])
+  const steps = target >= 0 ? target : 0
+  for (let step = 0; step < steps; step += 1) await key(h, '\x1b[B')
+}
+
+/** Open the L2 choice of one already-selected row and confirm the candidate
+ *  `steps` rows below the current one (the painted list order). */
+async function chooseCandidate(h: Harness, steps: number): Promise<void> {
+  await key(h, '\r') // L1 -> L2 choice
+  for (let step = 0; step < steps; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // explicit Confirm
+  await settle(h)
+}
+
+test('R1-01 Appearance keeps Theme + Icon style + the Footer launcher; Conversation is the frozen six', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await h.open('Appearance')
+  await key(h, '\r')
+  const appearance = h.view()
+  assert.match(appearance, /Rows \(3\)/u, 'Appearance states its real three rows')
+  assert.match(appearance, /Configured theme/u)
+  assert.match(appearance, /Icon style/u)
+  assert.match(appearance, /Footer & status line…/u)
+  assert.doesNotMatch(appearance, /Transcript detail|Thinking detail|Progress updates|Response style/u)
+
+  await key(h, '\x1b') // Rows -> Categories (narrow/wide both keep the level)
+  await h.vt.waitForRender()
+  await walkToConversation(h)
+  await key(h, '\r')
+  const conversation = h.view()
+  assert.match(conversation, /Rows \(6\)/u, 'Conversation states its real six rows')
+  let previous = -1
+  for (const label of CONVERSATION_ROWS) {
+    const at = conversation.indexOf(label)
+    assert.ok(at > previous, `${label} keeps its frozen position:\n${conversation}`)
+    previous = at
+  }
+  h.dispose()
+})
+
+/** Walk an ALREADY-OPEN workspace's rail to Conversation from any category. */
+async function walkToConversation(h: Harness): Promise<void> {
+  for (let step = 0; step < CATEGORY_ORDER.length; step += 1) {
+    if (h.rowsPlain().some(line => line.startsWith('> Conversation'))) return
+    await key(h, '\x1b[B')
+  }
+  assert.fail(`the rail never reached Conversation:\n${h.view()}`)
+}
+
+test('R1-02 browsing, moving, Tab, wheel and Esc never mutate any of the five', async () => {
+  const h = setup({ columns: 120, rows: 40, iconStyle: 'emoji' })
+  const iconBefore = h.app.currentIconStyle()
+  const expandBefore = h.app.isTranscriptDetailExpanded()
+  const thinkingBefore = h.app.isThinkingExpanded()
+  const progressBefore = h.progressUpdatesState.mode
+  const responseBefore = h.responseStyleState.style
+
+  await h.open('Appearance')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // Configured theme -> Icon style
+  await key(h, '\r') // the inline choice
+  assert.match(h.view(), /Choose value/u)
+  await key(h, '\x1b[B')
+  await key(h, '\t')
+  wheel(h, 8, 6)
+  await settle(h)
+  await key(h, '\x1b') // cancel
+
+  await key(h, '\x1b') // Rows -> Categories
+  await h.vt.waitForRender()
+  await walkToConversation(h)
+  await key(h, '\r')
+  for (let step = 0; step < 5; step += 1) {
+    await key(h, '\x1b[B')
+    await key(h, '\r') // details / choice
+    await key(h, '\x1b[B')
+    await key(h, '\x1b') // cancel
+  }
+
+  assert.equal(h.replacements(), 0, 'browsing never writes the document')
+  assert.equal(h.app.currentIconStyle(), iconBefore, 'the live icon style is untouched')
+  assert.equal(h.app.isTranscriptDetailExpanded(), expandBefore, 'the transcript disclosure is untouched')
+  assert.equal(h.app.isThinkingExpanded(), thinkingBefore, 'the thinking disclosure is untouched')
+  assert.equal(h.progressUpdatesState.mode, progressBefore, 'the shared progress state is untouched')
+  assert.equal(h.responseStyleState.style, responseBefore, 'the shared response state is untouched')
+  h.dispose()
+})
+
+test('R1-03 Icon style applies live and persists only its own document field', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: 'emoji' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings, iconStyle: 'emoji' })
+  await h.open('Appearance')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // Icon style
+  await key(h, '\r')
+  assert.match(h.view(), /> emoji\s+\[current\]/u, 'the LIVE style owns the current chip')
+  await key(h, '\x1b[B') // emoji -> symbols
+  await key(h, '\r') // Confirm
+  await settle(h)
+
+  assert.equal(h.app.currentIconStyle(), 'symbols', 'the surface really switched its glyph vocabulary')
+  assert.equal(fixture.document().iconStyle, 'symbols', 'the document stores the new style')
+  assert.equal(fixture.document().theme, 'dark', 'no other field was rewritten')
+  assert.equal(fixture.calls.length, 1, 'exactly one path-scoped mutation')
+  assert.deepEqual(fixture.calls[0]!.ops, [{ op: 'set', path: ['iconStyle'], value: 'symbols' }])
+  assert.match(h.view(), /Status\s+Verified/u, 'the authoritative re-read verified the write')
+  assert.match(h.view(), /Persisted\s+symbols/u, 'the persisted fact follows the document')
+  h.dispose()
+})
+
+test('R1-04 a missing or invalid stored iconStyle keeps its raw persisted fact while the runtime normalizes', async () => {
+  for (const stored of [undefined, 'garbage'] as const) {
+    const h = setup({
+      columns: 140,
+      rows: 40,
+      // An old/invalid document: the field is absent or carries junk.
+      tuiSettings: (() => {
+        const values: TuiSettingsDoc = { ...DEFAULT_DOC }
+        if (stored === undefined) delete (values as { iconStyle?: string }).iconStyle
+        else (values as { iconStyle?: string }).iconStyle = stored
+        return { get: () => values, replace: (next: TuiSettingsDoc) => { Object.assign(values, next) } }
+      })(),
+      iconStyle: 'emoji',
+    })
+    await h.open('Appearance')
+    await key(h, '\r')
+    await key(h, '\x1b[B')
+    assert.match(h.view(), /Value\s+emoji/u, `the runtime normalizes ${JSON.stringify(stored)} to emoji`)
+    assert.match(h.view(), /Persisted\s+not set|Persisted\s+garbage/u,
+      `the raw stored fact is never replaced by the normalized value (${JSON.stringify(stored)})`)
+    assert.ok(!h.view().includes('Persisted  emoji') && !/Persisted\s+emoji/u.test(h.view()),
+      'a normalized runtime value is never presented as the stored one')
+    assert.equal(h.replacements(), 0)
+    h.dispose()
+  }
+})
+
+test('R1-05 Transcript detail confirms into the SAME Ctrl+O owner and writes no document', async () => {
+  const h = setup({ columns: 140, rows: 40 })
+  const before = h.app.isTranscriptDetailExpanded()
+  await h.open('Conversation')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // Transcript display -> Transcript detail
+  await key(h, '\r')
+  assert.match(h.view(), /> collapsed\s+\[current\]/u)
+  await key(h, '\x1b[B') // collapsed -> expanded
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(h.app.isTranscriptDetailExpanded(), true, 'the Ctrl+O master switch really changed')
+  assert.equal(h.replacements(), 0, 'the runtime-only field writes NO settings document')
+  assert.equal(h.doc.displayPreset, DEFAULT_DOC.displayPreset, 'the display preset is untouched')
+  assert.match(h.view(), /Status\s+Verified/u, 'the live runtime fact was verified')
+  assert.match(h.view(), /Persisted\s+not applicable — runtime-only/u, 'the Detail never claims a save')
+  assert.ok(!h.view().includes('Saving…'), 'no persistence phase is painted for a runtime-only field')
+
+  // The hotkey keeps sharing the ONE owner: a later Ctrl+O changes what the
+  // next Settings open reads (the workspace is closed first: ONE lease).
+  await key(h, '\x1b') // Detail -> Rows
+  await key(h, '\x1b') // Rows -> Categories
+  await key(h, '\x1b') // close
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Settings · '), 'the workspace closed before the re-open')
+  await h.open('Conversation')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  assert.match(h.view(), /Value\s+expanded/u, 'a re-open reads the hotkey-updated fact')
+  h.dispose()
+})
+
+test('R1-06 Thinking detail confirms into the SAME Alt+T owner and writes no document', async () => {
+  const h = setup({ columns: 140, rows: 40 })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 2; step += 1) await key(h, '\x1b[B') // -> Thinking detail
+  await key(h, '\r')
+  assert.match(h.view(), /> collapsed\s+\[current\]/u)
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.app.isThinkingExpanded(), true, 'the shared Thinking disclosure really changed')
+  assert.equal(h.replacements(), 0, 'the runtime-only field writes NO settings document')
+  assert.match(h.view(), /Persisted\s+not applicable — runtime-only/u)
+  h.dispose()
+})
+
+test('R1-07 Progress updates writes the SAME shared state and persists Off / Milestones / Frequent', async () => {
+  const fixture = createDirectSettingsFixture({ progressUpdates: 'milestones' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 3; step += 1) await key(h, '\x1b[B') // -> Progress updates
+  await key(h, '\r')
+  assert.match(h.view(), /> milestones\s+\[current\]/u)
+  await key(h, '\x1b[A') // milestones -> off
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(h.progressUpdatesState.mode, 'off', 'the shared object the prompt provider reads changed')
+  assert.equal(fixture.document().progressUpdates, 'off', 'the cadence really persisted')
+  assert.equal(fixture.document().responseStyle, 'default', 'the OTHER prompt axis is untouched')
+  assert.equal(h.responseStyleState.style, 'default', 'the live response style is untouched')
+  assert.match(h.view(), /Status\s+Verified/u)
+  assert.match(h.view(), /Persisted\s+off/u, 'the persisted fact follows the stored value')
+  h.dispose()
+})
+
+test('R1-08 Response style writes the SAME shared state and never touches the progress axis', async () => {
+  const fixture = createDirectSettingsFixture({ progressUpdates: 'frequent', responseStyle: 'default' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  h.progressUpdatesState.mode = 'frequent'
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B') // -> Response style
+  await key(h, '\r')
+  await key(h, '\x1b[B') // default -> concise
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(h.responseStyleState.style, 'concise', 'the shared response-style object changed')
+  assert.equal(fixture.document().responseStyle, 'concise')
+  assert.equal(h.progressUpdatesState.mode, 'frequent', 'the progress axis is untouched in memory')
+  assert.equal(fixture.document().progressUpdates, 'frequent', 'and untouched in the document')
+  assert.match(h.view(), /Status\s+Verified/u)
+  h.dispose()
+})
+
+test('R1-09 every persisted field needs an agreeing authoritative re-read to be Verified', async () => {
+  for (const [field, steps, category] of [
+    ['icon-style', 1, 'Appearance'],
+    ['progress-updates', 3, 'Conversation'],
+    ['response-style', 4, 'Conversation'],
+  ] as const) {
+    const h = setup({ columns: 140, rows: 40 })
+    await h.open(category)
+    await key(h, '\r')
+    for (let step = 0; step < steps; step += 1) await key(h, '\x1b[B')
+    await chooseCandidate(h, 1)
+    assert.equal(h.replacements(), 1, `${field} wrote exactly once`)
+    assert.match(h.view(), /Status\s+Verified/u, `${field} verified after the re-read agreed`)
+    h.dispose()
+  }
+})
+
+test('R1-10 a completed write whose re-read is unavailable is Commit accepted, never Verified', async () => {
+  const h = setup({ columns: 140, rows: 40 })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B') // Response style
+  await key(h, '\r') // the choice
+  h.setReadiness('stale') // the backend goes stale while the choice is open
+  await key(h, '\x1b[B') // default -> concise
+  await key(h, '\r')
+  await settle(h)
+
+  // The READINESS gate refuses the persistence BEFORE the write, after the live
+  // runtime really applied: both halves are stated, and never as Verified.
+  assert.equal(h.replacements(), 0, 'a non-ready backend dispatches no document write')
+  assert.equal(h.responseStyleState.style, 'concise', 'the runtime fact still applied locally')
+  // The Detail wraps its status at the pane width: each phrase must be present,
+  // not one unwrapped sentence.
+  assert.match(h.view(), /Not saved · the response style is/u)
+  assert.match(h.view(), /configuration is stale/u)
+  assert.ok(!h.view().includes('Status  Verified'))
+  assert.match(h.view(), /Runtime now|Freshness/u, 'the Detail keeps stating the live fact')
+  h.dispose()
+})
+
+test('R1-11 a write the authority readably disagrees with is Not saved and keeps both facts apart', async () => {
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { responseStyle: 'default' },
+    applyReplace: () => {}, // the write returns success, the document never changes
+  })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B') // Response style
+  await key(h, '\r')
+  await key(h, '\x1b[B') // default -> concise
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(h.responseStyleState.style, 'concise', 'the live fact applied first (apply-first contract)')
+  assert.match(h.view(), /Not saved · the write reported success/u)
+  assert.match(h.view(), /authoritative document reads/u)
+  assert.match(h.view(), /Value\s+concise/u, 'the runtime fact is still shown as applied')
+  assert.match(h.view(), /Persisted\s+default/u, 'the stored fact still reads the old value')
+  assert.match(h.view(), /Retry save/u)
+  assert.ok(!h.view().includes('Status  Verified'))
+  h.dispose()
+})
+
+test('R1-12 a refused write is attributed from a fresh read: base unchanged is Not saved, a third value is unknown', async () => {
+  const notSaved = setup({
+    columns: 140,
+    rows: 40,
+    doc: { responseStyle: 'default' },
+    applyReplace: () => { throw new Error('settings namespace "tui-app" changed since it was read') },
+  })
+  await notSaved.open('Conversation')
+  await key(notSaved, '\r')
+  for (let step = 0; step < 4; step += 1) await key(notSaved, '\x1b[B')
+  await key(notSaved, '\r')
+  await key(notSaved, '\x1b[B')
+  await key(notSaved, '\r')
+  await settle(notSaved)
+  assert.match(notSaved.view(), /Not saved · the response style is applied/u)
+  assert.match(notSaved.view(), /storing it failed/u)
+  assert.ok(!notSaved.view().includes('Status  Verified'))
+  assert.equal(notSaved.responseStyleState.style, 'concise')
+  notSaved.dispose()
+
+  const third = setup({
+    columns: 140,
+    rows: 40,
+    doc: { responseStyle: 'default' },
+    // The Remote-shaped failure: the write goes through, an EXTERNAL writer owns
+    // the field by the time the failing post-write describe is classified.
+    applyReplace: () => {
+      third.doc.responseStyle = 'explanatory'
+      throw new Error('post-write describe failed')
+    },
+  })
+  await third.open('Conversation')
+  await key(third, '\r')
+  for (let step = 0; step < 4; step += 1) await key(third, '\x1b[B')
+  await key(third, '\r')
+  await key(third, '\x1b[B')
+  await key(third, '\r')
+  await settle(third)
+  assert.match(third.view(), /Outcome unknown/u,
+    'a rejection the authority no longer attributes to the base is never a refusal')
+  third.dispose()
+})
+
+test('R1-13 interleaved document writes never overwrite each other and keep unrelated fields', async () => {
+  const fixture = createDirectSettingsFixture({
+    theme: 'dark',
+    iconStyle: 'emoji',
+    progressUpdates: 'milestones',
+    keybindings: { 'app.quit': 'ctrl+q' },
+  })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  // Two interleaved commits on DIFFERENT fields: the second must be reconciled
+  // against the FIRST one's stored result, not the document read at open time.
+  await h.open('Appearance')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // Icon style
+  await key(h, '\r')
+  await key(h, '\x1b[B') // emoji -> symbols
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(fixture.document().iconStyle, 'symbols')
+
+  await key(h, '\x1b') // Rows
+  await key(h, '\x1b') // Categories
+  await h.vt.waitForRender()
+  await walkToConversation(h)
+  await key(h, '\r')
+  for (let step = 0; step < 3; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r')
+  await key(h, '\x1b[A') // milestones -> off
+  await key(h, '\r')
+  await settle(h)
+
+  const document = fixture.document() as unknown as Record<string, unknown>
+  assert.equal(document.iconStyle, 'symbols', 'the earlier field survives the later write')
+  assert.equal(document.progressUpdates, 'off', 'the later field really landed')
+  assert.equal(document.theme, 'dark', 'an unrelated field was never rewritten')
+  assert.deepEqual(document.keybindings, { 'app.quit': 'ctrl+q' }, 'the keybinding pass-through survives')
+  assert.equal(fixture.calls.length, 2, 'two path-scoped writes, never one whole-document overwrite')
+  h.dispose()
+})
+
+test('R1-15 More conversation settings… opens the existing editor on Submit while busy', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
+  assert.ok(h.view().includes('> More conversation settings…'))
+  await key(h, '\r')
+  const legacy = h.view()
+  assert.match(legacy, /Type to search/u, 'the existing complete editor is the physical owner')
+  assert.match(legacy, />\s*Submit while busy/u, 'it lands on the remaining row, never on a migrated field')
+  assert.ok(!legacy.includes('Settings · '), 'the workspace was retired, never stacked underneath')
+  h.dispose()
+})
+
+test('R1-18 the five migrated rows never copy, at every responsive width', async () => {
+  for (const [columns, rows] of [[120, 40], [80, 24], [44, 24]] as const) {
+    const h = setup({ columns, rows })
+    await h.open('Conversation')
+    await key(h, '\r')
+    await key(h, '\r') // the first row's choice
+    for (const data of ['c', 'C']) await key(h, data)
+    await settle(h)
+    assert.deepEqual(h.copied, [], `no configuration row copies at ${columns}x${rows}`)
+    assert.equal(h.replacements(), 0, `and no copy key writes at ${columns}x${rows}`)
+    h.dispose()
   }
 })

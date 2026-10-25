@@ -350,7 +350,8 @@ Settings 的一级分类是固定的 `About / Models / Account / Agent / Appeara
 写入/清除必须在页面里明确确认。Account 授权与普通 provider flow 分开：Account 只通过官方
 PlatformAccount 与 Host 的 loopback `/oauth/callback` 登录，不会被当作普通 credential record 清除。
 
-其中**「Configured theme」和「Transcript display」两行可以直接修改**：在 L1 设置行按
+其中 **Theme、Transcript display、Icon style、Transcript detail、Thinking detail、Progress
+updates、Response style 七行，以及 Tools 里的 Visual tools 开关，都可以直接修改**：在 L1 设置行按
 `Right` 或 `Enter`，或点击 `[Change…]` / 可见的 Detail 内容，即可在同一 L2 详情中打开
 候选选择；当前值与 Runtime / Persisted 事实留在同一详情事实区，并与候选列表独立滚动。`Up`/`Down`/`Home`/`End`
 移动候选，`PgUp`/`PgDn` 和事实区上的滚轮只滚动详情事实，候选区滚轮独立滚动候选；
@@ -366,8 +367,15 @@ L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选
 则如实报 Outcome unknown；写返回成功但权威可读地不一致同样按失败显示，而不是
 "verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本机生效，
 此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按 source-qualified 身份解析，
-已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成同名文件主题。Icon style 与
-Thinking detail 仍是只读行。
+已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成同名文件主题。这三类写入器互不混同：
+`Icon style`、`Progress updates`、`Response style` 先作用于各自的实时 owner（图标调色板；Agent
+提示词实际读取的同一份 progress/response state 对象），再经唯一串行整文档写入落盘；`Transcript
+detail`（与 `Ctrl+O` 同一份开关）与 `Thinking detail`（与 `Alt+T` 同一份开关）是纯运行态，
+没有持久字段，详情里明确写 `not applicable — runtime-only`，其 Verified 只代表运行态已生效。
+`[current]` 始终标记实时值，`Persisted` 另行显示文档里的原始存储值（未声明显示 `not set`，
+文档不可读显示 unknown）；归一化后的回退值永远不会伪装成已保存值。`Progress updates` 与
+`Response style` 的切换在下一次提示词组装时生效，不重新注册 section、不重建 Agent；Focus
+只是暂时抑制进度叙述，不修改已选择的节奏。
 
 `/settings → Tools` 提供一个 profile 级 **Visual tools** 总开关（默认 On）：它对应 Host 的
 `pi-tui-visual-tools.enabled` 配置，关闭后 `dsh_pi_tui_chart` 与 `dsh_pi_tui_svg` 会从该 Host
@@ -378,7 +386,8 @@ transcript 里的图表/SVG 结果仍可正常显示、复制、搜索与导出�
 
 旧的完整设置编辑器仍然可用：尚未迁移到新工作区的设置在各自所属分类里有一个明确标注
 `Existing settings editor` 的过渡行（`Agent → Agent settings…`、`Appearance → Footer & status line…`、
-`Conversation → More conversation settings…`、`Input & Terminal → Input & terminal settings…`、
+`Conversation → More conversation settings…`（只声明尚未迁移的 `Submit while busy` 与
+`Git attribution`，并定位到 `Submit while busy`）、`Input & Terminal → Input & terminal settings…`、
 `Extensions → Configure extension settings…`）；激活它才会先关闭工作区、恢复原界面，再打开原有
 编辑器并定位到对应的一项，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
 
@@ -397,7 +406,7 @@ API。Web 配置是 base profile 所有的设置，不是 Bxx Optional Bundle；
 同一 `Web Search / Fetch` 行；从 `Open existing settings…` 进入的旧路径仍返回会话。Remote 后端显示
 不可用，不发任何 Host 命名空间。
 
-`/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
+`/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格(也可在 Appearance 里直接改):`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
 保留状态/交互标记);切换立即生效并持久化。
 

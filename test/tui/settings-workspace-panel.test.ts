@@ -17,6 +17,7 @@ import {
   SettingsWorkspacePanel,
   type SettingsAuthPage,
   type SettingsWorkspaceCommitOutcome,
+  type SettingsWorkspaceCommitRequest,
   type SettingsWorkspacePanelIntents,
   type SettingsWorkspaceSnapshot,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
@@ -57,12 +58,23 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       id: 'icon-style',
       category: 'appearance',
       label: 'Icon style',
-      summary: 'emoji',
-      value: 'emoji',
-      scope: 'TUI settings document',
-      freshness: 'ready',
+      summary: 'symbols',
+      value: 'symbols',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
       description: 'glyph vocabulary',
       action: 'inspect',
+      edit: {
+        field: 'icon-style',
+        primary: 'runtime',
+        runtime: 'symbols',
+        persisted: 'emoji',
+        options: [
+          { value: 'emoji', label: 'emoji', available: true, current: false },
+          { value: 'symbols', label: 'symbols', available: true, current: true },
+          { value: 'minimal', label: 'minimal', available: true, current: false },
+        ],
+      },
     },
     {
       id: 'footer-settings-legacy',
@@ -97,6 +109,27 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
+      id: 'expand',
+      category: 'conversation',
+      label: 'Transcript detail',
+      summary: 'collapsed',
+      value: 'collapsed',
+      scope: 'Current TUI display state',
+      freshness: 'runtime',
+      description: 'bulk expansion for recent collapsible content',
+      action: 'inspect',
+      edit: {
+        field: 'expand',
+        primary: 'runtime',
+        runtime: 'collapsed',
+        persisted: 'not applicable — runtime-only',
+        options: [
+          { value: 'collapsed', label: 'collapsed', available: true, current: true },
+          { value: 'expanded', label: 'expanded', available: true, current: false },
+        ],
+      },
+    },
+    {
       id: 'thinking',
       category: 'conversation',
       label: 'Thinking detail',
@@ -106,6 +139,60 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       freshness: 'runtime',
       description: 'reasoning blocks',
       action: 'inspect',
+      edit: {
+        field: 'thinking',
+        primary: 'runtime',
+        runtime: 'collapsed',
+        persisted: 'not applicable — runtime-only',
+        options: [
+          { value: 'collapsed', label: 'collapsed', available: true, current: true },
+          { value: 'expanded', label: 'expanded', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'progress-updates',
+      category: 'conversation',
+      label: 'Progress updates',
+      summary: 'milestones',
+      value: 'milestones',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'mid-turn update cadence',
+      action: 'inspect',
+      edit: {
+        field: 'progress-updates',
+        primary: 'runtime',
+        runtime: 'milestones',
+        persisted: 'not set',
+        options: [
+          { value: 'off', label: 'off', available: true, current: false },
+          { value: 'milestones', label: 'milestones', available: true, current: true },
+          { value: 'frequent', label: 'frequent', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'response-style',
+      category: 'conversation',
+      label: 'Response style',
+      summary: 'default',
+      value: 'default',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'visible-answer density',
+      action: 'inspect',
+      edit: {
+        field: 'response-style',
+        primary: 'runtime',
+        runtime: 'default',
+        persisted: 'default',
+        options: [
+          { value: 'default', label: 'default', available: true, current: true },
+          { value: 'concise', label: 'concise', available: true, current: false },
+          { value: 'explanatory', label: 'explanatory', available: true, current: false },
+        ],
+      },
     },
     {
       id: 'conversation-settings-legacy',
@@ -116,7 +203,7 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       freshness: 'ready',
       description: 'the existing editor owns the remaining conversation settings',
       action: 'open-legacy',
-      legacyTargetId: 'expand',
+      legacyTargetId: 'busy-enter',
     },
     {
       id: 'agent-settings-legacy',
@@ -292,6 +379,8 @@ interface Harness {
   readonly legacyTargets: () => readonly (string | undefined)[]
   /** The settle callbacks of the dispatched writes, in order. */
   readonly settlements: readonly ((outcome: SettingsWorkspaceCommitOutcome) => void)[]
+  /** Every commit request the panel really dispatched, in order. */
+  readonly committed: readonly SettingsWorkspaceCommitRequest[]
 }
 
 function setup(options: {
@@ -319,6 +408,7 @@ function setup(options: {
   let commits = 0
   const legacyTargets: (string | undefined)[] = []
   let legacyOpens = 0
+  const committed: SettingsWorkspaceCommitRequest[] = []
   const intents: SettingsWorkspacePanelIntents = {
     aboutVersionFacts: { tui: '0.5.3', dsh: '0.2.1-rc.2' },
     rows: () => rows,
@@ -329,8 +419,9 @@ function setup(options: {
     onOpenLegacy: (targetId) => { legacyOpens += 1; legacyTargets.push(targetId) },
     ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
     onCopy: (text) => { options.onCopy?.(text) },
-    onCommit: (_request, settle) => {
+    onCommit: (request, settle) => {
       commits += 1
+      committed.push(request)
       settlements.push(settle)
     },
     onOpenPlugins: options.pluginPage === true
@@ -376,6 +467,7 @@ function setup(options: {
     commits: () => commits,
     legacyOpens: () => legacyOpens,
     legacyTargets: () => legacyTargets,
+    committed,
     settlements,
   }
 }
@@ -1857,6 +1949,158 @@ test('T08 a 44x8 frame scrolls and reveals the rail and never activates an off-s
   h.panel.onCellClick(3, 0)
   assert.equal(h.legacyOpens(), 0, 'no invisible row may open the legacy editor')
   assert.equal(h.commits(), 0, 'no invisible row may write')
+})
+
+// ── C2-R1: the five new writable rows ─────────────────────────────────────
+
+/** Walk to one Conversation row by its painted label: the fixture's row list is
+ *  the frozen order, so the walk presses the real Down key exactly as often as
+ *  the label sits below the first row. */
+const CONVERSATION_LABELS = [
+  'Transcript display', 'Transcript detail', 'Thinking detail',
+  'Progress updates', 'Response style', 'More conversation settings…',
+] as const
+
+const walkToConversationRow = (h: Harness, label: (typeof CONVERSATION_LABELS)[number]): void => {
+  const target = CONVERSATION_LABELS.indexOf(label)
+  assert.ok(target >= 0, `the fixture must know ${JSON.stringify(label)}`)
+  walkTo(h, 'conversation')
+  h.panel.handleInput('\r') // Categories -> Rows
+  for (let step = 0; step < target; step += 1) h.panel.handleInput('\u001b[B')
+  assert.match(plain(h), new RegExp(`> ${label}`, 'u'), `the ${label} row owns the selection`)
+}
+
+test('R1-P1 Appearance holds Theme, Icon style and the Footer launcher only', () => {
+  const h = setup()
+  plain(h)
+  walkTo(h, 'appearance')
+  h.panel.handleInput('\r')
+  const rows = plain(h)
+  assert.match(rows, /Configured theme/u)
+  assert.match(rows, /Icon style/u)
+  assert.match(rows, /Footer & status line…/u)
+  assert.doesNotMatch(rows, /Transcript display|Thinking detail|Progress updates|Response style/u,
+    'the Conversation rows never leak into Appearance')
+  assert.match(rows, /Rows \(3\)/u, 'the Appearance rows count is the real three')
+})
+
+test('R1-P2 Conversation keeps the frozen six-row order', () => {
+  const h = setup()
+  plain(h)
+  walkTo(h, 'conversation')
+  h.panel.handleInput('\r')
+  const frames: string[] = []
+  for (let step = 0; step < 6; step += 1) {
+    frames.push(plain(h))
+    if (step < 5) h.panel.handleInput('\u001b[B')
+  }
+  const labels = ['Transcript display', 'Transcript detail', 'Thinking detail', 'Progress updates', 'Response style', 'More conversation settings…']
+  // The rows pane paints the list itself, so the ORDER is read from the frame
+  // that shows every row at once (120 columns keeps all six inside the grant).
+  const all = frames[0]!
+  let previous = -1
+  for (const label of labels) {
+    const at = all.indexOf(label)
+    assert.ok(at > previous, `${label} sits in its frozen position:\n${all}`)
+    previous = at
+  }
+  assert.match(all, /Rows \(6\)/u, 'the Conversation rows count is the real six')
+})
+
+test('R1-P3 browsing the five rows writes nothing; only an explicit Confirm dispatches', () => {
+  for (const [label, field] of [
+    ['Icon style', 'icon-style'],
+    ['Transcript detail', 'expand'],
+    ['Thinking detail', 'thinking'],
+    ['Progress updates', 'progress-updates'],
+    ['Response style', 'response-style'],
+  ] as const) {
+    const h = setup({ columns: 120, rows: 40 })
+    plain(h)
+    if (field === 'icon-style') {
+      walkTo(h, 'appearance')
+      h.panel.handleInput('\r')
+      h.panel.handleInput('\u001b[B') // Configured theme -> Icon style
+    } else {
+      walkToConversationRow(h, label)
+    }
+    const atRows = plain(h)
+    assert.match(atRows, new RegExp(label, 'u'), `the row is selected at ${label}`)
+    assert.equal(h.commits(), 0, `selecting ${label} writes nothing`)
+    // Enter opens the choice, further Downs move the candidate, Tab and Esc are
+    // inert business-wise: none of them may write.
+    h.panel.handleInput('\r')
+    assert.match(plain(h), /Choose value/u, `${label} opens its explicit choice`)
+    assert.equal(h.commits(), 0, `opening the ${label} choice writes nothing`)
+    h.panel.handleInput('\u001b[B')
+    plain(h) // every grant belongs to the frame that painted it
+    h.panel.handleInput('\t')
+    wheelAt(h, 3, 6, 1)
+    assert.equal(h.commits(), 0, `moving/scrolling ${label} writes nothing`)
+    h.panel.handleInput('\u001b') // cancel
+    assert.doesNotMatch(plain(h), /Choose value/u, 'Esc cancels the choice without writing')
+    assert.equal(h.commits(), 0, `cancelling ${label} writes nothing`)
+    // The explicit Confirm is the ONE write.
+    h.panel.handleInput('\r') // re-open the choice
+    plain(h) // the confirm grant is published by the frame that painted it
+    h.panel.handleInput('\r') // confirm
+    assert.equal(h.commits(), 1, `the explicit Confirm dispatches ${field} exactly once`)
+    assert.deepEqual(h.committed.map(request => request.field), [field], 'the request names the row own field')
+  }
+})
+
+test('R1-P4 the confirm request carries the chosen candidate identity', () => {
+  const h = setup({ columns: 120, rows: 40 })
+  plain(h)
+  walkToConversationRow(h, 'Progress updates')
+  h.panel.handleInput('\r') // open the choice on the current candidate
+  plain(h) // the candidate-navigation grant belongs to the frame that painted it
+  h.panel.handleInput('\u001b[B') // milestones -> frequent
+  plain(h) // the confirm grant belongs to the frame that painted the candidate
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 1)
+  assert.deepEqual(h.committed, [{ field: 'progress-updates', value: 'frequent' }],
+    'the exact raw candidate identity is sent, with no revision fence on a document-shaped row')
+  // A refusal is reported, and the row keeps the explicit retry affordance.
+  h.settlements[0]!({ outcome: 'not-saved', reason: 'the document write was refused' })
+  const refused = plain(h)
+  assert.match(refused, /Not saved · the document write was/u, 'the real refusal reason is painted')
+  assert.match(refused, /refused/u)
+  assert.match(refused, /Retry save/u, 'the refused row offers the explicit retry')
+  assert.equal(h.commits(), 1, 'painting the settlement dispatches nothing')
+})
+
+test('R1-P5 the runtime-only rows state that no document holds them', () => {
+  for (const label of ['Transcript detail', 'Thinking detail'] as const) {
+    const h = setup({ columns: 120, rows: 40 })
+    plain(h)
+    walkToConversationRow(h, label)
+    assert.match(plain(h), /Persisted\s+not applicable — runtime-only/u,
+      `${label} names its non-persistence instead of implying a save`)
+  }
+  const persisted = setup({ columns: 120, rows: 40 })
+  plain(persisted)
+  walkToConversationRow(persisted, 'Progress updates')
+  assert.match(plain(persisted), /Persisted\s+not set/u, 'a persisted document row names its stored fact')
+  // The primary fact of a document-shaped row IS its live runtime value.
+  assert.match(plain(persisted), /Value\s+milestones/u, 'the row value stays the live runtime fact')
+})
+
+test('R1-P6 the five new rows expose no copy verb', () => {
+  const copied: string[] = []
+  for (const label of ['Transcript detail', 'Thinking detail', 'Progress updates', 'Response style'] as const) {
+    const h = setup({ columns: 120, rows: 40, onCopy: text => { copied.push(text) } })
+    plain(h)
+    walkToConversationRow(h, label)
+    h.panel.handleInput('\r') // Detail / choice
+    for (const data of ['c', 'C']) h.panel.handleInput(data)
+    assert.doesNotMatch(plain(h), /copy (?:value|fact)/u, `${label} advertises no copy verb`)
+    assert.equal(h.commits(), 0, `the copy keys never write on ${label}`)
+    h.panel.handleInput('\u001b')
+    for (const data of ['c', 'C']) h.panel.handleInput(data)
+    assert.equal(h.commits(), 0, `the copy keys never write the settled ${label} Detail`)
+  }
+  assert.deepEqual(copied, [], 'no configuration row copies anything')
 })
 
 test('T06b an app-driven fact reread that discovers an empty directory recovers before it paints', () => {

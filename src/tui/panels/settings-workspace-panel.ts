@@ -14,9 +14,11 @@
  *
  * The panel owns NO configuration authority: its rows are a detached read
  * projection assembled by the `/settings` command from the existing ConfigPort /
- * DisplayState / presentation-preference readers. Theme, Display and the
- * profile-wide Visual tools switch are requests through the existing
- * `onCommit` intent; every other setting keeps its existing read and
+ * DisplayState / presentation-preference readers. Every editable row (see
+ * {@link SettingsWorkspaceWritableField}) is a request through the existing
+ * `onCommit` intent; the writer behind that intent stays the ONE existing
+ * authority of its field, so the panel never applies, persists or re-reads a
+ * value itself. Every other setting keeps its existing read and
  * legacy-editor handoff behavior. Configuration rows expose no copy verb at all:
  * their `value` is read-only presentation, and there is no replacement copy
  * entry for a configuration field. About's `c`/`C` copy About's OWN facts
@@ -79,7 +81,10 @@ export type SettingsWorkspaceRowId =
   | 'theme'
   | 'icon-style'
   | 'display-preset'
+  | 'expand'
   | 'thinking'
+  | 'progress-updates'
+  | 'response-style'
   | 'visual-tools'
   | 'web-settings'
   | 'agent-settings-legacy'
@@ -92,13 +97,22 @@ export type SettingsWorkspaceRowId =
 export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'unavailable' | 'read-error'
 
 /**
- * The rows Phase 3B / B2-B and the PR-D follow-up make truly editable. `theme`
- * and `display-preset` write the TUI settings document; `visual-tools` is the
- * profile-wide Host switch. Nothing else in the workspace is writable:
- * `icon-style` and `thinking` stay readable rows and every not-yet-migrated
+ * The rows the workspace can edit. Each one has exactly ONE writer, and the
+ * writers are of three kinds (they never merge):
+ *  - a HOST-authority switch (`visual-tools`, the profile-wide built-in tool
+ *    registration, revision-checked through its own Config section);
+ *  - a TUI-settings-document preference applied live first and then persisted
+ *    (`theme`, `display-preset`, `icon-style`, `progress-updates`,
+ *    `response-style`);
+ *  - a Client-local RUNTIME-ONLY disclosure state with NO document field and no
+ *    persistence claim (`expand`, `thinking`).
+ * Everything else in the workspace stays a readable row; a not-yet-migrated
  * setting stays behind its category's `existing settings editor` launcher.
  */
-export type SettingsWorkspaceWritableField = 'theme' | 'display-preset' | 'visual-tools'
+export type SettingsWorkspaceWritableField =
+  | 'theme' | 'display-preset' | 'visual-tools'
+  | 'icon-style' | 'expand' | 'thinking'
+  | 'progress-updates' | 'response-style'
 
 /** One selectable candidate of a writable row. `value` is the EXACT identity
  *  that gets applied and persisted (a source-qualified theme id, a display
@@ -519,7 +533,10 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
   return id === 'theme'
     || id === 'icon-style'
     || id === 'display-preset'
+    || id === 'expand'
     || id === 'thinking'
+    || id === 'progress-updates'
+    || id === 'response-style'
     || id === 'visual-tools'
     || id === 'web-settings'
     || id === 'agent-settings-legacy'

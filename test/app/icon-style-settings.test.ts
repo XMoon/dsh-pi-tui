@@ -272,3 +272,27 @@ test('the toggle cycles through all three styles in one open panel', async () =>
   assert.equal(t.app.currentIconStyle(), 'emoji', 'the cycle wraps back to emoji')
   t.app.stop()
 })
+
+// ── C2-R1: the LEGACY row keeps its own writer until R7 ────────────────────
+//
+// The workspace's new Icon style row is a SECOND surface over the same
+// authority; it never replaces the existing editor's row. The legacy contract
+// above must keep passing unchanged (it does: the cases drive the real editor),
+// and this one pins the exact legacy-to-document shape the migration must not
+// disturb: ONE whole-document replace that changes ONLY `iconStyle`.
+test('the legacy Icon style write stays a whole-document replace of exactly one field', async () => {
+  const t = setupSettings({ iconStyle: 'minimal' })
+  await t.run()
+  await t.view()
+  t.vt.sendInput('\x1b[B') // icon-style row
+  await t.view()
+  t.vt.sendInput('\r') // minimal -> emoji
+  await t.view()
+  assert.equal(t.app.currentIconStyle(), 'emoji', 'the legacy runtime toggle still applies immediately')
+  const written = t.settings.writes.at(-1)
+  assert.ok(written !== undefined)
+  assert.equal(written.iconStyle, 'emoji')
+  assert.equal(written.theme, 'auto', 'the legacy replace still carries every other field verbatim')
+  assert.equal(written.busyEnter, 'queue')
+  t.app.stop()
+})

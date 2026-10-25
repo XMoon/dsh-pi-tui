@@ -359,3 +359,50 @@ test('production startup resolves both settings before compose and settings swit
   assert.equal(registry.sections.size, 4, 'neither setting recomposes the agent')
   assert.equal(registry.text('tui:git-attribution'), '', 'the default-off attribution section is empty')
 })
+
+// ── C2-R1: the Settings workspace writes the SAME live objects ─────────────
+//
+// The R1 writers must mutate the ONE `ProgressUpdatesState` /
+// `ResponseStyleState` object the registered prompt providers read — never
+// re-register a section and never build a second state. This case proves the
+// SOURCE → SINK chain on the real provider objects: the section closures are
+// installed ONCE, then the same objects are mutated exactly as the commit path
+// mutates them, and the EFFECTIVE prompt text follows.
+test('R1 the two live prompt axes are the objects Settings writes; Focus still only suppresses progress', () => {
+  const display: DisplayState = { preset: 'full' }
+  const t = communicationRegistry(display)
+  const progress = t.progressUpdatesState
+  const response = t.responseStyleState
+  assert.equal(t.registry.sections.size, 2, 'both sections registered once at composition')
+
+  // The widgets the workspace commits mutate the SAME objects (the writers do
+  // `runner.progressUpdatesState.mode = parseProgressUpdates(value)`).
+  for (const mode of ['off', 'milestones', 'frequent'] as const) {
+    progress.mode = parseProgressUpdates(mode)
+    assert.equal(t.progressUpdatesState, progress, 'the shared object identity never changes')
+    assert.equal(t.registry.sections.size, 2, 'a cadence change never re-registers')
+    if (mode === 'off') assert.match(t.progress(), /# Progress updates: Off/)
+    if (mode === 'milestones') assert.match(t.progress(), /# Progress updates: Milestones/)
+    if (mode === 'frequent') assert.match(t.progress(), /# Progress updates: Frequent/)
+    assert.equal(response.style, 'default', 'the other axis is untouched')
+  }
+  progress.mode = 'frequent'
+  for (const style of ['default', 'concise', 'explanatory'] as const) {
+    response.style = parseResponseStyle(style)
+    assert.equal(t.responseStyleState, response, 'the shared object identity never changes')
+    if (style === 'default') assert.equal(t.response(), '')
+    if (style === 'concise') assert.match(t.response(), /# Response style: Concise/)
+    if (style === 'explanatory') assert.match(t.response(), /# Response style: Explanatory/)
+    assert.equal(progress.mode, 'frequent', 'the progress cadence survives every response-style write')
+  }
+  // Focus: the effective progress section empties while BOTH selected values
+  // stay exactly as the user saved them.
+  display.preset = 'focus'
+  assert.equal(t.progress(), '')
+  assert.match(t.response(), /# Response style: Explanatory/)
+  assert.equal(progress.mode, 'frequent', 'Focus never rewrites the saved cadence')
+  assert.equal(response.style, 'explanatory', 'Focus never rewrites the saved style')
+  display.preset = 'full'
+  assert.match(t.progress(), /# Progress updates: Frequent/)
+  t.dispose()
+})

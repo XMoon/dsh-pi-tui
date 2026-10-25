@@ -114,6 +114,21 @@ type SettingsCommandRunner = Pick<
   | 'tuiSettings'
 >
 
+/** The R1 candidate identities, in their FROZEN order: the raw values the
+ *  document stores and the commit sends. The labels are the same lowercase
+ *  identities, so a candidate never round-trips through presentation text. */
+const ICON_STYLE_CANDIDATES = ['emoji', 'symbols', 'minimal'] as const
+const DISCLOSURE_CANDIDATES = ['collapsed', 'expanded'] as const
+const PROGRESS_UPDATES_CANDIDATES = ['off', 'milestones', 'frequent'] as const
+const RESPONSE_STYLE_CANDIDATES = ['default', 'concise', 'explanatory'] as const
+
+/** Whether a confirmed value really is one of a field's frozen candidates. The
+ *  parsers' default fallbacks are NOT a validation substitute: a writer must
+ *  refuse an unknown identity BEFORE it mutates anything. */
+function isCandidateOf<T extends string>(value: string, candidates: readonly T[]): value is T {
+  return (candidates as readonly string[]).includes(value)
+}
+
 export interface SettingsCommandDeps {
   runner: SettingsCommandRunner
   app: TuiApp
@@ -1285,6 +1300,54 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   })
 
   /**
+   * The candidate source of ONE runtime-only disclosure field (`expand`,
+   * `thinking`). The live value is the ONE fact that exists: these two rows have
+   * no settings-document field, so the persisted half states that it does not
+   * apply instead of inventing a stored fact.
+   */
+  const disclosureEditOf = (
+    field: 'expand' | 'thinking',
+    runtime: 'expanded' | 'collapsed',
+  ): SettingsWorkspaceEdit => ({
+    field,
+    primary: 'runtime',
+    options: DISCLOSURE_CANDIDATES.map(value => ({
+      value,
+      label: value,
+      available: true,
+      current: value === runtime,
+    })),
+    runtime,
+    persisted: 'not applicable — runtime-only',
+  })
+
+  /**
+   * The candidate source of ONE apply-first + persisted TUI-document field. The
+   * `[current]` chip follows the LIVE value (the runtime the surface really
+   * uses), never the possibly stale stored preference: the Detail's own
+   * `Persisted` fact is what names the stored value, so the two can never be
+   * conflated.
+   */
+  const persistedPreferenceEditOf = (
+    field: 'icon-style' | 'progress-updates' | 'response-style',
+    runtime: string,
+    candidates: readonly string[],
+    persisted: string | undefined,
+    readable: boolean,
+  ): SettingsWorkspaceEdit => ({
+    field,
+    primary: 'runtime',
+    options: candidates.map(value => ({
+      value,
+      label: value,
+      available: true,
+      current: value === runtime,
+    })),
+    runtime,
+    persisted: persistedFactOf(persisted, readable),
+  })
+
+  /**
    * The profile-wide Visual tools switch (PR-D follow-up). The row's authority
    * is the Host `pi-tui-visual-tools` Config section, never a TUI settings
    * document field: `enabled` decides whether BOTH built-in tools are offered
@@ -1438,11 +1501,33 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return verifyCommittedVisualTools(enabled)
   }
 
-  /** The two TUI-settings-document writers. It is deliberately NARROWER than
-   *  {@link SettingsWorkspaceWritableField}: the Host visual-tools switch has
-   *  its own authority and its own read/write helpers, so it can never fall
-   *  into the theme/display default branch. */
-  type TuiSettingsField = 'theme' | 'display-preset'
+  /** The TUI-settings-document writers. Deliberately NARROWER than
+   *  {@link SettingsWorkspaceWritableField}: the Host visual-tools switch and
+   *  the two runtime-only disclosure fields have no document field at all, so
+   *  they can never reach a document writer. */
+  type TuiSettingsField = 'theme' | 'display-preset' | 'icon-style' | 'progress-updates' | 'response-style'
+
+  /**
+   * The STORED value of one document field, read exactly as the document holds
+   * it, plus the comparison the authority's re-read must perform. An exhaustive
+   * switch keeps every field mapped to its OWN document key: no binary
+   * default can silently attribute a new field to another field's value.
+   */
+  const readDocumentField = (doc: TuiSettingsDoc, field: TuiSettingsField): string | undefined => {
+    switch (field) {
+      case 'theme': return normalizePersistedTheme(doc.theme)
+      case 'display-preset': return doc.displayPreset
+      case 'icon-style': return doc.iconStyle
+      case 'progress-updates': return doc.progressUpdates
+      case 'response-style': return doc.responseStyle
+      default: {
+        // Exhaustiveness fence: a new TuiSettingsField must add its own
+        // document mapping here instead of inheriting another field's value.
+        const unreachable: never = field
+        throw new Error(`unmapped TUI settings field ${String(unreachable)}`)
+      }
+    }
+  }
 
   /** The persisted value of one writable field, or undefined when unreadable. */
   const persistedValueOf = (field: TuiSettingsField): string | undefined => {
@@ -1454,7 +1539,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     } catch {
       return undefined
     }
-    return field === 'theme' ? normalizePersistedTheme(doc.theme) : doc.displayPreset
+    return readDocumentField(doc, field)
   }
 
   /** The structured authoritative readback of ONE committed field. */
@@ -1464,12 +1549,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     | { readonly kind: 'unavailable'; readonly reason: string }
 
   /**
-   * Phase 3B / B2-B: the authoritative re-read of ONE committed TUI-document
-   * field. `expected` is the value the authority must return for the commit to
-   * count as verified; a non-`ready` backend, an unreadable document or a
-   * different value is EXPLICIT (never silently reported as saved). A theme
-   * value is compared after the canonical normalization (a legacy `custom:X`
-   * document still means `file:X`); a display preset is compared exactly.
+   * Phase 3B / B2-B (extended by C2-R1): the authoritative re-read of ONE
+   * committed TUI-document field. `expected` is the value the authority must
+   * return for the commit to count as verified; a non-`ready` backend, an
+   * unreadable document or a different value is EXPLICIT (never silently
+   * reported as saved). A theme value is compared after the canonical
+   * normalization (a legacy `custom:X` document still means `file:X`); every
+   * other field is compared against the RAW value its own document key holds.
    */
   const readCommittedField = (field: TuiSettingsField, expected: string): CommittedReadback => {
     const settings = runner.tuiSettings
@@ -1486,7 +1572,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     } catch (error) {
       return { kind: 'unavailable', reason: `the persisted value could not be re-read: ${safeErrorMessage(error)}` }
     }
-    const actual = field === 'theme' ? normalizePersistedTheme(doc.theme) : doc.displayPreset
+    const actual = readDocumentField(doc, field)
     return actual === expected ? { kind: 'agrees' } : { kind: 'differs', actual }
   }
 
@@ -1552,12 +1638,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
-   * Phase 3B / B2-B: commit ONE writable Settings-workspace field. The runtime
-   * fact applies through its EXISTING owner first (the established
-   * apply-first policy), then the persistence commits through the SAME
-   * whole-document serialization + USER-custom-item preservation guard every
+   * Phase 3B / B2-B (extended by C2-R1): commit ONE writable Settings-workspace
+   * field. The runtime fact applies through its EXISTING owner first (the
+   * established apply-first policy), then the persistence commits through the
+   * SAME whole-document serialization + USER-custom-item preservation guard every
    * other settings writer uses, and finally the value is re-read from the
    * authority: only a completed write whose re-read agrees is `verified`.
+   *
+   * The dispatch is an EXHAUSTIVE switch over
+   * {@link SettingsWorkspaceWritableField}: every field reaches its own writer
+   * or the type system refuses the change. There is deliberately no runtime
+   * default — a new field can never inherit another field's writer.
    *
    * The Display preset deliberately does NOT go through the runner's
    * `setDisplayPreset` (which would dispatch a SECOND detached best-effort
@@ -1567,20 +1658,30 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const commitSettingsWorkspaceField = async (
     request: SettingsWorkspaceCommitRequest,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
-    // Explicit three-way dispatch: the Host visual-tools switch is neither a
-    // theme nor a display preset, so it must never reach those writers by
-    // falling through a binary default.
-    const outcome = request.field === 'visual-tools'
-      ? await commitVisualTools(request.value, request.revision)
-      : request.field === 'display-preset'
-        ? await commitDisplayPreset(request.value)
-        : await commitTheme(request.value)
+    const outcome = await ((): Promise<SettingsWorkspaceCommitOutcome> => {
+      switch (request.field) {
+        case 'visual-tools': return commitVisualTools(request.value, request.revision)
+        case 'display-preset': return commitDisplayPreset(request.value)
+        case 'theme': return commitTheme(request.value)
+        case 'icon-style': return commitIconStyle(request.value)
+        case 'expand': return Promise.resolve(commitTranscriptDetail(request.value))
+        case 'thinking': return Promise.resolve(commitThinkingDetail(request.value))
+        case 'progress-updates': return commitProgressUpdates(request.value)
+        case 'response-style': return commitResponseStyle(request.value)
+        default: {
+          // Exhaustiveness fence: a new writable field must name its writer
+          // here instead of falling into another field's branch.
+          const unreachable: never = request.field
+          throw new Error(`unmapped settings workspace field ${String(unreachable)}`)
+        }
+      }
+    })()
     if (outcome.outcome !== 'verified') {
       // The write OWNER records the real failure/uncertainty: the workspace's
       // settlement is deliberately dropped once its screen lease is gone, and a
       // dispatched write must stay diagnosable either way (§3/§5.5 — never a
-      // silently lost failure). The value is a theme/display name or a switch
-      // candidate, never a secret.
+      // silently lost failure). The value is a theme/display name, a disclosure
+      // level or a switch candidate, never a secret.
       runner.diag.warn('settings write', {
         field: request.field,
         value: request.value,
@@ -1589,6 +1690,165 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       })
     }
     return outcome
+  }
+
+  /**
+   * C2-R1: the runtime-only disclosure commits (`expand` / `thinking`). They
+   * touch the SAME `TuiApp` state owners the Ctrl+O / Alt+T hotkeys use, read the
+   * value back synchronously and never reach a settings document or a Host port:
+   * there is no persisted field behind them, so no write may be claimed.
+   */
+  const commitTranscriptDetail = (value: string): SettingsWorkspaceCommitOutcome => {
+    if (!isCandidateOf(value, DISCLOSURE_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a transcript detail candidate` }
+    }
+    app.setTranscriptDetailExpanded(value === 'expanded')
+    return app.isTranscriptDetailExpanded() === (value === 'expanded')
+      ? { outcome: 'verified' }
+      : { outcome: 'not-saved', reason: 'the live TUI state did not adopt the requested value' }
+  }
+
+  const commitThinkingDetail = (value: string): SettingsWorkspaceCommitOutcome => {
+    if (!isCandidateOf(value, DISCLOSURE_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a thinking detail candidate` }
+    }
+    app.setThinkingExpanded(value === 'expanded')
+    return app.isThinkingExpanded() === (value === 'expanded')
+      ? { outcome: 'verified' }
+      : { outcome: 'not-saved', reason: 'the live TUI state did not adopt the requested value' }
+  }
+
+  /**
+   * C2-R1: the apply-first + persisted writers. Each one, in this exact order:
+   *  1. captures the document value this request starts from (reject
+   *     attribution),
+   *  2. applies the live owner SYNCHRONOUSLY (never rolled back on a failed
+   *     persistence — the established product contract),
+   *  3. states both halves when there is no document or a non-`ready` backend,
+   *  4. otherwise serializes ONE whole-document mutation that re-reads the
+   *     document INSIDE the queue and preserves every other field plus the
+   *     USER-owned footer definitions,
+   *  5. re-reads the committed field: only a readable, equal value is `Verified`.
+   * The three fields differ ONLY in their live owner and their document key.
+   */
+  const commitIconStyle = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, ICON_STYLE_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not an icon style candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('icon-style')
+    // The live glyph vocabulary switches immediately: the transcript, tool and
+    // disclosure glyphs must not wait for disk persistence.
+    app.setIconStyle(value)
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the icon style is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'icon-style',
+      value,
+      base,
+      document: doc => ({ ...doc, iconStyle: value }),
+      localNoun: 'the icon style',
+    })
+  }
+
+  const commitProgressUpdates = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, PROGRESS_UPDATES_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a progress updates candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('progress-updates')
+    // The ONE shared prompt-state object the registered SystemPrompt provider
+    // reads on its next step: no section is re-registered and no second state
+    // is created.
+    runner.progressUpdatesState.mode = parseProgressUpdates(value)
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the progress updates cadence is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'progress-updates',
+      value,
+      base,
+      document: doc => ({ ...doc, progressUpdates: value }),
+      localNoun: 'the progress updates cadence',
+    })
+  }
+
+  const commitResponseStyle = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, RESPONSE_STYLE_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a response style candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('response-style')
+    // The ONE shared prompt-state object, exactly like progress updates and
+    // deliberately independent of it.
+    runner.responseStyleState.style = parseResponseStyle(value)
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the response style is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'response-style',
+      value,
+      base,
+      document: doc => ({ ...doc, responseStyle: value }),
+      localNoun: 'the response style',
+    })
+  }
+
+  /**
+   * The shared persistence half of the three apply-first fields: ONE serialized
+   * whole-document mutation (whose queue re-reads the live document), the
+   * existing refusal classification, then the authoritative re-read. A non-ready
+   * backend is refused BEFORE the write, after the runtime already applied.
+   */
+  const commitAppliedTuiField = async (spec: {
+    readonly settings: { get(): TuiSettingsDoc; replace(doc: TuiSettingsDoc): unknown }
+    readonly field: TuiSettingsField
+    readonly value: string
+    readonly base: string | undefined
+    readonly document: (doc: TuiSettingsDoc) => TuiSettingsDoc
+    readonly localNoun: string
+  }): Promise<SettingsWorkspaceCommitOutcome> => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return {
+        outcome: 'not-saved',
+        reason: `${spec.localNoun} is applied locally, but the configuration is ${readiness} so it could not be stored`,
+      }
+    }
+    try {
+      await serializeTuiSettingsMutation(spec.settings, async () => {
+        // Re-read INSIDE the queue: a document written by a concurrent writer
+        // while this request waited must not be overwritten wholesale.
+        await spec.settings.replace(
+          withUserFooterCustomItems(spec.document(spec.settings.get()), runner.config),
+        )
+      })
+    } catch (error) {
+      // Never a blanket `not-saved`: the Remote adapter can commit the write and
+      // still fail its post-write describe, so the outcome is attributed from a
+      // fresh authoritative read exactly like the theme/display writers.
+      return classifyRejectedWrite(
+        spec.field,
+        spec.value,
+        spec.base,
+        safeErrorMessage(error),
+        `${spec.localNoun} is applied locally, but storing it failed: `,
+      )
+    }
+    return verifyCommittedField(spec.field, spec.value)
   }
 
   const commitDisplayPreset = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
@@ -1742,10 +2002,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const unavailableNote = 'Unavailable — no authoritative config document'
     const themeRaw = doc?.theme
     const iconRaw = doc?.iconStyle
+    const progressRaw = doc?.progressUpdates
+    const responseRaw = doc?.responseStyle
     const persistedTheme = doc === undefined ? undefined : normalizePersistedTheme(themeRaw)
     const runtimePreset = displayPresetOf(runner)
     const persistedPreset = doc?.displayPreset
     const thinking = app.isThinkingExpanded() ? 'expanded' : 'collapsed'
+    // R1: the FIVE live runtime facts, read from the authority that really owns
+    // each of them. `iconStyleOf` normalizes only the RUNTIME selection (an
+    // absent/garbage stored value still behaves as `emoji`); the raw stored
+    // value stays the Persisted fact and is never overwritten by the normalizer.
+    const runtimeIcon = iconStyleOf(iconRaw)
+    const expand = app.isTranscriptDetailExpanded() ? 'expanded' : 'collapsed'
+    const runtimeProgress = runner.progressUpdatesState.mode
+    const runtimeResponse = runner.responseStyleState.style
     // The persisted fact is only a fact once the document was actually READ:
     // an absent document or a throwing read is an UNKNOWN persistence state,
     // never "read and not configured".
@@ -1802,17 +2072,27 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           edit: themeEditOf(persistedTheme, doc !== undefined),
         },
         {
+          // R1: the row is EDITABLE. Its primary fact is the live runtime style
+          // (what the surface paints with right now); the persisted document
+          // value stays a separate, explicitly named fact and is never replaced
+          // by the normalizer's fallback.
           id: 'icon-style',
           category: 'appearance',
           label: 'Icon style',
-          summary: doc === undefined ? unavailableNote : iconStyleOf(iconRaw),
-          ...(doc === undefined ? {} : { value: iconRaw }),
-          scope: 'TUI settings document',
-          freshness: configuredFreshness,
-          description: doc === undefined
-            ? 'The glyph vocabulary for structural icons. This preview only reads the configured value.'
-            : 'The glyph vocabulary for structural icons (tools, subagents, disclosures). The raw configured value is preserved even when it normalizes to a built-in style.',
+          summary: runtimeIcon,
+          value: runtimeIcon,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'The glyph vocabulary for structural icons — emoji, compact symbols, or minimal structural markers (tools, subagents, disclosures). '
+            + 'The live style applies immediately; the persisted preference may still differ until a write is verified.',
           action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'icon-style',
+            runtimeIcon,
+            ICON_STYLE_CANDIDATES,
+            iconRaw,
+            doc !== undefined,
+          ),
         },
         {
           id: 'display-preset',
@@ -1827,6 +2107,23 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           edit: displayEditOf(persistedPreset, doc !== undefined),
         },
         {
+          // R1: runtime-only disclosure — the Ctrl+O master switch. There is no
+          // settings-document field behind it (the legacy editor only changed
+          // the TUI runtime), so the Detail says so instead of implying a save.
+          id: 'expand',
+          category: 'conversation',
+          label: 'Transcript detail',
+          summary: expand,
+          value: expand,
+          scope: 'Current TUI display state',
+          freshness: 'runtime',
+          description: 'Bulk expansion for recent collapsible transcript content. '
+            + `A Client-local display state shared with ${keyHint('app.transcript.toggleExpand')} — `
+            + 'it is not persisted to the TUI settings document.',
+          action: 'inspect',
+          edit: disclosureEditOf('expand', expand),
+        },
+        {
           id: 'thinking',
           category: 'conversation',
           label: 'Thinking detail',
@@ -1834,8 +2131,53 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           value: thinking,
           scope: 'Current TUI display state',
           freshness: 'runtime',
-          description: 'Whether reasoning blocks render expanded or collapsed. A Client runtime presentation preference, not a persisted Host value.',
+          description: 'Whether reasoning blocks render expanded or collapsed. '
+            + `A Client runtime presentation preference shared with ${keyHint('app.transcript.toggleThinking')}; `
+            + 'not a persisted Host value.',
           action: 'inspect',
+          edit: disclosureEditOf('thinking', thinking),
+        },
+        {
+          // R1: apply-first + persisted. The live cadence is read from the ONE
+          // shared prompt-state object the Agent's prompt provider reads.
+          id: 'progress-updates',
+          category: 'conversation',
+          label: 'Progress updates',
+          summary: runtimeProgress,
+          value: runtimeProgress,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'How often the agent narrates its work: Off (no progress narration), Milestones (one update per completed phase), '
+            + 'or Frequent (updates as meaningful findings settle). Focus suppresses the effective narration without changing the selected cadence.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'progress-updates',
+            runtimeProgress,
+            PROGRESS_UPDATES_CANDIDATES,
+            progressRaw,
+            doc !== undefined,
+          ),
+        },
+        {
+          // R1: apply-first + persisted. Independent of progress updates: this
+          // axis shapes the visible answer, not the work narration.
+          id: 'response-style',
+          category: 'conversation',
+          label: 'Response style',
+          summary: runtimeResponse,
+          value: runtimeResponse,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'The density and explanation depth of visible answers: Default, Concise (result-first, no filler), '
+            + 'or Explanatory (rationale, constraints and tradeoffs). Independent of Progress updates.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'response-style',
+            runtimeResponse,
+            RESPONSE_STYLE_CANDIDATES,
+            responseRaw,
+            doc !== undefined,
+          ),
         },
         {
           // The ONE built-in Visual tools switch: a Host-profile setting, not a
@@ -1871,8 +2213,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           'conversation-settings-legacy',
           'conversation',
           'More conversation settings…',
-          'Transcript detail, progress updates and response style are configured by the existing settings editor. This row only opens that editor on its own row.',
-          'expand',
+          'Submit while busy and Git attribution are not yet editable in this workspace. '
+            + 'This row only opens the existing settings editor on its own row.',
+          'busy-enter',
         ),
         transitionRow(
           'input-terminal-settings-legacy',
