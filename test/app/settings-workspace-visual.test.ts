@@ -5506,9 +5506,7 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
     assert.equal(h.view().includes('Categories (9)'), true, 'no Extensions category without live rows')
 
     // A real plugin fiber registers through the PUBLIC service API.
-    let enabled = true
     const fiber = ctx.plugin((pluginCtx) => {
-      if (!enabled) return
       const svc = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as {
         registerSetting(contribution: {
           readonly id: string
