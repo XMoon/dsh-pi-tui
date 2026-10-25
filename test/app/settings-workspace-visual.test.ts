@@ -6347,7 +6347,8 @@ test('every required size walks the real rows: frozen order and Appearance membe
     return seen
   }
 
-  for (const [columns, rows] of [[200, 50], [120, 40], [80, 24], [44, 24], [44, 8]] as const) {
+  // The plan's R2-01 size list, in full.
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8]] as const) {
     const conversation = setup({ columns, rows })
     const conversationRows = await walkedRows(conversation, 'Conversation', CONVERSATION_ROWS)
     assert.deepEqual(conversationRows, [...CONVERSATION_ROWS],
