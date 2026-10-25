@@ -76,6 +76,46 @@ function hubIds(fixture: DirectTspFixture): string[] {
   return items.map(item => item.id)
 }
 
+/** One picker layer's published facts, as a diagnostic string. */
+function pickerFrame(fixture: DirectTspFixture, prefix: string): string {
+  const props = pickerProps(fixture.pane, prefix)
+  const items = (props.items ?? []) as Array<{ readonly id: string }>
+  return JSON.stringify({
+    state: props.state,
+    items: items.map(item => item.id),
+    current: props.current,
+    message: props.message,
+  })
+}
+
+/**
+ * Wait until ONE picker layer published `ready` AND the caller's own fact holds.
+ *
+ * `state === 'ready'` is the presenter's readiness authority (the read it owns
+ * settled); the extra predicate is the case's target row. A timeout prints the
+ * LAST wire frame, so a failure distinguishes `error`/`loading` from "ready but
+ * the target row is missing" instead of a bare assertion.
+ *
+ * This is local to this file on purpose: the readiness question is the TSP
+ * presenters' `PickerProps.state`, not a generic helper the other suites would
+ * have to adopt.
+ */
+async function waitForReadyPicker(
+  fixture: DirectTspFixture,
+  label: string,
+  prefix: string,
+  isReady: (props: Record<string, unknown>) => boolean,
+  timeoutMs = 25_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const props = pickerProps(fixture.pane, prefix)
+    if (props.state === 'ready' && isReady(props)) return
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`timed out waiting for ${label}; last ${prefix} frame: ${pickerFrame(fixture, prefix)}`)
+}
+
 /** The persisted parent Session's real log append (the durable catalog fact). */
 type Append = (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => void
 
@@ -383,7 +423,7 @@ test('E04: a Job-only roster shows the real Job and invents no descendant row', 
   }
 })
 
-test('E04b: an empty roster states the real empty Hub and invents no work item', async (t) => {
+test('an empty roster states the real empty Hub and invents no work item', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -396,10 +436,10 @@ test('E04b: an empty roster states the real empty Hub and invents no work item',
   try {
     await submitLine(fixture, '/tasks')
     await waitFor('the Hub mounts', () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
-    // The real read really completed (the Hub left its loading state), and the
-    // roster is empty because there is nothing to list.
-    await waitFor('the Hub left its loading state',
-      () => pickerProps(fixture.pane, HUB).loading !== true, 25_000)
+    // The roster is empty only once the Hub's OWN read settled: the published
+    // `state` (not a non-existent `loading` field) is the readiness fact, and a
+    // `loading`/`error` frame would make an empty `items` meaningless.
+    await waitForReadyPicker(fixture, 'the Hub read to settle ready', HUB, () => true)
     assert.deepEqual(hubIds(fixture), [], 'an empty real roster projects no work item')
     // Still a usable surface: no fake completed entry, and the close action exists.
     const actions = (pickerProps(fixture.pane, HUB).actions ?? []) as Array<{ readonly id: string }>
@@ -477,7 +517,7 @@ test('E12: reading every real row never stops a Job, interrupts a subagent or ca
 
 // ── E07: a genuinely sessionless submission creates the Session it needs ────
 
-test('E07: /tasks with NO Session follows the original ensureSession path and then opens the Hub', async (t) => {
+test('/tasks with NO Session creates the Session through the real submission path, then opens the Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // NO persisted Session and NO `startup.sessionId`: the runner boots
@@ -507,10 +547,11 @@ test('E07: /tasks with NO Session follows the original ensureSession path and th
     assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
       'the capability gate admitted the command (no refusal was needed)')
     assert.equal(screens(fixture), 0, 'opening the Hub acquires no Reader')
-    // The Hub is the REAL empty roster of the Session that was just created.
+    // The Hub is the REAL empty roster of the Session that was just created —
+    // asserted only after the Hub's own read published `ready`, so an empty
+    // `items` cannot be the pending placeholder.
+    await waitForReadyPicker(fixture, "the fresh Session's Hub read to settle ready", HUB, () => true)
     assert.deepEqual(hubIds(fixture), [], 'the fresh Session has no work to list yet')
-    const props = pickerProps(fixture.pane, HUB)
-    assert.equal(props.loading, undefined, 'the real read settled (no stuck loading state)')
   } finally {
     // reason: fixture teardown — waits for the real SDK to release the tty and
     // every mounted fiber to settle; it is not an observation window.
@@ -561,7 +602,7 @@ test('E06d: the same conflict rule covers the /subagents alias spelling', async 
   )
 })
 
-test('E06e: with the conflicting registration refused, the builtin /tasks still opens the real Hub', async (t) => {
+test('with the conflicting registration refused, the builtin /tasks still opens the real Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -575,6 +616,9 @@ test('E06e: with the conflicting registration refused, the builtin /tasks still 
     await liveSession(fixture, PARENT)
     await submitLine(fixture, '/tasks')
     await waitFor('the builtin /tasks still owns the name', () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
+    // Mounting is not loading: the empty roster is a fact only after the Hub's
+    // own read settled.
+    await waitForReadyPicker(fixture, "the resumed Session's Hub read to settle ready", HUB, () => true)
     assert.deepEqual(hubIds(fixture), [], 'the real empty roster of the resumed Session')
   } finally {
     // reason: fixture teardown — waits for the real SDK to release the tty and
@@ -585,7 +629,7 @@ test('E06e: with the conflicting registration refused, the builtin /tasks still 
 
 // ── E09: a real Session switch through the production Session Browser ───────
 
-test('E09: switching Session A→B through the real Browser leaves B with only B rows', async (t) => {
+test('switching Session A→B through the real Browser leaves B with only B rows', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const A = 'a3-switch-a'
@@ -617,11 +661,19 @@ test('E09: switching Session A→B through the real Browser leaves B with only B
     await submitLine(fixture, '/sessions')
     const BROWSER = 'session-browser-'
     await waitFor('the real Session Browser opened', () => pickerNode(fixture.pane, BROWSER) !== undefined, 25_000)
-    const rowId = (() => {
-      const items = (pickerProps(fixture.pane, BROWSER).items ?? []) as Array<{ readonly id: string }>
-      return items.find(item => item.id.includes(B))?.id
-    })()
-    assert.ok(rowId !== undefined, 'the real Browser lists Session B')
+    // Mounting the page is NOT the catalog: the Browser publishes `loading` with
+    // an EMPTY roster and fills it from the owned `SessionReader.list()` read.
+    // Both Session rows must be on the CURRENT wire frame (state `ready`) before
+    // a selection event is sent: an event that lands on the loading frame is
+    // dropped by the is-current fence, and a substring match could address a
+    // different Session whose id merely contains B.
+    const rowB = `session:${B}`
+    const rowA = `session:${A}`
+    await waitForReadyPicker(fixture, 'the real Browser to list both persisted sessions', BROWSER, props => {
+      const items = (props.items ?? []) as Array<{ readonly id: string }>
+      return items.some(item => item.id === rowA) && items.some(item => item.id === rowB)
+    })
+    const rowId = rowB
     fixture.pane.event({
       ev: 'select',
       sf: fixture.pane.frames().at(-1)!.sf,

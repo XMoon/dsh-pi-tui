@@ -26,6 +26,7 @@ import {
   settle,
 } from '../support/runner-harness.ts'
 import { packFixturePackage, startLocalNpmRegistry } from '../support/local-npm-registry.ts'
+import { waitForFrame as waitForRenderedFrame } from '../support/frame-wait.ts'
 import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -78,6 +79,20 @@ function invokeCommand(harness: ReturnType<typeof makeHarness>, name: string): u
 
 function plain(view: readonly string[]): string {
   return view.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+}
+
+/**
+ * Wait for the PAINTED frame that satisfies `pattern` (the existing narrow
+ * helper, `test/support/frame-wait.ts`): each round completes a real
+ * `waitForRender` frame, so the wait is on the renderer's own flush — never a
+ * timer guess about how far an async Host read has progressed.
+ *
+ * The bound is the helper's own frame budget; a caller that needs to name a
+ * different failure message just passes it.
+ */
+async function waitForPaintedFrame(vt: VirtualTerminal, pattern: RegExp, label: string): Promise<string> {
+  await waitForRenderedFrame(() => plain(vt.getViewport()), frame => pattern.test(frame), () => vt.waitForRender(), label)
+  return plain(vt.getViewport())
 }
 
 /**
@@ -164,12 +179,52 @@ async function mountPluginRunner(
 test('the real /plugins entry opens the Settings page on the plugin List; two Escs close to the editor', async (t) => {
   const { vt, harness } = await mountPluginRunner(t)
   invokeCommand(harness, 'plugins')
-  await vt.waitForRender()
-  const view = plain(vt.getViewport())
+  // The inventory read is ASYNC: the frame painted right after the open is the
+  // legitimate `Loading plugins…` transient. The final assertion is about the
+  // SETTLED page, so wait for the painted empty state instead of asserting
+  // against whichever frame happened to be on screen.
+  const view = await waitForPaintedFrame(vt, /No plugins/u, 'the settled empty plugin inventory')
   assert.match(view, /Settings · Plugins/, 'the direct entry leases the ONE Settings workspace')
   assert.doesNotMatch(view, /Settings · Categories/, 'the deep link lands on Plugins, not on About')
   assert.match(view, /No plugins/, 'the empty inventory paints an honest empty state')
   // Esc yields to the Categories rail; a second Esc closes the ONE lease.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.match(plain(vt.getViewport()), /Settings · Categories/, 'the first Esc yields to the rail')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.doesNotMatch(plain(vt.getViewport()), /Settings · /, 'the second Esc closes the workspace')
+})
+
+test('the /plugins page paints the loading transient and only its release paints the empty inventory', async (t) => {
+  // A4: the CI flake's exact shape, made deterministic. The inventory read is
+  // held open by a test-local gate, so the loading frame is a FACT the test owns
+  // instead of a race it happens to lose: while the read is pending the page
+  // must be open (the entry never blocks the input path) and must say so; only
+  // the explicit release turns it into the settled empty inventory.
+  let releaseBundles!: () => void
+  const bundlesGate = new Promise<void>(resolve => { releaseBundles = resolve })
+  let releasePlugins!: () => void
+  const pluginsGate = new Promise<void>(resolve => { releasePlugins = resolve })
+  t.after(() => { releaseBundles(); releasePlugins() })
+  const manager = {
+    ...fakePluginManager(),
+    listBundles: async () => { await bundlesGate; return [] },
+    listPlugins: async () => { await pluginsGate; return [] },
+  }
+  const { vt, harness } = await mountPluginRunner(t, manager)
+  const opened = invokeCommand(harness, 'plugins') as { kind: string }
+  assert.equal(opened.kind, 'success', 'the entry returns without waiting for the Host inventory')
+  const loading = await waitForPaintedFrame(vt, /Loading plugins…/u, 'the pending inventory frame')
+  assert.match(loading, /Settings · Plugins/, 'the page is open while its inventory read is pending')
+  assert.doesNotMatch(loading, /No plugins/u, 'the pending read never paints the settled empty state')
+
+  releaseBundles()
+  releasePlugins()
+  const settled = await waitForPaintedFrame(vt, /No plugins/u, 'the settled empty inventory after the release')
+  assert.match(settled, /Settings · Plugins/, 'the same page owns the settled frame')
+  assert.doesNotMatch(settled, /Loading plugins…/u, 'the loading transient is gone once the read settled')
+  // The real Esc ladder still works on the settled page.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.match(plain(vt.getViewport()), /Settings · Categories/, 'the first Esc yields to the rail')
@@ -232,9 +287,12 @@ test('the real Settings → Plugins category hosts the same page in place and Ba
   // Account, Agent, Appearance, Conversation, Input & Terminal, Tools, Plugins,
   // so eight Down presses reach Plugins.
   for (let step = 0; step < 8; step += 1) vt.sendInput('\x1b[B')
-  await vt.waitForRender()
   // The rail selection already previews the page; Enter only moves the keys.
-  assert.match(plain(vt.getViewport()), /Settings · Categories/)
+  // The preview's inventory read is async too, so wait for the PAINTED empty
+  // state rather than for one frame after the last key.
+  await waitForPaintedFrame(vt, /No plugins/u, 'the settled rail preview of the plugin page')
+  assert.match(plain(vt.getViewport()), /Settings · Categories/,
+    'the rail preview keeps the Categories header (it does not become the Plugins page)')
   assert.match(plain(vt.getViewport()), /No plugins/, 'the rail preview paints the real plugin page')
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -325,7 +383,11 @@ test('hostile plugin metadata never reaches the mounted panel TTY raw', async (t
   }
   const { vt, harness } = await mountPluginRunner(t, manager)
   invokeCommand(harness, 'plugins')
-  await vt.waitForRender()
+  // A Detail gesture is only admitted from the frame that painted the ACTION
+  // and its card: while the inventory read is still pending the List shows the
+  // `Loading plugins…` row and has no selection to open. Wait for the projected
+  // hostile card to be PAINTED, then drive the real keys.
+  await waitForPaintedFrame(vt, /evilname/u, 'the projected hostile plugin card')
   vt.resize(120, 60)
   await vt.waitForRender()
   // Open Details from the frame that painted the selection: the row action
@@ -353,7 +415,9 @@ test('a hostile Host installTarget spec is projected before the install Input re
   }
   const { vt, harness } = await mountPluginRunner(t, manager)
   invokeCommand(harness, 'plugins')
-  await vt.waitForRender()
+  // Same async inventory as above: the missing-official card must be PAINTED
+  // before a Detail gesture can be admitted from its row.
+  await waitForPaintedFrame(vt, /missing-official/u, 'the projected missing official bundle card')
   await openPaintedDetails(vt)
   // `Enter inspect` is painted ONLY by the install view's editing phase (the
   // Details bar says `Enter action`, the List bar `Enter details`), so it

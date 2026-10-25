@@ -8,8 +8,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { startApp } from '../support/app-harness.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+const view = (vt: { getViewport(): string[] }): string => strip(vt.getViewport().join('\n'))
 
 test('the viewer repaints the latest local observation snapshot, never a Host read', async () => {
   const { vt, app } = startApp(process.cwd())
@@ -22,12 +24,20 @@ test('the viewer repaints the latest local observation snapshot, never a Host re
       intervalMs: 10,
     })
     await vt.waitForRender()
-    assert.match(strip(vt.getViewport().join('\n')), /waiting for the retained-output stream/)
+    assert.match(view(vt), /waiting for the retained-output stream/)
 
     snapshot = 'completed\n\nbest-effort retained output preview (not a complete transcript):\n\nhello from the job'
-    await new Promise<void>(resolve => setTimeout(resolve, 40))
-    await vt.waitForRender()
-    const painted = strip(vt.getViewport().join('\n'))
+    // The refresh timer is the PRODUCTION trigger, never the test's success
+    // condition: wait for the refreshed facts to be PAINTED. Each round is a
+    // real rendered frame, so the wait is bounded by painted evidence instead of
+    // a guess about how many ticks fit in 40ms.
+    await waitForFrame(
+      () => view(vt),
+      frame => frame.includes('completed') && frame.includes('hello from the job'),
+      () => vt.waitForRender(),
+      'the refreshed viewer body never painted',
+    )
+    const painted = view(vt)
     assert.match(painted, /completed/)
     assert.match(painted, /hello from the job/)
     close()

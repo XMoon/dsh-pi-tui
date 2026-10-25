@@ -71,11 +71,17 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   return { vt, app }
 }
 
-/** Wait for a repaint and settle the loader's async read, then return the
- * viewport as one string. */
+/** The viewport as one string, after the image loader's async settle.
+ *
+ * The loader's read resolves on the microtask/timer queue and then only
+ * invalidates the thumbnail (it schedules no frame of its own), so the caller
+ * drives the repaint. A single extra render turn plus a macrotask turn is the
+ * loader's OWN settlement shape — not a duration guess — and the second render
+ * paints the bytes that arrived.
+ */
 async function viewport(vt: VirtualTerminal): Promise<string> {
   await vt.waitForRender()
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await new Promise<void>(resolve => setImmediate(resolve))
   await vt.waitForRender()
   return vt.getViewport().join('\n')
 }

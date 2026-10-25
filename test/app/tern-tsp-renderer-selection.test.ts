@@ -45,6 +45,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createSurfaceLifecycle } from '../../src/app/bootstrap/lifecycle.ts'
 import { createExitController } from '../../src/app/bootstrap/exit.ts'
+import { waitUntil } from '../support/tsp-runner-harness.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -550,10 +551,13 @@ test('the exit controller awaits the renderer release before the hint/appExit', 
     exit: () => order.push('exit'),
   })
   requestExit()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // The exit controller's own awaited `cleanup()` is the authority: until the
+  // test releases the tty the controller is parked INSIDE that await, so the
+  // recorded order is the fact — no window is needed to know it has not moved.
+  await waitUntil('the exit controller to enter cleanup', () => order.includes('cleanup'))
   assert.deepEqual(order, ['cleanup'], 'nothing after cleanup runs while the renderer still owns the tty')
   release!()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the exit path to finish after the release', () => order.includes('exit'))
   assert.deepEqual(order, ['cleanup', 'tty-released', 'hint', 'exit'],
     'the hint and appExit run only after the SDK restored the terminal')
 })
@@ -683,12 +687,14 @@ test('a SECOND cleanup awaits the SAME renderer release (never races to retireme
     exit: () => hintOrder.push('exit'),
   })
   requestExit()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // Parked INSIDE the awaited cleanup: the empty hint list is a fact of the
+  // controller's own await, not of an elapsed window.
+  await waitUntil('the teardown to enter the surface disposal batch', () => order.includes('surface.dispose'))
   assert.deepEqual(hintOrder, [], 'no hint/appExit while the renderer still owns the tty')
   assert.ok(!order.includes('tty-released'))
 
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the exit path to finish after the release', () => hintOrder.length >= 2)
   assert.deepEqual(hintOrder, ['hint', 'exit'], 'the hint and appExit run only after the release')
 })
 
@@ -699,10 +705,12 @@ test('a THROWING sibling still awaits the release before surfacing its failure',
   let failure: unknown
   let settled = false
   void (released as Promise<void>).then(() => { settled = true }, error => { settled = true; failure = error })
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // The teardown's OWN promise is the settlement authority: while the tty is
+  // held it cannot have settled, and once released it must settle.
+  await waitUntil('the teardown to enter the surface disposal batch', () => order.includes('surface.dispose'))
   assert.equal(settled, false, 'the throwing sibling does NOT settle the teardown before the tty release')
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the teardown promise to settle after the release', () => settled)
   assert.equal(settled, true, 'the teardown settles after the release')
   assert.ok(failure instanceof Error, 'the aggregated sync failure is surfaced to the caller')
   assert.match((failure as Error).message, /viewer disposal failed/)
@@ -710,7 +718,7 @@ test('a THROWING sibling still awaits the release before surfacing its failure',
 })
 
 test('the exit path with a throwing sibling still orders release -> hint -> exit', async () => {
-  const { lifecycle, release } = mountLifecycle({ throwInViewer: true })
+  const { lifecycle, order, release } = mountLifecycle({ throwInViewer: true })
   const seen: string[] = []
   const { requestExit } = createExitController({
     diag: { info: () => {}, error: () => { seen.push('cleanup-error') } },
@@ -720,10 +728,10 @@ test('the exit path with a throwing sibling still orders release -> hint -> exit
     exit: () => seen.push('exit'),
   })
   requestExit()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the teardown to enter the surface disposal batch', () => order.includes('surface.dispose'))
   assert.deepEqual(seen, [], 'nothing runs before the release when a sibling threw')
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the exit to finish after the release', () => seen.length >= 3)
   assert.deepEqual(seen, ['cleanup-error', 'hint', 'exit'],
     'the failure is recorded AFTER the release, and the hint/exit follow it')
 })
@@ -746,12 +754,12 @@ test('a synchronous re-entrant teardown cannot reach hint/appExit before the tty
   holder.requestExit = requestExit
 
   const first = lifecycle.disposeSurface()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the teardown to enter the surface disposal batch', () => order.includes('surface.dispose'))
   assert.ok(!order.includes('hint') && !order.includes('exit'),
     `the re-entrant exit path awaited the real release (order: ${order.join(',')})`)
 
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the re-entrant exit to finish after the release', () => order.includes('exit'))
   assert.ok(order.indexOf('tty-released') < order.indexOf('hint'),
     'the hint lands after the tty release')
   assert.deepEqual(order.slice(-2), ['hint', 'exit'], 'the exit follows the hint, once')
@@ -825,13 +833,14 @@ test('the teardown transaction WAITS for the ACQUISITION stage', async () => {
     exit: () => order.push('exit'),
   })
   requestExit()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the teardown to reach the held acquisition stage',
+    () => order.includes('surface.dispose'))
   assert.ok(!order.includes('hint') && !order.includes('exit'),
     `the exit cannot proceed while the handshake still owns the tty (order: ${order.join(',')})`)
 
   acquire()
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the exit to finish after both stages settled', () => order.includes('exit'))
   assert.deepEqual(order.slice(-2), ['hint', 'exit'],
     'the hint and appExit run only after BOTH the acquisition and the release settled')
 })
@@ -846,17 +855,18 @@ test('the ACQUISITION stage alone still gates the exit after the release settled
     exit: () => order.push('exit'),
   })
   requestExit()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the teardown to reach the held acquisition stage',
+    () => order.includes('surface.dispose'))
   // The renderer release settles FIRST; the exit must still wait for the
   // acquisition stage — otherwise the hint/appExit would run while the SDK
   // handshake still owns the terminal.
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the renderer release to land', () => order.includes('tty-released'))
   assert.ok(!order.includes('hint') && !order.includes('exit'),
     `the exit still waits for the acquisition stage (order: ${order.join(',')})`)
 
   acquire()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitUntil('the exit to finish after the acquisition settled', () => order.includes('exit'))
   assert.deepEqual(order.slice(-2), ['hint', 'exit'])
 })
 

@@ -28,6 +28,7 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { TuiSettingsDoc, WebProviderSettings } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
@@ -85,6 +86,14 @@ interface Harness {
   }
   /** How many authority reads were ISSUED (the newest-read witnesses). */
   readonly readCount: () => number
+  /** How many authority reads SETTLED (returned or threw). Together with
+   *  {@link readCount} this witnesses a read reaching its own settlement — the
+   *  fact a wall-clock wait cannot prove. */
+  readonly settledReadCount: () => number
+  /** Every Host write that SETTLED (committed or rejected), in order: the
+   *  authoritative settlement of the write itself, distinct from the UI's
+   *  read-back verdict. */
+  readonly settledWrites: () => readonly string[]
   /** How many Web writes overlapped (must never exceed 1: ONE owner FIFO). */
   readonly maxConcurrentWrites: () => number
   /** The write labels in COMMIT order. */
@@ -110,8 +119,10 @@ function setup(options: {
   let activeWrites = 0
   let maxActiveWrites = 0
   const log: string[] = []
+  const settledWrites: string[] = []
   let readGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   let readsIssued = 0
+  let readsSettled = 0
   const store = {
     available: options.available ?? true,
     failNext: undefined as string | undefined,
@@ -155,11 +166,13 @@ function setup(options: {
       if (store.failNext !== undefined) {
         const reason = store.failNext
         store.failNext = undefined
+        settledWrites.push(`failed:${label}`)
         throw new Error(reason)
       }
       writes.push(label)
       log.push(label)
       apply()
+      settledWrites.push(label)
     } finally {
       activeWrites -= 1
     }
@@ -216,10 +229,17 @@ function setup(options: {
           const captured = { ...store.web, api: { ...store.web.api } }
           const throws = store.readThrows
           const unreadable = !store.available || store.readUndefined
-          if (gate !== undefined) await gate.promise
-          if (throws) throw new Error('settings descriptor unreadable')
-          if (unreadable) return undefined
-          return captured
+          try {
+            if (gate !== undefined) await gate.promise
+            if (throws) throw new Error('settings descriptor unreadable')
+            if (unreadable) return undefined
+            return captured
+          } finally {
+            // The read's OWN settlement (returned or threw): the witness that a
+            // superseded/newest read really reached its end, which a wall-clock
+            // wait cannot prove.
+            readsSettled += 1
+          }
         },
         setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = store.keptProviderValue ?? id }, store.writeDelayMs) },
         setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
@@ -260,6 +280,8 @@ function setup(options: {
     delegated,
     store,
     readCount: () => readsIssued,
+    settledReadCount: () => readsSettled,
+    settledWrites: () => settledWrites,
     maxConcurrentWrites: () => maxActiveWrites,
     log,
     holdRead: () => {
@@ -318,19 +340,91 @@ async function openWebSection(h: Harness): Promise<void> {
   }
 }
 
-/** Let one asynchronous settle land and render to quiescence. */
-async function settle(h: Harness, ms = 20): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, ms))
+/** Wait until the PAINTED frame satisfies `predicate`, with the read/write
+ *  settlement witnesses in the failure message.
+ *
+ *  The wait is real rendered frames (`waitForFrame`), so success is the fact
+ *  the surface shows, not a timer guess; the bound is the helper's frame
+ *  budget plus the authoritative Host-side counters, so a failure says whether
+ *  the Host read/write even started and whether it SETTLED. */
+async function settlePainted(
+  h: Harness,
+  label: string,
+  predicate: (frame: string) => boolean,
+): Promise<string> {
+  try {
+    await waitForFrame(() => h.view(), predicate, () => h.vt.waitForRender(), label)
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\n`
+      + `the Host reads: issued ${h.readCount()}, settled ${h.settledReadCount()}; `
+      + `writes: ${JSON.stringify(h.writes)}; settled: ${JSON.stringify(h.settledWrites())}`)
+  }
+  return h.view()
+}
+
+/** The endpoint editor's settle: the panel's own verdict is PAINTED (Success
+ *  closes it, `Not saved`/`Outcome unknown` stays with its message). The write
+ *  itself must have SETTLED on the Host side before the wait can be satisfied. */
+async function settleEndpointPanel(h: Harness): Promise<string> {
+  const submitted = `endpoint:${h.store.web.api.baseURL}`
+  return await settlePainted(h, `the endpoint write's painted verdict (${submitted})`, frame =>
+    !frame.includes('Saving…')
+    && (!frame.includes('Enter confirm · Esc cancel')
+      || /Not saved|Outcome unknown/u.test(frame)))
+}
+
+/** Wait until at least `expected` authority reads have SETTLED on the Host side
+ *  and the surface painted the frame after that settlement.
+ *
+ *  This is the currentness cases' witness: `release()` only OPENS the gate, it
+ *  does not prove the read finished, so a wall-clock wait could assert absence
+ *  while the read was still pending — the exact false-negative these cases
+ *  exist to rule out. The counter is the Host fake's own settlement, and the
+ *  extra painted frame covers the UI continuation scheduled by it. */
+async function awaitReadSettlement(h: Harness, expected: number, label: string): Promise<string> {
+  try {
+    await waitForFrame(
+      () => h.view(),
+      () => h.settledReadCount() >= expected,
+      () => h.vt.waitForRender(),
+      label,
+    )
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\n`
+      + `the Host reads: issued ${h.readCount()}, settled ${h.settledReadCount()} (expected >= ${expected})`)
+  }
+  // One more painted frame: the settlement's UI continuation runs on the
+  // microtask queue, so observing the settled counter from a later task proves
+  // it already ran; this repaint makes its effect observable in the frame.
   await h.vt.waitForRender()
+  return h.view()
+}
+
+/** Wait until the named Host write has SETTLED (committed or rejected). */
+async function awaitWriteSettlement(h: Harness, label: string): Promise<string> {
+  try {
+    await waitForFrame(
+      () => h.view(),
+      () => h.settledWrites().some(entry => entry.endsWith(`:${label}`) || entry === label),
+      () => h.vt.waitForRender(),
+      `the Host write ${label} to settle`,
+    )
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\nsettled writes: ${JSON.stringify(h.settledWrites())}`)
+  }
+  await h.vt.waitForRender()
+  return h.view()
 }
 
 /** Open the Web section's endpoint editor on its CURRENT value and confirm the
- *  draft through the real panel keys (Enter opens the submenu, Enter submits). */
+ *  draft through the real panel keys (Enter opens the submenu, Enter submits).
+ *  The write is only DISPATCHED here: callers that assert the settled verdict
+ *  use {@link settleEndpointPanel}; the currentness cases deliberately keep the
+ *  verification read pending. */
 async function confirmEndpointDraft(h: Harness): Promise<void> {
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
   await key(h, ENTER)
   await key(h, ENTER)
-  await settle(h)
 }
 
 test('the workspace row reports the configured providers and opens the Web section focused', async t => {
@@ -365,9 +459,11 @@ test('the workspace row reports the configured providers and opens the Web secti
     'the current value and the packaged default are INDEPENDENT state chips')
   assert.match(h.view(), /Current: Messages/u, 'the selected row states the current value in full')
   // The deeplink focused the FIRST Web row: Enter commits the search provider.
+  // The settlement is the PAINTED verified row (the write's read-back landed);
+  // the chip/value assertions below are about that settled frame.
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
+  await settlePainted(h, 'the verified search provider row', frame =>
+    frame.includes('Current: DeepSeek Search API'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   assert.match(h.view(), /Web Search Provider +\[current\] +│/u,
@@ -383,8 +479,8 @@ test('a failed write reverts the row and never reports a save', async t => {
   await openWebSection(h)
   h.store.failNext = 'settings mutate rejected'
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
+  await settlePainted(h, 'the failed write reported as Not saved', frame =>
+    frame.includes('Web settings · Not saved: settings mutate rejected'))
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host store keeps the previous value')
   assert.match(h.view(), /Web settings · Not saved: settings mutate rejected/u, 'the failure is reported as Not saved')
 })
@@ -396,8 +492,10 @@ test('rapid conflicting selections commit in order and the row ends on the verif
   // Two intents in the same burst: never two concurrent writes, last one wins.
   await key(h, ENTER)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  // Both intents settle in FIFO order; the ROW must end on the verified
+  // read-back of the LAST one, so wait for that painted fact.
+  await settlePainted(h, 'the row settled on the last intent', frame =>
+    frame.includes('Current: DeepSeek Search API') && !frame.includes('Saving…'))
   assert.deepEqual(h.writes, ['search:deepseek-official', 'search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   assert.match(h.view(), /DeepSeek Search API/u, 'the row shows the authoritative read-back')
@@ -414,7 +512,11 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
   // decides, so this is never reported as a save.
   h.store.keptProviderValue = 'deepseek-official'
   await key(h, ENTER)
-  await settle(h)
+  // The verdict is a PAINTED fact: wait for the row's `[Not saved]` state
+  // (the read-back really landed and was judged) instead of assuming it within
+  // a fixed 20ms.
+  await settlePainted(h, 'the refused mutation to paint [Not saved]', frame =>
+    /Web Search Provider .*\[Not saved\]/u.test(frame) && frame.includes('Current: Not saved'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation really ran')
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host kept its own value')
   const refusedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
@@ -426,7 +528,7 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
   // the cycle from Messages (-> DeepSeek Search API), never from the rejected
   // intent — which would have submitted Messages a second time.
   await key(h, ENTER)
-  await settle(h)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api')
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-search-api'],
     'the selector sits on the Host value, not on the rejected intent')
 })
@@ -438,7 +540,8 @@ test('two selections on the same row end on the Host value when the second is no
 
   // First intent (Messages -> DeepSeek Search API): committed and verified.
   await key(h, ENTER)
-  await settle(h)
+  await settlePainted(h, 'the first selection to paint the verified value', frame =>
+    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('[Not saved]'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   const verifiedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
@@ -448,7 +551,8 @@ test('two selections on the same row end on the Host value when the second is no
   // keeps the first selection.
   h.store.keptProviderValue = 'deepseek-search-api'
   await key(h, ENTER)
-  await settle(h)
+  await settlePainted(h, 'the refused second intent to paint [Not saved]', frame =>
+    /Web Search Provider .*\[Not saved\]/u.test(frame))
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-official'],
     'the second intent really ran')
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the Host keeps the first selection')
@@ -459,7 +563,7 @@ test('two selections on the same row end on the Host value when the second is no
   // Messages again; a transient verdict word in that field (or the rejected
   // intent left in it) would have resumed the cycle from the wrong position.
   await key(h, ENTER)
-  await settle(h)
+  await awaitWriteSettlement(h, 'search:deepseek-official')
   assert.deepEqual(
     h.writes,
     ['search:deepseek-search-api', 'search:deepseek-official', 'search:deepseek-official'],
@@ -567,8 +671,10 @@ test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', a
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
   await key(h, ENTER)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 200))
-  await h.vt.waitForRender()
+  // The FIFO's own completion: the endpoint write is queued BEHIND the slow
+  // provider write, so waiting for BOTH to settle is the authoritative fact
+  // (a 200ms window only guessed that the 150ms delay had elapsed).
+  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools')
   assert.deepEqual(h.log, [
     'begin:search:deepseek-search-api',
     'search:deepseek-search-api',
@@ -726,9 +832,8 @@ test('entering the legacy Web section paints Loading…, never the last-known va
   assert.match(pending, /Current: Loading…/u, 'the description states the pending fact')
 
   release()
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  const settled = h.view()
+  const settled = await settlePainted(h, 'the mounted read to repaint the verified state', frame =>
+    /\[current\]/u.test(frame) && frame.includes('Current: Messages'))
   assert.match(settled, /\[current\]/u, `the mounted read repaints the verified state:\n${settled}`)
   assert.match(settled, /Current: Messages/u)
   assert.doesNotMatch(settled, /Loading…/u)
@@ -750,8 +855,8 @@ test('a section reopened after a FAILED read states Loading…, not the stale er
   assert.match(pending, /\[Loading…\]/u, `the reopened section is pending:\n${pending}`)
   assert.doesNotMatch(pending, /Current: Unavailable/u, 'the previous read error does not survive into the new read')
   release()
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
+  await settlePainted(h, 'the reopened section to repaint the settled facts', frame =>
+    frame.includes('Current: Messages'))
   assert.match(h.view(), /Current: Messages/u)
 })
 
@@ -775,27 +880,30 @@ test('an OLD read settling after a write never repaints the reopened Workspace (
   for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
   await key(h, DOWN)
   await key(h, ENTER)
-  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
+  // The section's OWN settled row is the fact (it re-entered pending): nothing
+  // below may run on the loading frame.
+  await settlePainted(h, 'the section to settle from the newest read', frame =>
+    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('Current: Loading…'))
   assert.match(h.view(), /\[current\]/u, 'the section settled from the newest read')
 
   // A real write, then Esc back to the Workspace (whose own read is newer).
+  const settledReadsBeforeWrite = h.settledReadCount()
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  await awaitWriteSettlement(h, 'search:deepseek-search-api')
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the write committed')
   await key(h, ESC)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  // The Workspace's newer read must SETTLE before the stale one is released:
+  // otherwise the assertion below could pass only because the newer read had
+  // not painted yet.
+  await awaitReadSettlement(h, settledReadsBeforeWrite + 1, 'the newer Workspace read to settle')
   assert.match(h.view(), /Search: DeepSeek Search API/u, `the Workspace shows the committed facts:\n${h.view()}`)
 
   // The OLD held read settles now: it must NOT repaint the Workspace with the
-  // pre-write summary.
+  // pre-write summary. Wait for ITS OWN settlement, so "no stale repaint" is a
+  // fact about a completed read rather than an assumption about a timer.
+  const settledBeforeRelease = h.settledReadCount()
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the stale Workspace read to settle')
   const after = h.view()
   assert.match(after, /Search: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
   assert.doesNotMatch(after, /Search: Messages/u, 'the pre-write summary never comes back')
@@ -813,24 +921,25 @@ test('a SUPERSEDED write readback never decides the verdict (owner-generation fe
   const release = h.holdRead()
   t.after(release)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  await awaitWriteSettlement(h, 'search:deepseek-search-api')
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
+  assert.match(h.view(), /Saving…/u, 'the write really issues its verification read (R1 is pending)')
 
   // A newer read (Esc → the restored Workspace) observes the post-write Host and
-  // commits those facts.
+  // commits those facts. Wait for THAT read's own settlement.
   h.store.readUndefined = false
+  const settledBeforeNewer = h.settledReadCount()
   await key(h, ESC)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  await awaitReadSettlement(h, settledBeforeNewer + 1, 'the newer Workspace read to settle')
   assert.match(h.view(), /Search: DeepSeek Search API/u, 'the newer read committed the post-write facts')
 
   // The superseded readback settles now: it must not turn the committed result
   // into a stale `Outcome unknown`/`Not saved`, and the rows keep the newest
-  // authority facts.
+  // authority facts. R1's own settlement is the witness that the stale
+  // continuation really reached the surface.
+  const settledBeforeRelease = h.settledReadCount()
   release()
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the superseded write readback to settle')
   const after = h.view()
   assert.doesNotMatch(after, /Outcome unknown|Not saved/u,
     `no stale verdict leaks into the surface:\n${after}`)
@@ -839,11 +948,8 @@ test('a SUPERSEDED write readback never decides the verdict (owner-generation fe
   // Re-open the section: the superseded readback must not have left a stale
   // verdict phase on the row (the reopened row states the verified value).
   await key(h, ENTER)
-  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
-  const reopened = h.view()
+  const reopened = await settlePainted(h, 'the reopened row to state the verified value', frame =>
+    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('Loading…'))
   assert.doesNotMatch(reopened, /\[Outcome unknown\]|\[Not saved\]/u,
     `the reopened row carries no stale verdict:\n${reopened}`)
   assert.match(reopened, /\[current\]/u, 'the reopened row states the verified value')
@@ -858,10 +964,13 @@ test('a superseded readback settling while the newer read is STILL pending never
   h.store.readUndefined = true
   const releaseR1 = h.holdRead()
   t.after(releaseR1)
+  const settledBeforeR1 = h.settledReadCount()
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
+  // The WRITE's own settlement (not a window) is the fact that R1 exists: the
+  // row is already `Saving…` because its verification read is pending.
+  await awaitWriteSettlement(h, 'search:deepseek-search-api')
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
+  assert.match(h.view(), /Saving…/u, 'the write really issued its verification read (R1 is pending)')
 
   // A NEWER read R2 starts (Esc → the restored Workspace) and is ALSO held, so
   // it is pending when R1 settles.
@@ -869,30 +978,25 @@ test('a superseded readback settling while the newer read is STILL pending never
   t.after(releaseR2)
   h.store.readUndefined = false
   await key(h, ESC)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
   assert.match(h.view(), /Loading…/u, 'the newer read is still pending')
 
-  // R1 settles first: the row must stay PENDING, never a stale verdict.
+  // R1 settles first: the row must stay PENDING, never a stale verdict. R1's OWN
+  // settlement is the witness that its continuation reached the surface.
   releaseR1()
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
-  const pending = h.view()
-  assert.doesNotMatch(pending, /Outcome unknown|Not saved/u,
-    `a superseded readback must not judge while the newer read is pending:\n${pending}`)
+  const settledAfterR1 = await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
+  assert.doesNotMatch(settledAfterR1, /Outcome unknown|Not saved/u,
+    `a superseded readback must not judge while the newer read is pending:\n${settledAfterR1}`)
 
   // R2 settles: the newest facts decide, with no stale verdict left behind.
+  const settledBeforeR2 = h.settledReadCount()
   releaseR2()
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
-  const settled = h.view()
+  await awaitReadSettlement(h, settledBeforeR2 + 1, 'the newest read R2 to settle')
+  const settled = await settlePainted(h, 'the newest read to paint its facts', frame =>
+    frame.includes('Search: DeepSeek Search API'))
   assert.match(settled, /Search: DeepSeek Search API/u, `the newest facts win:\n${settled}`)
   await key(h, ENTER)
-  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
-  const reopened = h.view()
+  const reopened = await settlePainted(h, 'the reopened row to state the verified value', frame =>
+    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('Loading…'))
   assert.doesNotMatch(reopened, /\[Outcome unknown\]|\[Not saved\]/u,
     `the reopened row carries no stale verdict:\n${reopened}`)
   assert.match(reopened, /\[current\]/u)
@@ -941,8 +1045,11 @@ function supersededEndpointCase(
     assert.equal(h.readCount(), readsBefore + 2, 'R2 really started — never a no-op witness')
 
     // R1 settles while R2 is pending: the superseded snapshot must NOT decide.
+    // R1's OWN settlement is the witness — otherwise this absence could hold
+    // simply because the superseded readback had not reached the surface yet.
+    const settledBeforeR1 = h.settledReadCount()
     releaseR1()
-    await settle(h)
+    await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
     assert.doesNotMatch(h.view(), /\[Outcome unknown\]|\[Not saved\]/u,
       `a superseded readback must not judge while the newest read is pending:\n${h.view()}`)
 
@@ -952,14 +1059,17 @@ function supersededEndpointCase(
     t.after(releaseR3)
     await key(h, ENTER)
     assert.equal(h.readCount(), readsBefore + 3, 're-entering the section issued the newer read R3')
+    const settledBeforeR2 = h.settledReadCount()
     releaseR2()
-    await settle(h)
+    await awaitReadSettlement(h, settledBeforeR2 + 1, 'the superseded readback R2 to settle')
     assert.doesNotMatch(h.view(), /\[Outcome unknown\]|\[Not saved\]/u,
       `R2 must not judge while R3 is pending:\n${h.view()}`)
 
-    // R3 (the newest authority) settles: ITS facts decide the verdict.
+    // R3 (the newest authority) settles: ITS facts decide the verdict. Wait for
+    // the painted verdict itself, which is what the case asserts.
     releaseR3()
-    await settle(h)
+    await settlePainted(h, 'the newest read to paint its verdict', frame =>
+      !frame.includes('Loading…') && !frame.includes('Saving…'))
     for (let index = 0; index < 4; index += 1) await key(h, DOWN)
     await assertVerdict(h.view(), columns, h)
   })
@@ -1034,7 +1144,9 @@ test('a superseded write holds the ONE owner FIFO until the newest read settles'
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
   await key(h, ENTER)
   await key(h, ENTER)
-  await settle(h, 250)
+  // Wait for write1's OWN settlement (it is deliberately slow): that is the
+  // fact "write1 committed", not the fact that 250ms happened to elapse.
+  await awaitWriteSettlement(h, 'search:deepseek-search-api')
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'write1 committed while write2 still waits')
   assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
   const readsBeforeR2 = h.readCount()
@@ -1048,12 +1160,15 @@ test('a superseded write holds the ONE owner FIFO until the newest read settles'
   assert.equal(h.readCount(), readsBeforeR2 + 1, 'R2 really started')
 
   // R1 settles: write1's verdict waits for R2, so its successor must NOT start.
+  // R1's own settlement is the witness that its continuation reached the FIFO.
+  const settledBeforeR1 = h.settledReadCount()
   releaseR1()
-  await settle(h)
+  await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
   assert.ok(!h.log.some(entry => entry.startsWith('begin:endpoint:')),
     `write2 must not start while the newest read is pending:\n${h.log.join('\n')}`)
+  // R2 settles: write2 is unblocked, and its OWN settlement proves it really ran.
   releaseR2()
-  await settle(h)
+  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools')
   assert.ok(h.log.some(entry => entry.startsWith('begin:endpoint:')),
     `write2 starts once the newest read settled:\n${h.log.join('\n')}`)
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'endpoint:https://api.deepseek.com/v1/tools'])
@@ -1064,6 +1179,7 @@ test('a verified endpoint save closes the panel on the Host value', async t => {
   t.after(h.dispose)
   await openWebSection(h)
   await confirmEndpointDraft(h)
+  await settleEndpointPanel(h)
   assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools'], 'the mutation committed')
   assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'the verified save closed the panel')
   assert.ok(h.view().includes('Current: https://api.deepseek.com/v1/tools'),
@@ -1078,6 +1194,7 @@ test('the endpoint editor reports Not saved with the value the Host actually kep
   // read-back differs from the request, so the write is never verified.
   h.store.endpointStoredValue = 'https://other.example/v1'
   await confirmEndpointDraft(h)
+  await settleEndpointPanel(h)
   const frame = h.view()
   assert.match(frame, /Not saved/u, `the panel states the Host's own answer:\n${frame}`)
   assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
@@ -1091,6 +1208,7 @@ test('the endpoint editor reports Outcome unknown when the read-back is unreadab
   await openWebSection(h)
   h.store.readUndefined = true
   await confirmEndpointDraft(h)
+  await settleEndpointPanel(h)
   const frame = h.view()
   assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
   assert.ok(frame.includes('the endpoint write could not be verified'),

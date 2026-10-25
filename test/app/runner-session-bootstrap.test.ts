@@ -354,8 +354,10 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
   await bIdleStartedPromise
   releaseBIdle()
   await switchPromise
+  // The switch's own promise is the completion signal: it resolves after the new
+  // owner committed, so the model read-back below is already final (the previous
+  // 70ms window was redundant with it).
   await settle()
-  await new Promise(resolve => setTimeout(resolve, 70))
   assert.equal(probe.capturedModels.at(-1), 'p/m',
     'opening model selection must be consumed by its matching request/header before the target commits')
   const openingMessages = probe.capturedMessages ?? []

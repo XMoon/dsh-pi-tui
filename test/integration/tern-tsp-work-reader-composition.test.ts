@@ -27,6 +27,7 @@ import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { TaskSubagentEntry } from '../../src/runtime/task-read-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { QuestionAttentionRow } from '../../src/app/surface/question-controller.ts'
+import { questionTaskRowValue } from '../../src/app/surface/task-attention.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import {
@@ -191,21 +192,78 @@ async function compose(
   })
   composition.tasks = tasks
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
-  // The Task Runtime's first read settles on the microtask/macrotask queue; a
-  // bounded drain lets the initial commit land before the browser opens.
-  for (let index = 0; index < 12; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
   tasks.openTasksBrowser('full')
   if (renderer.display.supportsTaskCenter) {
     await waitUntil('the real Task Runtime rows reach the Work Hub', () => pickerNode(pane, HUB) !== undefined)
-  } else {
-    // A refused open has no positive signal to await, so this is the bounded
-    // negative-observation window for "the production entry mounted nothing".
-    await new Promise<void>(resolve => setTimeout(resolve, 80)) // reason: bounded negative-observation window
   }
+  // A REFUSED open has no ASYNC producer: `openTasksBrowser` declines at the
+  // `supportsTaskCenter` check with a synchronous `notify()` + `return`
+  // (`src/app/surface/task-runtime.ts`). The notify TEXT still reaches the pane
+  // only when the SDK flushes its View, so the barrier below covers that flush —
+  // it is the renderer's own frame ordering, not a duration.
+  await waitForPaintedRefusal(pane, renderer)
   // The browser's own `onSelect` is the BUSINESS router; the Reader must never use it.
   const presentation = renderer.taskPresentation
   assert.ok(typeof presentation.openBrowser === 'function')
   return composition
+}
+
+/**
+ * Flush the renderer's View so the refusal notice is on the wire.
+ *
+ * A `notify()` is applied synchronously to the renderer model; the SDK sends the
+ * resulting View when it flushes. A second notify queued right behind it is a
+ * lockstep barrier: once ITS frame is recorded, the earlier notice has been
+ * sent too. This replaces a fixed wait with the renderer's documented ordering.
+ */
+async function waitForPaintedRefusal(pane: TspPane, renderer: TspRenderer): Promise<void> {
+  const framesBefore = pane.frameCount()
+  renderer.display.notify('refusal barrier', 'info')
+  await waitUntil('the frame behind the refused entry to land', () => pane.frameCount() > framesBefore)
+}
+
+/** The Hub's projected item ids from the CURRENT wire frame. */
+function hubItemIds(composition: Composition): string[] {
+  const items = (pickerProps(composition.pane, HUB).items ?? []) as Array<{ readonly id: string }>
+  return items.map(item => item.id)
+}
+
+/**
+ * Wait for the Hub's OWN published readiness (`PickerProps.state === 'ready'`,
+ * the presenter's projection of the read `TspWorkHub` owns) and, when given, for
+ * a target row id to be PRESENT in that ready frame.
+ *
+ * Mounting the layer is not loading: `src/tui/tsp/work-hub.ts` paints `state:
+ * 'loading'` with an EMPTY `items` array until the Task Runtime read commits, so
+ * an `items` assertion taken on the mount frame is meaningless. A refusal
+ * (`error`) is not a pass either, and the timeout prints the last frame so the
+ * two are distinguishable.
+ */
+async function waitForHub(
+  composition: Composition,
+  label: string,
+  rowId?: string,
+): Promise<void> {
+  const isReady = (): boolean => {
+    const props = pickerProps(composition.pane, HUB)
+    if (props.state !== 'ready') return false
+    if (rowId === undefined) return true
+    return hubItemIds(composition).includes(rowId)
+  }
+  try {
+    if (rowId === undefined) {
+      await waitUntil(`the Hub read to settle ready (${label})`, isReady)
+    } else {
+      await waitUntil(`the row ${rowId} to be painted in the ready Hub (${label})`, isReady)
+    }
+  } catch (error) {
+    const props = pickerProps(composition.pane, HUB)
+    throw new Error(`${(error as Error).message}; last Hub frame: ${JSON.stringify({
+      state: props.state,
+      items: hubItemIds(composition),
+      message: props.message,
+    })}`)
+  }
 }
 
 /** Select one real projected row in the Hub. */
@@ -264,7 +322,10 @@ test('a pane without the Reader kinds refuses the production entry even with the
 
 test('a real Job row reaches the temporary Reader with its own facts and no business selection', async (t) => {
   const composition = await compose(t, DESCENDANTS)
-  const ids = ((pickerProps(composition.pane, HUB).items ?? []) as Array<{ id: string }>).map(item => item.id)
+  // The Task Runtime read commits into the Hub; its READY frame is the only one
+  // whose roster means anything (the loading frame carries an empty list).
+  await waitForHub(composition, 'a real Job row reaches the Reader', 'job:job-2')
+  const ids = hubItemIds(composition)
   assert.ok(ids.includes('job:job-2'), `the real projected Job row is present: ${ids.join(',')}`)
   await selectRow(composition, 'job:job-2')
   const reader = await enterReader(composition)
@@ -292,6 +353,7 @@ test('a real Job row reaches the temporary Reader with its own facts and no busi
 
 test('a real continuable Subagent row is read as a subagent fact set, not as a Job', async (t) => {
   const composition = await compose(t, DESCENDANTS)
+  await waitForHub(composition, 'a continuable Subagent row', 'agent:child-1')
   await selectRow(composition, 'agent:child-1')
   const reader = await enterReader(composition)
   const content = surfaceTexts(composition.pane, reader)
@@ -307,7 +369,8 @@ test('a real continuable Subagent row is read as a subagent fact set, not as a J
 
 test('a real external leaf is read truthfully and offers no local viewer authority', async (t) => {
   const composition = await compose(t, [...DESCENDANTS, ...EXTERNAL])
-  const ids = ((pickerProps(composition.pane, HUB).items ?? []) as Array<{ id: string }>).map(item => item.id)
+  await waitForHub(composition, 'an external leaf', 'agent:external-1')
+  const ids = hubItemIds(composition)
   const externalId = ids.find(id => id.includes('external-1'))
   assert.ok(externalId !== undefined, `the external leaf is a projected row: ${ids.join(',')}`)
   await selectRow(composition, externalId)
@@ -331,9 +394,11 @@ test('a real parked Question row is read as human attention and offers no answer
       questions: [{ id: 'q1', header: 'Choose a deployment region', question: 'Which region should ship?' }],
     },
   ])
-  const ids = ((pickerProps(composition.pane, HUB).items ?? []) as Array<{ id: string }>).map(item => item.id)
-  const questionId = ids.find(id => id.startsWith('question:'))
-  assert.ok(questionId !== undefined, `the real Question attention row is projected: ${ids.join(',')}`)
+  // The Question identity is KNOWN (session `sess-main`, call `call-1`) and the
+  // production builder owns its row value, so the gate names the exact row a
+  // second Question could never satisfy.
+  const questionId = questionTaskRowValue('sess-main', 'call-1')
+  await waitForHub(composition, 'the parked Question row', questionId)
   await selectRow(composition, questionId)
   const reader = await enterReader(composition)
   const content = surfaceTexts(composition.pane, reader)
@@ -350,6 +415,7 @@ test('a real parked Question row is read as human attention and offers no answer
 
 test('a real background Job update repaints the open Reader without a new reading', async (t) => {
   const composition = await compose(t, DESCENDANTS)
+  await waitForHub(composition, 'the first reading of a background Job', 'job:job-1')
   await selectRow(composition, 'job:job-1')
   const reader = await enterReader(composition)
   assert.ok(surfaceTexts(composition.pane, reader).includes('Job · running'))

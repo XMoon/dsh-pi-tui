@@ -50,6 +50,22 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 3_
   }
 }
 
+/**
+ * Flush every op the SDK has queued so far.
+ *
+ * A key is routed SYNCHRONOUSLY into the seat, but the resulting View reaches
+ * the wire only when the SDK flushes. A `notify` is a complete new View queued
+ * BEHIND whatever this key produced, so its landing frame is a lockstep barrier:
+ * once it is recorded, every earlier effect has been sent too. This replaces a
+ * fixed "wait 40ms and hope the flush happened" with the renderer's own
+ * documented frame ordering.
+ */
+async function flushFrames(harness: Harness, label: string): Promise<void> {
+  const before = harness.ops().length
+  harness.renderer.display.notify(label, 'info')
+  await waitFor(() => harness.ops().length > before, `the frame barrier after ${label} landed`)
+}
+
 interface ContinuedRow {
   readonly sessionId: string
   readonly callId: string
@@ -299,7 +315,9 @@ test('approval keys are exactly y/n/Esc/Ctrl+C and every other key is consumed',
     const pending = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
     await waitFor(() => overlayAdds(harness.ops()).length > before, 'the modal opened')
     for (const key of ['\x04', '\r', '\x1b[200~y\x1b[201~', '\x1b[1;3y']) harness.pane.key(key)
-    await new Promise(resolve => setTimeout(resolve, 60))
+    // The seat consumes these keys synchronously; the barrier flushes whatever
+    // they produced, so the absences below cover the whole effect.
+    await flushFrames(harness, 'unknown approval keys')
     assert.equal(harness.submits.length, 0, 'no approval key reached the composer submit path')
     assert.equal(harness.renderer.composer.getDraft(), '', 'the composer stayed empty')
     const modalId = overlayAdds(harness.ops())[before] ?? ''
@@ -571,7 +589,7 @@ test('Alt+Q reads the parked rows fresh, reopens through the controller, and clo
   const harness = await mountHarness()
   try {
     harness.pane.key('\x1bq')
-    await new Promise(resolve => setTimeout(resolve, 30))
+    await flushFrames(harness, 'an empty Alt+Q list')
     assert.deepEqual(overlayAdds(harness.ops()), [], 'no rows -> no layer opened')
     assert.ok(wireText(harness.pane).includes('No continued questions'), 'the empty list is notified')
 
@@ -637,7 +655,7 @@ test('the modal seat outranks the hydration fence, while Alt+Q stays fenced out'
     harness.pane.key('x')
     harness.continued.push({ sessionId: 'session-a', callId: 'call-parked', presentation: 'parked' })
     harness.pane.key('\x1bq')
-    await new Promise(resolve => setTimeout(resolve, 40))
+    await flushFrames(harness, 'hydration-fenced keys')
     assert.equal(harness.renderer.composer.getDraft(), '', 'the hydration fence dropped the composer key')
     assert.deepEqual(overlayAdds(harness.ops()).slice(1), [], 'Alt+Q never opens a list during hydration')
   } finally {
@@ -651,7 +669,7 @@ test('a terminal focus event cannot move the caret away from an open form', asyn
     // Without a modal the event is not the seat's business: no new focus op.
     const before = focusTargets(harness.ops()).length
     harness.pane.event({ ev: 'focus', sf: 's1', id: 'dock.composer' })
-    await new Promise(resolve => setTimeout(resolve, 40))
+    await flushFrames(harness, 'an idle focus event')
     assert.equal(focusTargets(harness.ops()).length, before, 'an idle renderer ignores the focus event')
 
     const pending = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
@@ -907,7 +925,7 @@ test('re-confirming the same answer fires no real-answer mutation hook', async (
     await waitFor(() => recorder.mutations === 1, 'the first real answer change fired the hook')
     harness.pane.key('\x1b[D')   // back to the question
     harness.pane.key('\r')       // re-confirm A: no answer semantics change
-    await new Promise(resolve => setTimeout(resolve, 60))
+    await flushFrames(harness, 'a no-op re-confirmation')
     assert.equal(recorder.mutations, 1, 'a no-op re-confirmation is not a real-answer mutation')
     harness.pane.key('\r')       // submit from review
     assert.deepEqual(await answers, [{ id: 'f3', selected: ['A'] }])
@@ -981,6 +999,10 @@ test('a retired request detaches its real listener and cannot write into the sea
     await Promise.resolve()
     const rendersWithNext = renders
     controller.abort()
+    // reason: bounded negative-observation window — the retired request has no
+    // positive sink by contract (its whole obligation is "repaint nothing"), and
+    // the successor form the abort raced is already presented, so this window
+    // covers the only continuation the abort can still schedule.
     await new Promise(resolve => setTimeout(resolve, 30))
     assert.equal(renders, rendersWithNext, 'the retired lifetime repaints nothing in the new seat')
     assert.equal(hooks.mutation, mutationAtRetirement, 'the retired mutation hook never fires again')
@@ -1087,7 +1109,7 @@ test('the composer accepts input again only after the NEW projection scope commi
     // The switch begins: the fence goes up and the input is dropped.
     harness.renderer.display.beginSessionHydration()
     harness.pane.key('a')
-    await new Promise(resolve => setTimeout(resolve, 40))
+    await flushFrames(harness, 'a hydration-fenced composer key')
     assert.equal(harness.renderer.composer.getDraft(), '',
       'the hydration fence dropped the composer key (it is not held for replay)')
 

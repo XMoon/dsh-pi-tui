@@ -772,7 +772,11 @@ test('a question created while an approval owns the seat waits its turn (mixed h
       questions: [{ id: 'q-mixed', question: 'Pick', options: [{ label: 'A' }] }],
       signal: new AbortController().signal,
     })
-    await new Promise(resolve => setTimeout(resolve, 60))
+    // "Queued, not preempted" is checked on the frames the ask itself produced:
+    // the seat's own add/focus ops are synchronous, so draining one turn is the
+    // whole effect of the request having been made. The handoff below is then
+    // proven by the successor's own seat-taking frame.
+    await Promise.resolve()
     assert.equal(overlayAdds(harness.tern.ops()).length, 1, 'the queued question did not steal the seat')
     harness.tern.key('y')
     assert.equal(await approval, 'allowed-once')
@@ -797,7 +801,7 @@ test('an approval created while a question owns the seat waits its turn', async 
     })
     await waitFor(() => overlayAdds(harness.tern.ops()).length === 1, 'the question owns the seat')
     const approval = harness.approvalRequest({ toolName: 'bash', reason: 'queued behind the question', signal: new AbortController().signal })
-    await new Promise(resolve => setTimeout(resolve, 60))
+    await Promise.resolve()
     assert.equal(overlayAdds(harness.tern.ops()).length, 1, 'the approval queued instead of preempting')
     harness.tern.key('\r')   // adopt A
     harness.tern.key('\r')   // submit

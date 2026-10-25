@@ -249,6 +249,24 @@ test('an empty catalog paints the truthful empty text and keeps Close executable
   await waitUntil('the empty hub closes from its native action', () => h.closes.length === 1)
 })
 
+test('a loading Hub publishes an EMPTY roster with state loading, so an empty items list proves nothing until ready', async (t) => {
+  // The readiness contract this repository's consumers rely on: `PickerProps.
+  // state` is the presenter's own projection of the read it owns, and a
+  // `loading` frame carries `items: []`. A consumer that reads `items` without
+  // gating on `state` therefore sees the same empty array for "the read settled
+  // and found nothing" and "the read has not committed yet".
+  const h = await mount(t)
+  const handle = h.open([], { loading: true })
+  await waitUntil('the loading Hub picker is mounted', () => hubProps(h.pane).state === 'loading')
+  assert.deepEqual(hubItems(h.pane), [], 'the loading frame carries no row')
+  assert.equal(hubProps(h.pane).total, 0, 'and claims no total')
+  // The coordinator's commit is the ONLY transition to a settled roster.
+  handle.setRefreshState('ready')
+  await waitUntil('the Hub settled ready', () => hubProps(h.pane).state === 'ready')
+  assert.deepEqual(hubItems(h.pane), [], 'the settled roster is genuinely empty')
+  assert.equal(hubProps(h.pane).empty, 'No tasks are available for this session.')
+})
+
 // ── A1-T03/T04/T05: the frozen attention-first selection ladder ─────────────
 
 test('initial selection is attention-first, then failed work, then the first work row', async (t) => {
