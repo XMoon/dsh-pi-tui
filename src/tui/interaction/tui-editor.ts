@@ -284,17 +284,6 @@ export class TuiEditor extends Editor {
     this.cancelAutocomplete()
   }
 
-  /**
-   * Open the completion dropdown for the CURRENT cursor position (Image UX
-   * PR5): an accepted inline attachment ACTION lands the cursor inside the
-   * path argument (`/image `), and the path candidates must appear WITHOUT a
-   * further keystroke — the vendored editor's natural trigger fires on
-   * characters, not on a programmatic replacement. The ONE classifier decides
-   * whether the position is really a path seat, so this seam can never open
-   * the file list on ordinary prose. A forced request keeps the open
-   * independent of the fork's trigger patterns (the same route the host's Tab
-   * handler uses), and an already-open dropdown is refreshed, not duplicated.
-   */
   /** Whether this LINE belongs to a SHELL document: a `!`/`!!` input mode,
    *  or a prompt-mode buffer holding the literal wire form. Shell words are
    *  the shell plane's authority — never an attachment seat. */
@@ -302,6 +291,18 @@ export class TuiEditor extends Editor {
     return this.inputMode !== 'prompt' || textBeforeCursor.trimStart().startsWith('!')
   }
 
+  /**
+   * Open the completion dropdown for the CURRENT cursor position: an accepted
+   * inline attachment ACTION lands the cursor inside the path argument
+   * (`/image `), and the path candidates must appear WITHOUT a further
+   * keystroke — the vendored editor's natural trigger fires on characters, not
+   * on a programmatic replacement. The ONE classifier decides whether the
+   * position is really a path seat, so this seam can never open the file list
+   * on ordinary prose. A NATURAL request is used (never the forced-Tab route
+   * above): the vendored editor applies a single-candidate forced-Tab result
+   * with no confirm gesture, which would install a path instead of opening the
+   * menu, and an already-open dropdown is refreshed, not duplicated.
+   */
   openPathCompletion(): void {
     if (this.inputMode !== 'prompt') return
     const { line, col } = this.getCursor()
