@@ -313,7 +313,8 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     fullscreen viewport really resolves, the NEXT alt-screen mount option, the
     one completion controller's mode/method, and the terminal-native progress
     protocol selection. `Mouse wheel lines` applies to the NEXT fullscreen entry
-    only (the mounted viewport keeps its constructor-time step), notification
+    only — its live fact says so (`<n> (next fullscreen entry)`) and the mounted
+    viewport keeps its constructor-time step — while notification
     writes never emit a notification, and the terminal-progress preference is
     never confused with the Agent's `Progress updates` narration cadence. A
     legacy `on` terminal-progress value is a READ compatibility only and is
