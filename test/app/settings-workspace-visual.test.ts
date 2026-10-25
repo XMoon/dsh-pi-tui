@@ -5341,10 +5341,10 @@ test('C2-R0 a live registration appends Extensions and its launcher reaches the 
   h.dispose()
 })
 
-test('C2-R0 a same-id replacement is refused until repaint, then opens the CURRENT row', async () => {
+test('C2-R0 a stale keyboard Enter cannot open a replaced contributor before the repaint', async () => {
   let requestRender: () => void = () => {}
   const registry = new SettingsRegistry(() => requestRender())
-  const h = setup({ columns: 120, rows: 40, settingsRegistry: registry, pluginPage: true })
+  const h = setup({ columns: 120, rows: 40, settingsRegistry: registry })
   requestRender = () => h.app.requestRender()
   const oldCalls: string[] = []
   const newCalls: string[] = []
@@ -5361,13 +5361,9 @@ test('C2-R0 a same-id replacement is refused until repaint, then opens the CURRE
   await h.openHome()
   await key(h, '\u001b[F') // End -> Extensions
   await key(h, '\r') // its Rows level
-  const frame = h.rowsPlain()
-  const row = frame.findIndex(line => line.includes('Configure extension settings…'))
-  assert.ok(row >= 0, `the launcher must be painted:\n${h.view()}`)
-  const col = cellIndexOf(h, row, 'Configure extension settings…') + 1
-  // A pointer press is recorded against the frame that painted owner A.
-  press(h, row, col)
-  // The SAME id is unregistered and re-registered under a different owner and
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u)
+  assert.match(h.view(), /Configure extension settings…/u)
+  // The same id is unregistered and re-registered under a different owner and
   // callback BEFORE any repaint; the count stays 1 and only the revision moves.
   oldOwner.dispose()
   registry.register({
@@ -5379,19 +5375,19 @@ test('C2-R0 a same-id replacement is refused until repaint, then opens the CURRE
     order: 5,
     onChange: (value) => { newCalls.push(value); return true },
   }, 'acme-owner-new')
-  // The frame on screen is spent: a keyboard Enter and the release of the
-  // recorded press arrive BEFORE the repaint and may not open the old editor.
+  // A keyboard Enter arrives before the repaint. It must neither open the
+  // existing editor nor advance the level with the spent frame.
   h.vt.sendInput('\r')
-  release(h, row, col)
-  assert.ok(!h.view().includes('Type to search'), 'no stale gesture may mount the legacy editor')
+  assert.ok(!h.view().includes('Type to search'), 'the stale Enter did not mount the legacy editor')
   assert.deepEqual(oldCalls, [], 'the replaced owner callback never runs')
-  assert.deepEqual(newCalls, [], 'the current owner callback does not run from a stale gesture either')
-  // The next frame is composed against the CURRENT registry and only then is
-  // the launcher actionable again. The fresh activation is a keyboard Enter:
-  // the fork withholds a SECOND click on the same cell inside its multi-click
-  // window, which would prove the fork's rule instead of the panel's admission.
+  assert.deepEqual(newCalls, [], 'the current owner callback does not run from a stale key either')
+  // The frame composed against the CURRENT registry keeps the level where the
+  // user was: neither the editor (no Settings chrome) nor the Detail level may
+  // have been entered by the refused key.
   await h.vt.waitForRender()
-  assert.match(h.view(), /Configure extension settings…/u, 'the repainted launcher is still reachable')
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u, 'the refused key left the level untouched')
+  assert.ok(!h.view().includes('Change…'), 'the refused key entered no Detail action')
+  // The repainted launcher is actionable again and targets the CURRENT row.
   await key(h, '\r')
   const legacy = h.view()
   assert.match(legacy, /Type to search/u, `the existing editor is the physical owner:\n${legacy}`)
@@ -5403,5 +5399,54 @@ test('C2-R0 a same-id replacement is refused until repaint, then opens the CURRE
   await settle(h)
   assert.equal(oldCalls.length, 0, 'the replaced owner callback still never ran')
   assert.equal(newCalls.length, 1, 'the current owner callback ran exactly once')
+  h.dispose()
+})
+
+test('C2-R0 a cross-generation pointer release cannot open a replaced contributor', async () => {
+  let requestRender: () => void = () => {}
+  const registry = new SettingsRegistry(() => requestRender())
+  const h = setup({ columns: 120, rows: 40, settingsRegistry: registry })
+  requestRender = () => h.app.requestRender()
+  const calls: string[] = []
+  const oldOwner = registry.register({
+    id: 'acme.pointer-replaced',
+    label: 'Pointer setting v1',
+    description: 'The pressed owner generation',
+    currentValue: '3',
+    values: ['3', '5'],
+    order: 5,
+    onChange: (value) => { calls.push(`old:${value}`); return true },
+  }, 'acme-pointer-old')
+  await h.vt.waitForRender()
+  await h.openHome()
+  await key(h, '\u001b[F')
+  await key(h, '\r')
+  const frame = h.rowsPlain()
+  const row = frame.findIndex(line => line.includes('Configure extension settings…'))
+  assert.ok(row >= 0, `the launcher must be painted:\n${h.view()}`)
+  const col = cellIndexOf(h, row, 'Configure extension settings…') + 1
+  // The press is recorded against the frame that painted owner A.
+  press(h, row, col)
+  oldOwner.dispose()
+  registry.register({
+    id: 'acme.pointer-replaced',
+    label: 'Pointer setting v2',
+    description: 'The replacement owner generation',
+    currentValue: '5',
+    values: ['3', '5'],
+    order: 5,
+    onChange: (value) => { calls.push(`new:${value}`); return true },
+  }, 'acme-pointer-new')
+  // The release of the recorded press arrives before the repaint: it must not
+  // complete the gesture recorded against the replaced generation.
+  release(h, row, col)
+  assert.ok(!h.view().includes('Type to search'), 'the straddling release did not mount the legacy editor')
+  assert.deepEqual(calls, [], 'no owner callback ran from the stale pointer gesture')
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u, 'the refused release left the level untouched')
+  // The repainted frame admits a FRESH activation of the current row.
+  await key(h, '\r')
+  assert.match(h.view(), /Type to search/u, 'a fresh activation after the repaint opens the editor')
+  assert.match(h.view(), /Pointer setting v2/u, 'the editor opened on the replacement owner row')
   h.dispose()
 })
