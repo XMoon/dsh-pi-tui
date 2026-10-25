@@ -124,7 +124,6 @@ function searchableToolResult(message: TranscriptToolMessage): string {
     toolName: message.name,
     blocks: message.resultBlocks,
     text: message.result,
-    status: message.status,
   }).text
 }
 

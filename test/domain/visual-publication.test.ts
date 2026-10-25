@@ -19,6 +19,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgDigest, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { visualReference, visualReferenceLine } from '../../src/domain/visual/reference.ts'
+import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import {
   collectPublishedVisuals,
   collectVisualSources,
@@ -614,14 +615,15 @@ test('the receipt parser accepts only the exact version-1 shape', () => {
 
 // ── the human-facing projection ────────────────────────────────────────────
 
-test('the human projection drops only the official tail machine blocks', () => {
+test('the human projection drops only VALID official tail machine blocks', () => {
+  const fact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
   const blocks: ContentBlock[] = [
     { type: 'text', text: 'Request latency (ms)\np50  42 ms' },
     { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
-    { type: 'text', text: 'visual-v1:{"type":"chart"}' },
+    fact,
   ]
   const chart = humanFacingVisualResult({
-    toolName: 'dsh_pi_tui_chart', blocks, text: '', status: 'ok',
+    toolName: 'dsh_pi_tui_chart', blocks, text: '',
   })
   assert.equal(chart.text, 'Request latency (ms)\np50  42 ms')
   assert.deepEqual(chart.blocks, [{ type: 'text', text: 'Request latency (ms)\np50  42 ms' }])
@@ -632,29 +634,67 @@ test('the human projection drops only the official tail machine blocks', () => {
     blocks: [
       { type: 'text', text: 'title: visual-v1: CPU usage' },
       { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
-      { type: 'text', text: 'visual-v1:{"type":"chart"}' },
+      fact,
     ],
     text: '',
-    status: 'ok',
   })
   assert.equal(insideBody.text, 'title: visual-v1: CPU usage')
+})
+
+test('the human projection keeps an official tool’s ordinary PROSE that only looks like a machine block', () => {
+  // A policy replacement inside an official visual tool can end with plain
+  // human text that happens to start with a recognized prefix. It is NOT an
+  // official machine block, so a human surface must keep it.
+  const prose: ContentBlock[] = [
+    { type: 'text', text: 'the chart was redacted by policy' },
+    { type: 'text', text: 'visual-v1:{"type":"chart"}' },
+  ]
+  const replaced = humanFacingVisualResult({ toolName: 'dsh_pi_tui_chart', blocks: prose, text: '' })
+  assert.equal(replaced.blocks.length, 2, 'an invalid fact body is human text, never stripped')
+  assert.match(replaced.text, /redacted by policy/u)
+  assert.match(replaced.text, /visual-v1:\{"type":"chart"\}/u)
+
+  const refProse: ContentBlock[] = [
+    { type: 'text', text: 'selected refs were visual-ref-v1: see the log' },
+    { type: 'text', text: 'visual-ref-v1:not-a-reference' },
+  ]
+  const refReplaced = humanFacingVisualResult({ toolName: PRESENT_VISUAL_TOOL_NAME, blocks: refProse, text: '' })
+  assert.equal(refReplaced.blocks.length, 2, 'a malformed reference line is human text')
+
+  const receiptProse: ContentBlock[] = [
+    { type: 'text', text: 'the receipt was visual-published-v1: in the log' },
+    { type: 'text', text: 'visual-published-v1:{"version":1,"published":[]}' },
+  ]
+  const receiptReplaced = humanFacingVisualResult({ toolName: PRESENT_VISUAL_TOOL_NAME, blocks: receiptProse, text: '' })
+  assert.equal(receiptReplaced.blocks.length, 2, 'an empty publication body is human text')
+})
+
+test('a flat-text visual result keeps prose that only looks like a machine line', () => {
+  const fact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
+  const flat = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: undefined,
+    text: `the chart was replaced\nvisual-v1:{"type":"chart"}\n${fact.text}`,
+  })
+  assert.match(flat.text, /the chart was replaced/u)
+  assert.match(flat.text, /visual-v1:\{"type":"chart"\}/u, 'the invalid fact body survives')
+  assert.doesNotMatch(flat.text, /"series"/u, 'the VALID official fact line is still stripped')
 })
 
 test('the human projection never touches another tool’s similar text', () => {
   const blocks: ContentBlock[] = [
     { type: 'text', text: 'output' },
-    { type: 'text', text: 'visual-v1:{"type":"chart"}' },
+    { type: 'text', text: chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as never },
   ]
-  const bash = humanFacingVisualResult({ toolName: 'bash', blocks, text: '', status: 'ok' })
+  const bash = humanFacingVisualResult({ toolName: 'bash', blocks, text: '' })
   assert.deepEqual(bash.blocks, blocks)
   assert.equal(bash.text, '')
 
   // A flat-text result of the visual tool loses its machine tail too.
   const flat = humanFacingVisualResult({
-    toolName: 'present_visual',
+    toolName: PRESENT_VISUAL_TOOL_NAME,
     blocks: undefined,
-    text: `Selected 2 visuals for presentation.\n${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [] })}`,
-    status: 'ok',
+    text: `Selected 2 visuals for presentation.\n${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref: 'sv1_0123456789abcdef0123' }, { ref: 'sv1_0123456789abcdef0124' }] })}`,
   })
   assert.equal(flat.text, 'Selected 2 visuals for presentation.')
 })
@@ -664,7 +704,6 @@ test('the human projection keeps a failed visual result’s readable reason', ()
     toolName: 'present_visual',
     blocks: [{ type: 'text', text: 'unknown visual ref sv1_0123456789abcdef0123' }],
     text: 'unknown visual ref sv1_0123456789abcdef0123',
-    status: 'error',
   })
   assert.equal(human.text, 'unknown visual ref sv1_0123456789abcdef0123')
 })

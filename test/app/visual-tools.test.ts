@@ -747,3 +747,64 @@ test('present_visual refuses a prepared (non-live) observation', async () => {
   await assert.rejects(running, /requires a live Session observation/u)
   assert.equal(probe.leaseDisposed(), true)
 })
+
+test('a synchronous tools/change observer sees the running transition, and only the settled group is consistent', () => {
+  const { ctx, applied, setEnabled } = mountVisualTools(false)
+  // Record EVERY synchronous registry snapshot the official notifications expose.
+  const snapshots: string[][] = []
+  const record = (): void => {
+    snapshots.push(ctx.tools.schemas().map(schema => schema.name).sort())
+  }
+  const off = ctx.on('tools/change', record)
+
+  snapshots.length = 0
+  setEnabled(true)
+  // The registry publishes one notification per registration, so the running
+  // transition is observable — this is the REAL contract, not observer
+  // isolation. Each snapshot is a growing prefix of the fixed order.
+  assert.deepEqual(snapshots, [
+    [CHART_TOOL_NAME],
+    [CHART_TOOL_NAME, SVG_TOOL_NAME],
+    [CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME].sort(),
+  ], 'notifications are per-registration, so a running transition is visible')
+  // Settled state AFTER the drain: the complete group, reported honestly.
+  assert.equal(applied(), true)
+  assert.deepEqual(
+    ctx.tools.schemas().map(schema => schema.name).sort(),
+    [CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME].sort(),
+  )
+
+  snapshots.length = 0
+  setEnabled(false)
+  assert.deepEqual(snapshots, [
+    [CHART_TOOL_NAME, SVG_TOOL_NAME].sort(),
+    [CHART_TOOL_NAME],
+    [],
+  ], 'release runs in reverse order and the running transition is likewise visible')
+  assert.equal(applied(), false)
+  assert.deepEqual(ctx.tools.schemas().map(schema => schema.name), [])
+  off()
+})
+
+test('a rollback after a mid-transition failure leaves NO half-enabled settled group', () => {
+  const { ctx, applied, setEnabled } = mountVisualTools(false)
+  const originalRegister = ctx.tools.register.bind(ctx.tools)
+  let svgAttempted = false
+  ;(ctx.tools as unknown as { register: (definition: ToolDefinition) => () => void }).register = (definition: ToolDefinition) => {
+    if (definition.name === SVG_TOOL_NAME) {
+      svgAttempted = true
+      throw new Error('registry refused the SVG definition')
+    }
+    return originalRegister(definition)
+  }
+  const snapshots: string[][] = []
+  ctx.on('tools/change', () => { snapshots.push(ctx.tools.schemas().map(schema => schema.name)) })
+
+  assert.throws(() => setEnabled(true), /registry refused the SVG definition/u)
+  assert.equal(svgAttempted, true)
+  // The chart WAS visible during the transition (the per-registration
+  // notification is real), and the rollback removed it again.
+  assert.deepEqual(snapshots[0], [CHART_TOOL_NAME], 'the intermediate addition is observable')
+  assert.deepEqual(ctx.tools.schemas().map(schema => schema.name), [], 'the settled group is all-or-none')
+  assert.equal(applied(), false, 'the settled status never claims a registration the registry lost')
+})

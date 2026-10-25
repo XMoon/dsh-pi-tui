@@ -250,7 +250,6 @@ function readableResultBlocks(
     toolName,
     blocks: data.message.content,
     text: '',
-    status: data.message.isError === true ? 'error' : 'ok',
   }).blocks
 }
 

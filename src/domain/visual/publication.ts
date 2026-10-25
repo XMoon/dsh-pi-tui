@@ -36,8 +36,6 @@ import {
   PRESENT_VISUAL_TOOL_NAME,
   SVG_TOOL_NAME,
   VISUAL_PUBLISHED_PREFIX,
-  VISUAL_REFERENCE_PREFIX as VISUAL_REFERENCE_PREFIX_NAME,
-  isVisualMachineText,
 } from '../transcript/visual-text.ts'
 
 /**

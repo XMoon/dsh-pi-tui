@@ -46,13 +46,13 @@ import {
   type VisualSessionEvent,
 } from '../../src/domain/visual/publication.ts'
 import { svgFactFromArgs } from '../../src/domain/visual/svg.ts'
-import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
+import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src/domain/visual/chart.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
   + '<rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12">Gateway</text></svg>'
 
-const CHART_ARGS = {
+const CHART_ARGS: ChartArgs = {
   kind: 'bars',
   title: 'Request latency',
   unit: 'ms',
@@ -429,13 +429,19 @@ test('a reference from an earlier turn is refused in the next turn', async (t) =
   assert.match(result?.texts.join('\n') ?? '', /belongs to turn/u)
 })
 
-test('a fabricated receipt from a non-visual tool publishes nothing', async (t) => {
+test('a call to an unmounted tool yields no source and no publication', async (t) => {
   const life = testLifecycle(t)
-  const harness = await boot(life, 'fabricated')
-  // `bash` is not mounted in this fixture, so the call fails before producing any
-  // content at all; the durable evidence is still not a publication.
+  const harness = await boot(life, 'unmounted')
+  // This fixture does not mount `bash`, so the real loop refuses the call and
+  // persists a FAILED result with no content. The case therefore proves the
+  // UNKNOWN_TOOL durability shape, not a forged receipt; the forged-receipt
+  // authority is proven in `test/domain/visual-publication.test.ts`, where a real
+  // bash-shaped call/result pair carrying a valid receipt is rejected.
   await harness.run(() => [{ callId: 'call-bash', name: 'bash', args: { command: 'echo hi' } }])
   const events = await harness.observe()
+  const result = toolResults(events).find(entry => entry.callId === 'call-bash')
+  assert.ok(result !== undefined, 'the refusal is itself durable')
+  assert.equal(result.isError, true)
   assert.deepEqual(collectVisualSources(harness.sessionId, events), [])
   assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
 })
@@ -486,4 +492,45 @@ test('a second publication of the same reference keeps the FIRST occurrence', as
   const published = collectPublishedVisuals(harness.sessionId, events)
   assert.equal(published.length, 1, 'first-wins on the repeated reference')
   assert.equal(published[0]?.callId, 'present-1')
+})
+
+test('a publisher callId reused in a later turn never inherits the earlier publication', async (t) => {
+  const life = testLifecycle(t)
+  const harness = await boot(life, 'reused-publisher-id')
+  // Turn 1: a real chart + a real publication under `call-present`.
+  await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef('call-present'))
+  const first = await harness.observe()
+  assert.equal(collectPublishedVisuals(harness.sessionId, first).length, 1, 'the first turn really published')
+  const firstRef = modelVisibleRef(harness.adapter)
+
+  // Turn 2: the model reuses the SAME publisher callId, pointing at turn 1's
+  // ref. The durable identity is `(turn, step, callId)`, so this is a distinct
+  // occurrence and the cross-turn source is refused.
+  await harness.run(() => [{ callId: 'call-present', name: PRESENT_VISUAL_TOOL_NAME, args: { visuals: [{ ref: firstRef }] } }])
+  const events = await harness.observe()
+  const secondTurnResults = events.filter((event): event is Extract<VisualSessionEvent, { type: 'tool/result' }> =>
+    event.type === 'tool/result' && event.data.turn === 2 && event.data.message.toolCallId === 'call-present')
+  assert.equal(secondTurnResults.length, 1, 'the second turn has its own durable result')
+  assert.equal(secondTurnResults[0]?.data.message.isError, true, 'the reused id never inherits the earlier publication')
+  // The replay still reports exactly the FIRST publication, not a second one.
+  const published = collectPublishedVisuals(harness.sessionId, events)
+  assert.equal(published.length, 1)
+  assert.equal(published[0]?.turn, 1)
+})
+
+test('an earlier source from the SAME turn publishes after a later step, and the durable receipt pins it', async (t) => {
+  const life = testLifecycle(t)
+  const harness = await boot(life, 'same-turn-later-step')
+  await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef())
+  const events = await harness.observe()
+  const published = collectPublishedVisuals(harness.sessionId, events)
+  assert.equal(published.length, 1)
+  const source = published[0]?.source
+  const publisher = published[0]
+  assert.ok(source !== undefined && publisher !== undefined)
+  // The whole ordering contract, read off the real log.
+  assert.equal(source.turn, publisher.turn, 'same turn')
+  assert.ok(source.stepStartSeq < publisher.stepStartSeq, 'the source step opened EARLIER')
+  assert.ok(source.resultSeq < publisher.callSeq, 'the source result committed BEFORE the publishing call')
+  assert.equal(source.type, 'chart')
 })

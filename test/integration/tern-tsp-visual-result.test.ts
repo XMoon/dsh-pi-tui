@@ -22,6 +22,8 @@ import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
 import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { TranscriptNodeKeys, transcriptView } from '../../src/tui/tsp/transcript-view.ts'
 
 const SESSION_ID = 'prd-visual-session'
 
@@ -380,4 +382,62 @@ test('a conflicting PTC subCallId is rejected by the real fold before disclosure
       name: 'dsh_pi_tui_svg', arguments: secondArgs,
     } },
   ] as never), /conflicting PTC sub-call identity/u)
+})
+/** The node kinds and code texts the production TSP mapper emits for one row. */
+function mappedResultOf(blocks: readonly unknown[], name: string, argsRaw: string): {
+  readonly kinds: string[]
+  readonly text: string
+} {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 2, time: 1, data: { turn: 1, step: 0 } },
+    { type: 'tool/call', seq: 3, time: 1, data: { turn: 1, step: 0, callId: ToolCallId('call-present'), name, arguments: argsRaw } },
+    { type: 'tool/result', seq: 4, time: 1, data: {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('result-present'),
+        role: 'tool',
+        toolCallId: ToolCallId('call-present'),
+        content: blocks,
+        source: { kind: 'tool', callId: ToolCallId('call-present') },
+      },
+    } },
+    { type: 'turn/end', seq: 5, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+  ] as never)
+  const rows = folder.messages()
+  assert.equal(rows.length, 1)
+  const view = transcriptView(projectTranscriptStructure(rows), new TranscriptNodeKeys(), { chartKindsSupported: true })
+  const kinds: string[] = []
+  const texts: string[] = []
+  const walk = (node: { kind: string; props?: Record<string, unknown>; children: readonly unknown[] }): void => {
+    kinds.push(node.kind)
+    const text = node.props?.text
+    if (typeof text === 'string') texts.push(text)
+    for (const child of node.children) walk(child as { kind: string; props?: Record<string, unknown>; children: readonly unknown[] })
+  }
+  for (const child of (view as unknown as { children: readonly unknown[] }).children) {
+    walk(child as { kind: string; props?: Record<string, unknown>; children: readonly unknown[] })
+  }
+  return { kinds, text: texts.join('\n') }
+}
+
+test('the TSP mapper paints the publication summary and never the receipt machine block', () => {
+  const mapped = mappedResultOf([
+    { type: 'text', text: 'Selected 2 visuals for presentation.' },
+    { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"},{"ref":"sv1_0123456789abcdef0124"}]}' },
+  ], 'present_visual', JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }, { ref: 'sv1_0123456789abcdef0124' }] }))
+  assert.ok(mapped.text.includes('Selected 2 visuals for presentation.'), `the summary is painted:\n${mapped.text}`)
+  assert.ok(!mapped.text.includes('visual-published-v1:'), `the receipt is never painted:\n${mapped.text}`)
+  assert.ok(!mapped.kinds.includes('chart'), 'the publication tool never emits a chart node')
+  assert.ok(!mapped.kinds.includes('image'), 'the publication tool never emits an image node')
+})
+
+test('the TSP mapper keeps a failed publication’s readable reason', () => {
+  const mapped = mappedResultOf(
+    [{ type: 'text', text: 'unknown visual ref sv1_0123456789abcdef0123' }],
+    'present_visual',
+    JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }),
+  )
+  assert.ok(mapped.text.includes('unknown visual ref'), `the failure reason is painted:\n${mapped.text}`)
 })
