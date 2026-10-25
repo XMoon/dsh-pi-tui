@@ -125,9 +125,6 @@ interface HarnessOptions {
   getFailureAfterWrite?: boolean
   /** The USER-layer footer definitions the persistence guard must preserve. */
   footerCustomItemsRaw?: unknown
-  /** The trusted footer command configuration a whole-document write must
-   *  preserve verbatim. */
-  footerCommandTrust?: unknown
   /** The profile-wide Visual tools state the ConfigPort reads. The default is
    *  the shipped state: enabled from the schema default, both tools registered. */
   visualTools?: VisualToolsState
@@ -329,13 +326,7 @@ function setup(options: HarnessOptions = {}): Harness {
   let visualState: VisualToolsState | undefined = options.visualToolsUnavailable === true
     ? undefined
     : options.visualTools ?? { enabled: true, revision: 1, userOverridden: false, applied: true }
-  const doc: TuiSettingsDoc = {
-    ...DEFAULT_DOC,
-    ...options.doc,
-    ...options.footerCommandTrust === undefined
-      ? {}
-      : { footerCommand: options.footerCommandTrust as TuiSettingsDoc['footerCommand'] },
-  }
+  const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
   /** Whether a replace already ran: the configured re-read failure only applies
    *  to the readback of a COMPLETED write. */
   let wroteOnce = false
