@@ -36,6 +36,7 @@ import { createDirectSettingsFixture } from '../support/direct-settings-fixture.
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
 import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState } from '../../src/runtime/config-port.ts'
+import { serializeTuiSettingsMutation } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import type {
@@ -5612,6 +5613,9 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
 // live icon/disclosure state, the shared prompt-state objects, the document
 // the write really produced) — never a count of dispatched requests alone.
 
+/** The frozen Appearance row membership (C2-R1). */
+const APPEARANCE_ROWS = ['Configured theme', 'Icon style', 'Footer & status line…'] as const
+
 /** The frozen Conversation row order (F-1: the launcher sits LAST). */
 const CONVERSATION_ROWS = [
   'Transcript display', 'Transcript detail', 'Thinking detail',
@@ -6030,10 +6034,7 @@ test('R1-12 a refused write is attributed from a fresh read: base, expected and 
   unreadable.dispose()
 })
 
-test('R1-13 queued writes re-read the live document and preserve USER footer/keybinding data', async () => {
-  // The USER-layer definitions and the trusted command config the whole-document
-  // write must carry through untouched, plus the footer raw seam the writer
-  // projects.
+test('R1-13 a QUEUED second write re-reads the live document and preserves the pass-through fields', async () => {
   const userItems = [{ schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }]
   const trust = { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 }
   const keybindings = { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } }
@@ -6047,54 +6048,58 @@ test('R1-13 queued writes re-read the live document and preserve USER footer/key
     footerCommand: trust,
     keybindings,
   })
-  const h = setup({
-    columns: 140,
-    rows: 40,
-    tuiSettings: fixture.settings,
-    footerCustomItemsRaw: userItems,
-  })
-  await h.open('Appearance')
-  await key(h, '\r')
-  await key(h, '\x1b[B') // Icon style
-  await key(h, '\r')
-  await key(h, '\x1b[B') // emoji -> symbols
-  await key(h, '\r')
-  await settle(h)
-  assert.equal(fixture.document().iconStyle, 'symbols')
+  /**
+   * The write path the R1 writers really use (`serializeTuiSettingsMutation`),
+   * with the FIRST task held open. That is the only shape that can prove the
+   * queue-internal re-read: the second task must not have read the document yet.
+   */
+  let releaseFirst!: () => void
+  const firstHeld = new Promise<void>(resolve => { releaseFirst = resolve })
+  let firstStarted!: () => void
+  const firstRunning = new Promise<void>(resolve => { firstStarted = resolve })
+  let writeIndex = 0
+  const commit = (mutate: (doc: TuiSettingsDoc) => TuiSettingsDoc): Promise<unknown> =>
+    serializeTuiSettingsMutation(fixture.settings, async () => {
+      writeIndex += 1
+      if (writeIndex === 1) {
+        firstStarted()
+        await firstHeld
+      }
+      // The production shape: read INSIDE the queue, project the raw USER
+      // definitions, then replace.
+      return fixture.settings.replace(
+        mutate({ ...fixture.settings.get(), footerCustomItems: userItems }),
+      )
+    })
 
-  // The SECOND field is committed after the first one settled: the writer must
-  // reconcile against the CURRENT document (the first write's result), never the
-  // document that was open when the workspace opened.
-  await key(h, '\x1b') // Rows
-  await key(h, '\x1b') // Categories
-  await h.vt.waitForRender()
-  await walkToConversation(h)
-  await key(h, '\r')
-  for (let step = 0; step < 3; step += 1) await key(h, '\x1b[B')
-  await key(h, '\r')
-  await key(h, '\x1b[A') // milestones -> off
-  await key(h, '\r')
-  await settle(h)
+  const first = commit(doc => ({ ...doc, iconStyle: 'symbols' }))
+  await firstRunning
+  // The FIRST write is still in flight; the second is queued behind it and has
+  // NOT read the document yet.
+  assert.equal(fixture.calls.length, 0, 'the held write has not reached the Host')
+  const second = commit(doc => ({ ...doc, progressUpdates: 'off' }))
+  releaseFirst()
+  await first
+  await second
 
   const document = fixture.document() as unknown as Record<string, unknown>
-  assert.equal(document.iconStyle, 'symbols', 'the earlier field survives the later write')
-  assert.equal(document.progressUpdates, 'off', 'the later field really landed')
-  assert.equal(document.theme, 'dark', 'an unrelated field was never rewritten')
+  assert.equal(document.iconStyle, 'symbols', 'the first field landed')
+  assert.equal(document.progressUpdates, 'off', 'the queued field landed too — it read the FIRST result')
+  assert.equal(document.theme, 'dark', 'no unrelated field was rewritten')
   assert.deepEqual(document.keybindings, keybindings, 'the keybinding pass-through survives verbatim')
   assert.deepEqual(document.footerCommand, trust, 'the trusted footer command survives verbatim')
-  assert.deepEqual(document.footerCustomItems, userItems,
-    'the detached USER footer definitions are preserved, not the merged projection')
+  assert.deepEqual(document.footerCustomItems, userItems, 'the USER definitions survive verbatim')
   assert.equal(fixture.calls.length, 2, 'two path-scoped writes, never one whole-document overwrite')
-  for (const call of fixture.calls) {
-    // The plan's preservation rule: the writer projects the RAW USER definitions,
-    // so an unchanged collection produces no op at all, and the trusted command
-    // config / keybinding pass-through are never re-pinned by an unrelated field.
-    const touched = call.ops.map(op => op.path[0])
-    assert.ok(!touched.includes('footerCustomItems'), 'an unchanged USER definition set emits no op')
-    assert.ok(!touched.includes('footerCommand'), 'no write re-pins the trusted command config')
-    assert.ok(!touched.includes('keybindings'), 'no write re-pins keybindings')
-  }
-  h.dispose()
+  // The second write's ops carry ONLY its own field: it reconciled against the
+  // document the FIRST write produced, so the first field emits no op again.
+  assert.deepEqual(fixture.calls[0]!.ops, [{ op: 'set', path: ['iconStyle'], value: 'symbols' }])
+  assert.deepEqual(fixture.calls[1]!.ops, [{ op: 'set', path: ['progressUpdates'], value: 'off' }],
+    'the queued write did not re-pin the first field or the pass-through raw fields')
+  assert.deepEqual(
+    [fixture.calls[0]!.revision, fixture.calls[1]!.revision],
+    [7, 8],
+    'each write fences the revision its own read produced',
+  )
 })
 
 test('R1-15 More conversation settings… opens the existing editor on Submit while busy', async () => {
@@ -6147,24 +6152,62 @@ test('R1-18 every migrated row never copies, at every responsive width', async (
   }
 })
 
-test('R1-01b the frozen row order holds at every required size and Icon style stays in Appearance', async () => {
-  for (const [columns, rows] of [[200, 50], [120, 40], [80, 24], [44, 24], [44, 8]] as const) {
-    const h = setup({ columns, rows })
-    await h.open('Conversation')
-    await key(h, '\r')
-    const frame = h.view()
-    // At the shortest sizes the pane list scrolls: the ORDER is asserted over
-    // whatever rows the grant really paints, never over a scroll-away row.
-    let previous = -1
-    for (const label of CONVERSATION_ROWS) {
-      const at = frame.indexOf(label)
-      if (at < 0) continue
-      assert.ok(at > previous, `${columns}x${rows} keeps ${label} in its frozen position:\n${frame}`)
-      previous = at
+test('R1-01b every required size walks the real rows: frozen order and Appearance membership', async () => {
+  /** Walk a category's Rows level from the TOP, pressing Down until the
+   *  selection reaches the last row, collecting every row label the frame
+   *  really paints. A scrolled-away row is therefore VISITED, never skipped. */
+  const walkedRows = async (h: Harness, category: string, expected: readonly string[]): Promise<string[]> => {
+    await h.open(category)
+    await key(h, '\r') // L0 -> L1
+    const seen: string[] = []
+    for (let step = 0; step <= expected.length; step += 1) {
+      // The ROWS column is where the row cursor lives: the Categories rail has
+      // its own `> ` cursor, so the search starts at the pane header that names
+      // the Rows column.
+      const lines = h.rowsPlain()
+      const header = lines.findIndex(line => line.includes('Rows ('))
+      // A multi-column frame publishes the pane header that delimits the Rows
+      // column; a NARROW frame paints one column and therefore no pane header at
+      // all, so the whole body line is that column's cell.
+      let cells: string[]
+      if (header >= 0) {
+        const paneStart = Math.max(0, lines[header]!.indexOf('Rows (') - 2)
+        const detailsAt = lines[header]!.indexOf('Details', paneStart)
+        cells = lines.slice(header + 1).map(line => line.slice(paneStart, detailsAt < 0 ? undefined : detailsAt))
+      } else {
+        cells = lines
+      }
+      const cursorCell = cells.find(cell => cell.trimStart().startsWith('> '))
+      assert.ok(cursorCell !== undefined, `a row cursor must be painted in the Rows column:\n${h.view()}`)
+      // The label is the painted text between the cursor and its summary column.
+      // A launcher's summary starts in the SAME cell, so the longest expected
+      // label that prefixes the cell is the row's identity.
+      const rest = cursorCell.trimStart().slice(2)
+      const label = [...expected].sort((left, right) => right.length - left.length)
+        .find(candidate => rest.startsWith(candidate))
+      assert.ok(label !== undefined, `the painted row ${JSON.stringify(rest)} must be an expected row`)
+      if (label !== '' && seen.at(-1) !== label) seen.push(label)
+      await key(h, '\x1b[B')
     }
-    assert.ok(frame.includes('Transcript display'), `${columns}x${rows} paints the first Conversation row`)
-    assert.doesNotMatch(frame, /Configured theme|Visual tools/u, `${columns}x${rows} leaks no other category's rows`)
-    h.dispose()
+    return seen
+  }
+
+  for (const [columns, rows] of [[200, 50], [120, 40], [80, 24], [44, 24], [44, 8]] as const) {
+    const conversation = setup({ columns, rows })
+    const conversationRows = await walkedRows(conversation, 'Conversation', CONVERSATION_ROWS)
+    assert.deepEqual(conversationRows, [...CONVERSATION_ROWS],
+      `${columns}x${rows} walks the complete frozen Conversation order`)
+    assert.doesNotMatch(conversation.view(), /Configured theme|Visual tools/u,
+      `${columns}x${rows} leaks no other category's rows`)
+    conversation.dispose()
+
+    const appearance = setup({ columns, rows })
+    const appearanceRows = await walkedRows(appearance, 'Appearance', APPEARANCE_ROWS)
+    assert.deepEqual(appearanceRows, [...APPEARANCE_ROWS],
+      `${columns}x${rows} walks the complete Appearance membership`)
+    assert.doesNotMatch(appearance.view(), /Transcript detail|Thinking detail|Progress updates|Response style/u,
+      `${columns}x${rows} keeps the migrated Conversation rows out of Appearance`)
+    appearance.dispose()
   }
 })
 
@@ -6326,6 +6369,45 @@ test('R1-16 a held new-field commit never settles a closed or replacement worksp
   h.dispose()
 })
 
+test('R1-16b a FAILED new-field save retries the same value through the same writer', async () => {
+  let refuse = true
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { progressUpdates: 'milestones' },
+    applyReplace: (next) => {
+      if (refuse) throw new Error('settings namespace "tui-app" changed since it was read')
+      Object.assign(h.doc, next)
+    },
+  })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 3; step += 1) await key(h, '\x1b[B') // Progress updates
+  await key(h, '\r')
+  await highlightCandidate(h, 'frequent')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the first attempt really reached the document writer')
+  assert.match(h.view(), /Not saved · the progress updates cadence is applied/u)
+  assert.equal(h.progressUpdatesState.mode, 'frequent', 'the runtime fact stays applied')
+  assert.match(h.view(), /Retry save/u, 'the failed row offers the explicit retry')
+
+  // The write can succeed now: Retry must re-dispatch the SAME value through the
+  // ONE commit channel and really verify it. `Retry save` is a PAINTED button,
+  // so it is activated the way a user activates it.
+  refuse = false
+  const retryRow = rowOf(h, 'Retry save')
+  press(h, retryRow, cellIndexOf(h, retryRow, 'Retry save'))
+  release(h, retryRow, cellIndexOf(h, retryRow, 'Retry save'))
+  await settle(h)
+  assert.equal(h.replacements(), 2, 'the retry used the same writer exactly once')
+  assert.equal(h.doc.progressUpdates, 'frequent', 'the retried value is the one the user chose')
+  assert.equal(h.progressUpdatesState.mode, 'frequent', 'the live axis still carries it')
+  assert.match(h.view(), /Status\s+Verified/u, 'the retry verifies its own authoritative re-read')
+  assert.ok(!h.view().includes('Retry save'), 'a verified row offers no retry')
+  h.dispose()
+})
+
 test('R1-17 a real Registry revision change keeps an open new-field choice and revokes only the frame', async () => {
   let requestRender: () => void = () => {}
   const registry = new SettingsRegistry(() => requestRender())
@@ -6339,6 +6421,8 @@ test('R1-17 a real Registry revision change keeps an open new-field choice and r
   assert.ok(h.view().includes('> concise'), `the candidate is highlighted:\n${h.view()}`)
 
   // A plugin registers an UNRELATED settings row: the directory revision moves.
+  // The invalidation only SCHEDULES a frame; the registry callback runs inside
+  // the registration, so the next key arrives against the spent frame.
   const handle = registry.register({
     id: 'acme.demo-threshold',
     label: 'Demo threshold',
@@ -6348,6 +6432,11 @@ test('R1-17 a real Registry revision change keeps an open new-field choice and r
     order: 10,
     onChange: () => true,
   }, 'acme-owner')
+  // A Confirm from the REVOKED frame: it must dispatch nothing, because the
+  // frame that published the grant was composed against the previous directory.
+  h.vt.sendInput('\r')
+  assert.equal(h.replacements(), 0, 'an old-frame Confirm never dispatches after the directory moved')
+  assert.equal(h.doc.responseStyle, undefined, 'and the document is untouched')
   await h.vt.waitForRender()
   assert.match(h.view(), /Categories \(10\)/u, 'the live directory really changed')
   const afterRegister = h.view()
