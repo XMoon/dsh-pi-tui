@@ -7,6 +7,7 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 import { composeAgent } from '../../src/index.ts'
 import { FOCUS_MODE_PROMPT } from '../../src/domain/communication/focus.ts'
 import type { DisplayState } from '../../src/domain/display/preset.ts'
@@ -482,7 +483,15 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   vt.sendInput('\x1b[B') // default -> concise
   await vt.waitForRender()
   vt.sendInput('\r') // Confirm
-  await settle()
+  // Wait on the AUTHORITATIVE signal — the committed DOCUMENT value — not a
+  // timer. The section text follows the live state synchronously, so the
+  // persisted value settling is the event that proves the whole commit finished.
+  await waitForFrame(
+    () => String(doc.responseStyle),
+    value => value === 'concise',
+    () => vt.waitForRender(),
+    'the workspace commit never persisted its response style',
+  )
   assert.match(registry.text('tui:response-style'), /# Response style: Concise/,
     'the ALREADY REGISTERED response-style provider reads the workspace commit')
   assert.equal(doc.responseStyle, 'concise', 'and the same commit persisted')
