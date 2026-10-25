@@ -16,8 +16,10 @@
  * projection assembled by the `/settings` command from the existing ConfigPort /
  * DisplayState / presentation-preference readers. Theme, Display and the
  * profile-wide Visual tools switch are requests through the existing
- * `onCommit` intent; all other settings retain their existing read, copy and
- * legacy-editor handoff behavior.
+ * `onCommit` intent; every other setting keeps its existing read and
+ * legacy-editor handoff behavior. Configuration rows expose no copy verb — the
+ * clipboard belongs to the About page (`c` for the selected visible fact, `C`
+ * and the ONE body `Copy All [C]` for the whole painted report).
  * @module @xmoon76/dsh-pi-tui/tui/panels/settings-workspace-panel
  */
 
@@ -130,9 +132,10 @@ export interface SettingsWorkspaceEdit {
 
 /**
  * ONE row of the detached read projection. `summary` is the human-facing
- * display value, `value` is the exact source value the user copies (a
+ * display value, `value` the exact source value the authority answered (a
  * source-qualified theme id, a raw configured icon style, a runtime preset) —
- * never a re-derived display string.
+ * never a re-derived display string. It is a read/presentation fact: a
+ * configuration row has no copy verb, so `value` is never a clipboard payload.
  */
 export interface SettingsWorkspaceRow {
   readonly id: SettingsWorkspaceRowId
