@@ -195,31 +195,20 @@ async function compose(
   tasks.openTasksBrowser('full')
   if (renderer.display.supportsTaskCenter) {
     await waitUntil('the real Task Runtime rows reach the Work Hub', () => pickerNode(pane, HUB) !== undefined)
+  } else {
+    // Only the REFUSAL branch needs a wait, and the thing to wait for is the
+    // refusal text ITSELF — the production entry emits it with a synchronous
+    // `notify()` (`src/app/surface/task-runtime.ts`), but the text reaches the
+    // pane when the SDK flushes that View. Waiting for the exact text binds the
+    // observation to the refusal, so this adds no unrelated notice on the
+    // supported path and cannot be satisfied by another frame.
+    await waitUntil('the refusal notice to reach the pane', () =>
+      pane.output.text().includes('Work Hub is not available in this renderer yet.'))
   }
-  // A REFUSED open has no ASYNC producer: `openTasksBrowser` declines at the
-  // `supportsTaskCenter` check with a synchronous `notify()` + `return`
-  // (`src/app/surface/task-runtime.ts`). The notify TEXT still reaches the pane
-  // only when the SDK flushes its View, so the barrier below covers that flush —
-  // it is the renderer's own frame ordering, not a duration.
-  await waitForPaintedRefusal(pane, renderer)
   // The browser's own `onSelect` is the BUSINESS router; the Reader must never use it.
   const presentation = renderer.taskPresentation
   assert.ok(typeof presentation.openBrowser === 'function')
   return composition
-}
-
-/**
- * Flush the renderer's View so the refusal notice is on the wire.
- *
- * A `notify()` is applied synchronously to the renderer model; the SDK sends the
- * resulting View when it flushes. A second notify queued right behind it is a
- * lockstep barrier: once ITS frame is recorded, the earlier notice has been
- * sent too. This replaces a fixed wait with the renderer's documented ordering.
- */
-async function waitForPaintedRefusal(pane: TspPane, renderer: TspRenderer): Promise<void> {
-  const framesBefore = pane.frameCount()
-  renderer.display.notify('refusal barrier', 'info')
-  await waitUntil('the frame behind the refused entry to land', () => pane.frameCount() > framesBefore)
 }
 
 /** The Hub's projected item ids from the CURRENT wire frame. */
