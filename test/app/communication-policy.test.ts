@@ -5,6 +5,7 @@ import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { disposeContext, fakeSession, installVirtualProcessTerminal, makeHarness, mountRunner, sessionEvents, settle } from '../support/runner-harness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { composeAgent } from '../../src/index.ts'
 import { FOCUS_MODE_PROMPT } from '../../src/domain/communication/focus.ts'
@@ -368,7 +369,7 @@ test('production startup resolves both settings before compose and settings swit
 // SOURCE → SINK chain on the real provider objects: the section closures are
 // installed ONCE, then the same objects are mutated exactly as the commit path
 // mutates them, and the EFFECTIVE prompt text follows.
-test('R1 the two live prompt axes are the objects Settings writes; Focus still only suppresses progress', () => {
+test('The the two live prompt axes are the objects Settings writes; Focus still only suppresses progress', () => {
   const display: DisplayState = { preset: 'full' }
   const t = communicationRegistry(display)
   const progress = t.progressUpdatesState
@@ -405,4 +406,87 @@ test('R1 the two live prompt axes are the objects Settings writes; Focus still o
   display.preset = 'full'
   assert.match(t.progress(), /# Progress updates: Frequent/)
   t.dispose()
+})
+
+/**
+ * The complete source→sink chain the C2-R1 plan requires for the two prompt
+ * axes: the REAL Settings workspace commits a Conversation row, the production
+ * runner's shared state object changes, and the ALREADY REGISTERED SystemPrompt
+ * provider reads the new text. Deliberately one case, not two: separately
+ * proving "UI → state" and "state → prompt" would leave the join unproven.
+ */
+test('a Settings workspace Confirm reaches the registered prompt section through the production runner', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-r1-prompt-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(120, 40)
+  life.defer(installVirtualProcessTerminal(vt))
+  const session = fakeSession({
+    id: 'c2-r1-prompt-session',
+    header: { id: 'c2-r1-prompt-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('c2-r1 prompt chain'),
+  })
+  const harness = makeHarness(home, session)
+  const registry = promptRegistry()
+  const agents = harness.agents as {
+    resume(options: { setup?: (ctx: Context, agent: never) => unknown }): Promise<unknown>
+  }
+  const resume = agents.resume.bind(agents)
+  t.mock.method(agents, 'resume', (options: Parameters<typeof resume>[0]) => resume({
+    ...options,
+    setup: (ctx, agent) => {
+      t.mock.method(ctx, 'get', (name: string) => name === 'systemPrompt' ? registry.systemPrompt : undefined)
+      return options.setup?.(ctx, agent)
+    },
+  }))
+  // Both axes start from their documented defaults.
+  const doc: Record<string, unknown> = { progressUpdates: 'milestones', responseStyle: 'default' }
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('settings', {
+    describe: () => [{ ns: 'tui-app', value: { ...doc }, user: { ...doc }, revision: 1 }],
+    mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      for (const op of ops) {
+        if (op.op === 'set') doc[op.path[0]!] = op.value
+        else delete doc[op.path[0]!]
+      }
+    },
+  } as never)
+  const fiber = await mountRunner(ctx, home, harness, { sessionId: session.id }, {
+    sessionId: session.id,
+    progressUpdates: 'milestones',
+    responseStyle: 'default',
+  })
+  life.defer(() => fiber.dispose())
+  assert.equal(registry.text('tui:response-style'), '', 'the default response style adds no guidance')
+  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Milestones/)
+
+  // Drive the NEW workspace: Conversation -> Progress updates / Response style.
+  const commands = harness.commands as { handler(name: string): (input: { rawInput: string }) => unknown }
+  await commands.handler('settings')({ rawInput: '' })
+  await vt.waitForRender()
+  await selectSettingsCategory(vt, 'Conversation')
+  vt.sendInput('\r') // L0 -> L1
+  await vt.waitForRender()
+  for (let step = 0; step < 4; step += 1) {
+    vt.sendInput('\x1b[B') // -> Response style
+    await vt.waitForRender()
+  }
+  vt.sendInput('\r') // open the choice
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // default -> concise
+  await vt.waitForRender()
+  vt.sendInput('\r') // Confirm
+  await settle()
+  assert.match(registry.text('tui:response-style'), /# Response style: Concise/,
+    'the ALREADY REGISTERED response-style provider reads the workspace commit')
+  assert.equal(doc.responseStyle, 'concise', 'and the same commit persisted')
+  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Milestones/,
+    'the sibling axis is untouched')
+  assert.equal(registry.sections.size, 4, 'no section was re-registered by the commit')
 })
