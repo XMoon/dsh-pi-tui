@@ -1169,9 +1169,13 @@ test('a superseded write holds the ONE owner FIFO until the newest read settles'
   // Host write still runs — the rows stay selectable until a read starts.
   const releaseR1 = h.holdRead()
   t.after(releaseR1)
+  // The mark must be taken BEFORE the write it is about to observe starts:
+  // write1 is dispatched by the FIRST Enter, and the delay is 150ms — slower
+  // keys or a loaded machine could settle it during the navigation below, and a
+  // mark taken afterwards would then wait forever for an already-finished write.
+  const markWrite1 = settledWritesMark(h)
   await key(h, ENTER)
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  const markWrite1 = settledWritesMark(h)
   await key(h, ENTER)
   await key(h, ENTER)
   // Wait for write1's OWN settlement (it is deliberately slow): that is the

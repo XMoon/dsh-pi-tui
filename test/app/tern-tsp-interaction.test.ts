@@ -51,27 +51,37 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 3_
 }
 
 /**
- * Flush the SDK's queued ops and wait for THIS barrier's own frame.
+ * `pane.key()` is NOT synchronous as far as the RENDERER is concerned.
  *
- * A key is routed SYNCHRONOUSLY into the seat, but the resulting View reaches
- * the wire only when the SDK flushes. The barrier is a `notify` carrying a
- * UNIQUE label: the renderer stores it as a dock notice (`session.ts`'s
- * `notify` → `dock.notices` with its own `n<seq>` id) and the SDK sends it as a
- * later View. Waiting for the wire node that carries that exact label — not for
- * "the op count grew" — binds the observation to THIS barrier, so a frame
- * produced by something else cannot satisfy it. Because the barrier is queued
- * behind the earlier key's effect, its landing proves that effect was sent.
+ * The pane emits `data` synchronously, but the shipped SDK delivers it through
+ * its own async input loop (`for await (const input of session)` in
+ * src/tui/tsp/session.ts), so the renderer's `routeInput` runs on a later turn.
+ * Measured on this fixture: immediately after `pane.key('z')` the composer is
+ * still empty and only a later turn carries the `z`. A barrier that merely
+ * draws a frame therefore CANNOT prove a key was processed — the frame can win
+ * the race.
+ *
+ * A test that can name the key's effect waits for THAT effect directly (the
+ * cases below that do have one do exactly that). A pure "this must not happen"
+ * case has no positive sink by contract, so it keeps a bounded observation
+ * window whose reason is stated next to it (docs/guides/testing.md).
  */
-async function flushFrames(harness: Harness, label: string): Promise<void> {
-  // A unique marker per call: two barriers must never satisfy each other.
-  const marker = `flush-barrier ${label} ${++flushBarrierSerial}`
-  harness.renderer.display.notify(marker, 'info')
-  await waitFor(() => wireText(harness.pane).includes(marker),
-    `the frame carrying "${marker}" to reach the wire`)
-}
+const KEY_DELIVERY_WINDOW_MS = 120
 
-/** Makes every flush barrier's notice text unique within the file. */
-let flushBarrierSerial = 0
+/** Wait for the SDK input loop to have had the chance to deliver and process a
+ *  key: a bounded window, justified by the loop being the ONLY producer.
+ *
+ *  Used by the negative cases only. The bound is not a guess about how long an
+ *  arbitrary operation takes — it covers exactly one input dispatch plus the
+ *  renderer's synchronous handling, and the assertion that follows is about an
+ *  absence that must hold for EVERY such dispatch. */
+async function waitForKeyDeliveryWindow(): Promise<void> {
+  // reason: bounded negative-observation window — the SDK's async input loop is
+  // the single producer of a routed key, and a key the surface DROPS has no
+  // positive sink to await. The window covers one input dispatch plus the
+  // renderer's synchronous handling of it.
+  await new Promise<void>(resolve => setTimeout(resolve, KEY_DELIVERY_WINDOW_MS))
+}
 
 interface ContinuedRow {
   readonly sessionId: string
@@ -324,7 +334,7 @@ test('approval keys are exactly y/n/Esc/Ctrl+C and every other key is consumed',
     for (const key of ['\x04', '\r', '\x1b[200~y\x1b[201~', '\x1b[1;3y']) harness.pane.key(key)
     // The seat consumes these keys synchronously; the barrier flushes whatever
     // they produced, so the absences below cover the whole effect.
-    await flushFrames(harness, 'unknown approval keys')
+    await waitForKeyDeliveryWindow()
     assert.equal(harness.submits.length, 0, 'no approval key reached the composer submit path')
     assert.equal(harness.renderer.composer.getDraft(), '', 'the composer stayed empty')
     const modalId = overlayAdds(harness.ops())[before] ?? ''
@@ -596,9 +606,11 @@ test('Alt+Q reads the parked rows fresh, reopens through the controller, and clo
   const harness = await mountHarness()
   try {
     harness.pane.key('\x1bq')
-    await flushFrames(harness, 'an empty Alt+Q list')
+    // The notice IS this key's positive effect: wait for it on the wire instead
+    // of drawing a barrier that could win the race against input delivery.
+    await waitFor(() => wireText(harness.pane).includes('No continued questions'),
+      'the empty continued-question list to be notified')
     assert.deepEqual(overlayAdds(harness.ops()), [], 'no rows -> no layer opened')
-    assert.ok(wireText(harness.pane).includes('No continued questions'), 'the empty list is notified')
 
     harness.continued.push(
       { sessionId: 'session-a', callId: 'call-visible', presentation: 'visible' },
@@ -662,7 +674,7 @@ test('the modal seat outranks the hydration fence, while Alt+Q stays fenced out'
     harness.pane.key('x')
     harness.continued.push({ sessionId: 'session-a', callId: 'call-parked', presentation: 'parked' })
     harness.pane.key('\x1bq')
-    await flushFrames(harness, 'hydration-fenced keys')
+    await waitForKeyDeliveryWindow()
     assert.equal(harness.renderer.composer.getDraft(), '', 'the hydration fence dropped the composer key')
     assert.deepEqual(overlayAdds(harness.ops()).slice(1), [], 'Alt+Q never opens a list during hydration')
   } finally {
@@ -676,7 +688,7 @@ test('a terminal focus event cannot move the caret away from an open form', asyn
     // Without a modal the event is not the seat's business: no new focus op.
     const before = focusTargets(harness.ops()).length
     harness.pane.event({ ev: 'focus', sf: 's1', id: 'dock.composer' })
-    await flushFrames(harness, 'an idle focus event')
+    await waitForKeyDeliveryWindow()
     assert.equal(focusTargets(harness.ops()).length, before, 'an idle renderer ignores the focus event')
 
     const pending = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
@@ -932,7 +944,7 @@ test('re-confirming the same answer fires no real-answer mutation hook', async (
     await waitFor(() => recorder.mutations === 1, 'the first real answer change fired the hook')
     harness.pane.key('\x1b[D')   // back to the question
     harness.pane.key('\r')       // re-confirm A: no answer semantics change
-    await flushFrames(harness, 'a no-op re-confirmation')
+    await waitForKeyDeliveryWindow()
     assert.equal(recorder.mutations, 1, 'a no-op re-confirmation is not a real-answer mutation')
     harness.pane.key('\r')       // submit from review
     assert.deepEqual(await answers, [{ id: 'f3', selected: ['A'] }])
@@ -1116,7 +1128,7 @@ test('the composer accepts input again only after the NEW projection scope commi
     // The switch begins: the fence goes up and the input is dropped.
     harness.renderer.display.beginSessionHydration()
     harness.pane.key('a')
-    await flushFrames(harness, 'a hydration-fenced composer key')
+    await waitForKeyDeliveryWindow()
     assert.equal(harness.renderer.composer.getDraft(), '',
       'the hydration fence dropped the composer key (it is not held for replay)')
 
