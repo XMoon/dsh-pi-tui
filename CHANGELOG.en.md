@@ -178,6 +178,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Settings now has nine fixed first-level categories plus a conditional `Extensions`.**
+  `/settings` (and `/status`) lists `About / Models / Account / Agent / Appearance /
+  Conversation / Input & Terminal / Tools / Plugins`, and appends `Extensions` only while the
+  extension settings registry really has rows. After a registration, an unload or a same-id
+  replacement, a frame that has not repainted yet runs no click, wheel or key action and only
+  `Esc` still returns safely; when the `Extensions` entry disappears the selection lands on the
+  neighbouring `Plugins` instead of an empty category. `Other settings` is gone: a setting that
+  has not migrated yet is opened by a transition row in its own category that explicitly says
+  `Existing settings editor` and focuses that exact row (agent defaults, footer, more
+  conversation settings, input & terminal, extension settings), and the Web Search / Fetch
+  entry moved to `Tools`. The already-migrated Theme, Transcript display and Visual tools rows
+  keep their behavior.
+
 - **Settings copy has collapsed onto About's keyboard operation.** `/settings` (and
   `/status`) no longer paints a `Copy [C]` button after each About fact: the selected
   fact is copied with `c`, advertised only by the weak last-row Action Bar hint, while

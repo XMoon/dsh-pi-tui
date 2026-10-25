@@ -295,7 +295,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  resolve (`apiKeyEnv`'s shipped default). The value never reaches the TUI. */
   const WEB_CREDENTIAL_REF = 'DEEPSEEK_API_KEY'
   const WEB_CREDENTIAL_ROW_ID = 'web-credential'
-  /** The `Other`-category launcher row id (a NAVIGATION row: it never becomes a
+  /** The `Tools`-category launcher row id (a NAVIGATION row: it never becomes a
    *  Workspace editable field, so the editable-row count is unchanged). */
   const WEB_LAUNCHER_ROW_ID = 'web-settings'
   /** The legacy row the launcher focuses AND the identity that makes Esc
@@ -851,6 +851,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     handle = app.openSettingsWorkspace(
       {
         readSnapshot: readSettingsWorkspaceSnapshot,
+        // The LIVE extension settings directory: the in-process registry's own
+        // `{revision,count}`. It is a synchronous projection with no write and
+        // no second registry; its revision fences same-id re-registration too.
+        extensionDirectory: () => {
+          const registry = runner.extensions?.settings.snapshot()
+          return { revision: registry?.revision ?? 0, count: registry?.rows.length ?? 0 }
+        },
         onRefresh: () => { startWebSettingsRead(token) },
       },
       {
@@ -1711,6 +1718,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    */
   const readSettingsWorkspaceSnapshot = (): SettingsWorkspaceSnapshot => {
     const configReadiness = runner.config.configReadiness()
+    // ONE registry read per snapshot: the conditional `Extensions` category and
+    // its transition launcher are derived from the SAME live directory, so a
+    // registration between two reads can never produce a category without the
+    // row that makes it reachable.
+    const extensionRegistry = runner.extensions?.settings.snapshot()
+    const extensionRows = extensionRegistry?.rows ?? []
     const settings = runner.tuiSettings
     let doc: TuiSettingsDoc | undefined
     let readIssue: string | undefined
@@ -1744,10 +1757,32 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // the shipped default.
     const visualTools = runner.config.visualTools.read()
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
+    // The R0 transition rows: each one only NAMES the existing-editor row it
+    // focuses. They run no write of their own and never stand in for the real
+    // editor, which stays reachable behind them until R1–R6 migrate the field.
+    const transitionRow = (
+      id: SettingsWorkspaceRowId,
+      category: SettingsWorkspaceSnapshot['rows'][number]['category'],
+      label: string,
+      description: string,
+      legacyTargetId: string,
+    ): SettingsWorkspaceSnapshot['rows'][number] => ({
+      id,
+      category,
+      label,
+      summary: 'Existing settings editor',
+      scope: 'Existing settings editor',
+      freshness: 'ready',
+      description,
+      action: 'open-legacy',
+      legacyTargetId,
+    })
     return {
       configReadiness,
       capturedAt: Date.now(),
       ...(readIssue === undefined ? {} : { readIssue }),
+      extensionRevision: extensionRegistry?.revision ?? 0,
+      extensionCount: extensionRows.length,
       rows: [
         {
           id: 'theme',
@@ -1778,7 +1813,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         {
           id: 'display-preset',
-          category: 'display',
+          category: 'conversation',
           label: 'Transcript display',
           summary: runtimePreset,
           value: runtimePreset,
@@ -1790,7 +1825,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         {
           id: 'thinking',
-          category: 'display',
+          category: 'conversation',
           label: 'Thinking detail',
           summary: thinking,
           value: thinking,
@@ -1815,29 +1850,67 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           action: 'inspect',
           edit: visualToolsEditOf(visualTools, configReadiness),
         },
-        {
-          id: 'legacy-settings',
-          category: 'other',
-          label: 'Open existing settings…',
-          summary: 'Existing settings editor',
-          scope: 'Existing settings editor',
-          freshness: 'ready',
-          description: 'Opens the existing complete settings editor; returns to the conversation when closed.',
-          action: 'open-legacy',
-        },
+        transitionRow(
+          'agent-settings-legacy',
+          'agent',
+          'Agent settings…',
+          'Default permission for new sessions, read and written by the existing settings editor. This row only opens that editor on its own row.',
+          'default-permission',
+        ),
+        transitionRow(
+          'footer-settings-legacy',
+          'appearance',
+          'Footer & status line…',
+          'The footer layout is configured by the existing settings editor. This row only opens that editor on its own row.',
+          'footer',
+        ),
+        transitionRow(
+          'conversation-settings-legacy',
+          'conversation',
+          'More conversation settings…',
+          'Transcript detail, progress updates and response style are configured by the existing settings editor. This row only opens that editor on its own row.',
+          'expand',
+        ),
+        transitionRow(
+          'input-terminal-settings-legacy',
+          'input-terminal',
+          'Input & terminal settings…',
+          'Keyboard shortcuts and the terminal input preferences are configured by the existing settings editor. This row only opens that editor on its own row.',
+          'keyboard-shortcuts',
+        ),
         {
           // S2/PR-B §3.3: the ONE discoverable entry to the Web provider
           // settings section. The row opens the EXISTING legacy editor focused
-          // on that section's first row (the same editor as the compatibility
-          // row above; no second settings framework).
+          // on that section's first row (no second settings framework). R4
+          // replaces this launcher with an in-place section.
           id: WEB_LAUNCHER_ROW_ID,
-          category: 'other',
+          category: 'tools',
           label: 'Web Search / Fetch',
           ...webWorkspaceRowFacts(),
           scope: 'Host Web provider settings',
           action: 'open-legacy',
           legacyTargetId: 'web-search-provider',
         },
+        // The registry's live directory, newest snapshot only. Without a live
+        // row there is no Extensions category at all (the panel derives the
+        // category from `extensionCount`), so no empty page can be painted.
+        ...extensionRows.length === 0 ? [] : [{
+          // R0 is the transition ENTRY only: the row opens the existing editor
+          // on the registry's first (order ASC, id ASC) row. R6 replaces it
+          // with the per-owner extension settings list.
+          id: 'extension-settings-legacy' as const,
+          category: 'extensions' as const,
+          label: 'Configure extension settings…',
+          summary: `${extensionRows.length} ${extensionRows.length === 1 ? 'setting' : 'settings'} · ${new Set(extensionRows.map(row => row.owner)).size} ${new Set(extensionRows.map(row => row.owner)).size === 1 ? 'contributor' : 'contributors'}`,
+          scope: 'Existing settings editor',
+          freshness: 'ready' as const,
+          description: 'Extension registrations are edited by the existing settings editor. This row only opens that editor on the first registered setting; the per-owner list arrives with the extension settings migration.',
+          action: 'open-legacy' as const,
+          // The deeplink target is read from the LIVE registry on every open:
+          // it is never a stored id that could outlive the registration it
+          // names.
+          legacyTargetId: `ext-setting:${extensionRows[0]!.id}`,
+        }],
       ],
     }
   }

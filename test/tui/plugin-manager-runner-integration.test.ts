@@ -229,7 +229,8 @@ test('the real Settings → Plugins category hosts the same page in place and Ba
   await vt.waitForRender()
   assert.match(plain(vt.getViewport()), /Settings · Categories/)
   // The workspace opens on its About home; the rail order is About, Models,
-  // Account, Appearance, Display, Tools, Plugins, Other settings, so six Down
+  // Account, Agent, Appearance, Conversation, Input & Terminal, Tools, Plugins,
+  // so eight Down
   // presses reach Plugins.
   for (let step = 0; step < 6; step += 1) vt.sendInput('\x1b[B')
   await vt.waitForRender()

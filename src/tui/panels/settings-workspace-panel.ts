@@ -47,12 +47,14 @@ import type { ModelsInitialView, ModelsPageExit, ModelsWorkspacePage } from './m
 import type { AccountInitialView, AccountWorkspacePage } from './account-workspace-page.ts'
 import type { EmbeddedPluginPage, PluginWorkspaceView } from '../plugin-manager/workspace.ts'
 
-/** The frozen Settings categories, in the visible order. `About` is the
- * default home of the workspace; `Models` and `Account` are direct content
- * pages (like Plugins); the configuration categories keep their existing
- * behavior. */
+/** The Settings categories. `About` is the default home of the workspace;
+ * `Models`, `Account` and `Plugins` are direct content pages; the
+ * configuration categories keep their three-level browse. `extensions` is the
+ * ONE CONDITIONAL category: it is selectable only while the extension settings
+ * registry has live rows (see {@link SettingsWorkspacePanel.currentCategoryOrder}). */
 export type SettingsWorkspaceCategoryId =
-  | 'about' | 'models' | 'account' | 'appearance' | 'display' | 'tools' | 'plugins' | 'other'
+  | 'about' | 'models' | 'account' | 'agent' | 'appearance' | 'conversation'
+  | 'input-terminal' | 'tools' | 'plugins' | 'extensions'
 
 /** The navigation level of the LEGACY configuration categories: `categories`
  *  (L0) → `rows` (L1) → `detail` (L2).
@@ -70,15 +72,21 @@ export type SettingsWorkspaceFocus = SettingsWorkspacePage | 'content'
  *  it paints inside this SAME workspace lease and shares its ONE chrome. */
 export type SettingsWorkspaceDirectCategoryId = 'about' | 'models' | 'account' | 'plugins'
 
-/** The stable identity of one readonly pilot row. */
+/** The stable identity of one readonly pilot row. The `*-settings-legacy` rows
+ *  are the R0 TRANSITION launchers: each one names the exact existing-editor
+ *  row it focuses and runs no write of its own. */
 export type SettingsWorkspaceRowId =
   | 'theme'
   | 'icon-style'
   | 'display-preset'
   | 'thinking'
   | 'visual-tools'
-  | 'legacy-settings'
   | 'web-settings'
+  | 'agent-settings-legacy'
+  | 'footer-settings-legacy'
+  | 'conversation-settings-legacy'
+  | 'input-terminal-settings-legacy'
+  | 'extension-settings-legacy'
 
 /** How current one row's value is, as the reader proved it. */
 export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'unavailable' | 'read-error'
@@ -87,8 +95,8 @@ export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'u
  * The rows Phase 3B / B2-B and the PR-D follow-up make truly editable. `theme`
  * and `display-preset` write the TUI settings document; `visual-tools` is the
  * profile-wide Host switch. Nothing else in the workspace is writable:
- * `icon-style` and `thinking` stay readable rows and the complete editor stays
- * behind `legacy-settings`.
+ * `icon-style` and `thinking` stay readable rows and every not-yet-migrated
+ * setting stays behind its category's `existing settings editor` launcher.
  */
 export type SettingsWorkspaceWritableField = 'theme' | 'display-preset' | 'visual-tools'
 
@@ -206,11 +214,34 @@ export interface SettingsWorkspaceSnapshot {
   readonly rows: readonly SettingsWorkspaceRow[]
   readonly capturedAt: number
   readonly readIssue?: string
+  /** The extension settings registry revision this snapshot was assembled at.
+   *  It is a DERIVED presentation fact (the registry stays the authority), and
+   *  it is what makes an `Extension` category member of the directory: a
+   *  same-id replacement keeps the count while the revision moves, so the
+   *  count alone can never prove a painted row is still current. */
+  readonly extensionRevision?: number
+  /** How many live extension settings rows existed at this revision. */
+  readonly extensionCount?: number
+}
+
+/** The live extension settings DIRECTORY projection: the registry revision and
+ *  the live row count, read synchronously and without any write. */
+export interface SettingsWorkspaceExtensionDirectory {
+  readonly revision: number
+  readonly count: number
 }
 
 /** The read-only projection the app supplies (no shadow store, no watch). */
 export interface SettingsWorkspaceSource {
   readSnapshot(): SettingsWorkspaceSnapshot
+  /**
+   * The LIVE extension settings directory (`SettingsRegistry.snapshot()`), read
+   * synchronously before every input/mouse/render decision. It only reports the
+   * in-process registry's own `{revision,count}`; it never re-reads the TUI
+   * document, never writes and never becomes a second registry. Absent in
+   * compositions that carry no extension settings at all.
+   */
+  readonly extensionDirectory?: () => SettingsWorkspaceExtensionDirectory
   /** Invoked when the user asks for a refresh (`r`): the OWNER starts the
    *  asynchronous authority read and refreshes this generation when it
    *  settles (S2/PR-B §B3.4). The panel itself never reads Host facts. */
@@ -442,19 +473,27 @@ interface DetailProjection {
   readonly confirmCandidateVisible: boolean
 }
 
-const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = [
-  'about', 'models', 'account', 'appearance', 'display', 'tools', 'plugins', 'other',
-]
+/** The NINE category ids that always exist, in their visible order. `extensions`
+ *  is deliberately NOT a member: it is the ONE conditional category, appended
+ *  by {@link SettingsWorkspacePanel.currentCategoryOrder} only while the
+ *  extension settings registry has live rows. This is the ONE fixed order
+ *  every projection, keyboard path and hit map reads. */
+const FIXED_CATEGORY_ORDER = [
+  'about', 'models', 'account', 'agent', 'appearance',
+  'conversation', 'input-terminal', 'tools', 'plugins',
+] as const satisfies readonly SettingsWorkspaceCategoryId[]
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   about: 'About',
   models: 'Models',
   account: 'Account',
+  agent: 'Agent',
   appearance: 'Appearance',
-  display: 'Display',
+  conversation: 'Conversation',
+  'input-terminal': 'Input & Terminal',
   tools: 'Tools',
   plugins: 'Plugins',
-  other: 'Other settings',
+  extensions: 'Extensions',
 }
 
 /** Whether one category is a direct content page. */
@@ -462,9 +501,12 @@ function isDirectCategory(category: SettingsWorkspaceCategoryId): category is Se
   return category === 'about' || category === 'models' || category === 'account' || category === 'plugins'
 }
 
-/** The typed guard for a painted category id (a hit target never casts). */
+/** The typed guard for a painted category id. It answers only "is this a
+ *  category id at all"; whether the id is SELECTABLE right now is decided by
+ *  {@link SettingsWorkspacePanel.isSelectableCategory} against the LIVE
+ *  directory, because `extensions` is conditional. */
 function isCategoryId(id: string): id is SettingsWorkspaceCategoryId {
-  return (CATEGORY_ORDER as readonly string[]).includes(id)
+  return id === 'extensions' || (FIXED_CATEGORY_ORDER as readonly string[]).includes(id)
 }
 
 /** The typed guard for a painted legacy pane id (a hit target never casts). */
@@ -479,8 +521,12 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'display-preset'
     || id === 'thinking'
     || id === 'visual-tools'
-    || id === 'legacy-settings'
     || id === 'web-settings'
+    || id === 'agent-settings-legacy'
+    || id === 'footer-settings-legacy'
+    || id === 'conversation-settings-legacy'
+    || id === 'input-terminal-settings-legacy'
+    || id === 'extension-settings-legacy'
 }
 
 const WIDE_CATEGORY_WIDTH = 22
@@ -685,6 +731,21 @@ export class SettingsWorkspacePanel implements Component {
   /** The selected row of the LEGACY configuration categories; a direct page
    *  (About/Models/Account/Plugins) has no row at all. */
   private rowId: SettingsWorkspaceRowId | undefined
+  /** The extension settings registry revision/count the LIVE directory was last
+   *  observed at. It is the currentness fence of the conditional `Extensions`
+   *  category: a same-id re-registration keeps the COUNT and moves only the
+   *  revision, so a count comparison alone can never prove the painted row is
+   *  still current. */
+  private directoryRevision = 0
+  private directoryCount = 0
+  /** The category order of the CURRENT directory (the fixed nine, plus
+   *  `extensions` while the registry has live rows). Rebuilt only when the
+   *  directory really changes. */
+  private effectiveCategoryOrder: readonly SettingsWorkspaceCategoryId[] = FIXED_CATEGORY_ORDER
+  /** Set by a directory change and cleared only by a COMPLETED frame that was
+   *  composed against the still-current directory. While set, no key other
+   *  than Esc and no pointer/wheel gesture may dispatch. */
+  private directoryAwaitingPaint = false
   /** The ONE navigation focus state: the three legacy levels plus the direct
    *  page content. A new open starts on the category rail (or on the About
    *  content in a narrow terminal, which has no room for a rail). */
@@ -836,6 +897,7 @@ export class SettingsWorkspacePanel implements Component {
     this.source = source
     this.intents = intents
     this.snapshot = source.readSnapshot()
+    this.initializeDirectory(this.snapshot)
     this.rowId = this.firstRowOf(this.categoryId)
     if (options?.initialRowId !== undefined) {
       const target = this.snapshot.rows.find(row => row.id === options.initialRowId)
@@ -845,11 +907,19 @@ export class SettingsWorkspacePanel implements Component {
         this.focus = 'rows'
       }
     } else if (options?.initialCategory !== undefined) {
-      this.categoryId = options.initialCategory
-      // The `/plugins` deep link lands with the keyboard on the Plugin List
-      // (not on the rail): its ONE Settings lease paints the page on the first
-      // real frame and starts on the list, never on a resumed install.
-      this.focus = options.initialCategory === 'plugins' ? 'content' : 'categories'
+      if (this.isSelectableCategory(options.initialCategory)) {
+        this.categoryId = options.initialCategory
+        // The `/plugins` deep link lands with the keyboard on the Plugin List
+        // (not on the rail): its ONE Settings lease paints the page on the first
+        // real frame and starts on the list, never on a resumed install.
+        this.focus = options.initialCategory === 'plugins' ? 'content' : 'categories'
+      } else {
+        // A stale internal request for the CONDITIONAL category (the registry
+        // lost its rows before this open) never paints an empty Extensions
+        // page: it falls back to the stable first-party neighbour.
+        this.categoryId = 'plugins'
+        this.focus = 'categories'
+      }
     } else if (options?.initialModelsView !== undefined) {
       // A Models deeplink IS the Models category.
       this.categoryId = 'models'
@@ -881,6 +951,135 @@ export class SettingsWorkspacePanel implements Component {
         this.intents.requestRender()
       })
     }
+  }
+
+  // ── the conditional extension-settings directory ─────────────────────────
+
+  /**
+   * Seed the directory from the CONSTRUCTOR snapshot. A source without
+   * `extensionDirectory` (unit tests, historical compositions) contributes
+   * only what its snapshot really stated, so no Extensions category is invented.
+   */
+  private initializeDirectory(snapshot: SettingsWorkspaceSnapshot): void {
+    this.directoryRevision = snapshot.extensionRevision ?? 0
+    this.directoryCount = snapshot.extensionCount ?? 0
+    this.effectiveCategoryOrder = this.directoryCount > 0
+      ? [...FIXED_CATEGORY_ORDER, 'extensions']
+      : FIXED_CATEGORY_ORDER
+  }
+
+  /** The LIVE directory the source reports right now. Without a directory
+   *  source the constructor snapshot stays the (static) answer. */
+  private liveDirectory(): SettingsWorkspaceExtensionDirectory {
+    const directory = this.source.extensionDirectory
+    if (directory === undefined) {
+      return { revision: this.directoryRevision, count: this.directoryCount }
+    }
+    return directory()
+  }
+
+  /** The category order of the CURRENT directory: the nine fixed ids, plus
+   *  `extensions` while the extension settings registry has live rows. */
+  private currentCategoryOrder(): readonly SettingsWorkspaceCategoryId[] {
+    return this.effectiveCategoryOrder
+  }
+
+  /** Whether one category is SELECTABLE in the CURRENT directory. `extensions`
+   *  is a type member but only a directory member while the registry has live
+   *  rows; a painted id of a spent frame is never selectable. */
+  private isSelectableCategory(category: SettingsWorkspaceCategoryId): boolean {
+    return this.currentCategoryOrder().includes(category)
+  }
+
+  /**
+   * Reconcile the conditional `Extensions` directory with the live registry
+   * BEFORE any input/mouse/render decision dispatches. It is a synchronous
+   * in-process projection (the registry is the authority), so an equal
+   * `{revision,count}` costs one comparison and changes nothing.
+   *
+   * A real change is a pointer/keyboard boundary: the pressed gesture and the
+   * last-painted hit map are revoked, the snapshot is re-read, the selected row
+   * is re-anchored on a live row of its category, and the frame is fenced until
+   * a paint composed against the CURRENT directory completes.
+   */
+  private syncExtensionDirectory(): boolean {
+    const live = this.liveDirectory()
+    if (live.revision === this.directoryRevision && live.count === this.directoryCount) return false
+    const next = this.source.readSnapshot()
+    this.snapshot = next
+    // The frame is planned from the SNAPSHOT (its rows and its directory are
+    // one read): adopting the live count here would paint a directory whose
+    // rows the re-read did not describe.
+    this.applyDirectory(next.extensionRevision ?? 0, next.extensionCount ?? 0)
+    this.bumpRevision()
+    this.intents.requestRender()
+    return true
+  }
+
+  /** Commit one directory generation: the order, the revoked grants and the
+   *  selection repair of the CURRENT snapshot. */
+  private applyDirectory(revision: number, count: number): void {
+    this.directoryRevision = revision
+    this.directoryCount = count
+    this.effectiveCategoryOrder = count > 0
+      ? [...FIXED_CATEGORY_ORDER, 'extensions']
+      : FIXED_CATEGORY_ORDER
+    // The old frame's grants die with the directory change: a press recorded
+    // against the previous registry generation can never complete against a
+    // same-shaped target of the new one.
+    this.cancelPointerOwners()
+    this.paintedTargets = []
+    this.directoryAwaitingPaint = true
+    // The rail's rebase caches are LAYOUT sentinels, not cursors: a changed
+    // directory length must re-reveal the selection on the next paint.
+    this.lastCategoryIndex = -1
+    this.lastCategoryViewport = -1
+    if (!this.isSelectableCategory(this.categoryId)) {
+      // The registry emptied under the selected Extensions category: the ONE
+      // stable first-party neighbour takes the selection, the rail takes the
+      // keyboard, and NOTHING is installed/enabled/removed by this recovery.
+      this.categoryId = 'plugins'
+      this.focus = 'categories'
+    }
+    // The selected row must still exist in the CURRENT snapshot. A row that a
+    // re-registered owner dropped is never kept by id alone.
+    if (!this.snapshot.rows.some(row => row.id === this.rowId && row.category === this.categoryId)) {
+      this.rowId = this.firstRowOf(this.categoryId)
+    }
+    // Drop the transient choice the previous directory may have invalidated and
+    // re-anchor its owned offsets. A pending/settled write is app-owned and is
+    // never touched here.
+    this.resetChoice()
+    this.rowOffset = 0
+    this.detailOffset = 0
+  }
+
+  /** Adopt a freshly read snapshot WITHOUT re-reading it. A snapshot source
+   *  without a live directory keeps the constructor's directory (a historical
+   *  composition has no registry to observe). */
+  private adoptSnapshot(next: SettingsWorkspaceSnapshot): void {
+    this.snapshot = next
+    if (this.source.extensionDirectory === undefined) return
+    const revision = next.extensionRevision ?? this.directoryRevision
+    const count = next.extensionCount ?? this.directoryCount
+    if (revision === this.directoryRevision && count === this.directoryCount) return
+    this.applyDirectory(revision, count)
+    this.bumpRevision()
+  }
+
+  /** Publish (or keep withholding) the directory grant of the frame just
+   *  painted. The frame counts as composed against the CURRENT registry only if
+   *  the directory did not move while it was being rendered — a registration
+   *  that lands inside a render callback makes THIS frame stale, so it keeps the
+   *  fence and schedules the next one. */
+  private settleDirectoryFence(painted: SettingsWorkspaceExtensionDirectory): void {
+    if (!this.directoryAwaitingPaint) return
+    const live = this.liveDirectory()
+    if (live.revision !== painted.revision || live.count !== painted.count) {
+      this.intents.requestRender()
+      return
+    }
+    this.directoryAwaitingPaint = false
   }
 
   /**
@@ -990,6 +1189,21 @@ export class SettingsWorkspacePanel implements Component {
   // ── rendering ────────────────────────────────────────────────────────────
 
   render(width: number): string[] {
+    // The conditional `Extensions` directory is reconciled BEFORE the chrome is
+    // planned: a frame must never be composed against a membership the input
+    // and pointer fences already consider stale.
+    this.syncExtensionDirectory()
+    const paintedDirectory: SettingsWorkspaceExtensionDirectory = {
+      revision: this.directoryRevision,
+      count: this.directoryCount,
+    }
+    const lines = this.paintFrame(width)
+    this.settleDirectoryFence(paintedDirectory)
+    return lines
+  }
+
+  /** Compose ONE complete frame (the caller owns the directory sync/fence). */
+  private paintFrame(width: number): string[] {
     const liveRows = this.intents.rows()
     // A terminal resize is a gesture boundary: a press recorded against the old
     // geometry must not resolve against the new one, even when the target's own
@@ -1165,13 +1379,14 @@ export class SettingsWorkspacePanel implements Component {
     const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : semanticBar
     lines.push(fit(bar, plan.width))
     this.paintedContentBox = { x: contentX, top: contentTop, width: contentWidth, rows: contentRows }
+    const categories = this.currentCategoryOrder()
     this.paintedPanes = {
       categories: narrow ? undefined : {
         x: 0,
         width: categoryWidth,
         contentTop,
-        contentRows: Math.min(CATEGORY_ORDER.length, contentRows),
-        maxOffset: Math.max(0, CATEGORY_ORDER.length - contentRows),
+        contentRows: Math.min(categories.length, contentRows),
+        maxOffset: Math.max(0, categories.length - contentRows),
       },
     }
     this.paintedTargets = targets
@@ -1184,7 +1399,7 @@ export class SettingsWorkspacePanel implements Component {
    *  as the legacy pane headers. Display-only: it publishes no hit target and
    *  owns no focus. */
   private renderDirectPaneHeader(categoryWidth: number, contentWidth: number): string {
-    const left = fit(this.paneHeader(`Categories (${CATEGORY_ORDER.length})`, this.focus === 'categories'), categoryWidth)
+    const left = fit(this.paneHeader(`Categories (${this.currentCategoryOrder().length})`, this.focus === 'categories'), categoryWidth)
     const right = fit(this.paneHeader(CATEGORY_LABELS[this.categoryId], this.focus !== 'categories'), contentWidth)
     return `${left}${' '.repeat(COLUMN_GAP)}${right}`
   }
@@ -1227,15 +1442,16 @@ export class SettingsWorkspacePanel implements Component {
    * share ONE offset and ONE rebase rule.
    */
   private visibleCategories(viewport: number): readonly SettingsWorkspaceCategoryId[] {
-    const selected = CATEGORY_ORDER.indexOf(this.categoryId)
+    const order = this.currentCategoryOrder()
+    const selected = order.indexOf(this.categoryId)
     if (selected !== this.lastCategoryIndex || viewport !== this.lastCategoryViewport) {
-      this.categoryOffset = rebaseOffset(this.categoryOffset, selected, CATEGORY_ORDER.length, viewport)
+      this.categoryOffset = rebaseOffset(this.categoryOffset, selected, order.length, viewport)
       this.lastCategoryIndex = selected
       this.lastCategoryViewport = viewport
     } else {
-      this.categoryOffset = clampOffset(this.categoryOffset, CATEGORY_ORDER.length, viewport)
+      this.categoryOffset = clampOffset(this.categoryOffset, order.length, viewport)
     }
-    return CATEGORY_ORDER.slice(this.categoryOffset, this.categoryOffset + viewport)
+    return order.slice(this.categoryOffset, this.categoryOffset + viewport)
   }
 
   /**
@@ -1935,8 +2151,9 @@ export class SettingsWorkspacePanel implements Component {
       paneLines.set('detail', detail.lines)
     }
 
+    const categoryCount = this.currentCategoryOrder().length
     for (const pane of layout) {
-      let maxOffset = Math.max(0, CATEGORY_ORDER.length - contentRows)
+      let maxOffset = Math.max(0, categoryCount - contentRows)
       if (pane.page === 'rows') maxOffset = Math.max(0, this.rowsPaneCount() - contentRows)
       else if (pane.page === 'detail') {
         maxOffset = detailProjection === undefined ? 0 : Math.max(0, detailProjection.content.length - detailProjection.viewport)
@@ -1978,7 +2195,7 @@ export class SettingsWorkspacePanel implements Component {
     if (showPaneHeader) {
       const head = layout.map((pane) => {
         const title = pane.page === 'categories'
-          ? `Categories (${CATEGORY_ORDER.length})`
+          ? `Categories (${categoryCount})`
           : pane.page === 'rows'
             ? `Rows (${this.rowsPaneCount()})`
             : 'Details'
@@ -2004,7 +2221,7 @@ export class SettingsWorkspacePanel implements Component {
     const out: string[] = []
     if (this.focus === 'categories') {
       const visible = this.visibleCategories(viewport)
-      panes.categories = { x: 0, width, contentTop: bodyTop, contentRows: viewport, maxOffset: Math.max(0, CATEGORY_ORDER.length - viewport) }
+      panes.categories = { x: 0, width, contentTop: bodyTop, contentRows: viewport, maxOffset: Math.max(0, this.currentCategoryOrder().length - viewport) }
       for (let i = 0; i < visible.length; i += 1) {
         const id = visible[i]!
         targets.push({ kind: 'category', id, row: bodyTop + i, startCol: 0, endCol: width })
@@ -2620,7 +2837,7 @@ export class SettingsWorkspacePanel implements Component {
    */
   rereadFacts(): void {
     if (this.disposed) return
-    this.snapshot = this.source.readSnapshot()
+    this.adoptSnapshot(this.source.readSnapshot())
     // A live candidate source can change UNDER an open choice (a contribution
     // unloading re-numbers the rows). The chosen candidate is an IDENTITY, so the
     // phase is re-anchored on its VALUE: the highlight and the confirm keep naming the
@@ -2642,8 +2859,10 @@ export class SettingsWorkspacePanel implements Component {
   /** Re-read the same authorities; keep the stable selection when it survives. */
   private refresh(requestRender = true): void {
     const next = this.source.readSnapshot()
-    this.snapshot = next
-    if (next.rows.every(row => row.id !== this.rowId)) this.rowId = this.firstRowOf(this.categoryId)
+    this.adoptSnapshot(next)
+    if (!next.rows.some(row => row.id === this.rowId && row.category === this.categoryId)) {
+      this.rowId = this.firstRowOf(this.categoryId)
+    }
     this.detailOffset = 0
     this.bumpRevision()
     if (requestRender) this.intents.requestRender()
@@ -2931,14 +3150,15 @@ export class SettingsWorkspacePanel implements Component {
     const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : (child[childRows - 1] ?? '')
     lines.push(fit(bar, plan.width))
     this.paintedContentBox = { x: projection.contentX, top: contentTop, width: projection.contentWidth, rows: contentRows }
+    const categories = this.currentCategoryOrder()
     this.paintedPanes = projection.showCategories
       ? {
           categories: {
             x: 0,
             width: WIDE_CATEGORY_WIDTH,
             contentTop,
-            contentRows: Math.min(CATEGORY_ORDER.length, contentRows),
-            maxOffset: Math.max(0, CATEGORY_ORDER.length - contentRows),
+            contentRows: Math.min(categories.length, contentRows),
+            maxOffset: Math.max(0, categories.length - contentRows),
           },
         }
       : {}
@@ -2972,7 +3192,7 @@ export class SettingsWorkspacePanel implements Component {
   ): string {
     const parts: string[] = []
     if (projection.showCategories) {
-      parts.push(fit(this.paneHeader(`Categories (${CATEGORY_ORDER.length})`, this.focus === 'categories'), WIDE_CATEGORY_WIDTH))
+      parts.push(fit(this.paneHeader(`Categories (${this.currentCategoryOrder().length})`, this.focus === 'categories'), WIDE_CATEGORY_WIDTH))
       parts.push(' '.repeat(COLUMN_GAP))
     }
     if (layout.dual) {
@@ -3026,6 +3246,17 @@ export class SettingsWorkspacePanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // The conditional directory is a fail-closed boundary of its own: a changed
+    // registry membership revokes the painted grants BEFORE any dispatch, and
+    // the event that DISCOVERED the change never navigates with it. Until a
+    // frame composed against the CURRENT registry paints, only the real Esc
+    // acts (a navigation back, never an activation of a spent row).
+    this.syncExtensionDirectory()
+    // The only action admitted in this window is the real Esc: it runs the
+    // CURRENT state's legitimate return (the page's own back, one level back or
+    // the close) through the SAME dispatch a painted frame uses, and can never
+    // activate a row or category of the spent frame.
+    if (this.directoryAwaitingPaint && !matchesKey(data, 'escape')) return
     // A terminal resize is a fail-closed boundary for EVERY Settings pane even
     // when the effective child grant value is unchanged (8→7 rows keeps the
     // same body budget): the previous frame's physical last row can already be
@@ -3332,6 +3563,9 @@ export class SettingsWorkspacePanel implements Component {
    * projection is painted by the root), and the keyboard stays on the rail.
    */
   private selectCategory(category: SettingsWorkspaceCategoryId, focus: SettingsWorkspaceFocus = 'categories'): void {
+    // A category id that is not a member of the CURRENT directory can never be
+    // selected — a painted id of a spent frame or a stale deep link included.
+    if (!this.isSelectableCategory(category)) return
     const changed = category !== this.categoryId
     // A Host mutation owns the page: user navigation may not abandon it. The
     // gate covers the MOUSE switch too: the keyboard may never leave a page
@@ -3457,7 +3691,8 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (this.focus === 'categories') {
-      this.selectCategory(CATEGORY_ORDER[direction < 0 ? 0 : CATEGORY_ORDER.length - 1]!)
+      const order = this.currentCategoryOrder()
+      this.selectCategory(order[direction < 0 ? 0 : order.length - 1]!)
       return
     }
     const rows = this.currentRows()
@@ -3466,9 +3701,10 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private moveCategory(delta: number): void {
-    const index = CATEGORY_ORDER.indexOf(this.categoryId)
-    const next = Math.min(Math.max(0, index + delta), CATEGORY_ORDER.length - 1)
-    this.selectCategory(CATEGORY_ORDER[next]!)
+    const order = this.currentCategoryOrder()
+    const index = order.indexOf(this.categoryId)
+    const next = Math.min(Math.max(0, index + delta), order.length - 1)
+    this.selectCategory(order[next]!)
   }
 
   private moveRow(delta: number): void {
@@ -3723,6 +3959,14 @@ export class SettingsWorkspacePanel implements Component {
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
+    // The extension-settings DIRECTORY is re-proved before a wheel may resolve
+    // against any painted box: a registry membership change revokes every grant
+    // of the previous frame (independently of whether a cell happens to match).
+    this.syncExtensionDirectory()
+    if (this.directoryAwaitingPaint) {
+      this.cancelPointerOwners()
+      return undefined
+    }
     // A resize that has not repainted makes every painted pane box stale: a
     // wheel over the old geometry could scroll a pane the new frame does not
     // paint at that cell.
@@ -3829,6 +4073,14 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    // A directory change invalidates the WHOLE painted hit map, not just the
+    // cells that happen to move: the press is refused and the release may never
+    // resurrect a target of the previous registry generation.
+    this.syncExtensionDirectory()
+    if (this.directoryAwaitingPaint) {
+      this.cancelPointerOwners()
+      return
+    }
     // The pointer boxes still describe the previous terminal frame. Refuse the
     // press entirely and revoke every pending pointer owner; the release must
     // not resurrect an old hit at a cell the new layout paints differently.
@@ -3934,6 +4186,13 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
+    // The same directory fence on release: a gesture that began before a
+    // registration/unload/dispose can never complete against the new directory.
+    this.syncExtensionDirectory()
+    if (this.directoryAwaitingPaint) {
+      this.cancelPointerOwners()
+      return
+    }
     if (this.terminalGeometryStale()) {
       this.cancelPointerOwners()
       return
@@ -4084,6 +4343,8 @@ export class SettingsWorkspacePanel implements Component {
     switch (target.kind) {
       case 'category': {
         if (!isCategoryId(target.id)) return
+        // `isCategoryId` only proves the id is a category at all; the painted
+        // target must still be a member of the directory this frame drew.
         this.selectCategory(target.id, 'categories')
         return
       }

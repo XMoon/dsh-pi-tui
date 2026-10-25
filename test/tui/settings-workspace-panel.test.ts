@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import {
   SettingsWorkspacePanel,
   type SettingsAuthPage,
@@ -54,14 +54,112 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
-      id: 'web-settings',
+      id: 'icon-style',
       category: 'appearance',
-      label: 'Web settings',
+      label: 'Icon style',
+      summary: 'emoji',
+      value: 'emoji',
+      scope: 'TUI settings document',
+      freshness: 'ready',
+      description: 'glyph vocabulary',
+      action: 'inspect',
+    },
+    {
+      id: 'footer-settings-legacy',
+      category: 'appearance',
+      label: 'Footer & status line…',
+      summary: 'Existing settings editor',
+      scope: 'Existing settings editor',
+      freshness: 'ready',
+      description: 'the existing editor owns the footer layout',
+      action: 'open-legacy',
+      legacyTargetId: 'footer',
+    },
+    {
+      id: 'display-preset',
+      category: 'conversation',
+      label: 'Transcript display',
+      summary: 'full',
+      value: 'full',
+      scope: 'Client runtime',
+      freshness: 'runtime',
+      description: 'display preset',
+      action: 'inspect',
+      edit: {
+        field: 'display-preset',
+        primary: 'runtime',
+        runtime: 'full',
+        persisted: 'full',
+        options: [
+          { value: 'full', label: 'full', available: true, current: true },
+          { value: 'compact', label: 'compact', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'thinking',
+      category: 'conversation',
+      label: 'Thinking detail',
+      summary: 'collapsed',
+      value: 'collapsed',
+      scope: 'Current TUI display state',
+      freshness: 'runtime',
+      description: 'reasoning blocks',
+      action: 'inspect',
+    },
+    {
+      id: 'conversation-settings-legacy',
+      category: 'conversation',
+      label: 'More conversation settings…',
+      summary: 'Existing settings editor',
+      scope: 'Existing settings editor',
+      freshness: 'ready',
+      description: 'the existing editor owns the remaining conversation settings',
+      action: 'open-legacy',
+      legacyTargetId: 'expand',
+    },
+    {
+      id: 'agent-settings-legacy',
+      category: 'agent',
+      label: 'Agent settings…',
+      summary: 'Existing settings editor',
+      scope: 'Existing settings editor',
+      freshness: 'ready',
+      description: 'the existing editor owns the agent defaults',
+      action: 'open-legacy',
+      legacyTargetId: 'default-permission',
+    },
+    {
+      id: 'input-terminal-settings-legacy',
+      category: 'input-terminal',
+      label: 'Input & terminal settings…',
+      summary: 'Existing settings editor',
+      scope: 'Existing settings editor',
+      freshness: 'ready',
+      description: 'the existing editor owns the input and terminal preferences',
+      action: 'open-legacy',
+      legacyTargetId: 'keyboard-shortcuts',
+    },
+    {
+      id: 'visual-tools',
+      category: 'tools',
+      label: 'Visual tools',
+      summary: 'On',
+      scope: 'DSH Host profile · every agent on this Host',
+      freshness: 'ready',
+      description: 'profile-wide built-in tools switch',
+      action: 'inspect',
+    },
+    {
+      id: 'web-settings',
+      category: 'tools',
+      label: 'Web Search / Fetch',
       summary: 'Host',
-      scope: 'Host settings document',
+      scope: 'Host Web provider settings',
       freshness: 'ready',
       description: 'Host-owned Web settings',
       action: 'open-legacy',
+      legacyTargetId: 'web-search-provider',
     },
   ],
 }
@@ -190,6 +288,8 @@ interface Harness {
   readonly commits: () => number
   /** How many times the legacy editor handoff was requested. */
   readonly legacyOpens: () => number
+  /** The exact legacy-editor target of every handoff, in order. */
+  readonly legacyTargets: () => readonly (string | undefined)[]
   /** The settle callbacks of the dispatched writes, in order. */
   readonly settlements: readonly ((outcome: SettingsWorkspaceCommitOutcome) => void)[]
 }
@@ -205,6 +305,10 @@ function setup(options: {
   readonly aboutStatusSource?: () => AboutStatusController
   /** C3: the clipboard sink (records what the copy gestures emit). */
   readonly onCopy?: (text: string) => void
+  /** The snapshot seam (defaults to the static fixture). */
+  readonly snapshot?: () => SettingsWorkspaceSnapshot
+  /** The LIVE extension directory seam (`SettingsWorkspaceSource.extensionDirectory`). */
+  readonly directory?: () => { readonly revision: number; readonly count: number }
 } = {}): Harness {
   let columns = options.columns ?? 120
   let rows = options.rows ?? 40
@@ -213,6 +317,7 @@ function setup(options: {
   const settlements: ((outcome: SettingsWorkspaceCommitOutcome) => void)[] = []
   let closes = 0
   let commits = 0
+  const legacyTargets: (string | undefined)[] = []
   let legacyOpens = 0
   const intents: SettingsWorkspacePanelIntents = {
     aboutVersionFacts: { tui: '0.5.3', dsh: '0.2.1-rc.2' },
@@ -221,7 +326,7 @@ function setup(options: {
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => { closes += 1 },
-    onOpenLegacy: () => { legacyOpens += 1 },
+    onOpenLegacy: (targetId) => { legacyOpens += 1; legacyTargets.push(targetId) },
     ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
     onCopy: (text) => { options.onCopy?.(text) },
     onCommit: (_request, settle) => {
@@ -250,7 +355,13 @@ function setup(options: {
       return page
     },
   }
-  const panel = new SettingsWorkspacePanel({ readSnapshot: () => SNAPSHOT }, intents)
+  const readSnapshot = options.snapshot ?? ((): SettingsWorkspaceSnapshot => SNAPSHOT)
+  const panel = new SettingsWorkspacePanel(
+    options.directory === undefined
+      ? { readSnapshot }
+      : { readSnapshot, extensionDirectory: options.directory },
+    intents,
+  )
   return {
     panel,
     built,
@@ -264,6 +375,7 @@ function setup(options: {
     closes: () => closes,
     commits: () => commits,
     legacyOpens: () => legacyOpens,
+    legacyTargets: () => legacyTargets,
     settlements,
   }
 }
@@ -272,6 +384,23 @@ const plain = (harness: Harness, width = harness.columns()): string =>
   harness.panel.render(width).map(stripTerminalSequences).join('\n')
 
 const header = (harness: Harness): string => plain(harness).split('\n')[0] ?? ''
+
+/** The painted category order of the default fixture (no extension rows). */
+const CATEGORY_ORDER = [
+  'about', 'models', 'account', 'agent', 'appearance',
+  'conversation', 'input-terminal', 'tools', 'plugins',
+] as const
+
+/**
+ * Walk the rail from its About home to one category with the panel's REAL Down
+ * key. The fixture has no extension rows, so the directory is always the nine
+ * fixed categories.
+ */
+const walkTo = (h: Harness, category: (typeof CATEGORY_ORDER)[number]): void => {
+  const target = CATEGORY_ORDER.indexOf(category)
+  assert.ok(target >= 0, `the fixture must know ${JSON.stringify(category)}`)
+  for (let index = 0; index < target; index += 1) h.panel.handleInput('\u001b[B')
+}
 
 test('the wide rail mounts the selected direct page exactly once', () => {
   const h = setup()
@@ -470,9 +599,7 @@ test('Tab cycles the legacy panes without opening the Detail choice, and Shift+T
   for (const columns of [120, 90] as const) {
     const h = setup({ columns })
     plain(h)
-    h.panel.handleInput('\u001b[B')
-    h.panel.handleInput('\u001b[B')
-    h.panel.handleInput('\u001b[B') // About -> Appearance
+    walkTo(h, 'appearance')
     h.panel.handleInput('\t')
     assert.match(header(h), /Settings · Appearance · Rows/u, `Tab focuses Rows at ${columns}`)
     assert.ok(plain(h).includes('[Rows'), 'the focused pane header names the owner')
@@ -497,9 +624,7 @@ test('Tab cycles the legacy panes without opening the Detail choice, and Shift+T
 test('Tab is inert while a choice or a pending write owns the Detail', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h)
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B') // About -> Appearance
+  walkTo(h, 'appearance')
   h.panel.handleInput('\r') // categories -> rows
   h.panel.handleInput('\r') // rows -> Detail choice
   assert.match(plain(h), /Choose value/u)
@@ -551,9 +676,7 @@ test('a narrow frame keeps the root Tab inert and its existing drill-down path',
   const legacy = setup({ columns: 72, rows: 24 })
   plain(legacy)
   legacy.panel.handleInput('\u001b') // About content -> rail
-  legacy.panel.handleInput('\u001b[B')
-  legacy.panel.handleInput('\u001b[B')
-  legacy.panel.handleInput('\u001b[B') // Appearance
+  walkTo(legacy, 'appearance')
   legacy.panel.handleInput('\t')
   assert.match(header(legacy), /Settings · Categories/u, 'the narrow legacy Tab is inert on L0')
   legacy.panel.handleInput('\u001b[C')
@@ -605,13 +728,11 @@ test('Account content keeps the keyboard while a confirmation or an operation is
 test('a Tab focus change revokes a pointer press recorded on the previous pane', () => {
   const h = setup({ columns: 120 })
   plain(h)
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B') // Appearance
+  walkTo(h, 'appearance')
   const frame = plain(h).split('\n')
-  const y = frame.findIndex(line => line.includes('Web settings'))
-  assert.ok(y >= 0, `the legacy row must be painted:\n${frame.join('\n')}`)
-  const x = frame[y]!.indexOf('Web settings')
+  const y = frame.findIndex(line => line.includes('Icon style'))
+  assert.ok(y >= 0, `the appearance row must be painted:\n${frame.join('\n')}`)
+  const x = frame[y]!.indexOf('Icon style')
   // Press on the row while the RAIL owns the keyboard, Tab the focus into the
   // Rows pane, then release on the same painted cells: the old target must not
   // activate under the new focus.
@@ -625,7 +746,7 @@ test('a Tab focus change revokes a pointer press recorded on the previous pane',
 test('the embedded Plugin Manager owns the content keys while the rail keeps the cross-region ones', () => {
   const h = setup({ columns: 120, pluginPage: true })
   plain(h)
-  for (let index = 0; index < 6; index += 1) h.panel.handleInput('\u001b[B') // About -> Plugins
+  walkTo(h, 'plugins')
   // Selecting Plugins on the rail paints the live preview and keeps the keys on
   // the rail: it never builds a page twice.
   assert.equal(h.pluginPages.length, 1, 'the Plugins category mounted the page once')
@@ -644,7 +765,7 @@ test('the embedded Plugin Manager owns the content keys while the rail keeps the
   assert.equal(h.pluginPages[0]!.focused, false, 'the yielded page stopped owning the input focus')
   assert.equal(h.closes(), 0, 'the workspace stayed open')
   const frame = plain(h)
-  assert.match(frame, /Categories \(8\)/u, 'the rail is painted after the yield')
+  assert.match(frame, /Categories \(9\)/u, 'the rail is painted after the yield')
   assert.match(frame, /Esc close/u, 'the rail bar owns the last row after the yield')
   // Esc on the rail closes the Settings lease.
   h.panel.handleInput('\u001b')
@@ -654,7 +775,7 @@ test('the embedded Plugin Manager owns the content keys while the rail keeps the
 test('a real category change disposes the plugin page once; a focus yield never does', () => {
   const h = setup({ columns: 120, pluginPage: true })
   plain(h)
-  for (let index = 0; index < 6; index += 1) h.panel.handleInput('\u001b[B') // About -> Plugins
+  walkTo(h, 'plugins')
   plain(h) // the visible preview mounts the ONE page
   assert.equal(h.pluginPages.length, 1)
   h.panel.handleInput('\t') // focus the plugin content
@@ -664,7 +785,7 @@ test('a real category change disposes the plugin page once; a focus yield never 
   assert.equal(h.pluginPages[0]!.disposed, false, 'a yield keeps the page instance alive')
   assert.equal(h.closes(), 0)
   // A REAL category change disposes it exactly once and never builds another.
-  h.panel.handleInput('\u001b[B') // Plugins -> Other settings
+  h.panel.handleInput('\u001b[A') // Plugins -> Tools
   plain(h)
   assert.equal(h.pluginPages[0]!.disposed, true, 'the real category change disposes the page')
   assert.equal(h.pluginPages.length, 1, 'the category change builds no second page')
@@ -673,9 +794,7 @@ test('a real category change disposes the plugin page once; a focus yield never 
 test('a pending legacy write never advertises the direct rail Tab until it settles', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h)
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B') // About -> Appearance
+  walkTo(h, 'appearance')
   h.panel.handleInput('\r') // categories -> rows
   h.panel.handleInput('\r') // rows -> Detail choice
   plain(h)
@@ -794,9 +913,7 @@ test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any lev
       plain(h, columns)
     }
     assert.match(plain(h, columns).split('\n')[0] ?? '', /Settings · Categories/u, `the rail owns ${columns}`)
-    h.panel.handleInput('\u001b[B')
-    h.panel.handleInput('\u001b[B')
-    h.panel.handleInput('\u001b[B') // About -> Appearance
+    walkTo(h, 'appearance')
     // L0 (rail), L1 (rows) and L2 (Detail) each refuse every copy byte.
     for (const data of encodedCopyKeys) h.panel.handleInput(data)
     assert.equal(copied.length, 0, `L0 copies nothing at ${columns}`)
@@ -847,9 +964,7 @@ test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any lev
       choosing.panel.handleInput('\u001b')
       plain(choosing, columns)
     }
-    choosing.panel.handleInput('\u001b[B')
-    choosing.panel.handleInput('\u001b[B')
-    choosing.panel.handleInput('\u001b[B') // About -> Appearance
+    walkTo(choosing, 'appearance')
     choosing.panel.handleInput('\r') // L0 -> L1
     choosing.panel.handleInput('\x1b[H') // Home: the first, writable Theme row
     const writes = choosing.commits()
@@ -1257,9 +1372,7 @@ test('the region hints never crowd the About copy/refresh verbs out of a tight b
 test('the legacy 90-column bars keep refresh when the region hints drop and never advertise a copy', () => {
   const h = setup({ columns: 90, rows: 24 })
   plain(h, 90)
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B') // About -> Appearance
+  walkTo(h, 'appearance')
   h.panel.handleInput('\t') // categories -> rows
   const rowsBar = plain(h, 90).split('\n').at(-1)!
   assert.match(rowsBar, /Enter choose/u, 'the row action stays visible')
@@ -1285,33 +1398,31 @@ test('the pane header names the keyboard owner at 80 and 120 columns', () => {
     const h = setup({ columns, rows: 24 })
     h.panel.handleInput('\u001b[B') // About -> Models: the rail keeps the keys
     const preview = plain(h, columns).split('\n')
-    const previewPane = preview.findIndex(line => line.includes('[Categories (8)]'))
+    const previewPane = preview.findIndex(line => line.includes('[Categories (9)]'))
     assert.ok(previewPane >= 0, `the direct pane header paints at ${columns}:\n${preview.join('\n')}`)
-    assert.match(preview[previewPane]!, /\[Categories \(8\)\].*Models/u,
+    assert.match(preview[previewPane]!, /\[Categories \(9\)\].*Models/u,
       `the rail owns the active device:\n${preview[previewPane]}`)
     assert.doesNotMatch(preview[previewPane]!, /Rows \(/u, 'the direct pane header fakes no Rows pane')
 
     h.panel.handleInput('\r') // the content takes the keyboard, the page is reused
     const content = plain(h, columns).split('\n')
-    const contentPane = content.findIndex(line => line.includes('Categories (8)'))
+    const contentPane = content.findIndex(line => line.includes('Categories (9)'))
     assert.ok(contentPane >= 0)
-    assert.match(content[contentPane]!, /Categories \(8\).*\[Models\]/u,
+    assert.match(content[contentPane]!, /Categories \(9\).*\[Models\]/u,
       `the page owns the active device:\n${content[contentPane]}`)
 
     // The legacy projection keeps its own pane names on the same shared row.
     const legacy = setup({ columns, rows: 24 })
-    legacy.panel.handleInput('\u001b[B')
-    legacy.panel.handleInput('\u001b[B')
-    legacy.panel.handleInput('\u001b[B') // Appearance
+    walkTo(legacy, 'appearance')
     const l0 = plain(legacy, columns).split('\n')
-    const l0Pane = l0.findIndex(line => line.includes('[Categories (8)]'))
+    const l0Pane = l0.findIndex(line => line.includes('[Categories (9)]'))
     assert.ok(l0Pane >= 0)
-    assert.match(l0[l0Pane]!, /\[Categories \(8\)\].*Rows \(2\)/u)
+    assert.match(l0[l0Pane]!, /\[Categories \(9\)\].*Rows \(3\)/u)
     legacy.panel.handleInput('\t') // categories -> rows
     const l1 = plain(legacy, columns).split('\n')
-    const l1Pane = l1.findIndex(line => line.includes('[Rows (2)]'))
+    const l1Pane = l1.findIndex(line => line.includes('[Rows (3)]'))
     assert.ok(l1Pane >= 0, `the focused Rows header paints at ${columns}:\n${l1.join('\n')}`)
-    assert.match(l1[l1Pane]!, /\[Rows \(2\)\].*Details/u)
+    assert.match(l1[l1Pane]!, /\[Rows \(3\)\].*Details/u)
   }
 })
 
@@ -1330,7 +1441,7 @@ test('the pane header publishes no hit target and a focus key reuses the mounted
 
   // The header row is display-only: a click there owns no target.
   const frame = plain(h, 120).split('\n')
-  const paneRow = frame.findIndex(line => line.includes('Categories (8)'))
+  const paneRow = frame.findIndex(line => line.includes('Categories (9)'))
   assert.ok(paneRow >= 0)
   h.panel.onCellPress(2, paneRow)
   h.panel.onCellClick(2, paneRow)
@@ -1443,4 +1554,339 @@ test('below the body floor the content focus forwards only Esc, never a hidden p
   assert.equal(about.closes(), 0, 'the workspace never closes from a hidden key')
   about.panel.handleInput('\u001b')
   assert.match(plain(about, 44), /Settings · Categories/u)
+})
+
+// ── C2-R0: the nine fixed categories + the conditional Extensions ─────────
+
+/** One live extension-settings launcher, as the command layer builds it. */
+const extensionRow = (target: string): SettingsWorkspaceSnapshot['rows'][number] => ({
+  id: 'extension-settings-legacy',
+  category: 'extensions',
+  label: 'Configure extension settings…',
+  summary: '1 setting · 1 contributor',
+  scope: 'Existing settings editor',
+  freshness: 'ready',
+  description: 'extension registrations are edited by the existing settings editor',
+  action: 'open-legacy',
+  legacyTargetId: target,
+})
+
+/** The fixture at one registry directory state. */
+const snapshotWithExtensions = (
+  count: number,
+  revision: number,
+  target = 'ext-setting:demo',
+): SettingsWorkspaceSnapshot => ({
+  ...SNAPSHOT,
+  extensionRevision: revision,
+  extensionCount: count,
+  rows: count > 0 ? [...SNAPSHOT.rows, extensionRow(target)] : SNAPSHOT.rows,
+})
+
+/** The labels the painted category RAIL really shows, in row order. */
+const railLabels = (h: Harness): string[] => {
+  const lines = plain(h).split('\n')
+  const head = lines.findIndex(line => /Categories \(\d+\)/u.test(line))
+  assert.ok(head >= 0, `the rail pane header must be painted:\n${plain(h)}`)
+  const labels: string[] = []
+  for (const line of lines.slice(head + 1)) {
+    // Every rail cell starts with the cursor (`> `) or its 2-cell blank; the
+    // physical last row is the root Action Bar and owns no rail cell.
+    if (!/^(?:> | {2})/u.test(line)) continue
+    const cell = line.slice(0, 22).trimEnd()
+    if (cell === '') continue
+    labels.push(cell.replace(/^(?:> | {2})/u, '').trim())
+  }
+  return labels
+}
+
+/** One native wheel event over a panel cell. */
+const wheelAt = (h: Harness, x: number, y: number, delta = 1): void => {
+  h.panel.handleMouse({
+    type: 'wheel', button: 'none', x, y, screenX: x, screenY: y,
+    width: h.columns(), height: h.rows(), shift: false, alt: false, ctrl: false, wheelDelta: delta,
+  })
+}
+
+test('T01 the directory is the nine fixed categories with no Other settings and no Extensions', () => {
+  const h = setup({ pluginPage: true })
+  const frame = plain(h)
+  assert.match(frame, /Categories \(9\)/u, 'the rail states the real category count')
+  assert.deepEqual(railLabels(h), [
+    'About', 'Models', 'Account', 'Agent', 'Appearance',
+    'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
+  ], 'the fixed order is the frozen nine')
+  assert.doesNotMatch(frame, /Other settings/u, 'no Other settings category exists')
+  assert.doesNotMatch(frame, /Extensions/u, 'no Extensions category exists without live rows')
+  // End reaches the LAST existing category, never a category the directory lacks.
+  h.panel.handleInput('\u001b[F')
+  assert.match(plain(h), /> Plugins/u, 'End selects the last real category')
+  h.panel.handleInput('\r')
+  assert.match(header(h), /Settings · Plugins/u, 'Enter opens the Plugins content, never Extensions')
+  assert.equal(h.legacyOpens(), 0, 'reaching the rail end opens nothing')
+})
+
+test('T02 a live extension appends Extensions; browsing it never opens the editor or writes', () => {
+  let count = 0
+  let revision = 0
+  const h = setup({
+    directory: () => ({ revision, count }),
+    snapshot: () => snapshotWithExtensions(count, revision),
+  })
+  plain(h)
+  assert.match(plain(h), /Categories \(9\)/u, 'the empty directory paints nine categories')
+  // A registration lands: the next frame appends Extensions without stealing
+  // the selection, and the tenth category is reachable only after that paint.
+  revision = 1
+  count = 1
+  const appended = plain(h)
+  assert.match(appended, /Categories \(10\)/u, 'the frame that paints the registration states ten')
+  assert.deepEqual(railLabels(h).at(-1), 'Extensions', 'Extensions is the appended last category')
+  assert.match(appended, />\s*About/u, 'appending the category never steals the selection')
+  h.panel.handleInput('\u001b[F')
+  assert.match(plain(h), /> Extensions/u, 'End reaches the appended category')
+  h.panel.handleInput('\r')
+  const rows = plain(h)
+  assert.match(header(h), /Settings · Extensions · Rows/u)
+  assert.match(rows, /Configure extension settings…/u, 'the R0 transition row is painted')
+  assert.match(rows, /Existing settings editor/u, 'the row states its transition scope')
+  assert.equal(h.legacyOpens(), 0, 'reaching the row opens nothing')
+  assert.equal(h.commits(), 0, 'reaching the row writes nothing')
+  h.panel.handleInput('\t')
+  plain(h)
+  assert.equal(h.legacyOpens(), 0, 'a Tab focus change never opens the legacy editor')
+  h.panel.handleInput('\u001b') // Detail -> Rows
+  // Only the explicit activation of the painted row opens it, on the live first id.
+  h.panel.handleInput('\r')
+  assert.deepEqual(h.legacyTargets(), ['ext-setting:demo'], 'the launcher targets the registry first row')
+  assert.equal(h.commits(), 0, 'the transition launcher is a navigation, never a write')
+})
+
+test('T03 display rows live in Conversation while Theme/Icon stay in Appearance', () => {
+  const h = setup()
+  plain(h)
+  walkTo(h, 'conversation')
+  const conversation = plain(h)
+  assert.match(header(h), /Settings · Categories/u)
+  assert.match(conversation, /Transcript display/u, 'display-preset moved to Conversation')
+  assert.match(conversation, /Thinking detail/u, 'thinking moved to Conversation')
+  assert.match(conversation, /More conversation settings…/u)
+  assert.doesNotMatch(conversation, /Configured theme|Icon style/u, 'Theme/Icon never leak into Conversation')
+  h.panel.handleInput('\u001b[H') // Home -> About
+  walkTo(h, 'appearance')
+  const appearance = plain(h)
+  assert.match(appearance, /Configured theme/u)
+  assert.match(appearance, /Icon style/u)
+  assert.match(appearance, /Footer & status line…/u)
+  assert.doesNotMatch(appearance, /Transcript display|Thinking detail/u, 'the retired display rows stay out')
+  // The retired `display`/`other` ids are not categories any click can select:
+  // the rail only ever publishes the CURRENT directory's ids.
+  const ids = (h.panel as unknown as { paintedTargets: readonly { readonly kind: string; readonly id: string }[] }).paintedTargets
+    .filter(target => target.kind === 'category')
+    .map(target => target.id)
+  assert.deepEqual(ids, [...CATEGORY_ORDER], 'the painted rail publishes exactly the current directory')
+})
+
+test('T04 Agent and Input & Terminal expose only their existing-editor launchers', () => {
+  const h = setup()
+  plain(h)
+  walkTo(h, 'agent')
+  assert.match(plain(h), /Agent settings…/u)
+  h.panel.handleInput('\r')
+  h.panel.handleInput('\r')
+  assert.deepEqual(h.legacyTargets(), ['default-permission'], 'Agent opens the agent preset row')
+  assert.equal(h.commits(), 0, 'a transition launcher never writes')
+
+  const input = setup()
+  plain(input)
+  walkTo(input, 'input-terminal')
+  assert.match(plain(input), /Input & terminal settings…/u)
+  input.panel.handleInput('\r')
+  const rows = plain(input)
+  assert.match(rows, /Existing settings editor/u, 'the transition scope is stated in the detail')
+  input.panel.handleInput('\r')
+  assert.deepEqual(input.legacyTargets(), ['keyboard-shortcuts'], 'Input & Terminal opens the shortcuts row')
+  assert.equal(input.commits(), 0, 'a transition launcher has no writer to dispatch')
+  // A launcher row has no candidate source: no choice/confirm is ever painted.
+  assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'no fabricated editor on a transition row')
+})
+
+test('T05 a width cycle keeps the selected category/row/focus and refuses old coordinates', () => {
+  const h = setup({ columns: 120, rows: 40 })
+  plain(h)
+  walkTo(h, 'conversation')
+  h.panel.handleInput('\r') // rail -> rows
+  assert.match(header(h), /Settings · Conversation · Rows/u)
+  h.panel.handleInput('\u001b[B') // the second Conversation row
+  h.resize(44, 40)
+  assert.match(header(h), /Settings · Conversation · Rows/u, 'the selected category/level survive 44 columns')
+  h.resize(80, 24)
+  assert.match(header(h), /Settings · Conversation · Rows/u, 'and survive the medium projection')
+  h.resize(120, 40)
+  const wide = plain(h)
+  assert.match(header(h), /Settings · Conversation · Rows/u)
+  // The long `Input & Terminal` label fits its 22-cell rail column whole and
+  // never eats the neighbouring column.
+  const railLine = wide.split('\n').find(line => line.includes('Input & Terminal'))
+  assert.ok(railLine !== undefined, 'Input & Terminal is painted')
+  assert.equal(railLine!.slice(0, 22).trimEnd().endsWith('…'), false, 'the label is not truncated')
+  assert.equal(visibleWidth(railLine!.slice(0, 22)), 22, 'the rail keeps its exact 22 cells')
+  // A press recorded against the WIDE frame cannot dispatch after a resize
+  // whose repaint has not landed: the old coordinates are refused.
+  const targetRow = plain(h).split('\n').findIndex(line => line.startsWith('  Agent'))
+  assert.ok(targetRow >= 0)
+  h.panel.onCellPress(3, targetRow)
+  h.resize(44, 40)
+  h.panel.onCellClick(3, targetRow)
+  assert.match(header(h), /Settings · Conversation · Rows/u, 'the stale release activated nothing')
+  assert.equal(h.commits(), 0)
+  assert.equal(h.legacyOpens(), 0)
+})
+
+test('T06 losing the Extensions directory falls back to Plugins and refuses every stale gesture', () => {
+  let count = 1
+  let revision = 1
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    pluginPage: true,
+    directory: () => ({ revision, count }),
+    snapshot: () => snapshotWithExtensions(count, revision),
+  })
+  plain(h)
+  h.panel.handleInput('\u001b[F') // End -> Extensions
+  assert.match(plain(h), /> Extensions/u)
+  h.panel.handleInput('\r') // rows of Extensions
+  assert.match(header(h), /Settings · Extensions · Rows/u)
+  plain(h)
+  // The registry empties AFTER the frame painted the launcher.
+  revision = 2
+  count = 0
+  // Every gesture of the spent frame is refused BEFORE the repaint — Enter,
+  // Tab, Right, Backspace and the wheel included.
+  h.panel.handleInput('\r') // stale Enter
+  h.panel.handleInput('\t') // stale Tab
+  h.panel.handleInput('\u001b[C') // stale Right
+  h.panel.handleInput('\u007f') // stale Backspace
+  wheelAt(h, 3, 5)
+  assert.equal(h.legacyOpens(), 0, 'no stale gesture opens the legacy editor')
+  assert.equal(h.commits(), 0, 'no stale gesture writes')
+  assert.match(header(h), /Settings · Categories/u, 'the recovery moved the keyboard to the rail')
+  // The repaint shows the nine fixed categories with Plugins selected, never an
+  // empty Extensions page.
+  const recovered = plain(h)
+  assert.match(recovered, /Categories \(9\)/u)
+  assert.match(recovered, /> Plugins/u, 'Plugins is the stable fallback category')
+  assert.doesNotMatch(recovered, /Extensions/u, 'the spent Extensions entry is gone')
+  h.panel.handleInput('\u001b[F')
+  assert.match(plain(h), /> Plugins/u, 'End cannot reach a category the directory lacks')
+  // Registry 0 -> N again appends Extensions without stealing the selection.
+  revision = 3
+  count = 2
+  const appended = plain(h)
+  assert.match(appended, /Categories \(10\)/u)
+  assert.match(appended, /> Plugins/u, 'the re-appended category never steals the selection')
+  assert.doesNotMatch(appended, /Settings · Extensions/u, 'the keyboard stays on the rail')
+})
+
+test('T07 a same-count revision change refuses the old press until the new frame paints', () => {
+  let target = 'ext-setting:first'
+  let revision = 1
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision, count: 1 }),
+    snapshot: () => snapshotWithExtensions(1, revision, target),
+  })
+  plain(h)
+  h.panel.handleInput('\u001b[F') // Extensions
+  h.panel.handleInput('\r') // rows
+  const frame = plain(h)
+  const y = frame.split('\n').findIndex(line => line.includes('Configure extension settings…'))
+  assert.ok(y >= 0, `the launcher row must be painted:\n${frame}`)
+  const x = frame.split('\n')[y]!.indexOf('Configure extension settings…')
+  // A press is recorded against the row the frame painted.
+  h.panel.onCellPress(x + 1, y)
+  // The owner is replaced by a DIFFERENT one under the same id: the count stays
+  // 1 and only the registry revision moves.
+  revision = 2
+  target = 'ext-setting:second'
+  // The release arrives before any repaint: same coordinates, same painted row,
+  // but a registry generation that no longer exists.
+  h.panel.onCellClick(x + 1, y)
+  assert.equal(h.legacyOpens(), 0, 'the straddling release is refused')
+  // The next frame publishes the NEW registry row, and a fresh gesture opens it.
+  plain(h)
+  const repainted = plain(h)
+  const newY = repainted.split('\n').findIndex(line => line.includes('Configure extension settings…'))
+  assert.ok(newY >= 0)
+  const newX = repainted.split('\n')[newY]!.indexOf('Configure extension settings…')
+  h.panel.onCellPress(newX + 1, newY)
+  h.panel.onCellClick(newX + 1, newY)
+  assert.deepEqual(h.legacyTargets(), ['ext-setting:second'], 'the repainted launcher opens the CURRENT row')
+})
+
+test('T08 a 44x8 frame scrolls and reveals the rail and never activates an off-screen row', () => {
+  const h = setup({ columns: 44, rows: 8 })
+  const first = plain(h, 44)
+  assert.equal(first.split('\n').length, 8, 'the frame keeps its physical budget')
+  // The narrow first frame is the About content: Esc returns to the rail.
+  h.panel.handleInput('\u001b')
+  const rail = plain(h, 44)
+  assert.match(rail, /Settings · Categories/u)
+  assert.ok(!rail.includes('Extensions'), 'no Extensions category is painted')
+  // End reveals the last category; the earlier rows scroll out.
+  h.panel.handleInput('\u001b[F')
+  const end = plain(h, 44)
+  assert.match(end, /> Plugins/u, 'End reveals the last category')
+  assert.ok(!end.includes('  About'), 'the scrolled-out category is not painted')
+  // The wheel cannot leave the directory, and no off-screen category is hittable.
+  wheelAt(h, 3, 3, 5)
+  h.panel.handleInput('\u001b[A')
+  assert.match(plain(h, 44), /> Tools/u, 'Up moves from the revealed Plugins')
+  // Two rows: only the truthful Esc fallback is painted, and nothing dispatches.
+  h.resize(44, 2)
+  const tiny = plain(h, 44)
+  assert.equal(tiny.split('\n').length, 2)
+  assert.match(tiny.split('\n').at(-1)!, /Esc/u, 'the shortest frame keeps the Esc fallback')
+  h.panel.handleInput('\r')
+  h.panel.handleInput('\t')
+  h.panel.handleInput('\u001b[C')
+  wheelAt(h, 3, 1)
+  h.panel.onCellPress(3, 0)
+  h.panel.onCellClick(3, 0)
+  assert.equal(h.legacyOpens(), 0, 'no invisible row may open the legacy editor')
+  assert.equal(h.commits(), 0, 'no invisible row may write')
+})
+
+test('T06b an app-driven fact reread that discovers an empty directory recovers before it paints', () => {
+  let count = 1
+  let revision = 1
+  let snapshot = snapshotWithExtensions(count, revision)
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    pluginPage: true,
+    directory: () => ({ revision, count }),
+    snapshot: () => snapshot,
+  })
+  plain(h)
+  h.panel.handleInput('\u001b[F') // Extensions
+  h.panel.handleInput('\r') // its rows
+  assert.match(header(h), /Settings · Extensions · Rows/u)
+  plain(h)
+  // The registry empties and an unrelated app-driven reread (a write settle)
+  // observes the new snapshot BEFORE any user key arrives.
+  revision = 2
+  count = 0
+  snapshot = snapshotWithExtensions(count, revision)
+  h.panel.rereadFacts()
+  // The recovery is already committed: no empty Extensions page is planned and
+  // the next frame paints the fixed nine with Plugins selected.
+  assert.match(header(h), /Settings · Categories/u, 'the reread already moved the recovery')
+  const frame = plain(h)
+  assert.match(frame, /Categories \(9\)/u)
+  assert.match(frame, /> Plugins/u, 'Plugins is the stable fallback')
+  assert.doesNotMatch(frame, /Extensions/u, 'the spent category is gone')
+  assert.equal(h.legacyOpens(), 0, 'the reread opened nothing')
 })

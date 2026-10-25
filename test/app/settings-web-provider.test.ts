@@ -284,24 +284,22 @@ async function key(h: Harness, data: string): Promise<void> {
   await h.vt.waitForRender()
 }
 
-/** Open `/settings` and reach the `Other settings` rows level. */
+/** Open `/settings` and reach the `Tools` rows level (the Web launcher's own
+ *  category; Visual tools is the first row). */
 async function openOtherRows(h: Harness): Promise<void> {
   h.invoke('settings')
   for (let attempt = 0; attempt < 20 && !h.view().includes('Settings ·'); attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
-  // The rail order is About, Models, Account, Appearance, Display, Tools,
-  // Plugins, Other settings: seven Down presses reach the legacy launcher category.
-  const downs = Array.from({ length: 6 }, () => DOWN)
-  // The workspace opens on the About home: walk the rail to the legacy
-  // launcher category, then enter its Rows level.
-  await selectSettingsCategory(h.vt, 'Other settings')
+  // The workspace opens on the About home: walk the rail to the Tools category,
+  // then enter its Rows level.
+  await selectSettingsCategory(h.vt, 'Tools')
   await key(h, ENTER)
 }
 
 /** Drive `/settings` to the Web Search / Fetch row through the real workspace
- *  keys (categories → Other settings → the Web row), then open it. */
+ *  keys (categories → Tools → the Web row), then open it. */
 async function openWebSection(h: Harness): Promise<void> {
   await openOtherRows(h)
   await key(h, DOWN)
@@ -341,8 +339,8 @@ test('the workspace row reports the configured providers and opens the Web secti
   h.invoke('settings')
   await h.vt.waitForRender()
   // The Other category's Web row carries the live configured summary. The
-  // workspace opens on the About home: walk the rail to Other settings first.
-  await selectSettingsCategory(h.vt, 'Other settings')
+  // workspace opens on the About home: walk the rail to Tools first.
+  await selectSettingsCategory(h.vt, 'Tools')
   await key(h, ENTER)
   assert.match(h.view(), /Web Search \/ Fetch/u)
   // Select the launcher row: its Detail carries the authoritative summary and
@@ -493,7 +491,7 @@ test('closing and reopening the section shows the committed values', async t => 
   // Esc from the Web section restores the Workspace (v2 §B3.4); the restored
   // workspace then needs its own Esc ladder to reach the conversation.
   await key(h, ESC)
-  assert.match(h.view(), /Settings · Other/u)
+  assert.match(h.view(), /Settings · Tools/u)
   await key(h, ESC)
   await key(h, ESC)
   // Reopen the whole surface: the row summary and the section read the store.
@@ -536,7 +534,7 @@ test('Esc from the Web section restores the Settings workspace on the Web launch
   t.after(h.dispose)
   await openWebSection(h)
   await key(h, ESC)
-  assert.match(h.view(), /Settings · Other/u, 'the legacy editor closed back into the Settings workspace')
+  assert.match(h.view(), /Settings · Tools/u, 'the legacy editor closed back into the Settings workspace')
   assert.match(h.view(), /Web Search \/ Fetch/u)
   // The restored workspace carries the Web row's OWN detail (the launcher row),
   // never the default theme row.
@@ -693,7 +691,7 @@ test('the workspace `r` refresh re-enters pending instead of repainting the cach
   await openWebSection(h)
   // Esc returns to the Workspace ON the Web row (rows level, already focused).
   await key(h, ESC)
-  assert.match(h.view(), /Settings · Other settings/u, 'Esc restored the Workspace rows level')
+  assert.match(h.view(), /Settings · Tools/u, 'Esc restored the Workspace rows level')
   assert.match(h.view(), /Search: Messages/u, 'the settled summary is visible on the rows level')
 
   const release = h.holdRead()
@@ -714,7 +712,7 @@ test('entering the legacy Web section paints Loading…, never the last-known va
   await openWebSection(h)
   assert.match(h.view(), /\[current\]/u, 'the settled section paints the verified state')
   await key(h, ESC)
-  assert.match(h.view(), /Settings · Other settings/u)
+  assert.match(h.view(), /Settings · Tools/u)
 
   // Hold the read the section's own mount will request.
   const release = h.holdRead()
@@ -763,7 +761,7 @@ test('an OLD read settling after a write never repaints the reopened Workspace (
   await openWebSection(h)
   assert.match(h.view(), /Current: Messages/u, 'the section starts from the settled facts')
   await key(h, ESC)
-  assert.match(h.view(), /Settings · Other settings/u, 'Esc restored the Workspace rows level')
+  assert.match(h.view(), /Settings · Tools/u, 'Esc restored the Workspace rows level')
 
   // Hold the Workspace's own read (R_ws1): it observes the PRE-write Host state
   // and will settle LAST, after the write and a newer Workspace read.
@@ -938,7 +936,7 @@ function supersededEndpointCase(
     // is the part every size keeps: the first Esc closed only the submenu.
     assert.ok(h.view().includes('Search / Fetch'), 'the first Esc only closed the endpoint submenu')
     await key(h, ESC)
-    assert.ok(h.view().includes('Settings · Other'), 'the restored Workspace owns the surface')
+    assert.ok(h.view().includes('Settings · Tools'), 'the restored Workspace owns the surface')
     assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
     assert.equal(h.readCount(), readsBefore + 2, 'R2 really started — never a no-op witness')
 

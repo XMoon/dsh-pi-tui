@@ -272,7 +272,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; li
 }
 
 /** Open the /settings panel through the registered command, crossing the B2-A
- *  workspace's `Other settings → Open existing settings…` bridge. */
+ *  workspace's `Agent → Agent settings…` transition launcher. */
 async function openSettingsPanel(harness: ReturnType<typeof makeHarness>): Promise<void> {
   const settings = harness.defs.find(entry => entry.name === 'settings')
   assert.ok(settings?.handler !== undefined, 'the settings command must be registered')

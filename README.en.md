@@ -426,8 +426,11 @@ clipboard delivery path, and never writes configuration.
 `/status` is a real alias of `/settings`: the same handler, the same initial
 About focus and the same reads; neither creates a session or reads statistics
 while sessionless. `/statusline` remains the `/footer` alias and never goes
-through Settings. The Settings categories are now `About / Models / Account / Appearance / Display / Tools / Plugins /
-Other settings`; `/settings` (and `/status`) land on About. `Models` is an in-place page: it lists
+through Settings. The Settings categories are the fixed `About / Models / Account / Agent /
+Appearance / Conversation / Input & Terminal / Tools / Plugins`, and `Extensions` is appended only
+while the extension settings registry really has rows; `/settings` (and `/status`) land on About.
+Adding, removing or same-id re-registering an extension row revokes the previous frame's keyboard
+and pointer grants first, and only `Esc` can still return safely until that frame repaints. `Models` is an in-place page: it lists
 the Host provider directory, whether an API key is configured (presence only, never a
 connection test) and the DeepSeek Account entry; it exposes provider facts, a masked API-key
 editor, the Add Provider draft wizard, and provider-native sign-in with a persistent notice,
@@ -476,10 +479,13 @@ then says that it was not stored instead of pretending it was. A plugin theme is
 resolved again by its source-qualified identity at confirm time, so an unloaded
 plugin theme is listed as unavailable and refused rather than degrading into a
 same-named file theme. Icon style and Thinking detail stay read-only rows. The
-existing complete settings editor is still available: `Other settings` → `Open
-existing settings…` retires the workspace and restores the surface it paused
-before opening the original editor, so Theme, the Plugin Manager, keybindings,
-permissions and extension settings keep every existing write path.
+existing complete settings editor is still available: every setting that has not migrated yet
+has a transition row in its own category that explicitly says `Existing settings editor`
+(`Agent → Agent settings…`, `Appearance → Footer & status line…`,
+`Conversation → More conversation settings…`, `Input & Terminal → Input & terminal settings…`,
+`Extensions → Configure extension settings…`). Activating one retires the workspace and restores
+the surface it paused before opening the original editor on that exact row, so Theme, the Plugin
+Manager, keybindings, permissions and extension settings keep every existing write path.
 
 `/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
 Host's `pi-tui-visual-tools.enabled` configuration: turning it Off unregisters
@@ -491,7 +497,7 @@ still render, copy, search and export normally. The Direct backend shows `Verifi
 also confirming the Host registry state; Remote has no registry read and therefore reports the
 saved configuration without claiming the runtime registration took effect.
 
-`Other settings` in `/settings` now has a `Web Search / Fetch` row: it retires the workspace,
+`Tools` in `/settings` now has a `Web Search / Fetch` row: it retires the workspace,
 opens the existing editor's Web section and focuses its first item. The section switches the search
 provider (`Messages`, the official default, or the separately billed `DeepSeek Search API`), the fetch
 provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API result count (1–50,

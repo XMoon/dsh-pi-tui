@@ -125,6 +125,16 @@
 
 ### 变更
 
+- **Settings 的一级分类改为固定的九类，并按需出现 `Extensions`。** `/settings`（与 `/status`）
+  的分类现在是 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal /
+  Tools / Plugins`；只有扩展设置注册表里确实存在设置行时才在末尾追加 `Extensions`。注册、卸载或
+  同一 id 重新注册后，尚未重绘的旧帧不会再执行任何点击、滚轮或按键动作，重绘完成前只有 `Esc`
+  还能安全返回；`Extensions` 的条目消失时会落在相邻的 `Plugins`，不会留下空分类。`Other settings`
+  不再存在：尚未迁移的设置改由所属分类里明确标注 `Existing settings editor` 的过渡行打开原有编辑器
+  并定位到具体一项（Agent 默认权限、Footer、更多会话设置、输入与终端、扩展设置），
+  `Web Search / Fetch` 入口移到 `Tools`。已经在新工作区可写的 Theme、Transcript display 与
+  Visual tools 行为不变。
+
 - **Settings 的复制入口集中到 About 的键盘操作。** `/settings`（与 `/status`）的 About
   不再给每条事实画 `Copy [C]` 按钮，单条事实改由选中后按 `c` 复制，提示只留在最后一行
   动作栏；整页仍只有一个 `Copy All [C]`，`C` 也照旧复制完整报告。只有当前真正画在屏幕上的
