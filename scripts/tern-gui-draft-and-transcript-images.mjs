@@ -75,9 +75,13 @@ export default async function (h) {
     h.texts(snap).join(' | '))
   h.check('the Tool result identity line is painted', h.has(snap, '[IMAGE] shot.png'),
     h.texts(snap).join(' | '))
-  h.check('the dock states the live occurrence count and the hidden tail',
-    h.has(snap, 'Draft images · 3 occurrences') && h.has(snap, '1 more image occurrence'),
+  h.check('the dock states the live draft count on the existing status line',
+    h.has(snap, 'Draft 3 · '), h.texts(snap).join(' | '))
+  h.check('each SHOWN chip carries its compact identity caption',
+    h.has(snap, '#1 · 320×180') && h.has(snap, '#2 · 320×180'),
     h.texts(snap).join(' | '))
+  h.check('a third occurrence beyond the cap is NOT drawn as a chip',
+    !h.has(snap, '#3 · 320×180'), h.texts(snap).join(' | '))
 
   // ── The controlled editor: present, unclipped, typable ──
   // The client's tree carries no wire id: the controlled editor is found by the
@@ -128,8 +132,8 @@ export default async function (h) {
   const dark = h.snapshot()
   h.check('the User body image is still drawn in the client\'s own dark theme',
     dark.nodes.some(node => node.tag === 'img'), h.texts(dark).join(' | '))
-  h.check('the dock count line is still readable in the dark theme',
-    h.has(dark, 'Draft images · 3 occurrences'), h.texts(dark).join(' | '))
+  h.check('the dock count is still readable in the dark theme',
+    h.has(dark, 'Draft 3 · '), h.texts(dark).join(' | '))
   h.check('the controlled composer is still painted in the dark theme',
     composerOf(dark) !== undefined, h.texts(dark).join(' | '))
   h.capture('pr4-gui-dark', 'the same surfaces in the client\'s own dark theme')
@@ -221,8 +225,9 @@ export default async function (h) {
   const afterClose = h.snapshot()
   h.check('the transcript is back after the viewer closed',
     afterClose.nodes.some(node => node.tag === 'img'), h.texts(afterClose).join(' | '))
-  h.check('the dock rows survived the viewer round-trip',
-    h.has(afterClose, 'Draft images · 3 occurrences'), h.texts(afterClose).join(' | '))
+  h.check('the dock count and chips survived the viewer round-trip',
+    h.has(afterClose, 'Draft 3 · ') && h.has(afterClose, '#1 · 320×180'),
+    h.texts(afterClose).join(' | '))
 
   h.capture('pr4-gui-after-close', 'back in the transcript after the viewer closed')
 

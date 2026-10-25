@@ -12,7 +12,7 @@
  */
 import { appendFileSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
-import { connect, ui } from '@stencil-hq/tern'
+import { connect, ui, type Node } from '@stencil-hq/tern'
 import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import {
   TranscriptNodeKeys,
@@ -83,6 +83,13 @@ const PNGS: readonly Uint8Array[] = [
 const session = await connect({ app: 'tern-gui-draft-and-transcript-images', timeout: 2000 })
 if (!session) throw new Error('this subject must run inside a real Tern pane')
 const surface = session.open({ mode: 'inline', title: 'pr4-images-gui' })
+if (session.caps.features.includes('styles')) {
+  surface.stylesheet('dsh-draft-preview', `
+    @media (max-height: 640px) {
+      [data-role="dsh.draft-preview"] { display: none; }
+    }
+  `)
+}
 
 const blobIds = PNGS.map(bytes => session.blob(bytes, 'image/png'))
 const states = new Map<string, ToolImageState>([
@@ -125,12 +132,29 @@ const toolRow = {
   ],
 } as unknown as TranscriptMessage
 
-const DRAFT_ENTRIES: readonly DockDraftImageEntry[] = PNGS.map((bytes, index) => ({
-  key: `draft-image-${index + 1}-${index}`,
-  identity: `[IMAGE] draft-${index + 1}.png · ${WIDTH}×${HEIGHT} · ${(bytes.length / 1024).toFixed(1)} KiB`,
+const DRAFT_ENTRIES: readonly DockDraftImageEntry[] = PNGS.map((_bytes, index) => ({
+  id: index + 1,
+  ordinal: index,
+  caption: `#${index + 1} · ${WIDTH}×${HEIGHT}`,
   name: `draft-${index + 1}.png`,
   state: { state: 'ready', blobId: blobIds[index]! },
 }))
+
+/** The ONE preview row, or nothing when the frozen gate allows no preview. */
+function previewNodes(): readonly Node[] {
+  const row = dockDraftImageNodes(DRAFT_ENTRIES, previewLimit())
+  return row === undefined ? [] : [row]
+}
+
+/** The frozen preview-count decision, mirroring the production renderer. */
+function previewLimit(): number {
+  const canPreview = session!.caps.features.includes('styles')
+    && session!.caps.features.includes('blobs')
+    && session!.caps.kinds.includes('image')
+  if (!canPreview) return 0
+  const cols = session!.caps.cols
+  return cols < 72 ? 0 : cols < 100 ? 1 : 2
+}
 
 /**
  * The controlled editor's OWN draft state. The GUI lane must be able to prove
@@ -148,8 +172,8 @@ function render(): void {
   })
   const dock = ui.col(
     { key: 'dock' },
-    ui.text({ key: 'status', text: 'DSH TSP renderer · experimental composer' }),
-    ...dockDraftImageNodes(DRAFT_ENTRIES, session!.caps.cols, true),
+    ui.text({ key: 'status', wrap: 'none', text: `Draft ${DRAFT_ENTRIES.length} · DSH TSP renderer · experimental composer` }),
+    ...previewNodes(),
     ui.editor({ key: 'composer', text: draft, cursor, maxLines: 8, placeholder: 'Message', prompt: '> ' }),
   )
   surface.render({ main, dock })
