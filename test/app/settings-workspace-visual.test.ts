@@ -124,6 +124,23 @@ interface HarnessOptions {
   /** An external writer commits this enabled value (and bumps the revision)
    *  just before the next switch write: the decision is then stale. */
   visualToolsExternalChange?: boolean
+  /**
+   * Compose a LIVE main Session for the About page: the exact seams the real
+   * `/settings` command injects (`captureLiveSessionScope` / scope currency /
+   * stats / projection / context) answer for this scope, so the About facts and
+   * its `c` / `C` copy grants are reachable through the production chain.
+   * Omitted = the sessionless home the other cases use.
+   */
+  liveSession?: {
+    readonly sessionId: string
+    readonly title?: string
+    readonly cwd?: string
+    readonly turns?: number
+    readonly contextUsed?: number
+    /** Replace the About controller's scoped stats read (a controlled
+     *  republish/currentness seam). */
+    readonly currentSessionStats?: () => Promise<{ lifetime: { turns: number; steps: number; llmMs: number } }>
+  }
 }
 
 /** The embedded Plugin Manager page the composition factory hands the Settings
@@ -335,15 +352,32 @@ function setup(options: HarnessOptions = {}): Harness {
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     // A sessionless surface: the completion install and the legacy session rows
-    // must see no live scope.
-    currentSessionId: undefined,
-    captureLiveSessionScope: () => undefined,
+    // must see no live scope. A `liveSession` composition replaces these About
+    // seams below with the ones the real `/settings` command injects.
+    currentSessionId: options.liveSession?.sessionId,
+    captureLiveSessionScope: () => options.liveSession === undefined
+      ? undefined
+      : { sessionId: options.liveSession.sessionId, generation: 1 },
     // C3 About seams (this suite's stub composes no StatusRuntime): the
     // sessionless capture answers `unavailable` and no listener ever fires.
-    isSessionScopeCurrent: () => false,
-    currentSessionStats: async () => undefined,
-    sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
-    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    isSessionScopeCurrent: () => options.liveSession !== undefined,
+    currentSessionStats: options.liveSession?.currentSessionStats
+      ?? (async () => options.liveSession === undefined ? undefined : {
+        lifetime: {
+          turns: options.liveSession.turns ?? 3,
+          steps: 1,
+          llmMs: 1_000,
+        },
+      }),
+    sessionReader: {
+      measureContext: () => options.liveSession?.contextUsed,
+      sessionStatus: (sessionId: string) => options.liveSession === undefined
+        ? undefined
+        : { sessionId, cwd: options.liveSession.cwd ?? '/ws', title: options.liveSession.title },
+    },
+    forceContextMeasurementResult: () => options.liveSession?.contextUsed === undefined
+      ? { value: undefined, observation: 'unavailable' as const }
+      : { value: options.liveSession.contextUsed, observation: 'fresh' as const },
     backendKind: 'direct' as const,
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
@@ -837,7 +871,7 @@ test('A-06 200 → 72 → 44 → 200 preserves the category, the row, the level 
 
 // ── A-07: hostile external text ───────────────────────────────────────────
 
-test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint, wrapped to the pane, and copied verbatim', async () => {
+test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint and never reaches the clipboard', async () => {
   const hostile = `evil\x1b[31mred\x07payload-${'汉'.repeat(60)}`
   const h = setup({ columns: 100, rows: 24, doc: { theme: hostile } })
   await h.open()
@@ -846,6 +880,7 @@ test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint, wrapped to 
   assert.ok(!plain.includes('\x1b'), 'no raw escape sequence may reach the terminal text')
   assert.ok(!plain.includes('[31m'), 'the CSI sequence must be stripped whole, never left as visible payload')
   assertRowWidths(h, 100)
+  assert.match(plain, /evilredpayload/u, 'the sanitized source text stays visible')
   // RAW terminal-write safety: the terminal's own write sink is the witness (a
   // parsed viewport would already have interpreted the sequences). The whole
   // hostile value must never be emitted, nor its raw CSI/BEL/C1 bytes.
@@ -854,12 +889,13 @@ test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint, wrapped to 
   assert.ok(!emitted.includes('\x1b[31m'), 'the injected CSI must never reach the terminal')
   assert.ok(!emitted.includes('\x07payload'), 'the injected BEL must never reach the terminal')
   assert.ok(!emitted.includes('\u009b'), 'the injected C1 byte must never reach the terminal')
-  const copyRow = rowOf(h, 'Copy value [C]')
-  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
-  press(h, copyRow, copyCol)
-  release(h, copyRow, copyCol)
+  // PR3: the Legacy Detail has no Copy verb at all — the retired `Copy value
+  // [C]` is unevictable AND the copy keys deliver nothing to the clipboard.
+  assert.ok(!h.view().includes('Copy value [C]'), `no Legacy copy brand paints:\n${h.view()}`)
+  for (const data of ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~']) await key(h, data)
   await settle(h)
-  assert.deepEqual(h.copied, [`file:${hostile}`], 'the copy payload is the EXACT normalized source value, byte for byte')
+  assert.deepEqual(h.copied, [], 'the Legacy row never reaches the clipboard')
+  assert.equal(h.replacements(), 0, 'and no copy gesture writes the document')
   h.dispose()
 })
 
@@ -981,57 +1017,80 @@ test('A-09b the wheel scrolls only the visible pane under the pointer, and blank
 
 // ── A-10: exact copy and scoped feedback ──────────────────────────────────
 
-test('A-10 Copy sends the exact source value and its settlement is visible inside the workspace', async () => {
-  const h = setup({ columns: 100, rows: 24, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
-  await h.open()
-  await key(h, '\r') // L0 -> L1; the Details copy button is visible in medium
-  const row = rowOf(h, 'Copy value [C]')
-  const col = cellIndexOf(h, row, 'Copy value [C]')
-  press(h, row, col)
-  release(h, row, col)
+test('A-10 About c copies the exact selected fact and its settlement is visible inside the workspace', async () => {
+  const h = setup({ columns: 140, rows: 40, liveSession: { sessionId: 'sess-a10', title: 'a10 proof', contextUsed: 1_000 } })
+  await h.openHome()
+  await key(h, '\r') // rail -> About content
+  const frame = h.view()
+  assert.ok(!frame.includes('Copy [C]'), `no per-fact Copy badge:\n${frame}`)
+  assert.equal(frame.match(/Copy All \[C\]/gu)?.length, 1, `exactly one Copy All badge:\n${frame}`)
+  // Select the Title fact (runtime trio, Session ID, Title) and copy it.
+  for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B')
+  await key(h, 'c')
   await settle(h)
-  assert.deepEqual(h.copied, ['plugin:acme/solarized'], 'the copy payload is the raw identity, never the friendly label')
+  assert.deepEqual(h.copied, ['a10 proof'], 'the payload is the raw About fact value')
   assert.ok(h.rowsPlain().some(line => line.includes('Copy sent')), `the notice is painted inside the workspace:\n${h.view()}`)
   h.dispose()
 })
 
-test('A-10d the narrow inline choice advertises and runs exact keyboard Copy', async () => {
-  for (const [columns, rows, copyKey, copyVisible] of [[72, 24, 'c', true], [44, 20, 'C', true], [30, 24, 'c', false]] as const) {
-    const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
+test('A-10d Legacy choosing and settled Detail never copy, under raw and encoded copy keys', async () => {
+  const encodedCopyKeys = ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
+  for (const columns of [72, 44, 30] as const) {
+    // A plain palette: this case confirms a real write, and the fixture's theme
+    // registry deliberately carries a partial palette.
+    const h = setup({ columns, rows: 24, doc: { theme: 'dark' } })
     await h.open()
     await key(h, '\x1b[C') // Categories -> Rows
     await key(h, '\x1b[C') // Rows -> inline choice
-    assert.ok(h.view().includes('Choose value'), `the keyboard path reaches choosing at ${columns}x${rows}:\n${h.view()}`)
-    const copyHintVisible = h.rowsPlain().at(-1)!.includes('c copy')
-    assert.equal(copyHintVisible, copyVisible, `Copy hint visibility follows Action Bar width at ${columns}x${rows}:\n${h.view()}`)
-    await key(h, copyKey)
+    assert.ok(h.view().includes('Choose value'), `the keyboard path reaches choosing at ${columns}:\n${h.view()}`)
+    assert.ok(!h.rowsPlain().at(-1)!.includes('c copy'), `no copy hint in choosing at ${columns}:\n${h.view()}`)
+    for (const data of encodedCopyKeys) await key(h, data)
     await settle(h)
-    assert.deepEqual(h.copied, copyVisible ? ['plugin:acme/solarized'] : [], `Copy follows the visible hint at ${columns}x${rows}`)
-    if (copyVisible) assert.ok(h.view().includes('Choose value'), `Copy leaves the candidate choice open at ${columns}x${rows}`)
-    assert.equal(h.replacements(), 0, 'Copy never commits a candidate')
+    assert.deepEqual(h.copied, [], `choosing copies nothing at ${columns}`)
+    assert.ok(h.view().includes('Choose value'), `the choice survives the copy keys at ${columns}`)
+    assert.equal(h.replacements(), 0, 'no copy key commits a candidate')
+
+    // The whole session's copy surface is still empty after a real Confirm.
+    await key(h, '\r')
+    await settle(h)
+    assert.equal(h.replacements(), 1, `the source fixture reaches settled Detail at ${columns}`)
+    assert.ok(!h.view().includes('c copy value'), `settled Detail advertises no copy at ${columns}`)
+    for (const data of encodedCopyKeys) await key(h, data)
+    await settle(h)
+    assert.deepEqual(h.copied, [], `settled Detail copies nothing at ${columns}`)
+    assert.equal(h.replacements(), 1, 'no copy key adds a write')
     h.dispose()
   }
 })
 
-test('A-10e inline Copy accepts Kitty and modifyOtherKeys printable events', async () => {
-  const encodedCopyKeys = ['\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
-  for (const encodedKey of encodedCopyKeys) {
-    const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
-    await h.open()
-    await key(h, '\x1b[C') // Categories -> Rows
-    await key(h, '\x1b[C') // Rows -> inline choice
-    assert.ok(h.view().includes('Choose value'), `the inline choice is open:\n${h.view()}`)
-    assert.ok(h.view().includes('c copy'), `inline Copy remains advertised:\n${h.view()}`)
+test('A-10e About c/C accept raw, Kitty and modifyOtherKeys printable events', async () => {
+  // Each encoded event is one whole press of the same semantic key: `c` for the
+  // selected fact, the Shift+C form for the whole report.
+  const factKeys = ['c', '\x1b[99u'] as const
+  const allKeys = ['C', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
+  for (const encodedKey of factKeys) {
+    const h = setup({ columns: 100, rows: 30, liveSession: { sessionId: 'sess-a10e', title: 'a10e proof' } })
+    await h.openHome()
+    await key(h, '\r') // rail -> About content
+    assert.match(h.view(), /c copy fact/u, `the fact key is advertised:\n${h.view()}`)
     await key(h, encodedKey)
     await settle(h)
-    assert.deepEqual(h.copied, ['dark'], 'inline semantic Copy copies the original configured identity')
-    assert.match(h.view(), /dark\s+\[current\]/, 'inline Copy leaves the candidate selection open')
-    assert.equal(h.replacements(), 0, 'inline Copy never commits a candidate')
+    assert.deepEqual(h.copied, ['0.5.3'], `the encoded fact key copies the selected raw value (${JSON.stringify(encodedKey)})`)
+    h.dispose()
+  }
+  for (const encodedKey of allKeys) {
+    const h = setup({ columns: 100, rows: 30, liveSession: { sessionId: 'sess-a10e', title: 'a10e proof' } })
+    await h.openHome()
+    await key(h, '\r') // rail -> About content
+    await key(h, encodedKey)
+    await settle(h)
+    assert.equal(h.copied.length, 1, `the encoded Copy All key copies once (${JSON.stringify(encodedKey)})`)
+    assert.match(h.copied[0]!, /Session ID: sess-a10e/u, 'the report is the painted About serialization')
     h.dispose()
   }
 })
 
-test('A-10f settled Detail Copy accepts Kitty and modifyOtherKeys printable events', async () => {
+test('A-10f a copy key never edits a Legacy document at any level', async () => {
   const encodedCopyKeys = ['\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const encodedKey of encodedCopyKeys) {
     const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
@@ -1042,11 +1101,11 @@ test('A-10f settled Detail Copy accepts Kitty and modifyOtherKeys printable even
     await settle(h)
     assert.equal(h.replacements(), 1, 'the source fixture reaches settled Detail')
     assert.equal(h.doc.theme, 'light')
-    assert.ok(h.view().includes('c copy value'), `ordinary Detail Copy remains advertised:\n${h.view()}`)
+    assert.ok(!h.view().includes('c copy value'), `ordinary Detail advertises no copy verb:\n${h.view()}`)
     await key(h, encodedKey)
     await settle(h)
-    assert.deepEqual(h.copied, ['light'], 'semantic Detail Copy copies the raw configured identity')
-    assert.equal(h.replacements(), 1, 'Detail Copy never adds a settings write')
+    assert.deepEqual(h.copied, [], 'the encoded copy key copies nothing')
+    assert.equal(h.replacements(), 1, 'the copy key never adds a settings write')
     h.dispose()
   }
 })
@@ -1084,29 +1143,28 @@ test('B-15e mouse Confirm requires the painted Enter hint at the minimum Action 
 
 test('A-10b a copy settled after the workspace closed never notifies the restored surface', async () => {
   let settleCopy: ((ok: boolean) => void) | undefined
+  let copyRequests = 0
   const h = setup({
     columns: 100,
     rows: 24,
-    doc: { theme: 'dark' },
+    liveSession: { sessionId: 'sess-late', title: 'late settlement' },
     copySelection: async (text: string) => {
+      copyRequests += 1
       h.copied.push(text)
       return new Promise<boolean>(resolve => { settleCopy = resolve })
     },
   })
-  await h.open()
-  await key(h, '\r') // L0 -> L1
-  const copyRow = rowOf(h, 'Copy value [C]')
-  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
-  press(h, copyRow, copyCol)
-  release(h, copyRow, copyCol)
+  await h.openHome()
+  await key(h, 'C') // the rail-focused About Copy All (the real Client sink)
   await settle(h)
-  await key(h, '\x1b') // Detail -> rows after the painted copy takes column focus
-  await key(h, '\x1b') // rows -> categories
+  assert.equal(copyRequests, 1, 'the About Copy All really reached the clipboard strategy')
+  assert.match(h.copied[0] ?? '', /Session ID: sess-late/u, 'the payload is the painted About report')
   await key(h, '\x1b') // close the workspace before the clipboard settles
   assert.ok(h.view().includes('❯'), 'the editor is restored')
   settleCopy?.(true)
   await settle(h)
   assert.equal(h.app.notifyTextForTest(), '', 'a stale copy must not notify the new surface')
+  assert.equal(copyRequests, 1, 'the clipboard strategy ran exactly once')
   h.dispose()
 })
 
@@ -1217,20 +1275,35 @@ test('narrow item clicks select and focus, never drill past the level', async ()
   h.dispose()
 })
 
-test('the painted Copy button copies while the row list owns the keyboard focus', async () => {
+test('the retired Legacy Copy cells are inert while the rails Copy All stays a real click target', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.ok(!/c copy value/.test(h.rowsPlain().at(-1) ?? ''), 'c is never advertised outside the Detail level')
   await key(h, '\r') // L0 -> L1: the rows keep the keyboard while the Detail is visible
   assert.match(h.rowsPlain()[rowOf(h, 'Rows (2)')]!, /\[Rows \(2\)\]/, 'the rows level owns the keyboard')
-  const buttonRow = rowOf(h, 'Copy value [C]')
-  const buttonCol = cellIndexOf(h, buttonRow, 'Copy value [C]')
-  press(h, buttonRow, buttonCol)
-  release(h, buttonRow, buttonCol)
+  // The old painted button's coordinates (the Detail action row) are inert now.
+  const detailRow = rowOf(h, 'Change…')
+  const detailActionCol = cellIndexOf(h, detailRow, 'Change…') + 2
+  press(h, detailRow, detailActionCol)
+  release(h, detailRow, detailActionCol)
   await settle(h)
-  assert.deepEqual(h.copied, ['plugin:acme/solarized'], 'the painted mouse button copies without the Detail focus owner')
-  assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /\[Details\]/, 'the clicked column becomes the keyboard owner')
+  assert.deepEqual(h.copied, [], 'a Legacy Detail action never copies')
+  assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /\[Details\]/, 'the clicked column still becomes the keyboard owner')
+  assert.equal(h.replacements(), 0, 'the click opened no write')
   h.dispose()
+
+  // The About page's ONE body Copy All button IS a real last-painted target on a
+  // rail-focused frame.
+  const about = setup({ columns: 100, rows: 30, liveSession: { sessionId: 'sess-detail-click', title: 'detail click' } })
+  await about.openHome()
+  const copyAllRow = rowOf(about, 'Copy All [C]')
+  const copyAllCol = cellIndexOf(about, copyAllRow, 'Copy All [C]') + 2
+  press(about, copyAllRow, copyAllCol)
+  release(about, copyAllRow, copyAllCol)
+  await settle(about)
+  assert.equal(about.copied.length, 1, 'the painted About Copy All really copies')
+  assert.match(about.copied[0]!, /Session ID: sess-detail-click/u)
+  about.dispose()
 })
 
 test('a click anywhere in a visible column takes that column focus', async () => {
@@ -1295,29 +1368,29 @@ test('72x3 paints no hidden Copy or Confirm action', async () => {
 
 // ── F3: a gesture spanning a data change is refused ───────────────────────
 
-test('a release after Refresh is refused instead of copying the newer value', async () => {
-  const h = setup({ columns: 72, rows: 24, doc: { iconStyle: 'minimal' } })
+test('a press spanning a Refresh is refused instead of activating the newer frame', async () => {
+  // PR3: the Legacy Detail has no copy target left, so this case now proves the
+  // SAME press-identity fence through a real painted Legacy action (`Change…`):
+  // a stale press must never open the newer frame's choice.
+  const h = setup({ columns: 100, rows: 30, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // L0 -> L1
-  await key(h, '\x1b[B') // Configured theme -> read-only Icon style
-  await key(h, '\r') // read-only detail
-  const buttonRow = rowOf(h, 'Copy value [C]')
-  const buttonCol = cellIndexOf(h, buttonRow, 'Copy value [C]')
-  press(h, buttonRow, buttonCol)
-  h.doc.iconStyle = 'symbols'
+  await key(h, '\t') // L1 -> the Detail pane (browsing, no choice)
+  assert.ok(!h.view().includes('Copy value [C]'), 'the browsing Detail paints no copy action')
+  const changeRow = rowOf(h, 'Change…')
+  const changeCol = cellIndexOf(h, changeRow, 'Change…')
+  press(h, changeRow, changeCol)
+  h.doc.theme = 'light'
   await key(h, 'r') // refresh: the row value changes and the state version bumps
-  assert.match(h.view(), /symbols/, 'R really re-read the new value')
-  release(h, buttonRow, buttonCol)
+  assert.match(h.view(), /light/u, 'R really re-read the new value')
+  release(h, changeRow, changeCol)
   await settle(h)
-  assert.deepEqual(h.copied, [], 'the stale press must not copy the refreshed value')
-  // Positive control: the same gesture without an intervening change copies.
-  // A DIFFERENT cell inside the same painted button keeps it a single click.
-  const settledRow = rowOf(h, 'Copy value [C]')
-  const settledCol = cellIndexOf(h, settledRow, 'Copy value [C]') + 5
-  press(h, settledRow, settledCol)
-  release(h, settledRow, settledCol)
-  await settle(h)
-  assert.deepEqual(h.copied, ['symbols'], 'an unchanged gesture still copies')
+  assert.equal(h.replacements(), 0, 'the stale press never opened a write channel')
+  assert.ok(!h.view().includes('Choose value'), 'the stale press did not open the newer frame choice')
+  // Positive control: the freshly painted frame still runs the same action.
+  await key(h, '\r')
+  assert.match(h.view(), /Choose value/u, 'the repainted action still opens the choice')
+  assert.equal(h.replacements(), 0, 'opening the choice still writes nothing')
   h.dispose()
 })
 
@@ -1400,15 +1473,16 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   h.dispose()
 })
 
-test('A-10c the copy failure paths report inside the workspace instead of a false success', async () => {
+test('A-10c the About copy failure paths report inside the workspace instead of a false success', async () => {
   for (const failing of [async () => false, async () => { throw new Error('clipboard refused') }]) {
-    const h = setup({ columns: 140, rows: 24, doc: { theme: 'dark' }, copySelection: failing })
-    await h.open()
-    await key(h, '\r') // L0 -> L1 exposes the Details copy action
-    const row = rowOf(h, 'Copy value [C]')
-    const col = cellIndexOf(h, row, 'Copy value [C]')
-    press(h, row, col)
-    release(h, row, col)
+    const h = setup({
+      columns: 140,
+      rows: 24,
+      liveSession: { sessionId: 'sess-fail', title: 'failure path' },
+      copySelection: failing,
+    })
+    await h.openHome()
+    await key(h, 'C') // the rail-focused About Copy All (the real Client sink)
     await settle(h)
     assert.ok(h.rowsPlain().some(line => line.includes('Copy failed')), `the failure notice is visible:\n${h.view()}`)
     assert.ok(!h.view().includes('Copy sent'), 'a failure is never reported as success')
@@ -1701,30 +1775,33 @@ test('A-05b the decorative rules yield before readable content on short screens'
   short.dispose()
 
   // 6 and 8 rows with a LIVE notice: the notice's body floor is honoured first.
-  const live = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
-  await live.open()
-  await key(live, '\r') // L0 -> L1 exposes the real Detail button in medium
-  const copyRow = rowOf(live, 'Copy value [C]')
-  const copyCol = cellIndexOf(live, copyRow, 'Copy value [C]')
-  press(live, copyRow, copyCol)
-  release(live, copyRow, copyCol)
+  // PR3: the notice now comes from the real About clipboard sink (the Legacy
+  // Detail has no copy action left), which is the same App notice row.
+  const live = setup({ columns: 100, rows: 24, liveSession: { sessionId: 'sess-notice', title: 'notice proof' } })
+  await live.openHome()
+  await key(live, '\r') // rail -> About content
+  await key(live, 'c') // the selected fact through the real clipboard owner
   await settle(live)
+  assert.deepEqual(live.copied, ['0.5.3'], 'the About fact copy reached the clipboard owner')
   assert.ok(live.rowsPlain().some(line => line.includes('Copy sent')), 'the notice is live before the shrink')
   for (const rows of [6, 8]) {
     live.vt.resize(100, rows)
     await live.vt.waitForRender()
     const frame = live.rowsPlain()
     assert.equal(frame.length, rows)
-    assert.match(frame.at(-1)!, /Left back/)
+    assert.match(frame.at(-1)!, /Esc back/)
     assert.ok(frame.some(line => line.includes('Copy sent')), `the notice is still granted and painted at ${rows} rows:\n${live.view()}`)
     assert.equal(frame.filter(line => /^─+$/.test(line)).length, 0, `the decorative rules yield at ${rows} rows:\n${live.view()}`)
     if (rows === 8) {
       assert.ok(frame.some(line => line.includes('Config Ready')), 'the freshness/scope metadata is granted at 8 rows')
     }
     if (rows === 6) {
-      const detailHeader = frame.findIndex(line => line.includes('[Details]'))
-      assert.ok(detailHeader >= 0, 'the multi-column pane identity survives the live notice')
-      assert.ok(frame[detailHeader + 1]?.includes('Configured theme'), `the selected Detail row remains in the body:\n${live.view()}`)
+      const paneHeader = frame.findIndex(line => line.includes('[About]'))
+      assert.ok(paneHeader >= 0, 'the direct pane identity survives the live notice')
+      assert.ok(frame.some(line => line.includes('TUI')), `a real About fact remains in the body:\n${live.view()}`)
+      // The header row names the pane the frame really paints and the frame
+      // keeps exactly one physical bar.
+      assert.equal(frame.filter(line => /Esc (?:back|close)/u.test(line)).length, 1, 'one truthful bar')
     }
   }
   live.dispose()
@@ -1869,7 +1946,7 @@ test('the medium projection is a pure function of focus: L0 categories+rows, L1/
   }
 })
 
-test('the narrow projection keeps the inline choice across resize and preserves Detail copy', async () => {
+test('the narrow projection keeps the inline choice across resize and exposes no Legacy copy', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
@@ -1890,17 +1967,19 @@ test('the narrow projection keeps the inline choice across resize and preserves 
   assert.match(h.rowsPlain()[0]!, /Appearance · Conf/, 'the 44-column projection keeps the choice level')
   assert.ok(h.view().includes('Value'), 'the persisted old value stays reachable')
 
-  // Cancel back to L1; medium exposes the same Details copy action without a
-  // hidden focus cycle or an extra confirmation step.
+  // Cancel back to L1: the medium Detail paints the same row and value, but the
+  // retired Legacy Copy action is gone and no copy key reaches the clipboard —
+  // while the candidate identity and the write authority are unchanged.
   await key(h, '\x1b')
   h.vt.resize(100, 24)
   await h.vt.waitForRender()
-  const copyRow = rowOf(h, 'Copy value [C]')
-  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
-  press(h, copyRow, copyCol)
-  release(h, copyRow, copyCol)
+  assert.match(h.rowsPlain()[0]!, /· Rows/u, 'the choice cancelled back to L1')
+  assert.ok(!h.view().includes('Copy value [C]'), `no Legacy Copy action on the repainted Detail:\n${h.view()}`)
+  for (const data of ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~']) await key(h, data)
   await settle(h)
-  assert.deepEqual(h.copied, ['dark'], 'the copy still sends the exact source value')
+  assert.deepEqual(h.copied, [], 'no copy key reaches the clipboard after the resize cycle')
+  assert.equal(h.replacements(), 0, 'no copy key writes the document')
+  assert.equal(h.doc.theme, 'dark', 'the configured value is unchanged')
   h.dispose()
 })
 
@@ -2071,30 +2150,37 @@ test('only visible panes publish hits: the hidden Detail band neither copies nor
   h.dispose()
 })
 
-test('C copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
+test('no Legacy Detail level copies; R refreshes in place; browsing never writes', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
-  await key(h, 'c')
-  await settle(h)
-  assert.deepEqual(h.copied, [], 'C is inert on the categories level')
+  for (const data of ['c', 'C']) {
+    await key(h, data)
+    await settle(h)
+  }
+  assert.deepEqual(h.copied, [], 'the copy keys are inert on the categories level')
   await key(h, '\r') // L1
-  await key(h, 'c')
-  await settle(h)
-  assert.deepEqual(h.copied, [], 'C is inert on the rows level')
+  for (const data of ['c', 'C']) {
+    await key(h, data)
+    await settle(h)
+  }
+  assert.deepEqual(h.copied, [], 'the copy keys are inert on the rows level')
   const readsBefore = h.reads()
   await key(h, 'r')
   assert.ok(h.reads() > readsBefore, 'R re-reads the same authority')
   assert.match(h.rowsPlain()[0]!, /· Rows/, 'R keeps the current level')
   await key(h, '\x1b[B') // Configured theme -> read-only Icon style
   await key(h, '\r') // L2 read-only Detail
-  await key(h, 'c')
-  await settle(h)
-  assert.deepEqual(h.copied, ['symbols'], 'C in the read-only Detail copies the exact source value')
+  assert.ok(!h.view().includes('Copy value [C]'), 'the read-only Detail paints no Copy action')
+  for (const data of ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~']) {
+    await key(h, data)
+    await settle(h)
+  }
+  assert.deepEqual(h.copied, [], 'no copy key reaches the clipboard from the read-only Detail')
   assert.equal(h.replacements(), 0, 'no navigation or refresh ever writes the config document')
   h.dispose()
 })
 
-test('a long CJK value wraps inside the narrow read-only Detail and copies byte-exact', async () => {
+test('a long CJK read-only value wraps inside the narrow Detail and never reaches the clipboard', async () => {
   const value = `file:${'汉'.repeat(40)}`
   const h = setup({ columns: 44, rows: 8, doc: { iconStyle: value } })
   await h.open()
@@ -2105,9 +2191,15 @@ test('a long CJK value wraps inside the narrow read-only Detail and copies byte-
     assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
   }
   await key(h, '\x1b[B') // scroll the wrapped detail
-  await key(h, 'c')
-  await settle(h)
-  assert.deepEqual(h.copied, [value], 'the copy is the exact source value, never the wrapped display')
+  // The wrapped source stays readable in the Detail (no truncation to fit the
+  // pane), while the retired copy verb is absent.
+  assert.ok(!h.view().includes('Copy value [C]'), `no Copy action in the wrapped Detail:\n${h.view()}`)
+  for (const data of ['c', 'C']) {
+    await key(h, data)
+    await settle(h)
+  }
+  assert.deepEqual(h.copied, [], 'the copy keys stay inert on the wrapped value')
+  assert.equal(h.replacements(), 0, 'scrolling and copy keys write nothing')
   h.dispose()
 })
 
@@ -2511,22 +2603,24 @@ test('B-07 a stored theme whose source is gone is listed as unavailable and can 
   h.dispose()
 })
 
-test('B-08 the read-only rows keep their copy verb and gain no edit channel', async () => {
+test('B-08 the read-only rows keep their facts readable, lose the copy verb and gain no edit channel', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark', iconStyle: 'minimal' } })
   await openSelectedRow(h, 'theme')
   await key(h, '\x1b[B') // Configured theme -> Icon style
   await key(h, '\r') // read-only Detail
   assert.match(h.view(), /Icon style/)
-  assert.match(h.view(), /Copy value \[C\]/)
+  assert.ok(!h.view().includes('Copy value [C]'), 'a read-only row paints no Legacy Copy action')
   assert.ok(!h.view().includes('Change…'), 'a read-only row paints no edit verb')
   assert.match(h.view(), /read-only here/)
   const before = h.replacements()
   await key(h, '\r')
   assert.ok(!h.view().includes('Choose Icon style'), 'Enter on a read-only row opens no choice')
   assert.equal(h.replacements(), before, 'and writes nothing')
-  await key(h, 'c')
-  await settle(h)
-  assert.deepEqual(h.copied, ['minimal'], 'the copy verb still carries the exact source value')
+  for (const data of ['c', 'C']) {
+    await key(h, data)
+    await settle(h)
+  }
+  assert.deepEqual(h.copied, [], 'the copy keys carry nothing for a read-only row')
   assert.equal(h.replacements(), before)
   h.dispose()
 })
@@ -4208,11 +4302,24 @@ test('C3 the sessionless About action row: Copy All is clickable and blank cells
   await settle(h)
   assert.equal(h.copied.length, 1, 'the Copy All button copied')
   assert.match(h.copied[0]!, /dsh-pi-tui Status/u, 'the Copy All payload is the report')
+  // PR3: `C` is the reachable shortcut for the SAME painted report — including
+  // when the narrow frame drops the Copy All segment entirely.
+  await key(h, 'C')
+  await settle(h)
+  assert.equal(h.copied.length, 2, 'the keyboard Copy All reaches the same sink')
+  assert.equal(h.copied[1]!, h.copied[0]!, 'the badge and the key serialize the SAME painted view')
   // Blank cells after the button never copy.
   press(h, actionRowIndex, copyAllCol + 20)
   release(h, actionRowIndex, copyAllCol + 20)
   await settle(h)
-  assert.equal(h.copied.length, 1, 'a blank-cell click never copies')
+  assert.equal(h.copied.length, 2, 'a blank-cell click never copies')
+  // Every About FACT row is inert: the body paints no per-fact copy target.
+  for (let row = 0; row < actionRowIndex; row += 1) {
+    press(h, row, 40)
+    release(h, row, 40)
+  }
+  await settle(h)
+  assert.equal(h.copied.length, 2, 'no fact row publishes a copy hit target')
   h.dispose()
 })
 
@@ -4613,19 +4720,20 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
 })
 
 test('an app notice sits after the top rule and before the pane header at every granted height', async () => {
-  const h = setup({ columns: 120, rows: 24, doc: { theme: 'dark' } })
-  await h.open('Appearance')
-  await key(h, '\r') // L1 exposes the real Detail copy button
-  const copyRow = rowOf(h, 'Copy value [C]')
-  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
-  press(h, copyRow, copyCol)
-  release(h, copyRow, copyCol)
+  // PR3: the notice comes from the REAL About clipboard sink (the Legacy Detail
+  // has no copy action left); the notice row allocation is the same chrome.
+  const h = setup({ columns: 120, rows: 24, liveSession: { sessionId: 'sess-notice2', title: 'notice allocation' } })
+  await h.openHome()
+  await key(h, '\r') // rail -> About content
+  await key(h, 'C') // Copy All: the whole painted report reaches the sink
   await settle(h)
+  assert.equal(h.copied.length, 1, 'the About Copy All really reached the clipboard owner')
   assert.ok(h.view().includes('Copy sent'), `the app notice is live:\n${h.view()}`)
   let frame = h.rowsPlain()
   assert.equal(frame.findIndex(line => line.includes('Copy sent')), 3, 'the notice follows the top rule')
-  assert.equal(frame.findIndex(line => line.includes('Rows (2)')), 4, 'the pane header follows the notice')
-  assert.match(frame[5]!, /Configured theme/u, 'the first real body row follows the pane header')
+  assert.equal(frame.findIndex(line => line.includes('[About]')), 4, 'the pane header follows the notice')
+  assert.ok(frame.slice(5).some(line => /TUI {2}0\.5\.3/u.test(line)),
+    `a real About fact follows the pane header (the whale art may take the first rows):\n${h.view()}`)
   assert.match(frame.at(-1) ?? '', /Esc back/u)
   assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'exactly one app-level notice')
 
@@ -4633,7 +4741,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   await h.vt.waitForRender()
   frame = h.rowsPlain()
   assert.equal(frame[1]!.includes('Copy sent'), true, `the notice follows the header at 6 rows:\n${h.view()}`)
-  assert.equal(frame[2]!.includes('Rows (2)'), true, `the pane header follows the notice at 6 rows:\n${h.view()}`)
+  assert.equal(frame[2]!.includes('[About]'), true, `the pane header follows the notice at 6 rows:\n${h.view()}`)
   assert.match(frame.at(-1) ?? '', /Esc back/u)
   assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'still one notice')
 
@@ -4641,7 +4749,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   await h.vt.waitForRender()
   frame = h.rowsPlain()
   assert.equal(frame[2]!.includes('Copy sent'), true, `the notice follows the diagnostic line at 8 rows:\n${h.view()}`)
-  assert.equal(frame[3]!.includes('Rows (2)'), true, `the pane header follows the notice at 8 rows:\n${h.view()}`)
+  assert.equal(frame[3]!.includes('[About]'), true, `the pane header follows the notice at 8 rows:\n${h.view()}`)
   assert.match(frame.at(-1) ?? '', /Esc back/u)
   h.dispose()
 })
@@ -4840,21 +4948,25 @@ test('pointer and wheel act only on the last-painted body cells', async () => {
 })
 
 test('a resize, category change or notice insertion between press and release refuses the gesture', async () => {
-  const resized = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
-  await resized.open('Appearance')
-  await key(resized, '\r')
-  const resizeRow = rowOf(resized, 'Copy value [C]')
-  const resizeCol = cellIndexOf(resized, resizeRow, 'Copy value [C]')
-  press(resized, resizeRow, resizeCol)
-  resized.vt.resize(120, 24)
+  // The About Copy All is the remaining real clipboard target: every fence below
+  // is proven on it (the Legacy Copy hit that used to own this case is retired).
+  const resized = setup({ columns: 100, rows: 30, liveSession: { sessionId: 'sess-gesture', title: 'gesture proof' } })
+  await resized.openHome()
+  await settle(resized)
+  const resizeRow = rowOf(resized, 'Copy All [C]')
+  const resizeCol = cellIndexOf(resized, resizeRow, 'Copy All [C]')
+  press(resized, resizeRow, resizeCol + 2)
+  resized.vt.resize(120, 30)
   await resized.vt.waitForRender()
-  release(resized, resizeRow, resizeCol)
+  release(resized, resizeRow, resizeCol + 2)
   await settle(resized)
   assert.deepEqual(resized.copied, [], 'a resize between press and release refuses the gesture')
-  const freshRow = rowOf(resized, 'Copy value [C]')
-  const freshCol = cellIndexOf(resized, freshRow, 'Copy value [C]')
-  press(resized, freshRow, freshCol)
-  release(resized, freshRow, freshCol)
+  const freshRow = rowOf(resized, 'Copy All [C]')
+  const freshCol = cellIndexOf(resized, freshRow, 'Copy All [C]')
+  // A DIFFERENT cell inside the same painted button: a repeat press on the SAME
+  // cell is a word-select (a double click), not a disclosure click.
+  press(resized, freshRow, freshCol + 5)
+  release(resized, freshRow, freshCol + 5)
   await settle(resized)
   assert.equal(resized.copied.length, 1, 'an unchanged gesture on the repainted target still copies')
   resized.dispose()
@@ -4871,7 +4983,7 @@ test('a resize, category change or notice insertion between press and release re
   assert.doesNotMatch(switched.view(), /DeepSeek Account/u, 'the old Account press never activated')
   switched.dispose()
 
-  const noticed = setup({ columns: 120, rows: 24 })
+  const noticed = setup({ columns: 120, rows: 24, liveSession: { sessionId: 'sess-gesture2' } })
   await noticed.openHome()
   const noticeRow = rowOf(noticed, 'Copy All [C]')
   const noticeCol = cellIndexOf(noticed, noticeRow, 'Copy All [C]')
@@ -5106,17 +5218,20 @@ test('a resize that keeps the child grant still fails closed until the new termi
     'the stale Models mouse gesture did not open the catalog')
   mouseModels.dispose()
 
-  // The same guard covers the legacy Detail buttons.
+  // The same guard covers the Legacy Detail buttons (`Change…` is the remaining
+  // painted action: the Legacy Copy hit is retired).
   const mouseLegacy = setup({ columns: 120, rows: 8, doc: { theme: 'dark' } })
   await mouseLegacy.open('Appearance')
   await key(mouseLegacy, '\r') // rows level, Detail buttons painted
-  const staleCopyRow = rowOf(mouseLegacy, 'Copy value [C]')
-  const staleCopyCol = cellIndexOf(mouseLegacy, staleCopyRow, 'Copy value [C]')
+  const staleChangeRow = rowOf(mouseLegacy, 'Change…')
+  const staleChangeCol = cellIndexOf(mouseLegacy, staleChangeRow, 'Change…')
   mouseLegacy.vt.resize(120, 7)
-  press(mouseLegacy, staleCopyRow, staleCopyCol)
-  release(mouseLegacy, staleCopyRow, staleCopyCol)
+  press(mouseLegacy, staleChangeRow, staleChangeCol)
+  release(mouseLegacy, staleChangeRow, staleChangeCol)
   await settle(mouseLegacy)
-  assert.deepEqual(mouseLegacy.copied, [], 'the stale legacy Detail click did not copy')
+  assert.doesNotMatch(mouseLegacy.view(), /Choose value/u, 'the stale legacy Detail click did not open the choice')
+  assert.equal(mouseLegacy.replacements(), 0, 'the stale legacy Detail click wrote nothing')
+  assert.deepEqual(mouseLegacy.copied, [], 'and it copied nothing')
   mouseLegacy.dispose()
 
   // Backspace is not a portable back key: the Add Provider catalog binds it to

@@ -115,6 +115,14 @@
 
 ### 变更
 
+- **Settings 的复制入口集中到 About 的键盘操作。** `/settings`（与 `/status`）的 About
+  不再给每条事实画 `Copy [C]` 按钮，单条事实改由选中后按 `c` 复制，提示只留在最后一行
+  动作栏；整页仍只有一个 `Copy All [C]`，`C` 也照旧复制完整报告。只有当前真正画在屏幕上的
+  事实可以复制，滚出视口或选中 `Refresh context` 时 `c` 不生效。普通配置行（Appearance /
+  Display / Tools / Other settings）的 `Copy value [C]` 与 `c copy value` 一并移除，浏览、
+  选择、确认与重试都不受影响；Plugin Manager 的 Diagnostics 与 Models / Account 页面
+  自己的复制保持不变。
+
 - **`/plugins` 并入 Settings，成为 `Settings → Plugins` 的深链。** 两者现在使用同一个
   Settings 全屏 lease 和同一个插件页面，不再有独立的插件全屏界面，也不会新建或切换
   Session；`Settings` 的 `Plugins` 分类在本分类取得焦点时直接预览真实插件列表，不再需要

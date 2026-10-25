@@ -161,6 +161,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Settings copy has collapsed onto About's keyboard operation.** `/settings` (and
+  `/status`) no longer paints a `Copy [C]` button after each About fact: the selected
+  fact is copied with `c`, advertised only by the weak last-row Action Bar hint, while
+  the page keeps exactly one `Copy All [C]` affordance and `C` still copies the whole
+  stable report. Only a fact that is really painted in the viewport can be copied — a
+  fact scrolled out of view, or a selected `Refresh context` action, leaves `c` inert.
+  The ordinary configuration rows (Appearance / Display / Tools / Other settings) lose
+  their `Copy value [C]` button and `c copy value` hint; browsing, choosing, confirming
+  and retrying are unchanged. Plugin Manager Diagnostics and the Models / Account pages
+  keep their own copy actions.
+
 - **`/plugins` is now part of Settings, as a deep link into `Settings → Plugins`.**
   Both take the SAME Settings fullscreen lease and the SAME plugin page — there is
   no separate plugin screen and no Session create/switch. Selecting the `Plugins`

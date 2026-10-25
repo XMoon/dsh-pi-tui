@@ -212,13 +212,20 @@ the `/footer` alias and never enters this workspace.
   report, and `r` refreshes the Session statistics and Context once. `Enter`
   activates only the explicitly selected `Refresh context` action; an ordinary
   fact is inert. `Esc`/`Backspace`/`Left` returns the keyboard to the rail.
+  A fact row paints NO per-fact affordance: single-fact copy is advertised only
+  as the weak `c copy fact` Action Bar hint, and it is granted only while the
+  selected fact's physical row span intersects the painted viewport. `C` and
+  the ONE body `Copy All [C]` affordance are not gated on a visible fact row, so
+  a narrow frame that drops that segment keeps the keyboard shortcut.
 - About reads are non-creating and re-prove the captured SessionScope (owner +
   generation) after every await; a session switch revokes the old view
   immediately, and one semantic entry admits at most one refresh. While
   sessionless, no read starts and the Session-only Refresh is not painted.
-- Mouse `Copy`/`Copy All`/`Refresh` targets exist only for the WHOLE painted
+- Mouse `Copy All`/`Refresh` targets exist only for the WHOLE painted
   affordance at its last-painted geometry; a clipped or hidden button has no
-  target. The whale is decoration: the report carries facts, never artwork.
+  target. Ordinary fact cells publish no hit target at all, so clicking a value
+  never copies it. The whale is decoration: the report carries facts, never
+  artwork.
 - `Models` and `Account` are DIRECT content pages in the SAME lease (not
   fabricated Settings rows and not a second alt-screen owner). Selecting either
   on the rail paints the real page in the right column at once, while the
@@ -243,8 +250,8 @@ the `/footer` alias and never enters this workspace.
   settings`) keep their three-level browse (L0 categories, L1 rows, L2 detail)
   and their existing writers.
 - Three configuration rows are writable: the configured theme, the transcript
-  display setting, and the profile-wide `Visual tools` switch. Browse/copy never
-  write.
+  display setting, and the profile-wide `Visual tools` switch. Browsing never
+  writes, and the configuration rows expose no copy verb at all.
 - `Tools` holds exactly one built-in row, `Visual tools`, backed by the Host
   profile's `pi-tui-visual-tools.enabled` volatile Config (schema default On).
   Its stated value is the effective Host form value; `[default]` marks a value

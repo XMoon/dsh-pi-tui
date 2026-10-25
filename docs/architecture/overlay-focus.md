@@ -658,8 +658,10 @@ owns only the lease, focus and write-lifecycle mechanics.
   a hidden pane owns no wheel). A wheel-scrolled list keeps its viewport (only a
   selection or viewport change rebases it, so a shrink still reveals the
   selection). The workspace screen suspends the fork's native copy-on-select:
-  The Settings workspace has no drag-copy contract, and the panel's own `Copy value`/`C` verb is
-  the only copy source (a plain click can never put a character on the clipboard).
+  The Settings workspace has no drag-copy contract, and the panel's own About
+  `c`/`C` verbs (with the ONE body `Copy All [C]` affordance) are the only copy
+  sources (a plain click can never put a character on the clipboard). The
+  configuration rows expose no copy verb at all.
   The Action Bar advertises only the keys the current level and row grant actually
   honour: below the body floor it shows the Esc/back semantics alone.
 - **The L2 edit phase is a transient phase of the SAME lease.** On a writable

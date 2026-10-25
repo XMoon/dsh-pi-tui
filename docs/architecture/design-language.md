@@ -310,10 +310,10 @@ chrome rules budget of §6.2.
     (`Config ready`, `Loading models…`, `rows 7-40/40`) never does.
   - A status with no word (a glyph-only state) is not allowed in chrome.
 - Multiple words in one hint stay lowercase after the key: `Esc back`,
-  `Enter details`, `C copy value`.
+  `Enter details`, `C copy all`.
 - **Key tokens are Capitalized; a bare letter is lowercase.** `Esc`, `Enter`,
   `PgUp`, `Shift+S` are capitalized, but an unmodified single letter is written
-  `r refresh`, `c copy value`, `s stop` — because `R` reads as ⇧R and this repo
+  `r refresh`, `c copy fact`, `s stop` — because `R` reads as ⇧R and this repo
   already spells a shifted chord `Shift+S` (`formatKeyId`). The reference study
   found the same rationale in oh-my-pi's key formatter. This is a small
   user-visible wording change (`R refresh` → `r refresh`) and is part of the
@@ -633,8 +633,8 @@ anchor, without inventing a fourth meaning for `primary`.
 
 - A bar is a row of segments joined by ` · ` (D4).
 - **Hint segment** = `<Key> <verb>`: `Esc back`, `Enter details`, `r refresh`,
-  `c copy value`, `s stop`, `PgUp/PgDn`. Capitalized key token, lowercase verb;
-  a bare unmodified letter is lowercase (§4.1).
+  `c copy fact`, `C copy all`, `s stop`, `PgUp/PgDn`. Capitalized key token,
+  lowercase verb; a bare unmodified letter is lowercase (§4.1).
 - **One action advertises ONE key: the PRIMARY binding from the live effective
   keymap** (`keysFor(action)[0]`, or the action's leader sequence when it is bound
   only to one). An **action-bar segment** never enumerates an action's alternative
@@ -669,7 +669,7 @@ anchor, without inventing a fourth meaning for `primary`.
   (§13).
 - **A surface-local key that is deliberately NOT rebindable derives both its
   handler and its hint from one local constant.** The Settings workspace's
-  `r refresh` and `c copy value` are such keys: they are read by raw character
+  `r refresh` and `c copy fact`/`C copy all` are such keys: they are read by raw character
   comparison today (`settings-workspace-panel.ts:1185-1186`) and there is no
   corresponding `APP_KEYBINDINGS` action. A future implementation must introduce ONE local
   table used by both the handler and the hint — not a new rebindable action
@@ -682,10 +682,17 @@ anchor, without inventing a fourth meaning for `primary`.
   whole-word brackets (`[Change…]`) are replaced by this rule, so Settings and
   Job affordances look the same.
 - **A key badge spells a bare letter UPPERCASE, while the Action Bar hint keeps
-  it lowercase.** `Copy All [C]` / `Copy value [C]` name the *key*; the bar says
-  `c copy value` because `C` would read as ⇧C in prose (§4.1). The brackets are
-  the discriminator, so the two forms are not a contradiction: one is a key
-  badge, the other is a hint.
+  it lowercase.** `Copy All [C]` names the *key*; the bar says `C copy all`
+  because `C` would read as ⇧C in prose (§4.1). The brackets are the
+  discriminator, so the two forms are not a contradiction: one is a key badge,
+  the other is a hint.
+- **Settings About scopes the copy affordance to ONE body badge.** The
+  single-fact copy is advertised only as the weak Action Bar hint `c copy fact`
+  (never a per-row `Copy [C]` button, icon, bracket or hover-only target), and
+  the whole report carries at most one explicit `Copy All [C]` affordance in the
+  body. Plugin Diagnostics, the Models/Account pages and every other surface's
+  business copy keep their own affordances; this rule is scoped to Settings
+  About alone.
 - Affordances are `primary` (role 14).
 
 ### 7.2 Ordering and degradation
