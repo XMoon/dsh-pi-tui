@@ -27,8 +27,11 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
+import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
@@ -5449,4 +5452,111 @@ test('C2-R0 a cross-generation pointer release cannot open a replaced contributo
   assert.match(h.view(), /Type to search/u, 'a fresh activation after the repaint opens the editor')
   assert.match(h.view(), /Pointer setting v2/u, 'the editor opened on the replacement owner row')
   h.dispose()
+})
+
+// ── C2-R0: the REAL extension service → Settings repaint chain ────────────
+//
+// The cases above inject the in-process SettingsRegistry directly. This one
+// proves the same production path the PLAN requires: a real Cordis plugin fiber
+// calls the public `registerSetting()`, the service's InvalidateBatcher flushes
+// into the LIVE surface render sink, the production `/settings` handler reads
+// `runner.extensions.settings.snapshot()`, and the painted frame moves — with
+// the fiber dispose (the HMR unload) moving it back.
+
+test('C2-R0 a real extension fiber registration reaches the mounted Settings workspace and its unload retracts it', async () => {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    const startupFiber = ctx.plugin((c) => { c.provide(TUI_STARTUP_SERVICE, {}) })
+    await startupFiber
+    const hostFiber = ctx.plugin(applyExtensionHost)
+    await hostFiber
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as {
+      registerSetting(contribution: {
+        readonly id: string
+        readonly label: string
+        readonly description?: string
+        readonly currentValue: string
+        readonly values?: readonly string[]
+        readonly onChange?: (value: string) => boolean
+      }): { readonly id: string; setValue(value: string): void; dispose(): void }
+      settings: SettingsRegistry
+      attachSurface(
+        bridge: { subscribe(listener: (state: unknown) => void): () => void },
+        capabilities: ReadonlySet<string>,
+        surfaceId: string,
+        requestRender?: (force?: boolean) => void,
+      ): void
+      detachSurface(surfaceId?: string): void
+    }
+    assert.ok(service !== undefined, 'the extension service is provided by the real host')
+    // The workspace reads the SERVICE's own registry, not a test-owned copy.
+    const h = setup({ columns: 120, rows: 24, settingsRegistry: service.settings, pluginPage: true })
+    // Wire the service's batcher to THIS surface, exactly like the production
+    // extension runtime does after the SurfaceHost attaches.
+    service.attachSurface(
+      { subscribe: () => () => {} },
+      new Set(),
+      'c2-r0-surface',
+      () => h.app.requestRender(),
+    )
+    await h.vt.waitForRender()
+    await h.openHome()
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
+    assert.equal(h.view().includes('Categories (9)'), true, 'no Extensions category without live rows')
+
+    // A real plugin fiber registers through the PUBLIC service API.
+    let enabled = true
+    const fiber = ctx.plugin((pluginCtx) => {
+      if (!enabled) return
+      const svc = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as {
+        registerSetting(contribution: {
+          readonly id: string
+          readonly label: string
+          readonly description?: string
+          readonly currentValue: string
+          readonly values?: readonly string[]
+        }): unknown
+      }
+      svc.registerSetting({
+        id: 'fiber.demo-limit',
+        label: 'Demo limit',
+        description: 'Registered by a real fiber',
+        currentValue: '3',
+        values: ['1', '3', '5'],
+      })
+    })
+    await fiber
+    // The batcher flush is a microtask; the repaint it schedules is the ONLY
+    // reason the frame can change (no key was pressed).
+    await new Promise<void>(resolve => queueMicrotask(resolve))
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+    await h.vt.waitForRender()
+    assert.match(h.view(), /Categories \(10\)/u, 'the live registration appended Extensions with no user input')
+    await key(h, '\u001b[F')
+    await key(h, '\r')
+    assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u)
+    assert.match(h.view(), /Configure extension settings…/u)
+    assert.match(h.view(), /1 setting · 1 contributor/u, 'the summary counts the fiber-owned live rows')
+
+    // The fiber dispose is the HMR unload: the directory retracts through the
+    // same service → batcher → surface chain.
+    await fiber.dispose()
+    await new Promise<void>(resolve => queueMicrotask(resolve))
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+    await h.vt.waitForRender()
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the unload moved the keyboard to the rail')
+    assert.match(h.view(), /^> Plugins/mu, 'the emptied Extensions category falls back to Plugins')
+    assert.match(h.view(), /Categories \(9\)/u, 'the category is retracted without user input')
+    // Neither the register nor the unload started the existing editor: the
+    // Settings workspace still owns the frame.
+    assert.match(h.rowsPlain()[0]!, /Settings · /u, 'the Settings workspace still owns the frame')
+    assert.ok(!h.view().includes('Type to search'), 'the existing settings list never mounted')
+    service.detachSurface('c2-r0-surface')
+    h.dispose()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const disposedFiber of runtime.fibers) await Promise.resolve(disposedFiber.dispose())
+    }
+  }
 })

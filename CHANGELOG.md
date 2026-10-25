@@ -129,7 +129,9 @@
   的分类现在是 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal /
   Tools / Plugins`；只有扩展设置注册表里确实存在设置行时才在末尾追加 `Extensions`。注册、卸载或
   同一 id 重新注册后，尚未重绘的旧帧不会再执行任何点击、滚轮或按键动作，重绘完成前只有 `Esc`
-  还能安全返回；`Extensions` 的条目消失时会落在相邻的 `Plugins`，不会留下空分类。`Other settings`
+  还能安全返回；扩展的增删或取值变化不会打断正在进行的设置选择（候选、当前分类/行与滚动位置
+  都会保留），只有选择本身失效时才回到该分类的第一项；`Extensions` 的条目消失时会落在相邻的
+  `Plugins`，不会留下空分类。`Other settings`
   不再存在：尚未迁移的设置改由所属分类里明确标注 `Existing settings editor` 的过渡行打开原有编辑器
   并定位到具体一项（Agent 默认权限、Footer、更多会话设置、输入与终端、扩展设置），
   `Web Search / Fetch` 入口移到 `Tools`。已经在新工作区可写的 Theme、Transcript display 与
