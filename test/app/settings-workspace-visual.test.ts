@@ -33,7 +33,6 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { createTerminalNotificationPresentation } from '../../src/tui/notification/runtime.ts'
 import { getKeybindings } from '@xmoon76/pi-tui'
-import { applyHomeEndKeyMode } from '../../src/tui/keybindings/home-end-mode.ts'
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from '@xmoon76/pi-tui'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
@@ -7628,12 +7627,19 @@ test('a persist-first row reads the CURRENT raw value even when another writer j
 })
 
 // Regression: C2-R2 acceptance R2-03 (the consumer chain, not just the value).
-test('a Submit while busy confirm flows through SettingsRuntime.busyEnter into the submit route', async () => {
-  // The previous case proved the DOCUMENT value; this one proves the CHAIN the
-  // plan names: workspace Confirm -> document -> the runtime owner's own
-  // accessor -> the submit boundary. `createSettingsRuntime` is the production
-  // owner, so a broken accessor (or a writer that stops reaching the document
-  // the owner reads) fails here even when the document looks right.
+test('a Submit while busy confirm is readable through the runtime owner the viewer path uses', async () => {
+  // The previous case proved the DOCUMENT value. This one proves that the
+  // runtime owner's accessor reads the committed value — with a reverse
+  // control — so a writer that stops reaching the document the owner reads
+  // fails here even when the document looks right.
+  //
+  // SCOPE: `SettingsRuntime.busyEnter()` is NOT the main submit path. The main
+  // boundary reads `deps.tuiSettings.get().busyEnter` directly
+  // (`submission/controller.ts:1778`); this accessor serves the Subagent Viewer
+  // path (`application-events.ts:704`). The joined main-submit proof lives in
+  // `test/app/submit-hot-path.test.ts` ("a Submit while busy settings write
+  // reaches the REAL main-session submit route"), which drives the real
+  // `/settings` confirm and then the real `SubmissionController.submit()`.
   const fixture = createDirectSettingsFixture({ theme: 'dark', busyEnter: 'queue' })
   const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
   // The runtime owner over the SAME document the workspace writes.
