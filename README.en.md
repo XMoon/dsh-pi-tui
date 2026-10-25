@@ -545,14 +545,18 @@ the surface it paused before opening the original editor on that exact row, so T
 Manager, keybindings, permissions and extension settings keep every existing write path.
 
 `/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
-Host's `pi-tui-visual-tools.enabled` configuration: turning it Off unregisters
-`dsh_pi_tui_chart` and `dsh_pi_tui_svg` from that Host's global tool registry, so later model
-requests no longer see them; turning it back On restores the original definitions. The setting
-belongs to the whole DSH Host profile (across sessions and agents, not just the current TUI).
-Off affects only future tool availability: chart/SVG results already recorded in a transcript
-still render, copy, search and export normally. The Direct backend shows `Verified` only after
-also confirming the Host registry state; Remote has no registry read and therefore reports the
-saved configuration without claiming the runtime registration took effect.
+Host's `pi-tui-visual-tools.enabled` configuration. That one switch governs THREE model tools:
+the generators `dsh_pi_tui_chart` and `dsh_pi_tui_svg`, and the explicit publication tool
+`present_visual`. Turning it Off unregisters all three from that Host's global tool registry, so
+later model requests no longer see them; turning it back On restores the original definitions.
+The three registrations are atomic: a same-name conflict or a failed registration rolls the
+whole group back, so a half-enabled group is never observable. The setting belongs to the whole
+DSH Host profile (across sessions and agents, not just the current TUI). Off affects only future
+tool availability: chart/SVG results already recorded in a transcript, their model-visible
+`visual-ref-v1` references and their historical publications still render, copy, search and
+export normally. The Direct backend shows `Verified` only after also confirming the Host
+registry state; Remote has no registry read and therefore reports the saved configuration
+without claiming the runtime registration took effect.
 
 `Tools` in `/settings` now has a `Web Search / Fetch` row: it retires the workspace,
 opens the existing editor's Web section and focuses its first item. The section switches the search

@@ -508,3 +508,101 @@ test('a legal visual-v1: title/description still draws in the PiTui cards', asyn
   assert.doesNotMatch(view, /visual-v1:\{"type"/u)
   app.stop()
 })
+
+/** The durable publication pair: the human summary plus the receipt block. */
+function presentRows(): never[] {
+  return [
+    {
+      type: 'tool/call', seq: 1, time: 1,
+      data: { turn: 0, step: 1, callId: 'call-present', name: 'present_visual', arguments: JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }) },
+    } as never,
+    {
+      type: 'tool/result', seq: 2, time: 1,
+      data: {
+        turn: 0, step: 1,
+        message: createToolResultMessage({
+          callId: ToolCallId('call-present'),
+          content: [
+            { type: 'text', text: 'Selected 1 visual for presentation.' },
+            { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"}]}' },
+          ],
+          isError: false,
+        }),
+      },
+    } as never,
+  ]
+}
+
+test('the publication card shows its human summary and never the receipt machine block', async () => {
+  const { vt, app } = mountApp({ width: 100 })
+  await vt.waitForRender()
+  const folder = new TranscriptFolder()
+  folder.apply(presentRows() as never)
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Present visuals'), `publication header missing:\n${view}`)
+  assert.ok(view.includes('Selected 1 visual for presentation.'), `human summary missing:\n${view}`)
+  assert.ok(!view.includes('visual-published-v1:'), `the receipt must never be painted:\n${view}`)
+  assert.ok(!view.includes('sv1_'), `the raw ref never appears in the card:\n${view}`)
+  app.stop()
+})
+
+test('a failed publication card keeps its readable reason and no receipt', async () => {
+  const { vt, app } = mountApp({ width: 100 })
+  await vt.waitForRender()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'tool/call', seq: 1, time: 1,
+      data: { turn: 0, step: 1, callId: 'call-bad', name: 'present_visual', arguments: JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }) },
+    } as never,
+    {
+      type: 'tool/result', seq: 2, time: 1,
+      data: {
+        turn: 0, step: 1,
+        message: createToolResultMessage({
+          callId: ToolCallId('call-bad'),
+          content: [{ type: 'text', text: 'unknown visual ref sv1_0123456789abcdef0123' }],
+          isError: true,
+        }),
+      },
+    } as never,
+  ] as never)
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('unknown visual ref'), `the failure reason stays readable:\n${view}`)
+  assert.ok(!view.includes('visual-published-v1:'), 'a failure never paints a receipt')
+  app.stop()
+})
+
+test('a generated visual card never paints the projected reference block', async () => {
+  const { vt, app } = mountApp({ width: 100 })
+  await vt.waitForRender()
+  const fact = chartFactFromArgs({
+    kind: 'bars',
+    title: 'Request latency',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  })
+  const blocks = chartContentBlocks(fact)
+  const folder = new TranscriptFolder()
+  folder.apply(toolEvents('dsh_pi_tui_chart', {
+    kind: 'bars',
+    title: 'Request latency',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }, [
+    blocks[0] as ContentBlock,
+    { type: 'text', text: 'visual-ref-v1:sv1_0123456789abcdef0123' },
+    blocks[1] as ContentBlock,
+  ]) as never)
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('p50'), `values visible with a reference block present:\n${view}`)
+  assert.ok(!view.includes('visual-ref-v1:'), `the reference block must never be painted:\n${view}`)
+  assert.ok(!view.includes('visual-v1:'), 'nor the fact machine line')
+  app.stop()
+})

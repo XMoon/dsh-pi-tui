@@ -20,6 +20,7 @@ import type {
 import { finalizedBlockFallbackText } from '../../domain/transcript/content-blocks.ts'
 import { fileAttachmentSummary } from '../../domain/media/file-summary.ts'
 import { type IconSemantic } from '../../domain/display/icons.ts'
+import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
 
 import type { JsonValue } from '../../domain/transcript/types.ts'
 
@@ -84,10 +85,13 @@ const TOOL_TITLES: Record<string, string> = {
   // The skill loader's human title (its presentCall says `Load skill
   // <name>`; the fallback must say the same — plan §7.3/§9.2).
   skill: 'Load skill',
-  // PR-D's resident visual tools: the header names the shape, the title
+  // The resident visual tools: the header names the shape, the title
   // argument is the row's summary (never the chart kind or the raw JSON).
-  dsh_pi_tui_chart: 'Chart',
-  dsh_pi_tui_svg: 'SVG',
+  // `present_visual` names the explicit publication intent; its summary is the
+  // selected count, never the raw refs.
+  [CHART_TOOL_NAME]: 'Chart',
+  [SVG_TOOL_NAME]: 'SVG',
+  [PRESENT_VISUAL_TOOL_NAME]: 'Present visuals',
 }
 
 /**
@@ -750,12 +754,18 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     const skillName = args.name
     return typeof skillName === 'string' && skillName !== '' ? firstLine(skillName) : undefined
   }
-  if (name === 'dsh_pi_tui_chart' || name === 'dsh_pi_tui_svg') {
-    // PR-D: the supplied figure title is the row's identity. Falling through
-    // to the generic first-string rule would show the chart `kind` (or an
-    // arbitrary JSON key order) instead.
+  if (name === CHART_TOOL_NAME || name === SVG_TOOL_NAME) {
+    // The supplied figure title is the row's identity. Falling through to the
+    // generic first-string rule would show the chart `kind` (or an arbitrary
+    // JSON key order) instead.
     const title = args.title
     return typeof title === 'string' && title !== '' ? firstLine(title) : undefined
+  }
+  if (name === PRESENT_VISUAL_TOOL_NAME) {
+    // The count is the call's one-line identity; the refs are machine
+    // identities that belong to no header.
+    const count = Array.isArray(args.visuals) ? args.visuals.length : 0
+    return count === 0 ? undefined : `${count} visual${count === 1 ? '' : 's'}`
   }
   if (name !== 'todo_write') return undefined
   const todos = args.todos

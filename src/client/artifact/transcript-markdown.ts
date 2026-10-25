@@ -14,6 +14,8 @@ import { isReplacementSurfaceEvent, TOOL_NOT_STARTED } from '@deepseek-ai/dsh-se
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { finalizedBlockFallbackText } from '../../domain/transcript/content-blocks.ts'
+import { humanFacingVisualResult } from '../../domain/visual/publication.ts'
+import { isVisualToolName } from '../../domain/visual/tools.ts'
 import { fileAttachmentSummary } from '../../domain/media/file-summary.ts'
 import { WorkflowProjection } from '../../domain/transcript/workflow-projection.ts'
 import type { TranscriptWorkflowMessage } from '../../domain/transcript/workflow-projection.ts'
@@ -115,6 +117,9 @@ export function renderTranscriptMarkdown(session: {
   // id's recovery export (the fold's `pending === undefined` guard,
   // mirrored here).
   const observedToolCalls = new Set<string>()
+  // The durable `tool/call` names, under the same composite fence, so a result
+  // can be identified by its REAL tool instead of by text it happens to carry.
+  const observedToolNames = new Map<string, string>()
   // Alpha.4 Session shape: the event log arrives as a snapshot read, never a
   // live array — the markdown export is a full-log fold by definition.
   for (const event of session.snapshotEvents()) {
@@ -142,7 +147,11 @@ export function renderTranscriptMarkdown(session: {
       }
       case 'tool/call': {
         requestedToolNames.delete(event.data.callId)
+        // The REAL name is proven only here, by the durable `tool/call`; a
+        // result never donates its own identity. The readable export needs it
+        // to decide whether a result's tail machine blocks are official.
         observedToolCalls.add(`${event.data.turn}:${event.data.step}:${event.data.callId}`)
+        observedToolNames.set(`${event.data.turn}:${event.data.step}:${event.data.callId}`, event.data.name)
         const args = typeof event.data.arguments === 'string' ? event.data.arguments : JSON.stringify(event.data.arguments)
         lines.push(`### Tool ${event.data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`)
         break
@@ -150,7 +159,13 @@ export function renderTranscriptMarkdown(session: {
       case 'tool/result': {
         const request = requestedToolNames.get(event.data.message.toolCallId)
         requestedToolNames.delete(event.data.message.toolCallId)
-        const text = markdownContent(event.data.message.content)
+        // `/transcript` is a READABLE export: for the three official visual
+        // tools only, the official TAIL machine blocks are dropped so the
+        // export matches the cards. The raw Session JSONL keeps every block.
+        const toolName = observedToolNames.get(
+          `${event.data.turn}:${event.data.step}:${event.data.message.toolCallId}`,
+        )
+        const text = markdownContent(readableResultBlocks(event.data, toolName))
         if (event.data.error?.code === TOOL_NOT_STARTED
           && !observedToolCalls.has(`${event.data.turn}:${event.data.step}:${event.data.message.toolCallId}`)) {
           // A not-started recovery has NO durable tool/call behind it: the
@@ -217,6 +232,26 @@ export function renderTranscriptMarkdown(session: {
     lines.push(workflowMarkdownBlock(message))
   }
   return lines.join('\n')
+}
+
+/**
+ * The readable content blocks of one durable tool result.
+ *
+ * Only the three official visual tools lose their official tail machine blocks;
+ * the identity comes from the durable `tool/call` name (never from the result
+ * text), so another tool's similar-looking text is exported verbatim.
+ */
+function readableResultBlocks(
+  data: { readonly message: { readonly content: readonly ContentBlock[]; readonly isError?: boolean } },
+  toolName: string | undefined,
+): readonly ContentBlock[] {
+  if (toolName === undefined || !isVisualToolName(toolName)) return data.message.content
+  return humanFacingVisualResult({
+    toolName,
+    blocks: data.message.content,
+    text: '',
+    status: data.message.isError === true ? 'error' : 'ok',
+  }).blocks
 }
 
 /** One readable Workflow export block (plan §7.4): the run line with its

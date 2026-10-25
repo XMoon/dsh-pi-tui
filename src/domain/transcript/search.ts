@@ -10,6 +10,7 @@
  * @module @xmoon76/dsh-pi-tui/domain/transcript/search
  */
 
+import { humanFacingVisualResult, isVisualToolName } from './visual-text.ts'
 import { PTC_MAX_DEPTH } from './types.ts'
 import type {
   TranscriptCommandMessage,
@@ -110,12 +111,29 @@ export function transcriptSearchCorpus(message: TranscriptMessage, depth = 0): T
   return buildSearchCorpus(searchChunksForMessage(message, depth))
 }
 
+/**
+ * The searchable result text of one tool row: the SAME source-aware human
+ * projection the cards paint, so a visual tool's machine blocks (the projected
+ * reference, the fact line and present_visual's publication receipt) never
+ * become a search hit or a reveal preview. Every other tool keeps its raw
+ * result byte for byte, including text that merely resembles a machine line.
+ */
+function searchableToolResult(message: TranscriptToolMessage): string {
+  if (!isVisualToolName(message.name)) return message.result
+  return humanFacingVisualResult({
+    toolName: message.name,
+    blocks: message.resultBlocks,
+    text: message.result,
+    status: message.status,
+  }).text
+}
+
 function searchChunksForMessage(message: TranscriptMessage, depth: number): TranscriptSearchChunk[] {
   if (message.kind === 'tool') {
     const chunks: TranscriptSearchChunk[] = [
       { text: message.name, source: { kind: 'tool-field', field: 'name' } },
       { text: message.args, source: { kind: 'tool-field', field: 'args' } },
-      { text: message.result, source: { kind: 'tool-field', field: 'result' } },
+      { text: searchableToolResult(message), source: { kind: 'tool-field', field: 'result' } },
     ]
     if (message.subCalls !== undefined && message.subCalls.length > 0 && depth < PTC_MAX_DEPTH) {
       for (const child of message.subCalls) chunks.push(...searchChunksForSubCall(child, depth + 1, [child.subCallId ?? '']))
@@ -195,7 +213,7 @@ function searchChunksForSubCall(message: TranscriptToolMessage, depth: number, p
   const chunks: TranscriptSearchChunk[] = [
     { text: message.name, source: { kind: 'subcall-field', subCallIds: path, field: 'name' } },
     { text: message.args, source: { kind: 'subcall-field', subCallIds: path, field: 'args' } },
-    { text: message.result, source: { kind: 'subcall-field', subCallIds: path, field: 'result' } },
+    { text: searchableToolResult(message), source: { kind: 'subcall-field', subCallIds: path, field: 'result' } },
   ]
   if (message.subCalls !== undefined && message.subCalls.length > 0 && depth < PTC_MAX_DEPTH) {
     for (const child of message.subCalls) {

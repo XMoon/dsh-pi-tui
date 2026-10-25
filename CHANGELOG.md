@@ -9,6 +9,19 @@
 
 ### 新增
 
+- **模型现在可以显式声明“这些图是要给用户看的”。** 新增 `present_visual` 工具，与既有的
+  `dsh_pi_tui_chart`、`dsh_pi_tui_svg` 共享同一个 Visual tools 开关（默认 On，一处开关三个
+  工具原子地一起出现/消失，同名冲突或注册失败整组回滚）。图表/SVG 的成功结果现在还会带上
+  一个模型可见的稳定引用 `visual-ref-v1:sv1_…`（由 session、turn、当前 step 的事件序号与
+  `callId` 共同派生），模型在后续步骤用 1–8 个引用调用 `present_visual` 即可显式发布。
+  发布只认可本会话、当前 turn、**更早的已提交模型步骤**中的成功图表/SVG 结果：同一步的
+  来源即使已先提交也会被拒绝，跨 turn、未知/重复/尚未提交的引用会让整次调用失败，不等待、
+  不部分成功、不暗中重试；策略替换生成结果或发布结果同样会撤销资格。成功回执是“已选定 N 个
+  图”的人类摘要加一条严格的 `visual-published-v1` 机器行，失败回执只有可读原因。发布不新增
+  任何会话事件、持久化发布表或缓存，冷回放从同一份日志得到相同结论；三个工具的人类可读
+  卡片、搜索与 `/transcript` 导出都不会显示这些机器行，而原始会话记录仍然完整保留。当前
+  仍沿用原有 Tool Card，最终回答里的插图属于后续阶段。
+
 - **`/settings` 的 Appearance / Conversation 现在可以直接修改更多配置，不必再进旧编辑器。**
   Appearance 新增可编辑的 `Icon style`（`emoji` / `symbols` / `minimal`），切换立即
   改变结构图标并只持久化这一个字段。Conversation 新增可编辑的 `Transcript detail`、

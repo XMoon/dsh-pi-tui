@@ -449,22 +449,63 @@ and an unclipped node is still not a VISIBLE node on a scrolling document. See
 [the real-GUI guide](../guides/tern-gui-testing.md) for the run preconditions
 and the evidence rules.
 
-### Visual tool results (chart and SVG)
+### Visual tool results (chart, SVG and explicit publication)
 
-Two Host-owned tools, `dsh_pi_tui_chart` and `dsh_pi_tui_svg`, project
-inside the same existing tool card. Their durable result carries NO
-`presentationMeta`: the FINAL `tool/result` content is the only admission source
-for a drawing.
+Three Host-owned tools share one row: the two generators `dsh_pi_tui_chart` and
+`dsh_pi_tui_svg`, and the publication tool `present_visual`. They project inside
+the same existing tool card. Their durable results carry NO `presentationMeta`:
+the FINAL `tool/result` content is the only admission source for a drawing.
 
 Their availability is the DSH Host profile's `pi-tui-visual-tools.enabled`
 volatile Config (schema default On), never a Session, renderer or Client
-capability. Off releases BOTH registrations from the global Host tool registry,
-so a later model request neither sees the names nor carries their schemas; On
-restores the original definitions. The switch lives in the Settings `Tools`
-category and applies to every Agent on that Host. It governs only future model
-tool availability: already-recorded chart/SVG results remain readable,
-copyable, searchable and exportable, and a renderer never re-filters historical
-content by the current switch value.
+capability. It is ONE switch for all three: Off releases the whole group from
+the global Host tool registry, so a later model request neither sees the names
+nor carries their schemas; On restores the original definitions. Registration is
+atomic — a same-name conflict or a failed registration rolls the group back, so
+a half-enabled group can never be observed. `applied` reports the live registry
+identity of all three definitions, never a second enable value. The switch lives
+in the Settings `Tools` category and applies to every Agent on that Host. It
+governs only future model tool availability: already-recorded chart/SVG results,
+their projected references and their publications remain readable, copyable,
+searchable and exportable, and a renderer never re-filters historical content by
+the current switch value.
+
+- A generating result carries one versioned machine line in its own text block
+  (`visual-v1:{"type":"chart"|"svg",…}`) plus the readable value rows. When the
+  call has a live Agent, is a root call and runs inside an open `step/start`,
+  the tool's `projectContent` inserts ONE additional TEXT block immediately
+  before that fact: `visual-ref-v1:sv1_<20 lowercase hex>`. The reference is the
+  truncated SHA-256 of the exact `(sessionId, turn, step/start seq, callId, "")`
+  tuple, so the same figure produced twice is two references while a replayed
+  log derives the same one. The hash is an IDENTITY, never a permission token:
+  every publication re-verifies the tuple against committed events.
+- `present_visual({visuals:[{ref}]})` accepts 1–8 references and declares the
+  explicit publication intent. It reads the executing Session through the
+  official `sessionQuery.observeSession` lease, fences the `turnBoundary`
+  projection before and after that await, and delegates qualification to the
+  same domain authority cold replay uses. Only a top-level call of the current
+  turn may publish, each source must come from an EARLIER committed model step
+  of that turn (a same-step source is refused even when it committed first), and
+  a policy replacement of either the generating result or the publication result
+  removes the qualification. Any unknown, repeated, cross-turn or
+  not-yet-committed reference fails the WHOLE call; there is no partial
+  publication and no retry.
+- A successful publication's model-facing result is two TEXT blocks: the
+  human summary (`Selected N visual(s) for presentation.`) and one strict
+  `visual-published-v1:{"version":1,"published":[{"ref":…}]}` receipt whose
+  references must equal the call's arguments position by position. A failed
+  result carries only its readable reason and never the receipt. Publication is
+  proven by the durable `present_visual` call plus its FINAL result; a
+  model-written `visual-published-v1:` line, a `bash` forgery or an orphan
+  result has no authority. No new Session event, durable publication table or
+  cache is created: cold replay derives the same facts from the log.
+- Human-facing surfaces (Tool Card folded preview and expanded body, TSP result
+  nodes, transcript search, `/transcript` readable Markdown) drop ONLY the
+  official tail machine blocks of these three tools, identified by position plus
+  the tool NAME proven from the durable `tool/call`. Another tool whose text
+  merely resembles a machine line keeps its full text, and the raw Session
+  JSONL keeps every block. Current renderers still show the ordinary Tool Card;
+  Assistant in-place or trailing visuals are a later stage.
 
 
 - A chart result carries one versioned machine line in its own text block

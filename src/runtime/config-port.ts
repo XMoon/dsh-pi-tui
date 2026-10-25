@@ -618,8 +618,9 @@ export interface WebProviderConfig {
 }
 
 /** The effective state of the Host `pi-tui-visual-tools` row — the ONE
- *  profile-wide switch that decides whether the built-in `dsh_pi_tui_chart`
- *  and `dsh_pi_tui_svg` tools are registered for every Agent of this Host.
+ *  profile-wide switch that decides whether the built-in `dsh_pi_tui_chart`,
+ *  `dsh_pi_tui_svg` and `present_visual` tools are registered for every Agent
+ *  of this Host. It is one switch for all three: there is no per-tool field.
  *
  *  This is a Host CONFIGURATION fact, not a TUI preference and not a Session
  *  property: the persistent authority is the `pi-tui-visual-tools` profile
@@ -637,10 +638,10 @@ export interface VisualToolsState {
    *  exposes — so the UI may mark it `[default]` instead of claiming a user
    *  choice; the schema default itself is never re-derived here. */
   readonly userOverridden: boolean
-  /** Whether BOTH tool registrations are live, as the owning Host row reports
-   *  them. `undefined` when this backend cannot observe the Host registry
-   *  (Remote has no such wire), in which case neither success nor failure may
-   *  be claimed. */
+  /** Whether ALL THREE tool registrations are live, as the owning Host row
+   *  reports them. `undefined` when this backend cannot observe the Host
+   *  registry (Remote has no such wire), in which case neither success nor
+   *  failure may be claimed. */
   readonly applied: boolean | undefined
 }
 
