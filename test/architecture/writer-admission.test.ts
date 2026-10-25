@@ -533,16 +533,36 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
   // TWO read CALLS cover THREE read paths: `stageImage` performs the one image
   // read and is reached by `/image` directly and by `/attach` when the probe
   // reports an image.
-  const postReadFence = /const (\w+) = \(\): boolean => \{\s*\n/.exec(intake)
-  assert.ok(postReadFence !== null, 'the intake declares one post-read fence helper')
-  // The helper must itself perform the transition re-check (the fence body).
-  const helperStart = postReadFence.index
-  const helperBody = intake.slice(helperStart, helperStart + 1200)
+  const helperMatch = /const (\w+) = \(\): boolean => \{/.exec(intake)
+  assert.ok(helperMatch !== null, 'the intake declares one post-read fence helper')
+  const helperName = helperMatch[1]!
+  const helperAt = helperMatch.index
+  // The two re-checks must live in the helper's OWN BODY. A neighbourhood search
+  // is not enough: moving the transition check out of the helper (but keeping it
+  // nearby) leaves the guard call intact while the guard stops checking the
+  // transition. So the arrow function's matched braces are resolved exactly.
+  // The body starts at the `{` that closes the arrow signature — located by
+  // SEARCHING forward from the match, never by arithmetic on the match length.
+  const bodyStart = helperAt + helperMatch[0].length - 1
+  assert.equal(intake[bodyStart], '{', 'the helper body must start at its opening brace')
+  let depth = 0
+  let bodyEnd = -1
+  for (let index = bodyStart; index < intake.length; index += 1) {
+    const char = intake[index]
+    if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) { bodyEnd = index + 1; break }
+    }
+  }
+  assert.ok(bodyEnd > bodyStart, `the ${helperName}() body must be a balanced function body`)
+  const helperBody = intake.slice(bodyStart, bodyEnd)
   assert.ok(/runner\.sessionTransitionPending\(\)/.test(helperBody),
-    'the post-read fence helper must re-check the transition gate')
+    `the ${helperName}() body must itself re-check the transition gate`)
   assert.ok(/runner\.isSessionScopeCurrent\(/.test(helperBody),
-    'the post-read fence helper must re-check the session owner')
-  const helperName = postReadFence[1]!
+    `the ${helperName}() body must itself re-check the session owner`)
+  assert.ok(/target\.seatCurrent\(\)/.test(helperBody),
+    `the ${helperName}() body must itself re-check the seat`)
   const reads = Array.from(intake.matchAll(/await (readImageFile|probeAttachment)\([^\n]*\)\n/g))
   assert.equal(reads.length, 2,
     'the intake performs exactly two reads: the shared image read and the probe')
