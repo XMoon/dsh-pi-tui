@@ -48,7 +48,7 @@ import {
   CHART_TOOL_NAME,
   PRESENT_VISUAL_TOOL_NAME,
   SVG_TOOL_NAME,
-} from '../../src/app/host/visual-tools.ts'
+} from '../../src/domain/visual/tools.ts'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'

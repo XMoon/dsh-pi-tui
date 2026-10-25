@@ -33,7 +33,7 @@ import {
   CHART_TOOL_NAME,
   PRESENT_VISUAL_TOOL_NAME,
   SVG_TOOL_NAME,
-} from '../../src/app/host/visual-tools.ts'
+} from '../../src/domain/visual/tools.ts'
 import { VISUAL_TOOLS_STATUS_SERVICE } from '../../src/domain/visual/runtime-status.ts'
 import {
   mountVisualToolsSettingsPlane,

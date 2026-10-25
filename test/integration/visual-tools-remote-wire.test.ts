@@ -32,7 +32,10 @@ import { createRemoteClientRuntime } from '../../src/app/remote/client-runtime.t
 import { createRemoteHostRuntime } from '../../src/app/remote/host-runtime.ts'
 import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
-import { CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../src/app/host/visual-tools.ts'
+import {
+  CHART_TOOL_NAME,
+  SVG_TOOL_NAME,
+} from '../../src/domain/visual/tools.ts'
 import {
   createRemoteApplicationHostFixture,
   testPromptSerializer,

@@ -16,13 +16,12 @@ import { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import ToolRuntime, { defineTool, renderToolsSdk, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { apply as applyVisualTools, Config } from '../../src/app/host/visual-tools.ts'
 import {
-  apply as applyVisualTools,
   CHART_TOOL_NAME,
-  Config,
   PRESENT_VISUAL_TOOL_NAME,
   SVG_TOOL_NAME,
-} from '../../src/app/host/visual-tools.ts'
+} from '../../src/domain/visual/tools.ts'
 import {
   VISUAL_TOOLS_STATUS_SERVICE,
   type VisualToolsRuntimeStatus,
