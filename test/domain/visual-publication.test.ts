@@ -19,7 +19,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgDigest, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { visualReference, visualReferenceLine } from '../../src/domain/visual/reference.ts'
-import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME } from '../../src/domain/visual/tools.ts'
+import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import {
   collectPublishedVisuals,
   collectVisualSources,
@@ -679,6 +679,112 @@ test('a flat-text visual result keeps prose that only looks like a machine line'
   assert.match(flat.text, /the chart was replaced/u)
   assert.match(flat.text, /visual-v1:\{"type":"chart"\}/u, 'the invalid fact body survives')
   assert.doesNotMatch(flat.text, /"series"/u, 'the VALID official fact line is still stripped')
+})
+
+test('a fact-SHAPED line that the official serializer could not produce stays human text', () => {
+  // Each line has the right KEYS and version but violates the official value
+  // rules, so it cannot be a machine block: a policy-replaced official result
+  // ending with such prose must keep it.
+  const malformed: readonly string[] = [
+    // chart: bad kind enum
+    'visual-v1:{"version":1,"type":"chart","kind":"pie","title":"t","series":[{"label":"a","value":1},{"label":"b","value":2}]}',
+    // chart: too few points
+    'visual-v1:{"version":1,"type":"chart","kind":"bars","title":"t","series":[{"label":"a","value":1}]}',
+    // chart: too many points
+    `visual-v1:{"version":1,"type":"chart","kind":"bars","title":"t","series":${JSON.stringify(Array.from({ length: 13 }, (_, index) => ({ label: `p${String(index)}`, value: index })))}}`,
+    // chart: empty title
+    'visual-v1:{"version":1,"type":"chart","kind":"bars","title":"   ","series":[{"label":"a","value":1},{"label":"b","value":2}]}',
+    // chart: non-finite value
+    'visual-v1:{"version":1,"type":"chart","kind":"bars","title":"t","series":[{"label":"a","value":1e999},{"label":"b","value":2}]}',
+    // chart: string value
+    'visual-v1:{"version":1,"type":"chart","kind":"bars","title":"t","series":[{"label":"a","value":"1"},{"label":"b","value":2}]}',
+    // chart: extra key
+    'visual-v1:{"version":1,"type":"chart","kind":"bars","title":"t","note":"x","series":[{"label":"a","value":1},{"label":"b","value":2}]}',
+    // chart: over-budget title
+    `visual-v1:{"version":1,"type":"chart","kind":"bars","title":"${'x'.repeat(101)}","series":[{"label":"a","value":1},{"label":"b","value":2}]}`,
+    // chart: missing series
+    'visual-v1:{"version":1,"type":"chart","kind":"bars","title":"t"}',
+    // svg: short digest
+    'visual-v1:{"version":1,"type":"svg","title":"t","description":"d","digest":"abc","bytes":10}',
+    // svg: missing digest
+    'visual-v1:{"version":1,"type":"svg","title":"t","description":"d","bytes":10}',
+    // svg: missing title
+    `visual-v1:{"version":1,"type":"svg","description":"d","digest":"${'a'.repeat(64)}","bytes":10}`,
+    // svg: over-budget bytes
+    `visual-v1:{"version":1,"type":"svg","title":"t","description":"d","digest":"${'a'.repeat(64)}","bytes":${String(128 * 1024 + 1)}}`,
+    // svg: negative bytes
+    `visual-v1:{"version":1,"type":"svg","title":"t","description":"d","digest":"${'a'.repeat(64)}","bytes":-1}`,
+    // svg: non-integer bytes
+    `visual-v1:{"version":1,"type":"svg","title":"t","description":"d","digest":"${'a'.repeat(64)}","bytes":1.5}`,
+    // unknown type
+    'visual-v1:{"version":1,"type":"heatmap","title":"t"}',
+    // wrong version
+    'visual-v1:{"version":2,"type":"chart","kind":"bars","title":"t","series":[{"label":"a","value":1},{"label":"b","value":2}]}',
+  ]
+  for (const line of malformed) {
+    const blocks: ContentBlock[] = [
+      { type: 'text', text: 'the fact was written by a human here' },
+      { type: 'text', text: line },
+    ]
+    const chart = humanFacingVisualResult({ toolName: CHART_TOOL_NAME, blocks, text: '' })
+    assert.equal(chart.blocks.length, 2, `a malformed fact line must stay human text: ${line}`)
+    assert.match(chart.text, /the fact was written by a human here/u, line)
+    const svg = humanFacingVisualResult({ toolName: SVG_TOOL_NAME, blocks, text: '' })
+    assert.equal(svg.blocks.length, 2, `a malformed fact line must stay human text for SVG too: ${line}`)
+  }
+
+  // Control: the SAME shape with valid values IS stripped, so the cases above
+  // cannot pass merely because nothing is ever stripped.
+  const valid = chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
+  const control = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [{ type: 'text', text: 'the chart was here' }, valid],
+    text: '',
+  })
+  assert.equal(control.blocks.length, 1, 'a VALID official fact line is still stripped')
+  assert.equal(control.text, 'the chart was here')
+})
+
+test('a VALID fact line for the WRONG tool stays human text', () => {
+  // Both lines are fully valid official facts, but each belongs to the OTHER
+  // tool. The tool-to-fact pairing is part of the identity, so neither may be
+  // stripped from the tool that cannot have produced it.
+  const chartFact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
+  const svgFact = svgContentBlocks(svgFactFromArgs(SVG_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
+
+  const chartOnSvg = humanFacingVisualResult({
+    toolName: SVG_TOOL_NAME,
+    blocks: [{ type: 'text', text: 'the svg body' }, chartFact],
+    text: '',
+  })
+  assert.equal(chartOnSvg.blocks.length, 2, 'a chart fact is never an SVG machine block')
+  assert.match(chartOnSvg.text, /the svg body/u)
+
+  const svgOnChart = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [{ type: 'text', text: 'the chart body' }, svgFact],
+    text: '',
+  })
+  assert.equal(svgOnChart.blocks.length, 2, 'an SVG fact is never a chart machine block')
+
+  // A receipt belongs only to the publication tool.
+  const receipt = 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"}]}'
+  for (const toolName of [CHART_TOOL_NAME, SVG_TOOL_NAME]) {
+    const onGenerator = humanFacingVisualResult({
+      toolName,
+      blocks: [{ type: 'text', text: `a receipt written by policy: ${toolName}` }, { type: 'text', text: receipt }],
+      text: '',
+    })
+    assert.equal(onGenerator.blocks.length, 2, `a receipt is not a ${toolName} machine block`)
+  }
+  // Control: the receipt on its OWN tool is stripped.
+  const ownReceipt = humanFacingVisualResult({
+    toolName: PRESENT_VISUAL_TOOL_NAME,
+    blocks: [{ type: 'text', text: 'Selected 1 visual for presentation.' }, { type: 'text', text: receipt }],
+    text: '',
+  })
+  assert.equal(ownReceipt.blocks.length, 1)
+  assert.equal(ownReceipt.text, 'Selected 1 visual for presentation.')
 })
 
 test('the human projection never touches another tool’s similar text', () => {
