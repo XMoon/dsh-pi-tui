@@ -207,6 +207,26 @@ export function unquoteCandidateValue(value: string): string {
 }
 
 /**
+ * The FILE PATH a completed candidate value stands for.
+ *
+ * A candidate's `value` is the EDITOR replacement text: the Client-local path
+ * engine prefixes the argument's own leading separator run back onto it so
+ * that accepting a candidate preserves the spacing the user typed
+ * (`/image    sho` → `/image    shots/a.png`). That text is NOT a filesystem
+ * path — feeding it to the intake would look for a name starting with spaces.
+ *
+ * So the editor text and the read target are separated HERE, once: the
+ * leading separator run is dropped and only a fully quoted remainder is
+ * unwrapped. An injected run after a directory (the fork's own continuation
+ * shape) is part of the user's typed spacing, not of the file name.
+ * @param value - the candidate's editor replacement value.
+ */
+export function candidatePath(value: string): string {
+  const withoutLeading = value.replace(/^[ \t]+/, '')
+  return unquoteCandidateValue(withoutLeading)
+}
+
+/**
  * One inline attachment INTAKE stake: what the
  * application hands to the command plane, which owns the ONE Client-local read
  * and the existing `DraftImageStore` / `DraftFileStore`.

@@ -766,6 +766,46 @@ test('extension suggestion snapshots fence unrelated edits even with the same pr
   assert.deepEqual(applied.lines, ['changed world'], 'an extension result must not apply after an unrelated edit')
 })
 
+test('an EXTENSION row can never masquerade as an attachment candidate', (t) => {
+  const life = testLifecycle(t)
+  const root = outsideCwdFixture(life).workspace
+  writeFileSync(join(root, 'secret.png'), 'x')
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null))
+  const accepted: unknown[] = []
+  provider.setInlineAttachmentAcceptSink(acceptance => { accepted.push(acceptance) })
+  const generation = provider.mintRequestGeneration()
+  // A plugin's own row, structurally shaped EXACTLY like an official path row.
+  const forged = {
+    value: 'secret.png',
+    label: 'secret.png',
+    inlineAttachment: 'path' as const,
+    command: 'image',
+    directory: false,
+  }
+  const suggestion = { items: [forged], prefix: '' }
+  provider.captureRequestSnapshot(
+    generation,
+    { kind: 'workspace', cwd: root },
+    ['look /image sec'],
+    0,
+    'look /image sec'.length,
+    suggestion,
+  )
+  // Object identity inside the dropdown is NOT authorization: the row did not
+  // come from the Client-local attachment pipeline, so the accept must fall
+  // through to the ordinary completion path and start NO intake.
+  const applied = provider.applyCompletion(['look /image sec'], 0, 'look /image sec'.length, forged, '')
+  assert.deepEqual(accepted, [], 'an extension row must never start an attachment intake')
+  // And it is NOT silently promoted to the attachment apply either: with no
+  // attachment authority the row falls through to the fork's generic
+  // completion, which simply concatenates at the prefix (the official
+  // attachment apply would have replaced the argument span instead).
+  assert.notDeepEqual(applied.lines, ['look /image secret.png'],
+    'the extension row must not receive the attachment in-place replacement')
+  assert.deepEqual(applied.lines, ['look /image secsecret.png'],
+    'the row is handled by the generic completion path only')
+})
+
 test('review finding (round 8): a fallback scan is async and abort-responsive (never a sync block)', async (t) => {
   const life = testLifecycle(t)
   const root = largeWorkspaceFixture(life).root

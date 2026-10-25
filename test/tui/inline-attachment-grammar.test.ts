@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   INLINE_ATTACHMENT_ACTIONS,
+  candidatePath,
   applyInlineAttachmentAction,
   applyInlineAttachmentPath,
   isInlineAttachmentAction,
@@ -201,4 +202,19 @@ test('a SHELL document never yields an attachment seat (the shell plane owns it)
     'none',
     'a prompt-mode buffer holding the literal `!` wire form is classified as shell by its caller',
   )
+})
+
+test('the read path never inherits the editor replacement spacing', () => {
+  // The Client-local path engine prefixes the argument's leading separator run
+  // back onto a candidate so the accepted TEXT preserves the user's spacing.
+  // That text is an editor replacement, never a filesystem path.
+  assert.equal(candidatePath('   shot.png'), 'shot.png', 'an injected multi-space run is not part of the name')
+  assert.equal(candidatePath('\tshot.png'), 'shot.png', 'a tab separator is not part of the name')
+  assert.equal(candidatePath('shot.png'), 'shot.png', 'an unspaced value is unchanged')
+  // A quoted value keeps the quote contract, applied AFTER the spacing is gone.
+  assert.equal(candidatePath('   "my file.png"'), 'my file.png')
+  assert.equal(candidatePath(' '), '', 'a spacing-only value has no path')
+  // A directory continuation value keeps its own trailing separator (it is the
+  // editor text for the NEXT seat, and directories are never read).
+  assert.equal(candidatePath('   sub/'), 'sub/')
 })
