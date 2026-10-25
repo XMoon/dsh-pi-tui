@@ -463,7 +463,15 @@ function main() {
             + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
             + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL');"
             + "if (m[6].name !== 'pi-tui-performance-host') throw new Error('performance-host row');"
-            + "if (m[7].name !== 'pi-tui-visual-tools') throw new Error('visual-tools row'); console.log('imports-ok') })"
+            + "if (m[7].name !== 'pi-tui-visual-tools') throw new Error('visual-tools row');"
+            // The Loader row has PUBLICLY exported these two tool names since it
+            // shipped; dropping them would break a published entry, so the packed
+            // package must keep them.
+            + "if (m[7].CHART_TOOL_NAME !== 'dsh_pi_tui_chart') throw new Error('CHART_TOOL_NAME');"
+            + "if (m[7].SVG_TOOL_NAME !== 'dsh_pi_tui_svg') throw new Error('SVG_TOOL_NAME');"
+            + "if (typeof m[7].apply !== 'function') throw new Error('visual-tools apply');"
+            + "if (!Array.isArray(m[7].inject)) throw new Error('visual-tools inject');"
+            + "console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })
         check('all exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),

@@ -110,8 +110,29 @@ function codePointLength(text: string): number {
   return count
 }
 
-function isBoundedText(value: unknown, max: number): boolean {
+/**
+ * Whether one string is a NON-EMPTY string within the official code-point
+ * budget.
+ *
+ * This deliberately mirrors the official serializers' rule EXACTLY: they reject
+ * the empty string, never a whitespace-only one (`chartCoreProblem` accepts
+ * `unit: " "` and `label: " "`, and `svgArgsShapeProblem` uses `trim()` only for
+ * the title/description it requires to be meaningful). A filter that were
+ * stricter than the serializer would fail to recognise a fact the tool really
+ * produced and leak the machine line into human-facing output.
+ */
+/**
+ * Whether one string is a MEANINGFUL bounded text.
+ *
+ * The chart title and the SVG title/description are the official serializers'
+ * `trim() !== ''` fields, so they keep the stricter rule.
+ */
+function isOfficialMeaningfulText(value: unknown, max: number): boolean {
   return typeof value === 'string' && value.trim() !== '' && codePointLength(value) <= max
+}
+
+function isOfficialNonEmptyText(value: unknown, max: number): boolean {
+  return typeof value === 'string' && value !== '' && codePointLength(value) <= max
 }
 
 /**
@@ -137,22 +158,22 @@ export function parseOfficialFactBlock(text: string): { readonly type: 'chart' |
   if (parsed.type === 'chart') {
     if (!hasOnlyKeys(parsed, ['version', 'type', 'kind', 'title', 'unit', 'series'])) return undefined
     if (typeof parsed.kind !== 'string' || !CHART_KINDS.has(parsed.kind)) return undefined
-    if (!isBoundedText(parsed.title, FACT_LIMITS.chartMaxTitleCodePoints)) return undefined
-    if (parsed.unit !== undefined && !isBoundedText(parsed.unit, FACT_LIMITS.chartMaxUnitCodePoints)) return undefined
+    if (!isOfficialMeaningfulText(parsed.title, FACT_LIMITS.chartMaxTitleCodePoints)) return undefined
+    if (parsed.unit !== undefined && !isOfficialNonEmptyText(parsed.unit, FACT_LIMITS.chartMaxUnitCodePoints)) return undefined
     if (!Array.isArray(parsed.series)) return undefined
     const series = parsed.series as unknown[]
     if (series.length < 2 || series.length > FACT_LIMITS.chartMaxPoints) return undefined
     for (const point of series) {
       if (!isRecord(point) || !hasOnlyKeys(point, ['label', 'value'])) return undefined
-      if (!isBoundedText(point.label, FACT_LIMITS.chartMaxLabelCodePoints)) return undefined
+      if (!isOfficialNonEmptyText(point.label, FACT_LIMITS.chartMaxLabelCodePoints)) return undefined
       if (typeof point.value !== 'number' || !Number.isFinite(point.value)) return undefined
     }
     return { type: 'chart' }
   }
   if (parsed.type === 'svg') {
     if (!hasOnlyKeys(parsed, ['version', 'type', 'title', 'description', 'digest', 'bytes'])) return undefined
-    if (!isBoundedText(parsed.title, FACT_LIMITS.svgMaxTitleCodePoints)) return undefined
-    if (!isBoundedText(parsed.description, FACT_LIMITS.svgMaxDescriptionCodePoints)) return undefined
+    if (!isOfficialMeaningfulText(parsed.title, FACT_LIMITS.svgMaxTitleCodePoints)) return undefined
+    if (!isOfficialMeaningfulText(parsed.description, FACT_LIMITS.svgMaxDescriptionCodePoints)) return undefined
     if (typeof parsed.digest !== 'string' || !DIGEST_PATTERN.test(parsed.digest)) return undefined
     if (typeof parsed.bytes !== 'number' || !Number.isSafeInteger(parsed.bytes)) return undefined
     if (parsed.bytes < 0 || parsed.bytes > FACT_LIMITS.svgMaxSourceBytes) return undefined

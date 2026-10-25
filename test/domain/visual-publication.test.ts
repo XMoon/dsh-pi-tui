@@ -16,14 +16,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src/domain/visual/chart.ts'
-import { svgContentBlocks, svgDigest, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
+import { chartArgsProblem, chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src/domain/visual/chart.ts'
+import { svgArgsProblem, svgContentBlocks, svgDigest, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { visualReference, visualReferenceLine } from '../../src/domain/visual/reference.ts'
 import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import {
   collectPublishedVisuals,
   collectVisualSources,
   decidePublication,
+  parsePresentVisualArguments,
   humanFacingVisualResult,
   parsePublicationReceipt,
   VISUAL_PUBLISHED_PREFIX,
@@ -63,6 +64,14 @@ class LogBuilder {
     const seq = this.seq
     this.seq += 1
     this.log.push({ ...event, seq } as VisualSessionEvent)
+    return seq
+  }
+
+  /** Append one raw event (used for shapes the builder has no dedicated verb for). */
+  appendRaw(event: { readonly type: string; readonly data: unknown; readonly surfaceOp?: unknown }): number {
+    const seq = this.seq
+    this.seq += 1
+    this.log.push({ ...event, seq } as unknown as VisualSessionEvent)
     return seq
   }
 
@@ -495,6 +504,73 @@ test('repeated publications keep the FIRST successful occurrence of one referenc
   assert.equal(published[0]?.callId, 'present-1')
 })
 
+// ── model-only surface replacements (the compaction pruner) ────────────────
+
+/**
+ * Extend the builder with one MODEL-ONLY `tool/result` replacement: the exact
+ * shape the official `ToolResultPruner` appends (`...event.data`, marked
+ * `surfaceOp: { op: 'replace' }`, citing the shadowed node).
+ */
+function appendReplacement(
+  log: LogBuilder,
+  turn: number,
+  step: number,
+  callId: string,
+  content: readonly ContentBlock[],
+): void {
+  log.appendRaw({
+    type: 'tool/result',
+    data: { turn, step, message: { toolCallId: callId, content, isError: false } },
+    surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 } as never,
+  })
+}
+
+test('a model-only pruner replacement never retracts an accepted publication', () => {
+  const log = new LogBuilder().turnStart(1)
+  const { ref } = log.generate(1, 0, 'call-chart', 'chart')
+  log.stepEnd(1, 0)
+  log.publish(1, 1, 'call-present', [ref])
+  log.stepEnd(1, 1)
+  // The compaction pruner rewrites the MODEL-facing copy of the chart result:
+  // same turn/step/callId, marked as a surface replacement.
+  appendReplacement(log, 1, 0, 'call-chart', [
+    { type: 'text', text: 'Request latency (ms)\np50  42 ms\n[pruned]' },
+  ])
+  log.turnEnd(1)
+  const events = log.events()
+  // The append-origin source is still the authority.
+  const sources = collectVisualSources(SESSION, events)
+  assert.equal(sources.length, 1, 'the replacement is NOT a second durable result')
+  assert.equal(sources[0]?.ref, ref)
+  // The already-accepted publication still replays.
+  const published = collectPublishedVisuals(SESSION, events)
+  assert.equal(published.length, 1, 'a pruner rewrite never retracts a publication')
+  assert.equal(published[0]?.ref, ref)
+})
+
+test('a replacement-only log still yields no source, and an unmarked duplicate is still ambiguous', () => {
+  // A replacement with no append-origin fact behind it proves nothing.
+  const replacedOnly = new LogBuilder().turnStart(1)
+  replacedOnly.call(1, 0, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS)
+  replacedOnly.turnEnd(1)
+  const tuple = { turn: 1, stepStartSeq: 0, callId: 'call-chart' }
+  void tuple
+  assert.deepEqual(collectVisualSources(SESSION, replacedOnly.events()), [])
+
+  // An UNMARKED second result is not a replacement marker and stays ambiguous.
+  const unmarked = new LogBuilder().turnStart(1)
+  const generated = unmarked.generate(1, 0, 'dup', 'chart')
+  const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
+  unmarked.result(1, 0, 'dup', [
+    blocks[0] as ContentBlock,
+    { type: 'text', text: visualReferenceLine(generated.ref) },
+    blocks[1] as ContentBlock,
+  ])
+  unmarked.turnEnd(1)
+  assert.deepEqual(collectVisualSources(SESSION, unmarked.events()), [],
+    'absence of the replacement marker is never treated as a rewrite')
+})
+
 // ── the live decision ──────────────────────────────────────────────────────
 
 test('the live decision accepts an earlier-step committed source', () => {
@@ -560,11 +636,26 @@ test('the live decision refuses duplicated refs, an unknown ref and a missing pu
   const { tuple } = log.publish(1, 1, 'present', [ref])
   const base = { sessionId: SESSION, events: log.events(), turn: tuple.turn, stepStartSeq: tuple.stepStartSeq, callId: tuple.callId }
 
+  // A caller-supplied list that disagrees with the DURABLE arguments is refused
+  // before any identity work: the log owns what was requested.
   const duplicated = decidePublication({ ...base, refs: [ref, ref] })
   assert.equal(duplicated.ok, false)
-  assert.match(duplicated.ok ? '' : duplicated.reason, /same visual ref twice/u)
+  assert.match(duplicated.ok ? '' : duplicated.reason, /disagree with the durable/u)
 
-  const unknown = decidePublication({ ...base, refs: ['sv1_00000000000000000000'] })
+  // An UNKNOWN ref is a ref the durable call really requested but no committed
+  // source owns: the durable arguments carry it, so the identity check runs.
+  const unknownLog = new LogBuilder().turnStart(1)
+  unknownLog.generate(1, 0, 'chart', 'chart')
+  unknownLog.stepEnd(1, 0)
+  const unknownTuple = unknownLog.publish(1, 1, 'present', ['sv1_00000000000000000000'])
+  const unknown = decidePublication({
+    sessionId: SESSION,
+    events: unknownLog.events(),
+    refs: ['sv1_00000000000000000000'],
+    turn: unknownTuple.tuple.turn,
+    stepStartSeq: unknownTuple.tuple.stepStartSeq,
+    callId: unknownTuple.tuple.callId,
+  })
   assert.equal(unknown.ok, false)
   assert.match(unknown.ok ? '' : unknown.reason, /unknown visual ref/u)
 
@@ -574,6 +665,59 @@ test('the live decision refuses duplicated refs, an unknown ref and a missing pu
 
   const empty = decidePublication({ ...base, refs: [] })
   assert.equal(empty.ok, false)
+})
+
+// ── the ONE argument contract (live and replay) ────────────────────────────
+
+test('the shared argument contract refuses every non-official document', () => {
+  const ok = 'sv1_0123456789abcdef0123'
+  assert.deepEqual(parsePresentVisualArguments({ visuals: [{ ref: ok }] }), { ok: true, refs: [ok] })
+  const rejected: readonly unknown[] = [
+    {},
+    { visuals: [] },
+    { visuals: [{ ref: ok }], extra: 1 },
+    { visuals: [{ ref: ok, note: 'diagram' }] },
+    { visuals: [{ ref: ok }, { ref: ok }] },
+    { visuals: [{ ref: 'not-a-ref' }] },
+    { visuals: [{ ref: ok.toUpperCase() }] },
+    { visuals: [ok] },
+    { visuals: Array.from({ length: 9 }, (_, index) => ({ ref: `sv1_${String(index).padStart(20, '0')}` })) },
+    [{ visuals: [{ ref: ok }] }],
+    null,
+  ]
+  for (const document of rejected) {
+    const decision = parsePresentVisualArguments(document)
+    assert.equal(decision.ok, false, `must refuse: ${JSON.stringify(document)}`)
+  }
+})
+
+test('a successful live receipt always parses back from its DURABLE arguments', () => {
+  // The durable arguments are the authority: a body that accepted a document
+  // the replay parser would reject cannot exist, because both call the same
+  // function. This case pins the round trip on a real accepted publication.
+  const log = new LogBuilder().turnStart(1)
+  const { ref } = log.generate(1, 0, 'chart', 'chart')
+  log.stepEnd(1, 0)
+  const { tuple } = log.publish(1, 1, 'present', [ref])
+  log.turnEnd(1)
+  const events = log.events()
+  const call = events.find((event): event is Extract<VisualSessionEvent, { type: 'tool/call' }> =>
+    event.type === 'tool/call' && event.data.callId === 'present')
+  assert.ok(call !== undefined)
+  const parsed = parsePresentVisualArguments(JSON.parse(call.data.arguments))
+  assert.equal(parsed.ok, true)
+  assert.deepEqual(parsed.ok ? [...parsed.refs] : [], [ref])
+  const decision = decidePublication({
+    sessionId: SESSION,
+    events,
+    refs: [ref],
+    turn: tuple.turn,
+    stepStartSeq: tuple.stepStartSeq,
+    callId: tuple.callId,
+  })
+  assert.equal(decision.ok, true, decision.ok ? '' : decision.reason)
+  // And the REPLAY of the same log reports exactly that publication.
+  assert.equal(collectPublishedVisuals(SESSION, events).length, 1)
 })
 
 // ── the receipt parser ─────────────────────────────────────────────────────
@@ -899,4 +1043,60 @@ test('the human projection keeps a failed visual result’s readable reason', ()
     text: 'unknown visual ref sv1_0123456789abcdef0123',
   })
   assert.equal(human.text, 'unknown visual ref sv1_0123456789abcdef0123')
+})
+
+test('the readable filter recognises EVERY fact the official serializer can emit', () => {
+  // The filter must never be STRICTER than the serializer: a fact the tools
+  // really produced has to be recognised, or its machine lines leak into the
+  // folded preview, search and the readable export.
+  const accepted: readonly ChartArgs[] = [
+    // whitespace-only unit: the official rule is `unit !== ''`.
+    { kind: 'bars', title: 'A', unit: ' ', series: [{ label: 'p', value: 1 }, { label: 'q', value: 2 }] },
+    // whitespace-only label: the official rule is `label !== ''`.
+    { kind: 'spark', title: 'B', series: [{ label: ' ', value: 1 }, { label: '  ', value: -2 }] },
+    // A title that is meaningful but padded (the official check trims it).
+    { kind: 'bars', title: '  padded  ', series: [{ label: 'a', value: 0 }, { label: 'b', value: 0 }] },
+    // The exact minimum and maximum point counts.
+    { kind: 'bars', title: 'min', series: [{ label: 'a', value: 1 }, { label: 'b', value: 2 }] },
+    {
+      kind: 'spark',
+      title: 'max',
+      series: Array.from({ length: 12 }, (_, index) => ({ label: `p${String(index)}`, value: index })),
+    },
+    // Negative and zero values.
+    { kind: 'bars', title: 'neg', series: [{ label: 'a', value: -1 }, { label: 'b', value: 0 }] },
+  ]
+  for (const args of accepted) {
+    // The OFFICIAL validator must accept it...
+    assert.equal(chartArgsProblem(args), undefined, `the official validator rejects ${JSON.stringify(args)}`)
+    // ...and so must the filter.
+    const fact = chartFactFromArgs(args)
+    const blocks = chartContentBlocks(fact)
+    const projected = humanFacingVisualResult({
+      toolName: CHART_TOOL_NAME,
+      blocks: [
+        blocks[0] as ContentBlock,
+        { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
+        blocks[1] as ContentBlock,
+      ],
+      text: '',
+    })
+    assert.equal(projected.blocks.length, 1, `the filter failed to recognise ${JSON.stringify(args)}`)
+    assert.doesNotMatch(projected.text, /visual-(?:ref|v1):/u, `machine text leaked for ${JSON.stringify(args)}`)
+  }
+
+  // The SVG side: whitespace-padded but meaningful title/description.
+  const svgArgs = { title: ' T ', description: ' D ', svg: SVG_SOURCE }
+  assert.equal(svgArgsProblem(svgArgs), undefined, 'the official validator accepts padded text')
+  const svgBlocks = svgContentBlocks(svgFactFromArgs(svgArgs))
+  const svgProjected = humanFacingVisualResult({
+    toolName: SVG_TOOL_NAME,
+    blocks: [
+      svgBlocks[0] as ContentBlock,
+      { type: 'text', text: visualReferenceLine('sv1_0123456789abcdef0123') },
+      svgBlocks[1] as ContentBlock,
+    ],
+    text: '',
+  })
+  assert.equal(svgProjected.blocks.length, 1, 'the filter recognises the padded SVG credential')
 })
