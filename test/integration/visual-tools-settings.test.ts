@@ -205,7 +205,10 @@ test('a persisted Off survives a Host restart with no tools registered and no ot
   expectVisualState(second.port, { enabled: false, userOverridden: true, applied: false })
   assert.equal(second.ctx.tools.get(CHART_TOOL_NAME), undefined)
   assert.equal(second.ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.equal(second.ctx.tools.get(PRESENT_VISUAL_TOOL_NAME), undefined)
   assert.deepEqual(second.ctx.tools.schemas(), [])
+  assert.equal((second.ctx.get(VISUAL_TOOLS_STATUS_SERVICE) as { applied(): boolean }).applied(), false,
+    'the restarted row reports the truth: it owns no registration')
 
   // Only the visual-tools entry carries the profile write: the TUI settings
   // document and every other namespace stay untouched.
