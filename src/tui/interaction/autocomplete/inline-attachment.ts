@@ -138,13 +138,22 @@ export function splitTokenRemainder(
   /** The value being accepted: the unquoted boundary is derived from it, never
    *  from a character allowlist. */
   accepted = '',
+  /** Whether the caret sits inside an existing token (the seat's argument before
+   *  the caret is non-empty). At an EMPTY seat nothing may be consumed. */
+  caretInsideToken = false,
 ): { consumed: string; suffix: string } {
   if (!quoted) {
-    // Unquoted: the token cannot be described by a character allowlist (a POSIX
-    // filename may contain Unicode, `#`, `+`, …). What IS authoritative is the
-    // accepted VALUE: the part of the line the caret is inside must be a PREFIX
-    // of that value, so the remainder is whatever completes the same value.
+    // An UNQUOTED token's end cannot be inferred from characters, and it must
+    // not be inferred from "the text right of the caret happens to be a suffix
+    // of the accepted name" either: `请看 /image |png为什么失败` completed with
+    // `shot.png` would then delete the user's own `png`, because `png` IS a
+    // suffix of `shot.png` while being ordinary prose.
+    //
+    // The only sound fact is whether the caret sits INSIDE a token at all, which
+    // the caller establishes from the seat (the argument before the caret is
+    // non-empty). At an EMPTY seat the text to the right is prose, full stop.
     if (afterCursor === '' || /^\s/.test(afterCursor)) return { consumed: '', suffix: afterCursor }
+    if (!caretInsideToken) return { consumed: '', suffix: afterCursor }
     const typed = acceptedRemainderLength(afterCursor, accepted)
     if (typed > 0) return { consumed: afterCursor.slice(0, typed), suffix: afterCursor.slice(typed) }
     return { consumed: '', suffix: afterCursor }
@@ -250,17 +259,38 @@ export function applyInlineAttachmentPath(
   cursorCol: number,
   cursorLine: number,
   value: string,
+  /** Whether this accept COMPLETES the argument (a file). A directory only
+   *  continues the same seat, so it must not append a terminating separator. */
+  terminal = true,
 ): { line: string; cursorCol: number; span: InlineAttachmentSpan } {
   const start = seat.range.start
-  // The remainder of the token being completed (`t"` inside `"shot|t"`, or a
-  // half-typed CJK filename) belongs to the replaced fragment; the prose after
-  // it is preserved verbatim. Quoting comes from the SEAT, i.e. from the path
-  // grammar's own state — never guessed from characters.
+  // The accepted candidate is a COMPLETE token, so the accept always ends it
+  // with one separating space. That is what keeps the following prose apart
+  // without guessing where the old token stopped: whatever is left of the line
+  // after the caret is carried over verbatim, and the space guarantees the
+  // placeholder can never be glued to it. A quote the value itself closes takes
+  // the space AFTER the quote (`"my file name.png" `), never inside it.
   const quoted = isOpenQuotedToken(seat.argument ?? '')
-  const { suffix } = splitTokenRemainder(line.slice(cursorCol), quoted, unquoteCandidateValue(value))
-  // The argument's separator belongs to the fragment and is replaced with the
-  // token, so prose that continues right after it must not touch the token.
-  const trailing = suffix !== '' && !/^\s/.test(suffix) ? ' ' : ''
+  const tail = line.slice(cursorCol)
+  // A caret INSIDE an existing token still has to consume that token's own
+  // remainder (`文|件.png`), which the seat proves: it already holds an
+  // argument before the caret. At an EMPTY seat the tail is prose, untouched.
+  // The seat's argument is the text BEFORE the caret only: an EMPTY argument
+  // means the caret sits at the seat's first column, so the text to its right is
+  // the user's prose (even when a Tab-triggered list made the provider read that
+  // prose as a query).
+  const argumentBeforeCaret = (seat.argument ?? '').replace(/^[ \t]+/, '')
+  // Inside a token, the accept replaces that ENTIRE token, so the remainder is
+  // everything up to the next separator — not just the part that happens to
+  // match the new value. Otherwise switching `shot.txt` → `shot.png` would
+  // leave `txt` behind as stray prose.
+  const remainder = quoted
+    ? { consumed: tail.slice(0, tail.indexOf('"') === -1 ? tail.length : tail.indexOf('"') + 1) }
+    : { consumed: argumentBeforeCaret === '' ? '' : (/^[^ \t]*/.exec(tail)?.[0] ?? '') }
+  const suffix = tail.slice(remainder.consumed.length)
+  // ONE separating space ends the accepted token, so the placeholder can never
+  // touch whatever follows it.
+  const trailing = terminal && !/^[ \t]/.test(suffix) ? ' ' : ''
   const end = start + value.length
   return {
     line: `${line.slice(0, start)}${value}${trailing}${suffix}`,

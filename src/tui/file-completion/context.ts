@@ -240,11 +240,17 @@ export function pathArgumentSeat(
     }
     const command = textBeforeCursor.slice(index + 1, end)
     if (command === '' || !pathArgumentCommands.has(command)) continue
-    // The argument is everything after the FIRST separator character after
-    // the command name; a multi-space separator belongs to the argument (the
-    // fork's legacy argument apply replaces the whole range, so keeping the
-    // leftover whitespace in the value preserves the separator count).
+    // The argument is everything after the FIRST separator character after the
+    // command name; a multi-space separator belongs to the argument (the fork's
+    // legacy argument apply replaces the whole range, so keeping the leftover
+    // whitespace in the value preserves the separator count).
+    //
+    // The separator MUST be whitespace: `/image/foo` and `/attach/foo` are
+    // ordinary paths, not a declared command followed by an argument —
+    // accepting a `/` there would turn any path segment into an attachment
+    // seat.
     const separator = textBeforeCursor[end]
+    if (separator !== undefined && !isWhitespaceChar(separator)) continue
     last = separator === undefined
       ? { command, commandStart: index, argumentStart: undefined }
       : { command, commandStart: index, argumentStart: end + 1 }
