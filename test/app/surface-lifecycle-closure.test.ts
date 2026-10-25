@@ -1348,9 +1348,10 @@ function settingsWorkspaceSource(): SettingsWorkspaceSource {
       rows: [
         { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette', action: 'inspect' },
         { id: 'icon-style', category: 'appearance', label: 'Icon style', summary: 'emoji', value: 'emoji', scope: 'TUI settings document', freshness: 'ready', description: 'icons', action: 'inspect' },
+        { id: 'footer-settings-legacy', category: 'appearance', label: 'Footer & status line…', summary: 'Existing settings editor', scope: 'Existing settings editor', freshness: 'ready', description: 'legacy', action: 'open-legacy', legacyTargetId: 'footer' },
         { id: 'display-preset', category: 'conversation', label: 'Transcript display', summary: 'full', value: 'full', scope: 'Client runtime', freshness: 'runtime', description: 'display', action: 'inspect' },
         { id: 'thinking', category: 'conversation', label: 'Thinking detail', summary: 'collapsed', value: 'collapsed', scope: 'Current TUI display state', freshness: 'runtime', description: 'thinking', action: 'inspect' },
-        { id: 'agent-settings-legacy', category: 'agent', label: 'Agent settings…', summary: 'Existing settings editor', scope: 'Existing settings editor', freshness: 'ready', description: 'legacy', action: 'open-legacy', legacyTargetId: 'default-permission' },
+        { id: 'default-permission', category: 'agent', label: 'Default permission', summary: 'workspace-write', value: 'workspace-write', scope: 'DSH Host profile · permission default for new sessions', freshness: 'ready', description: 'permission default', action: 'inspect' },
       ],
     }),
   }
@@ -1468,13 +1469,16 @@ test('a legacy handoff that loses the surface to a NEWER workspace never mounts 
   })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
-  // Wide (80x24): the About home -> Agent -> rows -> activate the row.
-  // The rail order is About, Models, Account, Agent, ...: three Down presses
-  // reach the transition launcher row.
-  for (let step = 0; step < 3; step += 1) {
+  // Wide (80x24): the About home -> Appearance -> rows -> its transition
+  // launcher. The rail order is About, Models, Account, Agent, Appearance, ...
+  // and the launcher is the LAST Appearance row (Theme, Icon style, launcher).
+  for (let step = 0; step < 4; step += 1) {
     vt.sendInput('\x1b[B'); await vt.waitForRender()
   }
   vt.sendInput('\r'); await vt.waitForRender()
+  for (let step = 0; step < 2; step += 1) {
+    vt.sendInput('\x1b[B'); await vt.waitForRender()
+  }
   vt.sendInput('\r'); await vt.waitForRender()
   assert.equal(innerOpened, true, 'the close callback really leased a newer workspace')
   assert.equal(legacyOpens, 0, 'the stale intent must not open the legacy editor')
@@ -1595,13 +1599,15 @@ test('a legacy handoff never crosses a blocking owner started by its own close',
     },
   })
   await vt.waitForRender()
-  // Wide (80x24): the About home -> Agent -> rows -> activate the row.
-  // The rail order is About, Models, Account, Agent, ...: three Down presses
-  // reach the transition launcher row.
-  for (let step = 0; step < 3; step += 1) {
+  // Wide (80x24): the About home -> Appearance -> rows -> its transition
+  // launcher (the last Appearance row). Agent has no launcher any more.
+  for (let step = 0; step < 4; step += 1) {
     vt.sendInput('\x1b[B'); await vt.waitForRender()
   }
   vt.sendInput('\r'); await vt.waitForRender()
+  for (let step = 0; step < 2; step += 1) {
+    vt.sendInput('\x1b[B'); await vt.waitForRender()
+  }
   vt.sendInput('\r'); await vt.waitForRender()
   assert.ok(question !== undefined, 'the close callback really started a blocking owner')
   assert.equal(legacyOpens, 0, 'the handoff must not cross the new blocking owner')

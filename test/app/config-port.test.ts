@@ -902,6 +902,13 @@ test('permissions read names and the effective default, and persist the default'
   assert.equal(port({}).permissions.defaultPreset(), undefined, 'no service -> no default')
 })
 
+test('permissions setDefaultPreset WITHOUT a settings service rejects instead of silently succeeding', async () => {
+  // C2-R3: a missing settings service used to be a silent no-op, which let the
+  // Settings workspace report a Verified write that never reached the Host.
+  const permissions = port({ permissionPresets: { get names() { return ['workspace-write'] } } }).permissions
+  await assert.rejects(() => permissions.setDefaultPreset('workspace-write'), /settings service unavailable/u)
+})
+
 test('applyPermissionPreset runs the OFFICIAL command line through the resolved agent with the caller signal', async () => {
   const executed: Array<{ line: string; signal: AbortSignal }> = []
   const permissions = port({

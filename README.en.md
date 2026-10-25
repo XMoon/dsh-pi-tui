@@ -536,13 +536,41 @@ terminal-native protocols (OSC 9;4 / OSC 7501) and is independent of the `Progre
 narration cadence, while a legacy `on` value is normalized on READ and never written back without
 confirmation.
 
+`/settings → Agent` now edits five settings in place, in this frozen order:
+`Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
+`Subagent model selection` → `User shell sandbox policy`. Each one has exactly one authority and
+the five are never conflated. `Approval policy` is the official override of the CURRENT session:
+the workspace captures that session once on open and never re-targets a later one (the Confirm is
+refused synchronously and reopening Settings is what speaks about the new session); its `Persisted`
+fact says `not applicable — current session only`, while a separate `Runtime` fact states whether
+the next approval uses the session override or the consumer's own `ask` fallback. `Default
+permission` is the Host's `permission.defaultPreset`: its candidates are the Host-advertised raw
+preset ids, it applies to NEW sessions only (the running session's preset, sandbox and approval
+knobs are untouched), and a failed or unconfirmed Host read is never shown as `Verified`; a Host
+port without a settings service refuses explicitly instead of succeeding as a no-op. `Subagent
+allowed models` opens the existing searchable multi-select list through `Manage allowed models…`
+inside the SAME workspace lease (same grouping, filtering, scrolling and `Enter toggle`), where
+`Esc` returns to the Agent rows rather than leaving Settings; `Subagent model selection` is that
+official section's `enabled` — enabling with no allowed route performs ZERO writes, states the
+guidance and moves the selection to the allowed-models row, while disabling keeps every saved
+route. Both subagent surfaces share ONE write queue with the legacy editor, and each action writes
+only its own half (the picker writes the allowed-route list, the toggle writes `enabled`) while the
+other half is re-read from the official section when its turn comes — so an earlier slow write is
+never overwritten by a later stale snapshot. `User shell sandbox policy` is stored in the TUI settings
+document: `Value` is the raw stored value (a missing, illegal or unreadable one is stated as such),
+`Runtime` names what the next `!`/`!!` really does (including "no valid saved value, default
+bypass"), and only an agreed read-back is `Verified`. It is the Host user-shell execution policy,
+not the model's tool sandbox policy and not a permission preset, which is why it does not live in
+Input & Terminal.
+
 The existing complete settings editor is still available: every setting that has not migrated yet
 has a transition row in its own category that explicitly says `Existing settings editor`
-(`Agent → Agent settings…`, `Appearance → Footer & status line…`,
+(`Appearance → Footer & status line…`,
 `Input & Terminal → Input & terminal settings…` (only `Keyboard shortcuts` remains),
 `Extensions → Configure extension settings…`). Activating one retires the workspace and restores
 the surface it paused before opening the original editor on that exact row, so Theme, the Plugin
-Manager, keybindings, permissions and extension settings keep every existing write path.
+Manager, keybindings and extension settings keep every existing write path. `Agent` has no
+unmigrated field left, so its `Agent settings…` transition row is retired.
 
 `/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
 Host's `pi-tui-visual-tools.enabled` configuration. That one switch governs THREE model tools:

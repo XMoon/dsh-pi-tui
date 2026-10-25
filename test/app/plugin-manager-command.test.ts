@@ -117,9 +117,12 @@ function proxyRunner(
         throw new Error('a sessionless entry must not open a Session')
       },
     },
-    // The About controller's ONE semantic entry is a live-scope capture. The
-    // `/plugins` deep link lands on the Plugin List, so it must never capture
-    // (and therefore never read) the About page.
+    // The About controller's ONE semantic entry is a live-scope capture.
+    // Since C2-R3 the Settings workspace ALSO captures ONE session scope per
+    // open (the pinned approval target), so this counter can no longer stand in
+    // for "About read": it counts live-scope captures of ANY owner. The
+    // distinction is asserted through the real About view instead (the four
+    // cases below count captures, never About reads).
     captureLiveSessionScope: () => {
       counts.aboutEntries += 1
       return undefined
@@ -226,7 +229,8 @@ test('/plugins is registered by the real registrar and dispatches success into t
   await vt.waitForRender()
   assert.equal(counts.pages, 1, 'the deep link builds the embedded page exactly once')
   assert.equal(counts.disposed, 0)
-  assert.equal(counts.aboutEntries, 0, 'the Plugins deep link never admits an About read')
+  assert.equal(counts.aboutEntries, 1,
+    'the Plugins deep link admits NO About entry; the ONE capture is the pinned approval scope of the same open')
   assert.equal(counts.sessions, 0, 'the deep link creates no Session')
   const view = plain(vt.getViewport())
   assert.match(view, /Settings · Plugins/, 'the ONE lease lands with the Plugin List focused')
@@ -360,7 +364,8 @@ test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inven
   assert.match(view, /@vendor\/foo/u, 'the REAL inventory facts reach the painted list')
   assert.match(view, /Enter details/u, 'the keyboard starts on the plugin List')
   assert.equal(snapshotCalls, 1, 'the ONE inventory read landed')
-  assert.equal(counts.aboutEntries, 0, 'the deep link never admits an About read')
+  assert.equal(counts.aboutEntries, 1,
+    'the deep link admits NO About entry; the ONE capture is the pinned approval scope of the same open')
   assert.equal(counts.sessions, 0, 'the deep link creates no Session')
 
   // `i` enters the original install view through the REAL page keys.
@@ -400,7 +405,8 @@ test('/settings renders lazily (no embedded Plugin page build, no plugin invento
   await vt.waitForRender()
   assert.equal(counts.pages, 0, 'opening /settings must not build the Plugin Manager page')
   assert.equal(counts.disposed, 0)
-  assert.equal(counts.aboutEntries, 1, 'the About home is the ONE semantic About entry')
+  assert.equal(counts.aboutEntries, 2,
+    'the About home admits its ONE entry; the pinned approval scope is captured once for the same open')
   assert.equal(counts.sessions, 0, 'opening /settings creates no Session')
   const view = plain(vt.getViewport())
   assert.match(view, /Settings/)
@@ -418,7 +424,8 @@ test('a refused Settings lease is the documented error result, not a second scre
   assert.match(text, /^could not open the settings workspace: /)
   assert.match(text, /already leased/)
   assert.equal(counts.pages, 0, 'the refusal never builds a second page')
-  assert.equal(counts.aboutEntries, 1, 'the refused open never re-runs the About entry')
+  assert.equal(counts.aboutEntries, 2,
+    'a refused open captures no second scope and re-runs no About entry')
   // The existing Settings About screen is still the owner.
   assert.match(plain(vt.getViewport()), /Settings/)
 })

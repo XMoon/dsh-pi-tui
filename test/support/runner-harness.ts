@@ -526,6 +526,11 @@ export async function mountRunner(
    * already-settled barrier; tests that exercise the startup-status behavior
    * inject a controllable one to hold the barrier open. */
   loader: { await(): Promise<unknown> } = { await: async () => {} },
+  /** Receives the RESOLVED volatile config references (the object the runner's
+   *  document reads through). A test that must move a persisted preference
+   *  without a Settings service uses this to reach the same reference the
+   *  consumer reads, instead of asserting on a copied value. */
+  onResolvedConfig?: (config: unknown) => void,
 ) {
   ctx.provide('appExit', appExit)
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
@@ -540,7 +545,9 @@ export async function mountRunner(
   if (harness.jobs !== undefined) ctx.provide('jobs', harness.jobs as never)
   if (harness.shell !== undefined) ctx.provide('shell', harness.shell as never)
   ctx.provide('loader', loader as never)
-  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off', ...config } as never)))
+  const resolved = TuiConfigSchema({ fullscreen: 'off', ...config } as never)
+  onResolvedConfig?.(resolved)
+  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, resolved))
   await fiber
   await settle()
   return fiber

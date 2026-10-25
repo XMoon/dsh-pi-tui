@@ -27,6 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derives the same facts from the same log — and the human-facing cards, search and `/transcript`
   export never show these machine lines while the raw session log keeps them intact. The existing
   Tool Card still renders the visuals; inlining them into the final answer is a later stage.
+- **`/settings → Agent` now edits permission, delegation and user-shell policy in place, and the
+  `Agent settings…` transition row is retired.** The frozen order is `Approval policy (this
+  session)` → `Default permission` → `Subagent allowed models` → `Subagent model selection` →
+  `User shell sandbox policy`, each with exactly one authority: the approval policy is the CURRENT
+  session's official override (captured once when the workspace opens; after a session switch the
+  Confirm is refused synchronously and reopening Settings is what speaks about the new session, and
+  it never reaches the settings document); `Default permission` is the Host preset default for
+  FUTURE sessions only, never the running one, and a Host without a settings service fails
+  explicitly instead of pretending to succeed; `Subagent allowed models` opens the existing
+  searchable multi-select list through `Manage allowed models…` inside the same Settings workspace,
+  where `Esc` returns to the Agent rows, disabling never clears saved routes, and enabling with an
+  empty list writes nothing; `User shell sandbox policy` lives in the TUI settings document with the
+  raw stored value as its `Value`, the real effect on the next `!`/`!!` as its `Runtime`, and
+  `Verified` only after an agreeing read-back. When an authority is unavailable (no session, no
+  Remote approval channel, no Host presets or no official subagent section) the affected rows are
+  hidden truthfully instead of fabricating a current value or opening the legacy editor.
 
 - **`/settings` Appearance and Conversation now edit more configuration in place, without the
   existing editor.** Appearance gains an editable `Icon style` (`emoji` / `symbols` / `minimal`)

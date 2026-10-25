@@ -21,6 +21,7 @@ import { parseProgressUpdates, parseResponseStyle } from '../../domain/communica
 import { parseGitAttributionMode } from '../../domain/communication/git-attribution.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../../domain/notification/settings.ts'
 import { parseTerminalProgressMode } from '../../domain/terminal-progress/settings.ts'
+import { localShellSandboxPreferenceOf } from '../../app/submission/shell-context.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../../domain/display/wheel-scroll.ts'
 import { iconStyleOf } from '../../domain/display/icons.ts'
 import { parseUserKeybindings } from '../keybindings/config.ts'
@@ -134,6 +135,15 @@ const FULLSCREEN_CANDIDATES = ['off', 'on'] as const
 const NOTIFICATION_MODE_CANDIDATES = ['unfocused', 'always', 'off'] as const
 const NOTIFICATION_METHOD_CANDIDATES = ['auto', 'osc9', 'osc777', 'bell'] as const
 const TERMINAL_PROGRESS_CANDIDATES = ['9;4+7501', '9;4', '7501', 'off'] as const
+
+/** C2-R3: the Agent category's raw candidate identities. Approval and the
+ *  subagent toggle are the official `ask|never` / `off|on` values; the user
+ *  shell sandbox policy is the RAW TUI-document value (never the consumer's
+ *  bypass fallback). The default-permission roster is NOT a constant: its
+ *  candidates are the Host's own advertised preset ids, in Host order. */
+const APPROVAL_CANDIDATES = ['ask', 'never'] as const
+const SUBAGENT_SELECTION_CANDIDATES = ['off', 'on'] as const
+const LOCAL_SHELL_SANDBOX_CANDIDATES = ['bypass', 'sandbox'] as const
 
 /** Whether a confirmed value really is one of a field's frozen candidates. The
  *  parsers' default fallbacks are NOT a validation substitute: a writer must
@@ -851,8 +861,98 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     readonly initialAccountView?: AccountInitialView
   }
 
+  /**
+   * C2-R3: the ONE official-section write queue of this command owner.
+   *
+   * The official `subagent-model-selection` section is ONE stored value with TWO
+   * halves, and every surface (the embedded allowlist picker, the workspace
+   * toggle and the still-supported legacy editor rows) edits only ONE half per
+   * user action. A queue that merely serialized whole-section payloads captured
+   * BEFORE their turn would let an earlier intent be erased by a later payload
+   * built from a stale snapshot — the exact "a slow earlier write lands after a
+   * newer one" failure. Each queued item is therefore an INTENT over ONE half,
+   * and its payload is rebuilt from a FRESH official read INSIDE the queue,
+   * right before the write:
+   *  - a route edit replaces the allowlist and keeps the CURRENT `enabled`;
+   *  - an enabled edit sets the flag and keeps the CURRENT routes.
+   * It is a serialization + rebase barrier, not a settings authority: the
+   * official section stays the only stored value and each caller keeps its own
+   * real settlement.
+   */
+  interface OfficialSectionState {
+    readonly enabled: boolean
+    readonly allowedModels: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[]
+  }
+  let subagentSectionTail: Promise<void> = Promise.resolve()
+  const enqueueSubagentSectionWrite = <T>(write: () => Promise<T>): Promise<T> => {
+    // The tail absorbs the failure so one rejection can never lock the queue;
+    // the caller's own promise keeps the REAL settlement.
+    const turn = subagentSectionTail.then(write, write)
+    subagentSectionTail = turn.then(() => undefined, () => undefined)
+    return turn
+  }
+  /** Whether the official section may be written RIGHT NOW: the section must be
+   *  available AND the backend must vouch for its values. A stale/unavailable
+   *  mirror keeps readable last-known values, so a write built from it would
+   *  overwrite whatever the Host changed while this Client was not current. */
+  const subagentSectionWritable = (): boolean =>
+    runner.config.subagentModelSelection.available() && runner.config.configReadiness() === 'ready'
+  /**
+   * Queue ONE half-scoped section edit. `rebase` runs INSIDE the queue against
+   * the FRESH official section, so it must change only the half this intent owns
+   * and must copy the other half verbatim from `fresh`. Returning `undefined`
+   * refuses the edit with ZERO writes (a setup precondition, not a failure).
+   * `settle` maps what really happened to the caller's own outcome type.
+   */
+  const queueSubagentSectionEdit = <T>(
+    rebase: (fresh: OfficialSectionState) => OfficialSectionState | undefined,
+    settle: (written: OfficialSectionState | undefined) => T,
+  ): Promise<T> => enqueueSubagentSectionWrite(async () => {
+    if (!subagentSectionWritable()) return settle(undefined)
+    const section = runner.config.subagentModelSelection
+    // The FRESH read inside the queue is the rebase point: everything this
+    // intent does not own comes from HERE, never from a snapshot captured
+    // before the previous queued write settled.
+    const latest = section.get()
+    const payload = rebase({
+      enabled: latest.enabled,
+      allowedModels: latest.allowedModels.map(route => ({ ...route })),
+    })
+    if (payload === undefined) return settle(undefined)
+    await section.set(payload)
+    return settle(payload)
+  })
+  /** The narrow queue-backed section adapter the existing picker consumes. Its
+   *  `set` carries the caller's whole payload, but ONLY the route list is that
+   *  surface's intent: the `enabled` half is re-read inside the queue. */
+  const queuedSubagentSelection = (): import('../../runtime/config-port.ts').SubagentModelSelectionConfig => ({
+    available: () => subagentSectionWritable(),
+    get: () => runner.config.subagentModelSelection.get(),
+    set: value => queueSubagentSectionEdit<void>(
+      fresh => ({ enabled: fresh.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) }),
+      () => undefined,
+    ),
+  })
+
   const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): void => {
     const token = {}
+    // C2-R3: ONE pinned session scope per workspace open. The approval row
+    // targets EXACTLY this captured owner generation: a session switch never
+    // re-targets the row to the replacement Session (the user must reopen the
+    // workspace to speak about the new one). No Session is created here.
+    //
+    // The capture is LAZY: the panel's first snapshot (inside the app's own
+    // open, after the lease was granted) is what pins it, so a REFUSED open
+    // captures no scope at all.
+    let approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined
+    let approvalScopePinned = false
+    const pinnedApprovalScope = (): import('../../app/session/scope.ts').LiveSessionScope | undefined => {
+      if (!approvalScopePinned) {
+        approvalScopePinned = true
+        approvalScope = runner.captureLiveSessionScope()
+      }
+      return approvalScope
+    }
     // The panel snapshots its source in its CONSTRUCTOR, so the pending state
     // must be in place before the lease is taken.
     if (webSettingsAvailable()) beginWebSettingsRead()
@@ -886,7 +986,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     let verifiedFullscreenIntent: 'on' | 'off' | undefined
     handle = app.openSettingsWorkspace(
       {
-        readSnapshot: readSettingsWorkspaceSnapshot,
+        readSnapshot: () => readSettingsWorkspaceSnapshot(pinnedApprovalScope()),
         // The LIVE extension settings directory: the in-process registry's own
         // `{revision,count}`. It is a synchronous projection with no write and
         // no second registry; its revision fences same-id re-registration too.
@@ -900,7 +1000,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
         onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
         onCommit: async (request) => {
-          const result = await commitSettingsWorkspaceField(request)
+          const result = await commitSettingsWorkspaceField(request, pinnedApprovalScope())
           // Only a session that still belongs to THIS open may update the
           // intent, and only a VERIFIED Fullscreen result may set it. Any
           // non-verified Fullscreen attempt CLEARS the earlier intent, so a
@@ -914,6 +1014,34 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         createModelsPage,
         createAccountPage,
+        // C2-R3: the ONE embedded specialist page — the EXISTING subagent
+        // allowlist picker mounted in this same workspace body. It is created
+        // only by an explicit Manage/Enter, reads the OFFICIAL section and the
+        // official model directory, and writes through the SAME serialized
+        // section queue as the workspace toggle and the legacy editor.
+        createSubagentAllowlistPicker: (done, onAuthoritativeChange) => {
+          // The section must be AVAILABLE *and* CURRENT: opening a picker over a
+          // stale mirror would let the user toggle routes that can never commit.
+          if (!subagentSectionWritable() || !runner.catalog.models.available()) return undefined
+          return new SubagentModelAllowlistPicker({
+            selection: queuedSubagentSelection(),
+            catalog: runner.catalog.models,
+            notify: (message, kind) => app.notify(message, kind),
+            requestRender: () => app.requestRender(),
+            done: () => { done() },
+            // The picker's post-close convergence seam is already its own
+            // `done`; while it is MOUNTED the row summary follows the fresh
+            // snapshot instead.
+            summarize: () => { onAuthoritativeChange() },
+            runOwned: (label, task, options) => {
+              runOwned(label, task, {
+                diag: runner.diag,
+                sessionId: () => runner.currentSessionId,
+                ...options,
+              })
+            },
+          })
+        },
         // The About page's two version facts: read ONCE per workspace open on
         // the Client side. `tui` is this bundle's own version and `dsh` the
         // installed Harness version — neither is derived from the other, and
@@ -1465,7 +1593,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * `[current]` lights up only on an exact raw match.
    */
   const persistedOnlyEditOf = (
-    field: 'busy-enter' | 'fullscreen',
+    field: 'busy-enter' | 'fullscreen' | 'local-shell-sandbox',
     candidates: readonly string[],
     raw: string | undefined,
     readable: boolean,
@@ -1649,6 +1777,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     | 'busy-enter' | 'git-attribution'
     | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
     | 'notification-mode' | 'notification-method' | 'terminal-progress'
+    | 'local-shell-sandbox'
 
   /**
    * The STORED value of one document field, read exactly as the document holds
@@ -1671,6 +1800,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       case 'notification-mode': return doc.notificationMode
       case 'notification-method': return doc.notificationMethod
       case 'terminal-progress': return doc.terminalProgress
+      case 'local-shell-sandbox': return doc.localShellSandbox
       default: {
         // Exhaustiveness fence: a new TuiSettingsField must add its own
         // document mapping here instead of inheriting another field's value.
@@ -1808,6 +1938,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    */
   const commitSettingsWorkspaceField = async (
     request: SettingsWorkspaceCommitRequest,
+    approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
     const outcome = await ((): Promise<SettingsWorkspaceCommitOutcome> => {
       switch (request.field) {
@@ -1827,6 +1958,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'notification-mode': return commitNotificationMode(request.value)
         case 'notification-method': return commitNotificationMethod(request.value)
         case 'terminal-progress': return commitTerminalProgress(request.value)
+        case 'approval': return Promise.resolve(commitApproval(request.value, approvalScope))
+        case 'default-permission': return commitDefaultPermission(request.value)
+        case 'subagent-model-selection': return commitSubagentSelection(request.value)
+        case 'local-shell-sandbox': return commitLocalShellSandbox(request.value)
         default: {
           // Exhaustiveness fence: a new writable field must name its writer
           // here instead of falling into another field's branch.
@@ -2270,6 +2405,216 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     })
   }
 
+  /**
+   * C2-R3: PERSIST-FIRST user-shell sandbox policy. The stored document IS the
+   * authority; `user-shell.ts` reads the SAME raw field through
+   * `localShellSandboxPreferenceOf` at the next `!`/`!!`. Nothing about the Host
+   * shell routing, the permission presets or the Host sandbox default is
+   * touched here, and no local switch is introduced.
+   */
+  /** Whether two official allowlists carry the SAME ordered (provider,model)
+   *  pairs. The pair is the only route identity: a display name never compares. */
+  const sameAllowlist = (
+    left: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
+    right: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
+  ): boolean => left.length === right.length
+    && left.every((route, index) => route.provider === right[index]?.provider && route.model === right[index]?.model)
+
+  const commitLocalShellSandbox = (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, LOCAL_SHELL_SANDBOX_CANDIDATES)) {
+      return Promise.resolve({ outcome: 'not-saved', reason: `"${value}" is not a user shell sandbox policy candidate` })
+    }
+    return commitPersistedOnlyField({
+      field: 'local-shell-sandbox',
+      value,
+      document: doc => ({ ...doc, localShellSandbox: value }),
+      localNoun: 'the user shell sandbox policy',
+    })
+  }
+
+  /**
+   * C2-R3: RUNTIME-ONLY approval policy of the EXACT session this workspace was
+   * opened on. The pinned scope is the whole target identity: a scope that is no
+   * longer current is refused SYNCHRONOUSLY with no dispatch at all, so a stale
+   * Confirm can never land on the replacement Session. `Verified` means the
+   * official service now reads this value back for the SAME scope; it makes no
+   * persistence claim (there is no document field).
+   */
+  const commitApproval = (
+    value: string,
+    approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined,
+  ): SettingsWorkspaceCommitOutcome => {
+    if (!isCandidateOf(value, APPROVAL_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not an approval policy candidate` }
+    }
+    if (approvalScope === undefined || !runner.isSessionScopeCurrent(approvalScope)) {
+      // The row itself is gone from the next snapshot (the captured owner is no
+      // longer current), so the refusal must reach the user through the ONE
+      // app notice — the same wording the legacy editor used for a switch.
+      app.notify('the session changed — the approval policy was not applied', 'error')
+      return {
+        outcome: 'not-saved',
+        reason: 'the session this workspace was opened on is no longer current — reopen Settings to change the approval policy of the new session',
+      }
+    }
+    if (!runner.config.permissions.approvalOverrideAvailable()) {
+      return { outcome: 'not-saved', reason: 'this backend does not read or write a session approval override' }
+    }
+    if (runner.setSessionApprovalPolicy(approvalScope, value) === 'superseded') {
+      app.notify('the session changed — the approval policy was not applied', 'error')
+      return {
+        outcome: 'not-saved',
+        reason: 'the session changed — the approval policy was not applied',
+      }
+    }
+    // The official service is the reader: only a same-scope value that really
+    // reads back as the requested policy is Verified.
+    const readback = runner.currentApprovalOverride(approvalScope)
+    if (readback === value) {
+      runner.refreshStatus()
+      return { outcome: 'verified' }
+    }
+    if (readback === undefined) {
+      return { outcome: 'unverified', reason: 'the session approval override could not be re-read' }
+    }
+    return {
+      outcome: 'not-saved',
+      reason: `the session approval override reads ${readback}`,
+    }
+  }
+
+  /**
+   * C2-R3: the Host permission DEFAULT for future sessions. The write is
+   * HOST-PERSIST-FIRST: the value must still be a member of the CURRENT roster,
+   * the official `permission.defaultPreset` mutation runs, and only a fresh
+   * `defaultPreset()` that agrees is `Verified`. The running Session's preset,
+   * sandbox and approval knobs are never touched.
+   */
+  const commitDefaultPermission = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    const permissions = runner.config.permissions
+    const roster = [...permissions.presetNames()]
+    if (!roster.includes(value)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not an available permission preset` }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the permission default was not changed` }
+    }
+    const base = permissions.defaultPreset()
+    try {
+      await permissions.setDefaultPreset(value)
+    } catch (error) {
+      // Never a blanket `not-saved`: the write may have committed and failed
+      // only its read, so the outcome is attributed from a fresh read exactly
+      // like the document writers.
+      const readback = permissions.defaultPreset()
+      if (readback === value) {
+        return {
+          outcome: 'indeterminate',
+          reason: `the write failed (${safeErrorMessage(error)}), but the Host already reads ${value}: this request was either refused after that write or committed and not confirmed`,
+        }
+      }
+      if (readback === base) {
+        return { outcome: 'not-saved', reason: safeErrorMessage(error) }
+      }
+      return {
+        outcome: 'indeterminate',
+        reason: `${safeErrorMessage(error)}; the Host permission default no longer reads the value this request started from either, so its outcome cannot be attributed`,
+      }
+    }
+    const readback = permissions.defaultPreset()
+    if (readback === value) return { outcome: 'verified' }
+    if (readback === undefined) {
+      return { outcome: 'unverified', reason: 'the Host permission default could not be re-read' }
+    }
+    return {
+      outcome: 'not-saved',
+      reason: `the write reported success, but the Host permission default reads ${readback}`,
+    }
+  }
+
+  /**
+   * C2-R3: the official subagent model-selection toggle. It runs INSIDE the one
+   * section write queue, so a pending picker write can never be reordered. The
+   * fresh section read inside the queue is what decides the payload: enabling
+   * with ZERO allowed routes is refused with NO official write at all and the
+   * typed follow-up sends the user to the allowlist row. Disabling always keeps
+   * every saved route.
+   */
+  const commitSubagentSelection = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, SUBAGENT_SELECTION_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a subagent model selection candidate` }
+    }
+    const desired = value === 'on'
+    return enqueueSubagentSectionWrite(async (): Promise<SettingsWorkspaceCommitOutcome> => {
+      const section = runner.config.subagentModelSelection
+      if (!section.available()) {
+        return { outcome: 'not-saved', reason: 'the official subagent model-selection section is unavailable on this backend' }
+      }
+      // A stale/unavailable backend keeps readable LAST-KNOWN values: writing
+      // them back would overwrite whatever the Host changed while this Client
+      // was not current, so the commit is refused BEFORE any dispatch.
+      const readiness = runner.config.configReadiness()
+      if (readiness !== 'ready') {
+        return {
+          outcome: 'not-saved',
+          reason: `the configuration is ${readiness}; the official subagent section could not be confirmed current, so it was not changed`,
+        }
+      }
+      let latest: OfficialSectionState
+      try {
+        latest = section.get()
+      } catch (error) {
+        return { outcome: 'not-saved', reason: `the official subagent model-selection section could not be read: ${safeErrorMessage(error)}` }
+      }
+      if (desired && latest.allowedModels.length === 0) {
+        // Zero official writes: the setup precondition is stated where the user
+        // can still read it (the app notice survives the navigation) and the
+        // ONE typed follow-up moves the selection to the allowlist row.
+        const reason = 'Select at least one Subagent allowed model before enabling model selection.'
+        app.notify(reason, 'info')
+        return { outcome: 'not-saved', reason, followUpRowId: 'subagent-model-allowlist' }
+      }
+      // This intent owns the `enabled` half ONLY: the route list comes from the
+      // FRESH read made above (inside the queue), so a picker write that landed
+      // while this request waited is preserved instead of being overwritten by
+      // a stale snapshot.
+      const base: OfficialSectionState = {
+        enabled: latest.enabled,
+        allowedModels: latest.allowedModels.map(route => ({ ...route })),
+      }
+      try {
+        await section.set({ enabled: desired, allowedModels: base.allowedModels.map(route => ({ ...route })) })
+      } catch (error) {
+        // Attribute from a fresh official read: only a section still carrying
+        // the BASE value refutes THIS request.
+        const readback = section.get()
+        if (readback.enabled === desired && sameAllowlist(readback.allowedModels, base.allowedModels)) {
+          return {
+            outcome: 'indeterminate',
+            reason: `the write failed (${safeErrorMessage(error)}), but the official section already reads this selection`,
+          }
+        }
+        if (readback.enabled === base.enabled && sameAllowlist(readback.allowedModels, base.allowedModels)) {
+          return { outcome: 'not-saved', reason: safeErrorMessage(error) }
+        }
+        return {
+          outcome: 'indeterminate',
+          reason: `${safeErrorMessage(error)}; the official section no longer reads the value this request started from either`,
+        }
+      }
+      // Save/verify means BOTH halves of the section: the toggle AND the list.
+      const readback = section.get()
+      if (readback.enabled === desired && sameAllowlist(readback.allowedModels, base.allowedModels)) {
+        return { outcome: 'verified' }
+      }
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the official section reads enabled=${readback.enabled ? 'on' : 'off'} with ${readback.allowedModels.length} allowed ${readback.allowedModels.length === 1 ? 'route' : 'routes'}`,
+      }
+    })
+  }
+
   const commitDisplayPreset = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
     if (!isDisplayPreset(value) || !isDisplayPresetAvailable(value)) {
       return { outcome: 'not-saved', reason: `the display preset "${value}" is not available in this build` }
@@ -2397,7 +2742,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * default), a stale backend keeps the document as `last-known`, and a throwing
    * `get()` is the row's explicit `read-error`.
    */
-  const readSettingsWorkspaceSnapshot = (): SettingsWorkspaceSnapshot => {
+  const readSettingsWorkspaceSnapshot = (
+    approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined,
+  ): SettingsWorkspaceSnapshot => {
     const configReadiness = runner.config.configReadiness()
     // ONE registry read per snapshot: the conditional `Extensions` category and
     // its transition launcher are derived from the SAME live directory, so a
@@ -2473,6 +2820,154 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const visualTools = runner.config.visualTools.read()
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
     const extensionContributors = new Set(extensionRows.map(row => row.owner)).size
+    // ── C2-R3: the five Agent rows' read facts ────────────────────────────────
+    // PERMISSIONS. The approval row exists only for a LIVE, still-current
+    // captured scope on a backend that really reads and writes the override:
+    // a Remote composition (no capability) or a sessionless surface paints no
+    // approval row at all — never an `ask` the authority did not state.
+    const approvalLive = approvalScope !== undefined
+      && runner.isSessionScopeCurrent(approvalScope)
+      && runner.config.permissions.approvalOverrideAvailable()
+    const approvalOverride = approvalLive && approvalScope !== undefined
+      ? runner.currentApprovalOverride(approvalScope)
+      : undefined
+    const approvalRow: SettingsWorkspaceRow[] = !approvalLive ? [] : [{
+      id: 'approval',
+      category: 'agent',
+      label: 'Approval policy (this session)',
+      summary: approvalOverride ?? 'not overridden',
+      ...approvalOverride === undefined ? {} : { value: approvalOverride },
+      scope: 'Current session only · runtime-only override',
+      freshness: 'runtime',
+      description: 'How tool approvals are handled in the session this workspace was opened on. '
+        + 'This is the official per-session approval override, applied at the next approval the session needs; '
+        + 'it is not a permission preset and it never changes the default for new sessions. '
+        + 'Persisted: not applicable — current session only.',
+      action: 'inspect',
+      edit: {
+        field: 'approval',
+        primary: 'runtime',
+        options: APPROVAL_CANDIDATES.map(value => ({
+          value,
+          label: value,
+          available: true,
+          current: approvalOverride === value,
+        })),
+        // The primary Value IS the runtime override (or `not overridden`); the
+        // SEPARATE effect fact states what the next approval consumes, so an
+        // absent override never reads as a saved `ask`.
+        runtime: approvalOverride === undefined ? 'ask (consumer fallback; no session override)' : approvalOverride,
+        runtimeEffect: approvalOverride === undefined
+          ? 'next approval uses the consumer fallback ask (no session override)'
+          : `next approval uses ${approvalOverride} (session override)`,
+        persisted: 'not applicable — current session only',
+      },
+    }]
+    // The preset roster and the effective Host default are read ONCE for this
+    // snapshot: the row's candidates are the raw ids in Host order, and
+    // `[current]` follows the Host's EFFECTIVE default (this port exposes no
+    // separate raw USER override, and none is claimed).
+    const permissionNames = [...runner.config.permissions.presetNames()]
+    const defaultPermission = runner.config.permissions.defaultPreset()
+    const defaultPermissionRow: SettingsWorkspaceRow[] = permissionNames.length === 0 ? [] : [{
+      id: 'default-permission',
+      category: 'agent',
+      label: 'Default permission',
+      summary: defaultPermission ?? 'unknown',
+      ...defaultPermission === undefined ? {} : { value: defaultPermission },
+      scope: 'DSH Host profile · permission default for new sessions',
+      freshness: configReadiness === 'ready' ? 'ready' : configReadiness === 'stale' ? 'last-known' : 'unavailable',
+      description: 'The permission preset a NEWLY created Session starts with. '
+        + 'It applies to new sessions only: the running session keeps its current preset, sandbox and approval knobs. '
+        + 'Persisted: Host permission default; the raw USER override is not independently exposed by this port.',
+      action: 'inspect',
+      edit: {
+        field: 'default-permission',
+        primary: 'persisted',
+        // A non-ready backend cannot confirm a permission default write (the
+        // writer refuses before dispatch), so it offers NO confirmable
+        // candidate while keeping the row and its truthful facts.
+        options: configReadiness === 'ready' ? permissionNames.map(value => ({
+          value,
+          label: value,
+          available: true,
+          current: defaultPermission === value,
+        })) : [],
+        runtime: 'applies to new sessions, not this session',
+        persisted: defaultPermission ?? 'unknown',
+      },
+    }]
+    // DELEGATION. BOTH rows appear together, and only while the OFFICIAL
+    // section AND the model catalog are available (the existing availability
+    // contract): the allowlist is the setup dependency of the toggle.
+    const subagentAvailable = runner.config.subagentModelSelection.available() && runner.catalog.models.available()
+    const subagentSelection = subagentAvailable ? runner.config.subagentModelSelection.get() : undefined
+    // The section's VALUES must be current for either row to claim them: a
+    // stale/unavailable backend keeps readable LAST-KNOWN values, which are
+    // reported as such and can never be confirmed into a write.
+    const subagentFreshness: SettingsWorkspaceFreshness = configReadiness === 'ready'
+      ? 'ready'
+      : configReadiness === 'stale' ? 'last-known' : 'unavailable'
+    const subagentWritable = subagentFreshness === 'ready'
+    const subagentRows: SettingsWorkspaceRow[] = subagentSelection === undefined ? [] : [{
+      // The specialist page reaches the ONE official section through the SAME
+      // serialized write queue as the toggle: this row deliberately has NO
+      // `edit` (a scalar candidate list would be a second writer).
+      id: 'subagent-model-allowlist',
+      category: 'agent',
+      label: 'Subagent allowed models',
+      summary: allowlistSummary(subagentSelection.allowedModels),
+      scope: 'Official subagent model-selection section',
+      freshness: subagentFreshness,
+      description: 'The child LLM routes the official subagent tool may pick from in a NEW session. '
+        + 'Manage opens the searchable official model directory in this same workspace; every toggle writes the '
+        + 'official settings section. Saved routes stay removable even when the current catalog does not list them. '
+        + 'A running Agent keeps its existing tool schema. Persisted: the official subagent-model-selection section.',
+      action: 'inspect',
+      specialist: 'subagent-allowlist',
+      // Only a CURRENT section may open the picker: a stale mirror would let the
+      // user toggle routes that can never commit.
+      specialistAvailable: subagentWritable,
+    }, {
+      id: 'subagent-model-selection',
+      category: 'agent',
+      label: 'Subagent model selection',
+      summary: subagentSelection.enabled ? 'on' : 'off',
+      value: subagentSelection.enabled ? 'on' : 'off',
+      scope: 'Official subagent model-selection section',
+      freshness: subagentFreshness,
+      description: 'Whether a NEW session\'s subagent tool may pick a child provider/model from the allowed routes. '
+        + 'Changes new sessions only; the running session keeps its existing tool schema. '
+        + 'Enabling requires at least one allowed route; disabling keeps the saved routes. '
+        + 'Persisted: the official subagent-model-selection section.',
+      action: 'inspect',
+      edit: {
+        field: 'subagent-model-selection',
+        primary: 'persisted',
+        // A non-current backend offers NO confirmable candidate: a write built
+        // from last-known values would overwrite whatever the Host changed while
+        // this Client was not current.
+        options: subagentWritable ? SUBAGENT_SELECTION_CANDIDATES.map(value => ({
+          value,
+          label: value,
+          available: true,
+          current: (subagentSelection.enabled ? 'on' : 'off') === value,
+        })) : [],
+        runtime: `${subagentSelection.allowedModels.length} allowed ${subagentSelection.allowedModels.length === 1 ? 'route' : 'routes'} · applies to new sessions`,
+        persisted: subagentSelection.enabled ? 'on' : 'off',
+      },
+    }]
+    // EXECUTION POLICY. The RAW document value is the primary fact; the
+    // consumer's bypass fallback is stated separately so a missing/invalid raw
+    // value is never presented as an explicitly saved `bypass`.
+    const storedShellSandbox = storedCandidateFactOf(doc?.localShellSandbox, doc !== undefined, LOCAL_SHELL_SANDBOX_CANDIDATES, 'unknown')
+    const shellSandboxRuntime = doc === undefined
+      ? 'unknown — the next ! / !! policy cannot be read without the settings document'
+      : localShellSandboxPreferenceOf(doc) === 'sandbox'
+        ? 'Next ! / !! uses sandbox'
+        : doc.localShellSandbox === 'bypass'
+          ? 'Next ! / !! uses bypass'
+          : 'Next ! / !! uses bypass (default; no valid saved value)'
     // The R0 transition rows: each one only NAMES the existing-editor row it
     // focuses. They run no write of their own and never stand in for the real
     // editor, which stays reachable behind them until R1–R6 migrate the field.
@@ -2795,6 +3290,48 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             doc !== undefined,
           ),
         },
+        // ── C2-R3: the Agent category's five real rows, in their FROZEN order
+        //    (the detail descriptions keep the Permissions / Delegation /
+        //    Execution policy grouping without adding focusable section rows).
+        //    Each row reaches EXACTLY its own authority: a session-scoped
+        //    official approval override, the Host permission default, the ONE
+        //    official subagent model-selection section (twice) and the raw TUI
+        //    settings document field.
+        ...approvalRow,
+        ...defaultPermissionRow,
+        ...subagentRows,
+        {
+          // The TUI-document field is the authority; the consumer
+          // (`user-shell.ts` → `localShellSandboxPreferenceOf`) reads the SAME
+          // raw value at the next `!`/`!!`. The consumer's bypass fallback is
+          // stated as the runtime effect, never as a stored value.
+          id: 'local-shell-sandbox',
+          category: 'agent',
+          label: 'User shell sandbox policy',
+          summary: storedShellSandbox,
+          ...doc === undefined || doc.localShellSandbox === undefined ? {} : { value: doc.localShellSandbox },
+          scope: 'TUI settings document · Host user-shell execution policy',
+          freshness: configuredFreshness,
+          description: 'How Host-side user-shell execution runs your own ! / !! commands: '
+            + 'Bypass runs them outside the dsh sandbox (the default when nothing is stored), Sandbox runs them '
+            + 'under the DSH shell policy the Host really provides. This is the Host execution policy of the user '
+            + 'shell, not the model\'s tool sandbox policy and not a permission preset. The next ! / !! uses it.',
+          action: 'inspect',
+          // The persist-first writer refuses on a non-ready backend or an
+          // unreadable document, so the row offers NO confirmable candidate in
+          // those states while still reporting the raw stored fact.
+          edit: {
+            ...persistedOnlyEditOf(
+              'local-shell-sandbox',
+              LOCAL_SHELL_SANDBOX_CANDIDATES,
+              doc?.localShellSandbox,
+              doc !== undefined,
+              shellSandboxRuntime,
+              storedShellSandbox,
+            ),
+            ...configuredFreshness === 'ready' ? {} : { options: [] },
+          },
+        },
         {
           // The ONE built-in Visual tools switch: a Host-profile setting, not a
           // TUI preference. The row stays visible when the authority is
@@ -2811,13 +3348,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           action: 'inspect',
           edit: visualToolsEditOf(visualTools, configReadiness),
         },
-        transitionRow(
-          'agent-settings-legacy',
-          'agent',
-          'Agent settings…',
-          'Default permission for new sessions, read and written by the existing settings editor. This row only opens that editor on its own row.',
-          'default-permission',
-        ),
         transitionRow(
           'footer-settings-legacy',
           'appearance',
@@ -2937,11 +3467,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // Both panel rows degrade gracefully when the service is absent.
         const permissions = runner.config.permissions
         const permissionNames: string[] = [...permissions.presetNames()]
-        // Serialized whole-section writes for the subagent model-selection
-        // toggle: rapid toggles commit in order (a slow earlier write can
-        // never land after a newer one), and every settle re-syncs the row
-        // to the ACTUAL committed state (review round 2).
-        let subagentModelWriteChain: Promise<void> = Promise.resolve()
+        // C2-R3: the subagent model-selection toggle and the allowlist picker
+        // below share the command owner's ONE section queue
+        // (`enqueueSubagentSectionWrite`), so rapid toggles commit in order and a
+        // slow earlier write can never land after a newer one — including across
+        // the workspace surface and this editor. Every settle re-syncs the row
+        // to the ACTUAL committed state.
         const defaultPermission = permissions.defaultPreset()
         // Before the first session (deferred start) the session-scoped rows —
         // approval policy and the read-only session facts — do not exist yet;
@@ -3023,7 +3554,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             // it on never rewrites an already-running session's tools. The
             // ALLOWLIST row comes FIRST: the UI order expresses the setup
             // dependency (configure allowed routes, then enable selection).
-            ...(runner.config.subagentModelSelection.available() && runner.catalog.models.available()) ? (() => {
+            ...(subagentSectionWritable() && runner.catalog.models.available()) ? (() => {
               const subagentSelection = runner.config.subagentModelSelection.get()
               // The allowlist row's value is owned by the SUBMENU: a write
               // settling after the submenu closed must converge the displayed
@@ -3036,7 +3567,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 currentValue: allowlistSummary(subagentSelection.allowedModels),
                 submenu: (_currentValue: string, done: (selected?: string) => void) => {
                   const menu = new SubagentModelAllowlistPicker({
-                    selection: runner.config.subagentModelSelection,
+                    // C2-R3: the OLD editor's allowlist picker writes through the
+                    // SAME command-owner FIFO as the workspace picker and toggle —
+                    // no second concurrent section queue, no bare `set()` bypass.
+                    selection: queuedSubagentSelection(),
                     catalog: runner.catalog.models,
                     notify: (message, kind) => app.notify(message, kind),
                     requestRender: () => app.requestRender(),
@@ -3294,49 +3828,60 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 detach('permission default write', () => runner.config.permissions.setDefaultPreset(value) as Promise<unknown>, { notify: true })
               }
             } else if (id === 'subagent-model-selection') {
-              // The OFFICIAL section write (never a TUI-owned copy). The
-              // whole current allowlist rides along; enabling with an empty
-              // allowlist is refused by the official rule (the Direct
-              // adapter fails fast with the official message and the Host
-              // validates again at the section boundary). Writes are
-              // SERIALIZED (the payload is captured at toggle time, so the
-              // last toggle wins) and every settle re-syncs the row to the
-              // ACTUAL committed state — a rejected write rolls back, and a
-              // superseded success never leaves a stale display.
+              // The OFFICIAL section write (never a TUI-owned copy). This row
+              // owns the `enabled` half ONLY: the route list is re-read from the
+              // FRESH section INSIDE the shared command-owner queue, so a picker
+              // write that lands while this toggle waits is preserved.
+              // Enabling with an empty allowlist stays a SETUP PRECONDITION:
+              // zero official writes, the row rolls back and the cursor moves to
+              // the allowlist row.
               if (value === 'on' || value === 'off') {
                 const current = runner.config.subagentModelSelection.get()
                 const previous = current.enabled ? 'on' : 'off'
                 const desired = value === 'on'
-                // EMPTY-ALLOWLIST UX GATE: enabling with no allowed routes
-                // is a SETUP PRECONDITION, not a write failure. Skip the
-                // official write entirely (no Host settings mutation), keep
-                // the row off, and guide the user to configure the allowlist
-                // first — the ConfigPort/Host validation stays as the
-                // fail-closed boundary for non-UI callers (the TUI never
-                // auto-fills the allowlist: it is the user's explicit grant
-                // of which child routes the subagent tool may use).
-                if (desired && current.allowedModels.length === 0) {
-                  revert(previous)
-                  app.notify('Select at least one Subagent allowed model before enabling model selection.', 'info')
-                  navigate?.('subagent-model-allowlist')
-                  return
-                }
-                subagentModelWriteChain = subagentModelWriteChain
-                  .then(() => runner.config.subagentModelSelection.set({
-                    enabled: desired,
-                    allowedModels: current.allowedModels,
-                  }))
-                  .then(
-                    () => {
-                      // Re-sync to the committed state (a later toggle may
-                      // have superseded this one).
+                // The empty-allowlist decision is made ONLY inside the queue
+                // (below), against the FRESH section. An early read would race
+                // every pending section intent in BOTH directions: it would miss
+                // a route a queued write is about to remove, and it would refuse
+                // an enable whose route a queued write is about to add — dropping
+                // the user's intent instead of ordering it behind that write.
+                // C2-R3: the ONE command-owner section queue (shared with the
+                // workspace toggle and BOTH pickers). The chained settlement runs
+                // as ONE owned task and re-syncs the row to the committed state.
+                detach('subagent model selection write', async () => {
+                  let refusedEmpty = false
+                  try {
+                    await queueSubagentSectionEdit<void>(
+                      (fresh) => {
+                        if (desired && fresh.allowedModels.length === 0) {
+                          // SETUP PRECONDITION against the FRESH section: zero
+                          // official writes, the row rolls back and the cursor
+                          // moves to the allowlist row — never a generic write
+                          // failure for a precondition the UI can explain.
+                          refusedEmpty = true
+                          return undefined
+                        }
+                        return { enabled: desired, allowedModels: fresh.allowedModels.map(route => ({ ...route })) }
+                      },
+                      () => undefined,
+                    )
+                    if (refusedEmpty) {
+                      // SETUP PRECONDITION, not a write failure: zero official
+                      // writes happened, the row rolls back and the cursor moves
+                      // to the row that grants the missing route.
                       revert(runner.config.subagentModelSelection.get().enabled ? 'on' : 'off')
-                    },
-                    (error: unknown) => {
-                      revert(previous)
-                      app.notify(`subagent model selection write failed: ${safeErrorMessage(error)}`, 'error')
-                    },
-                  )
+                      app.notify('Select at least one Subagent allowed model before enabling model selection.', 'info')
+                      navigate?.('subagent-model-allowlist')
+                      return
+                    }
+                    // Re-sync to the committed state (a later toggle may have
+                    // superseded this one).
+                    revert(runner.config.subagentModelSelection.get().enabled ? 'on' : 'off')
+                  } catch (error) {
+                    revert(previous)
+                    app.notify(`subagent model selection write failed: ${safeErrorMessage(error)}`, 'error')
+                  }
+                }, { notify: false })
               }
             } else if (id === 'theme') {
               // The submenu fires onChange with the SOURCE-QUALIFIED selectable
