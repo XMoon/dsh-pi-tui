@@ -54,7 +54,8 @@ export default async function (h) {
   // split-pane gate (`TERN_GUI_SPLIT=1`). The split must happen BEFORE the
   // subject launches in a pane, so it cannot share the window journey's launch.
   if (process.env.TERN_GUI_SPLIT === '1') {
-    await splitPaneGate(h)
+    if (process.env.TERN_GUI_BUSY === '1') await splitPaneBusyGate(h)
+    else await splitPaneGate(h)
     return
   }
   const system = h.ctl('system')
@@ -298,8 +299,10 @@ async function splitPaneGate(h) {
   const blocks = () =>
     JSON.parse(spawnSync(tern, ['ls', '--json'], { env, encoding: 'utf8' }).stdout).sessions[0].tabs[0].blocks
 
-  // A TALL window, so the `max-height: 640px` rule can never match.
-  await h.resize(1280, 900)
+  // A TALL window, so the `max-height: 640px` rule can never match. The height
+  // is chosen so two panes land at the contract's 22 rows (the amendment's
+  // exact split case), not merely "short".
+  await h.resize(1280, 830)
   const before = blocks()
   spawnSync(tern, ['split', '@focused', 'down'], { env, encoding: 'utf8' })
   await h.sleep(1500)
@@ -307,8 +310,9 @@ async function splitPaneGate(h) {
   h.check('the tall window really split into two panes', after.length === before.length + 1,
     `blocks ${before.length} -> ${after.length}`)
   h.measure('the split pane rows', JSON.stringify(after.map(block => ({ rows: block.rows, cols: block.cols }))))
-  h.check('each split pane is SHORT (so the window rule cannot help)', after.every(block => block.rows <= 30),
-    JSON.stringify(after.map(block => block.rows)))
+  // The amendment's exact case is 2 × 22 rows: assert that band, not "<= 30".
+  h.check('each split pane is the contract 22-row band (so the window rule cannot help)',
+    after.every(block => block.rows >= 20 && block.rows <= 24), JSON.stringify(after.map(block => block.rows)))
 
   // Launch the subject in the FOCUSED (lower) pane and measure it there.
   const subject = join(h.repo, 'scripts', 'tern-gui-draft-and-transcript-images-subject.mts')
@@ -323,7 +327,26 @@ async function splitPaneGate(h) {
   h.check('the window really is taller than 640px', viewport[1] > 640, `height=${viewport[1]}`)
 
   // The preview chips must still be BOUNDED, and the editor must stay in-pane.
+  // HARD assertions on the geometry, not a measure: two previews, side by side
+  // (different x, near-identical y), each within the `12ch x 4lines` ceiling.
   const images = snap.nodes.filter(node => node.tag === 'img')
+  const dockImages = images.filter(node => {
+    const box = rect(node)
+    // The preview chips are the small ones; transcript images keep their size.
+    return box[2] > 0 && box[2] <= 12 * 8.2 && box[3] > 0 && box[3] <= 4 * 18
+  })
+  h.check('the split pane draws exactly TWO bounded preview chips', dockImages.length === 2,
+    JSON.stringify(images.map(node => rect(node))))
+  if (dockImages.length === 2) {
+    const [a, b] = dockImages.map(node => rect(node))
+    h.check('the two chips are side by side (different x, same row)', Math.abs(a[0] - b[0]) > 4 && Math.abs(a[1] - b[1]) <= 2,
+      `a=${JSON.stringify(a)} b=${JSON.stringify(b)}`)
+    h.check('each chip is within the 12ch x 4lines ceiling', dockImages.every(node => {
+      const box = rect(node)
+      return box[2] <= 12 * 8.2 + 1 && box[3] <= 4 * 18 + 1
+    }), JSON.stringify(dockImages.map(node => rect(node))))
+    h.measure('the chip boxes', JSON.stringify([a, b]))
+  }
   h.measure('image boxes inside the split pane', JSON.stringify(images.map(node => rect(node))))
   const composerOf = snapshot => snapshot.nodes.find(node => String(node.text ?? '').includes('see attached'))
   const composer = composerOf(snap)
@@ -345,4 +368,64 @@ async function splitPaneGate(h) {
     textBefore !== undefined && textAfter !== undefined && textAfter !== textBefore,
     `before=${JSON.stringify(textBefore)} after=${JSON.stringify(textAfter)}`)
   h.capture('pr4-gui-split-pane', 'the amendment split-pane gate: bounded chips, editor in-pane and typable')
+}
+
+/**
+ * The amendment's WORST short-pane case: the same 2 × 22-row split with queue
+ * rows and notices above the band and a MULTI-LINE draft. It runs the subject
+ * with `TERN_GUI_BUSY=1`, so the dock carries those rows for real.
+ */
+async function splitPaneBusyGate(h) {
+  const { spawnSync } = await import('node:child_process')
+  const { join } = await import('node:path')
+  const env = {
+    ...process.env,
+    TERN_CONFIG_DIR: join(h.root, 'config'),
+    TERN_DAEMON_SOCKET: join(h.root, 'daemon.sock'),
+    DISPLAY: process.env.DISPLAY,
+  }
+  const tern = process.env.TERN_BIN ?? 'tern'
+  const blocks = () =>
+    JSON.parse(spawnSync(tern, ['ls', '--json'], { env, encoding: 'utf8' }).stdout).sessions[0].tabs[0].blocks
+
+  await h.resize(1280, 830)
+  const before = blocks()
+  spawnSync(tern, ['split', '@focused', 'down'], { env, encoding: 'utf8' })
+  await h.sleep(1500)
+  const after = blocks()
+  h.check('the busy case really split into two panes', after.length === before.length + 1,
+    `blocks ${before.length} -> ${after.length}`)
+
+  // The launcher does not forward arbitrary env, so the busy shape is selected by
+  // a marker file inside the run directory (which the subject can read).
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync(join(h.root, 'busy.marker'), '1')
+  const subject = join(h.repo, 'scripts', 'tern-gui-draft-and-transcript-images-subject.mts')
+  const booted = await h.launch(subject, { ready: 'queued (queue)' })
+  h.check('the busy-subject boots inside a SPLIT pane', booted)
+  if (!booted) return
+
+  const snap = h.snapshot()
+  h.check('the queue row and the notices are painted', snap.nodes.some(node =>
+    String(node.text ?? '').includes('queued (queue)'))
+    && String(JSON.stringify(h.texts(snap))).includes('a previous attempt failed'),
+  h.texts(snap).join(' | '))
+
+  const composerOf = snapshot => snapshot.nodes.find(node => String(node.text ?? '').includes('see attached'))
+  const composer = composerOf(snap)
+  h.check('the MULTI-LINE editor is still painted in the busy split pane', composer !== undefined)
+  if (composer !== undefined) {
+    const box = rect(composer)
+    h.measure('busy dock composer box', JSON.stringify(box))
+    h.check('the busy editor is contained by its PANE', containedXY(snap.chains, composer),
+      `box=${JSON.stringify(box)}`)
+  }
+  const before2 = composer === undefined ? undefined : String(composer.text ?? '')
+  await h.key('d', 700)
+  const afterComposer = composerOf(h.snapshot())
+  const after2 = afterComposer === undefined ? undefined : String(afterComposer.text ?? '')
+  h.check('a REAL key in the busy split pane changes the controlled editor text',
+    before2 !== undefined && after2 !== undefined && after2 !== before2,
+    `before=${JSON.stringify(before2)} after=${JSON.stringify(after2)}`)
+  h.capture('pr4-gui-split-pane-busy', 'the worst short-pane case: notices, multi-line editor, bounded chips')
 }

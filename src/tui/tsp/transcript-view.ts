@@ -485,29 +485,23 @@ export function dockDraftImageNodes(
     const children: Node[] = []
     const state = entry.state
     if (state?.state === 'ready') {
+      // ONLY a READY blob produces a native image node. Every other state —
+      // including `loading` — draws text, so a chip can never reference a blob
+      // id that was not really sent.
       children.push(ui.image({
         key: 'image',
         blob: state.blobId,
         alt: sanitizeDisplayText(entry.name),
         max: DOCK_DRAFT_PREVIEW_MAX,
       }))
-    } else if (state?.state === 'loading') {
-      // The client's own placeholder for a read that has not settled: the SAME
-      // node shape, so the real blob replaces it in place.
-      children.push(ui.image({
-        key: 'image',
-        blob: PENDING_IMAGE_BLOB_ID,
-        alt: sanitizeDisplayText(entry.name),
-        max: DOCK_DRAFT_PREVIEW_MAX,
-      }))
     } else {
-      // No pixels may be drawn (unsupported pane, no scope, failed read, too
-      // large, or no state prepared): the chip states that truthfully and
-      // NEVER fabricates a blob.
-      const reason = state === undefined ? undefined : imageStatusText(state)
+      // `loading`, `error`, `no-scope`, `too-large`, `unsupported`, or no state
+      // prepared: the chip states that truthfully. A pending read shows the
+      // fixed `Preview unavailable` phrase rather than a placeholder bitmap,
+      // because a bitmap would claim bytes the pane does not have yet.
       children.push(ui.text({
         key: 'unavailable',
-        text: sanitizeDisplayText(reason ?? 'Preview unavailable'),
+        text: 'Preview unavailable',
         wrap: 'none',
         max: { w: DOCK_DRAFT_PREVIEW_MAX.w },
       }))

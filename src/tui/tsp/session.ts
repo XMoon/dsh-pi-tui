@@ -1304,8 +1304,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const recalledDraftRefs = (): ImageAttachmentRefLike[] => {
     const binding = imageBinding
     if (binding === undefined) return []
+    // The SAME frozen gate the preview band uses: a pane that may draw no
+    // preview must not read a recalled draft either. Without this, a pane with
+    // no `styles` (or fewer than 72 columns) would still start attachment reads
+    // for a band it can never paint.
+    const limit = dockPreviewLimit()
+    if (limit === 0) return []
     const refs: ImageAttachmentRefLike[] = []
-    for (const occurrence of binding.draftImages.occurrences()) {
+    // Only the occurrences the band can actually SHOW are read: a hidden tail is
+    // counted in the status line, never fetched.
+    for (const occurrence of binding.draftImages.occurrences().slice(0, limit)) {
       const image = occurrence.image
       if (image.source.type !== 'recalled') continue
       const ref = image.recalledRef
@@ -1331,13 +1339,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const prepareDockDraftImageStates = (): ReadonlyMap<string, ToolImageState> | undefined => {
     const binding = imageBinding
     if (binding === undefined) return undefined
-    const occurrences = binding.draftImages.occurrences()
-    if (occurrences.length === 0) return new Map()
     // The frozen capability gate comes FIRST: with no drawable preview (no
     // `styles`, no `image`/`blobs`, or too few columns) the dock must not touch
     // draft blob IO at all. Preparing state first would send bytes for a band
     // that can never be drawn.
-    if (dockPreviewLimit() === 0) return new Map()
+    const limit = dockPreviewLimit()
+    if (limit === 0) return new Map()
+    // Only the occurrences the band can SHOW are prepared: the hidden tail is
+    // counted in the status line and must never cost a read or a blob send.
+    const occurrences = binding.draftImages.occurrences().slice(0, limit)
+    if (occurrences.length === 0) return new Map()
     const states = new Map<string, ToolImageState>()
     if (!nativeImagesSupported()) {
       for (const occurrence of occurrences) states.set(draftOccurrenceKey(occurrence), { state: 'unsupported' })
