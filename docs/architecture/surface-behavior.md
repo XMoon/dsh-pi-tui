@@ -273,23 +273,28 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   Terminal`, `Tools`, and the conditional `Extensions`) keep their three-level
   browse (L0 categories, L1 rows, L2 detail). `About`, `Models`, `Account` and
   `Plugins` remain direct content pages.
-- Sixteen configuration rows are writable, in three writer kinds that are never
+- Twenty configuration rows are writable, in writer kinds that are never
   conflated: the configured theme, the transcript display preset, the icon style,
   the mid-turn progress-updates cadence, the response style, Git attribution,
-  Home/End keys, Mouse wheel lines, Notifications, Notification method and
-  Terminal progress are persisted through the ONE serialized TUI settings
-  document; the profile-wide `Visual tools` switch is the Host profile's
-  revision-checked form section; transcript detail (`Ctrl+O`) and thinking detail
-  (`Alt+T`) are Client-local RUNTIME-ONLY disclosure states with no document
-  field at all, so their Detail states `not applicable — runtime-only` and their
-  `Verified` claims only the live runtime fact. `Submit while busy` and
-  `Fullscreen` are the two PERSIST-FIRST document rows (see below). Browsing
-  never writes, and the configuration rows expose no copy verb at all.
+  Home/End keys, Mouse wheel lines, Notifications, Notification method,
+  Terminal progress and the `Agent` user-shell sandbox policy are persisted
+  through the ONE serialized TUI settings document; the profile-wide
+  `Visual tools` switch is the Host profile's revision-checked form section;
+  the `Agent` `Approval policy` is the official per-session runtime override
+  (no document field), `Default permission` is the Host permission default, and
+  `Subagent model selection` is the official subagent model-selection section;
+  transcript detail (`Ctrl+O`) and thinking detail (`Alt+T`) are Client-local
+  RUNTIME-ONLY disclosure states with no document field at all, so their Detail
+  states `not applicable — runtime-only` and their `Verified` claims only the
+  live runtime fact. `Submit while busy`, `Fullscreen` and the `Agent` user-shell
+  sandbox policy are the PERSIST-FIRST document rows (see below); the subagent
+  allowlist is a specialist PAGE action, not an L2 scalar writer. Browsing never
+  writes, and the configuration rows expose no copy verb at all.
 - The document-backed rows do NOT share one apply/persist order, and the
   contract keeps their differences instead of normalizing them:
-  - `Submit while busy` and `Fullscreen` are PERSIST-FIRST: the stored document
-    is the authority the row reports as its primary `Value` and as its
-    `[current]` chip. A missing/illegal raw value is stated exactly (`not set`,
+  - `Submit while busy`, `Fullscreen` and the `Agent` user-shell sandbox policy
+    are PERSIST-FIRST: the stored document is the authority the row reports as
+    its primary `Value` and as its `[current]` chip. A missing/illegal raw value is stated exactly (`not set`,
     `invalid stored value: <raw>`) and never replaced by the consumer's
     fallback; the `Runtime` half names the effect the next read of that document
     will have (`Next busy Enter: …`; the paused transcript mode plus the
@@ -352,8 +357,72 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     when the readable document carries none, an explicit unknown when it cannot
     be read), and a normalizer's fallback is never presented as the stored
     value.
+- `Agent` owns FIVE rows in this frozen order: `Approval policy (this session)`
+  (only for a live, still-current captured Session on a backend that really
+  reads and writes the official per-session approval override) → `Default
+  permission` (only while the Host advertises a preset roster) →
+  `Subagent allowed models` + `Subagent model selection` (BOTH only while the
+  official subagent model-selection section and the model catalog are
+  available) → `User shell sandbox policy` (always painted). The category stays
+  in the fixed rail even when every row is unavailable, and `Agent` has NO
+  transition launcher any more: it has no unmigrated field left.
+  - `Approval policy` is RUNTIME-ONLY and scope-pinned: the workspace captures
+    ONE live Session scope on open and never re-targets it. A session switch
+    makes the captured scope stale — the Confirm is refused synchronously
+    (zero dispatch, the refusal reaches the ONE app notice) and reopening the
+    workspace is what speaks about the new Session. `Value` is the override the
+    official service reads (or `not overridden`), a separate `Runtime` fact
+    states what the next approval consumes (the consumer's own `ask` fallback
+    when there is no override), and `Persisted` says
+    `not applicable — current session only`. `Verified` means the SAME scope
+    reads the value back; it is never a persistence claim, never a permission
+    preset and never `/yolo`.
+  - `Default permission` is HOST-PERSIST-FIRST: candidates are the Host's raw
+    preset ids in Host order, the write is the official
+    `permission.defaultPreset` mutation, and `Verified` needs a fresh
+    `defaultPreset()` read to agree. It applies to NEW Sessions only — the
+    running Session's preset, sandbox and approval knobs are untouched — and a
+    Host port without a settings service REFUSES explicitly instead of
+    succeeding as a no-op.
+  - `Subagent allowed models` opens the EXISTING subagent allowlist picker in
+    this same workspace body (same screen lease, same chrome, the picker's own
+    semantic hint as the physical last row) through the ONE explicit
+    `Manage allowed models…` action. Its `Esc` returns to the Agent rows — never
+    a category, never the conversation — and the row summary is re-read from the
+    official section on the way back. `Subagent model selection` is the same
+    official section's `enabled`: enabling with an EMPTY allowlist performs
+    ZERO official writes, states the setup guidance and moves the selection to
+    the allowlist row through a typed follow-up outcome (never by parsing the
+    message); disabling keeps every saved route; `Verified` requires BOTH the
+    toggle and the route list to read back.
+  - Both subagent surfaces write through ONE command-owner section queue (the
+    workspace toggle, the embedded picker and the still-supported legacy editor
+    rows), and each user action is an intent over ONE half of the section: the
+    picker replaces the allowed-route list, the toggle sets `enabled`, and the
+    half the action does not own is re-read from the official section INSIDE the
+    queue, immediately before the write. A slow earlier write therefore can
+    never land after a newer intent, and a payload captured before an earlier
+    write settled can never erase it. The queue is a serialization + rebase
+    barrier, not a second settings authority: the official section stays the
+    only stored value.
+  - Every `Agent` row that owns a Host write refuses to offer a confirmable
+    candidate while its authority cannot vouch for the value: a non-`ready`
+    backend (or an unreadable document) keeps the row and its truthful
+    last-known/raw facts but offers no candidate, so the UI never invites a
+    Confirm that the writer must refuse. The delegation rows keep their
+    last-known values labelled as such instead of claiming `Ready`/`[current]`.
+  - `User shell sandbox policy` is a PERSIST-FIRST TUI-document row: `Value` is
+    the RAW stored `localShellSandbox` (`not set` when absent, the invalid raw
+    value when illegal, `unknown` when the document cannot be read), `Runtime`
+    names the effect the NEXT `!`/`!!` really takes (including
+    `bypass (default; no valid saved value)`), and only an agreed fresh
+    document read is `Verified`. It is the Host user-shell execution policy —
+    never the model's tool sandbox policy, never a permission preset, and it is
+    deliberately not part of `Input & Terminal`. When the Host provides no
+    user-shell the preference still stores, and the existing executor fails
+    closed instead of degrading to a local spawn.
 - Every other setting stays in the existing complete editor behind a
-  per-category TRANSITION row (`Agent settings…`, `Footer & status line…`,
+  per-category TRANSITION row (`Footer & status line…`,
   `Input & terminal settings…`, `Configure extension settings…`, and the
   relocated `Web Search / Fetch`): each row is `open-legacy` with its exact
   legacy target, states the `Existing settings editor` scope, runs no write of

@@ -174,6 +174,44 @@ interface HarnessOptions {
      *  republish/currentness seam). */
     readonly currentSessionStats?: () => Promise<{ lifetime: { turns: number; steps: number; llmMs: number } }>
   }
+  /**
+   * C2-R3: the REAL Agent authorities this composition reads and writes. Every
+   * value lives on the object handed in, so a case can prove the downstream
+   * effect on the SAME instance the production seam consumes (never on a UI
+   * copy): the session approval override, the Host permission default, the
+   * official subagent model-selection section and the official model directory.
+   */
+  agent?: {
+    /** The live session scope the workspace pins (absent = sessionless). */
+    readonly sessionId?: string
+    /** Whether the pinned scope is still current (a session switch flips it). */
+    readonly scopeCurrent?: () => boolean
+    /** The approval capability (Remote compositions answer false). */
+    readonly approvalAvailable?: boolean
+    /** The official per-session approval override the service really holds. */
+    readonly approval?: { value: 'ask' | 'never' | undefined }
+    /** The Host permission roster, in Host order. */
+    readonly permissionNames?: readonly string[]
+    /** The Host's effective default for new sessions. */
+    readonly permissionDefault?: { value: string | undefined }
+    /** The official subagent model-selection section (absent = unavailable). */
+    readonly subagent?: {
+      enabled: boolean
+      allowedModels: { provider: string; model: string }[]
+    }
+    /**
+     * Hold every official subagent section write until the returned promise
+     * settles: the ONLY way a case can observe a real in-flight section write
+     * (the production queue serializes on it).
+     */
+    readonly gateSectionWrite?: () => Promise<void>
+    /** The official grouped model directory the allowlist picker reads. */
+    readonly directory?: readonly {
+      readonly id: string
+      readonly name: string
+      readonly models: readonly { readonly id: string; readonly name?: string }[]
+    }[]
+  }
   /** The icon style the REAL `TuiApp` starts with (the composition's persisted
    *  read). Omitted = the app's own default. */
   iconStyle?: 'emoji' | 'symbols' | 'minimal'
@@ -338,6 +376,16 @@ interface Harness {
   readonly pluginPageInstances: () => readonly FakeEmbeddedPluginPage[]
   /** Host/provider/account reads in the fake seams (the hidden-action witness). */
   readonly hostReads: () => number
+  /** The LIVE Agent authorities this composition reads and writes. */
+  readonly agent: NonNullable<HarnessOptions['agent']>
+  /** Every official subagent section write, in dispatch order. */
+  readonly subagentWrites: () => readonly { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }[]
+  /** Every Host permission-default write, in dispatch order. */
+  readonly permissionWrites: () => readonly string[]
+  /** The LIVE official subagent section the harness's seam serves. */
+  readonly subagentSection: () => { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] } | undefined
+  /** Every user-facing notice the app really emitted. */
+  readonly notices: () => readonly string[]
   /** Move the LIVE backend readiness the ConfigPort answers. */
   readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
   /** Resolves once the held first document write really started. */
@@ -385,6 +433,16 @@ function setup(options: HarnessOptions = {}): Harness {
     ? undefined
     : options.visualTools ?? { enabled: true, revision: 1, userOverridden: false, applied: true }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
+  // C2-R3: the Agent authorities. The MUTABLE parts are the objects the case
+  // handed in (a seam reads them on every call), so a write is observable on
+  // the exact instance the production consumer would read.
+  const agent = options.agent ?? {}
+  const subagentWrites: { enabled: boolean; allowedModels: { provider: string; model: string }[] }[] = []
+  const permissionWrites: string[] = []
+  const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
+  let subagentSection = agent.subagent === undefined
+    ? undefined
+    : { enabled: agent.subagent.enabled, allowedModels: agent.subagent.allowedModels.map(route => ({ ...route })) }
   /** Whether a replace already ran: the configured re-read failure only applies
    *  to the readback of a COMPLETED write. */
   let wroteOnce = false
@@ -440,11 +498,21 @@ function setup(options: HarnessOptions = {}): Harness {
   }
   const originalWrite = vt.write.bind(vt)
   vt.write = (data: string): void => { writes.push(data); originalWrite(data) }
+  const notices: string[] = []
   const app = new TuiApp(vt, events, {
     copySelection: options.copySelection ?? (async (text: string) => { copied.push(text); return true }),
     ...options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle },
     ...options.appTerminalProgress === undefined ? {} : { terminalProgressMode: options.appTerminalProgress },
   })
+  // The commands notify through the REAL app sink: record what it was really
+  // asked to tell the user (a refusal must reach them, not only the Detail).
+  {
+    const originalNotify = app.notify.bind(app)
+    app.notify = (message: string, kind?: 'info' | 'error') => {
+      notices.push(message)
+      originalNotify(message, kind)
+    }
+  }
   app.start()
   if (options.appFullscreen === true) app.setFullscreen(true)
   if (options.displayPreset !== undefined && options.displayPreset !== app.displayPreset()) {
@@ -503,13 +571,17 @@ function setup(options: HarnessOptions = {}): Harness {
     // A sessionless surface: the completion install and the legacy session rows
     // must see no live scope. A `liveSession` composition replaces these About
     // seams below with the ones the real `/settings` command injects.
-    currentSessionId: options.liveSession?.sessionId,
-    captureLiveSessionScope: () => options.liveSession === undefined
-      ? undefined
-      : { sessionId: options.liveSession.sessionId, generation: 1 },
+    // C2-R3: the Agent-authority session (an explicit `agent.sessionId`) takes
+    // precedence, so an Agent case can pin the scope without composing About
+    // statistics; `liveSession` remains the About composition.
+    currentSessionId: options.liveSession?.sessionId ?? agent.sessionId,
+    captureLiveSessionScope: () => {
+      const sessionId = agent.sessionId ?? options.liveSession?.sessionId
+      return sessionId === undefined ? undefined : { sessionId, generation: 1 }
+    },
     // C3 About seams (this suite's stub composes no StatusRuntime): the
     // sessionless capture answers `unavailable` and no listener ever fires.
-    isSessionScopeCurrent: () => options.liveSession !== undefined,
+    isSessionScopeCurrent: () => (agent.scopeCurrent?.() ?? true) && (options.liveSession !== undefined || agent.sessionId !== undefined),
     currentSessionStats: options.liveSession?.currentSessionStats
       ?? (async () => options.liveSession === undefined ? undefined : {
         lifetime: {
@@ -546,6 +618,19 @@ function setup(options: HarnessOptions = {}): Harness {
       return true
     },
     refreshStatus: () => { calls.push('refreshStatus') },
+    // C2-R3: the official per-session approval override, read and written on
+    // the SAME captured scope. A stale scope is refused exactly like the
+    // production surface facade does.
+    currentApprovalOverride: (scope: { sessionId: string }) => {
+      if (!(agent.scopeCurrent?.() ?? true)) return undefined
+      return approvalState.value
+    },
+    setSessionApprovalPolicy: (scope: { sessionId: string }, value: 'ask' | 'never') => {
+      calls.push(`approval:${scope.sessionId}:${value}`)
+      if (!(agent.scopeCurrent?.() ?? true)) return 'superseded'
+      approvalState.value = value
+      return 'applied'
+    },
     tuiSettings: options.settingsService === false
       ? undefined
       : options.tuiSettings ?? {
@@ -623,8 +708,31 @@ function setup(options: HarnessOptions = {}): Harness {
       footerCustomItems: {
         rawForPersistence: () => ({ kind: 'available' as const, value: options.footerCustomItemsRaw }),
       },
-      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
-      subagentModelSelection: { available: () => false },
+      // The REAL Agent authorities: the workspace reads them on every snapshot
+      // and its writers mutate exactly these objects.
+      permissions: {
+        presetNames: () => agent.permissionNames ?? [],
+        defaultPreset: () => agent.permissionDefault?.value,
+        setDefaultPreset: async (name: string) => {
+          permissionWrites.push(name)
+          if (agent.permissionDefault === undefined) throw new Error('settings service unavailable')
+          agent.permissionDefault.value = name
+        },
+        approvalOverrideOf: (sessionId: string) => sessionId === agent.sessionId ? approvalState.value : undefined,
+        approvalOverrideAvailable: () => agent.approvalAvailable ?? false,
+      },
+      subagentModelSelection: {
+        available: () => subagentSection !== undefined,
+        get: () => subagentSection === undefined
+          ? { enabled: false, allowedModels: [] }
+          : { enabled: subagentSection.enabled, allowedModels: subagentSection.allowedModels.map(route => ({ ...route })) },
+        set: async (value: { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }) => {
+          await agent.gateSectionWrite?.()
+          subagentWrites.push({ enabled: value.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) })
+          if (subagentSection === undefined) throw new Error('settings service unavailable')
+          subagentSection = { enabled: value.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) }
+        },
+      },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
       // Host settings plane, so the section reports unavailable and offers no write.
       web: { available: () => false },
@@ -677,7 +785,17 @@ function setup(options: HarnessOptions = {}): Harness {
         hasRunningAccountTasks: () => false,
       },
     },
-    catalog: { models: { available: () => false } },
+    catalog: {
+      models: {
+        available: () => agent.subagent !== undefined && agent.directory !== undefined,
+        loadDirectory: async () => ({
+          default: { provider: 'p', model: 'm' },
+          routableProviders: (agent.directory ?? []).map(group => group.id),
+          groups: (agent.directory ?? []).map(group => ({ id: group.id, name: group.name, models: group.models })),
+          failures: [],
+        }),
+      },
+    },
   }
   const runner = new Proxy(base, {
     get: (target, property) => property in target ? target[property as string] : () => undefined,
@@ -731,6 +849,11 @@ function setup(options: HarnessOptions = {}): Harness {
     app,
     copied,
     doc,
+    agent,
+    subagentWrites: () => subagentWrites,
+    permissionWrites: () => permissionWrites,
+    subagentSection: () => subagentSection,
+    notices: () => notices,
     progressUpdatesState,
     responseStyleState,
     gitAttributionState,
@@ -792,7 +915,10 @@ const rowsPaneText = (h: Harness, row: number): string => {
   const plain = h.rowsPlain()
   const header = plain.find(candidate => candidate.includes('Rows ('))
   assert.ok(header !== undefined, `the rows pane header must be painted:\n${h.view()}`)
-  const start = header.indexOf('Rows (')
+  // The pane starts at the header's active device (`[Rows (…)`) or at the bare
+  // label when it is not the focused pane.
+  const label = header.indexOf('Rows (')
+  const start = header[label - 1] === '[' ? label - 1 : label
   const detailAt = header.indexOf('Details', start)
   const end = detailAt < 0 ? plain[row]!.length : detailAt - 2
   return plain[row]!.slice(start, end)
@@ -1353,20 +1479,508 @@ test('A-10b a copy settled after the workspace closed never notifies the restore
 
 // ── A-11: the legacy compatibility bridge ─────────────────────────────────
 
-test('A-11 Agent settings opens the existing complete editor after retiring the workspace, and Esc returns', async () => {
-  const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
+test('A-11 Agent paints only the five availability-gated rows and no legacy launcher', async () => {
+  const h = setup({
+    columns: 140,
+    rows: 44,
+    doc: { theme: 'dark' },
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: undefined },
+      permissionNames: ['workspace-write', 'danger-full-access'],
+      permissionDefault: { value: 'workspace-write' },
+      subagent: { enabled: false, allowedModels: [] },
+      directory: [{ id: 'p', name: 'P', models: [{ id: 'm1' }] }],
+    },
+  })
   await h.open('Agent')
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Agent')), `the Agent category is selected:\n${h.view()}`)
   await key(h, '\r') // L0 -> L1 (the Agent rows level)
   assert.match(h.rowsPlain()[0]!, /Settings · Agent · Rows/)
-  assert.match(h.view(), /Agent settings…/u, 'the transition launcher is painted')
-  await key(h, '\r') // Enter on the explicit open-legacy row hands off
-  const legacy = h.view()
-  assert.match(legacy, /Type to search/, `the legacy SettingsList is the physical owner:\n${legacy}`)
-  assert.ok(!legacy.includes('Settings ·'), 'the workspace is gone, not stacked underneath')
-  await key(h, '\x1b')
-  assert.ok(h.view().includes('❯'), 'closing the legacy editor returns to the conversation')
+  const rows = h.rowsPlain()
+  const order = ['Approval policy (this session)', 'Default permission', 'Subagent allowed models', 'Subagent model selection', 'User shell sandbox policy']
+    .map(label => rows.findIndex(line => line.includes(label)))
+  for (const [index, row] of order.entries()) {
+    assert.ok(row >= 0, `Agent paints ${JSON.stringify(order[index])}:\n${h.view()}`)
+  }
+  assert.deepEqual([...order].sort((left, right) => left - right), order, 'the Agent rows keep the frozen order')
+  assert.doesNotMatch(h.view(), /Agent settings…/u, 'the legacy launcher is retired')
+  // Browsing the rows (L1 -> L2 back) writes nothing at all.
+  assert.equal(h.replacements(), 0, 'reading the Agent rows writes no document')
+  assert.deepEqual(h.subagentWrites(), [], 'reading the Agent rows writes no official section')
+  assert.deepEqual(h.permissionWrites(), [], 'reading the Agent rows writes no Host permission default')
+  // The approval row states an override-less session as such — never a saved
+  // `ask` it never read.
+  await key(h, '\r') // Enter the approval Detail (and its choice)
+  const approval = h.view()
+  assert.match(approval, /not overridden/u, `an absent override is stated, not faked:\n${approval}`)
+  assert.match(approval, /consumer fallback ask/u, 'the consumer fallback is named as the runtime effect')
+  assert.match(approval, /not applicable — current session only/u, 'the persisted half is explicitly not applicable')
   h.dispose()
+})
+
+test('A-11b Agent hides the approval and delegation rows when their authority is absent', async () => {
+  // Sessionless Direct with the capability present: no session-scoped row.
+  const sessionless = setup({
+    columns: 140,
+    rows: 44,
+    agent: { approvalAvailable: true, permissionNames: ['workspace-write'], permissionDefault: { value: 'workspace-write' } },
+  })
+  await sessionless.open('Agent')
+  await key(sessionless, '\r')
+  assert.doesNotMatch(sessionless.view(), /Approval policy \(this session\)/u, 'a sessionless surface paints no approval row')
+  assert.match(sessionless.view(), /Default permission/u, 'the Host-authority rows do not need a Session')
+  assert.match(sessionless.view(), /User shell sandbox policy/u, 'the document row does not need a Session')
+  assert.doesNotMatch(sessionless.view(), /Subagent (?:allowed models|model selection)/u, 'no official section means no delegation rows')
+  sessionless.dispose()
+
+  // A live session on a backend WITHOUT the approval capability (Remote): the
+  // row is absent rather than rendered as a saved `ask`.
+  const remote = setup({
+    columns: 140,
+    rows: 44,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: false,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await remote.open('Agent')
+  await key(remote, '\r')
+  assert.doesNotMatch(remote.view(), /Approval policy \(this session\)/u, 'no capability means no approval row')
+  remote.dispose()
+
+  // An empty Host roster paints no default-permission row at all.
+  const emptyRoster = setup({
+    columns: 140,
+    rows: 44,
+    agent: { sessionId: 'session-live', approvalAvailable: true, permissionNames: [], permissionDefault: { value: undefined } },
+  })
+  await emptyRoster.open('Agent')
+  await key(emptyRoster, '\r')
+  assert.doesNotMatch(emptyRoster.view(), /Default permission/u, 'an empty roster paints no default-permission row')
+  assert.match(emptyRoster.view(), /User shell sandbox policy/u, 'the other rows stay reachable')
+  emptyRoster.dispose()
+})
+
+// ── C2-R3: the Agent writers, end to end through the real workspace keys ──
+
+/**
+ * Walk the Agent row cursor to `label` WITHOUT leaving the open workspace
+ * (the caller already sits on the Agent Rows level).
+ */
+async function openRowInAgent(h: Harness, label: string): Promise<void> {
+  for (let step = 0; step < 8 && !agentSelectedRowLabel(h).includes(label); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  assert.match(agentSelectedRowLabel(h), new RegExp(`^${label.slice(0, 18)}`, 'u'),
+    `the Agent row ${JSON.stringify(label)} was reached:\n${h.view()}`)
+}
+
+/**
+ * The selected Agent row as the frame paints it. The cursor lives inside the
+ * Rows pane, whose column depends on the projection, so the pane's own painted
+ * header supplies the offset; only cells INSIDE that pane are read (the
+ * category rail has its own cursor).
+ */
+function agentSelectedRowLabel(h: Harness): string {
+  const lines = h.rowsPlain()
+  const header = lines.find(candidate => candidate.includes('Rows ('))
+  assert.ok(header !== undefined, `the Agent rows pane header must be painted:\n${h.view()}`)
+  const label = header.indexOf('Rows (')
+  // The active-device bracket `[` belongs to the pane title, not to its cells.
+  const start = header[label - 1] === '[' ? label - 1 : label
+  const detailAt = header.indexOf('Details', start)
+  const end = detailAt < 0 ? undefined : detailAt - 2
+  for (const line of lines) {
+    const pane = line.slice(start, end)
+    if (/^\s{0,2}> /u.test(pane)) return pane.replace(/^\s*> /u, '').trimEnd()
+  }
+  assert.fail(`the Agent rows pane paints no cursor:\n${h.view()}`)
+}
+
+/** Open the workspace on the Agent rows and walk the row cursor to `label`. */
+async function openAgentRow(h: Harness, label: string): Promise<void> {
+  await h.open('Agent')
+  await key(h, '\r') // L0 -> L1
+  for (let step = 0; step < 8; step += 1) {
+    if (agentSelectedRowLabel(h).includes(label)) return
+    await key(h, '\x1b[B')
+  }
+  assert.fail(`the Agent row ${JSON.stringify(label)} was never reached:\n${h.view()}`)
+}
+
+test('R3-01 confirming a permission preset writes the Host default and never the current session', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: 'ask' },
+      permissionNames: ['workspace-write', 'danger-full-access'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await openAgentRow(h, 'Default permission')
+  await key(h, '\r') // the Detail opens its inline choice
+  assert.match(h.view(), /Choose value/u, `the choice is painted:\n${h.view()}`)
+  await key(h, '\x1b[B') // workspace-write -> danger-full-access
+  await key(h, '\r') // explicit Confirm
+  await settle(h)
+  assert.deepEqual(h.permissionWrites(), ['danger-full-access'], 'exactly ONE Host permission default write')
+  assert.equal(h.agent.permissionDefault?.value, 'danger-full-access', 'the Host authority really changed')
+  assert.match(h.view(), /Verified/u, `the fresh Host read agrees:\n${h.view()}`)
+  // The CURRENT session is untouched: no approval write and no preset apply.
+  assert.deepEqual(h.calls().filter(call => call.startsWith('approval:')), [], 'the running session approval was not written')
+  assert.equal(h.agent.approval?.value, 'ask', 'the live session override is unchanged')
+  assert.equal(h.replacements(), 0, 'the permission default is never a TUI document field')
+  h.dispose()
+})
+
+test('R3-01b a Host permission default that could not be written is never reported as Verified', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      permissionNames: ['workspace-write', 'danger-full-access'],
+      // No permissionDefault object: the seam throws `settings service
+      // unavailable`, exactly like the Direct adapter without a settings service.
+      permissionDefault: undefined,
+    },
+  })
+  await openAgentRow(h, 'Default permission')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  const view = h.view()
+  assert.doesNotMatch(view, /Verified/u, `a failed default write must not claim Verified:\n${view}`)
+  assert.match(view, /Not saved|Outcome unknown/u, `the refusal is stated truthfully:\n${view}`)
+  h.dispose()
+})
+
+test('R3-02 the approval Confirm targets the pinned session scope; a stale scope dispatches nothing', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: undefined },
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await openAgentRow(h, 'Approval policy (this session)')
+  await key(h, '\r') // Detail + inline choice
+  await key(h, '\x1b[B') // ask -> never
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.calls().filter(call => call.startsWith('approval:')), ['approval:session-live:never'],
+    'the write names the ONE captured session')
+  assert.equal(h.agent.approval?.value, 'never', 'the official per-session override really changed')
+  assert.match(h.view(), /Verified/u, 'the same-scope readback agrees')
+  assert.equal(h.replacements(), 0, 'the approval policy never reaches the TUI document')
+  h.dispose()
+})
+
+test('R3-02b a session switch revokes the approval row instead of re-targeting the new session', async () => {
+  let current = true
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      scopeCurrent: () => current,
+      approvalAvailable: true,
+      approval: { value: 'ask' },
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await openAgentRow(h, 'Approval policy (this session)')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  // The session really changed before the Confirm: the captured scope is stale.
+  current = false
+  await key(h, '\r')
+  await settle(h)
+  const view = h.view()
+  assert.deepEqual(h.calls().filter(call => call.startsWith('approval:')), [],
+    'a stale scope dispatches NO approval write at all')
+  assert.ok(h.notices().some(message => /the session changed — the approval policy was not applied/u.test(message)),
+    `the refusal reaches the user:\n${h.notices().join('\n')}`)
+  assert.doesNotMatch(view, /Settings · Agent · Approval policy/u,
+    `the spent row is gone from the fresh frame instead of re-targeting a new session:\n${view}`)
+  assert.equal(h.agent.approval?.value, 'ask', 'the old override is untouched')
+  h.dispose()
+})
+
+test('R3-04 the allowlist row mounts the EXISTING picker in the same workspace and toggles the official section', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+      subagent: { enabled: false, allowedModels: [] },
+      directory: [
+        { id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }, { id: 'm2', name: 'Model Two' }] },
+        { id: 'p2', name: 'Provider Two', models: [{ id: 'm1' }] },
+      ],
+    },
+  })
+  await openAgentRow(h, 'Subagent allowed models')
+  // Tab focuses the Detail WITHOUT activating anything (the Manage action is
+  // painted there), then Enter mounts the SAME picker.
+  await key(h, '\t')
+  assert.match(h.view(), /Manage allowed models…/u, `the ONE explicit Manage action is painted:\n${h.view()}`)
+  await key(h, '\r')
+  const picker = h.view()
+  assert.match(picker, /Subagent allowed models/u, `the picker is painted in the same lease:\n${picker}`)
+  assert.match(picker, /Provider One|Provider Two/u, 'the official grouped directory really painted')
+  assert.match(picker, /Enter toggle/u, 'the picker keeps its own semantic hint on the last row')
+  // The picker is searchable: filter down to one route and toggle it.
+  await key(h, 'm')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.subagentWrites().length, 1, 'exactly ONE official section write')
+  assert.deepEqual(h.subagentWrites()[0]?.allowedModels, [{ provider: 'p1', model: 'm1' }],
+    'the write carries the exact (provider, model) pair')
+  assert.equal(h.subagentSection()?.allowedModels.length, 1, 'the official section really changed')
+  // Esc leaves the picker (NOT the workspace) and returns to the Agent rows.
+  await key(h, '\x1b')
+  const back = h.view()
+  assert.match(back, /Settings · Agent/u, `Esc returns to the Agent rows, not the conversation:\n${back}`)
+  assert.match(back, /1 route/u, 'the row summary follows the committed official section')
+  h.dispose()
+})
+
+test('R3-05 enabling the toggle with an EMPTY allowlist writes nothing and moves to the allowlist row', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+      subagent: { enabled: false, allowedModels: [] },
+      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
+    },
+  })
+  await openAgentRow(h, 'Subagent model selection')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // off -> on
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.subagentWrites(), [], 'an empty allowlist means ZERO official writes')
+  assert.equal(h.agent.subagent?.enabled, false, 'the section stays off')
+  const view = h.view()
+  assert.match(view, /Select at least one Subagent allowed model before enabling model selection\./u,
+    `the exact guidance is shown:\n${view}`)
+  assert.match(agentSelectedRowLabel(h), /^Subagent allowed models/u,
+    `the typed follow-up moved the selection to the allowlist row:\n${view}`)
+  h.dispose()
+})
+
+test('R3-05b enabling and disabling the toggle preserves every saved route', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+      subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
+    },
+  })
+  await openAgentRow(h, 'Subagent model selection')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.subagentWrites(), [{ enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] }],
+    'enabling keeps the existing route')
+  assert.match(h.view(), /Verified/u, 'both section halves read back')
+  // Disable again in a FRESH open: the routes survive.
+  for (let step = 0; step < 3; step += 1) await key(h, '\x1b')
+  await settle(h)
+  assert.doesNotMatch(h.view(), /Settings ·/u, `the workspace closed:\n${h.view()}`)
+  await openAgentRow(h, 'Subagent model selection')
+  await key(h, '\r')
+  await key(h, '\x1b[A') // the section reads enabled: on -> off
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.subagentWrites().length, 2, 'the second toggle dispatched ONE write')
+  assert.deepEqual(h.subagentWrites()[1], { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+    'disabling never clears the saved routes')
+  assert.equal(h.subagentSection()?.allowedModels.length, 1, 'the official section still carries the route')
+  h.dispose()
+})
+
+test('R3-07 the user shell sandbox policy Confirm stores the raw document value only', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    doc: { localShellSandbox: 'bypass' },
+    agent: { permissionNames: ['workspace-write'], permissionDefault: { value: 'workspace-write' } },
+  })
+  await openAgentRow(h, 'User shell sandbox policy')
+  const before = h.view()
+  assert.match(before, /Runtime\s+Next ! \/ !! uses bypass/u, `the consumer effect is its own line:\n${before}`)
+  await key(h, '\r')
+  await key(h, '\x1b[B') // bypass -> sandbox
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.localShellSandbox, 'sandbox', 'the TUI document really stored the new policy')
+  assert.equal(h.replacements(), 1, 'exactly ONE whole-document write')
+  assert.match(h.view(), /Verified/u, 'the fresh document read agrees')
+  assert.match(h.view(), /Next ! \/ !! uses sandbox/u, 'the consumer effect is stated separately')
+  assert.deepEqual(h.permissionWrites(), [], 'the shell policy never touches the Host permission default')
+  assert.deepEqual(h.subagentWrites(), [], 'the shell policy never touches the subagent section')
+  h.dispose()
+})
+
+test('R3-06 one queued section write cannot resurrect a route a pending picker write removed', async () => {
+  // The cross-surface failure this queue must prevent: the picker removes a
+  // route (its write is still in flight), the user leaves the picker and flips
+  // the toggle. The toggle owns ONLY `enabled`, so the route list it writes must
+  // come from the FRESH section inside the queue — not from the snapshot the
+  // user saw before the removal settled.
+  let openGate: (() => void) | undefined
+  const gate = new Promise<void>(resolve => { openGate = resolve })
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+      // Enabled with TWO routes: disabling must keep whatever routes survive,
+      // and the picker's removal is what they are.
+      subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }] },
+      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }, { id: 'm2' }] }],
+      gateSectionWrite: () => gate,
+    },
+  })
+  await openAgentRow(h, 'Subagent allowed models')
+  await key(h, '\r') // Detail focus
+  await key(h, '\r') // Manage → the picker
+  assert.match(h.view(), /P1/u, `the picker painted the official directory:\n${h.view()}`)
+  // Walk to m2 and toggle it OFF: that section write is held open.
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h, 2)
+  // Leave the picker (its own Esc) and flip the toggle while the removal is
+  // still in flight. The toggle is 'on' -> 'off', so it needs no route gate.
+  await key(h, '\x1b') // picker Esc -> the allowlist row's Detail
+  await key(h, '\x1b') // Detail -> Rows
+  for (let step = 0; step < 8 && !agentSelectedRowLabel(h).includes('Subagent model selection'); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  assert.match(agentSelectedRowLabel(h), /^Subagent model selection/u, `the toggle row was reached:\n${h.view()}`)
+  await key(h, '\r')
+  await key(h, '\x1b[A') // the current candidate is `on` → `off`
+  await key(h, '\r')
+  await settle(h, 2)
+  assert.deepEqual(h.subagentWrites(), [], 'nothing settles while the first write is held')
+
+  openGate!()
+  await settle(h, 12)
+  const writes = h.subagentWrites()
+  assert.equal(writes.length, 2, `both intents committed in order: ${JSON.stringify(writes)}`)
+  const survived = writes[0]!.allowedModels
+  assert.equal(survived.length, 1, 'the picker removed exactly one of the two routes')
+  assert.equal(writes[0]!.enabled, true, 'the picker kept the CURRENT enabled half instead of the value it saw when it was built')
+  assert.deepEqual(writes[1], { enabled: false, allowedModels: survived },
+    'the toggle kept the FRESH route list: the removed route is never resurrected')
+  assert.deepEqual(h.subagentSection(), { enabled: false, allowedModels: survived },
+    'the official section ends in the merged state of BOTH intents')
+  h.dispose()
+})
+
+test('R3-09 a NON-CURRENT backend paints no confirmable Agent candidate and claims no current value', async () => {
+  for (const readiness of ['stale', 'unavailable'] as const) {
+    const h = setup({
+      columns: 140,
+      rows: 44,
+      readiness,
+      doc: { localShellSandbox: 'bypass' },
+      agent: {
+        sessionId: 'session-live',
+        approvalAvailable: true,
+        approval: { value: 'ask' },
+        permissionNames: ['workspace-write', 'danger-full-access'],
+        permissionDefault: { value: 'workspace-write' },
+        subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+        directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
+      },
+    })
+    await h.open('Agent')
+    await key(h, '\r')
+    // The delegation rows report the LAST-KNOWN state and claim no [current],
+    // and the Manage action is NOT offered (the picker would refuse anyway).
+    assert.match(h.view(), /Subagent allowed models/u, `${readiness}: the row stays reachable`)
+    await openRowInAgent(h, 'Subagent allowed models')
+    await key(h, '\r')
+    assert.doesNotMatch(h.view(), /Manage allowed models…/u,
+      `${readiness}: a non-current section offers no Manage action:\n${h.view()}`)
+    assert.doesNotMatch(h.view(), /Provider One/u, `${readiness}: the picker never mounts`)
+    // Back to the rows level before walking to the toggle.
+    await key(h, '\x1b')
+    await openRowInAgent(h, 'Subagent model selection')
+    await key(h, '\r') // its Detail cannot open a choice with no candidates
+    const view = h.view()
+    assert.match(view, /No candidate is available for this setting right now\./u,
+      `${readiness}: a non-current section offers NO confirmable candidate:\n${view}`)
+    assert.doesNotMatch(view, /\[current\]/u, `${readiness}: no [current] chip on an unconfirmed value`)
+    assert.doesNotMatch(view, /Enter confirm/u, `${readiness}: no confirm affordance is advertised`)
+    h.dispose()
+  }
+})
+
+test('R3-09b the default permission and shell policy rows offer no candidate on a non-ready backend', async () => {
+  for (const readiness of ['stale', 'unavailable'] as const) {
+    const h = setup({
+      columns: 140,
+      rows: 44,
+      readiness,
+      doc: { localShellSandbox: 'bypass' },
+      agent: {
+        sessionId: 'session-live',
+        approvalAvailable: true,
+        permissionNames: ['workspace-write'],
+        permissionDefault: { value: 'workspace-write' },
+      },
+    })
+    await h.open('Agent')
+    await key(h, '\r')
+    // The rows still state their truthful facts…
+    assert.match(h.view(), /Default permission/u, `${readiness}: the default-permission row stays painted`)
+    await openRowInAgent(h, 'Default permission')
+    await key(h, '\r')
+    assert.match(h.view(), /No candidate is available for this setting right now\./u,
+      `${readiness}: the permission default offers no confirmable candidate`)
+    assert.match(h.view(), /Last-known value|Unavailable — no authoritative config document/u,
+      `${readiness}: the row states the real freshness`)
+    await key(h, '\x1b')
+    await openRowInAgent(h, 'User shell sandbox policy')
+    await key(h, '\r')
+    assert.match(h.view(), /No candidate is available for this setting right now\./u,
+      `${readiness}: the shell policy offers no confirmable candidate`)
+    h.dispose()
+  }
 })
 
 // ── A-12: the return surface ──────────────────────────────────────────────

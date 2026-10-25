@@ -421,11 +421,33 @@ Input & terminal settings…，最后一行只剩 `Keyboard shortcuts` 仍需打
 `Terminal progress` 只控制终端原生状态协议（OSC 9;4 / OSC 7501），与 `Progress updates` 的叙述节奏
 互不影响；旧文档里的 `on` 只在读取时归一为 `9;4+7501`，不会在未确认时被写回。
 
+`/settings → Agent` 现在直接编辑五项，不必再进旧编辑器，顺序固定为
+`Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
+`Subagent model selection` → `User shell sandbox policy`。五项各有唯一权威，语义互不混同：
+`Approval policy` 是**当前会话**的官方 approval override，本工作区打开时只捕获一次该会话，
+之后即使切换会话也不会改投到新会话（确认被同步拒绝，需重开工作区）；它的 `Persisted` 明确写着
+`not applicable — current session only`，`Runtime` 单独说明下一次审批实际会用的是会话 override
+还是消费者的 `ask` 回退。`Default permission` 是 Host 的 `permission.defaultPreset`：候选就是
+Host 公布的 preset 原始 id，只影响**以后新建**的会话，当前会话的 preset、sandbox 与 approval
+不变；写入返回成功但 Host 回读不一致时不会显示 `Verified`，而缺少 settings 服务时会明确失败，
+不再把 no-op 当成功。`Subagent allowed models` 用 `Manage allowed models…` 在**同一个工作区租约**
+里打开原有的可搜索多选列表（同一套分组/过滤/滚动与 `Enter toggle`），
+`Esc` 只回到 Agent 行而不是退出设置；`Subagent model selection` 是该官方 section 的 `enabled`：
+没有 allowed route 时开启会**零写入**、给出提示并把选中行移到 allowed models 行，关闭则保留全部
+已存 route。两个子代理入口与旧编辑器共用唯一一条写入队列，而且每个操作只写自己拥有的那一半
+（picklist 只写 allowed route 列表、开关只写 enabled），另一半在轮到它时从官方 section 重新读取，
+所以先前的慢写不会再被后到的旧快照覆盖。
+`User shell sandbox policy` 存在 TUI 设置文档里，`Value` 是原始存储值（未设置/非法值/不可读都分别
+如实显示），`Runtime` 说明下一次 `!`/`!!` 的实际效果（包括「无可信存档值，使用默认 bypass」），
+只有写入完成且回读一致才 `Verified`；它是 Host 的用户 shell 执行策略，不是模型工具 sandbox 策略，
+也不是权限 preset，因此不放在 Input & Terminal。
+
 旧的完整设置编辑器仍然可用：尚未迁移到新工作区的设置在各自所属分类里有一个明确标注
-`Existing settings editor` 的过渡行（`Agent → Agent settings…`、`Appearance → Footer & status line…`、
+`Existing settings editor` 的过渡行（`Appearance → Footer & status line…`、
 `Input & Terminal → Input & terminal settings…`（只剩 `Keyboard shortcuts`）、
 `Extensions → Configure extension settings…`）；激活它才会先关闭工作区、恢复原界面，再打开原有
-编辑器并定位到对应的一项，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
+编辑器并定位到对应的一项，Theme、Plugin Manager、键位与扩展设置的写入路径全部不变。`Agent`
+分类已经没有未迁移项，所以它的 `Agent settings…` 过渡行随之退休。
 
 `/settings` 的 `Tools` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
 的 Web 段并定位到第一项。段内可切换搜索 Provider（`Messages`，官方默认，或独立计费的

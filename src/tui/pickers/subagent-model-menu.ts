@@ -59,7 +59,10 @@ export interface AllowlistCatalogServices {
 }
 
 export interface SubagentAllowlistPickerDeps {
-  /** The official settings sub-domain (read + whole-section writes). */
+  /** The official settings sub-domain (read + whole-section writes).
+   *  `available()` answers "may a route be written RIGHT NOW": it is checked
+   *  before every toggle, so a stale/unavailable authority refuses instead of
+   *  painting an optimistic marker that can never commit. */
   selection: SubagentModelSelectionConfig
   /** The provider/model discovery catalog for the picker rows. */
   catalog: AllowlistCatalogServices
@@ -389,6 +392,14 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
 
   private toggle(route: SubagentAllowedModelRoute): void {
     if (this.disposed) return
+    // The section must be WRITABLE right now: a stale/unavailable backend keeps
+    // readable last-known values, so an optimistic toggle there could never
+    // commit and would silently roll back. Refuse BEFORE the optimistic marker
+    // instead of pretending the route changed.
+    if (!this.deps.selection.available()) {
+      this.deps.notify('the official subagent settings are not current; the allowlist was not changed', 'error')
+      return
+    }
     const present = this.allowed.some(existing =>
       existing.provider === route.provider && existing.model === route.model)
     if (present) {

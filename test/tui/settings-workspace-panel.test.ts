@@ -15,6 +15,7 @@ import test from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import {
   SettingsWorkspacePanel,
+  type EmbeddedSpecialistPage,
   type SettingsAuthPage,
   type SettingsWorkspaceCommitOutcome,
   type SettingsWorkspaceCommitRequest,
@@ -365,15 +366,36 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
-      id: 'agent-settings-legacy',
+      id: 'subagent-model-allowlist',
       category: 'agent',
-      label: 'Agent settings…',
-      summary: 'Existing settings editor',
-      scope: 'Existing settings editor',
+      label: 'Subagent allowed models',
+      summary: '1 route',
+      scope: 'Official subagent model-selection section',
       freshness: 'ready',
-      description: 'the existing editor owns the agent defaults',
-      action: 'open-legacy',
-      legacyTargetId: 'default-permission',
+      description: 'the official allowed child routes',
+      action: 'inspect',
+      specialist: 'subagent-allowlist',
+    },
+    {
+      id: 'default-permission',
+      category: 'agent',
+      label: 'Default permission',
+      summary: 'workspace-write',
+      value: 'workspace-write',
+      scope: 'DSH Host profile · permission default for new sessions',
+      freshness: 'ready',
+      description: 'the Host permission default for new sessions',
+      action: 'inspect',
+      edit: {
+        field: 'default-permission',
+        primary: 'persisted',
+        runtime: 'applies to new sessions, not this session',
+        persisted: 'workspace-write',
+        options: [
+          { value: 'workspace-write', label: 'workspace-write', available: true, current: true },
+          { value: 'danger-full-access', label: 'danger-full-access', available: true, current: false },
+        ],
+      },
     },
     {
       id: 'input-terminal-settings-legacy',
@@ -459,6 +481,39 @@ class FakePage implements SettingsAuthPage {
 
 /** A fake embedded Plugin Manager page: it paints only inside its granted
  *  viewport and reports the navigation yield instead of closing. */
+/**
+ * C2-R3: a fake embedded specialist page with the EXACT picker surface the
+ * workspace root delegates to (render/input/mouse/budget/focus/dispose). Every
+ * delegation is recorded, so a case can prove the root forwards only to the
+ * CURRENT page and only inside its own painted cells.
+ */
+class FakeSpecialistPage implements EmbeddedSpecialistPage {
+  inputs: string[] = []
+  presses: { readonly type: string; readonly x: number; readonly y: number }[] = []
+  grants: number[] = []
+  focused = false
+  disposed = false
+  /** Lines this page paints (the root budgets them). */
+  lines: string[] = ['SPECIALIST HEADER', '> alpha', '  beta', 'specialist hint']
+  render(width: number): string[] {
+    return this.lines.map(line => line.slice(0, width))
+  }
+  handleInput(data: string): void {
+    this.inputs.push(data)
+  }
+  handleMouse(event: { readonly type: string; readonly x: number; readonly y: number }): undefined {
+    this.presses.push({ type: event.type, x: event.x, y: event.y })
+    return undefined
+  }
+  setMaxRows(rows: number): void {
+    this.grants.push(rows)
+  }
+  invalidate(): void {}
+  dispose(): void {
+    this.disposed = true
+  }
+}
+
 class FakePluginPage implements EmbeddedPluginPage {
   readonly inputs: string[] = []
   readonly viewports: PluginContentViewport[] = []
@@ -540,6 +595,12 @@ interface Harness {
   readonly settlements: readonly ((outcome: SettingsWorkspaceCommitOutcome) => void)[]
   /** Every commit request the panel really dispatched, in order. */
   readonly committed: readonly SettingsWorkspaceCommitRequest[]
+  /** C2-R3: every embedded specialist page the factory really built. */
+  readonly specialistPages: readonly FakeSpecialistPage[]
+  /** How many times the factory ran (a second mount must never happen). */
+  readonly specialistBuilds: () => number
+  /** How many times the row-level authority re-read was requested. */
+  readonly specialistRefreshes: () => number
 }
 
 function setup(options: {
@@ -557,12 +618,19 @@ function setup(options: {
   readonly snapshot?: () => SettingsWorkspaceSnapshot
   /** The LIVE extension directory seam (`SettingsWorkspaceSource.extensionDirectory`). */
   readonly directory?: () => { readonly revision: number; readonly count: number }
+  /** C2-R3: build the embedded subagent allowlist page for the Agent row. */
+  readonly specialistPage?: boolean
+  /** Runs while the specialist factory builds its page (the reentrancy seam). */
+  readonly duringSpecialistBuild?: (harness: { readonly panel: SettingsWorkspacePanel }) => void
 } = {}): Harness {
   let columns = options.columns ?? 120
   let rows = options.rows ?? 40
   const built: FakePage[] = []
   const pluginPages: FakePluginPage[] = []
   const settlements: ((outcome: SettingsWorkspaceCommitOutcome) => void)[] = []
+  const specialistPages: FakeSpecialistPage[] = []
+  let specialistBuilds = 0
+  let specialistRefreshes = 0
   let closes = 0
   let commits = 0
   const legacyTargets: (string | undefined)[] = []
@@ -604,6 +672,21 @@ function setup(options: {
       options.duringBuild?.({ panel: panel!, built })
       return page
     },
+    ...options.specialistPage === true ? {
+      createSubagentAllowlistPicker: (done: () => void, onAuthoritativeChange: () => void) => {
+        specialistBuilds += 1
+        const page = new FakeSpecialistPage()
+        // The picker's own close returns to the Agent rows (never a category).
+        ;(page as unknown as { done: () => void }).done = done
+        ;(page as unknown as { refresh: () => void }).refresh = () => {
+          specialistRefreshes += 1
+          onAuthoritativeChange()
+        }
+        specialistPages.push(page)
+        options.duringSpecialistBuild?.({ panel: panel! })
+        return page
+      },
+    } : {},
   }
   const readSnapshot = options.snapshot ?? ((): SettingsWorkspaceSnapshot => SNAPSHOT)
   const panel = new SettingsWorkspacePanel(
@@ -628,6 +711,9 @@ function setup(options: {
     legacyTargets: () => legacyTargets,
     committed,
     settlements,
+    specialistPages,
+    specialistBuilds: () => specialistBuilds,
+    specialistRefreshes: () => specialistRefreshes,
   }
 }
 
@@ -1940,15 +2026,15 @@ test('T03 display rows live in Conversation while Theme/Icon stay in Appearance'
   assert.deepEqual(ids, [...CATEGORY_ORDER], 'the painted rail publishes exactly the current directory')
 })
 
-test('T04 Agent keeps its launcher while Input & Terminal ends on the Keyboard shortcuts handoff', () => {
+test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboard shortcuts handoff', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'agent')
-  assert.match(plain(h), /Agent settings…/u)
-  h.panel.handleInput('\r')
-  h.panel.handleInput('\r')
-  assert.deepEqual(h.legacyTargets(), ['default-permission'], 'Agent opens the agent preset row')
-  assert.equal(h.commits(), 0, 'a transition launcher never writes')
+  const agent = plain(h)
+  assert.match(agent, /Subagent allowed models|Default permission/u, 'the migrated Agent rows are painted')
+  assert.doesNotMatch(agent, /Agent settings…/u, 'Agent has no unmigrated field left, so it paints no launcher')
+  assert.equal(h.legacyTargets().length, 0, 'focusing the Agent rail opens no editor')
+  assert.equal(h.commits(), 0, 'browsing never writes')
 
   const input = setup()
   plain(input)
@@ -2465,4 +2551,168 @@ test('losing the Extensions category still repairs the selection and its offsets
   h.panel.handleInput('\u001b[A')
   assert.match(plain(h), /^> Tools/mu, 'the rail owns the keyboard after the repair')
   assert.equal(h.legacyOpens(), 0)
+})
+
+// ── C2-R3: the ONE embedded specialist page (subagent allowlist) ───────────
+
+/** Walk the rail to Agent and its Rows level, then to the allowlist row. */
+const openAllowlistRow = (h: Harness): void => {
+  walkTo(h, 'agent')
+  h.panel.handleInput('\r') // rail -> rows
+}
+
+test('R3-C1 the specialist row mounts ONE embedded page inside the same workspace and delegates only to it', () => {
+  const h = setup({ specialistPage: true })
+  openAllowlistRow(h)
+  const rows = plain(h)
+  assert.match(rows, /Subagent allowed models/u, 'the allowlist row is painted')
+  assert.equal(h.specialistBuilds(), 0, 'focusing the row never builds the page')
+  h.panel.handleInput('\r') // rows -> detail (no choice for a specialist row)
+  assert.equal(h.closes(), 0, 'entering the Detail never closes the workspace')
+  assert.equal(h.specialistBuilds(), 1, 'the explicit activation built the page exactly once')
+  const page = h.specialistPages[0]
+  assert.ok(page !== undefined)
+  assert.equal(page.disposed, false)
+  // The page owns the BODY: its own lines are painted and the hint is the
+  // physical last row.
+  const frame = plain(h)
+  assert.match(frame, /SPECIALIST HEADER/u, `the picker body is painted inside the workspace:\n${frame}`)
+  assert.match(frame, /\nspecialist hint\s*$/u, 'the picker hint becomes the ONE last-row bar')
+  assert.match(frame, /Settings · Agent · Subagent allowed models · Allowed models/u,
+    'the header states the sub-view identity')
+  // Keyboard goes to the picker only.
+  h.panel.handleInput('x')
+  assert.deepEqual(page.inputs, ['x'], 'the picker owns the keyboard')
+  assert.equal(h.closes(), 0, 'a plain key never closes the workspace')
+  // Entering again never builds a second page.
+  h.panel.handleInput('\r')
+  assert.equal(h.specialistBuilds(), 1, 'ONE instance per explicit open')
+  assert.ok(page.grants.length > 0 && page.grants.every(grant => grant >= 1), 'the body granted at least one row')
+})
+
+test('R3-C2 the picker Esc returns to the Agent rows with a fresh official snapshot and never closes the workspace', () => {
+  let reads = 0
+  const h = setup({
+    specialistPage: true,
+    snapshot: () => {
+      reads += 1
+      return SNAPSHOT
+    },
+  })
+  openAllowlistRow(h)
+  h.panel.handleInput('\r')
+  const page = h.specialistPages[0]!
+  const before = reads
+  ;(page as unknown as { done: () => void }).done() // the picker's own Esc
+  assert.equal(h.closes(), 0, 'the picker Esc never closes the workspace')
+  assert.equal(page.disposed, true, 'the page is disposed exactly once')
+  assert.ok(reads > before, 'returning re-reads the row authority')
+  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the picker body is gone')
+  assert.match(plain(h), /Settings · Agent · Subagent allowed models/u,
+    'the Agent row that opened the page owns the frame again')
+  assert.match(plain(h), /Rows \(2\)|\[Rows \(2\)\]/u, 'the rows pane is painted again')
+})
+
+test('R3-C3 a category change and a workspace teardown dispose the page; late callbacks never revive it', () => {
+  const change = setup({ specialistPage: true })
+  openAllowlistRow(change)
+  change.panel.handleInput('\r')
+  const page = change.specialistPages[0]!
+  // A category change while the page is mounted disposes it. The mounted page
+  // owns the WHOLE body (it is not a direct category), so this transition is
+  // driven through the root's own category selection — the same path a
+  // deeplink/rail change takes when the page is not holding the gesture.
+  ;(change.panel as unknown as { selectCategory: (id: string) => void }).selectCategory('appearance')
+  assert.equal(page.disposed, true, 'a real category change disposes the page')
+  assert.doesNotMatch(plain(change), /SPECIALIST HEADER/u, 'the disposed page is never painted')
+
+  const teardown = setup({ specialistPage: true })
+  openAllowlistRow(teardown)
+  teardown.panel.handleInput('\r')
+  const last = teardown.specialistPages[0]!
+  teardown.panel.dispose()
+  assert.equal(last.disposed, true, 'the workspace teardown disposes the page')
+  // A publication that arrives after the teardown can never repaint or reopen.
+  const frames = plain(teardown)
+  assert.doesNotMatch(frames, /SPECIALIST HEADER/u)
+  assert.equal(teardown.specialistBuilds(), 1, 'nothing re-mounts a page after teardown')
+})
+
+test('R3-C4 a row change while the page is mounting disposes the superseded instance', () => {
+  let built = 0
+  const h = setup({
+    specialistPage: true,
+    duringSpecialistBuild: ({ panel }) => {
+      built += 1
+      // Reenter the root ONCE: the ROW dialog layer is what the factory sees,
+      // so move the row selection directly to a different row while the
+      // factory is still running. The page it returns belongs to a spent row.
+      if (built === 1) (panel as unknown as { selectRow: (id: string) => void }).selectRow('default-permission')
+    },
+  })
+  openAllowlistRow(h)
+  h.panel.handleInput('\r')
+  assert.equal(h.specialistBuilds(), 1, 'the factory really ran once')
+  assert.equal(h.specialistPages[0]?.disposed, true, 'the superseded page was disposed instead of mounted')
+  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'a page for a spent row is never painted')
+})
+
+test('R3-C5 a pointer gesture only resolves inside the painted page cells under the same frame revision', () => {
+  const h = setup({ columns: 120, rows: 40, specialistPage: true })
+  openAllowlistRow(h)
+  h.panel.handleInput('\r')
+  const page = h.specialistPages[0]!
+  const frame = plain(h).split('\n')
+  const paneHeaderRow = frame.findIndex(line => line.includes('[Subagent allowed models]'))
+  assert.ok(paneHeaderRow >= 0, `the specialist pane header is painted:\n${frame.join('\n')}`)
+  // The page's own FIRST body line paints one row below the pane header.
+  const bodyRow = paneHeaderRow + 1
+  h.panel.onCellPress(4, bodyRow)
+  h.panel.onCellClick(4, bodyRow)
+  assert.deepEqual(page.presses.map(entry => entry.type), ['press', 'click'], 'a proven gesture reaches the page')
+  assert.deepEqual(page.presses.map(entry => [entry.x, entry.y]), [[4, 0], [4, 0]],
+    'the cells are translated into the page LOCAL coordinates')
+  // A gesture straddling a RESIZE (the root's own gesture boundary) is refused
+  // instead of resolving against the old cells; the page keeps its own
+  // last-painted fence for its internal state.
+  page.presses.length = 0
+  h.panel.onCellPress(4, bodyRow)
+  h.resize(120, 30) // the live geometry moved BEFORE the repaint
+  h.panel.onCellClick(4, bodyRow)
+  assert.deepEqual(page.presses.map(entry => entry.type), ['press'], 'a release after a resize is refused')
+  h.resize(120, 40)
+  plain(h)
+  // A click outside the page box never reaches it.
+  page.presses.length = 0
+  plain(h)
+  h.panel.onCellPress(0, 2)
+  h.panel.onCellClick(0, 2)
+  assert.deepEqual(page.presses, [], 'chrome cells never reach the embedded page')
+})
+
+test('R3-C6 the specialist page is refused on a frame with no body row and the row still paints', () => {
+  const h = setup({ columns: 120, rows: 3, specialistPage: true })
+  openAllowlistRow(h)
+  const frame = plain(h)
+  assert.match(frame, /Settings · Agent · Rows/u, 'the rows level still paints at the floor')
+  h.panel.handleInput('\r')
+  // Below the body floor the root admits no activation: no page is built.
+  assert.equal(h.specialistBuilds(), 0, 'an invisible body never starts the picker')
+})
+
+test('R3-C7 an 80x24 frame still reaches the Agent rows and the picker grant stays inside the body', () => {
+  const h = setup({ columns: 80, rows: 24, specialistPage: true })
+  openAllowlistRow(h)
+  h.panel.handleInput('\r')
+  // The grant is set by the FIRST frame that paints the page.
+  plain(h)
+  const page = h.specialistPages[0]!
+  assert.equal(page.disposed, false, 'a regular short frame mounts the picker')
+  // The grant is the body + the ONE physical action row, never the whole
+  // terminal: the chrome rows are not handed to the child.
+  const grant = page.grants.at(-1) ?? 0
+  const frame = plain(h).split('\n')
+  assert.ok(frame.length <= 24, `the frame never exceeds the terminal rows:\n${frame.join('\n')}`)
+  assert.ok(grant >= 1 && grant < 24, `the picker grant is bounded by the body, got ${grant}`)
+  assert.match(frame.at(-1) ?? '', /specialist hint/u, 'the picker hint owns the ONE last row')
 })

@@ -56,6 +56,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { mountVisualToolsSettingsPlane } from '../support/visual-tools-plane.ts'
+import { mountPermissionDefaultPlane } from '../support/permission-default-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 /** The PTC SDK rendering of the current Host registry (the same definitions a
@@ -222,6 +223,80 @@ function mountSettingsUi(port: DirectConfigPort): UiHarness {
     },
   }
 }
+
+/** The REAL official permission plane's PREREQUISITES (the shell capability,
+ *  the approval service and the turn-outline row the plugin injects). The
+ *  `permission` service itself is mounted as a real profile ROW by
+ *  `mountPermissionDefaultPlane`, because only a configurable plugin entry gets
+ *  the `permission` settings namespace the default write targets. */
+async function mountPermissionPrerequisites(ctx: Context): Promise<void> {
+  ctx.provide('shell', { sandboxMode: 'workspace-write' } as never)
+  const approval = await import('@deepseek-ai/dsh-user-approval')
+  await ctx.plugin((approval as unknown as { default: unknown }).default as never, undefined as never)
+  const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+  await ctx.plugin(turnOutline as never, undefined as never)
+}
+
+test('a real Settings Confirm of the permission default is what the NEXT Session samples', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx)
+  await mountAgentLoopTestHarness(ctx)
+  await ctx.plugin(Loader)
+  await mountPermissionPrerequisites(ctx)
+  await mountPermissionDefaultPlane(ctx, life.tempDir('permission-default-plane-'))
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const presets = ctx.get('permissionPresets') as unknown as {
+    readonly names: readonly string[]
+    readonly defaultPreset: string
+    current(session: unknown): string
+  }
+  const approval = ctx.get('approval') as unknown as { overrideOf(session: unknown): 'ask' | 'never' | undefined }
+
+  // The Host default is the shipped workspace-write before the UI runs.
+  assert.deepEqual([...presets.names], ['workspace-write', 'danger-full-access'])
+  assert.equal(presets.defaultPreset, 'workspace-write')
+
+  const ui = mountSettingsUi(port)
+  t.after(() => ui.dispose())
+  ui.invoke('settings')
+  await ui.vt.waitForRender()
+  await selectSettingsCategory(ui.vt, 'Agent')
+  // L0 -> L1. The approval row is absent (sessionless), so the FIRST Agent row
+  // is the default-permission row already.
+  ui.vt.sendInput('\r')
+  await ui.vt.waitForRender()
+  const rowsFrame = ui.vt.getViewport().join('\n')
+  assert.match(rowsFrame, /Settings · Agent · Rows/u, 'the Agent rows level owns the frame')
+  assert.match(rowsFrame, /> Default permission/u,
+    'a sessionless composition opens on the default-permission row')
+  // L1 -> L2 inline choice, then move to the OTHER preset and confirm.
+  ui.vt.sendInput('\r')
+  await ui.vt.waitForRender()
+  assert.match(ui.vt.getViewport().join('\n'), /Choose value/u)
+  ui.vt.sendInput('\x1b[B')
+  await ui.vt.waitForRender()
+  ui.vt.sendInput('\r')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Status\s+Verified/u.test(frame),
+    () => ui.vt.waitForRender(),
+    'the Settings Confirm must settle as Verified',
+  )
+
+  // The UI decision reached the REAL Host permission default.
+  assert.equal(presets.defaultPreset, 'danger-full-access',
+    'the official permission.defaultPreset mutation really committed')
+
+  // SOURCE -> SINK: a Session created AFTER the confirm samples that default.
+  const handle = await ctx.agents.create({ sessionId: SessionId('perm-default-after-confirm') as never })
+  const session = (handle.agent as unknown as { session: unknown }).session
+  assert.equal(presets.current(session), 'danger-full-access',
+    'the NEW Session was pinned with the updated Host default')
+  assert.equal(approval.overrideOf(session), 'never',
+    'and the preset bundle it sampled carries the never-approval knob')
+})
 
 test('a real Settings Confirm drives the Host registry and the next model request', async t => {
   const life = testLifecycle(t)

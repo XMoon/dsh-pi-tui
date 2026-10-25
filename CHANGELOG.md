@@ -22,7 +22,17 @@
   任何会话事件、持久化发布表或缓存，冷回放从同一份日志得到相同结论；三个工具的人类可读
   卡片、搜索与 `/transcript` 导出都不会显示这些机器行，而原始会话记录仍然完整保留。当前
   仍沿用原有 Tool Card，最终回答里的插图属于后续阶段。
-
+- **`/settings → Agent` 现在直接编辑权限、委派与用户 shell 策略五项，`Agent settings…` 过渡行退休。**
+  顺序固定为 `Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
+  `Subagent model selection` → `User shell sandbox policy`，每项只有一个权威：审批策略是**当前会话**
+  的官方 override（工作区打开时捕获一次，切换会话后确认被同步拒绝，需重开工作区，且从不写入文档）；
+  `Default permission` 是 Host 的 preset 默认值，只影响以后新建的会话，当前会话不变，Host 缺少 settings
+  服务时会明确失败而不是假装成功；`Subagent allowed models` 用 `Manage allowed models…` 在同一个
+  Settings 工作区里打开原有的可搜索多选列表，`Esc` 回到 Agent 行而不是退出设置，关掉开关不会清空已存
+  route，空列表时开启不会产生任何写入；`User shell sandbox policy` 存在 TUI 设置文档里，`Value` 是原始
+  存档值、`Runtime` 说明下一次 `!`/`!!` 的真实效果，只有回读一致才 `Verified`。五项在能力不可用时
+  （无会话、Remote 无 approval 通道、Host 无 preset 或官方 subagent section）如实隐藏对应行，不伪造
+  当前值，也不打开旧编辑器。
 - **`/settings` 的 Appearance / Conversation 现在可以直接修改更多配置，不必再进旧编辑器。**
   Appearance 新增可编辑的 `Icon style`（`emoji` / `symbols` / `minimal`），切换立即
   改变结构图标并只持久化这一个字段。Conversation 新增可编辑的 `Transcript detail`、

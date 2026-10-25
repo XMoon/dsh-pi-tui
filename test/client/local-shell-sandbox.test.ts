@@ -24,6 +24,7 @@ import {
 } from '../support/runner-harness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -102,12 +103,26 @@ interface MountedSandbox {
   readonly notices: readonly string[]
   readonly submit: (draft: string) => void
   readonly settle: () => Promise<void>
+  /** The live surface the runner created. */
+  readonly app: () => TuiApp
+  /** Write the persisted policy through the SAME volatile reference the
+   *  `user-shell` consumer reads on its next `!`/`!!`. */
+  readonly setPolicy: (value: 'bypass' | 'sandbox') => void
+  /** Every real Host settings mutation this composition dispatched. */
+  readonly settingsWrites: () => readonly { readonly ns: string; readonly ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }[]
+  /** Open the REAL `/settings` workspace through the registered command. */
+  readonly runSettings: () => Promise<void>
+  /** The physical terminal the runner paints into. */
+  readonly vt: () => VirtualTerminal
+  /** The live persisted document value (the consumer's own source). */
+  readonly policy: () => string | undefined
 }
 
-/** Mount the real runner with `localShellSandbox: 'sandbox'` and a shell fake. */
+/** Mount the real runner with the given localShellSandbox document value. */
 async function mountSandboxRunner(
   t: test.TestContext,
   shell: unknown | undefined,
+  sandbox: 'sandbox' | 'bypass' = 'sandbox',
 ): Promise<MountedSandbox> {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-shell-sandbox-')
@@ -119,6 +134,8 @@ async function mountSandboxRunner(
   })
   const vt = new VirtualTerminal(100, 24)
   life.defer(installVirtualProcessTerminal(vt))
+  /** The RESOLVED volatile refs: the SAME document `user-shell.ts` reads. */
+  let resolved: Record<string, unknown> | undefined
   // The probe patches must be installed BEFORE mounting: the runner creates
   // its TuiApp during mountRunner.
   const notices: string[] = []
@@ -145,15 +162,62 @@ async function mountSandboxRunner(
   })
   const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
   if (shell !== undefined) harness.shell = shell
-
   const context = new Context()
   life.defer(() => disposeContext(context))
+  // The ONE controlled stand-in of this composition: the Host `SettingsForms`
+  // surface. Its `mutate` commits the requested ops into the SAME volatile
+  // references the Loader/presentation plane hands the runner — so the Settings
+  // writer, the authoritative read-back AND the `user-shell` consumer all read
+  // one object. Every mutation is recorded.
+  const settingsWrites: { readonly ns: string; readonly ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }[] = []
+  let settingsRevision = 1
+  const settingsValues = (): Record<string, unknown> => {
+    const refs = resolved ?? {}
+    const read = (field: string): unknown => (refs[field] as { get(): unknown } | undefined)?.get()
+    return {
+      theme: read('theme'),
+      iconStyle: read('iconStyle'),
+      footer: read('footer'),
+      fullscreen: read('fullscreen'),
+      busyEnter: read('busyEnter'),
+      localShellSandbox: read('localShellSandbox'),
+      homeEndKeys: read('homeEndKeys'),
+      displayPreset: read('displayPreset'),
+      progressUpdates: read('progressUpdates'),
+      responseStyle: read('responseStyle'),
+      gitAttribution: read('gitAttribution'),
+      notificationMode: read('notificationMode'),
+      notificationMethod: read('notificationMethod'),
+      terminalProgress: read('terminalProgress'),
+      wheelScrollLines: read('wheelScrollLines'),
+    }
+  }
+  context.provide('settings', {
+    describe: () => [{ ns: 'tui-app', value: settingsValues(), user: {}, revision: settingsRevision }],
+    mutate: async (ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      settingsWrites.push({ ns, ops })
+      for (const op of ops) {
+        const field = op.path[0]
+        assert.ok(field !== undefined, 'a settings op must name a field')
+        const ref = (resolved ?? {})[field] as { get(): unknown } & Record<symbol, (value: unknown) => void> | undefined
+        if (op.op !== 'set' || ref === undefined) continue
+        const write = ref[Object.getOwnPropertySymbols(ref)[0]!]
+        write(op.value)
+      }
+      settingsRevision += 1
+      return undefined
+    },
+  })
+
   const fiber = await mountRunner(
     context,
     home,
     harness,
     { sessionId: parent.id },
-    { localShellSandbox: 'sandbox' },
+    { localShellSandbox: sandbox },
+    undefined,
+    undefined,
+    (config) => { resolved = config as Record<string, unknown> },
   )
   life.defer(() => fiber.dispose())
   assert.ok(apps.at(-1), 'the production runner must create a TuiApp')
@@ -166,11 +230,32 @@ async function mountSandboxRunner(
   }
   return {
     view,
+    vt: () => vt,
     notices,
     submit,
     settle: async () => {
       await settle()
       await vt.waitForRender()
+    },
+    app: () => apps.at(-1)!,
+    settingsWrites: () => settingsWrites,
+    runSettings: async (): Promise<void> => {
+      const handler = (harness.commands as { handler(name: string): ((inv: unknown) => unknown) | undefined }).handler('settings')
+      assert.ok(handler !== undefined, 'the production /settings command must be registered')
+      await Promise.resolve(handler({ commandId: 'cmd-shell-policy', agent: undefined, rawInput: '', signal: new AbortController().signal }))
+      await vt.waitForRender()
+    },
+    setPolicy: (value: 'bypass' | 'sandbox') => {
+      assert.ok(resolved !== undefined, 'the resolved config refs must be reachable')
+      // Write the SAME reference the consumer reads on its next `!` — this is
+      // the document authority, not a UI copy.
+      const ref = resolved.localShellSandbox as { get(): string } & Record<symbol, (value: string) => void>
+      const write = ref[Object.getOwnPropertySymbols(ref)[0]!]
+      write(value)
+    },
+    policy: () => {
+      const ref = resolved?.localShellSandbox as { get(): string } | undefined
+      return ref?.get()
     },
   }
 }
@@ -398,4 +483,116 @@ test('the default bypass preference never touches the composition shell capabili
   assert.ok(view.includes('bypass-local'), `the default path must run the plain local spawn:\n${view}`)
   assert.ok(!view.includes('must-not-appear'), `the sandbox executor must stay untouched:\n${view}`)
   assert.equal(shell.executeCount(), 0, 'the default bypass must never call the dsh shell capability')
+})
+
+// ── C2-R3: the persisted policy really selects the NEXT `!` execution path ──
+
+test('a REAL Settings Confirm of the shell policy is what the next `!` executes under', async (t) => {
+  const shell = makeShellFake({ result: async () => runResult({ exitCode: 0, stdout: 'sandboxed-by-settings' }) })
+  const mounted = await mountSandboxRunner(t, shell, 'bypass')
+  assert.equal(mounted.policy(), 'bypass', 'the document starts at bypass')
+
+  // CONTROL: the plain local spawn runs, the Host shell capability is untouched.
+  mounted.submit('!echo local-control')
+  const control = await waitForView(mounted, 'local-control', 'the local control card')
+  assert.equal(shell.executeCount(), 0, 'bypass never calls the dsh shell capability')
+  assert.ok(control.includes('local-control'))
+
+  // THE REAL UI PATH: open /settings → Agent → the shell policy row and Confirm
+  // `sandbox` through the workspace's own keys and writer.
+  await mounted.runSettings()
+  const open = mounted.view()
+  assert.match(open, /Settings · Categories/u, `the /settings workspace really opened:\n${open}`)
+  // Every step waits for the AUTHORITATIVE frame it produces (the painted
+  // breadcrumb / choice / status), never for a wall-clock window.
+  const pressUntil = async (key: string, settled: () => boolean, label: string, limit: number): Promise<void> => {
+    for (let attempt = 0; attempt < limit; attempt += 1) {
+      if (settled()) return
+      mounted.vt().sendInput(key)
+      // The key's owned task drains through microtasks and the workspace
+      // repaints; bounded settle, no timer window.
+      await mounted.settle()
+    }
+    assert.ok(settled(), label)
+  }
+  // Rail: About → Models → Account → Agent. The SELECTED rail row is the one
+  // whose cursor sits in the categories column.
+  const railSelects = (label: string): boolean => mounted.view().split('\n')
+    .some(line => line.trimStart().startsWith(`> ${label}`))
+  await pressUntil('\x1b[B', () => railSelects('Agent'), 'the rail selects Agent', 6)
+  await pressUntil('\r', () => /Settings · Agent · Rows/u.test(mounted.view()), 'Enter enters the Agent rows', 1)
+  // The Rows pane's cursor is the ONLY `> ` in that column; the Details column
+  // starts after it, so the check reads the same cells the user does.
+  const selectedRow = (): string => {
+    for (const line of mounted.view().split('\n')) {
+      const marker = line.indexOf('> ')
+      if (marker < 0) continue
+      const after = line.slice(marker + 2)
+      if (/^(?:Approval policy|Default permission|Subagent|User shell)/u.test(after)) return after
+    }
+    return ''
+  }
+  await pressUntil('\x1b[B', () => selectedRow().includes('User shell sandbox policy'),
+    'the shell policy row is selected', 8)
+  await pressUntil('\r', () => /Choose value/u.test(mounted.view()), 'the inline choice is open', 1)
+  await pressUntil('\x1b[B', () => />\s*sandbox(?:\s|$)/mu.test(mounted.view()), 'sandbox becomes the chosen candidate', 2)
+  mounted.vt().sendInput('\r') // explicit Confirm
+  await waitForFrame(
+    () => mounted.view(),
+    frame => /Status\s+Verified/u.test(frame),
+    // Bounded settle: the owned settings write settles, then the frame repaints.
+    () => mounted.settle(),
+    'the real Settings Confirm must settle as Verified',
+  )
+
+  // The write really went through the Host settings surface, and the document
+  // the consumer reads now carries the new policy.
+  const writes = mounted.settingsWrites().filter(write => write.ns === 'tui-app')
+  assert.ok(writes.some(write => write.ops.some(op => op.path[0] === 'localShellSandbox' && op.value === 'sandbox')),
+    `the confirm really mutated localShellSandbox:\n${JSON.stringify(writes)}`)
+  assert.equal(mounted.policy(), 'sandbox', 'the persisted document really changed')
+  // Leave the workspace by walking the real Esc gradient until its chrome is
+  // gone (the frame itself is the settlement signal).
+  for (let step = 0; step < 6 && /Settings · /u.test(mounted.view()); step += 1) {
+    mounted.vt().sendInput('\x1b')
+    // Bounded settle: the Esc gradient repaints before the next predicate read.
+    await mounted.settle()
+  }
+  assert.doesNotMatch(mounted.view(), /Settings · /u, `the workspace closed:\n${mounted.view()}`)
+
+  // SOURCE -> SINK: the NEXT `!` takes the sandbox executor.
+  mounted.submit('!make check')
+  const sandboxed = await waitForView(mounted, 'sandboxed-by-settings', 'the sandboxed card')
+  assert.equal(shell.executeCount(), 1, 'the next `!` really entered the dsh shell capability')
+  assert.ok(sandboxed.includes('sandboxed-by-settings'))
+})
+
+test('a policy change on the live settings document routes the NEXT `!` through the other executor', async (t) => {
+  const shell = makeShellFake({ result: async () => runResult({ exitCode: 0, stdout: 'sandboxed' }) })
+  // The document starts at the DEFAULT bypass, exactly like a fresh profile.
+  const mounted = await mountSandboxRunner(t, shell, 'bypass')
+  assert.equal(mounted.policy(), 'bypass', 'the harness serves the real persisted value')
+
+  // 1) bypass: the plain local spawn runs, the dsh shell capability is untouched.
+  mounted.submit('!echo bypass-run')
+  const bypassView = await waitForView(mounted, 'bypass-run', 'the bypass card')
+  assert.equal(shell.executeCount(), 0, 'bypass never calls the dsh shell capability')
+  assert.ok(bypassView.includes('bypass-run'))
+
+  // 2) the Settings writer stores `sandbox` on the SAME document the consumer reads.
+  mounted.setPolicy('sandbox')
+  assert.equal(mounted.policy(), 'sandbox', 'the persisted policy really changed')
+
+  // 3) the NEXT `!` takes the sandbox executor — the real Host policy path.
+  mounted.submit('!make check')
+  const sandboxView = await waitForView(mounted, 'sandboxed', 'the sandboxed card')
+  assert.equal(shell.executeCount(), 1, 'the sandboxed `!` really entered the dsh shell capability')
+  assert.ok(sandboxView.includes('sandboxed'), `the sandbox executor produced the card:\n${sandboxView}`)
+
+  // 4) switching back routes the following `!` to bypass again.
+  mounted.setPolicy('bypass')
+  mounted.submit('!echo back-to-bypass')
+  const backView = await waitForView(mounted, 'back-to-bypass', 'the restored bypass card')
+  assert.equal(shell.executeCount(), 1, 'the bypass run after the switch never re-entered the sandbox')
+  assert.ok(backView.includes('back-to-bypass'))
 })

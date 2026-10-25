@@ -1445,7 +1445,10 @@ export class DirectPermissionConfig implements PermissionConfig {
 
   async setDefaultPreset(name: string): Promise<void> {
     const settings = this.settings()
-    if (settings === undefined) return
+    // A missing settings service is an EXPLICIT failure, never a silent no-op:
+    // reporting success here would let the Settings UI claim a Verified write
+    // that never reached the Host (same rule as this file's other writers).
+    if (settings === undefined) throw new Error('settings service unavailable')
     await mutateSettings(settings, 'permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])

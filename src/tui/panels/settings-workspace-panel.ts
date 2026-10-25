@@ -95,7 +95,11 @@ export type SettingsWorkspaceRowId =
   | 'terminal-progress'
   | 'visual-tools'
   | 'web-settings'
-  | 'agent-settings-legacy'
+  | 'approval'
+  | 'default-permission'
+  | 'subagent-model-allowlist'
+  | 'subagent-model-selection'
+  | 'local-shell-sandbox'
   | 'footer-settings-legacy'
   | 'input-terminal-settings-legacy'
   | 'extension-settings-legacy'
@@ -123,6 +127,7 @@ export type SettingsWorkspaceWritableField =
   | 'busy-enter' | 'git-attribution'
   | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
   | 'notification-mode' | 'notification-method' | 'terminal-progress'
+  | 'approval' | 'default-permission' | 'subagent-model-selection' | 'local-shell-sandbox'
 
 /** One selectable candidate of a writable row. `value` is the EXACT identity
  *  that gets applied and persisted (a source-qualified theme id, a display
@@ -157,6 +162,12 @@ export interface SettingsWorkspaceEdit {
    *  `unknown — …` when there was no document to read. The panel never guesses
    *  which of those it is. */
   readonly persisted: string
+  /** A SECOND live effect fact that is NOT the primary `Value`, painted as its
+   *  own `Runtime` line. Only the session approval row needs it today: its
+   *  `Value` already is a runtime fact (the captured session's override), while
+   *  what the NEXT approval really consumes is the consumer's fallback when no
+   *  override exists. Absent on every other row. */
+  readonly runtimeEffect?: string
   /** The authority revision this candidate source was read at, when the row's
    *  write is revision-checked (the Host visual-tools switch). The commit
    *  request carries it back as the conflict fence, so an external edit between
@@ -188,6 +199,16 @@ export interface SettingsWorkspaceRow {
   /** Present ONLY on the writable pilot rows (B2-B). A row without it is never
    *  editable, whatever its action. */
   readonly edit?: SettingsWorkspaceEdit
+  /** C2-R3: the ONE row that opens an embedded SPECIALIST page inside this same
+   *  workspace body (the existing subagent allowlist picker). It is a
+   *  presentation seam only — no document field, no writer, no second lease.
+   *  A row without it never has a specialist page. */
+  readonly specialist?: 'subagent-allowlist'
+  /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
+   *  A non-current authority (a stale/unavailable backend) paints the row and
+   *  its last-known facts but offers no Manage action, because the page could
+   *  only refuse every write. */
+  readonly specialistAvailable?: boolean
 }
 
 /** The facts an authority OTHER than the settings document can change for one
@@ -221,6 +242,13 @@ export interface SettingsWorkspaceCommitRequest {
 export interface SettingsWorkspaceCommitOutcome {
   readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
+  /** C2-R3: the ONE typed follow-up navigation a refusal may carry (the
+   *  subagent toggle refused because the allowlist is empty points the user at
+   *  the allowlist row). It is a one-shot UI instruction returned ONLY with a
+   *  `not-saved` outcome; the panel applies it while this request is still the
+   *  live one. It is not a second settings authority and it is never derived
+   *  from the reason text. */
+  readonly followUpRowId?: 'subagent-model-allowlist'
 }
 
 /** The row's commit status as the Detail pane paints it: the status WORD, its
@@ -313,6 +341,18 @@ export interface SettingsWorkspacePanelIntents {
   ) => SettingsAuthPage | undefined
   /** The lazily built Account direct page. */
   readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
+  /**
+   * C2-R3: the ONE embedded specialist page factory, activated ONLY by an
+   * explicit Manage/Enter on a row that carries `specialist`. It returns the
+   * EXISTING subagent allowlist picker instance, which is mounted in this
+   * workspace's body under the SAME screen lease (no second alt-screen, no
+   * legacy editor). `done` returns to the Agent rows; `onAuthoritativeChange`
+   * asks the root for a fresh snapshot of that row.
+   */
+  readonly createSubagentAllowlistPicker?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -448,6 +488,19 @@ export interface SettingsAuthPage extends Component {
   dispose(): void
 }
 
+/** The ONE embedded specialist page surface (C2-R3). It is the EXISTING
+ *  subagent allowlist picker: the workspace root owns the screen/lease and
+ *  gives it the body grant, exactly like the Models/Account pages, but it has
+ *  no exit verb of its own — its `Esc` is the picker's own close, which returns
+ *  to the Agent rows through the factory's `done` callback. */
+export interface EmbeddedSpecialistPage extends Component {
+  handleInput(data: string): void
+  /** The bounded row budget the body grant really gives it. */
+  setMaxRows(rows: number): void
+  focused: boolean
+  dispose(): void
+}
+
 /** One pane the current frame actually paints: its level and absolute geometry.
  *  Hidden panes of the two-pane medium projection simply have no entry. */
 interface PaneLayout {
@@ -457,7 +510,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel' | 'about-action'
+  readonly kind: 'category' | 'row' | 'legacy' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -470,7 +523,7 @@ interface HitTarget {
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
 interface DetailButton {
-  readonly verb: 'change' | 'retry' | 'legacy' | 'confirm' | 'cancel'
+  readonly verb: 'change' | 'retry' | 'manage' | 'legacy' | 'confirm' | 'cancel'
   readonly text: string
   /** The identity the painted button acts on: the candidate it commits, or the
    *  selected row it belongs to. It is the painted hit target's id. */
@@ -557,7 +610,11 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'terminal-progress'
     || id === 'visual-tools'
     || id === 'web-settings'
-    || id === 'agent-settings-legacy'
+    || id === 'approval'
+    || id === 'default-permission'
+    || id === 'subagent-model-allowlist'
+    || id === 'subagent-model-selection'
+    || id === 'local-shell-sandbox'
     || id === 'footer-settings-legacy'
     || id === 'input-terminal-settings-legacy'
     || id === 'extension-settings-legacy'
@@ -895,6 +952,23 @@ export class SettingsWorkspacePanel implements Component {
   private lastChoiceWidth = -1
   private readonly source: SettingsWorkspaceSource
   private readonly intents: SettingsWorkspacePanelIntents
+  /** C2-R3: the ONE transient embedded specialist page (the existing subagent
+   *  allowlist picker). It exists only between an explicit Manage/Enter on its
+   *  row and the picker's own `done`/this workspace's teardown; it never
+   *  survives a category change, and it owns no settings authority. */
+  private specialistPage: EmbeddedSpecialistPage | undefined
+  private specialistRow: SettingsWorkspaceRowId | undefined
+  /** The panel cells the LAST specialist frame granted the picker, and the
+   *  press identity a release must still match. */
+  private paintedSpecialistBox: ContentBox | undefined
+  private specialistPressed: {
+    readonly x: number
+    readonly y: number
+    readonly columns: number
+    readonly rows: number
+    readonly revision: number
+    readonly box: ContentBox
+  } | undefined
   /** The active Models/Account direct page (at most one). */
   private authPage: SettingsAuthPage | undefined
   private authPageCategory: 'models' | 'account' | undefined
@@ -1322,6 +1396,12 @@ export class SettingsWorkspacePanel implements Component {
     // press map belong to the direct layout alone.
     this.directContentPainted = false
     this.paintedContentBox = undefined
+    // C2-R3: the embedded specialist page (the existing subagent allowlist
+    // picker) owns the WHOLE body of this same workspace: it is not a direct
+    // category, so it must be decided before the legacy panes project. While
+    // it is mounted its hit map is the picker's own last-painted geometry and
+    // the rows/detail panes publish nothing.
+    if (this.specialistPage !== undefined) return this.renderSpecialistPage(plan)
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
@@ -2024,6 +2104,7 @@ export class SettingsWorkspacePanel implements Component {
 
   invalidate(): void {
     this.pluginPage?.invalidate?.()
+    this.specialistPage?.invalidate?.()
     this.authPage?.invalidate()
   }
 
@@ -2035,15 +2116,19 @@ export class SettingsWorkspacePanel implements Component {
    *  owner or switch. */
   private renderHeader(plan: SettingsChromePlan): string[] {
     const row = this.selectedRow()
-    const breadcrumb = this.focus === 'categories'
-      ? 'Categories'
-      : this.focus === 'content'
-        ? (this.categoryId === 'plugins' && this.pluginPage !== undefined
-            ? this.pluginBreadcrumb(this.pluginPage.currentView())
-            : CATEGORY_LABELS[this.categoryId])
-        : this.focus === 'rows'
-          ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
-          : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
+    const breadcrumb = this.specialistPage !== undefined
+      // C2-R3: the embedded specialist page is a SUB-VIEW of the row that
+      // opened it, never a category and never a second screen owner.
+      ? `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'} · Allowed models`
+      : this.focus === 'categories'
+        ? 'Categories'
+        : this.focus === 'content'
+          ? (this.categoryId === 'plugins' && this.pluginPage !== undefined
+              ? this.pluginBreadcrumb(this.pluginPage.currentView())
+              : CATEGORY_LABELS[this.categoryId])
+          : this.focus === 'rows'
+            ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
+            : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
     // Identity is BOLD textStrong and the trail is textDim (roles 1 + 2): the
     // brand word is not `primary`, because primary means active/actionable and
     // already paints the cursor, the focused label and every affordance.
@@ -2418,9 +2503,16 @@ export class SettingsWorkspacePanel implements Component {
     // a half-cut note would read as a different statement.
     const note = buttons.some(button => button.verb === 'legacy')
       ? 'opens the existing complete settings editor'
-      : row !== undefined && row.edit === undefined && row.action === 'inspect'
-        ? 'read-only here · existing settings editor edits it'
-        : ''
+      // A specialist row whose page is refused right now (a non-current
+      // authority) must state WHAT is refused instead of pointing at the legacy
+      // editor, which no longer owns this field at all.
+      : row?.specialist !== undefined && row.specialistAvailable === false
+        ? 'not editable while the backend is not current'
+        : row !== undefined && row.edit === undefined && row.action === 'inspect'
+          // A migrated field has no legacy editor owner: the note must not send
+          // the user to an editor that cannot change it.
+          ? 'read-only here · no candidate is available right now'
+          : ''
     const noteAloneFits = buttons.length === 0 && note !== '' && visibleWidth(note) <= width
     const pinned = (buttons.length > 0 || noteAloneFits) && viewport >= 2 ? 1 : 0
     const scrollViewport = Math.max(0, viewport - pinned)
@@ -2644,6 +2736,14 @@ export class SettingsWorkspacePanel implements Component {
         buttons.push({ verb: 'retry', text: 'Retry save', id: phase.attempted })
       }
     }
+    // C2-R3: the ONE explicit specialist entry (the subagent allowlist). It is
+    // an alias for the row's own Enter/Right, and it exists only while the row
+    // really carries the specialist page AND has not been refused availability.
+    if (row.specialist === 'subagent-allowlist'
+      && row.specialistAvailable !== false
+      && this.intents.createSubagentAllowlistPicker !== undefined) {
+      buttons.push({ verb: 'manage', text: 'Manage allowed models…', id: row.id })
+    }
     if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…', id: row.id })
     return buttons
   }
@@ -2749,6 +2849,7 @@ export class SettingsWorkspacePanel implements Component {
       // compact line actually had to truncate it.
       field('Value', row.summary, color.text, true)
       if (edit !== undefined) {
+        if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect, color.textDim, true)
         if (edit.primary === 'persisted') field('Runtime', edit.runtime, color.textDim, true)
         else field('Persisted', edit.persisted, color.textDim, true)
       }
@@ -2759,6 +2860,7 @@ export class SettingsWorkspacePanel implements Component {
     if (row.value !== undefined && row.value !== row.summary) field('Source', row.value)
     if (edit !== undefined) {
       if (!inlineChoice) {
+        if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect)
         if (edit.primary === 'persisted') field('Runtime', edit.runtime)
         else field('Persisted', edit.persisted)
       }
@@ -3010,6 +3112,120 @@ export class SettingsWorkspacePanel implements Component {
   /** The current projection (see {@link projectionWidth}). */
   private currentLayout(): SettingsLayout {
     return layoutForWidth(this.projectionWidth())
+  }
+
+  // ── the embedded specialist page (C2-R3) ──────────────────────────────────
+
+  /**
+   * Mount the ONE embedded specialist page for a row that carries
+   * `specialist` (the existing subagent allowlist picker). The factory runs
+   * only on an explicit Manage/Enter; a category change, the picker's own
+   * `done` (Esc) or this workspace's teardown retires the instance exactly
+   * once. The panel never reads or writes the settings section itself.
+   */
+  private openSpecialist(row: SettingsWorkspaceRow): void {
+    if (row.specialist !== 'subagent-allowlist') return
+    // A row whose page is refused right now never starts Host or catalog IO.
+    if (row.specialistAvailable === false) return
+    if (this.specialistPage !== undefined) return
+    // A grant that cannot paint a candidate row never starts the picker: a
+    // toggle the user cannot see is not admissible.
+    if (this.bodyFloor() < 2) return
+    const page = this.intents.createSubagentAllowlistPicker?.(
+      () => { this.closeSpecialist() },
+      () => { this.refreshSpecialistSummary() },
+    )
+    if (page === undefined) return
+    // The factory may run a synchronous callback that already changed the
+    // workspace (a stale request): a page built for a superseded state must not
+    // be mounted.
+    if (this.disposed || this.categoryId !== row.category || this.rowId !== row.id) {
+      page.dispose()
+      return
+    }
+    this.specialistPage = page
+    this.specialistRow = row.id
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Retire the embedded specialist page. A write it already dispatched keeps
+   *  settling in its own owner; nothing here can revive the page. */
+  private closeSpecialist(): void {
+    const page = this.specialistPage
+    if (page === undefined) return
+    this.specialistPage = undefined
+    this.specialistRow = undefined
+    page.focused = false
+    page.dispose()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
+    // The row summary is re-read from the OFFICIAL section on the way back: the
+    // frame the user returns to never shows the pre-write summary.
+    this.snapshot = this.source.readSnapshot()
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** The picker committed something: re-read the snapshot the rows project
+   *  from (the row summary follows the official section), with the picker
+   *  still mounted. */
+  private refreshSpecialistSummary(): void {
+    if (this.disposed || this.specialistPage === undefined) return
+    this.snapshot = this.source.readSnapshot()
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /**
+   * Paint the embedded specialist page inside the SHARED Settings chrome: the
+   * root keeps the ONE Header/Metadata/rule/notice and the ONE physical
+   * last-row Action Bar; the picker contributes its business body and its own
+   * semantic hint line, which becomes that last row exactly like a direct
+   * page's bar. Its hit map is exclusively the picker's own last-painted
+   * geometry — the rows/detail panes behind it publish nothing.
+   */
+  private renderSpecialistPage(plan: SettingsChromePlan): string[] {
+    const lines: string[] = []
+    if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
+    if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
+    if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    const geometry = chromeGeometry(plan)
+    if (plan.paneHeaderRows === 1) lines.push(fit(this.paneHeader('Subagent allowed models', true), plan.width))
+    const page = this.specialistPage
+    const contentRows = geometry.contentRows
+    // The picker is granted the body rows PLUS the one physical action row: its
+    // own row-budgeted render already carries its semantic hint as the LAST
+    // line, which becomes this frame's bar exactly like a direct page's.
+    const childRows = Math.max(1, contentRows + plan.actionRows)
+    let child: readonly string[] = []
+    if (page !== undefined) {
+      page.focused = true
+      page.setMaxRows(childRows)
+      child = page.render(plan.width).slice(0, childRows)
+    }
+    // The picker's LOCAL last line is its semantic hint: it becomes this
+    // frame's ONE physical last-row Action Bar, exactly like a direct page's.
+    const body = child.slice(0, Math.max(0, child.length - 1))
+    for (let index = 0; index < contentRows; index += 1) lines.push(fit(body[index] ?? '', plan.width))
+    lines.push(fit(child[child.length - 1] ?? '', plan.width))
+    // The page's OWN painted cells are the only pointer grant of this frame: the
+    // rows/detail panes behind it publish nothing, so a click can never leak
+    // through to a hidden column.
+    // The picker is granted the full frame width and its own rows start at the
+    // first body line, so a page-local cell is `event - {0, contentTop}`.
+    this.paintedSpecialistBox = page === undefined
+      ? undefined
+      : { x: 0, top: geometry.contentTop, width: plan.width, rows: contentRows }
+    this.paintedTargets = []
+    this.paintedPanes = {}
+    this.paintedContentBox = undefined
+    this.paintedRevision = this.revision
+    return lines.slice(0, plan.rows)
   }
 
   // ── the embedded Plugin Manager page (PR2) ────────────────────────────────
@@ -3320,6 +3536,13 @@ export class SettingsWorkspacePanel implements Component {
     // outside the new viewport while its action/copy/navigation authorization is
     // still live. Only the back keys may pass until the resize frame paints.
     if (this.terminalGeometryStale() && !matchesKey(data, 'escape')) return
+    // C2-R3: the embedded specialist page owns the keyboard while it is
+    // mounted. Its own Esc closes IT (never the workspace, never a category)
+    // through the factory's `done`; the root intercepts nothing else.
+    if (this.specialistPage !== undefined) {
+      this.specialistPage.handleInput(data)
+      return
+    }
     // The CONTENT focus belongs to the direct page: the root never forwards a
     // navigation key to it, and the page never receives a key the root owns.
     if (this.focus === 'content') {
@@ -3643,6 +3866,7 @@ export class SettingsWorkspacePanel implements Component {
       }
     }
     if (changed) {
+      if (this.specialistPage !== undefined) this.closeSpecialist()
       if (this.authPageCategory !== undefined && this.authPageCategory !== category) this.closeAuthPage()
       if (this.categoryId === 'plugins' && category !== 'plugins') this.closePluginPage()
       // C3: an About→other-category change is one semantic About leave.
@@ -3774,6 +3998,7 @@ export class SettingsWorkspacePanel implements Component {
 
   private selectRow(id: SettingsWorkspaceRowId, focus?: SettingsWorkspaceFocus): void {
     const changedRow = id !== this.rowId
+    if (changedRow && this.specialistPage !== undefined) this.closeSpecialist()
     const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'rows')
     if (changedRow || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {
       this.leaveDetailTo(targetFocus, () => {
@@ -3799,6 +4024,14 @@ export class SettingsWorkspacePanel implements Component {
   private confirm(): void {
     if (this.focus === 'detail') {
       if (this.choiceField() !== undefined) return this.confirmChoice('keyboard')
+      // C2-R3: the specialist row's ONLY action is its embedded page. It is
+      // reachable from the Detail's painted Manage button/Enter too, never only
+      // from the Rows level.
+      const row = this.selectedRow()
+      if (row?.specialist !== undefined) {
+        this.openSpecialist(row)
+        return
+      }
       return this.beginChoice()
     }
     if (this.focus === 'categories') {
@@ -3818,6 +4051,14 @@ export class SettingsWorkspacePanel implements Component {
     const row = this.selectedRow()
     if (row?.action === 'open-legacy') {
       this.intents.onOpenLegacy(row.legacyTargetId)
+      return
+    }
+    // C2-R3: the specialist row has no L2 choice of its own — its ONE action
+    // mounts the embedded page in this same lease.
+    if (row?.specialist !== undefined) {
+      this.focus = 'detail'
+      this.bumpRevision()
+      this.openSpecialist(row)
       return
     }
     if (this.focus === 'detail') return
@@ -3978,6 +4219,16 @@ export class SettingsWorkspacePanel implements Component {
     const phase = this.editPhase
     if (phase.kind !== 'pending' || phase.requestId !== requestId) return
     this.settle(phase.field, phase.attempted, outcome)
+    // C2-R3: the ONE typed follow-up a refusal may carry. It is applied only
+    // after the settlement is committed above and only while this request is
+    // still the live one, so a late or superseded result can never move the
+    // user. Navigation only — never a write.
+    const followUp = outcome.followUpRowId
+    if (followUp === undefined || outcome.outcome !== 'not-saved') return
+    const current = this.editPhase
+    if (current.kind !== 'settled' || current.attempted !== phase.attempted) return
+    if (!this.snapshot.rows.some(row => row.id === followUp && row.category === this.categoryId)) return
+    this.selectRow(followUp, 'rows')
   }
 
   /** Record a settled outcome and re-read the authorities: the Detail then shows
@@ -4008,6 +4259,7 @@ export class SettingsWorkspacePanel implements Component {
   private cancelPointerOwners(): void {
     this.pressedGesture = undefined
     this.contentPressed = undefined
+    this.specialistPressed = undefined
     this.authPage?.cancelPointer?.()
     this.pluginPage?.cancelPointer()
   }
@@ -4049,6 +4301,17 @@ export class SettingsWorkspacePanel implements Component {
       this.cancelPointerOwners()
       this.intents.requestRender()
       return undefined
+    }
+    if (this.specialistPage !== undefined) {
+      const box = this.paintedSpecialistBox
+      if (box === undefined || !contentBoxContains(box, event.x, event.y)) return undefined
+      return this.specialistPage.handleMouse?.({
+        ...event,
+        x: event.x - box.x,
+        y: event.y - box.top,
+        screenX: event.screenX - box.x,
+        screenY: event.screenY - box.top,
+      })
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
@@ -4163,6 +4426,33 @@ export class SettingsWorkspacePanel implements Component {
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
     this.contentPressed = undefined
+    if (this.specialistPage !== undefined) {
+      const box = this.paintedSpecialistBox
+      this.specialistPressed = undefined
+      if (box === undefined || !contentBoxContains(box, x, y)) return
+      this.specialistPressed = {
+        x,
+        y,
+        columns: this.intents.columns(),
+        rows: this.intents.rows(),
+        revision: this.revision,
+        box,
+      }
+      this.specialistPage.handleMouse?.({
+        type: 'press',
+        button: 'left',
+        x: x - box.x,
+        y: y - box.top,
+        screenX: x,
+        screenY: y,
+        width: box.width,
+        height: box.rows,
+        shift: false,
+        alt: false,
+        ctrl: false,
+      })
+      return
+    }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
       const live = page === undefined ? undefined : this.syncPluginFrame()
@@ -4266,6 +4556,34 @@ export class SettingsWorkspacePanel implements Component {
     if (this.rootProjectionAwaitingPaint()) {
       this.cancelPointerOwners()
       this.intents.requestRender()
+      return
+    }
+    if (this.specialistPage !== undefined) {
+      const pressed = this.specialistPressed
+      this.specialistPressed = undefined
+      const box = this.paintedSpecialistBox
+      if (pressed === undefined || box === undefined) return
+      // A release must resolve against the SAME painted cells under the SAME
+      // root state: a resize, a scroll, a snapshot refresh or a picker-driven
+      // repaint between press and release refuses the gesture.
+      if (pressed.columns !== this.intents.columns()
+        || pressed.rows !== this.intents.rows()
+        || pressed.revision !== this.revision
+        || !sameContentBox(pressed.box, box)
+        || !contentBoxContains(box, x, y)) return
+      this.specialistPage.handleMouse?.({
+        type: 'click',
+        button: 'left',
+        x: x - box.x,
+        y: y - box.top,
+        screenX: x,
+        screenY: y,
+        width: box.width,
+        height: box.rows,
+        shift: false,
+        alt: false,
+        ctrl: false,
+      })
       return
     }
     if (this.categoryId === 'plugins') {
@@ -4442,6 +4760,12 @@ export class SettingsWorkspacePanel implements Component {
         this.takeColumnFocus('detail')
         this.retryCommit(target.id)
         return
+      case 'manage': {
+        this.takeColumnFocus('detail')
+        const row = this.selectedRow()
+        if (row?.id === target.id) this.openSpecialist(row)
+        return
+      }
       case 'option': {
         const edit = this.selectedRow()?.edit
         const index = edit?.options.findIndex(option => option.value === target.id) ?? -1
@@ -4564,6 +4888,13 @@ export class SettingsWorkspacePanel implements Component {
     this.aboutUnsubscribe?.()
     this.aboutUnsubscribe = undefined
     this.closeAuthPage()
+    // C2-R3: the embedded specialist page dies with the workspace; a write it
+    // already dispatched settles in its own owner and can never revive it.
+    this.specialistPage?.dispose()
+    this.specialistPage = undefined
+    this.specialistRow = undefined
+    this.paintedSpecialistBox = undefined
+    this.specialistPressed = undefined
     // An external Settings teardown releases the hosted Plugin page's owner
     // exactly once; a focus yield never reaches this path.
     this.closePluginPage()

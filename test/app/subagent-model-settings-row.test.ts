@@ -390,6 +390,131 @@ test('first-time setup happy path: add an allowed route, then enable selection',
   assert.equal(harness.notices.length, 0, 'the happy path produces no notice')
 })
 
+test('C2-R3: a legacy toggle queued behind a HELD allowlist write keeps the routes that write committed', async () => {
+  // The original cross-surface defect: the legacy editor toggle read the whole
+  // section BEFORE its turn and then wrote that stale list, erasing a route the
+  // picker had just committed. The toggle now owns only `enabled` and re-reads
+  // the routes inside the shared queue, so this case fails on the old code.
+  const harness = makeHarness({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }] })
+  await openSettingsPanel(harness)
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
+  const menu = allowlistRow.submenu!('2 routes', () => {}) as { handleInput(data: string): void }
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // let the catalog settle
+
+  // 1) The picker removes a route; its section write is HELD open.
+  const gate = harness.settings.gateNextWrite()
+  menu.handleInput('\x1b[B') // move off the first route
+  menu.handleInput(ENTER)
+  // The queue's fresh read + the write chain settle over a few microtasks.
+  for (let i = 0; i < 8 && harness.settings.writes.length < 1; i += 1) await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 1, 'the picker write really dispatched')
+
+  // 2) The user leaves the picker and flips the legacy toggle while that write
+  //    is still in flight. The toggle must NOT resurrect the removed route.
+  menu.handleInput('\x1b')
+  const change = harness.settingsChange!
+  change('subagent-model-selection', 'off', () => {})
+  await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 1, 'the toggle waits for the held picker write')
+
+  gate.release()
+  await settle(harness, 2)
+  const writes = harness.settings.writes
+  assert.equal(writes.length, 2, 'both intents committed, in order')
+  const surviving = writes[0]!.allowedModels as Array<{ provider: string; model: string }>
+  assert.equal(surviving.length, 1, 'the picker removed exactly one route')
+  assert.deepEqual(writes[1], { enabled: false, allowedModels: surviving },
+    'the legacy toggle kept the FRESH routes: the removed route is never resurrected')
+  assert.deepEqual(harness.settings.doc.allowedModels, surviving, 'the committed section carries the surviving route')
+  assert.equal(harness.settings.doc.enabled, false, 'and the toggle really landed')
+})
+
+test('C2-R3: removing the LAST route while disabled, then enabling, is a setup guide — never a write failure', async () => {
+  // RFL-006: the empty-allowlist precondition must be judged against the FRESH
+  // section INSIDE the queue. The early check sees a non-empty list (the picker
+  // removal has not settled yet), so only the in-queue decision can refuse the
+  // enable with the setup guidance instead of a rejected write.
+  const harness = makeHarness({ enabled: false, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  await openSettingsPanel(harness)
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
+  const menu = allowlistRow.submenu!('1 route', () => {}) as { handleInput(data: string): void }
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // let the catalog settle
+
+  // 1) Remove the ONLY route; that write is HELD open.
+  const gate = harness.settings.gateNextWrite()
+  menu.handleInput(ENTER) // the single allowed route is selected first
+  for (let i = 0; i < 8 && harness.settings.writes.length < 1; i += 1) await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 1, 'the removal really dispatched')
+  assert.deepEqual(harness.settings.doc.allowedModels, [{ provider: 'p', model: 'm1' }],
+    'the removal has NOT landed yet: the section still reads one route')
+
+  // 2) Leave the picker and enable selection while the removal is in flight.
+  menu.handleInput('\x1b')
+  const reverted: string[] = []
+  const navigated: string[] = []
+  const change = harness.settingsChange!
+  change('subagent-model-selection', 'on', (previous) => { reverted.push(previous) }, (targetId) => { navigated.push(targetId) })
+  await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 1, 'the enable waits for the held removal')
+
+  gate.release()
+  await settle(harness, 1)
+  // The detached settlement owns a few more microtasks (queue turn → refusal →
+  // revert/notice/navigate); flush until the row has really settled.
+  for (let i = 0; i < 16 && reverted.length === 0; i += 1) await Promise.resolve()
+  // The FRESH section is now empty, so the enable performs ZERO official writes
+  // and reports the SETUP PRECONDITION instead of a write failure.
+  assert.equal(harness.settings.writes.length, 1, 'no official enable write was dispatched')
+  assert.equal(harness.settings.doc.enabled, false, 'the section stays off')
+  assert.deepEqual(harness.settings.doc.allowedModels, [], 'the removal really committed')
+  assert.deepEqual(reverted.at(-1), 'off', 'the row rolls back to off')
+  assert.deepEqual(navigated, ['subagent-model-allowlist'], 'the cursor moves to the allowlist row')
+  const notice = harness.notices.at(-1)
+  assert.equal(notice?.kind, 'info', `the guidance is an info notice, not a failure: ${JSON.stringify(notice)}`)
+  assert.match(notice?.message ?? '', /Select at least one Subagent allowed model/i)
+  assert.doesNotMatch(notice?.message ?? '', /write failed/i, 'a setup precondition must never surface as a write failure')
+})
+
+test('C2-R3: enabling while a route ADD is still queued waits for it instead of refusing an empty list', async () => {
+  // The reverse race of RFL-006: an early empty-allowlist read would refuse this
+  // enable, dropping the user's intent even though the queued add is about to
+  // make it legal. The empty check therefore lives ONLY inside the queue.
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
+  const menu = allowlistRow.submenu!('0 routes', () => {}) as { handleInput(data: string): void }
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // let the catalog settle
+
+  // 1) Grant the first route; that write is HELD, so the section still reads [].
+  const gate = harness.settings.gateNextWrite()
+  menu.handleInput(ENTER)
+  for (let i = 0; i < 8 && harness.settings.writes.length < 1; i += 1) await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 1, 'the add really dispatched')
+  assert.deepEqual(harness.settings.doc.allowedModels, [], 'the add has NOT landed yet')
+
+  // 2) Leave the picker and enable selection right away.
+  menu.handleInput('\x1b')
+  const reverted: string[] = []
+  const navigated: string[] = []
+  const change = harness.settingsChange!
+  change('subagent-model-selection', 'on', (previous) => { reverted.push(previous) }, (targetId) => { navigated.push(targetId) })
+  await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 1, 'the enable waits behind the held add')
+
+  gate.release()
+  await settle(harness, 2)
+  assert.deepEqual(navigated, [], 'no setup guidance: the queued add makes the enable legal')
+  assert.equal(harness.settings.writes.length, 2, 'the enable really committed after the add')
+  assert.deepEqual(harness.settings.writes[1], { enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] },
+    'the enable carries the route the queued add committed')
+  assert.equal(harness.settings.doc.enabled, true, 'selection is on')
+  assert.deepEqual(harness.settings.doc.allowedModels, [{ provider: 'p', model: 'm1' }])
+  assert.equal(harness.notices.length, 0, 'the happy ordering produces no notice')
+})
+
 test('closing the WHOLE settings panel disposes the allowlist submenu (no late toast, row converges)', async () => {
   // The outer-teardown scenario: the allowlist submenu is open with a write
   // pending, and the user closes the ENTIRE /settings panel. The submenu must
