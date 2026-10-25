@@ -372,8 +372,10 @@ L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选
 提示词实际读取的同一份 progress/response state 对象），再经唯一串行整文档写入落盘；`Transcript
 detail`（与 `Ctrl+O` 同一份开关）与 `Thinking detail`（与 `Alt+T` 同一份开关）是纯运行态，
 没有持久字段，详情里明确写 `not applicable — runtime-only`，其 Verified 只代表运行态已生效。
-`[current]` 始终标记实时值，`Persisted` 另行显示文档里的原始存储值（未声明显示 `not set`，
-文档不可读显示 unknown）；归一化后的回退值永远不会伪装成已保存值。`Progress updates` 与
+三者的 `[current]` 标记实时生效值（先应用后落盘），`Persisted` 另行显示文档里的原始存储值
+（未声明显示 `not set`，文档不可读显示 unknown）；归一化后的回退值永远不会伪装成已保存值。
+`Configured theme` 与 `Transcript display` 保持原有语义不变：主题在 backend 非 ready 时先拒绝、
+不应用运行时，二者的 `[current]` 依据持久偏好而不是实时值。`Progress updates` 与
 `Response style` 的切换在下一次提示词组装时生效，不重新注册 section、不重建 Agent；Focus
 只是暂时抑制进度叙述，不修改已选择的节奏。
 

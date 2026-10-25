@@ -482,17 +482,19 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   }
   vt.sendInput('\r') // open the choice
   await vt.waitForRender()
-  vt.sendInput('\x1b[A') // milestones -> off
+  vt.sendInput('\x1b[B') // milestones -> frequent
   await vt.waitForRender()
   vt.sendInput('\r') // Confirm
   await waitForFrame(
     () => String(doc.progressUpdates),
-    value => value === 'off',
+    value => value === 'frequent',
     () => vt.waitForRender(),
     'the workspace commit never persisted its progress cadence',
   )
-  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/,
+  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Frequent/,
     'the ALREADY REGISTERED progress provider reads the workspace commit')
+  assert.equal(registry.text('tui:response-style'), '',
+    'the response axis still contributes no guidance')
   assert.equal(registry.sections.size, 4, 'no section was re-registered by the cadence commit')
 
   // The SECOND axis, confirmed from the same real workspace. After the settlement
@@ -519,7 +521,32 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   assert.match(registry.text('tui:response-style'), /# Response style: Concise/,
     'the ALREADY REGISTERED response-style provider reads the workspace commit')
   assert.equal(doc.responseStyle, 'concise', 'and the same commit persisted')
-  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/,
+  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Frequent/,
     'the progress axis keeps the cadence that was committed first')
   assert.equal(registry.sections.size, 4, 'no section was re-registered by either commit')
+
+  // Focus suppresses the EFFECTIVE progress narration without touching either
+  // committed preference — the suppression the workspace contract promises.
+  await commands.handler('display')({ rawInput: 'focus' })
+  await waitForFrame(
+    () => registry.text('tui:progress-updates'),
+    text => text === '',
+    () => vt.waitForRender(),
+    'Focus never emptied the effective progress section',
+  )
+  assert.match(registry.text('tui:response-style'), /# Response style: Concise/,
+    'the committed response style survives Focus')
+  // Focus is a PRESENTATION state: the live cadence the workspace committed is
+  // untouched, so leaving Focus must restore its exact text. (Read through the
+  // registered section rather than the document: `/display` runs its own
+  // whole-document replace, and this fixture's volatile refs stay at their
+  // startup values, so the document mirror is not the authority here.)
+  await commands.handler('display')({ rawInput: 'full' })
+  await waitForFrame(
+    () => registry.text('tui:progress-updates'),
+    text => /# Progress updates: Frequent/u.test(text),
+    () => vt.waitForRender(),
+    'leaving Focus never restored the committed cadence',
+  )
+  assert.equal(registry.sections.size, 4, 'Focus never re-registered a section')
 })

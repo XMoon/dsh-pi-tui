@@ -6662,10 +6662,15 @@ test('a PENDING apply-first commit already shows the RUNTIME value it applied', 
     await h.firstWriteStarted()
     const pending = h.view()
     assert.match(pending, /Saving…/u, `${entry.label} states the pending phase:\n${pending}`)
+    // For an apply-first row `primary` is `runtime`, so this field's RUNTIME fact
+    // is painted as `Value` and the OTHER fact carries its explicit label
+    // (`Persisted`) — the Detail never re-labels one as the other.
     assert.match(pending, entry.runtimeFact,
       `${entry.label} already shows the runtime value it applied, not the stale snapshot:\n${pending}`)
     assert.match(pending, entry.persistedFact,
       `${entry.label} still reports the stored value separately while pending:\n${pending}`)
+    assert.doesNotMatch(pending, /Value\s+(?:emoji|milestones|default)\b/u,
+      `${entry.label} never keeps the pre-commit runtime value as the primary fact:\n${pending}`)
     assert.doesNotMatch(pending, /Status\s+Verified/u, `${entry.label} is not Verified before settlement`)
     h.releaseFirstReplace()
     await settle(h, 10)
