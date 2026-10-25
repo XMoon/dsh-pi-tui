@@ -597,7 +597,7 @@ async function mountRunner(
   harness: ReturnType<typeof makeHarness>,
   startup: { sessionId?: string },
   config: Record<string, unknown> = {},
-): Promise<{ dispose: () => Promise<void>; app: TuiApp }> {
+): Promise<{ dispose: () => Promise<void>; app: TuiApp; configRefs: Record<string, unknown> }> {
   ctx.provide('appExit', () => {})
   // The startup service is normally provided here; an extension-hosting
   // harness provides it earlier (the extension host's `inject` gate needs it
@@ -612,13 +612,22 @@ async function mountRunner(
   ctx.provide('commands', harness.commands as never)
   ctx.provide('loader', { await: async () => {} } as never)
   let app: TuiApp | undefined
+  let boundConfigRefs: Record<string, unknown> | undefined
   const originalStart = TuiApp.prototype.start
   TuiApp.prototype.start = function (this: TuiApp) {
     app = this
     return originalStart.call(this)
   }
   try {
-    const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: startup.sessionId, ...config } as never)))
+    const schemaConfig = TuiConfigSchema({ sessionId: startup.sessionId, ...config } as never)
+    // The plugin config's field references are the ONE runtime authority the
+    // Direct facade reads (`DirectTuiSettings.get()` -> `refs.<field>.get()`),
+    // and the Loader commits a settings mutation into those SAME references
+    // without remounting. A harness whose fake settings service does not write
+    // them cannot prove any "settings write is seen by the runtime" chain, so
+    // the mount hands back the object it really used.
+    boundConfigRefs = schemaConfig as unknown as Record<string, unknown>
+    const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, schemaConfig))
     await fiber
     for (let index = 0; index < 60; index += 1) await Promise.resolve()
   } finally {
@@ -628,6 +637,7 @@ async function mountRunner(
   return {
     dispose: () => Promise.resolve(),
     app: app as TuiApp,
+    configRefs: boundConfigRefs as Record<string, unknown>,
   }
 }
 
@@ -1316,9 +1326,14 @@ async function bootCommandHarness(
   },
 ): Promise<{
   harness: ReturnType<typeof makeHarness>
-  mounted: { dispose: () => Promise<void>; app: TuiApp }
+  mounted: { dispose: () => Promise<void>; app: TuiApp; configRefs: Record<string, unknown> }
   /** The harness's Cordis context (durable session-event emission). */
   context: Context
+  /** Commit one settings mutation through this harness's REAL settings service
+   *  (the same `mutate` path a settings write uses), which — like the Loader —
+   *  also commits into the LIVE volatile reference the running application
+   *  reads. */
+  mutateSettings(ops: readonly { op: string; path: readonly string[]; value?: unknown }[]): Promise<void>
   /** Register a contribution AFTER the mount (a late/HMR plugin). */
   registerContribution(contribution: {
     id: string
@@ -1436,15 +1451,28 @@ async function bootCommandHarness(
     } as never)
   }
   const doc: Record<string, unknown> = { busyEnter: options.busyEnter }
-  context.provide('settings', {
+  // Mirror the Loader's contract: a settings mutation commits into the LIVE
+  // volatile reference the running application reads — it does NOT only update
+  // a document. `mountRunner` hands its schema object back into this slot.
+  const volatileWrite = Symbol.for('cosmokit.volatile.write')
+  let liveConfig: Record<string, unknown> | undefined
+  /** Bind the config `mountRunner` really used for THIS mount. */
+  const bindLiveConfig = (config: Record<string, unknown>): void => { liveConfig = config }
+  const settingsService = {
     describe: () => [{ ns: 'tui-app', value: { ...doc }, user: { ...doc }, revision: 1 }],
     mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       for (const op of ops) {
         if (op.op === 'set') doc[op.path[0]!] = op.value
         else delete doc[op.path[0]!]
       }
+      if (liveConfig === undefined) return
+      for (const op of ops) {
+        const ref = liveConfig[op.path[0]!] as { [volatileWrite]?: (value: unknown) => void } | undefined
+        ref?.[volatileWrite]?.(op.op === 'set' ? op.value : undefined)
+      }
     },
-  } as never)
+  }
+  context.provide('settings', settingsService as never)
   let extensionService: unknown
   const registerContribution = async (contribution: {
     id: string
@@ -1512,11 +1540,18 @@ async function bootCommandHarness(
   const mounted = await mountRunner(context, home, harness,
     options.deferredStart === true ? {} : { sessionId: 'command-session' },
     { busyEnter: options.busyEnter })
+  bindLiveConfig(mounted.configRefs)
   harness.host.status = options.status
   return {
     harness,
     mounted,
     context,
+    /** Commit one settings mutation through this harness's REAL settings
+     *  service (the same `mutate` path a settings write uses), which — like the
+     *  Loader — also commits into the LIVE volatile reference the running
+     *  application reads. */
+    mutateSettings: (ops: readonly { op: string; path: readonly string[]; value?: unknown }[]): Promise<void> =>
+      settingsService.mutate('tui-app', ops),
     registerContribution,
     imageSaves,
     fileSaves,
@@ -1969,6 +2004,49 @@ test('running + queue: an argued execute-kind line queues as an ordinary followu
   assert.equal(harness.executed.length, 0, 'an argued execute-kind line is not a command invocation')
   assert.equal(harness.host.followedUp.length, 1, 'it takes the ordinary queue delivery')
   assert.equal(harness.host.steered.length, 0, 'the queue preference never steers')
+})
+
+test('a Submit while busy settings write reaches the REAL main-session submit route', async (t) => {
+  // The main submit boundary reads `deps.tuiSettings.get().busyEnter` directly
+  // (`submission/controller.ts:1778`); `SettingsRuntime.busyEnter()` serves the
+  // Subagent Viewer path instead. This case drives the REAL
+  // `SubmissionController.submit()` through `TuiApp.submitDraft` and observes
+  // the delivery at the agent host — never a hand-called decision function.
+  //
+  // The write travels the SAME path a Settings Confirm uses: the settings
+  // service's `mutate`, which (like the Loader) commits into the LIVE volatile
+  // reference the running application reads.
+  const { harness, mounted, mutateSettings } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+
+  // Reverse control: the stored queue policy really queues a busy plain Enter.
+  mounted.app.setDraft('boot policy line')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'boot queue delivery')
+  assert.equal(harness.host.followedUp.length, 1, 'the stored queue policy queues a busy Enter')
+  assert.equal(harness.host.steered.length, 0, 'and never steers')
+
+  // The write a Settings Confirm produces.
+  await mutateSettings([{ op: 'set', path: ['busyEnter'], value: 'steer' }])
+  // A completed submit settles the fake agent; re-arm the busy precondition so
+  // this assertion is about the PREFERENCE, not the agent's status.
+  harness.host.status = 'running'
+  mounted.app.setDraft('written policy line')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  const steered = await drainUntil(() => harness.host.steered.length > 0, 15_000)
+  assert.ok(steered, 'the second submission must reach the agent inbox')
+  assert.equal(harness.host.steered.length, 1,
+    'the settings write reaches the REAL submit route through the live volatile reference')
+  assert.equal(harness.host.followedUp.length, 1, 'no second queue delivery was produced')
+
+  // Negative control on the same boot: writing it BACK restores queue delivery.
+  await mutateSettings([{ op: 'set', path: ['busyEnter'], value: 'queue' }])
+  harness.host.status = 'running'
+  mounted.app.setDraft('reverted policy line')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  const queued = await drainUntil(() => harness.host.followedUp.length > 1, 15_000)
+  assert.ok(queued, 'the third submission must reach the agent inbox')
+  assert.equal(harness.host.followedUp.length, 2, 'the reverted queue policy queues again')
+  assert.equal(harness.host.steered.length, 1, 'and does not steer')
 })
 
 test('running + steer: an argued execute-kind line steers as an ordinary prompt', async (t) => {
