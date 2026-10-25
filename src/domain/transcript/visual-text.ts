@@ -200,26 +200,53 @@ export function isOfficialVisualMachineBlock(text: string): boolean {
 }
 
 /**
- * Whether one text is an official machine block the given tool could produce.
+ * The length of the official machine-block SUFFIX this exact tool can produce.
  *
- * The tool-to-fact pairing is part of the identity: a chart tool never emits an
- * SVG fact and vice versa, so a mismatched line is prose, not a machine block.
- * The publication tool emits only a receipt.
+ * Each tool has one canonical tail composition, and a result carries at most
+ * that composition:
+ *
+ * - a generator: optionally one `visual-ref-v1` block immediately followed by
+ *   one `visual-v1` fact block of the MATCHING type, or the fact block alone
+ *   (the reference is only projected for a root call inside an open step);
+ * - the publication tool: one `visual-published-v1` receipt block.
+ *
+ * Suffix entries are validated as a SEQUENCE, not independently: a reference
+ * after the fact, a second reference, a second fact, or a reference without a
+ * fact is not something the official serializer can emit, so those blocks stay
+ * human text.
  * @param toolName - the durable `tool/call` name.
- * @param text - one result block's text.
- * @returns true only for a block this exact tool can produce.
+ * @param texts - the result's text blocks, in order.
+ * @returns how many TRAILING blocks are official machine blocks (0 when none).
  */
-export function isOfficialBlockOfTool(toolName: string, text: string): boolean {
-  if (toolName === CHART_TOOL_NAME) {
-    return parseOfficialReferenceBlock(text) !== undefined
-      || parseOfficialFactBlock(text)?.type === 'chart'
+export function officialMachineSuffixLength(toolName: string, texts: readonly string[]): number {
+  const last = texts[texts.length - 1]
+  if (last === undefined) return 0
+  if (toolName === PRESENT_VISUAL_TOOL_NAME) {
+    if (parseOfficialReceiptBlock(last) === undefined) return 0
+    // The publication tool emits exactly ONE receipt; a second one before it
+    // means this is not the official tail.
+    const before = texts[texts.length - 2]
+    if (before !== undefined && parseOfficialReceiptBlock(before) !== undefined) return 0
+    return 1
   }
-  if (toolName === SVG_TOOL_NAME) {
-    return parseOfficialReferenceBlock(text) !== undefined
-      || parseOfficialFactBlock(text)?.type === 'svg'
+  const expectedType = toolName === CHART_TOOL_NAME ? 'chart' : toolName === SVG_TOOL_NAME ? 'svg' : undefined
+  if (expectedType === undefined) return 0
+  if (parseOfficialFactBlock(last)?.type === expectedType) {
+    const before = texts[texts.length - 2]
+    if (before !== undefined && parseOfficialReferenceBlock(before) !== undefined) {
+      // Exactly one reference may precede the fact; a SECOND machine-looking
+      // block before it means this is not the projected composition.
+      const beforeThat = texts[texts.length - 3]
+      if (beforeThat !== undefined && parseOfficialReferenceBlock(beforeThat) !== undefined) return 0
+      if (beforeThat !== undefined && parseOfficialFactBlock(beforeThat) !== undefined) return 0
+      return 2
+    }
+    // A machine-looking block before a FACT-only tail means the fact is not the
+    // single official fact of this result.
+    if (before !== undefined && parseOfficialFactBlock(before) !== undefined) return 0
+    return 1
   }
-  if (toolName === PRESENT_VISUAL_TOOL_NAME) return parseOfficialReceiptBlock(text) !== undefined
-  return false
+  return 0
 }
 
 /**
@@ -245,16 +272,28 @@ export function humanFacingVisualResult(input: {
   }
   if (blocks === undefined) {
     const lines = text.split('\n')
-    let end = lines.length
-    while (end > 0 && isOfficialBlockOfTool(toolName, lines[end - 1] as string)) end -= 1
-    const human = lines.slice(0, end).join('\n')
+    const trimmed = officialMachineSuffixLength(toolName, lines)
+    const human = lines.slice(0, lines.length - trimmed).join('\n')
     return { blocks: human === '' ? [] : [{ type: 'text', text: human }], text: human }
   }
+  const texts: string[] = []
+  for (const block of blocks) if (block.type === 'text') texts.push(block.text)
+  const trimmed = officialMachineSuffixLength(toolName, texts)
+  // Map the text-level suffix back to block indices: only TRAILING text blocks
+  // participate, so a machine block before another block is never stripped.
+  let remaining = trimmed
   let end = blocks.length
-  while (end > 0) {
+  while (remaining > 0 && end > 0) {
     const block = blocks[end - 1]
-    if (block === undefined || block.type !== 'text' || !isOfficialBlockOfTool(toolName, block.text)) break
+    if (block === undefined) break
     end -= 1
+    if (block.type === 'text') remaining -= 1
+    else {
+      // A trailing non-text block breaks the official suffix: give the text
+      // blocks back as human content.
+      end = blocks.length
+      break
+    }
   }
   const human = blocks.slice(0, end)
   const humanText = human.filter(block => block.type === 'text').map(block => block.text).join('\n')
