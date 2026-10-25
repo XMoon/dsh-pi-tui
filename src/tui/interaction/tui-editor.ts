@@ -89,11 +89,12 @@ function routeEditorRenders(tui: TUI, route: ((force?: boolean) => void) | undef
  * three prompts (`❯ `, `! `, `!!`) are exactly this wide. */
 const PROMPT_WIDTH = 2
 
-/** Whether the cursor sits in a declared path-argument position (`/attach`/`/image
- * <arg>`): the classifier's `path-argument` kind, which the reopen gate
- * consumes (plan §11 — ONE classifier, never a per-command hardcode). */
-function isFileArgumentContext(textBeforeCursor: string, line: number): boolean {
-  return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS, { line }).kind === 'path-argument'
+/** Whether the cursor sits in a FILE completion position (`@mention` or a
+ * declared path argument `/attach`/`/image <arg>`): the classifier's answer,
+ * which the directory reopen gate consumes (plan §11 — ONE classifier, never a
+ * per-command hardcode). A `none` position keeps the dropdown closed. */
+function isFileCompletionContext(textBeforeCursor: string, line: number): boolean {
+  return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS, { line }).kind !== 'none'
 }
 
 /**
@@ -506,6 +507,7 @@ export class TuiEditor extends Editor {
     if (data !== '') super.handleInput(data)
     this.triggerNonstandardMentionCompletion(data)
     this.triggerInlineSkillCompletion(data)
+    this.triggerInlinePathArgumentCompletion(data)
     this.reopenAutocompleteAfterInput()
   }
 
@@ -535,6 +537,34 @@ export class TuiEditor extends Editor {
     const quotedMention = context.query.startsWith('@"')
     const nonstandardBoundary = beforeAt !== undefined && beforeAt !== ' ' && beforeAt !== '\t'
     if (!quotedMention && !nonstandardBoundary) return
+    this.requestAutocomplete({ force: false, explicitTab: false })
+  }
+
+  /**
+   * Trigger the provider while the cursor sits inside a declared path
+   * ARGUMENT that is not the first line's leading command
+   * (`hi /image sh`, a later line's `/attach no`). The vendored editor's
+   * per-letter trigger only recognizes its own line-start slash-command
+   * context, so an INLINE argument position would otherwise stay silent until
+   * an explicit Tab — the same consumer-side gap the `@`/skill triggers close.
+   * The ONE classifier decides; ordinary prose and paths never reach here.
+   */
+  private triggerInlinePathArgumentCompletion(data: string): void {
+    if (this.isShowingAutocomplete()) return
+    if (this.inputMode !== 'prompt') return
+    const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined)
+    // Navigation/control keys and paste markers are not typing.
+    if (printable === undefined && data.includes('\x1b')) return
+    if (printable === undefined && ![...data].some(character => character.charCodeAt(0) >= 32)) return
+    const { line, col } = this.getCursor()
+    const before = this.getLines()[line]?.slice(0, col) ?? ''
+    const context = classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS, { line })
+    if (context.kind !== 'path-argument' || context.leading) return
+    // One request per TYPED character, exactly like the fork's own per-letter
+    // trigger in its line-start command context (an open dropdown refreshes
+    // through the fork's update path; a closed one must be opened here).
+    // Escape sequences and paste markers were already rejected above, so Esc
+    // never re-triggers (kimi parity).
     this.requestAutocomplete({ force: false, explicitTab: false })
   }
 
@@ -691,7 +721,7 @@ export class TuiEditor extends Editor {
     // reopen through the same directory-shaped context gate — never a
     // per-command hardcode, and never a plain trailing `/` (a `see /tmp/`
     // position stays closed).
-    if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileArgumentContext(textBeforeCursor, line)) {
+    if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileCompletionContext(textBeforeCursor, line)) {
       this.requestAutocomplete({ force: false, explicitTab: false })
     }
   }
