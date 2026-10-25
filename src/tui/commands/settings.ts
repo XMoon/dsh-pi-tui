@@ -2009,10 +2009,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const persistedPreset = doc?.displayPreset
     const thinking = app.isThinkingExpanded() ? 'expanded' : 'collapsed'
     // R1: the FIVE live runtime facts, read from the authority that really owns
-    // each of them. `iconStyleOf` normalizes only the RUNTIME selection (an
-    // absent/garbage stored value still behaves as `emoji`); the raw stored
-    // value stays the Persisted fact and is never overwritten by the normalizer.
-    const runtimeIcon = iconStyleOf(iconRaw)
+    // each of them — never from the document. The icon palette is the running
+    // surface's own state: an apply-first write leaves it live even when the
+    // persistence was refused, so the stored `iconStyle` can legitimately be
+    // older (or absent/garbage) and stays a SEPARATE Persisted fact. The startup
+    // normalization (`iconStyleOf`) is what puts a legal value into the app.
+    const runtimeIcon = app.currentIconStyle()
     const expand = app.isTranscriptDetailExpanded() ? 'expanded' : 'collapsed'
     const runtimeProgress = runner.progressUpdatesState.mode
     const runtimeResponse = runner.responseStyleState.style
