@@ -819,3 +819,46 @@ test('submitting after an inline accept carries the placeholder, never the local
   assert.ok(!submitted!.includes('shot.png'), 'the selected local path never reaches the submission')
   assert.ok(!submitted!.includes('/image '), 'the inline command fragment never reaches the submission')
 })
+
+test('a MULTI-SPACE separator still reads the real file (not a space-prefixed name)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'spaced ')
+  await vt.waitForRender()
+  // Three spaces after the command name: the candidate's editor value carries
+  // them back onto the replacement text, and the READ must drop them.
+  type(vt, '/image   ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'spaced /image   shot', 'the filter lands with the spacing preserved')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the image candidate after a multi-space separator')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands')
+  assert.equal(h.imageStore.size(), 1, 'the real file was read despite the extra separator spacing')
+  // The canonical placeholder replaces the WHOLE inline fragment including the
+  // separator run — extra spacing the user only needed for the path does not
+  // survive as stray blanks in the prose.
+  assert.equal(app.seatTextForTest(), 'spaced [image #1 (1×1)]',
+    'the placeholder replaces the whole fragment, one separator kept')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('a TAB separator still reads the real file', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'tabbed ')
+  await vt.waitForRender()
+  type(vt, '/image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'tabbed /image shot', 'the filter lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the image candidate')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands')
+  assert.equal(h.imageStore.size(), 1, 'the file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})

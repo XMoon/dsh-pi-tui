@@ -31,7 +31,7 @@ import {
   applyInlineAttachmentPath,
   isInlineAttachmentAction,
   isInlineAttachmentPath,
-  unquoteCandidateValue,
+  candidatePath,
   type InlineAttachmentAcceptance,
   type InlineAttachmentActionItem,
   type InlineAttachmentPathItem,
@@ -585,6 +585,13 @@ export class MentionProvider implements AutocompleteProvider {
     cursorCol: number,
     result: T,
     strict = true,
+    /** Whether THIS capture may grant attachment authority. Only the base
+     *  provider's OWN Client-local discovery grants it: an extension answer is
+     *  an ordinary completion list, and object identity inside a dropdown is
+     *  not proof that a row came from the attachment pipeline. A structural
+     *  marker on a foreign row must therefore never authorize a local file
+     *  read. */
+    grantAttachments = true,
   ): T {
     if (generation !== this.requestGeneration) return result
     if (result === null) this.requestSnapshot = null
@@ -596,7 +603,9 @@ export class MentionProvider implements AutocompleteProvider {
       scope,
       localCwd,
       strict,
-      attachments: result.items.filter(item => isInlineAttachmentAction(item) || isInlineAttachmentPath(item)),
+      attachments: grantAttachments
+        ? result.items.filter(item => isInlineAttachmentAction(item) || isInlineAttachmentPath(item))
+        : [],
     }
     return result
   }
@@ -619,7 +628,8 @@ export class MentionProvider implements AutocompleteProvider {
     mode: EditorInputMode = this.inputModeSource(),
     localCwd: string = this.localCwdOf(),
   ): AutocompleteSuggestions | null {
-    return this.withRequestSnapshot(generation, scope, mode, localCwd, lines, cursorLine, cursorCol, result)
+    // An EXTENSION answer: binds the stale fence, never attachment authority.
+    return this.withRequestSnapshot(generation, scope, mode, localCwd, lines, cursorLine, cursorCol, result, true, false)
   }
 
   /** The base provider's suggestion entry for the DELEGATED wrap: the
@@ -824,7 +834,11 @@ export class MentionProvider implements AutocompleteProvider {
         this.acceptInlineAttachment({
           kind: item.directory ? 'directory' : 'path',
           command: item.command,
-          path: unquoteCandidateValue(item.value),
+          // The READ target, not the editor replacement text: a candidate's
+          // value carries the argument's leading separator run (kept so the
+          // accepted text preserves the user's spacing), which is never part
+          // of the file path.
+          path: candidatePath(item.value),
           lines: newLines,
           cursorLine,
           cursorCol: applied.cursorCol,
