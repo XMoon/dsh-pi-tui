@@ -126,9 +126,19 @@ export default async function (h) {
   h.check('the client drew native image elements for the transcript AND the dock',
     images.length >= 5, JSON.stringify(images.map(node => rect(node))))
   h.measure('image boxes (1280x800)', JSON.stringify(images.map(node => rect(node))))
-  h.check('every painted image is unclipped by its ancestors',
-    images.every(node => containedXY(snap.chains, node)),
-    JSON.stringify(images.map(node => ({ box: rect(node), ok: containedXY(snap.chains, node) }))))
+  // Scoped to the images the viewport actually shows: a long transcript scrolls
+  // earlier images out of the window, and a scrolled-out image is correctly
+  // clipped — asserting over ALL of them would demand the impossible.
+  const windowHeight = (h.ctl('stats').viewport ?? [0, 0, 0, 0])[1]
+  const onScreenImages = images.filter(node => {
+    const box = rect(node)
+    return box[1] >= 0 && box[1] + box[3] <= windowHeight
+  })
+  h.check('at least one painted image is on screen', onScreenImages.length > 0,
+    JSON.stringify(images.map(node => rect(node))))
+  h.check('every ON-SCREEN image is unclipped by its ancestors',
+    onScreenImages.every(node => containedXY(snap.chains, node)),
+    JSON.stringify(onScreenImages.map(node => ({ box: rect(node), ok: containedXY(snap.chains, node) }))))
 
   h.capture('pr4-gui-light', 'the PR4 image surfaces in a real Tern GUI window (light)')
 
@@ -287,28 +297,15 @@ export default async function (h) {
  * happen BEFORE the subject launches in the pane.
  */
 async function splitPaneGate(h) {
-  const { spawnSync } = await import('node:child_process')
   const { join } = await import('node:path')
-  const env = {
-    ...process.env,
-    TERN_CONFIG_DIR: join(h.root, 'config'),
-    TERN_DAEMON_SOCKET: join(h.root, 'daemon.sock'),
-    DISPLAY: process.env.DISPLAY,
-  }
-  const tern = process.env.TERN_BIN ?? 'tern'
-  const blocks = () =>
-    JSON.parse(spawnSync(tern, ['ls', '--json'], { env, encoding: 'utf8' }).stdout).sessions[0].tabs[0].blocks
 
   // A TALL window, so the `max-height: 640px` rule can never match. The height
   // is chosen so two panes land at the contract's 22 rows (the amendment's
   // exact split case), not merely "short".
   await h.resize(1280, 800)
-  const before = blocks()
-  spawnSync(tern, ['split', '@focused', 'down'], { env, encoding: 'utf8' })
-  await h.sleep(1500)
-  const after = blocks()
-  h.check('the tall window really split into two panes', after.length === before.length + 1,
-    `blocks ${before.length} -> ${after.length}`)
+  // The driver's OWN split: it asserts the pane count and that the focus did not
+  // move, so the subject can never launch into the wrong pane.
+  const after = await h.splitPane('down')
   h.measure('the split pane rows', JSON.stringify(after.map(block => ({ rows: block.rows, cols: block.cols }))))
   // The amendment's exact case is 2 × 22 rows: assert EXACTLY that, so the case
   // cannot pass on a nearby height.
@@ -377,25 +374,9 @@ async function splitPaneGate(h) {
  * with `TERN_GUI_BUSY=1`, so the dock carries those rows for real.
  */
 async function splitPaneBusyGate(h) {
-  const { spawnSync } = await import('node:child_process')
   const { join } = await import('node:path')
-  const env = {
-    ...process.env,
-    TERN_CONFIG_DIR: join(h.root, 'config'),
-    TERN_DAEMON_SOCKET: join(h.root, 'daemon.sock'),
-    DISPLAY: process.env.DISPLAY,
-  }
-  const tern = process.env.TERN_BIN ?? 'tern'
-  const blocks = () =>
-    JSON.parse(spawnSync(tern, ['ls', '--json'], { env, encoding: 'utf8' }).stdout).sessions[0].tabs[0].blocks
-
   await h.resize(1280, 800)
-  const before = blocks()
-  spawnSync(tern, ['split', '@focused', 'down'], { env, encoding: 'utf8' })
-  await h.sleep(1500)
-  const after = blocks()
-  h.check('the busy case really split into two panes', after.length === before.length + 1,
-    `blocks ${before.length} -> ${after.length}`)
+  const after = await h.splitPane('down')
   // The SAME T4 premises as the plain split gate, asserted — not measured — so a
   // nearby height can never stand in for the contract's 2 x 22 case.
   h.check('each busy split pane is EXACTLY the contract 22 rows (so the window rule cannot help)',
