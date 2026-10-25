@@ -2000,7 +2000,10 @@ test('a registry change that drops the chosen candidate identity drops the choic
 test('losing the Extensions category still repairs the selection and its offsets', () => {
   let revision = 1
   let count = 1
-  let snapshot = { ...withDirectory(revision, count), rows: [...SNAPSHOT.rows, extensionRow('ext-setting:demo')] }
+  let snapshot: SettingsWorkspaceSnapshot = {
+    ...withDirectory(revision, count),
+    rows: [...SNAPSHOT.rows, extensionRow('ext-setting:demo')],
+  }
   const h = setup({
     columns: 120,
     rows: 40,
