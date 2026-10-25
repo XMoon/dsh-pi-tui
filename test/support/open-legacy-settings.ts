@@ -3,11 +3,11 @@
  * through the REAL `/settings` entry.
  *
  * Since B2-A, `/settings` opens the readonly fullscreen Settings workspace; the
- * legacy SettingsList lives behind its `Other settings` → `Open existing
- * settings…` compatibility bridge. Every pre-existing suite that drives the real
- * command and then interacts with (or asserts on) the legacy rows must cross
- * that bridge through the real workspace keys and the real handoff — never by
- * calling `TuiApp.openSettings` or the legacy builder directly.
+ * legacy SettingsList lives behind the per-category transition launchers. Every
+ * pre-existing suite that drives the real command and then interacts with (or
+ * asserts on) the legacy rows must cross that bridge through the real workspace
+ * keys and the real handoff — never by calling `TuiApp.openSettings` or the
+ * legacy builder directly.
  *
  * Since Phase 3C / C2-A the workspace opens on its About home, so the walk
  * starts from there: the category rail is the only selection owner.

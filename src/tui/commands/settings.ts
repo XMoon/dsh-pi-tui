@@ -57,11 +57,13 @@ import { AboutStatusController } from '../../app/command/about-status.ts'
 import { bundleVersion, dshVersion, packageVersion } from '../../client/launcher/version.ts'
 import { openExternalUrl } from '../../client/url/open.ts'
 import type {
+  SettingsWorkspaceCategoryId,
   SettingsWorkspaceCommitOutcome,
   SettingsWorkspaceCommitRequest,
   SettingsWorkspaceEdit,
   SettingsWorkspaceEditOption,
   SettingsWorkspaceFreshness,
+  SettingsWorkspaceRow,
   SettingsWorkspaceRowId,
   SettingsWorkspaceSnapshot,
 } from '../panels/settings-workspace-panel.ts'
@@ -1757,16 +1759,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // the shipped default.
     const visualTools = runner.config.visualTools.read()
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
+    const extensionContributors = new Set(extensionRows.map(row => row.owner)).size
     // The R0 transition rows: each one only NAMES the existing-editor row it
     // focuses. They run no write of their own and never stand in for the real
     // editor, which stays reachable behind them until R1–R6 migrate the field.
     const transitionRow = (
       id: SettingsWorkspaceRowId,
-      category: SettingsWorkspaceSnapshot['rows'][number]['category'],
+      category: SettingsWorkspaceCategoryId,
       label: string,
       description: string,
       legacyTargetId: string,
-    ): SettingsWorkspaceSnapshot['rows'][number] => ({
+    ): SettingsWorkspaceRow => ({
       id,
       category,
       label,
@@ -1901,7 +1904,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           id: 'extension-settings-legacy' as const,
           category: 'extensions' as const,
           label: 'Configure extension settings…',
-          summary: `${extensionRows.length} ${extensionRows.length === 1 ? 'setting' : 'settings'} · ${new Set(extensionRows.map(row => row.owner)).size} ${new Set(extensionRows.map(row => row.owner)).size === 1 ? 'contributor' : 'contributors'}`,
+          summary: `${extensionRows.length} ${extensionRows.length === 1 ? 'setting' : 'settings'} · ${extensionContributors} ${extensionContributors === 1 ? 'contributor' : 'contributors'}`,
           scope: 'Existing settings editor',
           freshness: 'ready' as const,
           description: 'Extension registrations are edited by the existing settings editor. This row only opens that editor on the first registered setting; the per-owner list arrives with the extension settings migration.',
@@ -2825,10 +2828,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   /**
    * `/settings` — Phase 3B / B2-A: enter the readonly fullscreen Settings
-   * workspace. The legacy complete editor stays reachable through the
-   * workspace's `Other settings` → `Open existing settings…` row, which retires
-   * the workspace FIRST and then calls {@link openLegacySettings} on the
-   * restored surface.
+   * workspace. The legacy complete editor stays reachable through each
+   * configuration category's transition launcher row, which retires the
+   * workspace FIRST and then calls {@link openLegacySettings} on the restored
+   * surface.
    */
   const registerSettings = (): void => {
     // C5: `/status` is a REAL alias of `/settings` — the same handler, same

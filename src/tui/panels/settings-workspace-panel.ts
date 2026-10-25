@@ -2345,16 +2345,16 @@ export class SettingsWorkspacePanel implements Component {
     }
     const includeTitle = this.currentLayout() !== 'narrow'
     const buttons = row === undefined ? [] : this.detailButtons(row)
-    // A row without a write channel says so instead of looking editable: the
-    // complete editor stays one `Other settings` handoff away. The note is NOT
-    // a button and grants nothing: it keeps its own pinned row when the row has
-    // no action left to carry it (the Legacy Copy verb is retired). The
-    // decoration is dropped WHOLE when it does not fit — a half-cut note would
-    // read as a different statement.
+    // A row without a write channel says so instead of looking editable: this
+    // category's own transition launcher opens the existing complete settings
+    // editor. The note is NOT a button and grants nothing: it keeps its own
+    // pinned row when the row has no action left to carry it (the Legacy Copy
+    // verb is retired). The decoration is dropped WHOLE when it does not fit —
+    // a half-cut note would read as a different statement.
     const note = buttons.some(button => button.verb === 'legacy')
       ? 'opens the existing complete settings editor'
       : row !== undefined && row.edit === undefined && row.action === 'inspect'
-        ? 'read-only here · Other settings edits this row'
+        ? 'read-only here · existing settings editor edits it'
         : ''
     const noteAloneFits = buttons.length === 0 && note !== '' && visibleWidth(note) <= width
     const pinned = (buttons.length > 0 || noteAloneFits) && viewport >= 2 ? 1 : 0

@@ -423,9 +423,8 @@ test('the Settings → Plugins entry hosts the SAME Remote controller/panel and 
   await waitFor('the Settings workspace opens', () => /Settings · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
   // The workspace opens on its About home; the rail order is About, Models,
   // Account, Agent, Appearance, Conversation, Input & Terminal, Tools, Plugins,
-  // so eight Down
-  // presses reach Plugins.
-  for (let step = 0; step < 6; step += 1) fixture.vt.sendInput('\x1b[B')
+  // so eight Down presses reach Plugins.
+  for (let step = 0; step < 8; step += 1) fixture.vt.sendInput('\x1b[B')
   await fixture.vt.waitForRender()
   fixture.vt.sendInput('\r')
   await waitFor('the Plugin Manager page is hosted by Settings', () =>
