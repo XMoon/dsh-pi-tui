@@ -50,6 +50,13 @@ function elementsOf(node, out = []) {
 }
 
 export default async function (h) {
+  // Two modes over ONE flow file: the full window journey, and the amendment's
+  // split-pane gate (`TERN_GUI_SPLIT=1`). The split must happen BEFORE the
+  // subject launches in a pane, so it cannot share the window journey's launch.
+  if (process.env.TERN_GUI_SPLIT === '1') {
+    await splitPaneGate(h)
+    return
+  }
   const system = h.ctl('system')
   h.check('the GUI window is a real native window on a real display',
     (system.displays ?? []).length > 0 && typeof system.title === 'string',
@@ -269,4 +276,73 @@ export default async function (h) {
 
   writeFileSync(join(h.root, 'a11y-final.json'), JSON.stringify(h.ctl('a11y'), null, 1))
   h.measure('the viewport', JSON.stringify(h.ctl('stats').viewport ?? null))
+}
+
+/**
+ * The SPLIT-PANE gate (amendment §5 T4): a tall window divided into two short
+ * panes. The window media query does NOT fire here, so this is the case the
+ * per-node `max` ceiling has to carry — and the case a window-only CSS fix was
+ * proven not to solve. It runs as a SEPARATE drive on purpose: the split has to
+ * happen BEFORE the subject launches in the pane.
+ */
+async function splitPaneGate(h) {
+  const { spawnSync } = await import('node:child_process')
+  const { join } = await import('node:path')
+  const env = {
+    ...process.env,
+    TERN_CONFIG_DIR: join(h.root, 'config'),
+    TERN_DAEMON_SOCKET: join(h.root, 'daemon.sock'),
+    DISPLAY: process.env.DISPLAY,
+  }
+  const tern = process.env.TERN_BIN ?? 'tern'
+  const blocks = () =>
+    JSON.parse(spawnSync(tern, ['ls', '--json'], { env, encoding: 'utf8' }).stdout).sessions[0].tabs[0].blocks
+
+  // A TALL window, so the `max-height: 640px` rule can never match.
+  await h.resize(1280, 900)
+  const before = blocks()
+  spawnSync(tern, ['split', '@focused', 'down'], { env, encoding: 'utf8' })
+  await h.sleep(1500)
+  const after = blocks()
+  h.check('the tall window really split into two panes', after.length === before.length + 1,
+    `blocks ${before.length} -> ${after.length}`)
+  h.measure('the split pane rows', JSON.stringify(after.map(block => ({ rows: block.rows, cols: block.cols }))))
+  h.check('each split pane is SHORT (so the window rule cannot help)', after.every(block => block.rows <= 30),
+    JSON.stringify(after.map(block => block.rows)))
+
+  // Launch the subject in the FOCUSED (lower) pane and measure it there.
+  const subject = join(h.repo, 'scripts', 'tern-gui-draft-and-transcript-images-subject.mts')
+  const booted = await h.launch(subject, { ready: '[IMAGE] first-shot.png' })
+  h.check('the subject boots inside a SPLIT pane', booted)
+  if (!booted) return
+
+  const snap = h.snapshot()
+  const viewport = h.ctl('stats').viewport ?? [0, 0, 0, 0]
+  h.measure('THE WINDOW is taller than the CSS breakpoint (so the sheet cannot fire)',
+    `windowHeight=${viewport[1]}`)
+  h.check('the window really is taller than 640px', viewport[1] > 640, `height=${viewport[1]}`)
+
+  // The preview chips must still be BOUNDED, and the editor must stay in-pane.
+  const images = snap.nodes.filter(node => node.tag === 'img')
+  h.measure('image boxes inside the split pane', JSON.stringify(images.map(node => rect(node))))
+  const composerOf = snapshot => snapshot.nodes.find(node => String(node.text ?? '').includes('see attached'))
+  const composer = composerOf(snap)
+  h.check('the controlled editor is painted inside the split pane', composer !== undefined)
+  if (composer !== undefined) {
+    const box = rect(composer)
+    h.measure('dock composer box inside the split pane', JSON.stringify(box))
+    // Containment against the PANE's own ancestors, not the window viewport.
+    h.check('the editor is contained by its PANE (ancestor oracle, not the window)',
+      containedXY(snap.chains, composer), `box=${JSON.stringify(box)}`)
+  }
+  h.check('the draft count is on the status line inside the split pane',
+    h.has(snap, 'Draft 3 · '), h.texts(snap).join(' | '))
+  const textBefore = composer === undefined ? undefined : String(composer.text ?? '')
+  await h.key('c', 700)
+  const composerAfter = composerOf(h.snapshot())
+  const textAfter = composerAfter === undefined ? undefined : String(composerAfter.text ?? '')
+  h.check('a REAL key inside the split pane changes the controlled editor text',
+    textBefore !== undefined && textAfter !== undefined && textAfter !== textBefore,
+    `before=${JSON.stringify(textBefore)} after=${JSON.stringify(textAfter)}`)
+  h.capture('pr4-gui-split-pane', 'the amendment split-pane gate: bounded chips, editor in-pane and typable')
 }
