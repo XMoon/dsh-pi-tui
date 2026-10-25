@@ -804,10 +804,18 @@ export class MentionProvider implements AutocompleteProvider {
     // can never fake an attachment read).
     if (this.requestSnapshot?.strict === true && this.requestSnapshot.attachments.includes(item)
       && isInlineAttachmentPath(item)) {
+      // The SAME shell fact the suggestion request used (a shell MODE, or a
+      // prompt-mode buffer holding the literal `!`/`!!` wire form): applying
+      // must re-derive the seat exactly like suggesting did.
+      const applyBefore = currentLine.slice(0, cursorCol)
       const seat = classifyFileCompletionContext(
-        currentLine.slice(0, cursorCol),
+        applyBefore,
         this.pathArgumentCommands,
-        { line: cursorLine, shell: this.virtualShellSemanticContext(currentLine, cursorCol) !== null },
+        {
+          line: cursorLine,
+          shell: this.virtualShellSemanticContext(currentLine, cursorCol) !== null
+            || applyBefore.trimStart().startsWith('!'),
+        },
       )
       if (seat.kind === 'path-argument' && !seat.leading && seat.command === item.command) {
         const applied = applyInlineAttachmentPath(currentLine, seat, cursorCol, cursorLine, item.value)
