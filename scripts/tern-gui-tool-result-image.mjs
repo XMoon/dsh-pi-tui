@@ -117,7 +117,7 @@ export default async function (h) {
   // from `snap`, so its chains must come from `snap` too: the oracle indexes by
   // node identity, and chains from another snapshot do not contain this node.
   const hovered = await h.hover(snap.chains, image)
-  h.measure('the pointer over the image', JSON.stringify(hovered))
+  h.measure('the pointer over the image', JSON.stringify(hovered ?? null))
   const clicked = await h.click(snap.chains, image)
   h.check('a REAL pointer click on the image is delivered', clicked === true, JSON.stringify({ clicked }))
   const viewer = viewerOf(h.ctl('a11y'))

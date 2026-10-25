@@ -26,8 +26,8 @@
  * Tern CLI, so the test is deterministic and needs no display.
  */
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -58,6 +58,8 @@ if (args[0] === '--version') { process.stdout.write('tern 0.0.0-fake\\n'); proce
 if (args[0] === 'daemon') {
   const at = args.indexOf('--socket')
   if (at >= 0) appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'daemon-sockets.log'), args[at + 1] + '\\n')
+  // Record this process so a test can prove teardown reached it.
+  appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'pids.log'), 'daemon ' + process.pid + '\\n')
   setInterval(() => {}, 1 << 30)
   process.exit(0)
 }
@@ -68,6 +70,7 @@ if (args[0] === 'daemon') {
 // would keep passing after the driver stopped passing --out at all.
 if (args[0] === '--control') {
   const socket = args[args.indexOf('--control') + 1]
+  appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'pids.log'), 'window ' + process.pid + '\\n')
   const outFlag = args.indexOf('--out')
   if (outFlag >= 0) writeFileSync(${JSON.stringify(join(log, '..'))} + '/window-out.txt', args[outFlag + 1])
   writeFileSync(socket, '')
@@ -92,7 +95,18 @@ if (command === 'resize') {
   viewport = [Math.max(numeric[0] ?? 1280, 720), Math.max(numeric[1] ?? 800, 400), 1]
   reply({ ok: true })
 }
-if (command === 'stats') reply({ ok: true, viewport, pointer: [0, 0], frames: 1, nodes: 1 })
+// The pointer follows the last move, the way the client's own stats does, so a
+// hover can be checked against where it was actually sent.
+if (command === 'move') {
+  const ptr = rest.slice(2).map(Number).filter((n) => Number.isFinite(n))
+  writeFileSync(join(${JSON.stringify(join(log, '..'))}, 'pointer.txt'), JSON.stringify(ptr))
+  reply({ ok: true })
+}
+if (command === 'stats') {
+  let pointer = [0, 0]
+  try { pointer = JSON.parse(readFileSync(join(${JSON.stringify(join(log, '..'))}, 'pointer.txt'), 'utf8')) } catch { /* no move yet */ }
+  reply({ ok: true, viewport, pointer, frames: 1, nodes: 1 })
+}
 // state reports the focused pane and the pane list. FAKE_FOCUS_MOVES=1 makes
 // the split move the focus to the new pane, which is the state the driver must
 // refuse rather than repair.
@@ -106,12 +120,17 @@ if (command === 'shot') {
   // Where the WINDOW was really told to write. If the driver stops passing
   // --out, this file is absent and the shot falls back to cwd — which makes the
   // per-run assertion below FAIL instead of passing vacuously.
+  // FAKE_NO_PNG=1 makes the client acknowledge the shot but write no file: the
+  // driver must FAIL rather than return an id for evidence that does not exist.
+  if (process.env.FAKE_NO_PNG === '1') reply({ ok: true, elements: 1, png: join(process.cwd(), id + '.png') })
   let dir = process.env.FAKE_SHOT_DIR ?? process.cwd()
   try {
     dir = readFileSync(join(${JSON.stringify(join(log, '..'))}, 'window-out.txt'), 'utf8').trim()
   } catch { /* the window was never given --out: keep the fallback */ }
-  mkdirSync(dir, { recursive: true })
-  const png = join(dir, id + '.png')
+  // MEASURED: the real client nests its shots under <out>/live/.
+  const live = join(dir, 'live')
+  mkdirSync(live, { recursive: true })
+  const png = join(live, id + '.png')
   writeFileSync(png, 'PNG')
   reply({ ok: true, elements: 1, png })
 }
@@ -130,6 +149,41 @@ exec ${process.execPath} "$(dirname "$0")/fake-tern.mjs" "$@"
 `)
   chmodSync(file, 0o755)
   return file
+}
+
+/**
+ * Wait for the fake's PID log to record `count` helper processes.
+ *
+ * The FILE EVENT is the signal; `deadlineMs` only bounds a fake that never
+ * writes, so a broken helper fails with a real message instead of hanging.
+ */
+function waitForPids(pidsFile, count, deadlineMs) {
+  return new Promise((resolve, reject) => {
+    const read = () => existsSync(pidsFile)
+      ? readFileSync(pidsFile, 'utf8').trim().split('\n').filter(Boolean)
+      : []
+    const initial = read()
+    if (initial.length >= count) { resolve(initial); return }
+    // `watcher` is assigned below; the deadline callback must not touch it before
+    // the assignment completes, so it reads a mutable holder instead.
+    let watcher
+    const timer = setTimeout(() => {
+      watcher?.close()
+      reject(new Error(`the fake wrote ${read().length} pid line(s) within ${deadlineMs}ms`))
+    }, deadlineMs)
+    // reason: a bounded deadline around an fs event, not a settle window.
+    // The file appears when the fake starts, so watch the DIRECTORY: watching a
+    // path that does not exist yet throws ENOENT.
+    watcher = watch(dirname(pidsFile), { persistent: false }, (_event, name) => {
+      if (name !== undefined && String(name) !== pidsFile.split('/').pop()) return
+      const lines = read()
+      if (lines.length >= count) {
+        clearTimeout(timer)
+        watcher?.close()
+        resolve(lines)
+      }
+    })
+  })
 }
 
 /** Run the driver against the fake CLI with a flow that does nothing. */
@@ -289,9 +343,11 @@ test('the GUI driver reads shots from THIS run\'s own client directory', (t) => 
 
   // The run keeps its OWN client-shot directory, and the copied PNG is the one
   // the client wrote THERE — not a stale file from another run's directory.
+  // The client nests its own writes under <out>/live/, and the run must accept a
+  // file anywhere UNDER ITS OWN client-shot directory while copying it flat.
   const clientShots = joinPath(out, 'client-shots')
   assert.ok(existsSync(clientShots), 'the run has its own client-shot directory')
-  assert.equal(readFileSync(joinPath(clientShots, '01-one-shot.png'), 'utf8'), 'PNG')
+  assert.equal(readFileSync(joinPath(clientShots, 'live', '01-one-shot.png'), 'utf8'), 'PNG')
   assert.equal(readFileSync(joinPath(out, 'shots', '01-one-shot.png'), 'utf8'), 'PNG')
 })
 
@@ -356,4 +412,121 @@ test('splitPane refuses to continue when the split moved the focus', (t) => {
   assert.match(log, /the split moved the focus from pane \d+ to \d+/)
   // And it never typed a "restore the focus" command into a pane.
   assert.equal(log.split('\n').filter((line) => line.includes('focus-pane.sh')).length, 0)
+})
+
+test('a capture whose PNG the client never wrote FAILS instead of passing silently', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-nopng-')
+  const fake = writeFakeTern(dir)
+  const flow = joinPath(dir, 'flow.mjs')
+  writeFileSync(flow, `export default async function (h) {
+  h.capture('ghost-shot', 'the client acknowledges but writes nothing')
+}
+`)
+  const out = joinPath(dir, 'out')
+  const result = spawnSync(process.execPath, [driver, flow, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', FAKE_NO_PNG: '1' },
+  })
+  // No picture, no evidence, no green run.
+  assert.notEqual(result.status, 0, result.stdout + result.stderr)
+  const log = readFileSync(joinPath(out, 'run.log'), 'utf8')
+  assert.match(log, /SHOT-FAIL/)
+  assert.match(log, /wrote no PNG into/)
+  assert.equal(existsSync(joinPath(out, 'shots', '01-ghost-shot.png')), false)
+})
+
+test('a SIGTERM to the driver still tears down its daemon, window and socket directory', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-sigterm-')
+  const fake = writeFakeTern(dir)
+  const flow = joinPath(dir, 'flow.mjs')
+  // The flow parks so the driver stays alive long enough to be signalled. This
+  // is a NEGATIVE observation with no authoritative signal to wait for: the test
+  // must interrupt a LIVE driver, so it parks on its own promise and the driver
+  // is killed by the test, not by the flow finishing.
+  // reason: the window this test needs is the driver's own lifetime, bounded by
+  // the deadline below.
+  writeFileSync(flow, `export default async function (h) {
+  await new Promise(() => {})
+}
+`)
+  const out = joinPath(dir, 'out')
+  const child = spawn(process.execPath, [driver, flow, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0' },
+    stdio: 'ignore',
+  })
+  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+
+  // The authoritative signal: the fake writes its PID line as it starts, so the
+  // test can wait for that FILE EVENT instead of polling a clock. A deadline
+  // still bounds the wait, because a missing file is a real failure to report.
+  const pidsFile = joinPath(dir, 'pids.log')
+  // deadline reason: the helpers write synchronously on spawn; this only bounds
+  // a broken fake, it is not a settle window.
+  const spawned = await waitForPids(pidsFile, 2, 30_000)
+  assert.equal(spawned.length >= 2, true, `the driver started its helpers: ${JSON.stringify(spawned)}`)
+  const sockets = existsSync(joinPath(dir, 'daemon-sockets.log'))
+    ? readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim().split('\n').filter(Boolean)
+    : []
+  assert.equal(sockets.length, 1, 'the driver started one private daemon')
+
+  // The real interruption: no `exit` hook runs for a default SIGTERM.
+  const exited = new Promise((resolve) => child.on('exit', resolve))
+  child.kill('SIGTERM')
+  // The signal's own exit event is the authoritative signal: no clock involved.
+  await exited
+
+  // Neither helper may outlive the driver.
+  const alive = (pid) => {
+    try { process.kill(pid, 0); return true } catch { return false }
+  }
+  const survivors = spawned
+    .map((line) => ({ kind: line.split(' ')[0], pid: Number(line.split(' ')[1]) }))
+    .filter((entry) => Number.isFinite(entry.pid) && alive(entry.pid))
+  assert.deepEqual(survivors, [], `every helper was torn down: ${JSON.stringify(survivors)}`)
+  // And the socket directory is gone with it.
+  assert.equal(existsSync(dirname(sockets[0])), false,
+    `the daemon's socket directory was removed: ${sockets[0]}`)
+})
+
+test('the GUI driver hovers the VISIBLE fragment, and refuses a fully clipped node', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-hover-')
+  const fake = writeFakeTern(dir)
+  // Two nodes: `partial` survives y 100..110 of its own 100..140 box; `hidden`
+  // is entirely outside its sized ancestor.
+  const tree = [{
+    tag: 'div', class: 'clipper', rect: [0, 100, 200, 10],
+    children: [
+      { tag: 'div', class: 'partial', rect: [0, 100, 200, 40] },
+      { tag: 'div', class: 'hidden', rect: [0, 200, 200, 40] },
+    ],
+  }]
+  const flow = joinPath(dir, 'flow.mjs')
+  writeFileSync(flow, `export default async function (h) {
+  const snap = h.snapshot()
+  const partial = snap.nodes.find((n) => (n.class ?? '').includes('partial'))
+  const hidden = snap.nodes.find((n) => (n.class ?? '').includes('hidden'))
+  const overPartial = await h.hover(snap.chains, partial)
+  h.measure('hover over the partially clipped node', JSON.stringify(overPartial ?? null))
+  h.check('the hover lands inside the surviving fragment', overPartial?.moved === true)
+  const overHidden = await h.hover(snap.chains, hidden)
+  h.check('a fully clipped node is NOT hovered at all', overHidden === undefined,
+    JSON.stringify(overHidden ?? null))
+}
+`)
+  const out = joinPath(dir, 'out')
+  const result = spawnSync(process.execPath, [driver, flow, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', FAKE_TREE: JSON.stringify(tree) },
+  })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+
+  const log = readFileSync(joinPath(out, 'run.log'), 'utf8')
+  const moves = log.split('\n').filter((line) => line.startsWith('SEND ok ["move"'))
+  assert.equal(moves.length, 1, `only the visible node was moved to: ${JSON.stringify(moves)}`)
+  const [, y] = JSON.parse(moves[0].slice('SEND ok '.length).split(' :: ')[0]).slice(1)
+  assert.ok(y >= 100 && y <= 110, `the pointer landed inside the visible fragment, got y=${y}`)
 })
