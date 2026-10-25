@@ -1333,11 +1333,6 @@ async function bootCommandHarness(
   mounted: { dispose: () => Promise<void>; app: TuiApp; configRefs: Record<string, unknown> }
   /** The harness's Cordis context (durable session-event emission). */
   context: Context
-  /** Commit one settings mutation through this harness's REAL settings service
-   *  (the same `mutate` path a settings write uses), which — like the Loader —
-   *  also commits into the LIVE volatile reference the running application
-   *  reads. */
-  mutateSettings(ops: readonly { op: string; path: readonly string[]; value?: unknown }[]): Promise<void>
   /** Invoke one registered TUI command by name (the real `/settings` entry). */
   invoke(name: string): Promise<unknown>
   /** The virtual terminal, when `virtualTerminal: true` asked for one. */
@@ -1570,8 +1565,6 @@ async function bootCommandHarness(
      *  service (the same `mutate` path a settings write uses), which — like the
      *  Loader — also commits into the LIVE volatile reference the running
      *  application reads. */
-    mutateSettings: (ops: readonly { op: string; path: readonly string[]; value?: unknown }[]): Promise<void> =>
-      settingsService.mutate('tui-app', ops),
     registerContribution,
     imageSaves,
     fileSaves,
@@ -2094,6 +2087,40 @@ test('a Submit while busy settings write reaches the REAL main-session submit ro
   assert.equal(harness.host.steered.length, 1,
     'the workspace Confirm reaches the REAL main-session submit route')
   assert.equal(harness.host.followedUp.length, 1, 'no second queue delivery was produced')
+
+  // ── The RETURN TRIP the frozen matrix spells out (queue -> steer -> queue):
+  // the same workspace writes `queue` back, and the next busy Enter queues
+  // again. Same runner, same real `/settings` path, no test-side document edit.
+  await invoke('settings')
+  await settleWorkspaceFrame()
+  for (let step = 0; step < 9; step += 1) {
+    if (rows().some(line => line.startsWith('> Conversation'))) break
+    await key('\x1b[B')
+  }
+  await key('\r') // L0 -> L1
+  for (let step = 0; step < 5; step += 1) await key('\x1b[B') // -> Submit while busy
+  assert.ok(rows().some(line => line.includes('> Submit while busy')),
+    `the row owns the selection again:\n${rows().join('\n')}`)
+  await key('\r') // L1 -> the inline choice (the live `steer` owns [current])
+  for (let step = 0; step < 3; step += 1) {
+    if (rows().some(line => /^.*> queue\b/u.test(line))) break
+    await key('\x1b[A')
+  }
+  await key('\r') // explicit Confirm
+  await settleWorkspaceFrame()
+  assert.ok(rows().some(line => /Status\s+Verified/u.test(line)),
+    `the return-trip confirm was Verified:\n${rows().join('\n')}`)
+  for (let step = 0; step < 4; step += 1) await key('\x1b')
+  await settleWorkspaceFrame()
+
+  harness.host.status = 'running'
+  mounted.app.setDraft('reverted policy line')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  const requeued = await drainUntil(() => harness.host.followedUp.length > 1, 15_000)
+  assert.ok(requeued, 'the third submission must reach the agent inbox')
+  assert.equal(harness.host.followedUp.length, 2,
+    'the returned queue policy queues again through the REAL submit route')
+  assert.equal(harness.host.steered.length, 1, 'and produces no further steer delivery')
 })
 
 
