@@ -966,3 +966,43 @@ test('a quoted CJK filename with an EMPTY tail (cursor at the end) also complete
   assert.equal(h.submissions(), 0, 'never submits')
 })
 
+
+test('an UNQUOTED filename completed from its MIDDLE is replaced whole (production path)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life, { files: ['文件.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  // Reachable exactly as the inline grammar allows: type the full argument,
+  // then move the caret back INTO the basename (`文|件.png`).
+  type(vt, '请看 /image 文件.png')
+  await waitForDraft(app, draft => draft === '请看 /image 文件.png', 'the full argument is typed')
+  for (let index = 0; index < '件.png'.length; index += 1) vt.sendInput('\x1b[D')
+  await waitForDraft(app, draft => draft === '请看 /image 文件.png', 'the caret moved inside the token')
+  // An explicit Tab on a mid-token path seat is a production-reachable request
+  // (the vendored editor routes a forced file autocomplete for `/image <arg>`).
+  vt.sendInput('\t')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the candidate was accepted')
+  // The whole CJK token is replaced exactly once: no duplicated remainder.
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+    'the unquoted CJK token is replaced whole from a MID-TOKEN caret')
+  assert.equal(h.imageStore.size(), 1, 'the real CJK file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('a QUOTED spaced filename completed from its MIDDLE is replaced whole', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life, { files: ['my file name.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, '请看 /image "my file name.png"')
+  await waitForDraft(app, draft => draft === '请看 /image "my file name.png"', 'the full quoted argument is typed')
+  // Move the caret into the basename, right after `my `.
+  for (let index = 0; index < 'file name.png"'.length; index += 1) vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the quoted candidate was accepted')
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+    'the whole quoted token (spaces included) is replaced exactly once')
+  assert.equal(h.imageStore.size(), 1, 'the real spaced file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
