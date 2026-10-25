@@ -2044,11 +2044,11 @@ test('a Submit while busy settings write reaches the REAL main-session submit ro
   })
   assert.ok(vt !== undefined, 'the case drives a real virtual terminal')
   const rows = (): string[] => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
-  const settle = async (): Promise<void> => {
+  const settleWorkspaceFrame = async (): Promise<void> => {
     for (let round = 0; round < 8; round += 1) await Promise.resolve()
     await vt.waitForRender()
   }
-  const key = async (data: string): Promise<void> => { vt.sendInput(data); await settle() }
+  const key = async (data: string): Promise<void> => { vt.sendInput(data); await settleWorkspaceFrame() }
 
   // Reverse control: the stored queue policy really queues a busy plain Enter.
   mounted.app.setDraft('boot policy line')
@@ -2059,7 +2059,7 @@ test('a Submit while busy settings write reaches the REAL main-session submit ro
 
   // ── THE REAL SETTINGS CONFIRM.
   await invoke('settings')
-  await settle()
+  await settleWorkspaceFrame()
   // The workspace opens on About: walk the rail to Conversation.
   for (let step = 0; step < 9; step += 1) {
     if (rows().some(line => line.startsWith('> Conversation'))) break
@@ -2077,12 +2077,12 @@ test('a Submit while busy settings write reaches the REAL main-session submit ro
     await key('\x1b[B')
   }
   await key('\r') // explicit Confirm
-  await settle()
+  await settleWorkspaceFrame()
   assert.ok(rows().some(line => /Status\s+Verified/u.test(line)),
     `the confirm was Verified:\n${rows().join('\n')}`)
   // Leave the workspace so the transcript surface owns the screen again.
   for (let step = 0; step < 4; step += 1) await key('\x1b')
-  await settle()
+  await settleWorkspaceFrame()
   assert.ok(!rows().some(line => line.includes('Settings · ')), 'the workspace released the screen')
 
   // ── The NEXT busy Enter must steer, through the REAL submit route.
