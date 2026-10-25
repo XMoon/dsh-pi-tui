@@ -250,9 +250,16 @@ export function applyInlineAttachmentPath(
   // argument means the tail is prose).
   const quoted = isOpenQuotedToken(seat.argument ?? '')
   const argumentBeforeCaret = (seat.argument ?? '').replace(/^[ \t]+/, '')
-  const { suffix } = splitTokenRemainder(line.slice(cursorCol), quoted, argumentBeforeCaret !== '')
-  // ONE separating space ends the accepted token, so the placeholder can never
-  // touch whatever follows it.
+  const tail = line.slice(cursorCol)
+  const remainder = splitTokenRemainder(tail, quoted, argumentBeforeCaret !== '')
+  // A DIRECTORY keeps the quote OPEN (the seat must stay continuable), so the
+  // user's own closing quote is NOT part of what this accept replaces: it is the
+  // right boundary that keeps the following prose out of the open token. Strip
+  // it from the consumed remainder and let it lead the preserved suffix.
+  const keepsClosingQuote = !terminal && quoted && remainder.consumed.endsWith('"')
+  const suffix = keepsClosingQuote ? remainder.consumed.slice(-1) + remainder.suffix : remainder.suffix
+  // ONE separating space ends a FILE token, so the placeholder can never touch
+  // whatever follows it. A directory continues the seat instead.
   const trailing = terminal && !/^[ \t]/.test(suffix) ? ' ' : ''
   const end = start + value.length
   return {
