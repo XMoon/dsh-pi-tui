@@ -787,6 +787,93 @@ test('a VALID fact line for the WRONG tool stays human text', () => {
   assert.equal(ownReceipt.text, 'Selected 1 visual for presentation.')
 })
 
+test('only the OFFICIAL tail COMPOSITION is stripped, never a merely machine-looking suffix', () => {
+  const chartFact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
+  const svgFact = svgContentBlocks(svgFactFromArgs(SVG_ARGS))[1] as Extract<ContentBlock, { type: 'text' }>
+  const ref = visualReferenceLine('sv1_0123456789abcdef0123')
+  const ref2 = visualReferenceLine('sv1_0123456789abcdef0124')
+  const receipt = 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"}]}'
+
+  const human = (text: string): ContentBlock[] => [{ type: 'text', text }]
+
+  // 1. WRONG ORDER: ref AFTER the fact is not the projected composition.
+  const refAfterFact = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [...human('body'), chartFact, { type: 'text', text: ref }],
+    text: '',
+  })
+  assert.equal(refAfterFact.blocks.length, 3, 'a reference after the fact is NOT the official tail')
+  assert.match(refAfterFact.text, /body/u)
+
+  // 2. TWO valid refs before the fact: the official generator emits at most one.
+  const twoRefs = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [...human('body'), { type: 'text', text: ref }, { type: 'text', text: ref2 }, chartFact],
+    text: '',
+  })
+  assert.equal(twoRefs.blocks.length, 4, 'a second reference breaks the official tail')
+  assert.match(twoRefs.text, /body/u)
+
+  // 3. TWO valid facts: only the last one may be the single official fact, and
+  //    then the block before it is a FACT, not a reference, so nothing strips.
+  const twoFacts = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [...human('body'), chartFact, chartFact],
+    text: '',
+  })
+  assert.equal(twoFacts.blocks.length, 3, 'a duplicated fact is not the official tail')
+
+  // 4. Reference WITHOUT a fact after it: no official composition.
+  const refOnly = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [...human('body'), { type: 'text', text: ref }],
+    text: '',
+  })
+  assert.equal(refOnly.blocks.length, 2, 'a lone reference is not an official tail')
+
+  // 5. TWO receipts on the publication tool: at most one is official.
+  const twoReceipts = humanFacingVisualResult({
+    toolName: PRESENT_VISUAL_TOOL_NAME,
+    blocks: [...human('Selected 1 visual for presentation.'), { type: 'text', text: receipt }, { type: 'text', text: receipt }],
+    text: '',
+  })
+  assert.equal(twoReceipts.blocks.length, 3, 'a duplicated receipt is not the official tail')
+
+  // 6. A machine-looking TEXT block followed by an IMAGE block: the official
+  //    tail is the END of the result, so a trailing non-text block protects the
+  //    text before it.
+  const trailingImage = humanFacingVisualResult({
+    toolName: SVG_TOOL_NAME,
+    blocks: [
+      ...human('body'),
+      svgFact,
+      { type: 'image', attachment: { attachmentId: 'a'.repeat(64), name: 'x.png', width: 1, height: 1, mimeType: 'image/png' } } as never,
+    ],
+    text: '',
+  })
+  assert.equal(trailingImage.blocks.length, 3, 'a trailing non-text block is never stripped')
+
+  // Controls: every OFFICIAL composition IS stripped.
+  const factOnly = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [...human('body'), chartFact],
+    text: '',
+  })
+  assert.equal(factOnly.text, 'body', 'the fact alone is the legal no-reference composition')
+  const refThenFact = humanFacingVisualResult({
+    toolName: CHART_TOOL_NAME,
+    blocks: [...human('body'), { type: 'text', text: ref }, chartFact],
+    text: '',
+  })
+  assert.equal(refThenFact.text, 'body', 'ref immediately before the fact is the legal composition')
+  const singleReceipt = humanFacingVisualResult({
+    toolName: PRESENT_VISUAL_TOOL_NAME,
+    blocks: [...human('Selected'), { type: 'text', text: receipt }],
+    text: '',
+  })
+  assert.equal(singleReceipt.text, 'Selected')
+})
+
 test('the human projection never touches another tool’s similar text', () => {
   const blocks: ContentBlock[] = [
     { type: 'text', text: 'output' },
