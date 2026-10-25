@@ -17,9 +17,11 @@
  * DisplayState / presentation-preference readers. Theme, Display and the
  * profile-wide Visual tools switch are requests through the existing
  * `onCommit` intent; every other setting keeps its existing read and
- * legacy-editor handoff behavior. Configuration rows expose no copy verb — the
- * clipboard belongs to the About page (`c` for the selected visible fact, `C`
- * and the ONE body `Copy All [C]` for the whole painted report).
+ * legacy-editor handoff behavior. Configuration rows expose no copy verb: for a
+ * value from a configuration row, use About's copy actions (`c` for the selected
+ * visible fact, `C` and the ONE body `Copy All [C]` for the whole painted
+ * report). Plugin Manager Diagnostics and the Models/Account pages keep their
+ * own business copy.
  * @module @xmoon76/dsh-pi-tui/tui/panels/settings-workspace-panel
  */
 
