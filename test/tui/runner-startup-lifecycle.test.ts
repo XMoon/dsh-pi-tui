@@ -26,6 +26,24 @@ process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
 
+/**
+ * Wait for a startup-owner completion fact.
+ *
+ * The runner's startup root is a fire-and-forget IIFE, so neither the fiber load
+ * nor a status write marks its end. The production facts this file can observe —
+ * the mounted `TuiApp`, the real resume, the fatal exit — are the settlement
+ * points; a fixed sleep only guesses that the background work happened to
+ * finish.
+ */
+async function waitForStartup(label: string, settled: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (settled()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
 test('the Loader barrier shows Starting DSH… then clears; explicit cold resume continues with the resume status', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-startup-status-')
@@ -293,12 +311,16 @@ test('the Preparing status stays on screen through the catalog ready barrier', a
   })
   const harness = makeHarness(home, resumed)
   context = new Context()
-  // A SLOW skills service: the catalog ready barrier (resolveInitialCatalog
-  // → readSurfaceCatalog → readHumanSkillCatalog) takes ~300ms, so the
-  // test can observe the status while the barrier is still pending.
+  // A HELD skills snapshot: the catalog ready barrier (resolveInitialCatalog
+  // → readSurfaceCatalog → readHumanSkillCatalog) stays pending until the
+  // test releases it, so "the barrier is still running" is owned by the test
+  // rather than by a 300ms race against the machine.
+  let releaseSkills!: () => void
+  const skillsGate = new Promise<void>(resolve => { releaseSkills = resolve })
+  life.defer(releaseSkills)
   context.provide('skills', {
     snapshot: async () => {
-      await new Promise(resolve => setTimeout(resolve, 300))
+      await skillsGate
       return { skills: [], complete: true }
     },
   } as never)
@@ -324,6 +346,9 @@ test('the Preparing status stays on screen through the catalog ready barrier', a
     await new Promise(resolve => setTimeout(resolve, 20))
   }
   assert.ok(observed, 'the Preparing stage must appear while the barrier is pending')
+  // Observed: release the held catalog read. Everything below is then the REAL
+  // completion path (the barrier resolves, the status clears, the TUI mounts).
+  releaseSkills()
   fiber = await mountPromise
   // The fiber load settles when applyRunner returns (the startup IIFE
   // is fire-and-forget), so the mount promise resolves BEFORE the
@@ -340,9 +365,11 @@ test('the Preparing status stays on screen through the catalog ready barrier', a
   const last = writes[writes.length - 1]!
   assert.equal(last, '\r\x1b[2K',
     `the status must be cleared before mount: ${JSON.stringify(writes)}`)
-  // Let the post-mount wiring settle before the finally disposes the
-  // context (the runner's startup IIFE is fire-and-forget).
-  await new Promise(resolve => setTimeout(resolve, 200))
+  // The startup IIFE is fire-and-forget, so the status clear is not the end of
+  // the background work: the TUI's own mount is. Waiting for it is the startup
+  // owner's completion fact — a 200ms guess could dispose the context while the
+  // post-mount wiring was still running.
+  await waitForStartup('the mounted TUI', () => probe.apps.length === 1)
 })
 
 test('a fresh start with a FAILING preset resolution shows only the Loader barrier status', async (t) => {

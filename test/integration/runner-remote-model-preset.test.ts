@@ -38,7 +38,7 @@ interface HostFixture {
 interface RunnerFixture {
   readonly host: HostFixture
   readonly aggregate: { wire: { client: unknown } }
-  readonly vt: { getViewport(): string[]; sendInput(data: string): void }
+  readonly vt: { getViewport(): string[]; sendInput(data: string): void; waitForRender(): Promise<void> }
   runnerApp(): unknown
   readonly override: {
     readonly presentation: {
@@ -238,6 +238,29 @@ test('a STARTED resumed session keeps its recorded preset (no mutation, warning 
   append('agent-preset/selected', { agentPreset: hostPreset })
   seedCompletedTurn(append, 1, 'launch started probe', 'launch started answer')
   const before = sessionEvents(seedHost.ctx, mainId).map(event => event.type).join(',')
+  // THE PRODUCER WITNESS. The launch-preset apply is ONE
+  // `agentPresets.select(...)` call on the Host registry (the Remote
+  // `PresetCatalog.selectSessionPreset` maps onto it); a started Session is
+  // refused with `agent-preset/locked`. Recording that call's own settlement
+  // (resolved or rejected) is the fact that the launch write finished — the
+  // absence below is then asserted AFTER the producer, not after a duration.
+  // The seam is patched on the Host registry instance the Remote wire addresses,
+  // exactly like the `llm.listModels` park in the directory-fence case.
+  const registry = seedHost.ctx.get('agentPresets') as unknown as {
+    select(agent: unknown, preset: string): Promise<string>
+  }
+  const originalSelect = registry.select
+  const launchSelects: Array<{ readonly preset: string; readonly settled: 'committed' | 'rejected' }> = []
+  registry.select = function patchedSelect(this: unknown, agent: unknown, preset: string): Promise<string> {
+    return originalSelect.call(this, agent, preset).then(value => {
+      launchSelects.push({ preset, settled: 'committed' })
+      return value
+    }, error => {
+      launchSelects.push({ preset, settled: 'rejected' })
+      throw error
+    })
+  }
+  life.defer(() => { registry.select = originalSelect })
   const fixture = await mountRemoteRunner(life, {
     presetId: hostPreset,
     resumeSessionId: mainId,
@@ -247,8 +270,16 @@ test('a STARTED resumed session keeps its recorded preset (no mutation, warning 
   }) as unknown as RunnerFixture
   await waitFor('session facts retained', () =>
     fixture.override.presentation.sessionFacts.sessionStatus(mainId) !== undefined, 15_000)
-  // Give the (refused) launch write time to settle before asserting absence.
-  await new Promise(resolve => setTimeout(resolve, 500))
+  // The refusal is a NEGATIVE contract: a started Session must never receive an
+  // `agent-preset/selected` row. Wait for the launch write's OWN settlement on
+  // the Host registry — only then can "no durable row" be a fact about a
+  // finished attempt instead of a race with an unfinished one.
+  await waitFor('the launch preset write to settle on the Host registry',
+    () => launchSelects.length > 0, 20_000)
+  assert.equal(launchSelects[0]!.preset, 'm3-4-pr5-launch-target',
+    'the launch attempt really addressed the requested preset')
+  assert.equal(launchSelects[0]!.settled, 'rejected',
+    'a started Session refuses the launch preset instead of committing it')
   // The recorded preset is unchanged and NO selection row exists.
   assert.equal(fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.preset, hostPreset,
     'a started session keeps its recorded preset')
@@ -286,6 +317,8 @@ test('an official selectModel write owns the REOPENED picker current', async (t)
     submit(fixture.runnerApp(), '/model')
     await waitFor('picker rows rendered', () => rows().alt !== undefined && rows().smoke !== undefined, 15_000)
   }
+  /** Whether the /model picker panel is painted at all. */
+  const pickerOpen = (): boolean => rows().alt !== undefined || rows().smoke !== undefined
   await openPicker()
   assert.ok(rows().smoke !== undefined && /current/.test(rows().smoke!),
     'the first open marks the effective value (the smoke default — no session selection yet) current')
@@ -303,14 +336,18 @@ test('an official selectModel write owns the REOPENED picker current', async (t)
   const selectionEvents = sessionEvents(seedHost.ctx, mainId).filter(event => event.type === 'model/selection')
   assert.equal(selectionEvents.length, 1,
     'exactly one durable model/selection row (the official write, never a test append)')
-  // REOPEN: the committed projection owns the current marker. Close the
-  // first panel first (the closer the command layer holds) so the reopen
-  // mounts a FRESH picker rather than re-reading the still-open panel.
-  const closer = fixture.runnerApp() as unknown as { closeModelPicker?: () => void }
-  closer.closeModelPicker?.()
-  await new Promise(resolve => setTimeout(resolve, 250))
+  // REOPEN: the committed projection owns the current marker. The first panel
+  // is closed through the REAL user path (Esc) — the test cannot reach the
+  // private `closeModelPicker`, and a closer call that silently did nothing
+  // would leave the reopen reading the still-open (stale) picker.
+  fixture.vt.sendInput('\x1b')
+  await waitFor('the first picker panel to close', () => !pickerOpen(), 15_000)
   await openPicker()
-  await new Promise(resolve => setTimeout(resolve, 300))
+  // The reopened panel must paint the committed projection as `current`. The row
+  // set itself is the settle witness `openPicker` already waited for; the badge
+  // follows the same frame set.
+  await waitFor('the reopened picker to mark the committed value current',
+    () => rows().alt !== undefined && /current/.test(rows().alt!), 15_000)
   assert.ok(rows().alt !== undefined && /current/.test(rows().alt!),
     'the REOPENED picker marks the committed projection value (smoke-alt) current')
   assert.ok(rows().smoke !== undefined && !/current/.test(rows().smoke!),
@@ -340,10 +377,12 @@ test('a /preset SWITCH on a blank Remote session commits through the official wr
   // Select the target row: the picker is a settings panel — Enter activates
   // the row the cursor sits on. Drive the real key path: type a search that
   // isolates the target row, then Enter.
+  // Re-submitting the plain command runs the REAL command again (the roster is
+  // already showing). The case then drives `/preset <id>`, so no settle is owed
+  // here: the typed submit below is the thing under test.
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; pressEnter?: () => void; handleKey?: (key: string) => void }
   app.setDraft('/preset')
   app.submitDraft()
-  await new Promise(resolve => setTimeout(resolve, 150))
   // The official projection owns the outcome: the switch is driven by the
   // SAME official write the launch-preset test uses (the roster's Enter
   // path routes through applyPresetSelection → selectSessionPreset). Drive
@@ -385,6 +424,12 @@ test('a /model directory read pending across a session replacement never hydrate
   }
   const originalListModels = llmService.listModels.bind(llmService)
   let catalogParked = false
+  // The parked read's OWN settlement: the release only OPENS the gate, so the
+  // test needs a fact that proves the read really finished before it decides
+  // anything about the stale panel. `catalogSettled` is that witness — it is set
+  // by the parked promise's own resolve/reject, i.e. the exact boundary the
+  // release hands over to.
+  let catalogSettled = false
   let releaseCatalog: (() => void) | undefined
   let parkFailed = false
   llmService.listModels = (provider: string): Promise<unknown> => {
@@ -392,8 +437,12 @@ test('a /model directory read pending across a session replacement never hydrate
     catalogParked = true
     return new Promise((resolve, reject) => {
       releaseCatalog = () => {
-        originalListModels(provider).then(resolve, error => {
+        originalListModels(provider).then(value => {
+          catalogSettled = true
+          resolve(value)
+        }, error => {
           parkFailed = true
+          catalogSettled = true
           reject(error)
         })
       }
@@ -424,8 +473,13 @@ test('a /model directory read pending across a session replacement never hydrate
   const release = releaseCatalog
   releaseCatalog = undefined
   release?.()
-  await new Promise(resolve => setTimeout(resolve, 800))
+  // The parked read's OWN settlement is the authority (the old 800ms only
+  // guessed it): wait for it, then let the owned workflow's continuation land on
+  // a painted frame — `closeModelPicker` drops the overlay synchronously, so the
+  // frame that follows it is the observable end of the fence.
+  await waitFor('the parked directory read to settle', () => catalogSettled, 20_000)
   assert.equal(parkFailed, false, 'the parked official directory read settled successfully')
+  await fixture.vt.waitForRender()
   // The owner fence must have CLOSED A's stale loading panel: no picker
   // panel rows hydrate at all (the release arrived for a replaced subject —
   // neither A's current nor any directory hydration may paint).

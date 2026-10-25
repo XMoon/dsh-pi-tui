@@ -29,6 +29,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { waitUntil } from '../support/tsp-runner-harness.ts'
 
 interface Recorded {
   readonly editor: string[]
@@ -67,6 +68,9 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // The observable editor sink.
   let editorText = ''
   const recorded: { editor: string[]; notices: string[] } = { editor: [], notices: [] }
+  /** How many prompt writes the released submission committed (the OTHER
+   *  observable end of the same continuation). */
+  let committedWrites = 0
   const composer = {
     getDraft: () => editorText,
     setDraft: (text: string): void => { editorText = text; recorded.editor.push(`draft:${text}`) },
@@ -184,8 +188,7 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // The submission: the editor text is captured and cleared synchronously,
   // then the history persist parks.
   controller.submit('queued from A', 'enter')
-  await new Promise(resolve => setTimeout(resolve, 50))
-  assert.equal(editorText, '', 'fixture check: the submit cleared the editor before the parking window')
+  assert.equal(editorText, '', 'fixture check: the submit cleared the editor synchronously, before the parking window')
 
   // The owner change (or the lifetime end) lands INSIDE the awaited window.
   let lifetimeEditorMark = -1
@@ -204,7 +207,20 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   }
 
   releaseHistory()
-  await new Promise(resolve => setTimeout(resolve, 200))
+  // The ENDED-lifetime scenario is the ONE branch with NO positive sink: its
+  // whole contract is that the continuation writes and announces NOTHING.
+  //
+  // The continuation after `persistAfterSession` is a pure synchronous chain —
+  // `isCleanedUp()` / `captureMatches()` reads and the notice — with NO timer,
+  // retry or detached task (src/app/submission/controller.ts). Draining the
+  // microtask queue therefore reaches its end, and one macrotask turn proves no
+  // later turn was scheduled behind it. A live branch announces itself or
+  // commits a write, so it must be observable after the same drain.
+  await drainContinuation()
+  if (!options.endLifetime) {
+    assert.ok(recorded.notices.length > 0 || committedWrites > 0,
+      'a released LIVE submission must reach a notice or a committed write')
+  }
 
   return {
     editor: recorded.editor,
@@ -213,7 +229,20 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   }
 }
 
-test('round10 F1: a REPLACED owner on a switch-dropping renderer (TSP) never reseeds the new composer', async () => {
+/**
+ * Drain one released continuation to its end.
+ *
+ * The released path's steps are microtask continuations with no timer behind
+ * them (see the call site), so exhausting the microtask queue plus one
+ * macrotask turn reaches the last observable step — a duration would only guess
+ * how long the machine takes to run them.
+ */
+async function drainContinuation(): Promise<void> {
+  for (let index = 0; index < 50; index += 1) await Promise.resolve()
+  await new Promise<void>(resolve => setImmediate(resolve))
+}
+
+test('a REPLACED owner on a switch-dropping renderer (TSP) never reseeds the new composer', async () => {
   const recorded = await runQueuedSubmitAcrossOwnerChange({
     change: 'replaced-owner',
     retainsStaleDraftRestore: false,
@@ -226,7 +255,7 @@ test('round10 F1: a REPLACED owner on a switch-dropping renderer (TSP) never res
     `the OLD session's text was never written into the current composer: ${JSON.stringify(recorded.editor)}`)
 })
 
-test('round10 F1: the SAME-OWNER invalidation still restores (a failed switch kept the owner)', async () => {
+test('the SAME-OWNER invalidation still restores (a failed switch kept the owner)', async () => {
   const recorded = await runQueuedSubmitAcrossOwnerChange({
     change: 'same-owner-bump',
     retainsStaleDraftRestore: false,
@@ -239,7 +268,7 @@ test('round10 F1: the SAME-OWNER invalidation still restores (a failed switch ke
     `the same-owner stale restored the text: ${JSON.stringify(recorded.editor)}`)
 })
 
-test('round10 F1: a retaining renderer (PiTui) restores even on a genuinely replaced owner', async () => {
+test('a retaining renderer (PiTui) restores even on a genuinely replaced owner', async () => {
   const recorded = await runQueuedSubmitAcrossOwnerChange({
     change: 'replaced-owner',
     retainsStaleDraftRestore: true,
@@ -250,7 +279,7 @@ test('round10 F1: a retaining renderer (PiTui) restores even on a genuinely repl
     `the PiTui notice promises the restored retry: ${JSON.stringify(recorded.notices)}`)
 })
 
-test('round11 F1: the async failure restore with a LIVE lifetime stays the positive control', async () => {
+test('the async failure restore with a LIVE lifetime stays the positive control', async () => {
   const recorded = await runQueuedSubmitAcrossOwnerChange({
     retainsStaleDraftRestore: true,
     historyRejects: 'failure',
@@ -261,7 +290,7 @@ test('round11 F1: the async failure restore with a LIVE lifetime stays the posit
     `a live failure still reports itself: ${JSON.stringify(recorded.notices)}`)
 })
 
-test('round11 F1: an ENDED lifetime (abort + cleanup) writes and announces NOTHING', async () => {
+test('an ENDED lifetime (abort + cleanup) writes and announces NOTHING', async () => {
   for (const rejection of ['abort', 'failure'] as const) {
     const recorded = await runQueuedSubmitAcrossOwnerChange({
       // The retaining renderer is the worst case: the owner policy never
@@ -313,6 +342,10 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
   const executeGate = new Promise<void>(resolve => { releaseExecute = resolve })
   let enteredExecute!: () => void
   const entered = new Promise<void>(resolve => { enteredExecute = resolve })
+  /** The command-settlement lifecycle the controller drives on EVERY route:
+   *  the observable proof that the released execute's continuation ran (the
+   *  notice decision happens inside it). */
+  const settlementSinks: string[] = []
   const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
   const deepInert: unknown = new Proxy(function inert(): void {}, {
     get: (_target, key) => (key === 'then' ? undefined : deepInert),
@@ -337,9 +370,9 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
     },
     session: {
       ensureSession: async () => {},
-      beginCommandSettlement: () => {},
-      abortCommandSettlement: () => {},
-      settleCommandSettlement: () => {},
+      beginCommandSettlement: () => { settlementSinks.push('begin') },
+      abortCommandSettlement: () => { settlementSinks.push('abort') },
+      settleCommandSettlement: () => { settlementSinks.push('settle') },
       trackSettlementWork: () => {},
     },
     submissionRuntime: {
@@ -422,7 +455,12 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
     scopeCurrent = false
   }
   releaseExecute()
-  await new Promise(resolve => setTimeout(resolve, 120))
+  // Wait for the continuation's OWN settlement sink (not a 120ms window): a
+  // released execution always ends in exactly one abort/settle, and the notice
+  // decision runs inside that path — so an absence asserted afterwards is an
+  // absence after the code really reached it.
+  await waitUntil('the released Client command to settle',
+    () => settlementSinks.includes('abort') || settlementSinks.includes('settle'))
   return { notices }
 }
 

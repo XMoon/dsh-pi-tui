@@ -266,11 +266,19 @@ test('a lifecycle abort supersedes the refresh: no install, no failure report', 
   const outcome = await refresh
   assert.equal(outcome.kind, 'superseded')
   assert.deepEqual(installed, [])
-  // The late result stays dropped even after the gate resolves.
+  // The late result stays dropped even after the gate resolves. The released
+  // read's continuation is a pure microtask chain (both fences are checked
+  // before any await), so draining the queue is the complete settlement — no
+  // timer window can make it "more dropped".
   gate.resolve(snapshotA)
-  await new Promise(resolve => setTimeout(resolve, 5))
+  await drainMicrotasks()
   assert.deepEqual(installed, [])
 })
+
+/** Drain the microtask queue: the released read's continuation runs there. */
+async function drainMicrotasks(): Promise<void> {
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
+}
 
 test('dispose aborts the active refresh so no late install can land', async () => {
   const gate = deferred<SurfaceCatalogSnapshot>()
@@ -286,7 +294,7 @@ test('dispose aborts the active refresh so no late install can land', async () =
   const outcome = await refresh
   assert.equal(outcome.kind, 'superseded')
   gate.resolve(snapshotA)
-  await new Promise(resolve => setTimeout(resolve, 5))
+  await drainMicrotasks()
   assert.deepEqual(installed, [])
 })
 

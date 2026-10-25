@@ -191,9 +191,16 @@ function mountImages(app: TuiApp): void {
   app.setTranscript(folder.messages())
 }
 
+/** The viewport as one string, after the image loader's async settle.
+ *
+ * The loader resolves on the microtask/timer queue and only invalidates the
+ * thumbnail (no frame of its own), so the caller drives the repaint: one extra
+ * render turn plus a macrotask turn is that settlement shape, not a duration
+ * guess.
+ */
 async function viewport(vt: VirtualTerminal): Promise<string> {
   await vt.waitForRender()
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await new Promise<void>(resolve => setImmediate(resolve))
   await vt.waitForRender()
   return vt.getViewport().join('\n')
 }

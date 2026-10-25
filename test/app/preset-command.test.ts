@@ -2106,6 +2106,22 @@ test('a /preset picker whose Session identity drifts during the roster read neve
 // refused only by the official registry at execution time. These regressions
 // pin that the presentation no longer depends on a deployment policy flag.
 
+/**
+ * Wait for the command-completion projection to carry `name`.
+ *
+ * `installSnapshot` commits the catalog, but the COMPLETION projection onto the
+ * composer is a separate asynchronous install; waiting for the candidate itself
+ * is the fact every caller below asserts.
+ */
+async function waitForCompletion(app: { commandCompletionsForTest(): readonly { name: string }[] }, name: string): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    if (app.commandCompletionsForTest().some(command => command.name === name)) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error(`the completion projection never carried /${name}`)
+}
+
 const EMPTY_SURFACE_SNAPSHOT = Object.freeze({
   commands: Object.freeze([]),
   scopedCommands: Object.freeze([]),
@@ -2116,7 +2132,10 @@ const EMPTY_SURFACE_SNAPSHOT = Object.freeze({
 test('/preset stays advertised when the command catalog is healthy (no chooser policy)', async () => {
   const t = setup({ commandsListRegistered: true, height: 80 })
   t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // The completion projection is installed asynchronously after the snapshot
+  // commits: wait for the CANDIDATE itself (the fact the assertion is about),
+  // not for a 20ms window in which it may or may not have landed.
+  await waitForCompletion(t.app, 'preset')
   assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
     '/preset must be a normal candidate without any roster policy')
   await t.runCommand('help')
@@ -2131,7 +2150,7 @@ test('/preset stays advertised when the command catalog is healthy (no chooser p
 test('a rosterless deployment keeps /preset visible and refuses at execution', async () => {
   const t = setup({ commandsListRegistered: true, noPresets: true })
   t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await waitForCompletion(t.app, 'preset')
   assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
     'an unavailable roster must not hide the command')
   const result = await t.run('minimal') as { kind: string; text?: string }

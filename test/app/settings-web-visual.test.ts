@@ -37,6 +37,7 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import type { TuiSettingsDoc, WebProviderSettings } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
@@ -219,21 +220,37 @@ async function key(h: Harness, data: string): Promise<void> {
  *  launcher lives there; Visual tools is the first row). */
 async function openOtherRows(h: Harness): Promise<void> {
   h.invoke('settings')
-  for (let attempt = 0; attempt < 20 && !h.view().includes('Settings ·'); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
-  // The workspace opens on the About home: walk the rail to the Tools
-  // category, then enter its Rows level.
+  // The workspace opens on the About home: walk the rail to the Tools category
+  // (the Web launcher lives there), then enter its Rows level. The wait is on
+  // the PAINTED rail, never a 5ms polling window.
+  await waitForPainted(h, 'the Settings workspace to paint its rail', frame => frame.includes('Settings ·'))
   await selectSettingsCategory(h.vt, 'Tools')
   await key(h, ENTER)
 }
 
-/** Reach the legacy Web section through the real Workspace handoff. */
+/** Wait until the PAINTED frame satisfies `predicate` (a real rendered frame per
+ *  round via `test/support/frame-wait.ts` — never a timer guess about the Host
+ *  read). Returns the satisfied frame. */
+async function waitForPainted(h: Harness, label: string, predicate: (frame: string) => boolean): Promise<string> {
+  await waitForFrame(() => h.view(), predicate, () => h.vt.waitForRender(), label)
+  return h.view()
+}
+
+/** Reach the legacy Web section through the real Workspace handoff.
+ *
+ *  The section's facts start PENDING and settle with the authoritative Host read,
+ *  so the helper waits for the SETTLED section (the row's verified chip, or the
+ *  stated unavailable/loading-free state) before the caller presses keys: a key
+ *  the pending frame drops is lost for good, and a content assertion taken on
+ *  the pending frame would judge the transient. */
 async function openWebSection(h: Harness): Promise<void> {
   await openOtherRows(h)
   await key(h, DOWN)
   await key(h, ENTER)
+  await waitForPainted(h, 'the Web section to paint its settled facts', frame =>
+    frame.includes('Web Search Provider')
+    && !frame.includes('[Loading…]')
+    && !frame.includes('Current: Loading…'))
 }
 
 for (const [columns, rows] of SIZES) {
@@ -304,10 +321,6 @@ for (const [label, endpoint, wideNeedle] of [
       const h = setup({ columns, rows, endpoint })
       t.after(h.dispose)
       await openWebSection(h)
-      for (let attempt = 0; attempt < 40 && !h.view().includes('Web Search Provider'); attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, 5))
-        await h.vt.waitForRender()
-      }
       // The endpoint row is the fifth Web setting: select it so its Detail is
       // the parsed one, then read the ROW's own value slot. Only the LABEL
       // truncates with `…` at the 44-column floor, so the needle is its stem.
@@ -363,10 +376,6 @@ for (const [columns, rows] of SIZES) test(`a refused endpoint write reports the 
   const h = setup({ columns, rows })
   t.after(h.dispose)
   await openWebSection(h)
-  for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
   // The Host KEEPS another value than the submitted endpoint (a canonical form
   // or a winning project layer). The panel states the verdict and the value;
   // once the panel is gone (the section reopened from the Workspace) the ROW's
@@ -375,9 +384,10 @@ for (const [columns, rows] of SIZES) test(`a refused endpoint write reports the 
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
   await key(h, ENTER)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
-  const panel = h.view()
+  // The verdict is a PAINTED fact of the panel (the write and its read-back
+  // settled), so wait for it instead of guessing the async round trip in 20ms.
+  const panel = await waitForPainted(h, `the refused endpoint verdict at ${columns} columns`, frame =>
+    frame.includes('Not saved'))
   assert.match(panel, /Not saved/u, `the panel states Not saved at ${columns} columns:\n${panel}`)
   if (columns >= 72) {
     assert.ok(panel.includes('the Host keeps "https://other.example/v1"'),
@@ -386,12 +396,9 @@ for (const [columns, rows] of SIZES) test(`a refused endpoint write reports the 
   await key(h, ESC)
   await key(h, ESC)
   await key(h, ENTER)
-  for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  const reopened = h.view()
+  const reopened = await waitForPainted(h, `the reopened row fact at ${columns} columns`, frame =>
+    frame.includes('Current: https://other.example/v1'))
   assert.ok(reopened.includes('Current: https://other.example/v1'),
     `the reopened row reports the value the Host keeps at ${columns} columns:\n${reopened}`)
   for (const line of h.plain()) {
@@ -414,27 +421,21 @@ test('the refused-endpoint fact survives the light, custom and minimal-icon skin
       const h = setup({ columns: 120, rows: 40, iconStyle: skin.iconStyle })
       try {
         await openWebSection(h)
-        for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
-          await new Promise(resolve => setTimeout(resolve, 5))
-          await h.vt.waitForRender()
-        }
         h.store.endpointStoredValue = 'https://other.example/v1'
         for (let index = 0; index < 4; index += 1) await key(h, DOWN)
         await key(h, ENTER)
         await key(h, ENTER)
-        await new Promise(resolve => setTimeout(resolve, 20))
-        await h.vt.waitForRender()
+        await waitForPainted(h, `the ${skin.label} skin's refused verdict`, frame =>
+          frame.includes('Not saved'))
         assert.match(h.view(), /Not saved/u, `the ${skin.label} skin states the verdict:\n${h.view()}`)
         assert.ok(h.view().includes('the Host keeps "https://other.example/v1"'),
           `the ${skin.label} skin names the kept value:\n${h.view()}`)
         await key(h, ESC)
         await key(h, ESC)
         await key(h, ENTER)
-        for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
-          await new Promise(resolve => setTimeout(resolve, 5))
-          await h.vt.waitForRender()
-        }
         for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+        await waitForPainted(h, `the ${skin.label} skin's row fact`, frame =>
+          frame.includes('Current: https://other.example/v1'))
         assert.ok(h.view().includes('Current: https://other.example/v1'),
           `the ${skin.label} skin keeps the row fact:\n${h.view()}`)
         for (const line of h.plain()) {
@@ -470,8 +471,8 @@ test('the state chips use their frozen ink roles in dark and light', async t => 
     // the chip: never a colour-only signal).
     dark.store.failNext = 'mutate rejected'
     await key(dark, ENTER)
-    await new Promise(resolve => setTimeout(resolve, 10))
-    await dark.vt.waitForRender()
+    await waitForPainted(dark, 'the failed write to paint its Not saved chip', frame =>
+      frame.includes('[Not saved]'))
     assert.ok(dark.view().includes('[Not saved]'), `the failed write states Not saved:\n${dark.view()}`)
     assert.equal(chipCell(dark, 'Web Search Provider', '[Not saved]'), hexToRgb(currentPalette.error), 'Not saved wears the error token')
     dark.dispose()
