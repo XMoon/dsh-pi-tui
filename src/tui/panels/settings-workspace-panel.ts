@@ -17,11 +17,12 @@
  * DisplayState / presentation-preference readers. Theme, Display and the
  * profile-wide Visual tools switch are requests through the existing
  * `onCommit` intent; every other setting keeps its existing read and
- * legacy-editor handoff behavior. Configuration rows expose no copy verb: for a
- * value from a configuration row, use About's copy actions (`c` for the selected
- * visible fact, `C` and the ONE body `Copy All [C]` for the whole painted
- * report). Plugin Manager Diagnostics and the Models/Account pages keep their
- * own business copy.
+ * legacy-editor handoff behavior. Configuration rows expose no copy verb at all:
+ * their `value` is read-only presentation, and there is no replacement copy
+ * entry for a configuration field. About's `c`/`C` copy About's OWN facts
+ * (runtime, Session identity, statistics, performance, Context) — never a
+ * configuration row's value. Plugin Manager Diagnostics and the Models/Account
+ * pages keep their own business copy.
  * @module @xmoon76/dsh-pi-tui/tui/panels/settings-workspace-panel
  */
 

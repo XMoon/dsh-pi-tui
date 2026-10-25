@@ -310,7 +310,7 @@ chrome rules budget of §6.2.
     (`Config ready`, `Loading models…`, `rows 7-40/40`) never does.
   - A status with no word (a glyph-only state) is not allowed in chrome.
 - Multiple words in one hint stay lowercase after the key: `Esc back`,
-  `Enter details`, `C copy all`.
+  `Enter details`, `C copy all` (the scoped About chord exception in §7.1).
 - **Key tokens are Capitalized; a bare letter is lowercase.** `Esc`, `Enter`,
   `PgUp`, `Shift+S` are capitalized, but an unmodified single letter is written
   `r refresh`, `c copy fact`, `s stop` — because `R` reads as ⇧R and this repo
@@ -635,6 +635,14 @@ anchor, without inventing a fourth meaning for `primary`.
 - **Hint segment** = `<Key> <verb>`: `Esc back`, `Enter details`, `r refresh`,
   `c copy fact`, `C copy all`, `s stop`, `PgUp/PgDn`. Capitalized key token,
   lowercase verb; a bare unmodified letter is lowercase (§4.1).
+  - **Scoped exception — the About `Copy All` hint.** Settings About paints
+    `C copy all` for the whole-report copy. Its LOCAL key is the SHIFTED chord
+    (⇧C), and the About bar spells that chord the way the surface's own key
+    constant always has, so the hint matches the key the hand really presses
+    instead of inventing a second spelling. The rule stays: an UNMODIFIED single
+    letter is lowercase (`c copy fact`), and a shifted chord elsewhere is written
+    as an explicit chord (`Shift+S`). `C copy all` is the only such hint, it is
+    scoped to Settings About, and it does not loosen §4.1 for other surfaces.
 - **One action advertises ONE key: the PRIMARY binding from the live effective
   keymap** (`keysFor(action)[0]`, or the action's leader sequence when it is bound
   only to one). An **action-bar segment** never enumerates an action's alternative
@@ -681,11 +689,11 @@ anchor, without inventing a fourth meaning for `primary`.
   affordance that opens a further step renders `Verb…` (`Change…`). The current
   whole-word brackets (`[Change…]`) are replaced by this rule, so Settings and
   Job affordances look the same.
-- **A key badge spells a bare letter UPPERCASE, while the Action Bar hint keeps
-  it lowercase.** `Copy All [C]` names the *key*; the bar says `C copy all`
-  because `C` would read as ⇧C in prose (§4.1). The brackets are the
-  discriminator, so the two forms are not a contradiction: one is a key badge,
-  the other is a hint.
+- **A key badge spells a bare letter UPPERCASE, while the Action Bar hint follows
+  §4.1.** `Copy All [C]` is a key badge naming the key; the bar's matching hint is
+  the scoped `C copy all` above, and every OTHER one-letter hint stays lowercase
+  (`c copy fact`, `r refresh`, `s stop`). The brackets are the discriminator, so
+  the two forms are not a contradiction: one is a key badge, the other is a hint.
 - **Settings About scopes the copy affordance to ONE body badge.** The
   single-fact copy is advertised only as the weak Action Bar hint `c copy fact`
   (never a per-row `Copy [C]` button, icon, bracket or hover-only target), and
