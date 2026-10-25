@@ -65,15 +65,13 @@ import {
   asVisualSessionEvents,
   decidePublication,
   MAX_PUBLISHED_VISUALS,
+  parsePresentVisualArguments,
+  parsePublicationReceipt,
   VISUAL_PUBLISHED_PREFIX,
   type PublicationDecision,
 } from '../../domain/visual/publication.ts'
 import { visualReference, visualReferenceLine } from '../../domain/visual/reference.ts'
-import {
-  CHART_TOOL_NAME,
-  PRESENT_VISUAL_TOOL_NAME,
-  SVG_TOOL_NAME,
-} from '../../domain/visual/tools.ts'
+import { PRESENT_VISUAL_TOOL_NAME } from '../../domain/visual/tools.ts'
 
 /** Stable Cordis plugin name (the Loader row id in `cordis.patch.yml`). */
 export const name = 'pi-tui-visual-tools'
@@ -85,11 +83,18 @@ export const name = 'pi-tui-visual-tools'
  */
 export const inject = ['tools', 'agents', 'sessionQuery', 'sessionProjections']
 
-// The three tool names are owned by `domain/visual/tools.ts` (whose vocabulary
-// lives with the transcript's readable projection). This row does NOT re-export
-// them: the public `./visual-tools` declaration region must stay exactly
-// `app/host/visual-tools.d.ts`, and every consumer imports the names from the
-// domain owner directly.
+/**
+ * The two stable, namespaced generating tool names.
+ *
+ * These stay DEFINED here (not re-exported from `domain/visual/tools.ts`) for two
+ * reasons: `@xmoon76/dsh-pi-tui/visual-tools` has publicly exported them since the
+ * row shipped, so removing them would be a breaking change to a published entry,
+ * and a re-export would add the domain module's declaration region to the
+ * packaged `dist/visual-tools.d.mts`. They are compile-time literals, so the
+ * domain's copy is the same value and the two can never disagree at runtime.
+ */
+export const CHART_TOOL_NAME = 'dsh_pi_tui_chart'
+export const SVG_TOOL_NAME = 'dsh_pi_tui_svg'
 
 /**
  * The row's profile-wide availability switch. `enabled` is a volatile field:
@@ -318,35 +323,6 @@ function svgTool(projections: SessionProjectionReaderLike) {
   })
 }
 
-/** One requested `visuals` entry, already shape-validated by `defineTool`. */
-interface RequestedVisual {
-  readonly ref: string
-}
-
-/** The validated `present_visual` arguments. */
-interface PresentVisualArgs {
-  readonly visuals: readonly RequestedVisual[]
-}
-
-/** Validate the requested references beyond the JSON schema (uniqueness). */
-function presentVisualArgsProblem(args: unknown): string | undefined {
-  if (typeof args !== 'object' || args === null || Array.isArray(args)) return 'arguments must be an object with a visuals array'
-  const record = args as Record<string, unknown>
-  const visuals = record.visuals
-  if (!Array.isArray(visuals)) return 'visuals must be an array'
-  if (visuals.length === 0 || visuals.length > MAX_PUBLISHED_VISUALS) {
-    return `visuals must contain between 1 and ${MAX_PUBLISHED_VISUALS} items`
-  }
-  const refs = visuals.map((entry) => {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return undefined
-    const ref = (entry as Record<string, unknown>).ref
-    return typeof ref === 'string' ? ref : undefined
-  })
-  if (refs.some(ref => ref === undefined)) return 'every visual must carry a string ref'
-  if (new Set(refs).size !== refs.length) return 'the same visual ref appears more than once'
-  return undefined
-}
-
 /**
  * Define the publication tool.
  *
@@ -389,9 +365,12 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
     async execute(args, exec) {
       if (exec.agent === undefined) throw new Error('present_visual requires an agent Session')
       if (exec.parent !== undefined) throw new Error('present_visual is only available as a top-level model tool call')
-      const problem = presentVisualArgsProblem(args)
-      if (problem !== undefined) throw new Error(problem)
-      const requested = args as PresentVisualArgs
+      // The ONE argument contract: the same function cold replay parses the
+      // durable `tool/call.arguments` with, so a successful receipt can always
+      // be replay-verified.
+      const parsed = parsePresentVisualArguments(args)
+      if (!parsed.ok) throw new Error(parsed.reason)
+      const requested = parsed.refs
       const session = exec.agent.session
       const before = requireOpenStep(projections, session, 'present_visual')
       const query = ctx.reflect.get('sessionQuery') as SessionQueryObservationLike
@@ -420,7 +399,7 @@ function presentVisualTool(ctx: Context, projections: SessionProjectionReaderLik
       const decision: PublicationDecision = decidePublication({
         sessionId: session.id as unknown as string,
         events,
-        refs: requested.visuals.map(entry => entry.ref),
+        refs: [...requested],
         turn: before.lastTurn,
         stepStartSeq: before.lastStepStartSeq as unknown as number,
         callId: exec.callId as unknown as string,

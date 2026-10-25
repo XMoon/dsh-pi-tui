@@ -60,6 +60,7 @@ export type VisualSessionEvent =
   | {
     readonly type: 'tool/call'
     readonly seq: number
+    readonly surfaceOp?: unknown
     readonly data: {
       readonly turn: number
       readonly step: number
@@ -71,6 +72,12 @@ export type VisualSessionEvent =
   | {
     readonly type: 'tool/result'
     readonly seq: number
+    /**
+     * The official surface placement intent. A message-producing event must
+     * carry one; `{ op: 'replace', … }` marks a MODEL-ONLY rewrite (the
+     * compaction pruner's shadowed copy), never a second durable result.
+     */
+    readonly surfaceOp?: { readonly op: 'append' } | { readonly op: 'replace'; readonly startSeq: number; readonly endSeq: number }
     readonly data: {
       readonly turn: number
       readonly step: number
@@ -105,6 +112,36 @@ export function asVisualSessionEvents<T extends { readonly type: string }>(
   events: readonly T[],
 ): readonly (T & VisualSessionEvent)[] {
   return events.filter((event): event is T & VisualSessionEvent => RELEVANT_EVENT_TYPES.has(event.type))
+}
+
+/**
+ * Whether one event is a MODEL-ONLY surface replacement.
+ *
+ * The compaction `ToolResultPruner` appends a second `tool/result` that repeats
+ * the original's turn, step and `callId` and is marked
+ * `surfaceOp: { op: 'replace', … }`. Such a copy rewrites only the model-facing
+ * projection: the append-origin result stays the human-visible history, and
+ * treating the rewrite as a second durable result would mark the generating
+ * source ambiguous and retract an already-accepted publication. The same rule
+ * is applied by the transcript fold and the `/transcript` export. An unmarked
+ * legacy event is never a replacement — absence of the marker is not a rewrite.
+ * @param event - one log event.
+ * @returns true only for an explicit replacement.
+ */
+export function isModelOnlyReplacement(event: object): boolean {
+  const surfaceOp = (event as { readonly surfaceOp?: unknown }).surfaceOp
+  if (surfaceOp === undefined) return false
+  return (surfaceOp as { readonly op?: unknown }).op === 'replace'
+}
+
+/**
+ * The event log this authority indexes: the given events WITHOUT the model-only
+ * surface replacements, in log order.
+ * @param events - the observed committed events.
+ * @returns the append-origin events the visual facts live on.
+ */
+export function visualAuthorityEvents(events: readonly VisualSessionEvent[]): readonly VisualSessionEvent[] {
+  return events.filter(event => !isModelOnlyReplacement(event))
 }
 
 /** The maximum number of references one publication may carry. */
@@ -193,13 +230,17 @@ function callKey(turn: number, step: number, callId: string): string {
  * a duplicate composite identity or a second result marks the occurrence
  * ambiguous, and an ambiguous occurrence never authorizes a publication. A
  * `tool/call` outside an open `step/start` frame is not indexed at all: it has
- * no durable step identity, so nothing can be scoped to it.
+ * no durable step identity, so nothing can be scoped to it. MODEL-ONLY surface
+ * replacements are skipped: the compaction pruner appends a second `tool/result`
+ * that repeats the original turn/step/`callId`, and counting it would make an
+ * already-accepted publication look ambiguous.
  */
 function indexCalls(sessionId: string, events: readonly VisualSessionEvent[]): IndexedCall[] {
   const calls: IndexedCall[] = []
   const byKey = new Map<string, IndexedCall>()
   let openStepStartSeq: number | undefined
   for (const event of events) {
+    if (isModelOnlyReplacement(event)) continue
     switch (event.type) {
       case 'turn/start':
       case 'turn/end':
@@ -413,20 +454,60 @@ function requestedReferences(rawArguments: string): string[] | undefined {
   } catch {
     return undefined
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
-  const record = parsed as Record<string, unknown>
-  if (Object.keys(record).length !== 1 || !Array.isArray(record.visuals)) return undefined
+  const decision = parsePresentVisualArguments(parsed)
+  return decision.ok ? [...decision.refs] : undefined
+}
+
+/** The refusal of one `present_visual` argument document. */
+export type PresentVisualArgumentProblem = { readonly ok: false; readonly reason: string }
+
+/** The accepted reference list of one `present_visual` argument document. */
+export type PresentVisualArguments = { readonly ok: true; readonly refs: readonly string[] }
+
+/**
+ * The ONE `present_visual` argument contract, shared by live execution and cold
+ * replay.
+ *
+ * The official ToolRuntime does NOT apply a full JSON-Schema pass to a tool's
+ * arguments; the body receives them as-is. The live path therefore validates
+ * with THIS function, and the replay path parses the durable
+ * `tool/call.arguments` with the same one — so a successful receipt can always
+ * be replay-verified, and a replay can never accept a document the live body
+ * would have refused. The document is closed: only `visuals` at the root, only
+ * `ref` per entry, 1–8 entries, well-formed `sv1_` references, no duplicates.
+ * @param args - the model-supplied arguments (already JSON-parsed).
+ * @returns the accepted references, or the verbatim refusal reason.
+ */
+export function parsePresentVisualArguments(args: unknown): PresentVisualArguments | PresentVisualArgumentProblem {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+    return { ok: false, reason: 'arguments must be an object with a `visuals` array' }
+  }
+  const record = args as Record<string, unknown>
+  if (Object.keys(record).length !== 1 || !Array.isArray(record.visuals)) {
+    return { ok: false, reason: 'arguments must contain only `visuals`' }
+  }
   const visuals = record.visuals as unknown[]
-  if (visuals.length === 0 || visuals.length > MAX_PUBLISHED_VISUALS) return undefined
+  if (visuals.length === 0 || visuals.length > MAX_PUBLISHED_VISUALS) {
+    return { ok: false, reason: `visuals must contain between 1 and ${MAX_PUBLISHED_VISUALS} items` }
+  }
   const refs: string[] = []
   for (const entry of visuals) {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return undefined
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return { ok: false, reason: 'every visual must be an object' }
+    }
     const fields = entry as Record<string, unknown>
-    if (Object.keys(fields).length !== 1 || typeof fields.ref !== 'string') return undefined
-    if (!isReferenceSpelling(fields.ref)) return undefined
+    if (Object.keys(fields).length !== 1 || typeof fields.ref !== 'string') {
+      return { ok: false, reason: 'every visual must contain only `ref`' }
+    }
+    if (!isReferenceSpelling(fields.ref)) {
+      return { ok: false, reason: 'every visual ref must look like sv1_ followed by 20 lowercase hex digits' }
+    }
     refs.push(fields.ref)
   }
-  return new Set(refs).size === refs.length ? refs : undefined
+  if (new Set(refs).size !== refs.length) {
+    return { ok: false, reason: 'present_visual received the same visual ref twice' }
+  }
+  return { ok: true, refs }
 }
 
 /**
@@ -530,21 +611,17 @@ export type PublicationDecision = PublicationAcceptance | PublicationRefusal
 export function decidePublication(input: {
   readonly sessionId: string
   readonly events: readonly VisualSessionEvent[]
+  /**
+   * The references the executing call was handed. They are CHECKED against the
+   * durable `tool/call.arguments` below; the durable value is the authority, so
+   * a caller cannot widen (or narrow) what the log actually recorded.
+   */
   readonly refs: readonly string[]
   readonly turn: number
   readonly stepStartSeq: number
   readonly callId: string
 }): PublicationDecision {
   const { sessionId, events, refs, turn, stepStartSeq, callId } = input
-  if (refs.length === 0 || refs.length > MAX_PUBLISHED_VISUALS) {
-    return { ok: false, reason: `present_visual accepts 1 to ${MAX_PUBLISHED_VISUALS} visuals` }
-  }
-  if (!refs.every(ref => isReferenceSpelling(ref))) {
-    return { ok: false, reason: 'every visual ref must look like sv1_ followed by 20 lowercase hex digits' }
-  }
-  if (new Set(refs).size !== refs.length) {
-    return { ok: false, reason: 'present_visual received the same visual ref twice' }
-  }
   const calls = indexCalls(sessionId, events)
   const publishers = calls.filter(candidate =>
     candidate.name === PRESENT_VISUAL_TOOL_NAME
@@ -558,6 +635,17 @@ export function decidePublication(input: {
     }
   }
   const publisher = publishers[0] as IndexedCall
+  // The DURABLE arguments are the authority for what was requested.
+  const durable = requestedReferences(publisher.arguments)
+  if (durable === undefined) {
+    return { ok: false, reason: `the durable ${PRESENT_VISUAL_TOOL_NAME} arguments are not a valid request` }
+  }
+  if (durable.length !== refs.length || !durable.every((ref, position) => ref === refs[position])) {
+    return {
+      ok: false,
+      reason: 'the executing call arguments disagree with the durable tool/call arguments',
+    }
+  }
   const sources = calls.map(call => qualifySource(call)).filter((source): source is VisualSource => source !== undefined)
   const accepted: { ref: string }[] = []
   for (const ref of refs) {
