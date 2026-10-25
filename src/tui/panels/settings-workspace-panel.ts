@@ -1017,7 +1017,13 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** Commit one directory generation: the order, the revoked grants and the
-   *  selection repair of the CURRENT snapshot. */
+   *  selection repair of the CURRENT snapshot.
+   *
+   *  A registry change invalidates the PAINTED FRAME — never a business state
+   *  the change did not touch. The frame fence is unconditional; the selection
+   *  and the transient edit are repaired only where they really stopped being
+   *  valid. An unrelated `setValue()`/register/unload therefore keeps an open
+   *  candidate choice and the user's scroll position. */
   private applyDirectory(revision: number, count: number): void {
     this.directoryRevision = revision
     this.directoryCount = count
@@ -1034,24 +1040,49 @@ export class SettingsWorkspacePanel implements Component {
     // directory length must re-reveal the selection on the next paint.
     this.lastCategoryIndex = -1
     this.lastCategoryViewport = -1
+    let selectionInvalid = false
     if (!this.isSelectableCategory(this.categoryId)) {
       // The registry emptied under the selected Extensions category: the ONE
       // stable first-party neighbour takes the selection, the rail takes the
       // keyboard, and NOTHING is installed/enabled/removed by this recovery.
       this.categoryId = 'plugins'
       this.focus = 'categories'
+      selectionInvalid = true
     }
     // The selected row must still exist in the CURRENT snapshot. A row that a
     // re-registered owner dropped is never kept by id alone.
     if (!this.snapshot.rows.some(row => row.id === this.rowId && row.category === this.categoryId)) {
       this.rowId = this.firstRowOf(this.categoryId)
+      selectionInvalid = true
     }
-    // Drop the transient choice the previous directory may have invalidated and
-    // re-anchor its owned offsets. A pending/settled write is app-owned and is
-    // never touched here.
-    this.resetChoice()
-    this.rowOffset = 0
-    this.detailOffset = 0
+    if (selectionInvalid) {
+      // The selection itself changed: the transient edit and both list offsets
+      // belonged to it. A pending/settled write is app-owned and is never
+      // touched here.
+      this.resetChoice()
+      this.rowOffset = 0
+      this.detailOffset = 0
+      return
+    }
+    // The selection survived: only the candidate IDENTITIES may have moved (a
+    // contribution list can grow or shrink under an open choice). Re-anchor the
+    // choice on its VALUE and leave the scroll positions alone.
+    this.reanchorChoice()
+  }
+
+  /** Keep the open candidate choice on the SAME candidate identity after a
+   *  source re-read: a candidate whose source is gone drops the choice instead
+   *  of painting a confirm that can no longer dispatch it; a moved candidate
+   *  keeps its highlight. A non-choosing phase is untouched. */
+  private reanchorChoice(): void {
+    const phase = this.editPhase
+    if (phase.kind !== 'choosing') return
+    const options = this.snapshot.rows.find(row => row.edit?.field === phase.field)?.edit?.options ?? []
+    const index = options.findIndex(option => option.value === phase.candidate)
+    if (index < 0) this.editPhase = { kind: 'browsing' }
+    else if (index !== phase.index) {
+      this.editPhase = { kind: 'choosing', field: phase.field, candidate: phase.candidate, index }
+    }
   }
 
   /** Adopt a freshly read snapshot WITHOUT re-reading it. A snapshot source
@@ -2843,15 +2874,7 @@ export class SettingsWorkspacePanel implements Component {
     // phase is re-anchored on its VALUE: the highlight and the confirm keep naming the
     // same candidate, and a candidate whose source is gone drops the choice instead of
     // painting a confirm that can no longer dispatch it.
-    const phase = this.editPhase
-    if (phase.kind === 'choosing') {
-      const options = this.snapshot.rows.find(row => row.edit?.field === phase.field)?.edit?.options ?? []
-      const index = options.findIndex(option => option.value === phase.candidate)
-      if (index < 0) this.editPhase = { kind: 'browsing' }
-      else if (index !== phase.index) {
-        this.editPhase = { kind: 'choosing', field: phase.field, candidate: phase.candidate, index }
-      }
-    }
+    this.reanchorChoice()
     this.bumpRevision()
     this.intents.requestRender()
   }

@@ -168,10 +168,16 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   The count alone is never the fence: a same-id owner replacement keeps the
   count and moves only the revision. The event that discovers the change never
   navigates with it; a frame whose directory moved inside its own render
-  publishes no grant and schedules the next frame. When the registry empties
-  while `Extensions` is selected, the selection lands on `Plugins` with the rail
-  focused and nothing is installed, enabled or removed; a stale internal
-  `initialCategory: 'extensions'` request lands on `Plugins` too.
+  publishes no grant and schedules the next frame. A registry change invalidates
+  the PAINTED FRAME, never a business state it did not touch: an unrelated
+  registration, unload or `setValue()` keeps an open candidate choice (re-anchored
+  on its candidate identity), the selected category/row and both scroll offsets;
+  only a selection that really stopped being valid (a vanished row, or the
+  emptied `Extensions` category) repairs the choice and resets its offsets.
+  When the registry empties while `Extensions` is selected, the selection lands
+  on `Plugins` with the rail focused and nothing is installed, enabled or
+  removed; a stale internal `initialCategory: 'extensions'` request lands on
+  `Plugins` too.
 
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single

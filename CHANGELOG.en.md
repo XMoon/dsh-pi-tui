@@ -183,8 +183,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Conversation / Input & Terminal / Tools / Plugins`, and appends `Extensions` only while the
   extension settings registry really has rows. After a registration, an unload or a same-id
   replacement, a frame that has not repainted yet runs no click, wheel or key action and only
-  `Esc` still returns safely; when the `Extensions` entry disappears the selection lands on the
-  neighbouring `Plugins` instead of an empty category. `Other settings` is gone: a setting that
+  `Esc` still returns safely; a registration, unload or value change never interrupts an edit in
+  progress (the candidate, the selected category/row and the scroll positions are kept), and only
+  a selection that really stopped being valid falls back to the first row of its category; when
+  the `Extensions` entry disappears the selection lands on the neighbouring `Plugins` instead of
+  an empty category. `Other settings` is gone: a setting that
   has not migrated yet is opened by a transition row in its own category that explicitly says
   `Existing settings editor` and focuses that exact row (agent defaults, footer, more
   conversation settings, input & terminal, extension settings), and the Web Search / Fetch

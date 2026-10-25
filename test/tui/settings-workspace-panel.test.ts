@@ -1890,3 +1890,140 @@ test('T06b an app-driven fact reread that discovers an empty directory recovers 
   assert.doesNotMatch(frame, /Extensions/u, 'the spent category is gone')
   assert.equal(h.legacyOpens(), 0, 'the reread opened nothing')
 })
+
+// ── C2-R0 review fix: an unrelated registry change never cancels an edit ──
+
+/** A writable row fixture whose candidate source can be re-read after a
+ *  directory change (the live registry is what moves in production). */
+const withDirectory = (revision: number, count: number): SettingsWorkspaceSnapshot => ({
+  ...SNAPSHOT,
+  extensionRevision: revision,
+  extensionCount: count,
+})
+
+test('an unrelated registry change keeps an open candidate choice and its scroll, and only revokes the frame', () => {
+  // The production source reads the live registry ONCE per snapshot, so the
+  // fixture does the same: `extensionRevision`/`extensionCount` always describe
+  // the current directory and the row list it was assembled with.
+  let revision = 1
+  let count = 0
+  let extraRows: SettingsWorkspaceSnapshot['rows'] = []
+  const snapshot = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    extensionRevision: revision,
+    extensionCount: count,
+    rows: [...SNAPSHOT.rows, ...extraRows],
+  })
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision, count }),
+    snapshot,
+  })
+  plain(h)
+  walkTo(h, 'appearance')
+  h.panel.handleInput('\r') // L0 -> L1
+  h.panel.handleInput('\r') // L1 -> the Theme choice
+  assert.match(plain(h), /Choose value/u, 'the Theme choice is open')
+  h.panel.handleInput('\u001b[B') // move to the second candidate (`dark`)
+  assert.match(plain(h), /> dark\s+\[current\]/u, 'the second candidate is highlighted')
+  // An UNRELATED registry change: a plugin registers a settings row.
+  revision = 2
+  count = 1
+  extraRows = [extensionRow('ext-setting:other')]
+  const afterRegister = plain(h)
+  // The frame is re-proved against the new directory, but the user's business
+  // state is intact: same level, same candidate, same scroll.
+  assert.match(afterRegister, /Settings · Appearance · Configured theme/u, 'the choice level survives')
+  assert.match(afterRegister, /Choose value/u, 'the open Theme choice is NOT cancelled')
+  assert.match(afterRegister, /> dark\s+\[current\]/u, 'the highlighted candidate is unchanged')
+  assert.equal(h.commits(), 0, 'no write happened')
+  // A `setValue()` on the unrelated row: count stays 1 and only the revision moves.
+  revision = 3
+  const afterSetValue = plain(h)
+  assert.match(afterSetValue, /Choose value/u, 'a same-count revision change also keeps the choice')
+  assert.match(afterSetValue, /> dark\s+\[current\]/u, 'the candidate stays selected')
+  // The preserved choice still confirms through the one write channel.
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 1, 'the preserved choice still dispatches exactly one write')
+  assert.equal(h.legacyOpens(), 0, 'no registry change opened the legacy editor')
+})
+
+test('a registry change that drops the chosen candidate identity drops the choice', () => {
+  let revision = 1
+  let options = [
+    { value: 'auto', label: 'auto', available: true, current: false },
+    { value: 'dark', label: 'dark', available: true, current: true },
+  ]
+  const snapshotOf = (): SettingsWorkspaceSnapshot => ({
+    ...withDirectory(revision, 1),
+    rows: [
+      {
+        ...SNAPSHOT.rows[0]!,
+        edit: {
+          field: 'theme',
+          primary: 'runtime',
+          runtime: 'dark',
+          persisted: 'dark',
+          options,
+        },
+      },
+      extensionRow('ext-setting:other'),
+    ],
+  })
+  let snapshot = snapshotOf()
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision, count: 1 }),
+    snapshot: () => snapshot,
+  })
+  plain(h)
+  walkTo(h, 'appearance')
+  h.panel.handleInput('\r')
+  h.panel.handleInput('\r') // the choice, on `dark` (the current candidate)
+  assert.match(plain(h), /> dark\s+\[current\]/u)
+  // The chosen candidate's SOURCE disappears under the open choice.
+  revision = 2
+  options = [
+    { value: 'auto', label: 'auto', available: true, current: true },
+    { value: 'plugin:gone/theme', label: 'Gone theme', available: false, current: false },
+  ]
+  snapshot = snapshotOf()
+  const after = plain(h)
+  assert.doesNotMatch(after, /Choose value/u, 'a vanished candidate cannot keep painting a confirm')
+  assert.match(after, /Settings · Appearance · Configured theme/u, 'the row stays selected')
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 0, 'the dropped choice cannot dispatch a write')
+})
+
+test('losing the Extensions category still repairs the selection and its offsets', () => {
+  let revision = 1
+  let count = 1
+  let snapshot = { ...withDirectory(revision, count), rows: [...SNAPSHOT.rows, extensionRow('ext-setting:demo')] }
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    pluginPage: true,
+    directory: () => ({ revision, count }),
+    snapshot: () => snapshot,
+  })
+  plain(h)
+  h.panel.handleInput('\u001b[F') // Extensions
+  h.panel.handleInput('\r') // its Rows level
+  assert.match(header(h), /Settings · Extensions · Rows/u)
+  plain(h)
+  revision = 2
+  count = 0
+  snapshot = withDirectory(revision, count)
+  const recovered = plain(h)
+  assert.match(header(h), /Settings · Categories/u, 'the recovery moved the keyboard to the rail')
+  assert.match(recovered, /^> Plugins/mu, 'Plugins is the stable fallback category')
+  assert.match(recovered, /Categories \(9\)/u)
+  assert.doesNotMatch(recovered, /Extensions/u)
+  // The repaired selection really owns the next key: Down from Plugins is
+  // clamped, Up moves the CATEGORY, proving the rail — not a stale row — owns it.
+  h.panel.handleInput('\u001b[A')
+  assert.match(plain(h), /^> Tools/mu, 'the rail owns the keyboard after the repair')
+  assert.equal(h.legacyOpens(), 0)
+})
