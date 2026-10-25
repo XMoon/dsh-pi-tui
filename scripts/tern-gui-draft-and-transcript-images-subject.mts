@@ -10,7 +10,7 @@
  * Usage: DISPLAY=:0 node --import tsx/esm scripts/tern-gui-draft-and-transcript-images-subject.mts
  * @module scripts/tern-gui-draft-and-transcript-images-subject
  */
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
 import { connect, ui, type Node } from '@stencil-hq/tern'
 import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
@@ -170,11 +170,30 @@ function render(): void {
   const main = transcriptView(projectTranscriptStructure([userRow, toolRow]), new TranscriptNodeKeys(), {
     imageStates: states,
   })
+  // The split-pane gate also needs the BUSY dock shape: notices above the band
+  // and a MULTI-LINE editor, which is the worst case for the editor's visibility.
+  // The launcher does not forward arbitrary env, so the busy shape is selected by
+  // a marker file the flow drops into the run directory before launching.
+  const busy = existsSync(`${dir}/busy.marker`)
   const dock = ui.col(
     { key: 'dock' },
+    ...(busy
+      ? [
+        ui.text({ key: 'queue-1', text: 'queued (queue): an earlier queued message' }),
+        ui.text({ key: 'notice-1', text: '! a previous attempt failed' }),
+        ui.text({ key: 'notice-2', text: 'compacting (summarizing)' }),
+      ]
+      : []),
     ui.text({ key: 'status', wrap: 'none', text: `Draft ${DRAFT_ENTRIES.length} · DSH TSP renderer · experimental composer` }),
     ...previewNodes(),
-    ui.editor({ key: 'composer', text: draft, cursor, maxLines: 8, placeholder: 'Message', prompt: '> ' }),
+    ui.editor({
+      key: 'composer',
+      text: draft,
+      cursor,
+      maxLines: 8,
+      placeholder: 'Message',
+      prompt: '> ',
+    }),
   )
   surface.render({ main, dock })
   note({ frame: { cols: session!.caps.cols, draft } })

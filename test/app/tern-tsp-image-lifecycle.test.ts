@@ -818,8 +818,8 @@ test('bytes over the 16 MiB gate state the reason and send no blob', async () =>
   const harness = await mountHarness()
   const huge = localDraft(1, '[image #1 (640×360)]', 16 * 1024 * 1024 + 1, 'huge.png')
   harness.stageDrafts(huge.placeholder, [huge])
-  await until('the over-limit row to state its reason', () =>
-    dockDraftRows(harness.tern).some(row => String(row.text ?? '').includes('Image exceeds 16 MiB Blob limit')))
+  await until('the over-limit chip to report the preview as unavailable', () =>
+    dockDraftRows(harness.tern).some(row => String(row.text ?? '') === 'Preview unavailable'))
 
   assert.deepEqual(harness.tern.blobIds(), [], 'the over-limit draft never reaches the wire')
   assert.equal(dockDraftRows(harness.tern).some(row => row.kind === 'image'), false,
@@ -863,8 +863,8 @@ test('a recalled draft with NO owned scope states why and reads nothing', async 
   harness.scope(undefined)
   const recalled = recalledDraft(1, ATTACHMENT)
   harness.stageDrafts(recalled.placeholder, [recalled])
-  await until('the no-scope reason', () =>
-    dockDraftRows(harness.tern).some(row => String(row.text ?? '').includes('Image unavailable for this session')))
+  await until('the no-scope chip to report the preview as unavailable', () =>
+    dockDraftRows(harness.tern).some(row => String(row.text ?? '') === 'Preview unavailable'))
 
   assert.deepEqual(harness.reads, [], 'an absent scope reads nothing')
   assert.deepEqual(harness.tern.blobIds(), [], 'an empty byte array never becomes an image')
@@ -1050,5 +1050,50 @@ test('the live draft count prefixes the ONE status line and adds no extra title 
   // Back to an empty draft: the status text and key are byte-identical to before.
   harness.stageDrafts('', [first, second])
   await until('the status prefix to disappear', () => (dockStatusText(harness.tern) ?? '').startsWith('Draft') === false)
+  await harness.dispose()
+})
+
+// ── The capability gate must precede EVERY draft read (amendment S3.4) ───────
+
+test('a pane with NO `styles` never reads a recalled draft, even with the image capability', async () => {
+  // The pane keeps `image` + `blobs` and only loses `styles`, so the ONLY thing
+  // that forbids the preview is the frozen gate. Before the gate reached the
+  // subscription ledger this case still started an attachment read.
+  const harness = await mountHarness({
+    hello: { ...HELLO, features: HELLO.features.filter(feature => feature !== 'styles') },
+  })
+  commit(harness.renderer, [{ kind: 'user', turn: 1, text: 'earlier' } as TranscriptMessage], {})
+  const recalled = recalledDraft(1, ATTACHMENT)
+  harness.stageDrafts(recalled.placeholder, [recalled])
+  await until('the dock to repaint with the draft count', () =>
+    (dockStatusText(harness.tern) ?? '').startsWith('Draft 1'))
+  // A bounded window: without a read there is nothing to wait for.
+  await new Promise(resolve => setTimeout(resolve, 50))
+
+  assert.deepEqual(harness.reads, [], 'no styles => no preview => no attachment read')
+  assert.deepEqual(harness.tern.blobIds(), [], 'and no draft blob')
+  assert.equal(harness.loader.listenerCount(), 0, 'and no lingering subscription')
+  await harness.dispose()
+})
+
+test('a narrow pane reads and sends only the occurrences it can SHOW', async () => {
+  // 80 columns shows ONE preview; two distinct recalled drafts are staged. The
+  // hidden second occurrence must be counted but never fetched.
+  // An 80-column pane shows exactly ONE preview.
+  const harness = await mountHarness({ hello: { ...HELLO, cols: 80 } })
+  commit(harness.renderer, [{ kind: 'user', turn: 1, text: 'earlier' } as TranscriptMessage], {})
+  const first = recalledDraft(1, ATTACHMENT)
+  const second = recalledDraft(2, { ...ATTACHMENT, attachmentId: 'att-2', name: 'two.png' })
+  harness.stageDrafts(`${first.placeholder} ${second.placeholder}`, [first, second])
+  await until('the one visible chip to settle', () =>
+    dockDraftRows(harness.tern).some(row => row.kind === 'image'))
+
+  assert.deepEqual(harness.reads.map(read => read.id), ['att-1'],
+    'only the SHOWN occurrence was read; the hidden tail was not fetched')
+  assert.equal(harness.tern.blobIds().length, 1, 'and only its bytes were sent')
+  assert.equal(dockDraftRows(harness.tern).filter(row => row.kind === 'image').length, 1,
+    'exactly one preview node is drawn')
+  assert.equal((dockStatusText(harness.tern) ?? '').startsWith('Draft 2'), true,
+    'the hidden occurrence is still COUNTED in the status line')
   await harness.dispose()
 })

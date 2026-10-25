@@ -636,13 +636,22 @@ test('a chip with no drawable pixels states the reason and fabricates no blob', 
   }
 })
 
-test('a LOADING chip uses the client placeholder under the SAME node shape as the real blob', () => {
-  const loading = chipImage(chipsOf(dockDraftImageNodes([dockEntry(1, 0, { state: 'loading' })], 2))[0]!)
-  const ready = chipImage(chipsOf(dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'd'.repeat(64) })], 2))[0]!)
+test('a LOADING chip shows `Preview unavailable` and draws NO image node', () => {
+  const row = dockDraftImageNodes([dockEntry(1, 0, { state: 'loading' })], 2)
+  const [chip] = chipsOf(row)
+  assert.ok(chip !== undefined)
 
-  assert.equal(loading?.props.blob, PENDING_IMAGE_BLOB_ID)
-  assert.equal(loading?.props.key, ready?.props.key, 'the placeholder is replaced in place')
-  assert.deepEqual(loading?.props.max, ready?.props.max)
+  assert.equal(chipImage(chip), undefined,
+    'a pending read must not claim bytes it does not have')
+  const unavailable = chip.children.find(child => child.props.key === 'unavailable')
+  assert.equal(unavailable?.props.text, 'Preview unavailable')
+  assert.equal(chip.children.some(child => child.props.key === 'caption'), true,
+    'the caption still identifies which draft it is')
+
+  // The ready transition replaces the TEXT with the image under the same chip.
+  const ready = chipsOf(dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'd'.repeat(64) })], 2))[0]!
+  assert.equal(ready.props.key, chip.props.key, 'the chip keeps its key across the transition')
+  assert.equal(chipImage(ready)?.props.blob, 'd'.repeat(64))
 })
 
 test('a repeated token yields two chips with distinct keys over the same bytes', () => {
