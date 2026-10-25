@@ -93,32 +93,92 @@ export function isInlineAttachmentPath(
 }
 
 /**
- * How much of the text AFTER the cursor still belongs to the attachment token
- * being completed. Completion only knows what is left of the cursor, so the
- * remainder of the same token — a half-typed filename, its closing quote, or
- * the rest of a path segment — must be consumed too; otherwise it is glued to
- * the accepted value and the prose suffix loses its separation.
+ * How many characters of `afterCursor` complete the SAME token as the accepted
+ * value, i.e. the longest prefix that is a suffix of `value`.
  *
- * The token ends at whitespace, at a quote, or at any character a path name
- * cannot contain. Everything from there on is PRESERVED PROSE.
+ * This is the only sound unquoted boundary: a POSIX name may contain Unicode,
+ * `#`, `+`, `%` and any other non-separator character, so neither an ASCII
+ * allowlist nor "stop at the first non-letter" can tell a filename remainder
+ * from prose. The accepted value itself is the authority.
+ * @param afterCursor - text after the caret.
+ * @param value - the accepted candidate value (unquoted form).
+ * @returns the length of the matching remainder (0 when none matches).
+ */
+export function acceptedRemainderLength(afterCursor: string, value: string): number {
+  if (value === '') return 0
+  for (let length = Math.min(afterCursor.length, value.length - 1); length > 0; length -= 1) {
+    if (value.endsWith(afterCursor.slice(0, length))) return length
+  }
+  return 0
+}
+
+/**
+ * How much of the text AFTER the cursor still belongs to the attachment token
+ * being completed.
+ *
+ * The rule is the path argument's OWN grammar, never a character allowlist:
+ * - inside an OPEN quoted token (`/image "sho|t" more`), spaces are part of the
+ *   path, so the remainder runs to the matching quote (or to the end of the
+ *   line when the quote is still open);
+ * - outside quotes, the remainder is the rest of the current WORD — every
+ *   character up to whitespace, since a POSIX filename may legitimately carry
+ *   Unicode, `#`, `+`, `@`, `%` and so on.
+ *
+ * An allowlist cannot express this: it would both truncate valid CJK filenames
+ * and swallow prose that happens to look like a path.
  * @param afterCursor - the raw line text after the cursor.
+ * @param quoted - whether the token being completed is inside an open quote,
+ *   i.e. the seat's argument started with `"` and has not closed before the
+ *   cursor (the same fact the completion engine uses for its own values).
  * @returns the token remainder to consume and the prose suffix to preserve.
  */
-export function splitTokenRemainder(afterCursor: string): { consumed: string; suffix: string } {
-  let index = 0
-  while (index < afterCursor.length) {
-    const char = afterCursor[index]!
-    if (char === '"') {
-      index += 1
-      break
-    }
-    if (/\s/.test(char)) break
-    // A path NAME cannot continue through a non-ASCII character: CJK prose that
-    // follows the cursor is the user's text, never the rest of the filename.
-    if (!/[A-Za-z0-9._/\-]/.test(char)) break
-    index += 1
+export function splitTokenRemainder(
+  afterCursor: string,
+  quoted: boolean,
+  /** The value being accepted: the unquoted boundary is derived from it, never
+   *  from a character allowlist. */
+  accepted = '',
+): { consumed: string; suffix: string } {
+  if (!quoted) {
+    // Unquoted: the token cannot be described by a character allowlist (a POSIX
+    // filename may contain Unicode, `#`, `+`, …). What IS authoritative is the
+    // accepted VALUE: the part of the line the caret is inside must be a PREFIX
+    // of that value, so the remainder is whatever completes the same value.
+    if (afterCursor === '' || /^\s/.test(afterCursor)) return { consumed: '', suffix: afterCursor }
+    const typed = acceptedRemainderLength(afterCursor, accepted)
+    if (typed > 0) return { consumed: afterCursor.slice(0, typed), suffix: afterCursor.slice(typed) }
+    return { consumed: '', suffix: afterCursor }
   }
-  return { consumed: afterCursor.slice(0, index), suffix: afterCursor.slice(index) }
+  // Quoted: run to the closing quote. An unclosed quote keeps going, so a
+  // half-typed quoted filename is consumed whole.
+  const close = afterCursor.indexOf('"')
+  if (close === -1) return { consumed: afterCursor, suffix: '' }
+  return { consumed: afterCursor.slice(0, close + 1), suffix: afterCursor.slice(close + 1) }
+}
+
+/**
+ * The remainder of the `/name` QUERY token being completed: the current word up
+ * to whitespace or a quote. This is a command-NAME token, not a path, so the
+ * path grammar above must not be applied to it.
+ * @param afterCursor - text after the caret.
+ */
+export function splitQueryRemainder(afterCursor: string): { consumed: string; suffix: string } {
+  const match = /^[^\s"]*/.exec(afterCursor)
+  const consumed = match?.[0] ?? ''
+  return { consumed, suffix: afterCursor.slice(consumed.length) }
+}
+
+/**
+ * Whether the seat's argument is inside an OPEN quoted token: it starts with a
+ * `"` that has no partner before the cursor. This mirrors the completion
+ * engine's own `quoted` fact (an unclosed opening quote is the quoted form), so
+ * the boundary rule never has to guess from characters.
+ * @param argument - the seat's argument text before the cursor.
+ */
+export function isOpenQuotedToken(argument: string): boolean {
+  const token = argument.replace(/^[ \t]+/, '')
+  if (!token.startsWith('"')) return false
+  return token.indexOf('"', 1) === -1
 }
 
 /**
@@ -139,13 +199,13 @@ export function applyInlineAttachmentAction(
 ): { line: string; cursorCol: number } {
   const before = line.slice(0, slashStart)
   const after = line.slice(cursorCol)
-  // The rest of the QUERY token (`ge` of a half-typed `/image`) is part of what
-  // this accept replaces, never prose.
-  const remainder = splitTokenRemainder(after)
-  // An existing separator already opens the argument seat; otherwise insert
-  // exactly one. Either way the preserved prose keeps its own spacing.
-  const hasSeparator = remainder.consumed === '' && after[0] !== undefined && /\s/.test(after[0]!)
-  const rest = hasSeparator ? after : remainder.suffix
+  // The query token (`age` of `/im|age`) is the `/name` token being replaced, so
+  // its remainder is the current word — not a path value. What survives is the
+  // PROSE suffix: an existing separator is kept as-is and only a missing one is
+  // inserted, so `hi /im|age world` becomes `hi /image world`, never double-spaced.
+  const remainder = splitQueryRemainder(after)
+  const hasSeparator = remainder.suffix !== '' && /^\s/.test(remainder.suffix)
+  const rest = remainder.suffix
   const newLine = hasSeparator ? `${before}/${name}${rest}` : `${before}/${name} ${rest}`
   return { line: newLine, cursorCol: before.length + 1 + name.length + 1 }
 }
@@ -183,21 +243,23 @@ export function applyInlineAttachmentPath(
   seat: {
     readonly commandStart: number
     readonly range: { readonly start: number; readonly end: number }
+    /** The seat's argument before the cursor — the path grammar's own token
+     *  text, which decides whether the token is inside an open quote. */
+    readonly argument?: string
   },
   cursorCol: number,
   cursorLine: number,
   value: string,
 ): { line: string; cursorCol: number; span: InlineAttachmentSpan } {
   const start = seat.range.start
-  // The remainder of the token being completed (`t"` when the cursor sits
-  // inside `"shot|t"`, or just a closing quote) belongs to the replaced
-  // fragment; the prose after it is preserved verbatim. This is ONE boundary
-  // rule shared with the action step, never a per-shape special case.
-  const { suffix } = splitTokenRemainder(line.slice(cursorCol))
-  // When the accepted value ENDS the fragment and prose continues right after
-  // the cursor, the separator that introduced the argument still has to keep
-  // the placeholder and the prose apart (`/image |为什么` must not become
-  // `shot.png为什么`). The separator is re-emitted once, never doubled.
+  // The remainder of the token being completed (`t"` inside `"shot|t"`, or a
+  // half-typed CJK filename) belongs to the replaced fragment; the prose after
+  // it is preserved verbatim. Quoting comes from the SEAT, i.e. from the path
+  // grammar's own state — never guessed from characters.
+  const quoted = isOpenQuotedToken(seat.argument ?? '')
+  const { suffix } = splitTokenRemainder(line.slice(cursorCol), quoted, unquoteCandidateValue(value))
+  // The argument's separator belongs to the fragment and is replaced with the
+  // token, so prose that continues right after it must not touch the token.
   const trailing = suffix !== '' && !/^\s/.test(suffix) ? ' ' : ''
   const end = start + value.length
   return {
