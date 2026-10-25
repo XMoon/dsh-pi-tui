@@ -380,3 +380,25 @@ test('a Unicode whitespace inside a filename is NOT a token separator', () => {
   assert.deepEqual(splitTokenRemainder('\u3000件.png', false, true),
     { consumed: '\u3000件.png', suffix: '' })
 })
+
+test('a directory accept preserves the closing quote that bounds the prose', () => {
+  // Cursor INSIDE the quoted path, with the user's own closing quote and prose
+  // already on the right. A directory keeps the seat open, so that quote is the
+  // boundary that must survive — otherwise the prose would enter the token.
+  const line = 'look /image "my dir/" prose'
+  const cursorCol = 'look /image "my'.length
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), COMMANDS)
+  assert.ok(seat !== undefined)
+  const continued = applyInlineAttachmentPath(line, seat, cursorCol, 0, '"my dir/', false)
+  assert.equal(continued.line, 'look /image "my dir/" prose',
+    'the closing quote and prose survive a directory continue')
+  // Without a closing quote on the right nothing changes.
+  const open = 'look /image "my dir/child'
+  const openSeat = pathArgumentSeat(open.slice(0, cursorCol), COMMANDS)
+  assert.ok(openSeat !== undefined)
+  assert.equal(applyInlineAttachmentPath(open, openSeat, cursorCol, 0, '"my dir/', false).line,
+    'look /image "my dir/', 'an unclosed tail stays unclosed')
+  // A FILE accept still replaces the whole quoted token.
+  assert.equal(applyInlineAttachmentPath(line, seat, cursorCol, 0, '"my dir/f.png"', true).line,
+    'look /image "my dir/f.png" prose', 'a file accept closes the token and keeps the prose')
+})
