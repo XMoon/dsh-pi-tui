@@ -521,9 +521,16 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
     'the span must not reach the route wrappers')
   assert.equal(intake.includes('const inlineAttachmentStager ='), false,
     'the span must not reach the inline route stager')
-  const entryFence = (intake.match(/runner\.sessionTransitionPending\(\)/g) ?? []).length
-  assert.equal(entryFence, 2,
-    'the intake keeps the ENTRY transition fence and the post-read fence body')
+  // The two checkpoints are asserted SEPARATELY, not by a total count: a count
+  // alone is satisfied by deleting the entry check and duplicating the call
+  // inside the helper, which leaves the intake starting IO while a transition
+  // is already pending.
+  const helperDeclAt = intake.indexOf('const stillCurrent = ')
+  assert.ok(helperDeclAt > 0, 'the intake declares the post-read fence helper')
+  const entryPrefix = intake.slice(0, helperDeclAt)
+  const entryChecks = (entryPrefix.match(/runner\.sessionTransitionPending\(\)/g) ?? []).length
+  assert.equal(entryChecks, 1,
+    'the intake must refuse BEFORE any read when a transition is already pending')
   // Per-read coverage, checked as CONTROL FLOW inside the intake body:
   //   - a read call must be followed IMMEDIATELY by the currentness guard, i.e.
   //     the next nonblank, non-comment statement, so moving the guard after a
@@ -587,8 +594,8 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
   )
   assert.deepEqual(
     sites,
-    ['src/commands.ts', ...Array.from({ length: entryFence }, () => 'src/tui/commands/artifacts.ts')],
-    'the only sessionTransitionPending() outside the intake fence is the interface declaration in src/commands.ts (whole-tree)',
+    ['src/commands.ts', ...Array.from({ length: entryChecks + 1 }, () => 'src/tui/commands/artifacts.ts')],
+    'the artifacts owner holds EXACTLY the entry check plus the helper-body check; the only other site is the interface declaration in src/commands.ts (whole-tree)',
   )
 })
 

@@ -16,6 +16,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import { readImageFileUninjected, setImageReadForTest } from '../../src/client/media/image/intake.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { consumeDraftAttachments, pruneUnreferencedDraftAttachments } from '../../src/client/media/draft-attachments.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -494,7 +495,13 @@ interface MountedHarness {
  * seam the production `createCommandSurface` supplies. Commands execute through
  * the SAME Client registry object the submission owner consumes.
  */
-function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: ReturnType<typeof mountedComposer> }): MountedHarness {
+function mountedHarness(options: {
+  cwd: string
+  sessionCwd?: string
+  composer?: ReturnType<typeof mountedComposer>
+  /** Simulate a session transition already in progress at intake time. */
+  transitionPending?: boolean
+}): MountedHarness {
   const ctx = new Context()
   const services = fakeCommands()
   ctx.provide('commands', services.commands as never)
@@ -602,7 +609,7 @@ function mountedHarness(options: { cwd: string; sessionCwd?: string; composer?: 
     openJobView: () => {},
     openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
-    sessionTransitionPending: () => false,
+    sessionTransitionPending: () => options.transitionPending === true,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
@@ -1157,4 +1164,29 @@ test('a card-less Remote /image with a real path reaches the mounted composer th
     'the admitted block carries the SAME bytes the intake staged')
   assert.ok(!message.content.some(block => block.type === 'text' && block.text.includes(draft.placeholder)),
     'the canonical token is resolved into the image block, never sent as literal text')
+})
+
+test('a transition already pending REFUSES before any file read (entry fence)', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-intake-entry-fence-')
+  const file = join(dir, 'shot.png')
+  writeFileSync(file, pngBytes())
+  const h = mountedHarness({ cwd: dir, transitionPending: true })
+  // The READ SEAM is the witness (the runner `cwd` getter is also read by
+  // unrelated facts such as the session workspace, so it proves nothing here).
+  let readEntered = 0
+  setImageReadForTest(async (...args) => {
+    readEntered += 1
+    return readImageFileUninjected(...args)
+  })
+  life.defer(() => setImageReadForTest(undefined))
+  const execution = await h.execute(`/image ${file}`)
+  assert.deepEqual(execution?.result, { kind: 'success' }, 'the intent is accepted and dispatched')
+  await waitFor(() => h.composer.notices.length === 1)
+  // The ENTRY fence fires before the intake touches the filesystem.
+  assert.equal(readEntered, 0, 'no file read may start while a transition is already pending')
+  assert.equal(h.imageStore.size(), 0, 'nothing is staged')
+  assert.equal(h.composer.getDraft(), '', 'no token is written')
+  assert.deepEqual(h.composer.notices, [{ text: 'a session transition is in progress — try again in a moment', kind: 'error' }],
+    'exactly the entry-fence explanation, published once')
 })
