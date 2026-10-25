@@ -302,7 +302,7 @@ async function splitPaneGate(h) {
   // A TALL window, so the `max-height: 640px` rule can never match. The height
   // is chosen so two panes land at the contract's 22 rows (the amendment's
   // exact split case), not merely "short".
-  await h.resize(1280, 830)
+  await h.resize(1280, 800)
   const before = blocks()
   spawnSync(tern, ['split', '@focused', 'down'], { env, encoding: 'utf8' })
   await h.sleep(1500)
@@ -310,9 +310,10 @@ async function splitPaneGate(h) {
   h.check('the tall window really split into two panes', after.length === before.length + 1,
     `blocks ${before.length} -> ${after.length}`)
   h.measure('the split pane rows', JSON.stringify(after.map(block => ({ rows: block.rows, cols: block.cols }))))
-  // The amendment's exact case is 2 × 22 rows: assert that band, not "<= 30".
-  h.check('each split pane is the contract 22-row band (so the window rule cannot help)',
-    after.every(block => block.rows >= 20 && block.rows <= 24), JSON.stringify(after.map(block => block.rows)))
+  // The amendment's exact case is 2 × 22 rows: assert EXACTLY that, so the case
+  // cannot pass on a nearby height.
+  h.check('each split pane is EXACTLY the contract 22 rows (so the window rule cannot help)',
+    after.every(block => block.rows === 22), JSON.stringify(after.map(block => block.rows)))
 
   // Launch the subject in the FOCUSED (lower) pane and measure it there.
   const subject = join(h.repo, 'scripts', 'tern-gui-draft-and-transcript-images-subject.mts')
@@ -388,13 +389,14 @@ async function splitPaneBusyGate(h) {
   const blocks = () =>
     JSON.parse(spawnSync(tern, ['ls', '--json'], { env, encoding: 'utf8' }).stdout).sessions[0].tabs[0].blocks
 
-  await h.resize(1280, 830)
+  await h.resize(1280, 800)
   const before = blocks()
   spawnSync(tern, ['split', '@focused', 'down'], { env, encoding: 'utf8' })
   await h.sleep(1500)
   const after = blocks()
   h.check('the busy case really split into two panes', after.length === before.length + 1,
     `blocks ${before.length} -> ${after.length}`)
+  h.measure('the busy split pane rows', JSON.stringify(after.map(block => block.rows)))
 
   // The launcher does not forward arbitrary env, so the busy shape is selected by
   // a marker file inside the run directory (which the subject can read).
@@ -419,6 +421,12 @@ async function splitPaneBusyGate(h) {
     h.measure('busy dock composer box', JSON.stringify(box))
     h.check('the busy editor is contained by its PANE', containedXY(snap.chains, composer),
       `box=${JSON.stringify(box)}`)
+    // The editor must really BE multi-line. The client normalizes the controlled
+    // text for its accessibility string, so the RENDERED HEIGHT is the honest
+    // witness: a one-line editor is ~16px, the seeded 4-newline draft is taller.
+    h.check('the busy editor renders MORE THAN ONE text row (a real multi-line editor)',
+      box[3] > 3 * 16,
+      `editorBox=${JSON.stringify(box)} — a single-line editor is about 16px`)
   }
   const before2 = composer === undefined ? undefined : String(composer.text ?? '')
   await h.key('d', 700)

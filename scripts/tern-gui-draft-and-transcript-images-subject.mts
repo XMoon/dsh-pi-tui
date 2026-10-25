@@ -163,7 +163,17 @@ function previewLimit(): number {
  * controlled shape the production renderer uses (`text` + `cursor`, no native
  * editing).
  */
-let draft = 'see attached '
+/**
+ * The BUSY shape seeds a genuinely MULTI-LINE draft (the worst case for the
+ * editor's share of a short pane), so the busy gate really exercises a
+ * multi-line editor rather than a one-line draft that merely allows 8 lines.
+ * The marker file is chosen by the flow, because `launch()` does not forward
+ * arbitrary environment variables.
+ */
+const busyDock = existsSync(`${dir}/busy.marker`)
+let draft = busyDock
+  ? 'see attached \nplease compare the\nfirst and second shot\nand tell me what differs\n'
+  : 'see attached '
 let cursor = draft.length
 
 function render(): void {
@@ -174,7 +184,7 @@ function render(): void {
   // and a MULTI-LINE editor, which is the worst case for the editor's visibility.
   // The launcher does not forward arbitrary env, so the busy shape is selected by
   // a marker file the flow drops into the run directory before launching.
-  const busy = existsSync(`${dir}/busy.marker`)
+  const busy = busyDock
   const dock = ui.col(
     { key: 'dock' },
     ...(busy
