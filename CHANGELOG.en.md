@@ -37,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in user messages, assistant messages and
   tool results are shown in their original order as an identity line plus a native image, and the
   same image appearing several times stays several visible occurrences while being read and
-  uploaded once. Clicking an image, zooming and moving between neighbouring images are the Tern
-  client's own affordances: this program adds no page, command or dialog. A draft image pulled back
+  uploaded once. Clicking an image and zooming are the Tern
+  client's own affordances (moving between neighbouring images depends on the client's version
+  and capabilities): this program adds no page, command or dialog. A draft image pulled back
   from the queue reuses the existing read path and shows its identity plus the reason when no
   authorization is available, never an empty image. The default PiTui renderer's image behaviour is
   unchanged.

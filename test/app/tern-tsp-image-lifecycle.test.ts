@@ -1097,3 +1097,39 @@ test('a narrow pane reads and sends only the occurrences it can SHOW', async () 
     'the hidden occurrence is still COUNTED in the status line')
   await harness.dispose()
 })
+
+// ── P2 (external review): the cost of re-projecting a large draft preview ───
+
+test('typing with two large draft previews up does not re-hash their bytes into a new send', async () => {
+  // The external review measured ~10ms per 16 MiB SHA-256 inside `session.blob`.
+  // What must be bounded is the REPEAT cost on every keystroke, so this case
+  // measures the sustained path: two ~4 MiB drafts already previewed, then a
+  // burst of edits through the composer's own sink.
+  const harness = await mountHarness()
+  const big = 4 * 1024 * 1024
+  const first = localDraft(1, '[image #1 (640×360)]', big, 'a.png')
+  const second = localDraft(2, '[image #2 (640×360)]', big, 'b.png')
+  harness.stageDrafts(`${first.placeholder} ${second.placeholder}`, [first, second])
+  await until('both previews to settle', () =>
+    dockDraftRows(harness.tern).filter(row => row.kind === 'image').length === 2)
+  const blobsAfterFirstPaint = harness.tern.blobIds().length
+  assert.equal(blobsAfterFirstPaint, 2, 'both drafts were sent once on the first paint')
+
+  // Sustained edits: each notification re-runs the whole dock projection.
+  const edits = 25
+  const started = process.hrtime.bigint()
+  for (let i = 0; i < edits; i += 1) {
+    harness.renderer.composer.setDraft(`${first.placeholder} ${second.placeholder}${'x'.repeat(i + 1)}`)
+  }
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6
+
+  assert.equal(harness.tern.blobIds().length, blobsAfterFirstPaint,
+    'no further blob was sent: the SDK content dedupe held across every edit')
+  const perEdit = elapsedMs / edits
+  // A generous bound: 8 MiB of hashing is ~2ms, so 25 edits over two 4 MiB
+  // images must stay far below a frame budget per edit. This FAILS if the
+  // projection ever starts re-sending (and therefore re-hashing) real bytes.
+  assert.ok(perEdit < 25,
+    `each edit projects in ${perEdit.toFixed(2)}ms (25 edits in ${elapsedMs.toFixed(1)}ms)`)
+  await harness.dispose()
+})

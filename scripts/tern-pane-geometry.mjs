@@ -71,6 +71,36 @@ function surviving(chains, node, axis) {
 /** The surviving span on `axis` (`'x'` unless asked otherwise). */
 export const visibleSpan = (chains, node, axis = 'x') => surviving(chains, node, axis).span
 
+/**
+ * The node's own rect along `axis`, and the part of it that survives every
+ * clipping ancestor. Unlike {@link containedXY} this reports the NUMBERS, so a
+ * caller can require the whole extent to be visible rather than "contained by
+ * some ancestor" — a node can sit inside every recorded ancestor box and still
+ * be scrolled or laid out outside the visible pane.
+ */
+export function visibleBox(chains, node) {
+  const box = rect(node)
+  const x = surviving(chains, node, 'x')
+  const y = surviving(chains, node, 'y')
+  return {
+    rect: box,
+    start: { x: x.start, y: y.start },
+    span: { x: x.span, y: y.span },
+  }
+}
+
+/**
+ * Whether the node's ENTIRE rect survives clipping on both axes — i.e. the user
+ * can see all of it, not merely part of it. `true` requires a positive size and
+ * a surviving span that matches the node's own extent within rounding slack.
+ */
+export function fullyVisible(chains, node, slack = 0.5) {
+  const { rect: box, span } = visibleBox(chains, node)
+  const [width, height] = [box[2], box[3]]
+  if (!(width > 0) || !(height > 0)) return false
+  return span.x >= width - slack && span.y >= height - slack
+}
+
 /** Every clipping ancestor on `axis` contains this node (0.5px rounding slack). */
 const within = (chains, node, axis) => {
   const box = rect(node)
