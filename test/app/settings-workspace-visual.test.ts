@@ -24,6 +24,9 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { registerTuiCommands, resolveComposerDelivery, type TuiCommandRunner } from '../../src/commands.ts'
 import { installGitAttributionPrompt, type SystemPromptLike } from '../../src/app/direct/system-prompt.ts'
+import { createNotificationRuntime } from '../../src/app/surface/notification-runtime.ts'
+import { resolveSubmitDelivery } from '../../src/app/submission/command-policy.ts'
+import { createTerminalNotificationPresentation } from '../../src/tui/notification/runtime.ts'
 import { getKeybindings } from '@xmoon76/pi-tui'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
@@ -168,6 +171,25 @@ interface HarnessOptions {
   /** The icon style the REAL `TuiApp` starts with (the composition's persisted
    *  read). Omitted = the app's own default. */
   iconStyle?: 'emoji' | 'symbols' | 'minimal'
+  /**
+   * C2-R2 joined proof: when supplied, the runner's notification read/write
+   * seams are delegated to THIS real owner instead of the harness's local
+   * variables. The caller hands over the ONE `NotificationRuntime` it composed
+   * (over the real terminal presentation), so a case can assert the real
+   * `CompletionNotificationController` and the real terminal bytes.
+   */
+  notificationRuntime?: {
+    setMode(mode: string): void
+    setMethod(method: string): void
+    currentMode(): 'unfocused' | 'always' | 'off'
+    currentMethod(): 'auto' | 'osc9' | 'osc777' | 'bell'
+    setCompletionOwner(identity: string | undefined): void
+    onAgentStatus(agentId: string, status: 'idle' | 'running'): void
+  }
+  /** An additional sink that records every notification write the seam performs. */
+  notificationWritesSink?: string[]
+  /** The terminal-progress mode the REAL `TuiApp` starts with (the boot read). */
+  appTerminalProgress?: 'off' | '9;4' | '7501' | '9;4+7501'
 }
 
 /** The embedded Plugin Manager page the composition factory hands the Settings
@@ -377,7 +399,7 @@ function setup(options: HarnessOptions = {}): Harness {
   // values (setNotificationMode/Method are the only writers).
   let notificationMode = 'unfocused'
   let notificationMethod = 'auto'
-  const notificationWrites: string[] = []
+  const notificationWrites: string[] = (options.notificationWritesSink ?? [])
   const terminalProgressWrites: string[] = []
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
@@ -408,6 +430,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const app = new TuiApp(vt, events, {
     copySelection: options.copySelection ?? (async (text: string) => { copied.push(text); return true }),
     ...options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle },
+    ...options.appTerminalProgress === undefined ? {} : { terminalProgressMode: options.appTerminalProgress },
   })
   app.start()
   if (options.displayPreset !== undefined && options.displayPreset !== app.displayPreset()) {
@@ -439,10 +462,18 @@ function setup(options: HarnessOptions = {}): Harness {
     // C2-R2: the runner's REAL notification/preferences write seams. The
     // Settings workspace reads their live facts back, so these stubs must
     // actually store what they were handed.
-    setNotificationMode: (mode: string) => { notificationMode = mode; notificationWrites.push(`mode:${mode}`) },
-    setNotificationMethod: (method: string) => { notificationMethod = method; notificationWrites.push(`method:${method}`) },
-    currentNotificationMode: () => notificationMode,
-    currentNotificationMethod: () => notificationMethod,
+    setNotificationMode: (mode: string) => {
+      notificationWrites.push(`mode:${mode}`)
+      if (options.notificationRuntime !== undefined) options.notificationRuntime.setMode(mode)
+      else notificationMode = mode
+    },
+    setNotificationMethod: (method: string) => {
+      notificationWrites.push(`method:${method}`)
+      if (options.notificationRuntime !== undefined) options.notificationRuntime.setMethod(method)
+      else notificationMethod = method
+    },
+    currentNotificationMode: () => options.notificationRuntime?.currentMode() ?? notificationMode,
+    currentNotificationMethod: () => options.notificationRuntime?.currentMethod() ?? notificationMethod,
     setTerminalProgressMode: (mode: string) => {
       terminalProgressWrites.push(mode)
       // The REAL mounted surface receives the parsed selection, exactly as the
@@ -7106,4 +7137,438 @@ test('every migrated writer changes exactly its own document field', async () =>
     assert.equal(document.theme, 'dark', `${entry.label} rewrote no unrelated field`)
     h.dispose()
   }
+})
+
+// ── C2-R2 acceptance R2-08: the Fullscreen NEGATIVE matrix ───────────────────
+//
+// The positive path (one write, Verified, switch on normal exit) is proven
+// above. Every case here drives the REAL `onClose(reason)` wiring and asserts
+// the one thing that must not happen: a physical screen switch. The stored
+// preference is always allowed to land — that is the next-mount path.
+
+/** The pieces a negative case needs: the harness plus a switch probe. */
+function fullscreenProbe(): {
+  readonly switches: boolean[]
+  readonly setup: (h: Harness) => void
+} {
+  const switches: boolean[] = []
+  return {
+    switches,
+    setup: (h) => { h.setOnFullscreenChange(fullscreen => switches.push(fullscreen)) },
+  }
+}
+
+// Regression: C2-R2 acceptance R2-08.
+test('a Fullscreen choice whose write is still PENDING when the user leaves switches nothing', async () => {
+  const probe = fullscreenProbe()
+  // The document write is held: the commit never settles before the close.
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' }, holdFirstReplace: true })
+  probe.setup(h)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r') // Confirm: the document write is held open
+  await h.firstWriteStarted()
+  assert.equal(h.replacements(), 1, 'the write really started and is held')
+  assert.match(h.view(), /Saving…/u)
+
+  // Leave the workspace while the write is unsettled.
+  await key(h, '\x1b') // choice -> detail
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  h.releaseFirstReplace()
+  await settle(h, 12)
+
+  assert.deepEqual(probe.switches, [], 'an unsettled choice never switches the screen')
+  assert.equal(h.app.isFullscreen(), false, 'the transcript screen is unchanged')
+  assert.equal(h.doc.fullscreen, 'on', 'the preference still lands once the write completes')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-08.
+test('a Fullscreen choice refused with Not saved keeps the screen and leaves the preference alone', async () => {
+  const probe = fullscreenProbe()
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { theme: 'dark', fullscreen: 'off' },
+    // The write "succeeds" but the authority keeps reading the old value.
+    applyReplace: () => {},
+  })
+  probe.setup(h)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Status\s+Not saved/u, 'the authoritative disagreement is a refusal')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(probe.switches, [], 'a Not saved preference is never applied')
+  assert.equal(h.app.isFullscreen(), false)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-08.
+test('a Fullscreen choice that completed without a readable readback switches nothing', async () => {
+  const probe = fullscreenProbe()
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' }, getFailureAfterWrite: true })
+  probe.setup(h)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Commit accepted/u, 'a write with no readback is accepted-but-unverified')
+  assert.match(h.view(), /verification unavailable/u)
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(probe.switches, [], 'an UNVERIFIED preference is never applied')
+  assert.equal(h.app.isFullscreen(), false)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-08.
+test('a Fullscreen choice whose rejection cannot be attributed switches nothing', async () => {
+  const probe = fullscreenProbe()
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { theme: 'dark', fullscreen: 'off' },
+    applyReplace: (next) => {
+      // The value lands, then the write reports failure: the outcome cannot be
+      // attributed to this request, so it is neither accepted nor refused.
+      Object.assign(h.doc, next)
+      throw new Error('post-write describe failed')
+    },
+  })
+  probe.setup(h)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Outcome unknown/u, 'an unattributable write is Outcome unknown')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(probe.switches, [], 'an Outcome unknown is never applied')
+  assert.equal(h.app.isFullscreen(), false)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-08.
+test('a verified Fullscreen choice does not switch when a Question takes the surface over', async () => {
+  const probe = fullscreenProbe()
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' } })
+  probe.setup(h)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Status\s+Verified/u)
+  // A blocking Question ARRIVES while the workspace is leased: it preempts the
+  // workspace through the FORCED close path (never the user's own exit).
+  const questions = h.app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await h.vt.waitForRender()
+  questions.catch(() => {})
+  assert.deepEqual(probe.switches, [], 'a Question takeover never applies the pending preference')
+  assert.equal(h.app.isFullscreen(), false, 'the question owns the surface untouched')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-08.
+test('a verified Fullscreen choice does not switch when another writer changed the stored value', async () => {
+  const probe = fullscreenProbe()
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' } })
+  probe.setup(h)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.fullscreen, 'on', 'the choice really persisted')
+  // An EXTERNAL writer flips the stored preference before the workspace closes.
+  h.doc.fullscreen = 'off'
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(probe.switches, [],
+    'the close re-read no longer matches the verified target, so nothing switches')
+  assert.equal(h.app.isFullscreen(), false)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-08.
+test('a verified Fullscreen choice does not switch on a legacy hand-off', async () => {
+  const probe = fullscreenProbe()
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' } })
+  probe.setup(h)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+  await key(h, '\x1b') // back to the rows level
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // the legacy hand-off closes the workspace
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Type to search/u, 'the existing editor owns the screen')
+  assert.deepEqual(probe.switches, [], 'a legacy hand-off is not a user exit')
+  assert.equal(h.app.isFullscreen(), false)
+  h.dispose()
+})
+
+// ── C2-R2 acceptance R2-10 / R2-11: the JOINED notification proof ───────────
+//
+// One case per axis, driven through the REAL workspace Confirm into the REAL
+// `CompletionNotificationController` (the ONE owner the composition constructs)
+// and read back as REAL terminal bytes from the REAL terminal presentation. The
+// focus tracker and the agent-identity fence are the production ones, not
+// fixtures: `createNotificationRuntime` + `createTerminalNotificationPresentation`
+// are the same calls `src/app/bootstrap.ts` makes.
+
+/** A real notification owner over a recording terminal writer. */
+function realNotificationOwner(): {
+  readonly writes: string[]
+  readonly runtime: ReturnType<typeof createNotificationRuntime>
+} {
+  const writes: string[] = []
+  const presentation = createTerminalNotificationPresentation({
+    writer: { write: (sequence: string) => { writes.push(sequence) } },
+  })
+  const runtime = createNotificationRuntime({
+    presentation,
+    notificationMode: 'unfocused',
+    notificationMethod: 'auto',
+  })
+  return { writes, runtime }
+}
+
+// Regression: C2-R2 acceptance R2-10.
+test('a Notifications confirm reaches the ONE controller and gates the next real completion', async () => {
+  const owner = realNotificationOwner()
+  const fixture = createDirectSettingsFixture({ theme: 'dark', notificationMode: 'unfocused' })
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    tuiSettings: fixture.settings,
+    notificationRuntime: owner.runtime,
+  })
+  // The terminal is FOCUSED, so the `unfocused` default suppresses a settle.
+  owner.runtime.setCompletionOwner('agent-1')
+  owner.runtime.noteUserInput()
+  owner.runtime.onAgentStatus('agent-1', 'running')
+  owner.runtime.onAgentStatus('agent-1', 'idle')
+  assert.deepEqual(owner.writes, [], 'the default mode suppresses a settle while focused')
+
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Notifications')
+  await highlightCandidate(h, 'always')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Status\s+Verified/u)
+  assert.equal(fixture.document().notificationMode, 'always')
+
+  // The SAME controller, driven by a REAL same-agent running -> idle, now emits.
+  owner.runtime.onAgentStatus('agent-1', 'running')
+  owner.runtime.onAgentStatus('agent-1', 'idle')
+  assert.equal(owner.writes.length, 1, 'the freshly selected mode lets the next settle through')
+
+  // A RETIRED agent's late idle still emits nothing (the production fence).
+  owner.runtime.onAgentStatus('agent-retired', 'running')
+  owner.runtime.onAgentStatus('agent-retired', 'idle')
+  assert.equal(owner.writes.length, 1, 'a late idle from a non-current agent never notifies')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-11.
+test('a Notification method confirm selects the real emitter and never emits a notification itself', async () => {
+  const owner = realNotificationOwner()
+  const fixture = createDirectSettingsFixture({ theme: 'dark', notificationMode: 'always', notificationMethod: 'auto' })
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    tuiSettings: fixture.settings,
+    notificationRuntime: owner.runtime,
+  })
+  owner.runtime.setCompletionOwner('agent-1')
+  // Start from `always` so the mode is not the variable under test.
+  owner.runtime.setMode('always')
+  await h.open('Input & Terminal')
+  await key(h, '\r')
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.indexOf('Notification method'); step += 1) await key(h, '\x1b[B')
+  assert.ok(h.view().includes('> Notification method'))
+  await key(h, '\r')
+  await highlightCandidate(h, 'bell')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(fixture.document().notificationMethod, 'bell')
+  assert.deepEqual(owner.writes, [],
+    'confirming the method emits NO notification — a synthetic probe is never sent')
+
+  // The NEXT real completion uses the selected emitter (one BEL byte).
+  owner.runtime.onAgentStatus('agent-1', 'running')
+  owner.runtime.onAgentStatus('agent-1', 'idle')
+  assert.deepEqual(owner.writes, ['\x07'], 'the same controller now delivers with the confirmed method')
+  h.dispose()
+})
+
+// ── C2-R2 acceptance R2-03: the JOINED busy-Enter route ─────────────────────
+//
+// The Document -> consumer link is the whole point of a persist-first field, so
+// this case joins the two halves on ONE document: the REAL workspace Confirm
+// writes it, and the REAL submit boundary (`resolveSubmitDelivery`, the exact
+// function `SubmissionController` calls with `deps.tuiSettings?.get().busyEnter`)
+// is then asked what the next busy Enter does — reading that same document.
+
+// Regression: C2-R2 acceptance R2-03.
+test('a Submit while busy confirm changes the very value the submit boundary reads', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', busyEnter: 'queue' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Submit while busy')
+  await highlightCandidate(h, 'steer')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Status\s+Verified/u)
+
+  // The consumer side, evaluated against the SAME document the write verified —
+  // no test-local copy of the policy is involved.
+  const document = fixture.settings.get()
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', document.busyEnter), 'steer',
+    'a busy plain Enter now steers the draft into the running turn')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', document.busyEnter), 'queue',
+    'the accelerated chord still takes the opposite delivery')
+  assert.equal(resolveSubmitDelivery(undefined, false, 'enter', document.busyEnter), 'queue',
+    'an IDLE submit is unaffected by the busy policy')
+  // And the row itself reports that same next-action policy as its Runtime fact.
+  await key(h, '\r')
+  assert.match(h.view(), /Runtime\s+Next busy Enter: steer/u,
+    `the Detail's Runtime fact agrees with the consumer:\n${h.view()}`)
+  h.dispose()
+})
+
+// ── C2-R2 acceptance R2-14 / R2-12: the remaining failure and legacy cases ───
+
+// Regression: C2-R2 acceptance R2-14.
+test('an R2 persist-first write is held inside the ONE queue and Retry uses the same writer', async () => {
+  let refuse = true
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { theme: 'dark', busyEnter: 'queue' },
+    applyReplace: (next) => {
+      if (refuse) throw new Error('settings namespace "tui-app" changed since it was read')
+      Object.assign(h.doc, next)
+    },
+  })
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Submit while busy')
+  await highlightCandidate(h, 'steer')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the first attempt reached the document writer')
+  // A persist-first refusal must NOT be dressed up as applied: the primary
+  // Value still reports the STORED fact, and no runtime switch is claimed.
+  assert.match(h.view(), /Status\s+Not saved/u, `the refusal is stated:\n${h.view()}`)
+  // A persist-first row's PRIMARY fact is the stored document value, so the
+  // unchanged store is painted as `Value` (there is no separate `Persisted`
+  // row on this row kind) — and the runtime half still says queue.
+  assert.match(h.view(), /Value\s+queue/u, 'the stored fact is unchanged')
+  assert.match(h.view(), /Runtime\s+Next busy Enter: queue/u,
+    'the next action really is still queue — nothing was applied')
+  assert.match(h.view(), /Retry save/u, 'the row offers the explicit retry')
+
+  // Retry through the SAME writer (the painted button, as a user clicks it).
+  refuse = false
+  const retryRow = rowOf(h, 'Retry save')
+  press(h, retryRow, cellIndexOf(h, retryRow, 'Retry save'))
+  release(h, retryRow, cellIndexOf(h, retryRow, 'Retry save'))
+  await settle(h)
+  assert.equal(h.replacements(), 2, 'the retry used the same writer exactly once')
+  assert.equal(h.doc.busyEnter, 'steer', 'the retried value is the one the user chose')
+  assert.match(h.view(), /Status\s+Verified/u, 'the retry verifies its own authoritative re-read')
+  assert.match(h.view(), /Runtime\s+Next busy Enter: steer/u, 'and the consumer fact follows it')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-12.
+test('a legacy terminalProgress "on" reads as the dual protocol and is never written back', async () => {
+  const values: TuiSettingsDoc = { ...DEFAULT_DOC, theme: 'dark', terminalProgress: 'on' }
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    tuiSettings: {
+      get: () => values,
+      replace: (next: TuiSettingsDoc) => { Object.assign(values, next) },
+    },
+    // The legacy value is what the mounted surface was booted with.
+    appTerminalProgress: '9;4+7501',
+  })
+  await h.open('Input & Terminal')
+  await key(h, '\r')
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.indexOf('Terminal progress'); step += 1) await key(h, '\x1b[B')
+  assert.ok(h.view().includes('> Terminal progress'))
+  // This row is runtime-primary: the LIVE fact reads the dual protocol and the
+  // RAW stored value (`on`) is reported separately as `Persisted`.
+  assert.match(h.view(), /Runtime\s+9;4\+7501|Value\s+9;4\+7501/u,
+    `the retired value reads as the dual protocol:\n${h.view()}`)
+  assert.match(h.view(), /Persisted\s+on/u,
+    `the raw stored value is reported verbatim, never rewritten:\n${h.view()}`)
+  assert.equal(h.replacements(), 0, 'merely reading a legacy value writes NOTHING back')
+
+  // A confirm on a DIFFERENT candidate is the only thing that may rewrite it.
+  await key(h, '\r')
+  await highlightCandidate(h, 'off')
+  await key(h, '\r')
+  await settle(h)
+  // This case supplies its OWN document object, so the authoritative read is
+  // that object — never the harness's default copy.
+  assert.equal(values.terminalProgress, 'off', 'only an explicit confirmation rewrites the field')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-04.
+test('a persist-first row reads the CURRENT raw value even when another writer just changed it', async () => {
+  // The painted read and the Confirm are separate moments. This case proves the
+  // row reports the document as it really is at THIS read — a stale value can
+  // never be presented as the stored one — by changing the document between two
+  // snapshot reads and re-opening the row.
+  const values: TuiSettingsDoc = { ...DEFAULT_DOC, theme: 'dark', busyEnter: 'queue' }
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    tuiSettings: {
+      get: () => values,
+      replace: (next: TuiSettingsDoc) => { Object.assign(values, next) },
+    },
+  })
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Submit while busy')
+  assert.match(h.view(), /> queue\s+\[current\]/u, 'the first read marks queue')
+
+  // Another writer commits `steer` behind the workspace's back WHILE the choice
+  // is open. A live choice must NOT silently re-anchor on an external write —
+  // its candidates stay the ones the user is looking at.
+  values.busyEnter = 'steer'
+  await key(h, 'r') // the refresh key is deliberately inert during a live choice
+  await settle(h)
+  assert.match(h.view(), /> queue\s+\[current\]/u,
+    `an external write never rewrites the open choice's candidates:\n${h.view()}`)
+  assert.equal(h.replacements(), 0, 'and nothing was written')
+
+  // Cancel the live choice, then use the workspace's OWN refresh gesture: `r`
+  // re-reads the authorities at the Detail level and the row must then report
+  // the value the document really holds NOW.
+  await key(h, '\x1b') // cancel the choice, back to the Detail level
+  await settle(h)
+  await key(h, 'r')
+  await settle(h)
+  assert.match(h.view(), /Value\s+steer/u,
+    `the re-read row reports the CURRENT stored value, never the stale one:\n${h.view()}`)
+  assert.match(h.view(), /Runtime\s+Next busy Enter: steer/u,
+    'the consumer fact follows the same fresh read')
+  await key(h, '\r') // re-open the choice on the fresh snapshot
+  assert.match(h.view(), /> steer\s+\[current\]/u, 'the fresh snapshot owns [current]')
+  assert.doesNotMatch(h.view(), /> queue\s+\[current\]/u,
+    'the previous stored value no longer claims to be current')
+  h.dispose()
 })
