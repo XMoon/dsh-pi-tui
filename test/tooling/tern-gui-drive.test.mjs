@@ -15,14 +15,19 @@
  *      visible in the result, not silently applied;
  *   4. the driver COPIES the client's PNG into the run directory: the client
  *      writes its shots into its own tree, and a run's evidence must not live
- *      outside the run.
+ *      outside the run — and each run reads from its OWN client-shot
+ *      directory, so a later run cannot overwrite an earlier run's picture;
+ *   5. the driver's `snapshot()` uses the SHARED index (chains keyed by the
+ *      node OBJECT) and its `click` goes through the visibility oracle: a node
+ *      whose own centre falls outside the fragment the client shows must NOT be
+ *      clicked at its centre.
  *
  * The client itself is NOT required: the driver is exercised against a fake
  * Tern CLI, so the test is deterministic and needs no display.
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -42,7 +47,7 @@ const driver = joinPath(repo, 'scripts', 'tern-gui-drive.mjs')
  */
 function writeFakeTern(dir) {
   const log = joinPath(dir, 'calls.log')
-  const script = `import { appendFileSync, writeFileSync } from 'node:fs'
+  const script = `import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 const args = process.argv.slice(2)
 appendFileSync(${JSON.stringify(log)}, args.join(' ') + '\\n')
@@ -70,10 +75,14 @@ if (command === 'resize') {
   reply({ ok: true })
 }
 if (command === 'stats') reply({ ok: true, viewport, pointer: [0, 0], frames: 1, nodes: 1 })
-if (command === 'tree') reply({ ok: true, tree: [] })
+if (command === 'tree') reply({ ok: true, tree: process.env.FAKE_TREE ? JSON.parse(process.env.FAKE_TREE) : [] })
 if (command === 'shot') {
   const id = rest[2] ?? 'shot'
-  const dir = process.env.FAKE_SHOT_DIR ?? process.cwd()
+  // A real client writes into the directory its WINDOW was started with. A ctl
+  // invocation's argv never carries that flag, so the test hands the directory in
+  // through the environment, exactly as the window would have received it.
+  const dir = process.env.FAKE_WINDOW_SHOTS ?? process.env.FAKE_SHOT_DIR ?? process.cwd()
+  mkdirSync(dir, { recursive: true })
   const png = join(dir, id + '.png')
   writeFileSync(png, 'PNG')
   reply({ ok: true, elements: 1, png })
@@ -194,4 +203,67 @@ test('the GUI driver copies the client\'s PNG into the run directory', (t) => {
   assert.equal(result.status, 0, result.stdout + result.stderr)
   // The client wrote its PNG into ITS OWN directory; the run must own a copy.
   assert.ok(readFileSync(joinPath(out, 'shots', '01-a-capture.png'), 'utf8') === 'PNG')
+})
+
+test('the GUI driver clicks the VISIBLE fragment, never a clipped node\'s centre', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-visible-')
+  const fake = writeFakeTern(dir)
+  // A node whose own box is y 100..140 but whose sized ancestor clips it at
+  // y 100..110: its centre (y=120) is in the clipped-away part.
+  const tree = [{
+    tag: 'div', class: 'clipper', rect: [0, 100, 200, 10],
+    children: [{ tag: 'div', class: 'sf sf-editor target', rect: [0, 100, 200, 40] }],
+  }]
+  const flow = joinPath(dir, 'flow.mjs')
+  writeFileSync(flow, `export default async function (h) {
+  const snap = h.snapshot()
+  const node = snap.nodes.find((n) => (n.class ?? '').includes('target'))
+  h.check('the target is in the tree', node !== undefined)
+  const clicked = await h.click(snap.chains, node)
+  h.measure('click result', JSON.stringify({ clicked }))
+  h.check('the click survives the clip', clicked === true)
+}
+`)
+  const out = joinPath(dir, 'out')
+  const result = spawnSync(process.execPath, [driver, flow, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', FAKE_TREE: JSON.stringify(tree) },
+  })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+
+  const log = readFileSync(joinPath(out, 'run.log'), 'utf8')
+  const sent = log.split('\n').find((line) => line.startsWith('SEND ok ["click"'))
+  assert.ok(sent !== undefined, 'the click was delivered')
+  // The surviving fragment is y 100..110, so the click must land at y=105 — a
+  // centre-only driver would send y=120, which is outside the clip.
+  const [, y] = JSON.parse(sent.slice('SEND ok '.length).split(' :: ')[0]).slice(1)
+  assert.ok(y >= 100 && y <= 110, `the click landed inside the visible fragment, got y=${y}`)
+})
+
+test('the GUI driver reads shots from THIS run\'s own client directory', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-shots-')
+  const fake = writeFakeTern(dir)
+  const flow = joinPath(dir, 'flow.mjs')
+  writeFileSync(flow, `export default async function (h) {
+  h.capture('one-shot', 'the capture under test')
+}
+`)
+  const out = joinPath(dir, 'out')
+  const env = {
+    ...process.env,
+    TERN_BIN: fake.file,
+    DISPLAY: ':0',
+    FAKE_WINDOW_SHOTS: joinPath(out, 'client-shots'),
+  }
+  const result = spawnSync(process.execPath, [driver, flow, '--out', out], { encoding: 'utf8', env })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+
+  // The run keeps its OWN client-shot directory, and the copied PNG is the one
+  // the client wrote THERE — not a stale file from another run's directory.
+  const clientShots = joinPath(out, 'client-shots')
+  assert.ok(existsSync(clientShots), 'the run has its own client-shot directory')
+  assert.equal(readFileSync(joinPath(clientShots, '01-one-shot.png'), 'utf8'), 'PNG')
+  assert.equal(readFileSync(joinPath(out, 'shots', '01-one-shot.png'), 'utf8'), 'PNG')
 })
