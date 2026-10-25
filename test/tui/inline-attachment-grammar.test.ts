@@ -251,6 +251,9 @@ test('a candidate closing quote is consumed with the token it closes', () => {
   // The reported fragment is exactly what the canonical placeholder replaces.
   assert.equal(applied.line.slice(applied.span.start, applied.span.end), '/image "shot.png"')
   // An UNQUOTED candidate never eats a following quote (it did not open it).
+  // A quote sitting right after an UNQUOTED token is that token's own closing
+  // fragment (the user typed `"sho|" ` or `sho|"`), so it is consumed with it —
+  // otherwise the completion would strand exactly the `"` this rule removes.
   const plain = applyInlineAttachmentPath('look /image sho" now', seat, 'look /image sho'.length, 0, 'shot.png')
-  assert.equal(plain.line, 'look /image shot.png" now', 'an unquoted value leaves the quote alone')
+  assert.equal(plain.line, 'look /image shot.png now', 'a stray closing fragment is consumed with the token')
 })
