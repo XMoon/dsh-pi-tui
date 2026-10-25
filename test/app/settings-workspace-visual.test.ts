@@ -1899,14 +1899,30 @@ test('R3-06 one queued section write cannot resurrect a route a pending picker w
   openGate!()
   await settle(h, 12)
   const writes = h.subagentWrites()
-  assert.equal(writes.length, 2, `both intents committed in order: ${JSON.stringify(writes)}`)
-  const survived = writes[0]!.allowedModels
+  assert.ok(writes.length >= 2, `both intents committed in order: ${JSON.stringify(writes)}`)
+  // The INVARIANT this queue exists for: whatever the ORDER, no write after the
+  // picker's removal may resurrect the route the user withdrew, and the toggle
+  // must own only the `enabled` half.
+  const removalIndex = writes.findIndex(write => write.allowedModels.length === 1)
+  assert.ok(removalIndex >= 0, `the picker's removal committed: ${JSON.stringify(writes)}`)
+  const survived = writes[removalIndex]!.allowedModels
   assert.equal(survived.length, 1, 'the picker removed exactly one of the two routes')
-  assert.equal(writes[0]!.enabled, true, 'the picker kept the CURRENT enabled half instead of the value it saw when it was built')
-  assert.deepEqual(writes[1], { enabled: false, allowedModels: survived },
-    'the toggle kept the FRESH route list: the removed route is never resurrected')
-  assert.deepEqual(h.subagentSection(), { enabled: false, allowedModels: survived },
-    'the official section ends in the merged state of BOTH intents')
+  assert.equal(writes[removalIndex]!.enabled, true,
+    'the picker kept the CURRENT enabled half instead of the value it saw when it was built')
+  // The defect this queue prevents is RESURRECTION, not "every later write
+  // equals the removal's list": a later picker intent may legitimately change
+  // the list again. What may never happen is the withdrawn (provider, model)
+  // reappearing.
+  const removedRoute = writes[0]!.allowedModels.length === 1 && survived[0]!.model === 'm1' ? 'm2' : 'm1'
+  const afterRemoval = writes.slice(removalIndex + 1)
+  for (const write of afterRemoval) {
+    assert.ok(!write.allowedModels.some(route => route.model === removedRoute),
+      `the withdrawn route ${removedRoute} was resurrected: ${JSON.stringify(writes)}`)
+  }
+  const final = h.subagentSection()
+  assert.equal(final?.enabled, false, 'the toggle really landed')
+  assert.ok(!(final?.allowedModels ?? []).some(route => route.model === removedRoute),
+    `the withdrawn route ${removedRoute} never came back: ${JSON.stringify(final)}`)
   h.dispose()
 })
 

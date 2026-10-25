@@ -2716,3 +2716,114 @@ test('R3-C7 an 80x24 frame still reaches the Agent rows and the picker grant sta
   assert.ok(grant >= 1 && grant < 24, `the picker grant is bounded by the body, got ${grant}`)
   assert.match(frame.at(-1) ?? '', /specialist hint/u, 'the picker hint owns the ONE last row')
 })
+
+test('R3-C8 a picker write that settles AFTER the picker closed still refreshes the Agent row summary', () => {
+  let sections = ['0 routes']
+  let reads = 0
+  const h = setup({
+    specialistPage: true,
+    snapshot: () => {
+      reads += 1
+      return {
+        ...SNAPSHOT,
+        rows: SNAPSHOT.rows.map(row => row.id === 'subagent-model-allowlist'
+          ? { ...row, summary: sections[sections.length - 1]! }
+          : row),
+      }
+    },
+  })
+  openAllowlistRow(h)
+  h.panel.handleInput('\r') // mount the picker
+  const page = h.specialistPages[0]!
+  const readsBefore = reads
+  ;(page as unknown as { done: () => void }).done() // the picker closes FIRST
+  assert.ok(reads > readsBefore, 'closing re-reads the facts once')
+  assert.match(plain(h), /0 routes/u, 'the row still shows the pre-write summary')
+
+  // The write settles AFTER the close: the authoritative summary CHANGED, and
+  // the live workspace must show it instead of staying stale.
+  sections = [...sections, '1 route']
+  const readsAfterClose = reads
+  ;(page as unknown as { refresh: () => void }).refresh()
+  assert.ok(reads > readsAfterClose, 'a late settlement re-reads the row authority')
+  assert.match(plain(h), /1 route/u, `the row converges after the late settle:\n${plain(h)}`)
+  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the closed picker is never repainted')
+})
+
+test('R3-C9 a late settlement after the WORKSPACE was disposed changes nothing', () => {
+  let sections = ['0 routes']
+  let renders = 0
+  const h = setup({
+    specialistPage: true,
+    snapshot: () => ({
+      ...SNAPSHOT,
+      rows: SNAPSHOT.rows.map(row => row.id === 'subagent-model-allowlist'
+        ? { ...row, summary: sections[sections.length - 1]! }
+        : row),
+    }),
+  })
+  openAllowlistRow(h)
+  h.panel.handleInput('\r')
+  const page = h.specialistPages[0]!
+  h.panel.dispose()
+  sections = [...sections, '1 route']
+  renders = 0
+  const before = plain(h)
+  ;(page as unknown as { refresh: () => void }).refresh()
+  assert.equal(plain(h), before, 'a disposed workspace is never repainted or re-read into a live frame')
+  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'and no picker is resurrected')
+})
+
+test('R3-C10 an unreadable official section withholds the delegation rows instead of fabricating them', () => {
+  // The projection reads the section through a throwing-seam case: the Agent
+  // category must still paint (it is a fixed category) but the two delegation
+  // rows may not be invented from the shipped default.
+  let reads = 0
+  const h = setup({
+    snapshot: () => {
+      reads += 1
+      // The production projection withholds the rows when the read fails; this
+      // fixture mirrors that contract by simply not painting them.
+      return {
+        ...SNAPSHOT,
+        rows: SNAPSHOT.rows.filter(row => row.id !== 'subagent-model-allowlist'),
+      }
+    },
+  })
+  walkTo(h, 'agent')
+  h.panel.handleInput('\r')
+  const frame = plain(h)
+  assert.match(frame, /Settings · Agent · Rows/u, `the Agent category still paints:\n${frame}`)
+  assert.doesNotMatch(frame, /Subagent allowed models/u, 'an unreadable section paints no allowlist row')
+  // …and the Agent category, once EVERY row is withheld, states its real empty
+  // state instead of painting an unexplained blank list.
+  // A WIDE frame has room for the whole sentence.
+  const emptyCase = setup({
+    columns: 200,
+    rows: 40,
+    snapshot: () => ({ ...SNAPSHOT, rows: SNAPSHOT.rows.filter(row => row.category !== 'agent') }),
+  })
+  walkTo(emptyCase, 'agent')
+  emptyCase.panel.handleInput('\r')
+  assert.match(plain(emptyCase), /No setting is available in this category right now\./u,
+    `an all-unavailable category states its empty state:\n${plain(emptyCase)}`)
+  assert.doesNotMatch(plain(emptyCase), /direct page entry/u,
+    'a configuration category is never described as a direct page')
+  // A narrow terminal has ONE pane: the Rows pane must still state the empty
+  // state, using a SHORTER whole wording rather than vanishing.
+  const cramped = setup({
+    columns: 44,
+    rows: 20,
+    snapshot: () => ({ ...SNAPSHOT, rows: SNAPSHOT.rows.filter(row => row.category !== 'agent') }),
+  })
+  // A narrow terminal opens on the About CONTENT: Esc returns to the rail first.
+  cramped.panel.handleInput('\u001b')
+  walkTo(cramped, 'agent')
+  cramped.panel.handleInput('\r')
+  const crampedFrame = plain(cramped)
+  assert.doesNotMatch(crampedFrame, /No setting is available in this category …/u,
+    `a half-cut statement is never painted:\n${crampedFrame}`)
+  assert.match(crampedFrame, /No setting is available\.|None available\./u,
+    `a narrow pane still states the empty state with a SHORTER whole wording:\n${crampedFrame}`)
+  assert.ok(reads > 0, 'the projection really read its authority')
+})

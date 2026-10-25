@@ -1565,21 +1565,23 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
 
   get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
     const selection = this.selection()
+    // No official service mounted at all: this is the shipped default, and
+    // `available()` already refuses to offer the rows (a caller that still asks
+    // gets the honest absence of a section, not a fabricated saved value).
     if (selection === undefined) return { enabled: false, allowedModels: [] }
-    try {
-      const current = selection.current()
-      return {
-        enabled: current.enabled === true,
-        allowedModels: (current.allowedModels ?? []).flatMap(route => {
-          const candidate = route as { provider?: unknown; model?: unknown }
-          return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
-            ? [{ provider: candidate.provider, model: candidate.model }]
-            : []
-        }),
-      }
-    } catch {
-      // A failing official read reports the shipped default (off, empty).
-      return { enabled: false, allowedModels: [] }
+    // A THROWING official read is UNREADABLE, never `{enabled:false, []}`: the
+    // shipped default is not the stored value, and handing it to a writer would
+    // let `enabled:false` + an empty list overwrite routes the Host still holds.
+    // The read therefore fails loud and every writer/verifier must handle it.
+    const current = selection.current()
+    return {
+      enabled: current.enabled === true,
+      allowedModels: (current.allowedModels ?? []).flatMap(route => {
+        const candidate = route as { provider?: unknown; model?: unknown }
+        return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
+          ? [{ provider: candidate.provider, model: candidate.model }]
+          : []
+      }),
     }
   }
 
