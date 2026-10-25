@@ -46,6 +46,7 @@ import {
   type VisualSessionEvent,
 } from '../../src/domain/visual/publication.ts'
 import { svgFactFromArgs } from '../../src/domain/visual/svg.ts'
+import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
@@ -128,7 +129,12 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
-type PolicyName = 'none' | 'replace-generating' | 'replace-publishing' | 'block-publishing'
+type PolicyName =
+  | 'none'
+  | 'replace-generating'
+  | 'replace-generating-content'
+  | 'replace-publishing'
+  | 'block-publishing'
 
 /** One real Host with the production visual row and one live agent. */
 interface Harness {
@@ -155,6 +161,17 @@ function installPolicy(agentCtx: Context, policy: PolicyName): void {
     if (policy === 'replace-generating' && generating) {
       await next()
       return { kind: 'accept', content: [{ type: 'text', text: 'REPLACED: the generating result was redacted' }] }
+    }
+    if (policy === 'replace-generating-content' && generating) {
+      await next()
+      // A CONTENT-ONLY rewrite that keeps a valid-looking fact line but drops
+      // the projected reference block: the fact survives, the credential to
+      // publish does not.
+      if (exec.name === CHART_TOOL_NAME) {
+        const fact = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
+        return { kind: 'accept', content: [fact[0] as { type: 'text'; text: string }, fact[1] as { type: 'text'; text: string }] }
+      }
+      return next()
     }
     if (policy === 'replace-publishing' && publishing) {
       await next()
@@ -339,6 +356,24 @@ test('a policy replacement of the generating result removes every qualification'
   assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
   const publishResult = toolResults(events).find(result => result.callId === 'call-present')
   assert.equal(publishResult?.isError, true, 'the publication had nothing to publish')
+})
+
+test('a content-only rewrite that drops the reference block leaves the fact but no source', async (t) => {
+  const life = testLifecycle(t)
+  const harness = await boot(life, 'strip-ref', 'replace-generating-content')
+  await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), () => [{
+    callId: 'call-present',
+    name: PRESENT_VISUAL_TOOL_NAME,
+    args: { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+  }])
+  const events = await harness.observe()
+  const result = toolResults(events).find(entry => entry.callId === 'call-chart')
+  assert.ok(result !== undefined)
+  assert.ok(result.texts.some(text => text.startsWith('visual-v1:')), 'the fact line survives the rewrite')
+  assert.ok(!result.texts.some(text => text.startsWith('visual-ref-v1:')), 'the reference block is gone')
+  assert.deepEqual(collectVisualSources(harness.sessionId, events), [],
+    'a fact without its projected reference is not a publishable source')
+  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
 })
 
 test('a policy replacement of the publication result makes the publication unreal', async (t) => {
