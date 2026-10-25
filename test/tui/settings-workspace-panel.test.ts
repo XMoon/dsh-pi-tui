@@ -2132,6 +2132,15 @@ const INPUT_TERMINAL_LABELS = [
   'Notifications', 'Notification method', 'Terminal progress',
 ] as const
 
+const walkToInputTerminalRow = (h: Harness, label: (typeof INPUT_TERMINAL_LABELS)[number]): void => {
+  const target = INPUT_TERMINAL_LABELS.indexOf(label)
+  assert.ok(target >= 0, `the fixture must know ${JSON.stringify(label)}`)
+  walkTo(h, 'input-terminal')
+  h.panel.handleInput('\r') // Categories -> Rows
+  for (let step = 0; step < target; step += 1) h.panel.handleInput('\u001b[B')
+  assert.match(plain(h), new RegExp(`> ${label}`, 'u'), `the ${label} row owns the selection`)
+}
+
 const walkToConversationRow = (h: Harness, label: (typeof CONVERSATION_LABELS)[number]): void => {
   const target = CONVERSATION_LABELS.indexOf(label)
   assert.ok(target >= 0, `the fixture must know ${JSON.stringify(label)}`)
@@ -2178,13 +2187,23 @@ test('Conversation keeps the frozen seven-row order', () => {
   assert.match(all, /Rows \(7\)/u, 'the Conversation rows count is the real seven')
 })
 
-test('browsing the five rows writes nothing; only an explicit Confirm dispatches', () => {
-  for (const [label, field] of [
-    ['Icon style', 'icon-style'],
-    ['Transcript detail', 'expand'],
-    ['Thinking detail', 'thinking'],
-    ['Progress updates', 'progress-updates'],
-    ['Response style', 'response-style'],
+test('browsing a writable row writes nothing; only an explicit Confirm dispatches', () => {
+  for (const [label, field, category] of [
+    ['Icon style', 'icon-style', 'appearance'],
+    ['Transcript detail', 'expand', 'conversation'],
+    ['Thinking detail', 'thinking', 'conversation'],
+    ['Progress updates', 'progress-updates', 'conversation'],
+    ['Response style', 'response-style', 'conversation'],
+    // C2-R2: the two persist-first rows and the six apply-first rows share the
+    // SAME choice/Confirm machinery, so browsing them must write nothing too.
+    ['Submit while busy', 'busy-enter', 'conversation'],
+    ['Git attribution', 'git-attribution', 'conversation'],
+    ['Home/End keys', 'home-end-keys', 'input-terminal'],
+    ['Fullscreen', 'fullscreen', 'input-terminal'],
+    ['Mouse wheel lines', 'wheel-scroll-lines', 'input-terminal'],
+    ['Notifications', 'notification-mode', 'input-terminal'],
+    ['Notification method', 'notification-method', 'input-terminal'],
+    ['Terminal progress', 'terminal-progress', 'input-terminal'],
   ] as const) {
     const h = setup({ columns: 120, rows: 40 })
     plain(h)
@@ -2192,8 +2211,10 @@ test('browsing the five rows writes nothing; only an explicit Confirm dispatches
       walkTo(h, 'appearance')
       h.panel.handleInput('\r')
       h.panel.handleInput('\u001b[B') // Configured theme -> Icon style
+    } else if (category === 'conversation') {
+      walkToConversationRow(h, label as (typeof CONVERSATION_LABELS)[number])
     } else {
-      walkToConversationRow(h, label)
+      walkToInputTerminalRow(h, label as (typeof INPUT_TERMINAL_LABELS)[number])
     }
     const atRows = plain(h)
     assert.match(atRows, new RegExp(label, 'u'), `the row is selected at ${label}`)
