@@ -590,3 +590,160 @@ test('present_visual declares its concurrency safety and its exact output shape'
   assert.match(schema, /"version"/u)
   assert.doesNotMatch(schema, /callId|turn|title|path|bytes/u, 'no redundant authority crosses the output contract')
 })
+
+/** A registry whose `sessionQuery` observation is under test control. */
+function mountWithControlledObservation(boundaryState: {
+  openTurnStartSeq: number | null
+  lastStepStartSeq: number | null
+  lastStepBoundary: { kind: 'start' | 'end'; seq: number } | null
+  lastTurn: number
+}): {
+  ctx: Context
+  boundary: typeof boundaryState
+  /** Resolve the suspended observation with the given committed events. */
+  releaseObservation(events: readonly { type: string }[], source?: 'live' | 'prepared'): void
+  /** Whether the observation lease was disposed. */
+  leaseDisposed(): boolean
+  /** Whether an observation was requested at all. */
+  observed(): boolean
+} {
+  const ctx = new Context()
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('systemPrompt', {
+    tools: () => {},
+    section: () => () => {},
+  })
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('agents', { get: () => undefined })
+  let disposed = false
+  let requested = false
+  let resolvePending: ((value: unknown) => void) | undefined
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionQuery', {
+    observeSession: async () => {
+      requested = true
+      const value = await new Promise(resolve => { resolvePending = resolve })
+      return { ...(value as object), [Symbol.dispose]: () => { disposed = true } }
+    },
+  })
+  const boundary = boundaryState
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionProjections', {
+    // The real projection hands out a fresh value per read; returning one shared
+    // object would let a later mutation rewrite the tool body's OWN fence.
+    stateOf: () => ({ ...boundary, lastStepBoundary: boundary.lastStepBoundary === null ? null : { ...boundary.lastStepBoundary } }),
+  })
+  new ToolRuntime(ctx)
+  return {
+    ctx,
+    boundary,
+    releaseObservation(events, source = 'live'): void {
+      const resolve = resolvePending
+      assert.ok(resolve !== undefined, 'the tool body must request an observation before it can be released')
+      resolvePending = undefined
+      resolve({ source, header: { id: SESSION_ID }, events })
+    },
+    leaseDisposed: () => disposed,
+    observed: () => requested,
+  }
+}
+
+const SESSION_ID = 'session-observation-probe'
+
+/** Install the production row over an agent-shaped `exec`. */
+function installPresentProbe(ctx: Context): void {
+  applyVisualTools(ctx, { enabled: { get: () => true } } as never)
+}
+
+test('present_visual rejects a boundary change across its observation and releases the lease', async () => {
+  const boundary = {
+    openTurnStartSeq: 3 as number | null,
+    lastStepStartSeq: 7 as number | null,
+    lastStepBoundary: { kind: 'start' as 'start' | 'end', seq: 7 },
+    lastTurn: 1,
+  }
+  const probe = mountWithControlledObservation(boundary)
+  installPresentProbe(probe.ctx)
+  const definition = probe.ctx.tools.get(PRESENT_VISUAL_TOOL_NAME)
+  assert.ok(definition !== undefined)
+  const exec = {
+    callId: ToolCallId('call-present'),
+    agent: { session: { id: SESSION_ID } },
+    signal: new AbortController().signal,
+    deferContext: () => {},
+    concludeTurn: () => {},
+    token: Symbol('token'),
+    rootCallId: ToolCallId('call-present'),
+    name: PRESENT_VISUAL_TOOL_NAME,
+    arguments: {},
+  }
+  const running = definition.execute(
+    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    exec as never,
+  )
+  // The observation is suspended and the turn advances to a DIFFERENT open
+  // step underneath it: the boundary is still a legal open step, so only the
+  // before/after comparison can catch the change.
+  assert.equal(probe.observed(), true)
+  probe.boundary.lastStepBoundary = { kind: 'start', seq: 11 }
+  probe.boundary.lastStepStartSeq = 11
+  probe.releaseObservation([])
+  await assert.rejects(running, /boundary changed/u)
+  assert.equal(probe.leaseDisposed(), true, 'the observation lease is released on the refusal path')
+})
+
+test('present_visual surfaces an aborted observation as cancellation and still releases the lease', async () => {
+  const probe = mountWithControlledObservation({
+    openTurnStartSeq: 3,
+    lastStepStartSeq: 7,
+    lastStepBoundary: { kind: 'start', seq: 7 },
+    lastTurn: 1,
+  })
+  installPresentProbe(probe.ctx)
+  const definition = probe.ctx.tools.get(PRESENT_VISUAL_TOOL_NAME)
+  assert.ok(definition !== undefined)
+  const controller = new AbortController()
+  const running = definition.execute(
+    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    {
+      callId: ToolCallId('call-present-abort'),
+      agent: { session: { id: SESSION_ID } },
+      signal: controller.signal,
+      deferContext: () => {},
+      concludeTurn: () => {},
+      token: Symbol('token'),
+      rootCallId: ToolCallId('call-present-abort'),
+      name: PRESENT_VISUAL_TOOL_NAME,
+      arguments: {},
+    } as never,
+  )
+  controller.abort(new Error('the caller cancelled the turn'))
+  probe.releaseObservation([])
+  await assert.rejects(running, /the caller cancelled the turn/u)
+  assert.equal(probe.leaseDisposed(), true, 'an aborted read never leaks the lease')
+})
+
+test('present_visual refuses a prepared (non-live) observation', async () => {
+  const probe = mountWithControlledObservation({
+    openTurnStartSeq: 3,
+    lastStepStartSeq: 7,
+    lastStepBoundary: { kind: 'start', seq: 7 },
+    lastTurn: 1,
+  })
+  installPresentProbe(probe.ctx)
+  const definition = probe.ctx.tools.get(PRESENT_VISUAL_TOOL_NAME)
+  assert.ok(definition !== undefined)
+  const running = definition.execute(
+    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    {
+      callId: ToolCallId('call-present-prepared'),
+      agent: { session: { id: SESSION_ID } },
+      signal: new AbortController().signal,
+      deferContext: () => {},
+      concludeTurn: () => {},
+      token: Symbol('token'),
+      rootCallId: ToolCallId('call-present-prepared'),
+      name: PRESENT_VISUAL_TOOL_NAME,
+      arguments: {},
+    } as never,
+  )
+  probe.releaseObservation([], 'prepared')
+  await assert.rejects(running, /requires a live Session observation/u)
+  assert.equal(probe.leaseDisposed(), true)
+})

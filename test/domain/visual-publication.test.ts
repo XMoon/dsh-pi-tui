@@ -225,6 +225,35 @@ test('a missing, mismatched or malformed reference block never becomes a source'
   assert.deepEqual(collectVisualSources(SESSION, malformed.events()), [])
 })
 
+test('a reference block in the wrong POSITION is not a projected reference', () => {
+  const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
+  const tuple = new LogBuilder().turnStart(1).call(1, 0, 'c1', 'dsh_pi_tui_chart', CHART_ARGS)
+  const ref = visualReference({ sessionId: SESSION, ...tuple })
+  // The ref text is present but NOT immediately before the fact: it sits before
+  // the human block instead. Position, not presence, is the contract.
+  const log = new LogBuilder().turnStart(1)
+  log.call(1, 0, 'c1', 'dsh_pi_tui_chart', CHART_ARGS)
+  log.result(1, 0, 'c1', [
+    { type: 'text', text: visualReferenceLine(ref) },
+    blocks[0] as ContentBlock,
+    blocks[1] as ContentBlock,
+  ])
+  log.turnEnd(1)
+  assert.deepEqual(collectVisualSources(SESSION, log.events()), [],
+    'a reference block that is not the one immediately before the fact is not projected')
+
+  // A reference block AFTER the fact is likewise not a projected reference.
+  const after = new LogBuilder().turnStart(1)
+  after.call(1, 0, 'c1', 'dsh_pi_tui_chart', CHART_ARGS)
+  after.result(1, 0, 'c1', [
+    blocks[0] as ContentBlock,
+    blocks[1] as ContentBlock,
+    { type: 'text', text: visualReferenceLine(ref) },
+  ])
+  after.turnEnd(1)
+  assert.deepEqual(collectVisualSources(SESSION, after.events()), [])
+})
+
 test('a failed result, a mismatched fact type or a replaced credential never becomes a source', () => {
   // isError result.
   const failed = new LogBuilder().turnStart(1)
@@ -330,6 +359,37 @@ test('a real present_visual call/result pair publishes its reference once', () =
   assert.equal(published[0]?.ref, ref)
   assert.equal(published[0]?.source.type, 'chart')
   assert.equal(published[0]?.callId, 'call-present')
+})
+
+test('a non-visual tool whose RESULT text claims the chart shape is not a source', () => {
+  // The durable call owns the tool identity. This `bash` result satisfies EVERY
+  // other qualifier — the exact projected reference block plus a valid final
+  // chart fact — so only the real `tool/call` name can refuse it.
+  const log = new LogBuilder().turnStart(1)
+  const tuple = log.call(1, 0, 'call-bash', 'bash', { command: 'cat chart.json' })
+  const ref = visualReference({ sessionId: SESSION, ...tuple })
+  const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
+  log.result(1, 0, 'call-bash', [
+    blocks[0] as ContentBlock,
+    { type: 'text', text: visualReferenceLine(ref) },
+    blocks[1] as ContentBlock,
+  ])
+  log.turnEnd(1)
+  const events = log.events()
+  // Control: the very same result shape under the REAL chart name IS a source,
+  // so this case cannot pass merely because the shape is unqualified.
+  const control = new LogBuilder().turnStart(1)
+  const controlTuple = control.call(1, 0, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS)
+  const controlRef = visualReference({ sessionId: SESSION, ...controlTuple })
+  control.result(1, 0, 'call-chart', [
+    blocks[0] as ContentBlock,
+    { type: 'text', text: visualReferenceLine(controlRef) },
+    blocks[1] as ContentBlock,
+  ])
+  control.turnEnd(1)
+  assert.equal(collectVisualSources(SESSION, control.events()).length, 1, 'the shape alone qualifies under the real name')
+  assert.deepEqual(collectVisualSources(SESSION, events), [],
+    'the durable tool/call name, not the result text, decides the tool')
 })
 
 test('a fabricated receipt from another tool publishes nothing', () => {
