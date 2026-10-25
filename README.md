@@ -325,8 +325,13 @@ TUI 使用 DSH 提供的模型和设置服务。
 保留 `[Details]` 焦点标识；只有标题会占掉唯一内容行时才让位。
 它展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好名称、
 Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
-态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
-原始值；浏览、选择与复制本身都不写入配置。
+态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取；浏览与选择本身都不写入配置。
+普通配置行不提供复制：需要精确保留某个值时请到 About 复制对应事实。
+
+About 的复制入口只留在键盘上：选中一事实按 `c` 复制该事实的精确原始值（动作栏只在它真的
+画在屏幕上时提示 `c copy fact`），按 `C` 把整份 About 报告复制到剪贴板；正文里最多只有
+一个 `Copy All [C]`，每条事实后面不再有 `Copy [C]` 按钮，点击普通事实也不会复制。
+`Shift+C` 在分类栏焦点下同样可用。复制仍只证明已交给本地剪贴板交付路径，不写入任何配置。
 
 `/status` 是 `/settings` 的真实别名：同一 handler、同一初始 About 焦点与同一套读取；无 Session
 时两者都不创建会话、不读统计。`/statusline` 仍是 `/footer` 的别名，不经过 Settings。
@@ -346,7 +351,7 @@ PlatformAccount 与 Host 的 loopback `/oauth/callback` 登录，不会被当作
 `Right` 或 `Enter`，或点击 `[Change…]` / 可见的 Detail 内容，即可在同一 L2 详情中打开
 候选选择；当前值与 Runtime / Persisted 事实留在同一详情事实区，并与候选列表独立滚动。`Up`/`Down`/`Home`/`End`
 移动候选，`PgUp`/`PgDn` 和事实区上的滚轮只滚动详情事实，候选区滚轮独立滚动候选；
-选择期间可按 `C` 复制仍未更改的原始值，但仅当动作栏实际绘出 `c copy`，它不会提交候选。
+选择期间的复制键不复制任何内容，也不会提交候选。
 `Enter` 或点击 `[Confirm]` 明确确认，`Left`/`Esc`/`Backspace` 或 `[Cancel]` 取消并直接回到
 L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选择；pending 写入时不触发新选择。若当前候选身份已滚出可见区域，第一次 `Enter` 只将其重新显示，之后才能确认；
 44×8 短屏在长身份需要空间时先省略可选的 `Choose value` 标题；若仍不足，再将事实区压到只保留旧 `Value` 的一行。只有完整身份、`Confirm` 与 `Enter confirm` 同屏可见时才能确认，超过剩余容量仍拒绝写入。只有实际绘制出来的

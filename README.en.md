@@ -410,8 +410,17 @@ Display facts: the theme's source-qualified raw value plus its friendly name,
 Icon style, the live Transcript display preset alongside the persisted preference,
 the live Thinking detail state, and each row's configuration Scope and backend
 readiness. `R`
-re-reads and `C` copies the selected row's exact source value. Browsing, choosing
-and copying alone never write configuration.
+re-reads. Browsing and choosing never write configuration, and the ordinary
+configuration rows offer no copy at all: copy the matching About fact when you
+need an exact value.
+
+About's copy actions live on the keyboard: with a fact selected, `c` copies that
+fact's exact raw value (the Action Bar advertises `c copy fact` only while the
+fact is really painted), and `C` copies the whole About report to the clipboard.
+The body carries at most one `Copy All [C]`; facts no longer get a `Copy [C]`
+button and clicking an ordinary fact never copies. `Shift+C` works from the
+category rail too. A copy still only proves the bytes were emitted to the local
+clipboard delivery path, and never writes configuration.
 
 `/status` is a real alias of `/settings`: the same handler, the same initial
 About focus and the same reads; neither creates a session or reads statistics
@@ -439,8 +448,8 @@ Detail content opens the candidate choice in the SAME L2 pane. Current-value and
 Runtime/Persisted facts stay in the same pane above the candidate region and scroll
 independently. `Up`/`Down`/`Home`/`End` move the candidate; `PgUp`/`PgDn` and the
 wheel over facts scroll only the fact region, while the candidate wheel scrolls
-independently. During choice, `C` copies the original row value only while the
-Action Bar paints `c copy`; it never copies or commits the draft candidate. `Enter`
+independently. During choice the copy keys copy nothing and never commit the
+draft candidate. `Enter`
 or `[Confirm]` confirms explicitly, and `Left`/`Esc`/`Backspace` or `[Cancel]`
 cancels directly to L1 without writing anything. If the selected candidate identity
 has scrolled out of view, the first Enter only reveals it; confirmation requires a

@@ -776,6 +776,198 @@ function staticAboutSource(view: AboutStatusView, onRefresh: () => void = () => 
   return () => controller
 }
 
+// ── PR3: the Legacy Copy verb is retired from every level/phase ────────────
+//
+// The Legacy configuration Detail no longer paints `Copy value [C]`, no longer
+// advertises `c copy value`, and no `c`/`C` byte — raw, Kitty CSI-u or
+// modifyOtherKeys — reaches the clipboard owner at ANY level or edit phase.
+// The negative control is the CLIPBOARD SINK (not "no Host call") and every
+// positive Legacy behavior (change/confirm/retry/legacy handoff) still runs.
+test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any level or phase', () => {
+  const encodedCopyKeys = ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
+  for (const columns of [72, 100, 120] as const) {
+    const copied: string[] = []
+    const h = setup({ columns, rows: 24, onCopy: text => { copied.push(text) } })
+    // A narrow terminal opens on the About CONTENT: Esc returns to the rail.
+    if (!/Settings · Categories/u.test(plain(h, columns).split('\n')[0] ?? '')) {
+      h.panel.handleInput('\u001b')
+      plain(h, columns)
+    }
+    assert.match(plain(h, columns).split('\n')[0] ?? '', /Settings · Categories/u, `the rail owns ${columns}`)
+    h.panel.handleInput('\u001b[B')
+    h.panel.handleInput('\u001b[B')
+    h.panel.handleInput('\u001b[B') // About -> Appearance
+    // L0 (rail), L1 (rows) and L2 (Detail) each refuse every copy byte.
+    for (const data of encodedCopyKeys) h.panel.handleInput(data)
+    assert.equal(copied.length, 0, `L0 copies nothing at ${columns}`)
+    h.panel.handleInput('\r') // L0 -> L1
+    for (const data of encodedCopyKeys) h.panel.handleInput(data)
+    assert.equal(copied.length, 0, `L1 copies nothing at ${columns}`)
+    // The browsing L2 (the level the retired `Copy value [C]` lived on) exists
+    // only where Tab can re-focus the Detail pane WITHOUT opening the choice:
+    // a narrow frame paints one region at a time. A narrow walk therefore goes
+    // straight L1 -> choosing, which the case below covers at every width.
+    if (columns >= 76) {
+      h.panel.handleInput('\t')
+      const browsing = plain(h, columns)
+      assert.match(browsing.split('\n')[0] ?? '', /Appearance · Configured theme/u,
+        `the Detail pane owns the keyboard at ${columns}:\n${browsing}`)
+      assert.doesNotMatch(browsing, /Copy value \[C\]/u, `L2 paints no Copy value badge at ${columns}`)
+      assert.doesNotMatch(browsing, /c copy value/u, `L2 advertises no copy verb at ${columns}`)
+      // The retired verb is gone but the REAL Detail verbs are intact.
+      const detailBar = browsing.split('\n').at(-1)!
+      assert.match(detailBar, /r refresh/u, `the Detail refresh hint survives at ${columns}:\n${detailBar}`)
+      assert.match(detailBar, /Left back/u, `the Detail back hint survives at ${columns}:\n${detailBar}`)
+      // Every painted cell of the DETAIL pane (where the retired button lived)
+      // is inert for a copy gesture. The sweep stays inside that pane so it
+      // cannot navigate the rail.
+      const detail = (h.panel as unknown as {
+        paintedPanes: { detail?: { x: number; width: number; contentTop: number; contentRows: number } }
+      }).paintedPanes.detail
+      assert.ok(detail !== undefined, `the Detail pane is painted at ${columns}`)
+      for (let row = detail.contentTop; row < detail.contentTop + Math.max(1, detail.contentRows); row += 1) {
+        for (let col = detail.x; col < detail.x + detail.width; col += 4) {
+          h.panel.onCellPress(col, row)
+          h.panel.onCellClick(col, row)
+          // Re-paint so a click that changed focus cannot leave the frame stale
+          // for the next gesture in the sweep.
+          plain(h, columns)
+        }
+      }
+      for (const data of encodedCopyKeys) h.panel.handleInput(data)
+      assert.equal(copied.length, 0, `no Detail cell or key copies at L2 ${columns}`)
+    }
+
+    // Choosing still needs the painted Confirm: the retry/confirm ladder and
+    // the write path are untouched by the copy removal. This leg uses its own
+    // harness so the cell sweep above cannot have moved the selection.
+    const choosing = setup({ columns, rows: 24, onCopy: text => { copied.push(text) } })
+    plain(choosing, columns)
+    if (!/Settings · Categories/u.test(plain(choosing, columns).split('\n')[0] ?? '')) {
+      choosing.panel.handleInput('\u001b')
+      plain(choosing, columns)
+    }
+    choosing.panel.handleInput('\u001b[B')
+    choosing.panel.handleInput('\u001b[B')
+    choosing.panel.handleInput('\u001b[B') // About -> Appearance
+    choosing.panel.handleInput('\r') // L0 -> L1
+    choosing.panel.handleInput('\x1b[H') // Home: the first, writable Theme row
+    const writes = choosing.commits()
+    choosing.panel.handleInput('\r') // rows -> choosing (writable Theme row)
+    assert.match(plain(choosing, columns), /Choose value/u, `Enter still opens the choice at ${columns}`)
+    for (const data of encodedCopyKeys) choosing.panel.handleInput(data)
+    assert.equal(copied.length, 0, `choosing copies nothing at ${columns}`)
+    assert.match(plain(choosing, columns), /Choose value/u, 'the copy keys never dismiss the choice')
+    choosing.panel.handleInput('\r') // explicit Confirm -> the ONE pending write
+    assert.equal(choosing.commits(), writes + 1, `Confirm still dispatches exactly one write at ${columns}`)
+  }
+})
+
+// ── PR3: About keeps keyboard c / C with the ONE body Copy All badge ──────
+test('PR3 About: a visible selected fact copies with c, never from a per-fact badge; rail focus keeps only Shift+C', () => {
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: { kind: 'ready', sessionId: 'sess-pr3', title: 'pr3 proof', cwd: '/ws', context: 'fresh' },
+    epoch: 5,
+  }
+  const copied: string[] = []
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    aboutStatusSource: staticAboutSource(view),
+    onCopy: text => { copied.push(text) },
+  })
+  const railFrame = plain(h, 120)
+  assert.equal(railFrame.match(/Copy All \[C\]/gu)?.length, 1, 'the rail frame paints exactly one Copy All')
+  assert.doesNotMatch(railFrame, /Copy \[C\]/u, 'no per-fact Copy badge on the rail frame')
+  // A rail frame does not advertise the content key.
+  assert.doesNotMatch(railFrame.split('\n').at(-1)!, /c copy fact/u, 'the rail never advertises c copy fact')
+  // Lowercase c is inert on the rail; Shift+C copies the whole painted report.
+  h.panel.handleInput('c')
+  assert.equal(copied.length, 0, 'lowercase c is inert on the rail')
+  h.panel.handleInput('C')
+  assert.equal(copied.length, 1, 'Shift+C copies the whole report from the rail')
+  assert.match(copied[0]!, /Session ID: sess-pr3/u)
+
+  // Content focus: the bar advertises the fact key for a visible selection.
+  h.panel.handleInput('\r')
+  const contentBar = plain(h, 120).split('\n').at(-1)!
+  assert.match(contentBar, /c copy fact/u, 'the content bar advertises c copy fact for a visible fact')
+  assert.match(contentBar, /C copy all/u, 'the content bar advertises C copy all')
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), '0.5.3', 'c copies the selected visible fact raw value')
+
+  // Selecting the Refresh action leaves no selected fact: c is inert, C stays.
+  h.panel.handleInput('\x1b[F') // End: last fact
+  h.panel.handleInput('\x1b[B') // ↓ past the last fact: the Refresh action
+  const actionFrame = plain(h, 120)
+  assert.match(actionFrame, /^ *> Refresh context \[R\]/mu, `the Refresh action is selected:\n${actionFrame}`)
+  const before = copied.length
+  h.panel.handleInput('c')
+  assert.equal(copied.length, before, 'c is inert while the Refresh action is selected')
+  assert.doesNotMatch(actionFrame.split('\n').at(-1)!, /c copy fact/u, 'the bar stops advertising c copy fact')
+  h.panel.handleInput('C')
+  assert.equal(copied.length, before + 1, 'C still copies the whole report')
+})
+
+test('PR3 About: a fact scrolled out of the viewport is not copyable until it is painted again', () => {
+  const view: AboutStatusView = {
+    runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
+    session: {
+      kind: 'ready',
+      sessionId: 'sess-scroll',
+      title: 'scroll proof',
+      cwd: '/ws',
+      context: 'fresh',
+      stats: { lifetime: { turns: 3, steps: 4, llmMs: 5_000 } },
+    },
+    epoch: 6,
+  }
+  const copied: string[] = []
+  const h = setup({
+    columns: 100,
+    rows: 20,
+    aboutStatusSource: staticAboutSource(view),
+    onCopy: text => { copied.push(text) },
+  })
+  plain(h, 100)
+  h.panel.handleInput('\r') // rail -> About content
+  h.panel.handleInput('\x1b[F') // End: the LAST fact
+  plain(h, 100)
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), 'Fresh', 'the last fact copies while it is painted')
+  // Wheel the projection up so the selected fact leaves the viewport.
+  const box = (h.panel as unknown as { paintedContentBox?: { x: number; top: number; rows: number } }).paintedContentBox
+  assert.ok(box !== undefined, 'the content box is recorded by the last frame')
+  for (let step = 0; step < 2; step += 1) {
+    h.panel.handleMouse({
+      type: 'wheel',
+      button: 'none',
+      x: box.x + 2,
+      y: box.top + 1,
+      screenX: box.x + 2,
+      screenY: box.top + 1,
+      width: 100,
+      height: 20,
+      shift: false,
+      alt: false,
+      ctrl: false,
+      wheelDelta: -5,
+    })
+  }
+  const scrolled = plain(h, 100)
+  assert.doesNotMatch(scrolled, /Observation/u, 'the selected fact really left the frame')
+  const before = copied.length
+  h.panel.handleInput('c')
+  assert.equal(copied.length, before, 'c is inert while the selected fact is out of the viewport')
+  assert.doesNotMatch(scrolled.split('\n').at(-1)!, /c copy fact/u, 'the bar stops advertising the fact key')
+  // Scrolling back reveals it again and restores the grant.
+  h.panel.handleInput('\x1b[F') // End reveals the last fact again
+  plain(h, 100)
+  h.panel.handleInput('c')
+  assert.equal(copied.at(-1), 'Fresh', 'the revealed fact is copyable again')
+})
+
 // ── C3: the Refresh action is SELECTED before Enter can fire it ───────────
 test('C3 Enter refreshes only the selected Refresh action, never an ordinary fact', () => {
   let refreshes = 0
@@ -808,8 +1000,8 @@ test('C3 Enter refreshes only the selected Refresh action, never an ordinary fac
   assert.equal(refreshes, 2, 'r remains the About refresh shortcut')
 })
 
-// ── C3: a clipped Copy button never leaves a hit target ───────────────────
-test('C3 a truncated per-field Copy affordance paints no target; keyboard copy still works', () => {
+// ── C3: no per-fact badge and no per-fact hit target ──────────────────────
+test('C3 every fact paints without a Copy badge and has no hit target; keyboard c copies the selected value', () => {
   for (const title of ['x'.repeat(31), '路径'.repeat(16)]) {
     const copied: string[] = []
     const view: AboutStatusView = {
@@ -826,12 +1018,21 @@ test('C3 a truncated per-field Copy affordance paints no target; keyboard copy s
     const frame = plain(h, 44).split('\n')
     const titleRow = frame.findIndex(line => line.includes('Title'))
     assert.ok(titleRow >= 0, `the Title row paints:\n${frame.join('\n')}`)
-    // The whole `Copy [C]` cannot fit this row: neither the clipped affordance
-    // nor its target may survive. The keyboard `c` remains the copy path.
-    assert.equal(frame[titleRow]!.includes('Co…'), false, 'no clipped Copy affordance')
+    // The retired affix: no `Copy [C]` badge anywhere, not even a clipped one.
+    // The single retained body affordance is `Copy All [C]`, which this short
+    // viewport may scroll past (a long wrapped title pushes the action row out):
+    // it is never duplicated and never replaced by per-fact badges.
+    assert.equal(frame.some(line => line.includes('Copy [C]')), false, 'no per-fact Copy badge')
+    assert.ok((frame.join('\n').match(/Copy All \[C\]/gu)?.length ?? 0) <= 1, 'at most one Copy All badge')
+    // Neither the old last cell nor a sweep of the whole Title row copies.
     h.panel.onCellPress(43, titleRow)
     h.panel.onCellClick(43, titleRow)
-    assert.equal(copied.length, 0, 'a click on the elided last cell never copies')
+    for (let col = 0; col < 44; col += 1) {
+      h.panel.onCellPress(col, titleRow)
+      h.panel.onCellClick(col, titleRow)
+    }
+    assert.equal(copied.length, 0, 'no fact cell is a copy target')
+    // The keyboard `c` still copies the exact, complete source value.
     for (let step = 0; step < 4; step += 1) h.panel.handleInput('\x1b[B')
     plain(h, 44)
     h.panel.handleInput('c')
@@ -939,8 +1140,10 @@ test('C3 a newline/tab title cannot forge a Copy All report line', () => {
     onCopy: text => { copied.push(text) },
   })
   plain(h, 44)
-  // Select Title (4 downs) for the single-field sink.
+  // Select Title (4 downs) for the single-field sink; the selection reveal is a
+  // state change, so the frame that carries the copy grant is painted again.
   for (let step = 0; step < 4; step += 1) h.panel.handleInput('\x1b[B')
+  plain(h, 44)
   h.panel.handleInput('c')
   assert.equal(copied.at(-1), 'normal\\nBackend: Remote\\t- tail', 'the single-field copy escapes the controls')
   h.panel.handleInput('C')
@@ -1051,7 +1254,7 @@ test('the region hints never crowd the About copy/refresh verbs out of a tight b
     `every hint fits at 120:\n${wideBar}`)
 })
 
-test('the legacy 90-column bars keep refresh when the region hints drop', () => {
+test('the legacy 90-column bars keep refresh when the region hints drop and never advertise a copy', () => {
   const h = setup({ columns: 90, rows: 24 })
   plain(h, 90)
   h.panel.handleInput('\u001b[B')
@@ -1068,9 +1271,11 @@ test('the legacy 90-column bars keep refresh when the region hints drop', () => 
   assert.doesNotMatch(plain(h, 90), /Choose value/u, 'Tab never opens the detail choice')
   const detailBar = plain(h, 90).split('\n').at(-1)!
   assert.match(detailBar, /r refresh/u, 'the Detail refresh stays visible')
-  assert.match(detailBar, /c copy value/u, 'the Detail copy hint stays visible')
   assert.match(detailBar, /Left back/u)
-  assert.doesNotMatch(detailBar, /Tab panes/u, 'the region key is dropped before any semantic verb')
+  assert.doesNotMatch(detailBar, /copy/u, 'a Legacy Detail advertises no copy verb')
+  // Retiring the copy segment frees whole-segment room: the region hints now
+  // survive the same 90-column Detail bar they used to be dropped from.
+  assert.match(detailBar, /Tab panes · Shift\+Tab back/u, 'the region hints keep the room the copy verb released')
 })
 
 // ── The shared chrome budget at the panel seam ────────────────────────────

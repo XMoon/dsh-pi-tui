@@ -396,7 +396,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'copy' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel' | 'about-action'
+  readonly kind: 'category' | 'row' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel' | 'about-action'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -409,7 +409,7 @@ interface HitTarget {
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
 interface DetailButton {
-  readonly verb: 'change' | 'retry' | 'copy' | 'legacy' | 'confirm' | 'cancel'
+  readonly verb: 'change' | 'retry' | 'legacy' | 'confirm' | 'cancel'
   readonly text: string
   /** The identity the painted button acts on: the candidate it commits, or the
    *  selected row it belongs to. It is the painted hit target's id. */
@@ -712,8 +712,8 @@ export class SettingsWorkspacePanel implements Component {
   private aboutUnsubscribe: (() => void) | undefined
   /** The About ACTION targets collected by the LAST content render, in
    *  COLUMN rows (translated to panel rows by the direct-page painter):
-   *  `copy` (the selected fact's Copy button), `copy-all`, `refresh`. */
-  private paintedAboutTargets: readonly { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number; readonly factId?: string }[] = []
+   *  `copy-all` and `refresh`. Ordinary fact rows publish no target. */
+  private paintedAboutTargets: readonly { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number }[] = []
   /** The exact IMMUTABLE About view the last frame painted. A copy gesture is
    *  refused unless this is still the controller's current snapshot: every
    *  publication allocates a new view, so OBJECT IDENTITY (not the epoch)
@@ -725,6 +725,10 @@ export class SettingsWorkspacePanel implements Component {
    *  NON-consuming keyboard-activation record — `takePaintedAboutTargets`
    *  empties the click-target list, never this). */
   private paintedAboutActionIds: ReadonlySet<string> = new Set()
+  /** The facts whose physical row span INTERSECTED the last painted viewport.
+   *  This is the ONLY grant for the keyboard `c`: a fact that scrolled out of
+   *  the frame has no value the user is reading, so `c` is inert for it. */
+  private paintedAboutVisibleFactIds: ReadonlySet<string> = new Set()
   /** The whale variant of THIS open's About page: picked once per open, like
    *  the Welcome card picks one per process. */
   private readonly aboutWhaleVariant = pickWelcomeWhaleVariant()
@@ -767,7 +771,6 @@ export class SettingsWorkspacePanel implements Component {
   /** Facts from the current painted projection, used to grant choice actions. */
   private paintedChoiceCandidateVisible = false
   private paintedEnterConfirm = false
-  private paintedChoiceCopy = false
   private paintedChoiceNavigation = false
   private paintedChoiceFactScroll = false
   private paintedRevision = -1
@@ -1015,7 +1018,6 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedFocus = this.focus
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
-    this.paintedChoiceCopy = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
     if (direct) {
@@ -1257,6 +1259,7 @@ export class SettingsWorkspacePanel implements Component {
       lines.push(...this.aboutFactRows('DSH  ', facts.dsh ?? 'Unknown', width))
       this.paintedAboutFacts = []
       this.paintedAboutView = undefined
+      this.paintedAboutVisibleFactIds = new Set()
       this.aboutActionSelected = false
       this.paintedAboutHeaderRows = 0
       this.aboutScrollExtent = Math.max(0, lines.length - rows)
@@ -1285,11 +1288,16 @@ export class SettingsWorkspacePanel implements Component {
     }
     const bodyWidth = Math.max(1, width - 2)
     const rowCounts = new Map<string, number>()
-    const copyTargets: { readonly columnRow: number; readonly id: string; readonly startCol: number; readonly endCol: number; readonly factId: string }[] = []
     const body: string[] = []
+    // The physical first row of every fact group in COLUMN coordinates (the
+    // header rows scroll with the facts). The viewport slice below turns these
+    // spans into the keyboard copy grant.
+    const factStarts = new Map<string, number>()
     for (const fact of aboutFacts) {
       // One semantic fact = one wrapped physical row group. The label owns its
-      // column; the value wraps below it and is never truncated.
+      // column; the value wraps below it and is never truncated. A fact paints
+      // NO per-row affordance: `c` copies the selected visible fact and the bar
+      // advertises that key (Settings About copy contract).
       const head = color.textDim(`${fact.label}  `)
       const selected = !this.aboutActionSelected && fact.id === selectedId
       // Cursor glyph = role 6 (`primary`), the selected row's text = role 8
@@ -1301,38 +1309,10 @@ export class SettingsWorkspacePanel implements Component {
       const parts = wrapTextWithAnsi(bodyText, Math.max(1, bodyWidth - visibleWidth(marker) - visibleWidth(head)))
       const wrapped = parts.length === 0 ? [''] : parts
       rowCounts.set(fact.id, wrapped.length)
-      const factStartRow = headerRows + body.length
+      factStarts.set(fact.id, headerRows + body.length)
       wrapped.forEach((part, index) => {
         body.push(index === 0 ? `${marker}${head}${part}` : `${' '.repeat(visibleWidth(marker) + visibleWidth(head))}${part}`)
       })
-      // The per-fact Copy button paints ON THE LAST WRAPPED ROW, and its
-      // hit target covers EXACTLY the painted button cells on THAT row (the
-      // plan's last-painted rule; value text and blank cells never copy).
-      // Only real data facts get the affordance; the state-word row is inert.
-      // Affordance contract (design language §7.1): `Verb [Key]` with the key
-      // badge UPPERCASE, painted `primary` (role 14) — the same device the
-      // legacy Detail buttons use.
-      if (fact.id !== 'status.unavailable') {
-        const label = ` Copy [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]`
-        const buttonRow = headerRows + body.length - 1
-        const startCol = visibleWidth(marker) + visibleWidth(head)
-          + visibleWidth(stripTerminalSequences(wrapped[wrapped.length - 1] ?? ''))
-        const endCol = startCol + visibleWidth(label)
-        // Whole-affordance fit test (design language §8): the button paints and
-        // registers a target ONLY when its complete `Verb [Key]` fits this
-        // content row. A clipped `Co…` must never leave a hit target; the
-        // keyboard `c` keeps the fact copyable without the painted button.
-        if (endCol <= width) {
-          body[body.length - 1] += color.primary(label)
-          copyTargets.push({
-            columnRow: buttonRow,
-            id: `about:fact:${fact.id}`,
-            startCol,
-            endCol,
-            factId: fact.id,
-          })
-        }
-      }
     }
     this.paintedAboutFacts = aboutFacts
     this.paintedAboutFactRows = rowCounts
@@ -1382,12 +1362,24 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedAboutView = capturedView
     // The NON-consuming record of what the frame painted (the Enter/keyboard
     // activation reads this AFTER the painter consumed the target list).
-    this.paintedAboutActionIds = new Set([...copyTargets, ...actions]
+    this.paintedAboutActionIds = new Set(actions
       .filter(target => target.columnRow >= offset && target.columnRow < offset + rows)
       .map(target => target.id))
-    this.paintedAboutTargets = [...copyTargets, ...actions]
+    this.paintedAboutTargets = actions
       .filter(target => target.columnRow >= offset && target.columnRow < offset + rows)
       .map(target => ({ ...target, columnRow: target.columnRow - offset }))
+    // The ONE keyboard copy grant of THIS paint: a fact whose physical row span
+    // INTERSECTS the viewport (a partially visible fact is visible). A fact that
+    // scrolled out of the frame is not copyable — `c` never emits a value the
+    // frame does not show.
+    const visibleFactIds = new Set<string>()
+    for (const fact of aboutFacts) {
+      const start = factStarts.get(fact.id)
+      if (start === undefined) continue
+      const end = start + (rowCounts.get(fact.id) ?? 1)
+      if (end > offset && start < offset + rows) visibleFactIds.add(fact.id)
+    }
+    this.paintedAboutVisibleFactIds = visibleFactIds
     return column.slice(offset, offset + rows)
   }
 
@@ -1614,28 +1606,39 @@ export class SettingsWorkspacePanel implements Component {
     return controller
   }
 
-  /** `c`: copy the selected fact's RAW copy value from THE VIEW THIS PANEL
+  /** Whether the frame the About copy grant came from is still the live frame:
+   *  the terminal geometry and the root chrome must not have moved since the
+   *  paint (an unrepainted resize/notice means the cells on screen are not the
+   *  frame the grant was derived from). */
+  private aboutFrameIsCurrent(): boolean {
+    return !this.terminalGeometryStale() && !this.chromeGeometryStale()
+  }
+
+  /** `c`: copy the SELECTED fact's RAW copy value from THE VIEW THIS PANEL
    *  PAINTED (never the painted ANSI string, never a re-read, never a newer
-   *  revision that has not been painted yet). */
-  private copyAboutFact(factId?: string): void {
-    // The keyboard `c` copies the SELECTED fact; with the Refresh action
-    // selected there is no selected fact, so `c` is inert. A painted field
-    // Copy click passes its fact id explicitly and still copies.
-    if (factId === undefined && this.aboutActionSelected) return
-    const controller = this.paintedAboutController()
-    const id = factId ?? this.aboutSelectedFactId
-    if (controller === undefined || id === undefined) return
+   *  revision that has not been painted yet). Inert unless the selection is a
+   *  fact (the Refresh action is not one), that fact was really painted inside
+   *  the last viewport, and no state change has superseded that frame. */
+  private copyAboutFact(): void {
+    if (this.aboutActionSelected) return
+    if (this.paintedRevision !== this.revision) return
+    if (!this.aboutFrameIsCurrent()) return
+    const id = this.aboutSelectedFactId
+    if (id === undefined || !this.paintedAboutVisibleFactIds.has(id)) return
+    if (this.paintedAboutController() === undefined) return
     const fact = this.paintedAboutFacts.find(row => row.id === id)
     if (fact === undefined) return
     this.intents.onCopy(fact.copyValue)
   }
-
   /** `C` / Copy All: serialize THE VIEW THIS PANEL PAINTED (the stable Copy
    *  All contract, all defined facts even when offscreen; a publication
-   *  between paint and gesture refuses the copy). */
+   *  between paint and gesture refuses the copy). It is deliberately NOT gated
+   *  on the painted `Copy All` badge or on the fact selection: a narrow frame
+   *  may drop that segment while `C` stays the reachable shortcut for the whole
+   *  report that IS on screen. */
   private copyAboutAll(): void {
     const painted = this.paintedAboutView
-    if (this.paintedAboutController() === undefined || painted === undefined) return
+    if (painted === undefined || this.paintedAboutController() === undefined) return
     this.intents.onCopy(serializeAboutStatusOf(painted))
   }
 
@@ -1666,20 +1669,23 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** The About page's own action bar: it scrolls and it returns to the
-   *  category rail — it never closes the workspace. With the C3 fact model
-   *  the bar ALSO advertises the semantic copy/refresh keys; below the body
-   *  floor every navigation target is invisible, so only Esc survives. */
+   *  category rail — it never closes the workspace. With the C3 fact model the
+   *  bar advertises the keys the CURRENT frame really honours: `c copy fact`
+   *  only for a selected fact that is on screen, `C copy all` only while the
+   *  painted About view is still the controller's current snapshot. Below the
+   *  body floor every navigation target is invisible, so only Esc survives. */
   private renderAboutActionBar(width: number): string {
     if (this.bodyFloor() < 1) return color.textMuted('Esc back')
+    const about = this.categoryId === 'about' && this.paintedAboutController() !== undefined
+    const factCopyable = about
+      && !this.aboutActionSelected
+      && this.aboutSelectedFactId !== undefined
+      && this.paintedAboutVisibleFactIds.has(this.aboutSelectedFactId)
     return color.textMuted(renderActionBarRow([
       ...(this.aboutScrollExtent > 0 ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
-      ...(this.aboutSelected()
-        ? [
-            { text: `${SETTINGS_LOCAL_KEYS.copy} copy fact`, priority: 3 },
-            { text: `${SETTINGS_LOCAL_KEYS.copy.toUpperCase()} copy all`, priority: 2 },
-            { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 5 },
-          ]
-        : []),
+      ...(factCopyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy fact`, priority: 3 }] : []),
+      ...(about ? [{ text: `${SETTINGS_LOCAL_KEYS.copy.toUpperCase()} copy all`, priority: 2 }] : []),
+      ...(this.aboutSelected() ? [{ text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 5 }] : []),
       ...this.regionActionBarHints('focus', true),
       { text: 'Esc back', priority: 8 },
     ], width))
@@ -1696,8 +1702,8 @@ export class SettingsWorkspacePanel implements Component {
     if (layoutForWidth(this.intents.columns()) === 'narrow') return []
     // Priority 0 is the LOWEST drop priority in the workspace: on a tight
     // bar the region keys always yield first, so they can never crowd out an
-    // existing semantic action hint (`c copy fact`, `C copy all`, `r refresh`,
-    // `c copy value`) or a navigation hint.
+    // existing semantic action hint (`c copy fact`, `C copy all`, `r refresh`)
+    // or a navigation hint.
     return [
       { text: `${SETTINGS_REGION_LABELS.forward} ${forward === 'focus' ? 'focus' : 'panes'}`, priority: 0 },
       ...(backward ? [{ text: `${SETTINGS_REGION_LABELS.backward} back`, priority: 0 }] : []),
@@ -2116,7 +2122,19 @@ export class SettingsWorkspacePanel implements Component {
     }
     const includeTitle = this.currentLayout() !== 'narrow'
     const buttons = row === undefined ? [] : this.detailButtons(row)
-    const pinned = buttons.length > 0 && viewport >= 2 ? 1 : 0
+    // A row without a write channel says so instead of looking editable: the
+    // complete editor stays one `Other settings` handoff away. The note is NOT
+    // a button and grants nothing: it keeps its own pinned row when the row has
+    // no action left to carry it (the Legacy Copy verb is retired). The
+    // decoration is dropped WHOLE when it does not fit — a half-cut note would
+    // read as a different statement.
+    const note = buttons.some(button => button.verb === 'legacy')
+      ? 'opens the existing complete settings editor'
+      : row !== undefined && row.edit === undefined && row.action === 'inspect'
+        ? 'read-only here · Other settings edits this row'
+        : ''
+    const noteAloneFits = buttons.length === 0 && note !== '' && visibleWidth(note) <= width
+    const pinned = (buttons.length > 0 || noteAloneFits) && viewport >= 2 ? 1 : 0
     const scrollViewport = Math.max(0, viewport - pinned)
     const directPage = this.categoryId === 'models'
       ? 'Models'
@@ -2132,16 +2150,11 @@ export class SettingsWorkspacePanel implements Component {
     for (let i = 0; i < scrollViewport; i += 1) lines.push(content[offset + i] ?? '')
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
     if (pinned === 1) {
-      // A row without a write channel says so instead of looking editable: the
-      // complete editor stays one `Other settings` handoff away. The decoration
-      // is dropped WHOLE when it does not fit — a half-cut note would read as a
-      // different statement.
-      const note = buttons.some(button => button.verb === 'legacy')
-        ? 'opens the existing complete settings editor'
-        : row !== undefined && row.edit === undefined && row.action === 'inspect'
-          ? 'read-only here · Other settings edits this row'
-          : ''
-      const decorated = note === '' || painted.text === '' ? painted.text : `${painted.text}  ${color.textMuted(note)}`
+      // The note rides beside the painted buttons when it fits WHOLE, and keeps
+      // the row alone when the row has no action left. A half-cut note would
+      // read as a different statement, so the whole decoration is dropped then.
+      const noteInk = note === '' ? '' : color.textMuted(note)
+      const decorated = painted.text === '' ? noteInk : noteInk === '' ? painted.text : `${painted.text}  ${noteInk}`
       lines.push(fit(visibleWidth(decorated) <= width ? decorated : painted.text, width))
     }
     return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false }
@@ -2319,9 +2332,10 @@ export class SettingsWorkspacePanel implements Component {
     return this.choiceOffset
   }
 
-  /** The actions the pinned row may paint for this row in the CURRENT phase.
+  /**
+   * The actions the pinned row may paint for this row in the CURRENT phase.
    *  A pending commit disables the edit verbs (ONE commit at a time) and a
-   *  non-writable row only ever offers copy/legacy.
+   *  non-writable row offers only its legacy handoff.
    *
    *  A verb label never wears brackets (design language §4.5): `Verb [Key]` when
    *  the affordance has a key, `Verb` for a click-only action, `Verb…` when it
@@ -2342,8 +2356,7 @@ export class SettingsWorkspacePanel implements Component {
         buttons.push({ verb: 'retry', text: 'Retry save', id: phase.attempted })
       }
     }
-    if (row.value !== undefined) buttons.push({ verb: 'copy', text: `Copy value [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]`, id: row.id })
-    else if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…', id: row.id })
+    if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…', id: row.id })
     return buttons
   }
 
@@ -2484,7 +2497,6 @@ export class SettingsWorkspacePanel implements Component {
    *  is never cut mid-word. */
   private renderActionBar(plan: SettingsChromePlan): string {
     const row = this.selectedRow()
-    const copyable = row?.value !== undefined
     const back = this.focus === 'categories' ? 'Esc close' : 'Esc back'
     if (this.bodyFloor() < 1) return fit(color.textMuted(back), plan.width)
     let segments: ActionBarSegment[]
@@ -2500,11 +2512,6 @@ export class SettingsWorkspacePanel implements Component {
         ...this.paintedChoiceCandidateVisible && this.paintedViewport >= 3
           ? [CHOICE_CONFIRM_HINT]
           : [],
-        ...copyable && this.paintedViewport >= 3 ? [{
-          text: `${SETTINGS_LOCAL_KEYS.copy} copy value`,
-          short: `${SETTINGS_LOCAL_KEYS.copy} copy`,
-          priority: 4,
-        }] : [],
         CHOICE_BACK_HINT,
       ]
     } else if (this.editPhase.kind === 'pending') {
@@ -2550,7 +2557,6 @@ export class SettingsWorkspacePanel implements Component {
         ...(detailScroll ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
         ...(detailScroll ? [{ text: 'PgUp/PgDn details', priority: 3 }] : []),
         { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
-        ...(copyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy value`, priority: 1 }] : []),
         { text: 'Left back', priority: 7 },
         ...(this.currentRows().length > 0 ? this.regionActionBarHints('panes', true) : []),
         { text: back, priority: 8 },
@@ -2564,7 +2570,6 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedChoiceNavigation = choosing && rendered.includes('Up/Down')
     this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
     this.paintedEnterConfirm = choosing && rendered.includes(CHOICE_CONFIRM_HINT.text)
-    this.paintedChoiceCopy = choosing && rendered.includes(`${SETTINGS_LOCAL_KEYS.copy} copy`)
     return color.textMuted(rendered)
   }
 
@@ -3058,8 +3063,7 @@ export class SettingsWorkspacePanel implements Component {
       this.jumpRegion(tabForward)
       return
     }
-    const copyKeyPressed = matchesKey(data, SETTINGS_LOCAL_KEYS.copy)
-      || matchesKey(data, Key.shift(SETTINGS_LOCAL_KEYS.copy))
+    const shiftCopyPressed = matchesKey(data, Key.shift(SETTINGS_LOCAL_KEYS.copy))
     if (matchesKey(data, 'left')) {
       if (this.focus !== 'categories') this.goBack()
       return
@@ -3099,10 +3103,6 @@ export class SettingsWorkspacePanel implements Component {
         return
       }
       if (matchesKey(data, 'enter')) return this.confirmChoice('keyboard')
-      if (copyKeyPressed
-        && this.paintedChoiceCopy
-        && this.lastRenderWidth === this.intents.columns()
-        && this.lastRenderRows === this.intents.rows()) return this.copy()
       return
     }
     if (matchesKey(data, 'up')) return this.move(-1)
@@ -3124,16 +3124,14 @@ export class SettingsWorkspacePanel implements Component {
       this.source.onRefresh?.()
       return
     }
-    if (copyKeyPressed) {
+    if (shiftCopyPressed) {
       // Shift+C with About selected on the rail = the About Copy All (plan
-      // §2.1); lowercase `c` stays inert (ordinary Settings detail copy).
+      // §2.1); lowercase `c` stays inert (no Legacy row copy exists).
       if (this.categoryId === 'about'
-        && matchesKey(data, Key.shift(SETTINGS_LOCAL_KEYS.copy))
         && this.intents.aboutStatusSource !== undefined) {
         this.copyAboutAll()
-        return
       }
-      return this.copy()
+      return
     }
     // Everything else is inert inside the workspace: no key leaks to the hidden
     // editor, transcript or a host composer action.
@@ -3699,21 +3697,6 @@ export class SettingsWorkspacePanel implements Component {
     this.refresh()
   }
 
-  /** The keyboard Copy verb is Detail-local and carries the exact source value.
-   *  While choosing, the caller additionally requires the painted Copy hint. */
-  private copy(): void {
-    if (this.focus !== 'detail') return
-    this.copySelected()
-  }
-
-  /** The mouse Copy verb: the painted button IS the action, independent of
-   *  which pane owns the keyboard focus. */
-  private copySelected(): void {
-    const row = this.selectedRow()
-    if (row?.value === undefined) return
-    this.intents.onCopy(row.value)
-  }
-
   // ── mouse ────────────────────────────────────────────────────────────────
 
   /**
@@ -4107,23 +4090,16 @@ export class SettingsWorkspacePanel implements Component {
         if (legacyRow?.action === 'open-legacy') this.intents.onOpenLegacy(legacyRow.legacyTargetId)
         return
       }
-      case 'copy':
-        this.takeColumnFocus('detail')
-        this.copySelected()
-        return
       case 'about-action': {
         // The painted About affordance IS the action, exactly like the
         // keyboard: a stale release never reaches here (the revision/geometry
         // gate above already refused it), and the copy verbs bind to THE
         // VIEW THIS PANEL PAINTED (fenced by the painted-view identity inside
-        // the copy methods: a newer same-epoch publication is refused).
+        // the copy methods: a newer same-epoch publication is refused). An
+        // ordinary fact row publishes no target, so a click on the value text
+        // falls through to its pane and copies nothing.
         if (target.id === 'about:copy-all') this.copyAboutAll()
         else if (target.id === 'about:refresh') this.aboutRefresh()
-        else if (target.id.startsWith('about:fact:')) {
-          const factId = target.id.slice('about:fact:'.length)
-          this.copyAboutFact(factId)
-          this.selectAboutFact(factId)
-        }
         return
       }
       case 'legacy': {
