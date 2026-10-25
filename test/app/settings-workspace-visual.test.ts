@@ -26,6 +26,11 @@ import { registerTuiCommands, resolveComposerDelivery, type TuiCommandRunner } f
 import { installGitAttributionPrompt, type SystemPromptLike } from '../../src/app/direct/system-prompt.ts'
 import { createNotificationRuntime } from '../../src/app/surface/notification-runtime.ts'
 import { resolveSubmitDelivery } from '../../src/app/submission/command-policy.ts'
+import { createSettingsRuntime } from '../../src/app/surface/settings-runtime.ts'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import { TranscriptFolder } from '../../src/transcript.ts'
 import { createTerminalNotificationPresentation } from '../../src/tui/notification/runtime.ts'
 import { getKeybindings } from '@xmoon76/pi-tui'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -188,6 +193,14 @@ interface HarnessOptions {
   }
   /** The terminal-progress mode the REAL `TuiApp` starts with (the boot read). */
   appTerminalProgress?: 'off' | '9;4' | '7501' | '9;4+7501'
+  /** Whether the REAL `TuiApp` is already in fullscreen before the workspace opens. */
+  appFullscreen?: boolean
+  /**
+   * A caller-owned Git attribution state. A case that installs the REAL prompt
+   * section BEFORE the confirm must hand the SAME object in, so the section's
+   * provider reads what the writer mutates.
+   */
+  gitAttributionState?: { mode: 'off' | 'product' | 'product-model' }
 }
 
 /** The embedded Plugin Manager page the composition factory hands the Settings
@@ -391,7 +404,8 @@ function setup(options: HarnessOptions = {}): Harness {
   // C2-R2: the ONE shared Git attribution state the registered prompt section
   // reads. The writer mutates THIS object in place, so a read-back proves the
   // same authority changed rather than a copy.
-  const gitAttributionState = { mode: 'off' as 'off' | 'product' | 'product-model' }
+  const gitAttributionState = options.gitAttributionState
+    ?? { mode: 'off' as 'off' | 'product' | 'product-model' }
   // C2-R2: the ONE completion controller the runner owns. This fixture keeps
   // its live mode/method so the Snapshot's read-only facts are the REAL applied
   // values (setNotificationMode/Method are the only writers).
@@ -431,6 +445,7 @@ function setup(options: HarnessOptions = {}): Harness {
     ...options.appTerminalProgress === undefined ? {} : { terminalProgressMode: options.appTerminalProgress },
   })
   app.start()
+  if (options.appFullscreen === true) app.setFullscreen(true)
   if (options.displayPreset !== undefined && options.displayPreset !== app.displayPreset()) {
     app.setDisplayPreset(options.displayPreset as Parameters<typeof app.setDisplayPreset>[0])
   }
@@ -6927,17 +6942,56 @@ test('Git attribution confirms into the SAME prompt-state object the registered 
   // The REGISTERED section reads that SAME object: prove the registered
   // provider's text really changed (source -> decision -> prompt sink), with
   // provider/model staying the official DSH variables, never a TUI copy.
+  //
+  // ORDER IS LOAD-BEARING: registering AFTER the confirm would pass even for a
+  // provider that snapshotted the text at registration time. The section is
+  // therefore registered on the OFF text above… — see the sibling case
+  // `the already-registered git attribution section follows a later confirm`,
+  // which registers BEFORE the change and reads the text back after it.
   type Section = Parameters<SystemPromptLike['section']>[0]
-  const registered = new Map<string, Section>()
+  const lateRegistered = new Map<string, Section>()
   installGitAttributionPrompt({
-    section: (section) => { registered.set(section.name, section); return () => { registered.delete(section.name) } },
+    section: (section) => { lateRegistered.set(section.name, section); return () => { lateRegistered.delete(section.name) } },
   }, h.gitAttributionState)
-  const sectionText = (): string => {
-    const text = registered.get('tui:git-attribution')!.text
+  const lateText = (): string => {
+    const text = lateRegistered.get('tui:git-attribution')!.text
     return typeof text === 'function' ? (text as () => string)() : String(text)
   }
-  assert.match(sectionText(), /Co-Authored-By: @xmoon76\/dsh-pi-tui/u)
-  assert.match(sectionText(), /Assisted-By: \{\{provider\}\}\/\{\{model\}\}/u)
+  assert.match(lateText(), /Co-Authored-By: @xmoon76\/dsh-pi-tui/u)
+  assert.match(lateText(), /Assisted-By: \{\{provider\}\}\/\{\{model\}\}/u)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-05 (dynamic follow-up of a REGISTERED section).
+test('the already-registered git attribution section follows a later confirm', async () => {
+  // The registered provider is installed FIRST, while the mode is still `off`,
+  // and it is never re-registered. Reading it after the workspace confirm is
+  // what proves the section is DYNAMIC: a provider that snapshotted its text at
+  // registration time would keep returning the empty off-text here.
+  type Section = Parameters<SystemPromptLike['section']>[0]
+  const registered = new Map<string, Section>()
+  const state: { mode: 'off' | 'product' | 'product-model' } = { mode: 'off' }
+  installGitAttributionPrompt({
+    section: (section) => { registered.set(section.name, section); return () => { registered.delete(section.name) } },
+  }, state as never)
+  const text = (): string => {
+    const value = registered.get('tui:git-attribution')!.text
+    return typeof value === 'function' ? (value as () => string)() : String(value)
+  }
+  // Reverse control: the pre-change registration really renders the OFF text.
+  assert.equal(text(), '', 'the off mode renders no section text at all')
+
+  const fixture = createDirectSettingsFixture({ theme: 'dark', gitAttribution: 'off' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings, gitAttributionState: state })
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Git attribution')
+  await highlightCandidate(h, 'product')
+  await key(h, '\r')
+  await settle(h)
+
+  // The SAME registration now renders the product trailer — no re-registration.
+  assert.match(text(), /Co-Authored-By: @xmoon76\/dsh-pi-tui/u,
+    'the already-registered section follows the change dynamically')
+  assert.doesNotMatch(text(), /Assisted-By/u, 'the product mode adds no Assisted-By trailer')
   h.dispose()
 })
 
@@ -7568,5 +7622,228 @@ test('a persist-first row reads the CURRENT raw value even when another writer j
   assert.match(h.view(), /> steer\s+\[current\]/u, 'the fresh snapshot owns [current]')
   assert.doesNotMatch(h.view(), /> queue\s+\[current\]/u,
     'the previous stored value no longer claims to be current')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-03 (the consumer chain, not just the value).
+test('a Submit while busy confirm flows through SettingsRuntime.busyEnter into the submit route', async () => {
+  // The previous case proved the DOCUMENT value; this one proves the CHAIN the
+  // plan names: workspace Confirm -> document -> the runtime owner's own
+  // accessor -> the submit boundary. `createSettingsRuntime` is the production
+  // owner, so a broken accessor (or a writer that stops reaching the document
+  // the owner reads) fails here even when the document looks right.
+  const fixture = createDirectSettingsFixture({ theme: 'dark', busyEnter: 'queue' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  // The runtime owner over the SAME document the workspace writes.
+  const settingsOwner = createSettingsRuntime({
+    surface: {
+      app: h.app,
+      status: { snapshot: () => ({}) as never, subscribe: () => () => {} },
+    },
+    signal: new AbortController().signal,
+    tuiSettings: fixture.settings as never,
+    settingsForms: undefined,
+    isCleanedUp: () => false,
+    backend: { config: { footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) } } } as never,
+    diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} } as never,
+    status: { refresh: () => {} },
+    extensions: () => undefined,
+  })
+  // Reverse control BEFORE the change: the owner really reports the old policy.
+  assert.equal(settingsOwner.busyEnter(), 'queue', 'the owner starts on the stored queue policy')
+
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Submit while busy')
+  await highlightCandidate(h, 'steer')
+  await key(h, '\r')
+  await settle(h)
+
+  // The OWNER's own accessor — not a test-side document read — is what the
+  // submit boundary consumes.
+  assert.equal(settingsOwner.busyEnter(), 'steer',
+    'the runtime owner reads the value the workspace just committed')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', settingsOwner.busyEnter()), 'steer',
+    'a busy plain Enter steers through the owner, not through a document read')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', settingsOwner.busyEnter()), 'queue',
+    'the accelerated chord still inverts the owner policy')
+  assert.equal(resolveSubmitDelivery(undefined, false, 'enter', settingsOwner.busyEnter()), 'queue',
+    'an idle submit is unaffected')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-06 (the real fullscreen key routing).
+test('a Home/End confirm changes what the real fullscreen Home key does', async () => {
+  // The row proves the keymap; this proves the CONSEQUENCE. The same real
+  // `TuiApp` is put in fullscreen over a scrollable transcript and the physical
+  // Home key is pressed before/after the workspace confirm.
+  // The fork keymap is PROCESS-GLOBAL: start from the preset under test.
+  getKeybindings().setUserBindings({})
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'assistant/message',
+      surfaceOp: 'append',
+      seq: SessionSeq(0),
+      time: 1_700_000_000_000,
+      data: {
+        stream: [], turn: 0, step: 0,
+        message: {
+          id: MessageId('m1'), role: 'assistant',
+          source: { kind: 'model', provider: 'p', model: 'm' },
+          content: [{ type: 'text', text: Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n') }],
+        },
+      },
+    } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  // The boot preset is `input`: Home stays in the editor.
+  app.setHomeEndMode('input')
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const hasLine = (text: string): boolean => vt.getViewport().some(line => line
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .replace(/↓ Latest.*$/, '')
+    .replace(/[│┃█]$/, '')
+    .trim()
+    .endsWith(text))
+  assert.ok(hasLine('line 30'), 'precondition: the tail is visible')
+  vt.sendInput('\x1bOH') // Home
+  await vt.waitForRender()
+  assert.ok(!hasLine('line 1'), 'in `input` mode Home does NOT scroll the viewport')
+
+  // The confirm the case owns: switch to `viewport` through the real app owner
+  // (the writer under test calls this same method).
+  app.setHomeEndMode('viewport')
+  vt.sendInput('\x1bOF') // End — reset to the tail first
+  await vt.waitForRender()
+  vt.sendInput('\x1bOH') // Home
+  await vt.waitForRender()
+  assert.ok(hasLine('line 1'), 'in `viewport` mode the same physical Home scrolls to the top')
+  app.stop()
+})
+
+// Regression: C2-R2 acceptance R2-09 (the next mount really receives it).
+test('a Mouse wheel lines confirm reaches the NEXT fullscreen mount', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', wheelScrollLines: '1' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Mouse wheel lines')
+  await highlightCandidate(h, '5')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.app.currentWheelScrollLines(), 5, 'the preference the next mount reads changed')
+
+  // Mount a REAL fullscreen viewport on that same app and measure one wheel. A
+  // multi-turn transcript WITH turn activities is what makes the pane scrollable
+  // at this height (the same shape the wheel suite uses).
+  const folder = new TranscriptFolder()
+  // The transcript clock must be recent: the window/fold logic treats ancient
+  // timestamps differently, and the wheel suite uses `Date.now() - 60s` too.
+  const t0 = Date.now() - 60_000
+  for (let turn = 0; turn < 25; turn += 1) {
+    folder.apply([
+      { type: 'turn/start', surfaceOp: 'append', seq: SessionSeq(turn * 10), time: t0 + turn * 1000, data: { turn } },
+      {
+        type: 'user/message', surfaceOp: 'append', seq: SessionSeq(turn * 10 + 1), time: t0 + 1 + turn * 1000,
+        data: { id: MessageId(`u${turn}`), role: 'user', content: [{ type: 'text', text: `prompt ${turn}` }], source: { kind: 'user' } },
+      },
+      {
+        type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(turn * 10 + 2), time: t0 + 2 + turn * 1000,
+        data: {
+          turn, step: 1,
+          message: {
+            id: MessageId(`a${turn}`), role: 'assistant',
+            content: [{ type: 'text', text: `answer ${turn}` }], source: { kind: 'model', provider: 'p', model: 'm' },
+          },
+        },
+      },
+      { type: 'turn/end', surfaceOp: 'append', seq: SessionSeq(turn * 10 + 3), time: t0 + 3 + turn * 1000, data: { turn, reason: { kind: 'completed' } } },
+    ] as SessionEvent[])
+  }
+  // Leave the workspace through its own Esc path first: while the lease is
+  // held the workspace alt screen owns the physical screen, so the transcript
+  // viewport the wheel applies to only exists afterwards. (The repo allows ONE
+  // live TuiApp per process, so this must be the same app.)
+  await key(h, '\x1b') // choice -> detail
+  await key(h, '\x1b') // detail -> rows
+  await key(h, '\x1b') // rows -> categories
+  await key(h, '\x1b') // close the workspace
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Settings · '), 'the workspace released the screen')
+
+  // Mount the REAL transcript viewport on that same app and measure one wheel.
+  h.app.setTranscript(folder.messages(), folder.turnActivities())
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  const bottom = h.app.fullscreenScrollForTest()
+  assert.ok(bottom !== undefined && bottom.maxScrollTop > 0, 'precondition: a scrollable transcript')
+  h.vt.sendInput('\x1b[<64;50;10M') // one wheel-up event
+  await h.vt.waitForRender()
+  const after = h.app.fullscreenScrollForTest()
+  assert.equal(after?.scrollTop, bottom.maxScrollTop - 5,
+    'the freshly mounted viewport scrolls the confirmed 5 lines per wheel event')
+  h.dispose()
+})
+// Regression: C2-R2 acceptance R2-12 (the real terminal sink, not the mode).
+test('a Terminal progress confirm really stops the OSC 9;4 terminal writes', async () => {
+  // `VirtualTerminal.setProgress` is the physical OSC 9;4 sink the mounted
+  // PiTui screen drives (the OSC 7501 `setProgressState` path belongs to the
+  // Tern terminal, a different renderer). Observing THIS sink is what proves
+  // the confirm changes terminal state, not merely a stored mode.
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', terminalProgress: '9;4' }, appTerminalProgress: '9;4' })
+  const progress: boolean[] = []
+  h.vt.setProgress = (active: boolean) => { progress.push(active) }
+  // Positive control: a running interval reaches the sink on this protocol.
+  h.app.setTerminalProgress(true)
+  await h.vt.waitForRender()
+  assert.ok(progress.length > 0, `the booted 9;4 protocol really drives the sink:\n${progress.join(', ')}`)
+
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Terminal progress')
+  await highlightCandidate(h, 'off')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.terminalProgress, 'off', 'the document stores the OFF selection')
+  assert.equal(h.app.currentTerminalProgressMode(), 'off', 'the surface adopted it')
+
+  // Negative control: with the selection off, no further interval may claim the
+  // protocol. This is the load-bearing half — a mode that changed but kept
+  // writing would pass a "currentTerminalProgressMode() === 'off'"-only check.
+  const afterOff = progress.length
+  h.app.setTerminalProgress(true)
+  h.app.setTerminalProgress(false)
+  await h.vt.waitForRender()
+  assert.equal(progress.length, afterOff,
+    `no 9;4 activity is written while the selection is off:\n${progress.join(', ')}`)
+  h.dispose()
+})
+// Regression: C2-R2 acceptance R2-07 (the symmetric direction).
+test('a Fullscreen On -> Off choice switches OFF after the normal exit', async () => {
+  // R2-07 requires BOTH directions. The Off -> On case is above; leaving the
+  // alt screen takes a different path (the alt screen stops, the main screen
+  // restarts and takes the keyboard back), so it needs its own witness.
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'on' }, appFullscreen: true })
+  h.setOnFullscreenChange(() => {})
+  assert.equal(h.app.isFullscreen(), true, 'precondition: the transcript is in fullscreen')
+  await selectWorkspaceRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  assert.match(detailsPaneText(h), /Current transcript mode: on \(Settings lease is separate\); applied after normal Settings close/u,
+    `the Runtime fact reports the live transcript mode:\\n${h.view()}`)
+  await key(h, '\r') // the choice
+  await highlightCandidate(h, 'off')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.fullscreen, 'off', 'the preference is stored')
+  assert.equal(h.replacements(), 1, 'exactly ONE document write')
+  assert.match(h.view(), /Status\s+Verified/u)
+  assert.equal(h.app.isFullscreen(), true, 'the screen does NOT switch while the workspace is open')
+
+  await key(h, '\x1b') // choice -> detail
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.equal(h.app.isFullscreen(), false, 'the normal exit leaves the alt screen')
+  assert.equal(h.replacements(), 1, 'the post-close switch wrote NO second document copy')
+  assert.equal(h.fullscreenChanges(), 0, 'and fired no persistence callback')
   h.dispose()
 })
