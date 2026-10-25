@@ -24,7 +24,7 @@
  */
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { containedXY, rect } from './tern-pane-geometry.mjs'
+import { containedXY, fullyVisible, rect, visibleBox } from './tern-pane-geometry.mjs'
 
 /** The client's image-viewer dialog, read from the accessibility tree. */
 function viewerOf(a11y) {
@@ -290,6 +290,58 @@ export default async function (h) {
 }
 
 /**
+ * The pane an editor really lives in, plus the strict verdicts the acceptance
+ * requires. `containedXY` alone is NOT a visibility proof: a node can sit inside
+ * every recorded ancestor box and still be laid out below the pane's visible
+ * edge (that is exactly how the first short-window draft was wrong). This
+ * resolves the nearest `section.tn-pane` ancestor and reports:
+ *
+ * - `inPaneRect`: the editor's full top/bottom/left/right inside that pane's rect;
+ * - `fullyVisible`: the editor's entire rect survives EVERY clipping ancestor;
+ * - `ancestorContained`: the original `containedXY` answer, kept for continuity.
+ */
+function editorPaneVisibility(snapshot, composer) {
+  const chain = snapshot.chains.get(composer) ?? []
+  const pane = [...chain].reverse().find(node => /\btn-pane\b/.test(String(node.class ?? '')))
+  const box = rect(composer)
+  const paneRect = pane === undefined ? undefined : rect(pane)
+  const inPaneRect = paneRect !== undefined
+    && box[0] >= paneRect[0]
+    && box[1] >= paneRect[1]
+    && box[0] + box[2] <= paneRect[0] + paneRect[2]
+    && box[1] + box[3] <= paneRect[1] + paneRect[3]
+  return {
+    paneRect,
+    box,
+    inPaneRect,
+    fullyVisible: fullyVisible(snapshot.chains, composer),
+    ancestorContained: containedXY(snapshot.chains, composer),
+    visible: visibleBox(snapshot.chains, composer),
+  }
+}
+
+/**
+ * The THREE verdicts must all hold, together, for one editor: it is inside its
+ * pane's own rect, its whole rect survives clipping, and (checked by the caller)
+ * a real key edits it.
+ */
+function assertEditorVisibleInPane(h, label, snapshot, composer) {
+  const v = editorPaneVisibility(snapshot, composer)
+  h.measure(`${label} editor vs pane`, JSON.stringify(v))
+  // Three INDEPENDENT verdicts, each able to fail on its own. Measured on the
+  // real client, a partially clipped editor can still be "inside the pane rect"
+  // (its top/bottom are within the pane box) while only a 7.6px sliver of its
+  // 16px row survives — so the rect test alone never implies visibility.
+  h.check(`${label}: the editor's WHOLE rect is inside its PANE rect`, v.inPaneRect,
+    `editor=${JSON.stringify(v.box)} pane=${JSON.stringify(v.paneRect)}`)
+  h.check(`${label}: the editor's whole rect survives every clipping ancestor`, v.fullyVisible,
+    JSON.stringify(v.visible))
+  h.check(`${label}: the editor is ancestor-contained (containedXY, kept)`, v.ancestorContained,
+    `editor=${JSON.stringify(v.box)}`)
+  return v
+}
+
+/**
  * The SPLIT-PANE gate (amendment §5 T4): a tall window divided into two short
  * panes. The window media query does NOT fire here, so this is the case the
  * per-node `max` ceiling has to carry — and the case a window-only CSS fix was
@@ -350,11 +402,8 @@ async function splitPaneGate(h) {
   const composer = composerOf(snap)
   h.check('the controlled editor is painted inside the split pane', composer !== undefined)
   if (composer !== undefined) {
-    const box = rect(composer)
-    h.measure('dock composer box inside the split pane', JSON.stringify(box))
-    // Containment against the PANE's own ancestors, not the window viewport.
-    h.check('the editor is contained by its PANE (ancestor oracle, not the window)',
-      containedXY(snap.chains, composer), `box=${JSON.stringify(box)}`)
+    h.measure('dock composer box inside the split pane', JSON.stringify(rect(composer)))
+    assertEditorVisibleInPane(h, '22-row split', snap, composer)
   }
   h.check('the draft count is on the status line inside the split pane',
     h.has(snap, 'Draft 3 · '), h.texts(snap).join(' | '))
@@ -414,8 +463,7 @@ async function splitPaneBusyGate(h) {
   if (composer !== undefined) {
     const box = rect(composer)
     h.measure('busy dock composer box', JSON.stringify(box))
-    h.check('the busy editor is contained by its PANE', containedXY(snap.chains, composer),
-      `box=${JSON.stringify(box)}`)
+    assertEditorVisibleInPane(h, 'busy 22-row split', snap, composer)
     // The editor must really BE multi-line. The client normalizes the controlled
     // text for its accessibility string, so the RENDERED HEIGHT is the honest
     // witness: a one-line editor is ~16px, the seeded 4-newline draft is taller.
