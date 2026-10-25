@@ -170,7 +170,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     setDisplayPreset: () => ({ kind: 'applied' as const, preset: 'full' }),
     focusEnabled: () => false,
     setFocusMode: () => {},
-    setNotificationMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
     setNotificationMethod: () => {},
     setTerminalProgressMode: (mode) => { appliedModes.push(mode) },
     updateWelcomeCard: () => {},

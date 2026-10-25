@@ -145,6 +145,7 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 // constructed exactly once here; none of them imports this aggregate's value
 // implementation (only its cross-owner facade types).
 import { createNotificationRuntime, type AgentLifecycleStatus, type TerminalNotificationPresentation } from './notification-runtime.ts'
+import type { NotificationMethod, NotificationMode } from '../../domain/notification/settings.ts'
 import {
   createExtensionRuntime,
   type OptionCapability,
@@ -675,6 +676,10 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   /** The notification settings write path (`/notify`, `agent/status` policy). */
   setNotificationMode(mode: string): void
   setNotificationMethod(method: string): void
+  /** The mode the ONE completion controller currently applies (read-only). */
+  currentNotificationMode(): NotificationMode
+  /** The delivery method the ONE completion controller currently applies. */
+  currentNotificationMethod(): NotificationMethod
   /** The native-terminal-progress preference write path (`/settings` row):
    *  parse the raw mode through the shared parser and gate the mounted app's
    *  physical OSC 9;4 projection. Never a persistence authority. */
@@ -1949,6 +1954,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     setNotificationMethod(method) {
       notification.setMethod(method)
+    },
+    currentNotificationMode() {
+      return notification.currentMode()
+    },
+    currentNotificationMethod() {
+      return notification.currentMethod()
     },
     setTerminalProgressMode(mode) {
       app?.setTerminalProgressMode(parseTerminalProgressMode(mode))

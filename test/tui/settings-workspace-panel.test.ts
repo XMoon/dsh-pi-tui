@@ -195,15 +195,174 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
-      id: 'conversation-settings-legacy',
+      id: 'busy-enter',
       category: 'conversation',
-      label: 'More conversation settings…',
-      summary: 'Existing settings editor',
-      scope: 'Existing settings editor',
+      label: 'Submit while busy',
+      summary: 'queue',
+      value: 'queue',
+      scope: 'TUI settings document · input preference',
       freshness: 'ready',
-      description: 'the existing editor owns the remaining conversation settings',
-      action: 'open-legacy',
-      legacyTargetId: 'busy-enter',
+      description: 'what a plain Enter does while the agent is running',
+      action: 'inspect',
+      edit: {
+        field: 'busy-enter',
+        primary: 'persisted',
+        runtime: 'Next busy Enter: queue',
+        persisted: 'queue',
+        options: [
+          { value: 'queue', label: 'queue', available: true, current: true },
+          { value: 'steer', label: 'steer', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'git-attribution',
+      category: 'conversation',
+      label: 'Git attribution',
+      summary: 'off',
+      value: 'off',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'Git trailer prompt guidance',
+      action: 'inspect',
+      edit: {
+        field: 'git-attribution',
+        primary: 'runtime',
+        runtime: 'off',
+        persisted: 'off',
+        options: [
+          { value: 'off', label: 'off', available: true, current: true },
+          { value: 'product', label: 'product', available: true, current: false },
+          { value: 'product-model', label: 'product-model', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'home-end-keys',
+      category: 'input-terminal',
+      label: 'Home/End keys',
+      summary: 'input',
+      value: 'input',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'Home/End navigation preset',
+      action: 'inspect',
+      edit: {
+        field: 'home-end-keys',
+        primary: 'runtime',
+        runtime: 'input',
+        persisted: 'input',
+        options: [
+          { value: 'input', label: 'input', available: true, current: true },
+          { value: 'viewport', label: 'viewport', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'fullscreen',
+      category: 'input-terminal',
+      label: 'Fullscreen',
+      summary: 'off',
+      value: 'off',
+      scope: 'TUI settings document · Client screen mode',
+      freshness: 'ready',
+      description: 'Save preference, then leave Settings normally to switch the transcript screen.',
+      action: 'inspect',
+      edit: {
+        field: 'fullscreen',
+        primary: 'persisted',
+        runtime: 'Current transcript mode: off (Settings lease is separate); applied after normal Settings close',
+        persisted: 'off',
+        options: [
+          { value: 'off', label: 'off', available: true, current: true },
+          { value: 'on', label: 'on', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'wheel-scroll-lines',
+      category: 'input-terminal',
+      label: 'Mouse wheel lines',
+      summary: '1',
+      value: '1',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'wheel step for the next fullscreen entry',
+      action: 'inspect',
+      edit: {
+        field: 'wheel-scroll-lines',
+        primary: 'runtime',
+        runtime: '1',
+        persisted: '1',
+        options: [
+          { value: '1', label: '1', available: true, current: true },
+          { value: '2', label: '2', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'notification-mode',
+      category: 'input-terminal',
+      label: 'Notifications',
+      summary: 'unfocused',
+      value: 'unfocused',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'when a completion notifies',
+      action: 'inspect',
+      edit: {
+        field: 'notification-mode',
+        primary: 'runtime',
+        runtime: 'unfocused',
+        persisted: 'unfocused',
+        options: [
+          { value: 'unfocused', label: 'unfocused', available: true, current: true },
+          { value: 'always', label: 'always', available: true, current: false },
+          { value: 'off', label: 'off', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'notification-method',
+      category: 'input-terminal',
+      label: 'Notification method',
+      summary: 'auto',
+      value: 'auto',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'how a completion notification is delivered',
+      action: 'inspect',
+      edit: {
+        field: 'notification-method',
+        primary: 'runtime',
+        runtime: 'auto',
+        persisted: 'auto',
+        options: [
+          { value: 'auto', label: 'auto', available: true, current: true },
+          { value: 'bell', label: 'bell', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'terminal-progress',
+      category: 'input-terminal',
+      label: 'Terminal progress',
+      summary: '9;4+7501',
+      value: '9;4+7501',
+      scope: 'Client runtime · optional TUI preference persistence',
+      freshness: 'runtime',
+      description: 'terminal-native status protocols',
+      action: 'inspect',
+      edit: {
+        field: 'terminal-progress',
+        primary: 'runtime',
+        runtime: '9;4+7501',
+        persisted: '9;4+7501',
+        options: [
+          { value: '9;4+7501', label: '9;4+7501', available: true, current: true },
+          { value: 'off', label: 'off', available: true, current: false },
+        ],
+      },
     },
     {
       id: 'agent-settings-legacy',
@@ -1762,7 +1921,9 @@ test('T03 display rows live in Conversation while Theme/Icon stay in Appearance'
   assert.match(header(h), /Settings · Categories/u)
   assert.match(conversation, /Transcript display/u, 'display-preset moved to Conversation')
   assert.match(conversation, /Thinking detail/u, 'thinking moved to Conversation')
-  assert.match(conversation, /More conversation settings…/u)
+  assert.match(conversation, /Submit while busy/u, 'the busy-Enter policy is a Conversation row')
+  assert.doesNotMatch(conversation, /More conversation settings…/u,
+    'the migrated Conversation launcher is gone: no field remains behind it')
   assert.doesNotMatch(conversation, /Configured theme|Icon style/u, 'Theme/Icon never leak into Conversation')
   h.panel.handleInput('\u001b[H') // Home -> About
   walkTo(h, 'appearance')
@@ -1779,7 +1940,7 @@ test('T03 display rows live in Conversation while Theme/Icon stay in Appearance'
   assert.deepEqual(ids, [...CATEGORY_ORDER], 'the painted rail publishes exactly the current directory')
 })
 
-test('T04 Agent and Input & Terminal expose only their existing-editor launchers', () => {
+test('T04 Agent keeps its launcher while Input & Terminal ends on the Keyboard shortcuts handoff', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'agent')
@@ -1792,15 +1953,19 @@ test('T04 Agent and Input & Terminal expose only their existing-editor launchers
   const input = setup()
   plain(input)
   walkTo(input, 'input-terminal')
-  assert.match(plain(input), /Input & terminal settings…/u)
-  input.panel.handleInput('\r')
   const rows = plain(input)
-  assert.match(rows, /Existing settings editor/u, 'the transition scope is stated in the detail')
+  assert.match(rows, /Home\/End keys|Fullscreen|Mouse wheel lines/u,
+    'the migrated Input & Terminal rows are painted')
+  assert.match(rows, /Input & terminal settings…/u, 'the remaining Keyboard shortcuts handoff is last')
+  // The launcher is the LAST row: walk the six writable rows before activating it.
+  input.panel.handleInput('\r')
+  for (let step = 0; step < 6; step += 1) input.panel.handleInput('\u001b[B')
+  const detail = plain(input)
+  assert.match(detail, /Existing settings editor/u, 'the handoff states its scope in a launcher row')
   input.panel.handleInput('\r')
   assert.deepEqual(input.legacyTargets(), ['keyboard-shortcuts'], 'Input & Terminal opens the shortcuts row')
-  assert.equal(input.commits(), 0, 'a transition launcher has no writer to dispatch')
-  // A launcher row has no candidate source: no choice/confirm is ever painted.
-  assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'no fabricated editor on a transition row')
+  assert.equal(input.commits(), 0, 'the handoff itself writes nothing')
+  assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'the launcher row paints no editor')
 })
 
 test('T05 a width cycle keeps the selected category/row/focus and refuses old coordinates', () => {
@@ -1958,7 +2123,13 @@ test('T08 a 44x8 frame scrolls and reveals the rail and never activates an off-s
  *  the label sits below the first row. */
 const CONVERSATION_LABELS = [
   'Transcript display', 'Transcript detail', 'Thinking detail',
-  'Progress updates', 'Response style', 'More conversation settings…',
+  'Progress updates', 'Response style', 'Submit while busy', 'Git attribution',
+] as const
+
+/** Walk to one Input & Terminal row by its painted label (the fixture order). */
+const INPUT_TERMINAL_LABELS = [
+  'Home/End keys', 'Fullscreen', 'Mouse wheel lines',
+  'Notifications', 'Notification method', 'Terminal progress',
 ] as const
 
 const walkToConversationRow = (h: Harness, label: (typeof CONVERSATION_LABELS)[number]): void => {
@@ -1984,19 +2155,19 @@ test('Appearance holds Theme, Icon style and the Footer launcher only', () => {
   assert.match(rows, /Rows \(3\)/u, 'the Appearance rows count is the real three')
 })
 
-test('Conversation keeps the frozen six-row order', () => {
+test('Conversation keeps the frozen seven-row order', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'conversation')
   h.panel.handleInput('\r')
   const frames: string[] = []
-  for (let step = 0; step < 6; step += 1) {
+  for (let step = 0; step < CONVERSATION_LABELS.length; step += 1) {
     frames.push(plain(h))
-    if (step < 5) h.panel.handleInput('\u001b[B')
+    if (step < CONVERSATION_LABELS.length - 1) h.panel.handleInput('\u001b[B')
   }
-  const labels = ['Transcript display', 'Transcript detail', 'Thinking detail', 'Progress updates', 'Response style', 'More conversation settings…']
+  const labels = [...CONVERSATION_LABELS]
   // The rows pane paints the list itself, so the ORDER is read from the frame
-  // that shows every row at once (120 columns keeps all six inside the grant).
+  // that shows every row at once (120 columns keeps all of them inside the grant).
   const all = frames[0]!
   let previous = -1
   for (const label of labels) {
@@ -2004,7 +2175,7 @@ test('Conversation keeps the frozen six-row order', () => {
     assert.ok(at > previous, `${label} sits in its frozen position:\n${all}`)
     previous = at
   }
-  assert.match(all, /Rows \(6\)/u, 'the Conversation rows count is the real six')
+  assert.match(all, /Rows \(7\)/u, 'the Conversation rows count is the real seven')
 })
 
 test('browsing the five rows writes nothing; only an explicit Confirm dispatches', () => {

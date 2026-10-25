@@ -187,6 +187,10 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     focusEnabled: () => displayState.preset === 'focus',
     setFocusMode: () => {},
     setNotificationMode: (mode) => { appliedModes.push(mode) },
+    // The Settings workspace reads the live controller facts; this fixture's
+    // cases drive the LEGACY editor, which never asks for them.
+    currentNotificationMode: () => 'unfocused',
+    currentNotificationMethod: () => 'auto',
     setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},

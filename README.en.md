@@ -468,11 +468,13 @@ An identity beyond the remaining candidate capacity stays unconfirmable. Only
 buttons and candidates that are really painted can be clicked. A confirmed change is stored through the existing
 serialized whole-document write path and then re-read from the authority: the
 detail keeps the two facts apart: a runtime-primary row (`Icon style`,
-`Transcript display`, `Progress updates`, `Response style`) shows the value that
-took effect as `Value` and the stored preference as `Persisted`, while
-`Configured theme` and the `Visual tools` switch — the only rows whose primary
-fact IS the persisted value — also carry an explicit `Runtime` row (e.g. the
-current palette). `[current]` is a separate decision: `Configured theme` and `Transcript display`
+`Transcript display`, `Progress updates`, `Response style`, `Git attribution`,
+`Home/End keys`, `Mouse wheel lines`, `Notifications`, `Notification method`,
+`Terminal progress`) shows the value that took effect as `Value` and the stored
+preference as `Persisted`, while `Configured theme`, the `Visual tools` switch,
+`Submit while busy` and `Fullscreen` — the rows whose primary fact IS the
+persisted value — also carry an explicit `Runtime` row (e.g. the current
+palette, the next busy-Enter delivery, the current transcript mode). `[current]` is a separate decision: `Configured theme` and `Transcript display`
 mark it from the persisted preference and `Icon style`, `Progress updates` and
 `Response style` from the live value, while the `Visual tools` switch under Tools
 is its own case — its candidate `[current]` reflects the **Host configuration
@@ -506,12 +508,38 @@ both mark `[current]` from the persisted preference rather than the live value.
 `Progress updates` and `Response style` take effect on the next
 prompt assembly without re-registering a section or rebuilding the Agent, and
 Focus only suppresses progress narration without changing the saved cadence. The
-existing complete settings editor is still available: every setting that has not migrated yet
+Conversation and Input & Terminal now edit all eight historical settings in place: Conversation is
+Transcript display → Transcript detail → Thinking detail → Progress updates → Response style →
+Submit while busy → Git attribution, and Input & Terminal is Home/End keys → Fullscreen →
+Mouse wheel lines → Notifications → Notification method → Terminal progress →
+Input & terminal settings… (whose launcher only needs the existing editor for `Keyboard shortcuts`).
+
+`Submit while busy` and `Fullscreen` are the two PERSIST-FIRST rows: only a completed write whose
+authoritative re-read agrees shows `Verified`, and no runtime state is pretended to have switched.
+`Submit while busy`'s `Value` is the raw stored value (`not set` when absent, `invalid stored
+value: <raw>` when illegal), and its `Runtime` says what the NEXT busy Enter really does — the
+default is named as `queue (default; no valid saved value)` instead of being presented as saved.
+Its confirmation never rewrites a turn that is already running. A `Fullscreen` preference keeps
+the workspace usable and switches the transcript screen only after you leave Settings
+normally; a Legacy hand-off, a Question/Approval takeover, a forced close or an unverified write
+switches nothing, and the stored preference still applies at the next TUI start.
+
+The other six apply their real runtime owner first and then persist (a failed write never rolls
+the runtime back, and `Persisted` keeps reporting the raw stored value): `Git attribution`
+mutates the same `tui:git-attribution` prompt state and stays prompt guidance only (no Git hook,
+no automatic commit edits, and `minimal` personas keep receiving nothing); `Home/End keys`
+rewrites the bindings the fullscreen viewport really resolves without touching any other binding;
+`Mouse wheel lines` applies on the NEXT fullscreen entry only, so the mounted viewport keeps its
+constructor step; `Notifications` and `Notification method` drive the same completion controller,
+and changing the method never emits a notification by itself; `Terminal progress` controls only the
+terminal-native protocols (OSC 9;4 / OSC 7501) and is independent of the `Progress updates`
+narration cadence, while a legacy `on` value is normalized on READ and never written back without
+confirmation.
+
+The existing complete settings editor is still available: every setting that has not migrated yet
 has a transition row in its own category that explicitly says `Existing settings editor`
 (`Agent → Agent settings…`, `Appearance → Footer & status line…`,
-`Conversation → More conversation settings…` (naming only the still-unmigrated
-`Submit while busy` and `Git attribution`, and landing on `Submit while busy`),
-`Input & Terminal → Input & terminal settings…`,
+`Input & Terminal → Input & terminal settings…` (only `Keyboard shortcuts` remains),
 `Extensions → Configure extension settings…`). Activating one retires the workspace and restores
 the surface it paused before opening the original editor on that exact row, so Theme, the Plugin
 Manager, keybindings, permissions and extension settings keep every existing write path.

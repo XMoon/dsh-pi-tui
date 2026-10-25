@@ -491,6 +491,17 @@ workspace must return to.
   detaching the paused surface. `activeScreen.mode` — not `this.fullscreen` — is
   the predicate for "the active screen is a viewport owner" (for example the
   focus-report pass-through).
+- **One bounded post-close hand-off is the only exception.** The Settings
+  workspace reports HOW it closed (`user-exit`, `legacy-handoff`, `forced`) and
+  the command layer may, on `user-exit` only, hand a VERIFIED stored display
+  preference back to the restored surface as ONE
+  `setFullscreen(value, {persistPreference: false, onlyWhenIdle: true})` call.
+  The app re-proves the idle claim synchronously inside `setFullscreen` (no
+  Job/workspace lease, no Question/Approval/Save owner, the same return screen),
+  skips the detached persistence callback so the choice is never written twice,
+  and refuses the switch otherwise. This is not a second screen authority: the
+  preference remains the document's, the lease still owns the screen while it is
+  open, and a refused or missing hand-off simply applies at the next TUI mount.
 - **Modal pre-emption is by closure, not layering.** A Question, Approval or Save
   Location that ARRIVES while a workspace is leased closes it FIRST (the three
   entry points run `jobWorkspace.close()` before they commit their own state), so

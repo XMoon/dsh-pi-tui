@@ -1597,6 +1597,14 @@ interface JobWorkspaceRecord {
 }
 
 /**
+ * How one Settings workspace lease really ended (C2-R2). The reason is the ONE
+ * distinction a post-close action may base a decision on: a `verified` field
+ * whose physical effect must wait for the user to LEAVE the workspace is
+ * applied only on `user-exit`.
+ */
+export type SettingsWorkspaceCloseReason = 'user-exit' | 'legacy-handoff' | 'forced'
+
+/**
  * The opening options of ONE Settings workspace (Phase 3B / B2-A). The
  * `/settings` command owns the readonly read projection; the app owns only the
  * temporary physical screen lease over it. `onOpenLegacy` is the compatibility
@@ -1650,8 +1658,13 @@ export interface SettingsWorkspaceOpenOptions {
   readonly onOpenPlugins?: (
     onYieldNavigation: () => void,
   ) => import('./tui/plugin-manager/workspace.ts').EmbeddedPluginPage | undefined
-  /** Fired once when the workspace is torn down by ANY path. */
-  readonly onClose?: () => void
+  /** Fired once when the workspace is torn down by ANY path, with the reason
+   *  the lease really closed. `user-exit` is the panel's own L0 Esc/Close
+   *  gesture, `legacy-handoff` the compatibility bridge into the existing
+   *  editor, and everything else (forced teardown, an interrupting modal, a
+   *  replacement screen) is `forced`. A callback that ignores the argument
+   *  stays compatible (C2-R2). */
+  readonly onClose?: (reason: SettingsWorkspaceCloseReason) => void
   /** The row this open selects first (the Web Settings return path,
    *  S2/PR-B §B3.4): a re-entry restores the SAME row instead of the default. */
   readonly initialRowId?: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceRowId
@@ -5041,6 +5054,15 @@ export class TuiApp {
   }
 
   /**
+   * The protocol selection this surface really applies right now (the same
+   * field {@link setTerminalProgressMode} writes). Read-only: the Settings
+   * workspace's live fact is pulled from this owner, never cached beside it.
+   */
+  currentTerminalProgressMode(): TerminalProgressMode {
+    return this.terminalProgressMode
+  }
+
+  /**
    * Apply the persisted "Terminal progress" protocol selection live. The same
    * mode is a no-op. A real transition performs the plan's FORCED actions in
    * the fixed order — retirements first (9;4 then 7501), then the newly enabled
@@ -7574,12 +7596,41 @@ export class TuiApp {
     this.wheelScrollLines = Number.isFinite(lines) ? Math.max(1, Math.floor(lines)) : 1
   }
 
+  /** The wheel step the NEXT alt-screen mount will receive (the already-mounted
+   *  fullscreen viewport keeps its constructor-time value). A read-only fact of
+   *  the same preference {@link setWheelScrollLines} writes. */
+  currentWheelScrollLines(): number {
+    return this.wheelScrollLines
+  }
+
+  /** Whether the surface is genuinely idle for a POST-CLOSE fullscreen
+   *  hand-off: no Job/workspace lease, no blocking Question/Approval/Save owner
+   *  and the return screen is still the active physical owner. This is the
+   *  in-app re-proof `setFullscreen(..., { onlyWhenIdle: true })` performs
+   *  synchronously, so the Command layer never keeps a private shadow copy of
+   *  these owners. */
+  private surfaceIsIdleForFullscreenHandoff(): boolean {
+    return this.jobWorkspace === undefined
+      && this.workspaceLease === undefined
+      && this.activeQuestions === undefined
+      && !this.approvals.isActive()
+      && this.activeSaveLocation === undefined
+      && this.activeScreen === (this.fullscreen ?? this.tui)
+  }
+
   /**
    * Enter or leave fullscreen (alt screen), reporting the change through
    * {@link TuiAppEvents.onFullscreenChange} so the host can persist it.
    * @param enabled - true renders the alt screen, false returns to the main screen.
+   * @param options - `persistPreference: false` skips the detached persistence
+   *   callback (a caller that already stored the preference itself must not
+   *   trigger a second document write); `onlyWhenIdle` re-proves INSIDE this
+   *   method that no other blocking owner (a Job lease, another workspace
+   *   screen, a Question/Approval/Save owner) or replacement screen appeared,
+   *   and refuses the physical switch when one did. Both default to the
+   *   ordinary behavior.
    */
-  setFullscreen(enabled: boolean): void {
+  setFullscreen(enabled: boolean, options?: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean }): void {
     if (this.disposed) return
     // A leased workspace (Job OR Settings) owns the physical screen: a
     // display-mode switch now would detach the PAUSED return surface (killing
@@ -7589,6 +7640,12 @@ export class TuiApp {
     // — the preference value itself is untouched and takes effect after the user
     // leaves it.
     if (this.jobWorkspace !== undefined || this.workspaceLease !== undefined) return
+    // The post-close hand-off of a VERIFIED Settings choice re-proves the whole
+    // idle claim here, synchronously, immediately before the swap: a Question,
+    // an approval sheet, a Save prompt, a Job/workspace lease or a replacement
+    // screen that appeared since the close callback was queued refuses the
+    // switch (the stored preference still applies at the next TUI mount).
+    if (options?.onlyWhenIdle === true && !this.surfaceIsIdleForFullscreenHandoff()) return
     // Fullscreen transitions change the focused screen and disarm transient
     // keyboard confirmation state.
     this.clearExitConfirmation()
@@ -7894,7 +7951,10 @@ export class TuiApp {
       this.refreshSchemeRegistrations()
     }
     this.completeScreenHandoff()
-    this.events.onFullscreenChange?.(enabled)
+    // A caller that already persisted this preference (the Settings
+    // workspace's verified post-close hand-off) must not trigger a SECOND
+    // detached document write from this transition.
+    if (options?.persistPreference !== false) this.events.onFullscreenChange?.(enabled)
     // Re-create every remountable raw projection on the CURRENT active
     // screen, back → front by the broker's CURRENT logical z-order (not the
     // creation order, and never grouped by overlay kind).
@@ -23056,6 +23116,10 @@ export class TuiApp {
   ): SettingsWorkspaceHandle {
     this.assertWorkspaceLeaseAvailable('Settings')
     let record: WorkspaceLeaseRecord
+    // The ONE close reason of THIS open (C2-R2): the panel's own L0 gesture
+    // sets `user-exit`, the legacy bridge sets `legacy-handoff`, and every
+    // other teardown keeps the conservative `forced`.
+    let closeReason: SettingsWorkspaceCloseReason = 'forced'
     const panel = new SettingsWorkspacePanel(source, {
       rows: () => this.terminal.rows,
       columns: () => this.terminal.columns,
@@ -23065,7 +23129,13 @@ export class TuiApp {
       ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
       ...(options.onAboutEnter === undefined ? {} : { onAboutEnter: options.onAboutEnter }),
       ...(options.onAboutLeave === undefined ? {} : { onAboutLeave: options.onAboutLeave }),
-      onClose: () => record.close(),
+      onClose: () => {
+        // The user's OWN close gesture (L0 Esc / Close): record it BEFORE the
+        // lease is retired, so the notification that follows the restore sees
+        // the real reason.
+        closeReason = 'user-exit'
+        record.close()
+      },
       onOpenLegacy: (targetId?: string) => openLegacy(targetId),
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),
       ...(options.createModelsPage === undefined ? {} : { createModelsPage: options.createModelsPage }),
@@ -23125,7 +23195,7 @@ export class TuiApp {
       ...options.initialModelsView === undefined ? {} : { initialModelsView: options.initialModelsView },
       ...options.initialAccountView === undefined ? {} : { initialAccountView: options.initialAccountView },
     })
-    record = this.leaseWorkspaceScreen('settings', panel, options.onClose)
+    record = this.leaseWorkspaceScreen('settings', panel, () => options.onClose?.(closeReason))
     const close = (): void => record.close()
     /** The compatibility bridge: retire THIS workspace and restore the surface it
      *  paused BEFORE the existing settings editor can mount — the legacy
@@ -23134,6 +23204,9 @@ export class TuiApp {
      *  and never resurrects the closed workspace. */
     const openLegacy = (targetId?: string): void => {
       if (this.workspaceLease !== record) return
+      // The hand-off is NOT a user exit: a verified fullscreen preference must
+      // never swap the screen behind the editor that is about to mount.
+      closeReason = 'legacy-handoff'
       close()
       if (this.disposed) return
       if (

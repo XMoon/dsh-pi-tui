@@ -12,19 +12,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`/settings` Appearance and Conversation now edit more configuration in place, without the
   existing editor.** Appearance gains an editable `Icon style` (`emoji` / `symbols` / `minimal`)
   that changes the structural glyphs immediately and persists only that field. Conversation keeps
-  the fixed order Transcript display → Transcript detail → Thinking detail → Progress updates →
-  Response style → More conversation settings…, gains editable `Transcript detail`, `Progress
-  updates` and `Response style`, and makes the previously read-only `Thinking detail` editable.
+  editable `Transcript detail`, `Progress updates` and `Response style`, and makes the
+  previously read-only `Thinking detail` editable.
   `Transcript detail` shares the `Ctrl+O` switch and `Thinking detail` shares the `Alt+T` switch;
   both are pure display state, are never persisted, and say `not applicable — runtime-only` in
   their Detail. `Progress updates` and `Response style` mutate the same state objects the Agent's
   prompt provider reads on its next assembly and persist independently, while Focus only
-  suppresses progress narration without changing the saved cadence. `More conversation settings…`
-  now names only the still-unmigrated `Submit while busy` and `Git attribution` and lands the
-  existing editor on `Submit while busy`. Browsing, moving a candidate, Tab, the wheel, a resize
+  suppresses progress narration without changing the saved cadence. Browsing, moving a candidate,
+  Tab, the wheel, a resize
   and Esc write nothing; only an explicit Confirm commits, and the outcome still distinguishes
   `Verified` / `Not saved` / `Commit accepted` / `Outcome unknown` while showing the live value
   and the stored document value separately.
+
+- **`/settings` Conversation and Input & Terminal now edit all eight historical settings in place.**
+  Conversation's fixed order becomes Transcript display → Transcript detail → Thinking detail →
+  Progress updates → Response style → Submit while busy → Git attribution, and the old
+  `More conversation settings…` transition row is retired because the category has no unmigrated
+  field left. Input & Terminal becomes Home/End keys → Fullscreen → Mouse wheel lines →
+  Notifications → Notification method → Terminal progress → Input & terminal settings…, where the
+  last row only needs the existing editor for `Keyboard shortcuts`. The eight fields have two
+  writer semantics: `Submit while busy` and `Fullscreen` write the document first and only claim
+  `Verified` after an agreeing read-back (nothing pretends to apply instantly), while the other
+  six apply their real runtime owner first and then persist, never rolling the runtime back on a
+  failed write, with `Persisted` always naming the raw stored value separately. `Submit while
+  busy` changes the NEXT busy Enter, never a running turn; `Git attribution` mutates the same
+  `tui:git-attribution` prompt state (still prompt guidance: no Git hooks, no automatic commit
+  edits, and `minimal` personas keep receiving nothing); Home/End rewrite the bindings the
+  fullscreen viewport really resolves while every other keybinding survives; Mouse wheel lines
+  applies on the **next** fullscreen entry only, so the mounted viewport keeps its constructor
+  step; Notifications and Notification method drive the same completion controller; Terminal
+  progress changes only the terminal-native status protocols and never the Progress updates
+  narration cadence. A Fullscreen choice stores the preference, keeps the workspace usable, and
+  switches the transcript screen only after you leave Settings normally — a Legacy hand-off, a
+  Question/Approval takeover, a forced close or an unverified write never switches, and a stored
+  preference still applies at the next TUI start. Browsing, Tab, the wheel, a resize and Esc still
+  write nothing; only an explicit Confirm on a fully visible candidate commits.
 
 - **Type `/image` or `/attach` anywhere in the body to attach a local image or file in place.**
   There is no need to start a new line or clear what you already wrote: typing `/ima` or `/att`

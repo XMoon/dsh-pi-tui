@@ -188,7 +188,7 @@ function stubRunner(
     progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => displayPreset === 'focus',
     setFocusMode: (enabled) => { displayPreset = enabled ? 'focus' : 'full' },
-    setNotificationMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},

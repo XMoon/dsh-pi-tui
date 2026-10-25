@@ -22,7 +22,9 @@ import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
-import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
+import { registerTuiCommands, resolveComposerDelivery, type TuiCommandRunner } from '../../src/commands.ts'
+import { installGitAttributionPrompt, type SystemPromptLike } from '../../src/app/direct/system-prompt.ts'
+import { getKeybindings } from '@xmoon76/pi-tui'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
@@ -259,6 +261,12 @@ interface Harness {
   /** The runner's LIVE prompt policy objects (the same ones the providers read). */
   readonly progressUpdatesState: { mode: 'off' | 'milestones' | 'frequent' }
   readonly responseStyleState: { style: 'default' | 'concise' | 'explanatory' }
+  /** C2-R2: the ONE shared Git attribution state the prompt section reads. */
+  readonly gitAttributionState: { mode: 'off' | 'product' | 'product-model' }
+  /** C2-R2: a live fullscreen-change probe the app really invokes. */
+  readonly setOnFullscreenChange: (listener: (fullscreen: boolean) => void) => () => void
+  /** How many times the live fullscreen-change callback really ran. */
+  readonly fullscreenChanges: () => number
   readonly invoke: (name?: string, rawInput?: string) => unknown
   /** Open the workspace and walk the category rail to one category. */
   readonly open: (category?: string) => Promise<void>
@@ -276,6 +284,10 @@ interface Harness {
   readonly replaced: () => readonly TuiSettingsDoc[]
   /** Every runner capability the commands called, in order. */
   readonly calls: () => readonly string[]
+  /** C2-R2: every notification mode/method the runner's controller was handed. */
+  readonly notificationWrites: () => readonly string[]
+  /** C2-R2: every terminal-progress mode the mounted surface was handed. */
+  readonly terminalProgressWrites: () => readonly string[]
   /** Every `diag.warn` the commands recorded (the write-owner failure trail). */
   readonly warnings: () => readonly { readonly message: string; readonly fields?: Record<string, unknown> }[]
   /** Every `visualTools.setEnabled` value the UI dispatched, in order. */
@@ -356,6 +368,17 @@ function setup(options: HarnessOptions = {}): Harness {
   // They are the SAME objects the registered SystemPrompt providers read.
   const progressUpdatesState = { mode: 'milestones' as const } as { mode: 'off' | 'milestones' | 'frequent' }
   const responseStyleState = { style: 'default' as const } as { style: 'default' | 'concise' | 'explanatory' }
+  // C2-R2: the ONE shared Git attribution state the registered prompt section
+  // reads. The writer mutates THIS object in place, so a read-back proves the
+  // same authority changed rather than a copy.
+  const gitAttributionState = { mode: 'off' as 'off' | 'product' | 'product-model' }
+  // C2-R2: the ONE completion controller the runner owns. This fixture keeps
+  // its live mode/method so the Snapshot's read-only facts are the REAL applied
+  // values (setNotificationMode/Method are the only writers).
+  let notificationMode = 'unfocused'
+  let notificationMethod = 'auto'
+  const notificationWrites: string[] = []
+  const terminalProgressWrites: string[] = []
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
   const owned: OwnedRunner = (_label, task, runOptions) => {
@@ -371,6 +394,15 @@ function setup(options: HarnessOptions = {}): Harness {
     else run()
   }
   const events: TuiAppEvents = { onSubmit: () => {}, onExit: () => {}, runOwned: owned }
+  /** C2-R2: the live fullscreen-change probe (the app invokes THIS callback). */
+  let fullscreenChanges = 0
+  const setOnFullscreenChange = (listener: (fullscreen: boolean) => void): (() => void) => {
+    events.onFullscreenChange = (fullscreen: boolean) => {
+      fullscreenChanges += 1
+      listener(fullscreen)
+    }
+    return () => { delete events.onFullscreenChange }
+  }
   const originalWrite = vt.write.bind(vt)
   vt.write = (data: string): void => { writes.push(data); originalWrite(data) }
   const app = new TuiApp(vt, events, {
@@ -403,7 +435,20 @@ function setup(options: HarnessOptions = {}): Harness {
     sessionCwd: () => '/ws',
     progressUpdatesState,
     responseStyleState,
-    gitAttributionState: { mode: 'off' },
+    gitAttributionState,
+    // C2-R2: the runner's REAL notification/preferences write seams. The
+    // Settings workspace reads their live facts back, so these stubs must
+    // actually store what they were handed.
+    setNotificationMode: (mode: string) => { notificationMode = mode; notificationWrites.push(`mode:${mode}`) },
+    setNotificationMethod: (method: string) => { notificationMethod = method; notificationWrites.push(`method:${method}`) },
+    currentNotificationMode: () => notificationMode,
+    currentNotificationMethod: () => notificationMethod,
+    setTerminalProgressMode: (mode: string) => {
+      terminalProgressWrites.push(mode)
+      // The REAL mounted surface receives the parsed selection, exactly as the
+      // production `SurfaceRuntime` seam does.
+      app.setTerminalProgressMode(mode as Parameters<TuiApp['setTerminalProgressMode']>[0])
+    },
     signal: new AbortController().signal,
     commandRegistry: commands,
     clientCommands: createClientCommandRegistry(parseCommand),
@@ -643,6 +688,9 @@ function setup(options: HarnessOptions = {}): Harness {
     doc,
     progressUpdatesState,
     responseStyleState,
+    gitAttributionState,
+    setOnFullscreenChange,
+    fullscreenChanges: () => fullscreenChanges,
     invoke,
     open,
     openHome,
@@ -653,6 +701,8 @@ function setup(options: HarnessOptions = {}): Harness {
     replacements: () => replacements,
     replaced: () => replaced,
     calls: () => calls,
+    notificationWrites: () => notificationWrites,
+    terminalProgressWrites: () => terminalProgressWrites,
     warnings: () => warnings,
     visualWrites: () => visualWrites,
     visualState: () => visualState,
@@ -2695,32 +2745,32 @@ test('B-07 a stored theme whose source is gone is listed as unavailable and can 
   h.dispose()
 })
 
-test('B-08 the transition launcher keeps its facts readable and gains no edit channel', async () => {
-  // C2-R1 migrated every Appearance/Conversation configuration row, so the
-  // read-only launcher is now the ONLY non-edit row of those categories: it must
-  // keep stating its facts, paint no writer and expose no copy verb.
+test('B-08 the Input & Terminal handoff keeps its facts readable and gains no edit channel', async () => {
+  // C2-R2 migrated every Input & Terminal configuration row, so the read-only
+  // handoff is now the ONLY non-edit row of that category: it must keep stating
+  // its facts, paint no writer and expose no copy verb.
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' } })
-  await h.open('Conversation')
+  await h.open('Input & Terminal')
   await key(h, '\r') // L0 -> L1
-  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B') // ... -> More conversation settings…
-  assert.ok(h.view().includes('> More conversation settings…'),
-    `the launcher is the selected Conversation row:\n${h.view()}`)
-  // The FROZEN Conversation order, as painted in the ROWS column (the Detail
-  // repeats the selected row's label, so the order is read from the list).
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
+  assert.ok(h.view().includes('> Input & terminal settings…'),
+    `the handoff is the selected Input & Terminal row:\n${h.view()}`)
+  // The FROZEN order, as painted in the ROWS column (the Detail repeats the
+  // selected row's label, so the order is read from the list).
   const rowsColumn = h.rowsPlain().map((_, index) => rowsPaneText(h, index)).join('\n')
   let previous = -1
-  for (const label of ['Transcript display', 'Transcript detail', 'Thinking detail', 'Progress updates', 'Response style', 'More conversation settings…']) {
+  for (const label of INPUT_TERMINAL_ROWS) {
     const at = rowsColumn.indexOf(label)
-    assert.ok(at > previous, `${label} keeps the frozen Conversation order:\n${h.view()}`)
+    assert.ok(at > previous, `${label} keeps the frozen Input & Terminal order:\n${h.view()}`)
     previous = at
   }
-  assert.match(h.view(), /Submit while busy and Git attribution are not yet editable in this workspace/u,
-    'the launcher advertises only the fields that were NOT migrated')
+  assert.match(h.view(), /Keyboard shortcuts are still configured by the existing settings editor/u,
+    'the handoff advertises only the field that was NOT migrated')
   assert.ok(!h.view().includes('Copy value [C]'), 'a launcher row paints no Legacy Copy action')
   await key(h, '\r') // the legacy handoff (a launcher owns no Detail level)
   const legacy = h.view()
   assert.match(legacy, /Type to search/, `the legacy editor is the physical owner:\n${legacy}`)
-  assert.match(legacy, />\s*Submit while busy/u, 'the handoff lands on the remaining row, never on a migrated field')
+  assert.match(legacy, />\s*Keyboard shortcuts/u, 'the handoff lands on the remaining row, never on a migrated field')
   assert.equal(h.replacements(), 0, 'activating a launcher writes nothing')
   h.dispose()
 })
@@ -5653,10 +5703,19 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
 /** The frozen Appearance row membership (C2-R1). */
 const APPEARANCE_ROWS = ['Configured theme', 'Icon style', 'Footer & status line…'] as const
 
-/** The frozen Conversation row order (F-1: the launcher sits LAST). */
+/** The frozen Conversation row order (C2-R2: the launcher is retired, the two
+ *  migrated policy rows sit LAST). */
 const CONVERSATION_ROWS = [
   'Transcript display', 'Transcript detail', 'Thinking detail',
-  'Progress updates', 'Response style', 'More conversation settings…',
+  'Progress updates', 'Response style', 'Submit while busy', 'Git attribution',
+] as const
+
+/** The frozen Input & Terminal row order (C2-R2: six writable rows, then the
+ *  remaining Keyboard shortcuts handoff LAST). */
+const INPUT_TERMINAL_ROWS = [
+  'Home/End keys', 'Fullscreen', 'Mouse wheel lines',
+  'Notifications', 'Notification method', 'Terminal progress',
+  'Input & terminal settings…',
 ] as const
 
 /** Select one LEGACY row of a category at L1 with the real keys. */
@@ -5708,7 +5767,7 @@ async function chooseCandidate(h: Harness, steps: number): Promise<void> {
 }
 
 // Regression: C2-R1 acceptance R1-01.
-test('Appearance keeps Theme + Icon style + the Footer launcher; Conversation is the frozen six', async () => {
+test('Appearance keeps Theme + Icon style + the Footer launcher; Conversation is the frozen seven', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await h.open('Appearance')
   await key(h, '\r')
@@ -5724,7 +5783,7 @@ test('Appearance keeps Theme + Icon style + the Footer launcher; Conversation is
   await walkToConversation(h)
   await key(h, '\r')
   const conversation = h.view()
-  assert.match(conversation, /Rows \(6\)/u, 'Conversation states its real six rows')
+  assert.match(conversation, /Rows \(7\)/u, 'Conversation states its real seven rows')
   let previous = -1
   for (const label of CONVERSATION_ROWS) {
     const at = conversation.indexOf(label)
@@ -5767,7 +5826,7 @@ test('browsing, moving, Tab, wheel and Esc never mutate any of the five', async 
   await h.vt.waitForRender()
   await walkToConversation(h)
   await key(h, '\r')
-  for (let step = 0; step < 5; step += 1) {
+  for (let step = 0; step < 6; step += 1) {
     await key(h, '\x1b[B')
     await key(h, '\r') // details / choice
     await key(h, '\x1b[B')
@@ -6184,17 +6243,28 @@ test('a QUEUED second write re-reads the live document and preserves the pass-th
   )
 })
 
-// Regression: C2-R1 acceptance R1-15.
-test('More conversation settings… opens the existing editor on Submit while busy', async () => {
+// Regression: C2-R2 acceptance R2-01.
+test('the migrated Conversation keeps no launcher while Input & Terminal hands off only Keyboard shortcuts', async () => {
+  const conversation = setup({ columns: 120, rows: 40 })
+  await conversation.open('Conversation')
+  await key(conversation, '\r')
+  // Conversation has no unmigrated field left: no launcher may be painted (a
+  // launcher for nothing is a false affordance).
+  assert.ok(!conversation.view().includes('More conversation settings'),
+    `Conversation paints no launcher anymore:\n${conversation.view()}`)
+  assert.match(conversation.view(), /Rows \(7\)/u)
+  conversation.dispose()
+
   const h = setup({ columns: 120, rows: 40 })
-  await h.open('Conversation')
+  await h.open('Input & Terminal')
   await key(h, '\r')
-  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
-  assert.ok(h.view().includes('> More conversation settings…'))
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
+  assert.ok(h.view().includes('> Input & terminal settings…'),
+    `the remaining handoff owns the last Input & Terminal row:\n${h.view()}`)
   await key(h, '\r')
   const legacy = h.view()
   assert.match(legacy, /Type to search/u, 'the existing complete editor is the physical owner')
-  assert.match(legacy, />\s*Submit while busy/u, 'it lands on the remaining row, never on a migrated field')
+  assert.match(legacy, />\s*Keyboard shortcuts/u, 'it lands on the remaining row, never on a migrated field')
   assert.ok(!legacy.includes('Settings · '), 'the workspace was retired, never stacked underneath')
   h.dispose()
 })
@@ -6293,6 +6363,14 @@ test('every required size walks the real rows: frozen order and Appearance membe
     assert.doesNotMatch(appearance.view(), /Transcript detail|Thinking detail|Progress updates|Response style/u,
       `${columns}x${rows} keeps the migrated Conversation rows out of Appearance`)
     appearance.dispose()
+
+    const inputTerminal = setup({ columns, rows })
+    const inputRows = await walkedRows(inputTerminal, 'Input & Terminal', INPUT_TERMINAL_ROWS)
+    assert.deepEqual(inputRows, [...INPUT_TERMINAL_ROWS],
+      `${columns}x${rows} walks the complete frozen Input & Terminal order`)
+    assert.doesNotMatch(inputTerminal.view(), /Transcript display|Icon style|Visual tools/u,
+      `${columns}x${rows} leaks no other category's rows`)
+    inputTerminal.dispose()
   }
 })
 
@@ -6401,13 +6479,13 @@ test('every response style persists and clears its own axis only', async () => {
   }
 })
 
-// Regression: C2-R1 acceptance R1-15.
+// Regression: C2-R2 acceptance R2-01.
 test('the lease return stays ONE stack: Esc ends the editor, never a second Settings', async () => {
   const h = setup({ columns: 120, rows: 40 })
-  await h.open('Conversation')
+  await h.open('Input & Terminal')
   await key(h, '\r')
-  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
-  await key(h, '\r') // the legacy handoff
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // the remaining Keyboard shortcuts handoff
   assert.match(h.view(), /Type to search/u, 'the existing editor is the physical owner')
   assert.ok(!h.view().includes('Settings · '), 'the workspace lease was retired, never stacked')
   await key(h, '\x1b') // leave the editor
@@ -6579,20 +6657,34 @@ test('a held Settings commit and a queued LEGACY write share the ONE production 
   assert.equal(h.replacements(), 1, 'the Settings write started and is held inside the queue')
 
   // 2. While it is held, the real handoff opens the existing complete editor on
-  //    the remaining Conversation row, and THAT editor's own write is queued.
+  //    the remaining Keyboard shortcuts row, and THAT editor's own write is
+  //    queued behind it.
   await key(h, '\x1b') // Detail -> Rows
   await key(h, '\x1b') // Rows -> Categories
   await h.vt.waitForRender()
-  await walkToConversation(h)
+  // Walk the rail DOWN from the current category (Appearance) to Input &
+  // Terminal; the rail is the only selection owner.
+  for (let step = 0; step < CATEGORY_ORDER.length; step += 1) {
+    if (h.rowsPlain().some(line => line.startsWith('> Input & Terminal'))) break
+    await key(h, '\x1b[B')
+  }
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Input & Terminal')),
+    `the rail reached Input & Terminal:\n${h.view()}`)
   await key(h, '\r') // L0 -> L1
-  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
-  await key(h, '\r') // the launcher's handoff
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // the handoff
   await h.vt.waitForRender()
   assert.match(h.view(), /Type to search/u, `the legacy editor owns the screen:\n${h.view()}`)
-  assert.match(h.view(), />\s*Submit while busy/u, 'it landed on the remaining row')
-  await key(h, '\r') // queue -> steer: the legacy writer
+  assert.match(h.view(), />\s*Keyboard shortcuts/u, 'it landed on the remaining row')
+  // The legacy complete editor still owns its own `Submit while busy` writer:
+  // filter to that row and activate it (a cycle row) — its document write is
+  // queued behind the held Settings write.
+  for (const data of 'Submit while busy') await key(h, data)
   await settle(h, 8)
-  assert.equal(h.replacements(), 1, 'the legacy write is QUEUED behind the held Settings write')
+  assert.ok(h.view().includes('> Submit while busy'), `the filtered row is selected:\n${h.view()}`)
+  await key(h, '\r') // cycle the row: the legacy writer runs
+  await settle(h, 8)
+  assert.ok(h.replacements() >= 1, 'the legacy write is QUEUED behind the held Settings write')
 
   // 3. Release the first write: both land, and the queued one carries the FIRST
   //    write's result plus the production USER-layer footer projection.
@@ -6674,6 +6766,343 @@ test('a PENDING apply-first commit already shows the RUNTIME value it applied', 
     assert.doesNotMatch(pending, /Status\s+Verified/u, `${entry.label} is not Verified before settlement`)
     h.releaseFirstReplace()
     await settle(h, 10)
+    h.dispose()
+  }
+})
+
+// ── C2-R2: the eight migrated Conversation / Input & Terminal writers ───────
+//
+// Every case below drives the REAL composition (the registered `/settings`
+// command, the workspace panel, the ONE `commitSettingsWorkspaceField` writer
+// and the serialized document queue) and reads the real SINK: the app's live
+// screen/terminal-progress state, the shared `gitAttributionState` object, the
+// ONE completion controller's own mode/method, the keymap the Home/End preset
+// writes and the document the write produced.
+
+/** Walk an open-or-not workspace to one row and open its L2 choice (both the
+ *  Detail-level facts and the choice are observed by the caller). */
+async function chooseRow(
+  h: Harness,
+  category: string,
+  rows: readonly string[],
+  label: string,
+): Promise<void> {
+  await selectWorkspaceRow(h, category, rows, label)
+  await key(h, '\r') // L1 -> L2 choice
+}
+
+/** Walk an open-or-not workspace to one row's settled DETAIL level. */
+async function selectWorkspaceRow(
+  h: Harness,
+  category: string,
+  rows: readonly string[],
+  label: string,
+): Promise<void> {
+  await h.open(category)
+  await key(h, '\r') // L0 -> L1
+  const target = rows.indexOf(label)
+  assert.ok(target >= 0, `the harness must know ${JSON.stringify(label)}`)
+  for (let step = 0; step < target; step += 1) await key(h, '\x1b[B')
+  assert.ok(h.view().includes(`> ${label}`), `the ${label} row owns the selection:\n${h.view()}`)
+}
+
+/** The DETAILS column of the painted frame as ONE whitespace-collapsed
+ *  sentence: a long user-facing sentence wraps at the pane width, so a prose
+ *  assertion must read the column the sentence is painted in — never the whole
+ *  frame, whose other columns would be interleaved between the wrapped lines. */
+const detailsPaneText = (h: Harness): string => {
+  const lines = h.rowsPlain()
+  // The pane header names Details whether or not IT owns the focus
+  // (`[Details]` while focused, a plain `Details` while the Rows pane is).
+  const header = lines.findIndex(line => /(?:\[)?Details(?:\])?/u.test(line))
+  assert.ok(header >= 0, `the Details pane header must be painted:\n${h.view()}`)
+  const marker = lines[header]!.search(/(?:\[)?Details(?:\])?/u)
+  const paneStart = Math.max(0, marker - 2)
+  return lines.slice(header + 1)
+    .map(line => line.slice(paneStart))
+    .join(' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+}
+
+// Regression: C2-R2 acceptance R2-03 / R2-04.
+test('Submit while busy confirms into the TUI document and the NEXT busy Enter reads it', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', busyEnter: 'queue' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Submit while busy')
+  assert.match(h.view(), /> queue\s+\[current\]/u, 'the stored value owns the current chip')
+  assert.match(h.view(), /Runtime\s+Next busy Enter: queue/u,
+    'the Runtime fact names the policy the next submit really applies')
+  await highlightCandidate(h, 'steer')
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(fixture.document().busyEnter, 'steer', 'the document stores the new policy')
+  assert.deepEqual(fixture.calls.at(-1)!.ops, [{ op: 'set', path: ['busyEnter'], value: 'steer' }],
+    'exactly one path-scoped write of its own field')
+  assert.match(h.view(), /Status\s+Verified/u, 'the authoritative re-read verified the write')
+  // The consumer reads the SAME document field: this is the production rule the
+  // next busy Enter applies (no second policy object exists).
+  assert.equal(resolveComposerDelivery(true, 'enter', fixture.document().busyEnter), 'steer',
+    'the next busy Enter routes the draft into the running turn')
+  assert.equal(resolveComposerDelivery(false, 'enter', fixture.document().busyEnter), 'queue',
+    'a NON-busy submit is unaffected')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-04.
+test('Submit while busy never presents a missing or invalid stored value as the saved one', async () => {
+  for (const stored of [undefined, 'garbage'] as const) {
+    const values: TuiSettingsDoc = { ...DEFAULT_DOC, theme: 'dark' }
+    if (stored === undefined) delete (values as { busyEnter?: string }).busyEnter
+    else (values as { busyEnter?: string }).busyEnter = stored
+    const h = setup({
+      columns: 140,
+      rows: 40,
+      tuiSettings: { get: () => values, replace: (next: TuiSettingsDoc) => { Object.assign(values, next) } },
+    })
+    await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Submit while busy')
+    const frame = h.view()
+    if (stored === undefined) {
+      assert.match(frame, /Value\s+not set/u, 'a readable document with no value says `not set`')
+      assert.match(frame, /Next busy Enter: queue \(default; no valid saved value\)/u,
+        'the consumer default is NAMED as a default')
+    } else {
+      assert.match(frame, /Value\s+invalid stored value: garbage/u,
+        'an invalid stored value is reported verbatim, never replaced by the default')
+      assert.match(frame, /Next busy Enter: queue \(default; no valid saved value\)/u)
+    }
+    assert.ok(!/> (?:queue|steer)\s+\[current\]/u.test(frame),
+      `no candidate may claim [current] without an exact stored match (${JSON.stringify(stored)}):\n${frame}`)
+    assert.equal(h.replacements(), 0, 'reading the row writes nothing')
+    h.dispose()
+  }
+})
+
+// Regression: C2-R2 acceptance R2-05.
+test('Git attribution confirms into the SAME prompt-state object the registered section reads', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', gitAttribution: 'off' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Git attribution')
+  assert.match(h.view(), /> off\s+\[current\]/u)
+  await highlightCandidate(h, 'product-model')
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(h.gitAttributionState.mode, 'product-model',
+    'the ONE state the tui:git-attribution SystemPrompt section reads changed')
+  assert.equal(fixture.document().gitAttribution, 'product-model', 'and the document stores it')
+  assert.deepEqual(fixture.calls.at(-1)!.ops, [{ op: 'set', path: ['gitAttribution'], value: 'product-model' }])
+  assert.match(h.view(), /Status\s+Verified/u)
+  // The REGISTERED section reads that SAME object: prove the registered
+  // provider's text really changed (source -> decision -> prompt sink), with
+  // provider/model staying the official DSH variables, never a TUI copy.
+  type Section = Parameters<SystemPromptLike['section']>[0]
+  const registered = new Map<string, Section>()
+  installGitAttributionPrompt({
+    section: (section) => { registered.set(section.name, section); return () => { registered.delete(section.name) } },
+  }, h.gitAttributionState)
+  const sectionText = (): string => {
+    const text = registered.get('tui:git-attribution')!.text
+    return typeof text === 'function' ? (text as () => string)() : String(text)
+  }
+  assert.match(sectionText(), /Co-Authored-By: @xmoon76\/dsh-pi-tui/u)
+  assert.match(sectionText(), /Assisted-By: \{\{provider\}\}\/\{\{model\}\}/u)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-06.
+test('Home/End keys confirms into the ONE keymap preset and leaves every other binding alone', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', homeEndKeys: 'input' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  // The real boot applies the persisted preset BEFORE the workspace opens
+  // (`applyBootDisplay`), so the live keymap fact is the one the user runs.
+  getKeybindings().setUserBindings({ 'tui.altScreen.search': 'ctrl+f' })
+  h.app.setHomeEndMode(fixture.document().homeEndKeys)
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Home/End keys')
+  assert.match(h.view(), /> input\s+\[current\]/u, 'the live keymap fact owns the chip')
+  await highlightCandidate(h, 'viewport')
+  await key(h, '\r')
+  await settle(h)
+
+  const user = getKeybindings().getUserBindings()
+  assert.equal(user['tui.altScreen.top'], 'home', 'the fullscreen viewport now owns Home')
+  assert.equal(user['tui.altScreen.bottom'], 'end', 'and End')
+  assert.equal(user['tui.altScreen.search'], 'ctrl+f', 'no other user binding was rewritten')
+  assert.match(h.view(), /Value\s+viewport/u, `the settled Value is the applied preset:\n${h.view()}`)
+  // Re-open the choice: the LIVE fact (not the document) owns the chip.
+  await key(h, '\r')
+  assert.match(h.view(), /> viewport\s+\[current\]/u, `the live fact follows the applied preset:\n${h.view()}`)
+  assert.equal(fixture.document().homeEndKeys, 'viewport')
+  assert.deepEqual(fixture.calls.at(-1)!.ops, [{ op: 'set', path: ['homeEndKeys'], value: 'viewport' }])
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-07 / R2-08.
+test('Fullscreen stores the preference while the workspace still owns the screen, and applies it on the normal exit', async () => {
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' } })
+  h.setOnFullscreenChange(() => {})
+  await selectWorkspaceRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  assert.match(detailsPaneText(h), /Current transcript mode: off \(Settings lease is separate\); applied after normal Settings close/u,
+    `the Runtime fact names the paused transcript mode and the post-close apply:\n${h.view()}`)
+  await key(h, '\r') // the choice
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(h.doc.fullscreen, 'on', 'the preference is stored')
+  assert.equal(h.replacements(), 1, 'exactly ONE document write')
+  assert.match(h.view(), /Status\s+Verified/u)
+  assert.equal(h.app.isFullscreen(), false, 'the physical screen did NOT switch while the workspace is open')
+  assert.equal(h.fullscreenChanges(), 0, 'no screen-change callback fired during the commit')
+
+  // Leaving the workspace normally is what applies the verified preference.
+  await key(h, '\x1b') // choice -> detail
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.equal(h.app.isFullscreen(), true, 'the transcript screen switched after the normal exit')
+  assert.equal(h.replacements(), 1, 'the post-close switch wrote NO second document copy')
+  assert.equal(h.fullscreenChanges(), 0, 'the hand-off keeps `persistPreference: false`: no second notify/write')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-08.
+test('Fullscreen never switches the screen when the workspace closes for another reason', async () => {
+  // A Legacy hand-off closes the workspace through the compatibility bridge: the
+  // verified preference must NOT swap the screen behind the mounting editor.
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' } })
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
+  await highlightCandidate(h, 'on')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.fullscreen, 'on')
+  // Navigate to the remaining handoff row and activate it: `legacy-handoff`.
+  await key(h, '\x1b') // back to the rows level
+  for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
+  assert.ok(h.view().includes('> Input & terminal settings…'))
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Type to search/u, 'the existing editor owns the screen')
+  assert.equal(h.app.isFullscreen(), false, 'a legacy hand-off never swaps the screen')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-09.
+test('Mouse wheel lines confirms the NEXT-mount step and never claims the mounted viewport changed', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', wheelScrollLines: '1' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await selectWorkspaceRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Mouse wheel lines')
+  assert.match(detailsPaneText(h), /Number of transcript lines moved per mouse-wheel event in fullscreen\. Applies on the next fullscreen entry; the existing fullscreen viewport keeps its constructor-time step\./u,
+    `the row states the next-entry semantics verbatim:\n${h.view()}`)
+  await key(h, '\r') // the choice
+  await highlightCandidate(h, '5')
+  await key(h, '\r')
+  await settle(h)
+
+  assert.equal(h.app.currentWheelScrollLines(), 5, 'the NEXT mount option changed')
+  assert.equal(fixture.document().wheelScrollLines, '5')
+  assert.deepEqual(fixture.calls.at(-1)!.ops, [{ op: 'set', path: ['wheelScrollLines'], value: '5' }])
+  assert.match(h.view(), /Status\s+Verified/u)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-10 / R2-11.
+test('Notifications and Notification method confirm into the ONE completion controller', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', notificationMode: 'unfocused', notificationMethod: 'auto' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Notifications')
+  assert.match(h.view(), /> unfocused\s+\[current\]/u)
+  await highlightCandidate(h, 'always')
+  await key(h, '\r')
+  await settle(h)
+  assert.ok(h.notificationWrites().includes('mode:always'), 'the ONE controller received the mode')
+  assert.equal(fixture.document().notificationMode, 'always')
+
+  // Back to the SAME rows level, then the next row (Notification method).
+  await key(h, '\x1b') // Detail -> Rows
+  await key(h, '\x1b[B')
+  assert.ok(h.view().includes('> Notification method'), `the next row owns the selection:\n${h.view()}`)
+  await key(h, '\r')
+  await highlightCandidate(h, 'osc9')
+  await key(h, '\r')
+  await settle(h)
+  assert.ok(h.notificationWrites().includes('method:osc9'), 'the SAME controller received the method')
+  assert.equal(fixture.document().notificationMethod, 'osc9')
+  assert.equal(fixture.document().notificationMode, 'always', 'the mode is untouched by the method write')
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-12.
+test('Terminal progress confirms into the mounted surface and its document field, leaving Progress updates alone', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', terminalProgress: '9;4+7501', progressUpdates: 'milestones' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  h.progressUpdatesState.mode = 'milestones'
+  await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Terminal progress')
+  assert.match(h.view(), /> 9;4\+7501\s+\[current\]/u)
+  await highlightCandidate(h, 'off')
+  await key(h, '\r')
+  await settle(h)
+
+  assert.deepEqual(h.terminalProgressWrites(), ['off'], 'the mounted surface received the selection once')
+  assert.equal(h.app.currentTerminalProgressMode(), 'off', 'the app really applies it')
+  assert.equal(fixture.document().terminalProgress, 'off')
+  assert.equal(h.progressUpdatesState.mode, 'milestones', 'the Agent narration cadence is untouched')
+  assert.equal(fixture.document().progressUpdates, 'milestones', 'and so is its document field')
+  assert.match(h.view(), /Status\s+Verified/u)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-02 / R2-13 (the persist-first gate and the
+// field isolation of every writer).
+test('a persist-first confirm refuses to write when the document cannot be read', async () => {
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', busyEnter: 'queue' }, throwOnGet: true })
+  await chooseRow(h, 'Conversation', CONVERSATION_ROWS, 'Submit while busy')
+  await highlightCandidate(h, 'steer')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 0, 'an unreadable document receives NO write')
+  assert.match(h.view(), /Not saved · the busy Enter policy was not stored/u,
+    `the refusal names the field and the unreadable document:\n${h.view()}`)
+  assert.match(h.view(), /could not be read/u)
+  assert.doesNotMatch(h.view(), /Status\s+Verified/u)
+  h.dispose()
+})
+
+// Regression: C2-R2 acceptance R2-13.
+test('every migrated writer changes exactly its own document field', async () => {
+  const cases = [
+    { category: 'Conversation', rows: CONVERSATION_ROWS, label: 'Submit while busy', applied: 'steer', path: 'busyEnter', doc: { busyEnter: 'queue' } },
+    { category: 'Conversation', rows: CONVERSATION_ROWS, label: 'Git attribution', applied: 'product', path: 'gitAttribution', doc: { gitAttribution: 'off' } },
+    { category: 'Input & Terminal', rows: INPUT_TERMINAL_ROWS, label: 'Home/End keys', applied: 'viewport', path: 'homeEndKeys', doc: { homeEndKeys: 'input' } },
+    { category: 'Input & Terminal', rows: INPUT_TERMINAL_ROWS, label: 'Fullscreen', applied: 'on', path: 'fullscreen', doc: { fullscreen: 'off' } },
+    { category: 'Input & Terminal', rows: INPUT_TERMINAL_ROWS, label: 'Mouse wheel lines', applied: '3', path: 'wheelScrollLines', doc: { wheelScrollLines: '1' } },
+    { category: 'Input & Terminal', rows: INPUT_TERMINAL_ROWS, label: 'Notifications', applied: 'always', path: 'notificationMode', doc: { notificationMode: 'unfocused' } },
+    { category: 'Input & Terminal', rows: INPUT_TERMINAL_ROWS, label: 'Notification method', applied: 'bell', path: 'notificationMethod', doc: { notificationMethod: 'auto' } },
+    { category: 'Input & Terminal', rows: INPUT_TERMINAL_ROWS, label: 'Terminal progress', applied: '7501', path: 'terminalProgress', doc: { terminalProgress: '9;4+7501' } },
+  ] as const
+
+  for (const entry of cases) {
+    const fixture = createDirectSettingsFixture({
+      theme: 'dark',
+      footerCommand: { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 },
+      keybindings: { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } },
+      ...entry.doc,
+    })
+    const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+    await chooseRow(h, entry.category, entry.rows, entry.label)
+    await highlightCandidate(h, entry.applied)
+    await key(h, '\r')
+    await settle(h)
+    assert.deepEqual(fixture.calls.at(-1)!.ops, [{ op: 'set', path: [entry.path], value: entry.applied }],
+      `${entry.label} writes ONLY its own document path`)
+    assert.equal(fixture.calls.length, 1, `${entry.label} dispatched exactly one path-scoped write`)
+    const document = fixture.document() as unknown as Record<string, unknown>
+    assert.deepEqual(document.footerCommand, { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 },
+      `${entry.label} preserves the trusted footer command verbatim`)
+    assert.deepEqual(document.keybindings, { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } },
+      `${entry.label} preserves the keybinding pass-through verbatim`)
+    assert.equal(document.theme, 'dark', `${entry.label} rewrote no unrelated field`)
     h.dispose()
   }
 })

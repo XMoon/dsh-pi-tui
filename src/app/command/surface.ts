@@ -54,6 +54,7 @@ import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 import type { ModelPresentation } from './model-presentation.ts'
 import type { PresetPresentation } from './preset-presentation.ts'
 import type { SessionBrowserPresentation } from './session-browser-presentation.ts'
+import type { NotificationMethod, NotificationMode } from '../../domain/notification/settings.ts'
 
 /** The catalog capability slice the command surface subscribes to. */
 export interface CommandCatalogCapability {
@@ -218,6 +219,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly surface: {
     setNotificationMode(mode: string): void
     setNotificationMethod(method: string): void
+    /** The mode the ONE completion controller really applies (read-only). */
+    currentNotificationMode(): NotificationMode
+    /** The delivery method that controller really applies (read-only). */
+    currentNotificationMethod(): NotificationMethod
     setTerminalProgressMode(mode: string): void
     openJobView(jobId: string): void
     /** B4-B: the Full Task Center only — the quick modal is retired. */
@@ -963,6 +968,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the panel persists the raw string through the config port.
       setNotificationMode: (mode) => deps.surface.setNotificationMode(mode),
       setNotificationMethod: (method) => deps.surface.setNotificationMethod(method),
+      currentNotificationMode: () => deps.surface.currentNotificationMode(),
+      currentNotificationMethod: () => deps.surface.currentNotificationMethod(),
       setTerminalProgressMode: (mode) => deps.surface.setTerminalProgressMode(mode),
       ensureSession: () => deps.session.ensureSession(),
       get selected() { return deps.model.selected },

@@ -89,6 +89,17 @@ export class CompletionNotificationController {
     this.method = method
   }
 
+  /** The mode this controller is really applying right now. Read-only: the
+   *  Settings workspace's live fact is a pull of THIS owner, never a copy. */
+  currentMode(): NotificationMode {
+    return this.mode
+  }
+
+  /** The delivery method this controller really applies right now. */
+  currentMethod(): NotificationMethod {
+    return this.method
+  }
+
   /** One `agent/status` transition. Only the CURRENT live main agent's
    * `running → idle` forms a completion candidate. */
   onAgentStatus(agentId: string, status: AgentLifecycleStatus): void {

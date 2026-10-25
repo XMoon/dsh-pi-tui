@@ -12,7 +12,7 @@
  */
 
 import type { SettingItem, SettingValuePart } from '@xmoon76/pi-tui'
-import { SettingsList } from '@xmoon76/pi-tui'
+import { getKeybindings, SettingsList } from '@xmoon76/pi-tui'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { TuiApp } from '../../tui-app.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../keybindings/home-end-mode.ts'
@@ -86,6 +86,8 @@ type SettingsCommandRunner = Pick<
   | 'config'
   | 'createPluginManagerPage'
   | 'currentApprovalOverride'
+  | 'currentNotificationMethod'
+  | 'currentNotificationMode'
   | 'currentPreset'
   | 'currentSessionId'
   | 'currentSessionRouting'
@@ -121,6 +123,17 @@ const ICON_STYLE_CANDIDATES = ['emoji', 'symbols', 'minimal'] as const
 const DISCLOSURE_CANDIDATES = ['collapsed', 'expanded'] as const
 const PROGRESS_UPDATES_CANDIDATES = ['off', 'milestones', 'frequent'] as const
 const RESPONSE_STYLE_CANDIDATES = ['default', 'concise', 'explanatory'] as const
+
+/** C2-R2: the eight migrated Conversation / Input & Terminal candidates, in
+ *  their frozen order. Each list is the EXACT raw string the document stores,
+ *  so a confirmed candidate never round-trips through presentation text. */
+const BUSY_ENTER_CANDIDATES = ['queue', 'steer'] as const
+const GIT_ATTRIBUTION_CANDIDATES = ['off', 'product', 'product-model'] as const
+const HOME_END_CANDIDATES = ['input', 'viewport'] as const
+const FULLSCREEN_CANDIDATES = ['off', 'on'] as const
+const NOTIFICATION_MODE_CANDIDATES = ['unfocused', 'always', 'off'] as const
+const NOTIFICATION_METHOD_CANDIDATES = ['auto', 'osc9', 'osc777', 'bell'] as const
+const TERMINAL_PROGRESS_CANDIDATES = ['9;4+7501', '9;4', '7501', 'off'] as const
 
 /** Whether a confirmed value really is one of a field's frozen candidates. The
  *  parsers' default fallbacks are NOT a validation substitute: a writer must
@@ -865,6 +878,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return aboutController
     }
     let handle: import('../../tui-app.ts').SettingsWorkspaceHandle | undefined
+    // C2-R2: the per-open VERIFIED fullscreen intent. A Fullscreen confirm that
+    // really stored its preference records the target here; the post-close
+    // hand-off applies the LAST verified choice of THIS open only. It is not a
+    // second persistence authority — it is the navigation action the stored
+    // preference already implies, released with the workspace.
+    let verifiedFullscreenIntent: 'on' | 'off' | undefined
     handle = app.openSettingsWorkspace(
       {
         readSnapshot: readSettingsWorkspaceSnapshot,
@@ -880,7 +899,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       {
         onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
         onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
-        onCommit: commitSettingsWorkspaceField,
+        onCommit: async (request) => {
+          const result = await commitSettingsWorkspaceField(request)
+          // Only a session that still belongs to THIS open may update the
+          // intent, and only a VERIFIED Fullscreen result may set it. Any
+          // non-verified Fullscreen attempt CLEARS the earlier intent, so a
+          // stale success can never fire behind a newer failed choice.
+          if (request.field === 'fullscreen' && activeSettingsWorkspace?.token === token) {
+            verifiedFullscreenIntent = result.outcome === 'verified' && (request.value === 'on' || request.value === 'off')
+              ? request.value
+              : undefined
+          }
+          return result
+        },
         createModelsPage,
         createAccountPage,
         // The About page's two version facts: read ONCE per workspace open on
@@ -894,12 +925,40 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         onAboutEnter: () => { aboutStatusSource().enter() },
         onAboutLeave: () => { aboutStatusSource().leave() },
         ...spec,
-        onClose: () => {
-          if (activeSettingsWorkspace?.token === token) activeSettingsWorkspace = undefined
+        onClose: (reason) => {
+          // Retire the token FIRST: every late callback of this open becomes
+          // inert before any physical switch is attempted.
+          const wasActive = activeSettingsWorkspace?.token === token
+          if (wasActive) activeSettingsWorkspace = undefined
           // The controller dies with the workspace: the subscription and any
           // in-flight read are released exactly once.
           aboutController?.dispose()
           aboutController = undefined
+          // C2-R2: apply the last VERIFIED Fullscreen choice only on a real user
+          // exit of the workspace that owned it, and only when the stored
+          // preference still reads exactly that target. Everything else
+          // (legacy hand-off, a forced teardown, a question/approval takeover)
+          // keeps the stored preference for the next mount and swaps NOTHING.
+          const target = verifiedFullscreenIntent
+          verifiedFullscreenIntent = undefined
+          if (!wasActive || reason !== 'user-exit' || target === undefined) return
+          if (app.isDisposed()) return
+          // The stored preference is re-read from the SAME authority the write
+          // verified: a value another writer changed in the meantime (or a
+          // non-ready/unreadable document) means this open no longer owns the
+          // decision, so nothing is switched.
+          const settings = runner.tuiSettings
+          if (settings === undefined || runner.config.configReadiness() !== 'ready') return
+          let stored: string
+          try {
+            stored = settings.get().fullscreen
+          } catch {
+            return
+          }
+          if (stored !== target) return
+          // The app re-proves its own idle claim synchronously; a newer owner
+          // that appeared disposes the switch.
+          app.setFullscreen(target === 'on', { persistPreference: false, onlyWhenIdle: true })
         },
       },
     )
@@ -1258,6 +1317,48 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         : value
 
   /**
+   * C2-R2: the primary fact of a PERSIST-FIRST row (`busy-enter`, `fullscreen`).
+   * These two fields report the stored document, so an unreadable document is
+   * an explicit unknown, a legal raw value is reported exactly, and anything
+   * else is named as the invalid stored value it is — never replaced by the
+   * consumer's default.
+   */
+  const storedCandidateFactOf = (
+    raw: string | undefined,
+    readable: boolean,
+    candidates: readonly string[],
+    unreadable: string,
+  ): string => {
+    if (!readable) return unreadable
+    if (raw === undefined || raw === '') return 'not set'
+    return isCandidateOf(raw, candidates) ? raw : `invalid stored value: ${raw}`
+  }
+
+  /**
+   * C2-R2: the Home/End preset the LIVE keymap really resolves. The Fact is the
+   * pair of chords `applyHomeEndKeyMode` writes, read from the keymap the
+   * resolver itself uses — never a copied chord table and never the stored
+   * document value. `input` is the pair the fork's own definitions resolve to;
+   * `viewport` is the pair the preset writes; anything else is a custom mapping
+   * named as such rather than labelled with a preset the user is not running.
+   */
+  const homeEndLiveModeOf = (): string => {
+    const manager = getKeybindings()
+    const resolved = manager.getResolvedBindings()
+    const asList = (value: string | readonly string[] | undefined): readonly string[] =>
+      value === undefined ? [] : typeof value === 'string' ? [value] : value
+    const same = (left: readonly string[], right: readonly string[]): boolean =>
+      left.length === right.length && left.every((entry, index) => entry === right[index])
+    const top = asList(resolved['tui.altScreen.top'])
+    const bottom = asList(resolved['tui.altScreen.bottom'])
+    const defaultTop = asList(manager.getDefinition('tui.altScreen.top').defaultKeys)
+    const defaultBottom = asList(manager.getDefinition('tui.altScreen.bottom').defaultKeys)
+    if (same(top, defaultTop) && same(bottom, defaultBottom)) return 'input'
+    if (same(top, ['home']) && same(bottom, ['end'])) return 'viewport'
+    return 'custom/unrecognized'
+  }
+
+  /**
    * The candidate source of ONE writable pilot row. A stored value whose source
    * is gone is still listed (the row must not lose the real stored identity) but
    * marked unavailable, so it can never be confirmed back into a write.
@@ -1329,7 +1430,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * conflated.
    */
   const persistedPreferenceEditOf = (
-    field: 'icon-style' | 'progress-updates' | 'response-style',
+    field: 'icon-style' | 'progress-updates' | 'response-style' | 'git-attribution'
+      | 'home-end-keys' | 'wheel-scroll-lines' | 'notification-mode' | 'notification-method'
+      | 'terminal-progress',
     runtime: string,
     candidates: readonly string[],
     persisted: string | undefined,
@@ -1345,6 +1448,36 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     })),
     runtime,
     persisted: persistedFactOf(persisted, readable),
+  })
+
+  /**
+   * C2-R2: the candidate source of ONE PERSIST-FIRST field (`busy-enter`,
+   * `fullscreen`). The stored document is the authority the Detail reports as
+   * its primary `Value`, so a missing or invalid raw value must never be
+   * replaced by the consumer's default; the `Runtime` half states the effect
+   * the NEXT read of that document will have (or the live screen mode).
+   * `[current]` lights up only on an exact raw match.
+   */
+  const persistedOnlyEditOf = (
+    field: 'busy-enter' | 'fullscreen',
+    candidates: readonly string[],
+    raw: string | undefined,
+    readable: boolean,
+    runtime: string,
+    persisted: string,
+  ): SettingsWorkspaceEdit => ({
+    field,
+    primary: 'persisted',
+    // The row's primary Value/summary is the STORED fact: an exact raw match is
+    // the only candidate that may claim `[current]`.
+    options: candidates.map(value => ({
+      value,
+      label: value,
+      available: true,
+      current: readable && raw === value,
+    })),
+    runtime,
+    persisted,
   })
 
   /**
@@ -1505,7 +1638,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  {@link SettingsWorkspaceWritableField}: the Host visual-tools switch and
    *  the two runtime-only disclosure fields have no document field at all, so
    *  they can never reach a document writer. */
-  type TuiSettingsField = 'theme' | 'display-preset' | 'icon-style' | 'progress-updates' | 'response-style'
+  type TuiSettingsField =
+    | 'theme' | 'display-preset' | 'icon-style' | 'progress-updates' | 'response-style'
+    | 'busy-enter' | 'git-attribution'
+    | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
+    | 'notification-mode' | 'notification-method' | 'terminal-progress'
 
   /**
    * The STORED value of one document field, read exactly as the document holds
@@ -1520,6 +1657,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       case 'icon-style': return doc.iconStyle
       case 'progress-updates': return doc.progressUpdates
       case 'response-style': return doc.responseStyle
+      case 'busy-enter': return doc.busyEnter
+      case 'git-attribution': return doc.gitAttribution
+      case 'home-end-keys': return doc.homeEndKeys
+      case 'fullscreen': return doc.fullscreen
+      case 'wheel-scroll-lines': return doc.wheelScrollLines
+      case 'notification-mode': return doc.notificationMode
+      case 'notification-method': return doc.notificationMethod
+      case 'terminal-progress': return doc.terminalProgress
       default: {
         // Exhaustiveness fence: a new TuiSettingsField must add its own
         // document mapping here instead of inheriting another field's value.
@@ -1668,6 +1813,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'thinking': return Promise.resolve(commitThinkingDetail(request.value))
         case 'progress-updates': return commitProgressUpdates(request.value)
         case 'response-style': return commitResponseStyle(request.value)
+        case 'busy-enter': return commitBusyEnter(request.value)
+        case 'git-attribution': return commitGitAttribution(request.value)
+        case 'home-end-keys': return commitHomeEndKeys(request.value)
+        case 'fullscreen': return commitFullscreen(request.value)
+        case 'wheel-scroll-lines': return commitWheelScrollLines(request.value)
+        case 'notification-mode': return commitNotificationMode(request.value)
+        case 'notification-method': return commitNotificationMethod(request.value)
+        case 'terminal-progress': return commitTerminalProgress(request.value)
         default: {
           // Exhaustiveness fence: a new writable field must name its writer
           // here instead of falling into another field's branch.
@@ -1814,7 +1967,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
-   * The shared persistence half of the three apply-first fields: ONE serialized
+   * The shared persistence half of the apply-first fields: ONE serialized
    * whole-document mutation (whose queue re-reads the live document), the
    * existing refusal classification, then the authoritative re-read. A non-ready
    * backend is refused BEFORE the write, after the runtime already applied.
@@ -1855,6 +2008,260 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       )
     }
     return verifyCommittedField(spec.field, spec.value)
+  }
+
+  /**
+   * C2-R2: the shared persistence half of the two PERSIST-FIRST fields
+   * (`busy-enter`, `fullscreen`). The stored document IS the authority, so —
+   * unlike the apply-first helper — nothing is applied before the write: the
+   * readiness/readability gate refuses BEFORE any mutation, the ONE serialized
+   * whole-document mutation carries the field, and only a completed write whose
+   * fresh read agrees is `Verified`. Two callers (the busy-Enter input policy
+   * and the lease-safe fullscreen preference) share this exact outcome
+   * taxonomy instead of growing a second one.
+   */
+  const commitPersistedOnlyField = async (spec: {
+    readonly field: TuiSettingsField
+    readonly value: string
+    readonly document: (doc: TuiSettingsDoc) => TuiSettingsDoc
+    readonly localNoun: string
+  }): Promise<SettingsWorkspaceCommitOutcome> => {
+    const settings = runner.tuiSettings
+    if (settings === undefined) {
+      return { outcome: 'not-saved', reason: `no authoritative TUI settings document is available to store ${spec.localNoun}` }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; ${spec.localNoun} was not stored` }
+    }
+    // A persist-first field has NO runtime half to fall back on: the write is
+    // only allowed against a document that can really be read NOW, and the
+    // current value is the base a rejection is attributed from.
+    let base: string | undefined
+    try {
+      base = readDocumentField(settings.get(), spec.field)
+    } catch (error) {
+      return {
+        outcome: 'not-saved',
+        reason: `${spec.localNoun} was not stored: the TUI settings document could not be read (${safeErrorMessage(error)})`,
+      }
+    }
+    try {
+      await serializeTuiSettingsMutation(settings, async () => {
+        // Re-read INSIDE the queue: a document written by a concurrent writer
+        // while this request waited must not be overwritten wholesale.
+        await settings.replace(withUserFooterCustomItems(spec.document(settings.get()), runner.config))
+      })
+    } catch (error) {
+      return classifyRejectedWrite(
+        spec.field,
+        spec.value,
+        base,
+        safeErrorMessage(error),
+        `storing ${spec.localNoun} failed: `,
+      )
+    }
+    return verifyCommittedField(spec.field, spec.value)
+  }
+
+  /**
+   * C2-R2: the six apply-first writers. Each one, in this exact order:
+   *  1. strict candidate membership (a parser's default is normalization, never
+   *     validation) and the base document value the request starts from,
+   *  2. the ONE live owner applies SYNCHRONOUSLY (never rolled back later),
+   *  3. the pending row's runtime fact is re-read through the app's own push,
+   *  4. the shared persistence half writes ONE whole document and re-reads it.
+   * They differ ONLY in their live owner and their document key.
+   */
+  const commitGitAttribution = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, GIT_ATTRIBUTION_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a Git attribution candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('git-attribution')
+    // The ONE state the registered `tui:git-attribution` SystemPrompt section
+    // reads on its next assembly: no section is re-registered and no second
+    // state is created.
+    runner.gitAttributionState.mode = parseGitAttributionMode(value)
+    app.refreshSettingsWorkspaceRuntimeFacts()
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the Git attribution guidance is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'git-attribution',
+      value,
+      base,
+      document: doc => ({ ...doc, gitAttribution: value }),
+      localNoun: 'the Git attribution guidance',
+    })
+  }
+
+  const commitHomeEndKeys = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, HOME_END_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a Home/End keys candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('home-end-keys')
+    // The ONE keymap owner: the preset rewrites only the two viewport chords,
+    // so every other binding survives.
+    app.setHomeEndMode(value)
+    app.refreshSettingsWorkspaceRuntimeFacts()
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the Home/End keys preset is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'home-end-keys',
+      value,
+      base,
+      document: doc => ({ ...doc, homeEndKeys: value }),
+      localNoun: 'the Home/End keys preset',
+    })
+  }
+
+  const commitWheelScrollLines = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, WHEEL_SCROLL_LINE_VALUES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a mouse wheel lines candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('wheel-scroll-lines')
+    const lines = wheelScrollLinesOf(value)
+    // NEXT-mount preference only: the mounted fullscreen viewport keeps its
+    // constructor-time step (the fork exposes no setter), so nothing here may
+    // claim the LIVE wheel already changed.
+    app.setWheelScrollLines(lines)
+    app.refreshSettingsWorkspaceRuntimeFacts()
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the mouse wheel step is set for the next fullscreen entry, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'wheel-scroll-lines',
+      value: String(lines),
+      base,
+      document: doc => ({ ...doc, wheelScrollLines: String(lines) }),
+      localNoun: 'the mouse wheel step',
+    })
+  }
+
+  const commitNotificationMode = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, NOTIFICATION_MODE_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a notification mode candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('notification-mode')
+    // The SAME completion controller: the next settle already uses the new
+    // policy, and no second controller is created.
+    runner.setNotificationMode(value)
+    app.refreshSettingsWorkspaceRuntimeFacts()
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the notification policy is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'notification-mode',
+      value,
+      base,
+      document: doc => ({ ...doc, notificationMode: value }),
+      localNoun: 'the notification policy',
+    })
+  }
+
+  const commitNotificationMethod = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, NOTIFICATION_METHOD_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a notification method candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('notification-method')
+    // Delivery axis of the SAME controller. It emits nothing by itself, so no
+    // synthetic notification is ever sent to probe the result.
+    runner.setNotificationMethod(value)
+    app.refreshSettingsWorkspaceRuntimeFacts()
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the notification method is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'notification-method',
+      value,
+      base,
+      document: doc => ({ ...doc, notificationMethod: value }),
+      localNoun: 'the notification method',
+    })
+  }
+
+  const commitTerminalProgress = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, TERMINAL_PROGRESS_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a terminal progress candidate` }
+    }
+    const settings = runner.tuiSettings
+    const base = persistedValueOf('terminal-progress')
+    // The ONE terminal status owner: the OSC 9;4 / OSC 7501 projection follows
+    // immediately. The retired `on` value is read compatibility only and is
+    // never a candidate this writer accepts.
+    runner.setTerminalProgressMode(value)
+    app.refreshSettingsWorkspaceRuntimeFacts()
+    if (settings === undefined) {
+      return {
+        outcome: 'not-saved',
+        reason: 'the terminal progress selection is applied locally, but no authoritative TUI settings document is available to store it',
+      }
+    }
+    return commitAppliedTuiField({
+      settings,
+      field: 'terminal-progress',
+      value,
+      base,
+      document: doc => ({ ...doc, terminalProgress: value }),
+      localNoun: 'the terminal progress selection',
+    })
+  }
+
+  /** C2-R2: PERSIST-FIRST busy Enter. The next busy Enter reads this document
+   *  field through `SettingsRuntime.busyEnter()`; nothing about a running turn
+   *  is rewritten and no local switch is created. */
+  const commitBusyEnter = (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, BUSY_ENTER_CANDIDATES)) {
+      return Promise.resolve({ outcome: 'not-saved', reason: `"${value}" is not a busy Enter candidate` })
+    }
+    return commitPersistedOnlyField({
+      field: 'busy-enter',
+      value,
+      document: doc => ({ ...doc, busyEnter: value }),
+      localNoun: 'the busy Enter policy',
+    })
+  }
+
+  /** C2-R2: PERSIST-FIRST fullscreen. The write ONLY stores the preference: the
+   *  physical switch is the workspace's post-close action (the lease owns the
+   *  screen while this panel is open), so a confirmed value never swaps screens
+   *  here and `Verified` only ever means the document was stored and re-read. */
+  const commitFullscreen = (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, FULLSCREEN_CANDIDATES)) {
+      return Promise.resolve({ outcome: 'not-saved', reason: `"${value}" is not a fullscreen candidate` })
+    }
+    return commitPersistedOnlyField({
+      field: 'fullscreen',
+      value,
+      document: doc => ({ ...doc, fullscreen: value }),
+      localNoun: 'the fullscreen preference',
+    })
   }
 
   const commitDisplayPreset = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
@@ -2024,6 +2431,26 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const expand = app.isTranscriptDetailExpanded() ? 'expanded' : 'collapsed'
     const runtimeProgress = runner.progressUpdatesState.mode
     const runtimeResponse = runner.responseStyleState.style
+    // C2-R2: the SIX apply-first live owners, read from the same authorities
+    // their writers mutate. The document's raw value stays a SEPARATE fact.
+    const runtimeGitAttribution = runner.gitAttributionState.mode
+    const runtimeHomeEnd = homeEndLiveModeOf()
+    const runtimeNotificationMode = runner.currentNotificationMode()
+    const runtimeNotificationMethod = runner.currentNotificationMethod()
+    const runtimeTerminalProgress = app.currentTerminalProgressMode()
+    const runtimeWheel = String(app.currentWheelScrollLines())
+    // The persist-first rows report the DOCUMENT as their primary fact, so the
+    // stored raw value (never the consumer default) is what the Detail shows.
+    const storedBusyEnter = storedCandidateFactOf(doc?.busyEnter, doc !== undefined, BUSY_ENTER_CANDIDATES, 'unknown — document unavailable')
+    const storedFullscreen = storedCandidateFactOf(doc?.fullscreen, doc !== undefined, FULLSCREEN_CANDIDATES, 'unknown')
+    // The consumer's NEXT busy Enter policy: the raw document read through the
+    // SAME rule `resolveComposerDelivery` applies, with the default called out
+    // as such instead of being presented as a saved value.
+    const busyEnterRuntime = doc === undefined
+      ? 'unknown — the next busy Enter policy cannot be read without the settings document'
+      : doc.busyEnter === 'queue' || doc.busyEnter === 'steer'
+        ? `Next busy Enter: ${doc.busyEnter}`
+        : 'Next busy Enter: queue (default; no valid saved value)'
     // The persisted fact is only a fact once the document was actually READ:
     // an absent document or a throwing read is an UNKNOWN persistence state,
     // never "read and not configured".
@@ -2188,6 +2615,179 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           ),
         },
         {
+          // C2-R2: PERSIST-FIRST. The document is the authority; the consumer
+          // (`SettingsRuntime.busyEnter()`) reads the SAME field at the next
+          // busy Enter, so `Value` reports the stored fact and `Runtime` states
+          // the policy that next read will produce.
+          id: 'busy-enter',
+          category: 'conversation',
+          label: 'Submit while busy',
+          summary: storedBusyEnter,
+          ...doc === undefined || doc.busyEnter === undefined ? {} : { value: doc.busyEnter },
+          scope: 'TUI settings document · input preference',
+          freshness: configuredFreshness,
+          description: 'What a plain Enter does while the agent is running: Queue adds the draft to the turn queue, '
+            + 'Steer injects it into the running turn. The choice is stored in the TUI settings document and is used by the NEXT busy Enter; '
+            + 'it never rewrites a turn that is already running.',
+          action: 'inspect',
+          edit: persistedOnlyEditOf(
+            'busy-enter',
+            BUSY_ENTER_CANDIDATES,
+            doc?.busyEnter,
+            doc !== undefined,
+            busyEnterRuntime,
+            storedBusyEnter,
+          ),
+        },
+        {
+          // C2-R2: APPLY-FIRST. The ONE `gitAttributionState` object the
+          // registered `tui:git-attribution` SystemPrompt section reads.
+          id: 'git-attribution',
+          category: 'conversation',
+          label: 'Git attribution',
+          summary: runtimeGitAttribution,
+          value: runtimeGitAttribution,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'Prompt guidance for Git commits the Agent creates: Off, Product (the official Co-Authored-By trailer), '
+            + 'or Product + model (also Assisted-By provider/model). Guidance only — no Git hooks and no automatic commit edits; '
+            + 'presets with a complete persona (minimal) receive no TUI prompt guidance.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'git-attribution',
+            runtimeGitAttribution,
+            GIT_ATTRIBUTION_CANDIDATES,
+            doc?.gitAttribution,
+            doc !== undefined,
+          ),
+        },
+        {
+          // C2-R2: APPLY-FIRST. The live fact is the chord the keymap really
+          // resolves (`applyHomeEndKeyMode` is the ONE writer).
+          id: 'home-end-keys',
+          category: 'input-terminal',
+          label: 'Home/End keys',
+          summary: runtimeHomeEnd,
+          value: runtimeHomeEnd,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'Input: Home/End move within the input; Ctrl+Home/End scroll the conversation. '
+            + 'Viewport: Home/End scroll the conversation; Ctrl+Home/End move within the input.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'home-end-keys',
+            runtimeHomeEnd,
+            HOME_END_CANDIDATES,
+            doc?.homeEndKeys,
+            doc !== undefined,
+          ),
+        },
+        {
+          // C2-R2: PERSIST-FIRST. The stored preference is the authority; the
+          // physical switch happens only after this workspace closes normally
+          // (`Runtime` names the paused transcript mode it will leave from).
+          id: 'fullscreen',
+          category: 'input-terminal',
+          label: 'Fullscreen',
+          summary: storedFullscreen,
+          ...doc === undefined || doc.fullscreen === undefined ? {} : { value: doc.fullscreen },
+          scope: 'TUI settings document · Client screen mode',
+          freshness: configuredFreshness,
+          description: 'Save preference, then leave Settings normally to switch the transcript screen. '
+            + 'The Settings workspace itself stays mounted until you leave.',
+          action: 'inspect',
+          edit: persistedOnlyEditOf(
+            'fullscreen',
+            FULLSCREEN_CANDIDATES,
+            doc?.fullscreen,
+            doc !== undefined,
+            `Current transcript mode: ${app.isFullscreen() ? 'on' : 'off'} (Settings lease is separate); applied after normal Settings close`,
+            storedFullscreen,
+          ),
+        },
+        {
+          // C2-R2: APPLY-FIRST to the NEXT alt-screen mount only. The mounted
+          // fullscreen viewport keeps its constructor-time step.
+          id: 'wheel-scroll-lines',
+          category: 'input-terminal',
+          label: 'Mouse wheel lines',
+          summary: runtimeWheel,
+          value: runtimeWheel,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'Number of transcript lines moved per mouse-wheel event in fullscreen. '
+            + 'Applies on the next fullscreen entry; the existing fullscreen viewport keeps its constructor-time step.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'wheel-scroll-lines',
+            runtimeWheel,
+            WHEEL_SCROLL_LINE_VALUES,
+            doc?.wheelScrollLines,
+            doc !== undefined,
+          ),
+        },
+        {
+          // C2-R2: APPLY-FIRST. The ONE completion controller's own mode.
+          id: 'notification-mode',
+          category: 'input-terminal',
+          label: 'Notifications',
+          summary: runtimeNotificationMode,
+          value: runtimeNotificationMode,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'When to notify that the main agent finished: Unfocused — only while the terminal is not focused; '
+            + 'Always — whenever the main agent settles; Off — disable completion notifications.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'notification-mode',
+            runtimeNotificationMode,
+            NOTIFICATION_MODE_CANDIDATES,
+            doc?.notificationMode,
+            doc !== undefined,
+          ),
+        },
+        {
+          // C2-R2: APPLY-FIRST. Same controller, delivery axis only.
+          id: 'notification-method',
+          category: 'input-terminal',
+          label: 'Notification method',
+          summary: runtimeNotificationMethod,
+          value: runtimeNotificationMethod,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'How the completion notification is delivered: Auto — OSC 9 / OSC 777 / bell by terminal; '
+            + 'OSC 9; OSC 777; Bell. Changing the method never emits a notification by itself.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'notification-method',
+            runtimeNotificationMethod,
+            NOTIFICATION_METHOD_CANDIDATES,
+            doc?.notificationMethod,
+            doc !== undefined,
+          ),
+        },
+        {
+          // C2-R2: APPLY-FIRST. The terminal-native projection only; the Agent
+          // narration cadence (Progress updates) is a separate field.
+          id: 'terminal-progress',
+          category: 'input-terminal',
+          label: 'Terminal progress',
+          summary: runtimeTerminalProgress,
+          value: runtimeTerminalProgress,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: 'Native terminal status: 9;4+7501 reports both the OSC 9;4 progress bar and the OSC 7501 semantic state; '
+            + '9;4 reports only the progress bar; 7501 reports only the semantic state; Off clears and suppresses both.',
+          action: 'inspect',
+          edit: persistedPreferenceEditOf(
+            'terminal-progress',
+            runtimeTerminalProgress,
+            TERMINAL_PROGRESS_CANDIDATES,
+            doc?.terminalProgress,
+            doc !== undefined,
+          ),
+        },
+        {
           // The ONE built-in Visual tools switch: a Host-profile setting, not a
           // TUI preference. The row stays visible when the authority is
           // unavailable (the category exists), but `edit.options` is empty in
@@ -2218,18 +2818,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           'footer',
         ),
         transitionRow(
-          'conversation-settings-legacy',
-          'conversation',
-          'More conversation settings…',
-          'Submit while busy and Git attribution are not yet editable in this workspace. '
-            + 'Open the existing settings editor at Submit while busy.',
-          'busy-enter',
-        ),
-        transitionRow(
           'input-terminal-settings-legacy',
           'input-terminal',
           'Input & terminal settings…',
-          'Keyboard shortcuts and the terminal input preferences are configured by the existing settings editor. This row only opens that editor on its own row.',
+          'Keyboard shortcuts are still configured by the existing settings editor. This row only opens that editor on that row.',
           'keyboard-shortcuts',
         ),
         {
