@@ -28,7 +28,24 @@ export function index(roots) {
   return { nodes, chains }
 }
 
-export const ancestorsOf = (chains, node) => (chains.get(node) ?? []).slice(0, -1)
+/**
+ * Every ancestor of `node`, from the ROOT down to its parent.
+ *
+ * FAIL CLOSED: `chains` is built by {@link index} around ONE snapshot, and a node
+ * from a DIFFERENT snapshot is not in it. Returning an empty list there would
+ * read as "this node has no clipping ancestor" — every clipped node in a stale
+ * snapshot would then look visible and clickable, which is precisely the false
+ * pass this oracle exists to prevent. A node the map does not know is a caller
+ * bug (mixing two snapshots), so it throws instead.
+ */
+export const ancestorsOf = (chains, node) => {
+  const chain = chains.get(node)
+  if (chain === undefined) {
+    throw new TypeError('this node is not part of the snapshot these chains index: '
+      + 'take the node AND the chains from the SAME snapshot() call')
+  }
+  return chain.slice(0, -1)
+}
 
 const edge = (box, axis) => (axis === 'x' ? box[0] : box[1])
 const extent = (box, axis) => (axis === 'x' ? box[2] : box[3])

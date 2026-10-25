@@ -81,9 +81,12 @@ export default async function (h) {
     JSON.stringify(rows))
 
   // The pointer really moves: a HOVER is what the headless lane cannot do.
-  const hoverTarget = h.snapshot().nodes.find((node) => node.tag === 'button')
+  // The node and its chains come from the SAME snapshot: the geometry oracle
+  // indexes by node identity, so a chain from another snapshot is empty.
+  const hoverSnap = h.snapshot()
+  const hoverTarget = hoverSnap.nodes.find((node) => node.tag === 'button')
   if (hoverTarget !== undefined) {
-    const moved = await h.hover(h.snapshot().chains, hoverTarget)
+    const moved = await h.hover(hoverSnap.chains, hoverTarget)
     h.check('the REAL pointer moves to the node it was sent to', moved.moved === true,
       JSON.stringify(moved))
   }

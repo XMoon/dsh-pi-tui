@@ -82,11 +82,12 @@ async function createHarness({ ternBin, root, display }) {
   // work in). The socket's directory must be 0700, or the daemon refuses to
   // start ("the socket needs a private directory").
   // MEASURED: a Unix socket path must stay under SUN_LEN (~107 bytes), and a
-  // run directory under `temp/` easily exceeds it. The daemon's own directory
-  // therefore lives in the system temp dir, keyed by this run's basename, so two
-  // concurrent runs still get different sockets.
-  const daemonDir = join(tmpdir(), `tern-gui-daemon-${basename(root)}`)
-  mkdirSync(daemonDir, { recursive: true })
+  // run directory under `temp/` easily exceeds it. The daemon's directory
+  // therefore lives in the system temp dir — and it is ATOMICALLY UNIQUE, the
+  // same way the run directory itself is: two runs whose `--out` basenames
+  // collide must never share a socket, or one run's teardown removes the
+  // other's daemon.
+  const daemonDir = mkdtempSync(join(tmpdir(), 'tern-gui-daemon-'))
   chmodSync(daemonDir, 0o700)
   const daemonSocket = join(daemonDir, 'daemon.sock')
   // The window's env: the run's own config AND daemon, so nothing it does can
@@ -308,8 +309,11 @@ export DISPLAY=${JSON.stringify(display)}
 cd ${JSON.stringify(repo)} || exit 1
 exec node --import tsx/esm ${JSON.stringify(subject)} 2>> ${JSON.stringify(join(root, 'subject.err'))}
 `, { mode: 0o755 })
-    // `run` takes ONE path-shaped token.
-    ctl('run', launcher)
+    // `run` takes ONE path-shaped token, and it TYPES that line into the
+    // focused pane: a retry would start a SECOND subject. Deliver it once and
+    // let an unacknowledged send abort the run; whether the subject actually
+    // booted is decided by the ready marker below, never by the `run` reply.
+    send('run', launcher)
     if (ready === undefined) return true
     const deadline = Date.now() + readyTimeoutMs
     while (Date.now() < deadline) {
@@ -338,31 +342,44 @@ exec node --import tsx/esm ${JSON.stringify(subject)} 2>> ${JSON.stringify(join(
    * run's own daemon. MEASURED: `tern split` from outside always resolves
    * `@focused` against whatever daemon the caller's env names, which is how a
    * run ends up splitting the operator's window.
+   *
+   * The split must happen while the pane is EMPTY: splitting a pane that already
+   * runs a live TSP subject silently produces no second pane.
+   *
+   * MEASURED: the client keeps the ORIGINAL pane focused after the split
+   * (`focus left|right|up|down` would move it). This function therefore never
+   * "restores" the focus — a `run` that typed a focus command would be delivered
+   * to whichever pane holds the focus, and the new pane is running the keep-open
+   * placeholder, not a shell. It ASSERTS the invariant instead, and fails the run
+   * when it does not hold, so a subject can never be launched into the wrong pane.
    */
   async function splitPane(direction = 'down', keepOpen = 'sleep 180') {
     const before = ctl('state')?.focused?.id
+    if (before === undefined) throw new Error('the window reports no focused pane before the split')
     const script = join(root, `split-${direction}.sh`)
     writeFileSync(script, `#!/bin/bash
 export TERN_DAEMON_SOCKET=${JSON.stringify(daemonSocket)}
 exec ${JSON.stringify(ternBin)} split @focused ${direction} -- ${keepOpen}
 `, { mode: 0o755 })
-    ctl('run', script)
+    // A `run` TYPES a command line into the focused pane, so it must never be
+    // retried: a repeat would split a second time. `send` delivers it once and
+    // aborts the run when the reply is lost.
+    send('run', script)
     await sleep(2500)
     const panes = ctl('state')?.panes ?? []
-    // MEASURED: after the split the focus stays on the NEW pane, so a subject
-    // launched next would be typed into the placeholder. Focus the pane the
-    // probe must own: the one whose id is NOT the new pane's sentinel id.
-    if (panes.length === 2) {
-      const keep = panes.find((pane) => pane.id === before ?? pane.id) ?? panes[0]
-      const focusScript = join(root, 'focus-pane.sh')
-      writeFileSync(focusScript, `#!/bin/bash
-export TERN_DAEMON_SOCKET=${JSON.stringify(daemonSocket)}
-exec ${JSON.stringify(ternBin)} focus ${keep.id}
-`, { mode: 0o755 })
-      ctl('run', focusScript)
-      await sleep(800)
+    const after = ctl('state')?.focused?.id
+    if (panes.length !== 2) {
+      throw new Error(`the split produced ${panes.length} pane(s), expected 2: ${JSON.stringify(panes)}`)
     }
-    return ctl('state')?.panes ?? []
+    if (after !== before) {
+      // Never "recover" by typing a focus command: the panes may not be running
+      // a shell, so that input would be lost or land in the wrong place. The
+      // window's own `focus` command is the only supported route, and the
+      // invariant is asserted rather than repaired silently.
+      throw new Error(`the split moved the focus from pane ${before} to ${after}; `
+        + `refusing to launch a subject into an unverified pane`)
+    }
+    return panes
   }
 
   return {

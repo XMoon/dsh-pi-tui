@@ -96,3 +96,23 @@ test('visiblePoint refuses a fragment too small to hit', () => {
   const { chains } = index([node([0, 0, 400, 400], [clip])])
   assert.equal(visiblePoint(chains, covered), undefined, 'nothing of it survives')
 })
+
+test('the oracle FAILS CLOSED for a node that is not part of the indexed snapshot', () => {
+  // Two independent snapshots of the SAME tree: the node below belongs to the
+  // first one only. Reading it through the second one's chains must not read as
+  // "this node has no clipping ancestor" — that would report a clipped node as
+  // visible, the exact false pass the oracle exists to prevent.
+  // TWO separate trees, not two indexes of one: `index` keeps node identity, so
+  // indexing the same object twice would put the SAME node in both maps.
+  const makeTree = () => [{
+    tag: 'div', class: 'clipper', rect: [0, 100, 200, 10],
+    children: [{ tag: 'div', class: 'target', rect: [0, 100, 200, 40] }],
+  }]
+  const first = index(makeTree())
+  const second = index(makeTree())
+  const node = first.nodes.find((entry) => entry.class === 'target')
+  assert.ok(node !== undefined)
+  assert.throws(() => containedXY(second.chains, node), /not part of the snapshot/,
+    'a stale node must not silently lose its clipping ancestors')
+  assert.throws(() => visiblePoint(second.chains, node), /not part of the snapshot/)
+})
