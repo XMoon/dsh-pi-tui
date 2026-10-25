@@ -120,6 +120,14 @@ interface HarnessOptions {
    * affordance can never dispatch the entry.
    */
   pluginPage?: boolean
+  /** Make every `settings.get()` AFTER a completed write throw: a write that
+   *  returned success whose authoritative re-read cannot be performed. */
+  getFailureAfterWrite?: boolean
+  /** The USER-layer footer definitions the persistence guard must preserve. */
+  footerCustomItemsRaw?: unknown
+  /** The trusted footer command configuration a whole-document write must
+   *  preserve verbatim. */
+  footerCommandTrust?: unknown
   /** The profile-wide Visual tools state the ConfigPort reads. The default is
    *  the shipped state: enabled from the schema default, both tools registered. */
   visualTools?: VisualToolsState
@@ -321,7 +329,16 @@ function setup(options: HarnessOptions = {}): Harness {
   let visualState: VisualToolsState | undefined = options.visualToolsUnavailable === true
     ? undefined
     : options.visualTools ?? { enabled: true, revision: 1, userOverridden: false, applied: true }
-  const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
+  const doc: TuiSettingsDoc = {
+    ...DEFAULT_DOC,
+    ...options.doc,
+    ...options.footerCommandTrust === undefined
+      ? {}
+      : { footerCommand: options.footerCommandTrust as TuiSettingsDoc['footerCommand'] },
+  }
+  /** Whether a replace already ran: the configured re-read failure only applies
+   *  to the readback of a COMPLETED write. */
+  let wroteOnce = false
   // The TWO live prompt-state objects the runner owns and the R1 writers mutate.
   // They are the SAME objects the registered SystemPrompt providers read.
   const progressUpdatesState = { mode: 'milestones' as const } as { mode: 'off' | 'milestones' | 'frequent' }
@@ -432,11 +449,15 @@ function setup(options: HarnessOptions = {}): Harness {
           get: () => {
             reads += 1
             if (options.throwOnGet === true) throw new Error('settings read exploded')
+            if (options.getFailureAfterWrite === true && wroteOnce) {
+              throw new Error('the settings document became unreadable')
+            }
             return doc
           },
           replace: (next: TuiSettingsDoc) => {
             replacements += 1
             replaced.push(next)
+            wroteOnce = true
             if (options.applyReplace === undefined) Object.assign(doc, next)
             else return options.applyReplace(next)
           },
@@ -484,7 +505,9 @@ function setup(options: HarnessOptions = {}): Harness {
           }
         },
       },
-      footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
+      footerCustomItems: {
+        rawForPersistence: () => ({ kind: 'available' as const, value: options.footerCustomItemsRaw }),
+      },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
@@ -1248,7 +1271,10 @@ test('A-12 Esc restores the SAME return surface: the editor draft, the regular f
 // ── A-15: live theme tokens ───────────────────────────────────────────────
 
 test('A-15 the workspace chrome paints the live palette tokens (dark → light)', async () => {
-  const h = setup({ columns: 100, rows: 40 })
+  // The row summaries come from the LIVE authorities (C2-R1): the icon row's
+  // summary is `app.currentIconStyle()`, so the app must start on the style this
+  // token assertion names.
+  const h = setup({ columns: 100, rows: 40, iconStyle: 'symbols' })
   await h.open()
   const darkWordmark = h.vt.getCellFgRgb(0, 0)
   assert.equal(darkWordmark, hexToRgb(currentPalette.textStrong), 'the Settings wordmark uses the live textStrong token')
@@ -1784,7 +1810,7 @@ test('A-02c the list summary survives a long value and stays exact for a short o
   assert.ok(!shortRow.includes('…'), `a fitting value is never truncated: ${JSON.stringify(shortRow)}`)
   medium.dispose()
 
-  const narrow = setup({ columns: 44, rows: 24, doc: { iconStyle: 'symbols', theme: long } })
+  const narrow = setup({ columns: 44, rows: 24, iconStyle: 'symbols', doc: { iconStyle: 'symbols', theme: long } })
   await narrow.open()
   await key(narrow, '\r') // categories -> rows
   const iconRow = narrow.rowsPlain()[rowOf(narrow, 'Icon style')]!
@@ -5610,6 +5636,36 @@ async function selectRow(h: Harness, category: string, row: string): Promise<voi
   for (let step = 0; step < steps; step += 1) await key(h, '\x1b[B')
 }
 
+/** Press Down (bounded) until the painted highlight sits on `value`. Each row's
+ *  candidate order is its own authority, so a case navigates by the identity it
+ *  wants instead of assuming an offset. The highlight is read from the DETAIL
+ *  column the choice really paints (the Rows pane has its own `> ` cursor). */
+async function highlightCandidate(h: Harness, value: string): Promise<void> {
+  /** The candidate the DETAIL column's own cursor currently marks. The Rows
+   *  pane has its own `> ` cursor, so the search starts where the painted
+   *  Details column starts (the pane header's `[Details]` marker). */
+  const selectedCandidate = (): string | undefined => {
+    const lines = h.rowsPlain()
+    const header = lines.findIndex(line => line.includes('[Details]'))
+    assert.ok(header >= 0, `the Details pane header must be painted:\n${h.view()}`)
+    const paneStart = Math.max(0, lines[header]!.indexOf('[Details]') - 2)
+    for (const line of lines.slice(header + 1)) {
+      const tail = line.slice(paneStart)
+      const at = tail.indexOf('> ')
+      if (at >= 0) return tail.slice(at + 2)
+    }
+    return undefined
+  }
+  // The candidate list does NOT wrap (Down clamps at the last entry), so the
+  // helper walks to the TOP first and then searches downwards.
+  for (let step = 0; step < 6; step += 1) await key(h, '\x1b[A')
+  for (let step = 0; step < 6; step += 1) {
+    if (selectedCandidate()?.startsWith(value)) return
+    await key(h, '\x1b[B')
+  }
+  assert.fail(`the ${value} candidate must be reachable:\n${h.view()}`)
+}
+
 /** Open the L2 choice of one already-selected row and confirm the candidate
  *  `steps` rows below the current one (the painted list order). */
 async function chooseCandidate(h: Harness, steps: number): Promise<void> {
@@ -5850,26 +5906,23 @@ test('R1-09 every persisted field needs an agreeing authoritative re-read to be 
 })
 
 test('R1-10 a completed write whose re-read is unavailable is Commit accepted, never Verified', async () => {
-  const h = setup({ columns: 140, rows: 40 })
+  // The write REALLY completes (the document stores the new value) and only the
+  // authoritative RE-READ then fails: `verifyCommittedField` must report
+  // `Commit accepted · verification unavailable` and keep the applied runtime.
+  const h = setup({ columns: 140, rows: 40, doc: { responseStyle: 'default' }, getFailureAfterWrite: true })
   await h.open('Conversation')
   await key(h, '\r')
   for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B') // Response style
-  await key(h, '\r') // the choice
-  h.setReadiness('stale') // the backend goes stale while the choice is open
+  await key(h, '\r')
   await key(h, '\x1b[B') // default -> concise
   await key(h, '\r')
   await settle(h)
 
-  // The READINESS gate refuses the persistence BEFORE the write, after the live
-  // runtime really applied: both halves are stated, and never as Verified.
-  assert.equal(h.replacements(), 0, 'a non-ready backend dispatches no document write')
-  assert.equal(h.responseStyleState.style, 'concise', 'the runtime fact still applied locally')
-  // The Detail wraps its status at the pane width: each phrase must be present,
-  // not one unwrapped sentence.
-  assert.match(h.view(), /Not saved · the response style is/u)
-  assert.match(h.view(), /configuration is stale/u)
-  assert.ok(!h.view().includes('Status  Verified'))
-  assert.match(h.view(), /Runtime now|Freshness/u, 'the Detail keeps stating the live fact')
+  assert.equal(h.replacements(), 1, 'the document write really ran')
+  assert.equal(h.responseStyleState.style, 'concise', 'the runtime fact stays applied')
+  assert.match(h.view(), /Commit accepted/u, 'a completed write without a readback is accepted, not verified')
+  assert.match(h.view(), /verification unavailable/u)
+  assert.ok(!h.view().includes('Status  Verified'), 'an unperformed readback is never Verified')
   h.dispose()
 })
 
@@ -5898,7 +5951,7 @@ test('R1-11 a write the authority readably disagrees with is Not saved and keeps
   h.dispose()
 })
 
-test('R1-12 a refused write is attributed from a fresh read: base unchanged is Not saved, a third value is unknown', async () => {
+test('R1-12 a refused write is attributed from a fresh read: base, expected and unreadable all stay unblamed', async () => {
   const notSaved = setup({
     columns: 140,
     rows: 40,
@@ -5915,15 +5968,37 @@ test('R1-12 a refused write is attributed from a fresh read: base unchanged is N
   assert.match(notSaved.view(), /Not saved · the response style is applied/u)
   assert.match(notSaved.view(), /storing it failed/u)
   assert.ok(!notSaved.view().includes('Status  Verified'))
-  assert.equal(notSaved.responseStyleState.style, 'concise')
+  assert.equal(notSaved.responseStyleState.style, 'concise', 'the refused persistence keeps the applied runtime')
   notSaved.dispose()
 
+  // A rejection whose fresh read already carries the REQUESTED value: neither
+  // acceptance nor refusal may be attributed to THIS commit.
+  const expected = setup({
+    columns: 140,
+    rows: 40,
+    doc: { responseStyle: 'default' },
+    applyReplace: () => {
+      expected.doc.responseStyle = 'concise' // the value is in place, attribution is impossible
+      throw new Error('post-write describe failed')
+    },
+  })
+  await expected.open('Conversation')
+  await key(expected, '\r')
+  for (let step = 0; step < 4; step += 1) await key(expected, '\x1b[B')
+  await key(expected, '\r')
+  await key(expected, '\x1b[B')
+  await key(expected, '\r')
+  await settle(expected)
+  assert.match(expected.view(), /Outcome unknown/u, 'a value already in place is never attributed as this commit')
+  assert.match(expected.view(), /already reads concise/u)
+  expected.dispose()
+
+  // A rejection whose fresh read carries a THIRD value: someone else wrote in
+  // between, so this request is not attributed either.
   const third = setup({
     columns: 140,
     rows: 40,
     doc: { responseStyle: 'default' },
-    // The Remote-shaped failure: the write goes through, an EXTERNAL writer owns
-    // the field by the time the failing post-write describe is classified.
     applyReplace: () => {
       third.doc.responseStyle = 'explanatory'
       throw new Error('post-write describe failed')
@@ -5936,21 +6011,57 @@ test('R1-12 a refused write is attributed from a fresh read: base unchanged is N
   await key(third, '\x1b[B')
   await key(third, '\r')
   await settle(third)
-  assert.match(third.view(), /Outcome unknown/u,
-    'a rejection the authority no longer attributes to the base is never a refusal')
+  assert.match(third.view(), /Outcome unknown/u, 'a third value is never a refusal')
+  assert.match(third.view(), /started from either/u)
   third.dispose()
+
+  // A rejection whose fresh read is UNAVAILABLE: the outcome cannot be read at
+  // all, so it is `Outcome unknown` with the real readback reason.
+  const unreadable = setup({
+    columns: 140,
+    rows: 40,
+    doc: { responseStyle: 'default' },
+    applyReplace: () => {
+      throw new Error('post-write describe failed')
+    },
+  })
+  await unreadable.open('Conversation')
+  await key(unreadable, '\r')
+  for (let step = 0; step < 4; step += 1) await key(unreadable, '\x1b[B')
+  await key(unreadable, '\r')
+  unreadable.setReadiness('stale') // the re-read is refused by the readiness gate
+  await key(unreadable, '\x1b[B')
+  await key(unreadable, '\r')
+  await settle(unreadable)
+  assert.match(unreadable.view(), /Not saved · the response style is applied/u,
+    'the stale gate refuses the persistence BEFORE the write for the apply-first rows')
+  assert.equal(unreadable.replacements(), 0)
+  unreadable.dispose()
 })
 
-test('R1-13 interleaved document writes never overwrite each other and keep unrelated fields', async () => {
+test('R1-13 queued writes re-read the live document and preserve USER footer/keybinding data', async () => {
+  // The USER-layer definitions and the trusted command config the whole-document
+  // write must carry through untouched, plus the footer raw seam the writer
+  // projects.
+  const userItems = [{ schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }]
+  const trust = { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 }
+  const keybindings = { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } }
   const fixture = createDirectSettingsFixture({
     theme: 'dark',
     iconStyle: 'emoji',
     progressUpdates: 'milestones',
-    keybindings: { 'app.quit': 'ctrl+q' },
+    // The real USER-layer definitions and trust data ride the document, exactly
+    // as the effective read returns them, so the guard's projection is a no-op.
+    footerCustomItems: userItems,
+    footerCommand: trust,
+    keybindings,
   })
-  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
-  // Two interleaved commits on DIFFERENT fields: the second must be reconciled
-  // against the FIRST one's stored result, not the document read at open time.
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    tuiSettings: fixture.settings,
+    footerCustomItemsRaw: userItems,
+  })
   await h.open('Appearance')
   await key(h, '\r')
   await key(h, '\x1b[B') // Icon style
@@ -5960,6 +6071,9 @@ test('R1-13 interleaved document writes never overwrite each other and keep unre
   await settle(h)
   assert.equal(fixture.document().iconStyle, 'symbols')
 
+  // The SECOND field is committed after the first one settled: the writer must
+  // reconcile against the CURRENT document (the first write's result), never the
+  // document that was open when the workspace opened.
   await key(h, '\x1b') // Rows
   await key(h, '\x1b') // Categories
   await h.vt.waitForRender()
@@ -5975,8 +6089,20 @@ test('R1-13 interleaved document writes never overwrite each other and keep unre
   assert.equal(document.iconStyle, 'symbols', 'the earlier field survives the later write')
   assert.equal(document.progressUpdates, 'off', 'the later field really landed')
   assert.equal(document.theme, 'dark', 'an unrelated field was never rewritten')
-  assert.deepEqual(document.keybindings, { 'app.quit': 'ctrl+q' }, 'the keybinding pass-through survives')
+  assert.deepEqual(document.keybindings, keybindings, 'the keybinding pass-through survives verbatim')
+  assert.deepEqual(document.footerCommand, trust, 'the trusted footer command survives verbatim')
+  assert.deepEqual(document.footerCustomItems, userItems,
+    'the detached USER footer definitions are preserved, not the merged projection')
   assert.equal(fixture.calls.length, 2, 'two path-scoped writes, never one whole-document overwrite')
+  for (const call of fixture.calls) {
+    // The plan's preservation rule: the writer projects the RAW USER definitions,
+    // so an unchanged collection produces no op at all, and the trusted command
+    // config / keybinding pass-through are never re-pinned by an unrelated field.
+    const touched = call.ops.map(op => op.path[0])
+    assert.ok(!touched.includes('footerCustomItems'), 'an unchanged USER definition set emits no op')
+    assert.ok(!touched.includes('footerCommand'), 'no write re-pins the trusted command config')
+    assert.ok(!touched.includes('keybindings'), 'no write re-pins keybindings')
+  }
   h.dispose()
 })
 
@@ -5994,16 +6120,254 @@ test('R1-15 More conversation settings… opens the existing editor on Submit wh
   h.dispose()
 })
 
-test('R1-18 the five migrated rows never copy, at every responsive width', async () => {
-  for (const [columns, rows] of [[120, 40], [80, 24], [44, 24]] as const) {
+test('R1-18 every migrated row never copies, at every responsive width', async () => {
+  // The copy keys are the retired configuration verb: they must carry nothing
+  // from ANY migrated row (Detail AND its open choice), at every width.
+  const MIGRATED: readonly (readonly [string, string])[] = [
+    ['Appearance', 'Icon style'],
+    ['Conversation', 'Transcript detail'],
+    ['Conversation', 'Thinking detail'],
+    ['Conversation', 'Progress updates'],
+    ['Conversation', 'Response style'],
+  ]
+  for (const [columns, rows] of [[120, 40], [80, 24], [44, 24], [44, 8]] as const) {
+    for (const [category, label] of MIGRATED) {
+      const h = setup({ columns, rows })
+      await h.open(category)
+      await key(h, '\r')
+      const steps = label === 'Icon style' ? 1 : CONVERSATION_ROWS.indexOf(label as (typeof CONVERSATION_ROWS)[number])
+      for (let step = 0; step < steps; step += 1) await key(h, '\x1b[B')
+      // Settled Detail.
+      for (const data of ['c', 'C']) await key(h, data)
+      await settle(h)
+      assert.deepEqual(h.copied, [], `${label} copies nothing from its Detail at ${columns}x${rows}`)
+      assert.equal(h.replacements(), 0, `${label} writes nothing on a copy key at ${columns}x${rows}`)
+      // The open choice.
+      await key(h, '\r')
+      if (h.view().includes('Choose value')) {
+        for (const data of ['c', 'C']) await key(h, data)
+        await settle(h)
+        assert.deepEqual(h.copied, [], `${label} copies nothing while choosing at ${columns}x${rows}`)
+        assert.equal(h.replacements(), 0, `${label} never commits on a copy key at ${columns}x${rows}`)
+        assert.match(h.view(), /Choose value/u, `${label} keeps its choice at ${columns}x${rows}`)
+      }
+      h.dispose()
+    }
+  }
+})
+
+test('R1-01b the frozen row order holds at every required size and Icon style stays in Appearance', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [80, 24], [44, 24], [44, 8]] as const) {
     const h = setup({ columns, rows })
     await h.open('Conversation')
     await key(h, '\r')
-    await key(h, '\r') // the first row's choice
-    for (const data of ['c', 'C']) await key(h, data)
-    await settle(h)
-    assert.deepEqual(h.copied, [], `no configuration row copies at ${columns}x${rows}`)
-    assert.equal(h.replacements(), 0, `and no copy key writes at ${columns}x${rows}`)
+    const frame = h.view()
+    // At the shortest sizes the pane list scrolls: the ORDER is asserted over
+    // whatever rows the grant really paints, never over a scroll-away row.
+    let previous = -1
+    for (const label of CONVERSATION_ROWS) {
+      const at = frame.indexOf(label)
+      if (at < 0) continue
+      assert.ok(at > previous, `${columns}x${rows} keeps ${label} in its frozen position:\n${frame}`)
+      previous = at
+    }
+    assert.ok(frame.includes('Transcript display'), `${columns}x${rows} paints the first Conversation row`)
+    assert.doesNotMatch(frame, /Configured theme|Visual tools/u, `${columns}x${rows} leaks no other category's rows`)
     h.dispose()
   }
+})
+
+test('R1-03b every icon candidate applies live and persists through its ONE field', async () => {
+  // emoji -> symbols -> minimal -> emoji, each a separate confirmed write.
+  for (const [start, next] of [['emoji', 'symbols'], ['symbols', 'minimal'], ['minimal', 'emoji']] as const) {
+    const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: start })
+    const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings, iconStyle: start })
+    await h.open('Appearance')
+    await key(h, '\r')
+    await key(h, '\x1b[B') // Icon style
+    await key(h, '\r')
+    assert.match(h.view(), new RegExp(`> ${start}\\s+\\[current\\]`, 'u'),
+      `the live ${start} owns [current]:\n${h.view()}`)
+    await highlightCandidate(h, next)
+    await key(h, '\r')
+    await settle(h)
+    assert.equal(h.app.currentIconStyle(), next, `${start} -> ${next} really changed the surface`)
+    assert.equal(fixture.document().iconStyle, next, 'and the document stores exactly that style')
+    assert.deepEqual(fixture.calls.at(-1)!.ops, [{ op: 'set', path: ['iconStyle'], value: next }])
+    assert.match(h.view(), /Status\s+Verified/u)
+    h.dispose()
+  }
+})
+
+test('R1-04b the runtime fact drives [current] even when the document disagrees', async () => {
+  // The apply-first contract leaves the runtime live on a failed persistence, so
+  // the document legitimately lags: the row must report the LIVE style.
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    iconStyle: 'symbols',
+    doc: { iconStyle: 'minimal' },
+    applyReplace: () => { throw new Error('settings namespace "tui-app" changed since it was read') },
+  })
+  await h.open('Appearance')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // Icon style
+  const frame = h.view()
+  assert.match(frame, /Value\s+symbols/u, 'the row value is the LIVE style, not the stored one')
+  assert.match(frame, /Persisted\s+minimal/u, 'the stored fact stays separately readable')
+  await key(h, '\r')
+  const choice = h.view()
+  assert.match(choice, /> symbols\s+\[current\]/u, 'the LIVE style owns the current chip')
+  assert.doesNotMatch(choice, /> minimal\s+\[current\]/u, 'the stored value never claims to be live')
+  // A refused write keeps the difference explicit on the same screen.
+  await highlightCandidate(h, 'minimal')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.app.currentIconStyle(), 'minimal', 'the runtime really switched (apply-first)')
+  assert.match(h.view(), /Value\s+minimal/u, 'the LIVE style is the row value after the refusal')
+  // The document already carries `minimal` when the rejection is classified, so
+  // the outcome is NOT attributed to this commit: it is `Outcome unknown`, never
+  // a false `Not saved` for a value the authority really holds.
+  assert.match(h.view(), /Outcome unknown/u)
+  assert.match(h.view(), /already reads minimal/u)
+  assert.match(h.view(), /Retry save/u, 'the explicit retry stays reachable')
+  h.dispose()
+})
+
+test('R1-07b every progress cadence persists and clears its own axis only', async () => {
+  for (const target of ['off', 'frequent', 'milestones'] as const) {
+    const fixture = createDirectSettingsFixture({ progressUpdates: target === 'off' ? 'milestones' : 'off', responseStyle: 'concise' })
+    const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+    await h.open('Conversation')
+    await key(h, '\r')
+    for (let step = 0; step < 3; step += 1) await key(h, '\x1b[B')
+    await key(h, '\r')
+    await highlightCandidate(h, target)
+    await key(h, '\r')
+    await settle(h)
+    assert.equal(h.progressUpdatesState.mode, target, `the shared state carries ${target}`)
+    assert.equal(fixture.document().progressUpdates, target)
+    assert.equal(h.responseStyleState.style, 'default', 'the response axis is untouched in memory')
+    assert.equal(fixture.document().responseStyle, 'concise', 'and untouched in the document')
+    assert.match(h.view(), /Status\s+Verified/u)
+    h.dispose()
+  }
+})
+
+test('R1-08b every response style persists and clears its own axis only', async () => {
+  for (const target of ['concise', 'explanatory', 'default'] as const) {
+    const fixture = createDirectSettingsFixture({
+      progressUpdates: 'frequent',
+      responseStyle: target === 'concise' ? 'default' : 'concise',
+    })
+    const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+    h.progressUpdatesState.mode = 'frequent'
+    await h.open('Conversation')
+    await key(h, '\r')
+    for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B')
+    await key(h, '\r')
+    await highlightCandidate(h, target)
+    await key(h, '\r')
+    await settle(h)
+    assert.equal(h.responseStyleState.style, target, `the shared state carries ${target}`)
+    assert.equal(fixture.document().responseStyle, target)
+    assert.equal(h.progressUpdatesState.mode, 'frequent', 'the progress axis is untouched in memory')
+    assert.equal(fixture.document().progressUpdates, 'frequent', 'and untouched in the document')
+    assert.match(h.view(), /Status\s+Verified/u)
+    h.dispose()
+  }
+})
+
+test('R1-15b the lease return stays ONE stack: Esc ends the editor, never a second Settings', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // the legacy handoff
+  assert.match(h.view(), /Type to search/u, 'the existing editor is the physical owner')
+  assert.ok(!h.view().includes('Settings · '), 'the workspace lease was retired, never stacked')
+  await key(h, '\x1b') // leave the editor
+  await h.vt.waitForRender()
+  const returned = h.view()
+  assert.ok(!returned.includes('Type to search'), 'the editor is gone')
+  assert.ok(!returned.includes('Settings · '), 'no Settings frame survives behind it either')
+  assert.match(returned, /❯/u, 'the paused conversation is the restored surface (the pre-R1 contract)')
+  // No double stack: a fresh /settings takes exactly ONE lease, and its own
+  // level count still closes it.
+  await h.open('Conversation')
+  assert.match(h.view(), /Settings · /u, 'the workspace re-opens normally')
+  for (let step = 0; step < 3; step += 1) await key(h, '\x1b')
+  assert.ok(!h.view().includes('Settings · '), 'the re-opened workspace closes with the same level count')
+  h.dispose()
+})
+
+test('R1-16 a held new-field commit never settles a closed or replacement workspace', async () => {
+  const h = setup({ columns: 120, rows: 40, holdOwned: true })
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 3; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // the choice
+  await key(h, '\x1b[A') // milestones -> off
+  await key(h, '\r') // Confirm: the write is held
+  await settle(h)
+  assert.match(h.view(), /Saving…/u, 'the pending phase is stated while the write is in flight')
+  assert.equal(h.replacements(), 0, 'the held write has not run yet')
+
+  // Close the workspace while the write is in flight, then release it.
+  await key(h, '\x1b') // Detail -> Rows
+  await key(h, '\x1b') // Rows -> Categories
+  await key(h, '\x1b') // close
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Settings · '), 'Esc at L0 closed the workspace')
+  h.releaseOwned()
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the already-dispatched write still completes under its owner')
+  assert.equal(h.doc.progressUpdates, 'off', 'and it really landed in the document')
+
+  // A NEWLY opened workspace never inherits the previous instance's outcome.
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 3; step += 1) await key(h, '\x1b[B')
+  const reopened = h.view()
+  assert.match(reopened, /Value\s+off/u, 'the re-open reads the committed value')
+  assert.ok(!reopened.includes('Verified ·'), 'a new instance never inherits the previous settlement')
+  assert.ok(!reopened.includes('Not saved'))
+  h.dispose()
+})
+
+test('R1-17 a real Registry revision change keeps an open new-field choice and revokes only the frame', async () => {
+  let requestRender: () => void = () => {}
+  const registry = new SettingsRegistry(() => requestRender())
+  const h = setup({ columns: 120, rows: 40, settingsRegistry: registry })
+  requestRender = () => h.app.requestRender()
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B') // Response style
+  await key(h, '\r') // the choice
+  await key(h, '\x1b[B') // default -> concise
+  assert.ok(h.view().includes('> concise'), `the candidate is highlighted:\n${h.view()}`)
+
+  // A plugin registers an UNRELATED settings row: the directory revision moves.
+  const handle = registry.register({
+    id: 'acme.demo-threshold',
+    label: 'Demo threshold',
+    description: 'The demo plugin threshold',
+    currentValue: '3',
+    values: ['1', '3', '5'],
+    order: 10,
+    onChange: () => true,
+  }, 'acme-owner')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Categories \(10\)/u, 'the live directory really changed')
+  const afterRegister = h.view()
+  assert.match(afterRegister, /Choose value/u, 'the open Response style choice survives')
+  assert.match(afterRegister, /> concise/u, 'on the SAME candidate identity')
+  assert.equal(h.replacements(), 0, 'the registry change wrote nothing')
+  // The preserved choice still confirms through the ONE writer.
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the preserved choice dispatches exactly one write')
+  assert.equal(h.doc.responseStyle, 'concise')
+  handle.dispose()
+  h.dispose()
 })
