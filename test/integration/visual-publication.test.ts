@@ -146,6 +146,8 @@ interface Harness {
     session: { id: string; snapshotEvents(): readonly { type: string }[] }
   }
   readonly adapter: ScriptedAdapter
+  /** Flip the ONE profile-wide switch the production row reads. */
+  setEnabled(next: boolean): void
   /** Read committed durable events through the official observation lease. */
   observe(): Promise<VisualSessionEvent[]>
   /** Run one prompt through the real loop with the given step plan. */
@@ -189,7 +191,8 @@ async function boot(life: TestLifecycle, label: string, policy: PolicyName = 'no
   await mountAgentLoopTestDependencies(ctx, {})
   await mountAgentLoopTestHarness(ctx)
   await ctx.plugin(SessionQuerySqlite, { path: ':memory:', openAt: 'never' })
-  applyVisualTools(ctx, { enabled: { get: () => true } } as never)
+  let enabled = true
+  applyVisualTools(ctx, { enabled: { get: () => enabled } } as never)
   const sessionId = `${label}-${Math.random().toString(36).slice(2, 10)}`
   const adapter = new ScriptedAdapter()
   ctx.llm.registerAdapter([`visual-publication-${label}`], adapter)
@@ -207,6 +210,10 @@ async function boot(life: TestLifecycle, label: string, policy: PolicyName = 'no
     sessionId,
     agent,
     adapter,
+    setEnabled(next: boolean): void {
+      enabled = next
+      ctx.emit('loader/volatile-update', [['enabled']])
+    },
     observe: async function observe(): Promise<VisualSessionEvent[]> {
       const query = ctx.get('sessionQuery') as unknown as {
         observeSession(id: string, options: { projectionMode: 'none' }): Promise<{
@@ -533,4 +540,39 @@ test('an earlier source from the SAME turn publishes after a later step, and the
   assert.ok(source.stepStartSeq < publisher.stepStartSeq, 'the source step opened EARLIER')
   assert.ok(source.resultSeq < publisher.callSeq, 'the source result committed BEFORE the publishing call')
   assert.equal(source.type, 'chart')
+})
+
+test('turning Visual Tools Off keeps an already-recorded publication readable and replayable', async (t) => {
+  const life = testLifecycle(t)
+  const harness = await boot(life, 'off-history')
+  await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef())
+  const recorded = await harness.observe()
+  assert.equal(collectPublishedVisuals(harness.sessionId, recorded).length, 1, 'the publication really happened')
+  const settledGroup = [CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME].sort()
+  assert.deepEqual(harness.ctx.tools.schemas().map(schema => schema.name).sort(), settledGroup)
+
+  // Turn the ONE profile-wide switch Off on the SAME Host: the production row
+  // releases the whole group through its real disposers.
+  harness.setEnabled(false)
+  assert.equal(harness.ctx.tools.get(CHART_TOOL_NAME), undefined)
+  assert.equal(harness.ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.equal(harness.ctx.tools.get(PRESENT_VISUAL_TOOL_NAME), undefined)
+  assert.deepEqual(harness.ctx.tools.schemas(), [], 'the next model request carries no visual schema')
+
+  // The durable facts are INDEPENDENT of the live registry: replay still reads
+  // them while the tools are gone from the catalog.
+  const replay = collectPublishedVisuals(harness.sessionId, recorded)
+  assert.equal(replay.length, 1, 'history is not filtered by the current switch value')
+  assert.equal(replay[0]?.source.title, 'Request latency')
+  assert.equal(replay[0]?.source.type, 'chart')
+  assert.equal(collectVisualSources(harness.sessionId, recorded).length, 1,
+    'the generating source stays readable while the tools are unregistered')
+  const publishResult = toolResults(recorded).find(entry => entry.callId === 'call-present')
+  assert.ok(publishResult !== undefined)
+  assert.ok(publishResult.texts.some(text => text.startsWith('visual-published-v1:')),
+    'the raw durable receipt is intact regardless of the switch')
+
+  // Turning it back On restores the exact group on the same Host.
+  harness.setEnabled(true)
+  assert.deepEqual(harness.ctx.tools.schemas().map(schema => schema.name).sort(), settledGroup)
 })
