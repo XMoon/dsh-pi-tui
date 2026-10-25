@@ -138,7 +138,7 @@ export class MentionProvider implements AutocompleteProvider {
      * legacy shell-word adapter keeps its prefix-only behavior for direct
      * shell apply callers. */
     strict: boolean
-    /** Image UX PR5: the inline attachment rows THIS request produced (object
+    /** the inline attachment rows THIS request produced (object
      * identity is the permission — see {@link InlineAttachmentAcceptance}).
      * Empty for every request that offered none. */
     attachments: readonly AutocompleteItem[]
@@ -179,7 +179,7 @@ export class MentionProvider implements AutocompleteProvider {
     this.localDiscovery = new ClientLocalDiscoveryDriver(localFdPath)
   }
 
-  /** The inline-attachment ACCEPTANCE sink (Image UX PR5). The provider
+  /** The inline-attachment ACCEPTANCE sink. The provider
    * captures the immutable acceptance synchronously and hands it here; the
    * SINK owns the post-apply timing (the vendored editor installs the applied
    * document AFTER applyCompletion returns, so the sink must observe the real
@@ -378,7 +378,7 @@ export class MentionProvider implements AutocompleteProvider {
     // completion (plan §27) that never touches file paths.
     const inline = extractInlineSkillPrefix(lines, cursorLine, cursorCol)
     if (inline !== undefined) {
-      // Image UX PR5: the FIXED Client-local attachment actions ride the same
+      // the FIXED Client-local attachment actions ride the same
       // inline `/name` seat as the skill catalog, as their own rows (a skill
       // with the SAME name stays a distinct row and only inserts text). An
       // accepted action inserts `/image ` / `/attach ` — the existing path
@@ -761,7 +761,7 @@ export class MentionProvider implements AutocompleteProvider {
     // argument-apply (which would mangle the reference).
     const inline = extractInlineSkillPrefix(lines, cursorLine, cursorCol)
     if (inline !== undefined && inline.query === prefix) {
-      // Image UX PR5: an attachment ACTION row is this provider's own row for
+      // an attachment ACTION row is this provider's own row for
       // THIS request (identity), and it only inserts `/image ` — the path
       // argument seat — never a file read.
       if (isInlineAttachmentAction(item) && this.requestSnapshot?.attachments.includes(item) === true) {
@@ -793,7 +793,7 @@ export class MentionProvider implements AutocompleteProvider {
         }
       }
     }
-    // INLINE ATTACHMENT PATH apply (Image UX PR5): a DIRECTORY continues the
+    // INLINE ATTACHMENT PATH apply: a DIRECTORY continues the
     // path seat in place; a FILE also applies the selected value in place and
     // hands the application the immutable acceptance that starts the ONE
     // Client-local intake — the canonical placeholder then replaces this

@@ -31,7 +31,7 @@
  * `../foo`, `/tmp/foo`, `foo` — must neither naturally trigger a file
  * dropdown nor open one on Tab.
  *
- * THE COMMAND TOKEN IS POSITION-SCOPED (Image UX PR5): the seat is the LAST
+ * THE COMMAND TOKEN IS POSITION-SCOPED: the seat is the LAST
  * declared command token before the cursor at a whitespace boundary, so
  * `hi /image ./a` (mid-body on the first line) and a later line's leading
  * `/attach ../f` are BOTH path arguments — while `weird/image /x`,

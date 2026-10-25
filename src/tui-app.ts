@@ -3425,7 +3425,7 @@ export class TuiApp {
   /** The last installed slash-command rows (host catalog + client command
    * contributions) — the headless-test read of the `/` menu source. */
   private installedCommandCompletions: readonly SlashCommand[] = []
-  /** Image UX PR5: the inline attachment stager the command plane supplies
+  /** the inline attachment stager the command plane supplies
    * (read + stage through the ONE Client-local intake). `undefined` on an
    * assembly without an attachment plane — an inline acceptance then only
    * edits text, exactly like an inline skill reference. */
@@ -21636,7 +21636,7 @@ export class TuiApp {
       hostShellCompletion,
     )
     this.installedCommandCompletions = [...commands]
-    // Image UX PR5: the inline attachment acceptance rides THIS provider (the
+    // The inline attachment acceptance rides THIS provider (the
     // base one owns the strict snapshot; the delegating wrap only forwards
     // applyCompletion, so either installation must install the same sink).
     base.setInlineAttachmentAcceptSink(acceptance => this.acceptInlineAttachment(acceptance))
@@ -21741,7 +21741,7 @@ export class TuiApp {
   }
 
   /**
-   * Install the INLINE ATTACHMENT stager (Image UX PR5): the command plane's
+   * Install the INLINE ATTACHMENT stager: the command plane's
    * ONE Client-local read + `DraftImageStore`/`DraftFileStore` staging entry,
    * reused by the leading `/image` `/attach` commands. The app never reads a
    * file and the command plane never edits the editor — the stager is handed a
@@ -21758,7 +21758,7 @@ export class TuiApp {
   }
 
   /**
-   * Settle ONE inline attachment acceptance (Image UX PR5 Step B.1): the
+   * Settle ONE inline attachment acceptance: the
    * vendored editor installs the applied document AFTER `applyCompletion`
    * returns, so the acceptance is settled in a microtask that FIRST proves the
    * live editor really holds the accepted document at the accepted cursor.
@@ -21840,8 +21840,7 @@ export class TuiApp {
   }
 
   /**
-   * Commit ONE canonical attachment placeholder in place (Image UX PR5
-   * Step B): replace exactly the accepted fragment of the RAW draft through
+   * Commit ONE canonical attachment placeholder in place: replace exactly the accepted fragment of the RAW draft through
    * the host editor's real undoable-edit seam, and place the cursor right
    * after the placeholder. The whole raw document is sliced — never rebuilt
    * from expanded text — so paste markers, other tokens and every other line

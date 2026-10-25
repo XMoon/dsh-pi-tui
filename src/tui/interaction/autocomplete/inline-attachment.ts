@@ -1,5 +1,5 @@
 /**
- * The INLINE attachment completion grammar (Image UX PR5): the fixed
+ * The INLINE attachment completion grammar: the fixed
  * Client-local attachment actions a draft can reach ANYWHERE in its body, the
  * candidate rows of their path argument, and the immutable ACCEPTANCE record
  * the provider hands to the application.
@@ -125,7 +125,7 @@ export interface InlineAttachmentSpan {
 }
 
 /**
- * The accepted PATH replacement (Image UX PR5): the argument span is replaced
+ * The accepted PATH replacement: the argument span is replaced
  * by the accepted candidate's value, so the draft reads `/image sub/` (or
  * `/image ./shots/err.png`) with the cursor right after it — the ordinary
  * completion shape, which is what lets a DIRECTORY seat continue with the
@@ -164,8 +164,7 @@ export function applyInlineAttachmentPath(
 }
 
 /**
- * The immutable ACCEPTANCE of one inline attachment row (Image UX PR5 Step
- * B.1): everything the application needs to prove the accepted document is
+ * The immutable ACCEPTANCE of one inline attachment row: everything the application needs to prove the accepted document is
  * really installed, and — for a FILE — the exact raw span the canonical
  * placeholder replaces. It is a one-shot USER OPERATION description, never a
  * second copy of business state: it carries no store, no bytes and no editor.
@@ -208,7 +207,7 @@ export function unquoteCandidateValue(value: string): string {
 }
 
 /**
- * One inline attachment INTAKE stake (Image UX PR5 Step C): what the
+ * One inline attachment INTAKE stake: what the
  * application hands to the command plane, which owns the ONE Client-local read
  * and the existing `DraftImageStore` / `DraftFileStore`.
  *

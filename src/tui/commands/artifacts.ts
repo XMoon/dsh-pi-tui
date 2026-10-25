@@ -80,7 +80,7 @@ export interface ArtifactsCommandRegistrars {
   registerCopy(): void
   registerAttach(): void
   /**
-   * Image UX PR5: the INLINE completion route's attachment stager. It runs the
+   * the INLINE completion route's attachment stager. It runs the
    * SAME read/stage core as the leading command; only the commit (the app's
    * one undoable in-place edit) differs. Handed to the mounted app by the
    * coordinator; a renderer without a composer gets a stager that refuses.
@@ -341,7 +341,7 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
   }
 
   /**
-   * The INLINE completion route (Image UX PR5): the SAME Client-local intake,
+   * The INLINE completion route: the SAME Client-local intake,
    * committed through the stake's own in-place undoable edit instead of the
    * composer's cursor insert. The stake is supplied by the mounted app, which
    * owns the editor, the undoable edit and the seat fence; this plane owns the
