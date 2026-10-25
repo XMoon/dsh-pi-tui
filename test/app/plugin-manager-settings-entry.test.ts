@@ -179,6 +179,10 @@ function setup(options: { columns?: number; rows?: number } = {}): {
     progressUpdatesState: { mode: 'milestones' as const },
     responseStyleState: { style: 'default' as const },
     gitAttributionState: { mode: 'off' as const },
+    // C2-R2: the completion controller's read-only facts. This composition's
+    // Settings rows read them back; /settings itself stays the same surface.
+    currentNotificationMode: () => 'unfocused' as const,
+    currentNotificationMethod: () => 'auto' as const,
     tuiSettings: undefined,
     extensions: undefined,
     createPluginManagerPage: (onYieldNavigation: () => void) => {
