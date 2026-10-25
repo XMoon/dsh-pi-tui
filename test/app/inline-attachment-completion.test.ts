@@ -30,6 +30,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import { readImageFileUninjected, setImageReadForTest } from '../../src/client/media/image/intake.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -100,6 +101,13 @@ interface Harness {
    * sleep.
    */
   postRead(): Promise<void>
+  /**
+   * Hold the REAL image read. The returned `release()` lets it proceed; the
+   * gate resolves only after the intake actually entered the read, so a test
+   * editing in between is genuinely racing an in-flight IO (not the acceptance
+   * microtask).
+   */
+  holdImageRead(): { release: () => void; entered: Promise<void> }
   /** Submissions the REAL app owner observed (Enter, accelerated, steer). */
   submissions(): number
 }
@@ -114,15 +122,44 @@ function fixture(life: TestLifecycle): { root: string; image: string; plain: str
   return { root, image: join(root, 'shot.png'), plain: join(root, 'notes.txt') }
 }
 
-function setup(life: TestLifecycle, options: { attachFileStore?: boolean } = {}): Harness {
+function setup(life: TestLifecycle, options: { attachFileStore?: boolean; onSubmitCapture?: (text: string) => void } = {}): Harness {
   const { root, image } = fixture(life)
   let cwdReads = 0
   let markPostRead!: () => void
   const postRead = new Promise<void>(resolve => { markPostRead = resolve })
+  // The UNINJECTED production read: the gate delegates to it, so the intake
+  // keeps its real behavior (metadata parse, limits) instead of chaining onto
+  // another test's seam.
+  const realRead = readImageFileUninjected
+  let gate: { entered: () => void; wait: Promise<void> } | undefined
+  let releaseGate: (() => void) | undefined
+  const holdImageRead = (): { release: () => void; entered: Promise<void> } => {
+    let entered!: () => void
+    const enteredPromise = new Promise<void>(resolve => { entered = resolve })
+    let wait!: Promise<void>
+    wait = new Promise<void>(resolve => { releaseGate = resolve })
+    gate = { entered, wait }
+    return { release: () => { releaseGate?.() }, entered: enteredPromise }
+  }
+  life.defer(() => {
+    gate = undefined
+    releaseGate?.()
+    setImageReadForTest(undefined)
+  })
+  setImageReadForTest(async (rawPath, cwd, limits, cap) => {
+    const held = gate
+    if (held !== undefined) {
+      // The intake has ENTERED the real read: the stale input arrives while
+      // the IO is genuinely in flight, not before the acceptance microtask.
+      held.entered()
+      await held.wait
+    }
+    return realRead(rawPath, cwd, limits, cap)
+  })
   const vt = new VirtualTerminal(100, 24)
   let submissions = 0
   const app = new TuiApp(vt, {
-    onSubmit: () => { submissions += 1 },
+    onSubmit: (text) => { submissions += 1; options.onSubmitCapture?.(text) },
     onExit: () => {},
   })
   app.start()
@@ -240,6 +277,8 @@ function setup(life: TestLifecycle, options: { attachFileStore?: boolean } = {})
     submissions: () => submissions,
     cwdReads: () => cwdReads,
     postRead: () => postRead,
+    // Consecutive holds share one gate; each test holds at most once.
+    holdImageRead,
   }
 }
 
@@ -508,23 +547,26 @@ test('a draft edited AFTER the read started is never overwritten', async (t) => 
   type(vt, 'shot')
   await waitForDraft(app, draft => draft === 'a /image shot', 'the filter lands in the draft')
   await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
-  const readsBefore = h.cwdReads()
+  // HOLD THE REAL READ: the gate resolves only once the intake is inside the
+  // read itself, so the following edit races genuinely in-flight IO. (The
+  // `cwd` getter is NOT such a witness: the apply-time snapshot validation
+  // reads it before any IO starts.)
+  const hold = h.holdImageRead()
   vt.sendInput('\r')
-  // The READ WITNESS decides: the acceptance microtask has already handed the
-  // stake to the intake, and the intake's read evaluated `cwd`. Only NOW is
-  // "the read is in flight" a fact rather than an assumption — editing before
-  // this point would exercise the microtask fence instead.
-  await waitFor(() => h.cwdReads() > readsBefore, 'the intake read started')
+  await hold.entered
   type(vt, 'X')
   await vt.waitForRender()
   const afterEdit = app.seatTextForTest()
   assert.ok(afterEdit.endsWith('X'), `the user's edit survives: ${JSON.stringify(afterEdit)}`)
-  // The late intake settles: it must neither paste a placeholder into the
-  // newer draft nor keep an unreferenced staged item.
-  await waitFor(() => h.imageStore.size() === 0, 'the stale intake kept no bytes')
+  // Release the held read and wait for the authoritative POST-READ fence: the
+  // stale result is only refused AFTER the IO settled, so an empty store at
+  // this point proves the fence, not merely "nothing started yet".
+  hold.release()
+  await h.postRead()
   await vt.waitForRender()
-  assert.ok(app.seatTextForTest().endsWith('X'), 'the placeholder never overwrote the newer draft')
+  assert.equal(app.seatTextForTest(), `${afterEdit}`, 'the placeholder never overwrote the newer draft')
   assert.ok(!app.seatTextForTest().includes('[image #'), 'no placeholder was written')
+  assert.equal(h.imageStore.size(), 0, 'the stale intake kept no bytes')
   assert.equal(h.submissions(), 0, 'never submits')
 })
 
@@ -538,16 +580,19 @@ test('moving the cursor after the read started also refuses the late write', asy
   type(vt, 'shot')
   await waitForDraft(app, draft => draft === 'b /image shot', 'the filter lands in the draft')
   await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
-  const readsBefore = h.cwdReads()
+  const hold = h.holdImageRead()
   vt.sendInput('\r')
-  await waitFor(() => h.cwdReads() > readsBefore, 'the intake read started')
+  await hold.entered
   // The TEXT is untouched — only the caret moves. A content-only fence would
   // accept this and then move the user's cursor to the placeholder's end.
   vt.sendInput('\x1b[D')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'b /image shot.png', 'the accepted value stayed in place')
-  await waitFor(() => h.imageStore.size() === 0, 'the cursor change kept no bytes')
+  hold.release()
+  await h.postRead()
+  await vt.waitForRender()
   assert.ok(!app.seatTextForTest().includes('[image #'), 'a caret move must refuse the late placeholder write')
+  assert.equal(h.imageStore.size(), 0, 'the cursor change kept no bytes')
   assert.equal(h.submissions(), 0, 'never submits')
 })
 
@@ -679,9 +724,9 @@ test('an edit + Undo back to the SAME text still refuses the late write (ABA)', 
   type(vt, 'shot')
   await waitForDraft(app, draft => draft === 'c /image shot', 'the filter lands in the draft')
   await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
-  const readsBefore = h.cwdReads()
+  const hold = h.holdImageRead()
   vt.sendInput('\r')
-  await waitFor(() => h.cwdReads() > readsBefore, 'the intake read started')
+  await hold.entered
   const accepted = app.seatTextForTest()
   assert.equal(accepted, 'c /image shot.png', 'the accepted value is installed')
   // ONE typed character is its own undo step (the fork coalesces only
@@ -692,9 +737,11 @@ test('an edit + Undo back to the SAME text still refuses the late write (ABA)', 
   await waitForDraft(app, draft => draft === `${accepted}Q`, 'the intervening edit landed')
   vt.sendInput('\x1b[45;5u')
   await waitForDraft(app, draft => draft === accepted, 'the Undo restored the accepted text')
-  // Wait for the AUTHORITATIVE post-read fence: the intake really finished its
-  // read while the document looked unchanged, so a late write would have
-  // happened by now if the fence compared text (and cursor) only.
+  // Release the held read, then wait for the AUTHORITATIVE post-read fence: the
+  // intake really finished its read while the document looked unchanged, so a
+  // late write would have happened by now if the fence compared text and
+  // cursor only.
+  hold.release()
   await h.postRead()
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), accepted,
@@ -750,4 +797,35 @@ test('a FILE confirm through TAB is accept-only (no submit, no queue, no steer)'
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands via Tab')
   assert.equal(h.imageStore.size(), 1, 'the real intake staged exactly one image')
   assert.equal(h.submissions(), 0, 'Tab accepts only: never submits, queues or steers')
+})
+
+test('submitting after an inline accept carries the placeholder, never the local path', async (t) => {
+  const life = testLifecycle(t)
+  // A REAL submit capture: the app's submission owner receives the serialized
+  // draft. The inline fragment must have become the placeholder BEFORE that,
+  // and the path the user selected must never reach the submitted text.
+  let submitted: string | undefined
+  const h = setup(life, { onSubmitCapture: (text) => { submitted = text } })
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'why does this fail ')
+  await vt.waitForRender()
+  type(vt, '/image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'why does this fail /image shot', 'the filter lands')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands in place')
+  assert.equal(h.submissions(), 0, 'accepting never submitted anything by itself')
+  // NOW the user submits deliberately. This is the real submission entry, and
+  // the acceptance has already replaced the fragment, so the submitted text
+  // can only carry the canonical placeholder.
+  vt.sendInput('\r')
+  await waitFor(() => h.submissions() === 1, 'the deliberate submit reached the owner')
+  assert.ok(submitted !== undefined, 'the submission owner received a draft')
+  assert.equal(submitted, 'why does this fail [image #1 (1×1)]',
+    'the submitted text carries the placeholder, never the local path')
+  assert.ok(!submitted!.includes('shot.png'), 'the selected local path never reaches the submission')
+  assert.ok(!submitted!.includes('/image '), 'the inline command fragment never reaches the submission')
 })
