@@ -362,15 +362,15 @@ test('production startup resolves both settings before compose and settings swit
   assert.equal(registry.text('tui:git-attribution'), '', 'the default-off attribution section is empty')
 })
 
-// ── C2-R1: the Settings workspace writes the SAME live objects ─────────────
+// ── C2-R1: the two prompt axes are independent live objects ────────────────
 //
-// The R1 writers must mutate the ONE `ProgressUpdatesState` /
-// `ResponseStyleState` object the registered prompt providers read — never
-// re-register a section and never build a second state. This case proves the
-// SOURCE → SINK chain on the real provider objects: the section closures are
-// installed ONCE, then the same objects are mutated exactly as the commit path
-// mutates them, and the EFFECTIVE prompt text follows.
-test('The the two live prompt axes are the objects Settings writes; Focus still only suppresses progress', () => {
+// The provider half of the contract: the section closures are installed ONCE
+// and read the LIVE state object on every assembly, so mutating that object
+// changes the effective text without re-registering anything, and neither axis
+// can move the other. This case deliberately mutates the state directly — it is
+// NOT the Settings path; the joined Settings→writer→provider chain is the
+// separate case below.
+test('the registered sections read the live axes, and neither axis moves the other', () => {
   const display: DisplayState = { preset: 'full' }
   const t = communicationRegistry(display)
   const progress = t.progressUpdatesState
@@ -467,17 +467,41 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   assert.equal(registry.text('tui:response-style'), '', 'the default response style adds no guidance')
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Milestones/)
 
-  // Drive the NEW workspace: Conversation -> Progress updates / Response style.
+  // Drive the NEW workspace: Conversation -> Progress updates -> Response style,
+  // confirming BOTH axes so each has its own joined proof (a shared-state
+  // regression on one axis must fail on its own, not be masked by the other).
   const commands = harness.commands as { handler(name: string): (input: { rawInput: string }) => unknown }
   await commands.handler('settings')({ rawInput: '' })
   await vt.waitForRender()
   await selectSettingsCategory(vt, 'Conversation')
   vt.sendInput('\r') // L0 -> L1
   await vt.waitForRender()
-  for (let step = 0; step < 4; step += 1) {
-    vt.sendInput('\x1b[B') // -> Response style
+  for (let step = 0; step < 3; step += 1) {
+    vt.sendInput('\x1b[B') // -> Progress updates
     await vt.waitForRender()
   }
+  vt.sendInput('\r') // open the choice
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A') // milestones -> off
+  await vt.waitForRender()
+  vt.sendInput('\r') // Confirm
+  await waitForFrame(
+    () => String(doc.progressUpdates),
+    value => value === 'off',
+    () => vt.waitForRender(),
+    'the workspace commit never persisted its progress cadence',
+  )
+  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/,
+    'the ALREADY REGISTERED progress provider reads the workspace commit')
+  assert.equal(registry.sections.size, 4, 'no section was re-registered by the cadence commit')
+
+  // The SECOND axis, confirmed from the same real workspace. After the settlement
+  // the panel is at L2, so Esc returns to the Rows level first and only then does
+  // Down move to the next row.
+  vt.sendInput('\x1b') // settled Detail -> Rows
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // Progress updates -> Response style
+  await vt.waitForRender()
   vt.sendInput('\r') // open the choice
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // default -> concise
@@ -495,7 +519,7 @@ test('a Settings workspace Confirm reaches the registered prompt section through
   assert.match(registry.text('tui:response-style'), /# Response style: Concise/,
     'the ALREADY REGISTERED response-style provider reads the workspace commit')
   assert.equal(doc.responseStyle, 'concise', 'and the same commit persisted')
-  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Milestones/,
-    'the sibling axis is untouched')
-  assert.equal(registry.sections.size, 4, 'no section was re-registered by the commit')
+  assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/,
+    'the progress axis keeps the cadence that was committed first')
+  assert.equal(registry.sections.size, 4, 'no section was re-registered by either commit')
 })
