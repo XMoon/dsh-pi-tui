@@ -1033,6 +1033,12 @@ test('subagentModelSelection reads the official service and degrades to the ship
   assert.equal(current.enabled, true)
   assert.deepEqual(current.allowedModels, [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }])
 
+  // A THROWING official read is UNREADABLE, never the shipped default: a writer
+  // handed `{enabled:false, []}` would erase routes the Host still stores.
+  const throwing = port({ subagentModelSelection: { current: () => { throw new Error('official read failed') } }, settings: settings({}) }).subagentModelSelection
+  assert.throws(() => throwing.get(), /official read failed/u,
+    'an unreadable official section must fail loud, not fabricate the default')
+
   const missing = port({ subagentModelSelection: { current: () => ({ enabled: false, allowedModels: [] }) }, settings: settings({}) }).subagentModelSelection
   assert.deepEqual(missing.get(), { enabled: false, allowedModels: [] }, 'the service reads its own shipped default')
   const noService = port({}).subagentModelSelection

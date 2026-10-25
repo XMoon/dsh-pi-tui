@@ -2277,7 +2277,11 @@ export class SettingsWorkspacePanel implements Component {
         }
         // The summary truncates against the pane width this list is ACTUALLY
         // painted in; medium L0 and L1 give the same list different widths.
-        paneLines.set('rows', visible.map(row => this.rowLine(row, pane.width)))
+        // A category whose rows are ALL unavailable states that instead of
+        // painting an unexplained blank list (the category itself is fixed).
+        paneLines.set('rows', rows.length === 0
+          ? [this.emptyRowsLine(pane.width)]
+          : visible.map(row => this.rowLine(row, pane.width)))
         continue
       }
       const detail = this.detailLines(pane.width, contentRows)
@@ -2391,6 +2395,9 @@ export class SettingsWorkspacePanel implements Component {
       }
       const visible = rows.slice(this.rowOffset, this.rowOffset + viewport)
       panes.rows = { x: 0, width, contentTop: bodyTop, contentRows: viewport, maxOffset: Math.max(0, rows.length - viewport) }
+      // A category whose rows are ALL unavailable states that instead of
+      // painting an unexplained blank list (the category itself is fixed).
+      if (rows.length === 0) out.push(fit(this.emptyRowsLine(width), width))
       for (let i = 0; i < visible.length; i += 1) {
         const row = visible[i]!
         targets.push({ kind: 'row', id: row.id, row: bodyTop + i, startCol: 0, endCol: width })
@@ -2454,6 +2461,22 @@ export class SettingsWorkspacePanel implements Component {
     // Cursor glyph = role 6 (`primary`), the selected row's own text = role 8
     // (bold textStrong): two anchors, one meaning each.
     return `${marker}${selected ? color.textStrong(label) : color.text(label)}`
+  }
+
+  /**
+   * The statement of an all-unavailable category, in the LONGEST wording that
+   * fits WHOLE. It is never truncated (a half-cut sentence reads as a different
+   * claim), and a pane too narrow for even the shortest wording still says
+   * nothing rather than something false.
+   */
+  private emptyRowsLine(width: number): string {
+    const wordings = [
+      'No setting is available in this category right now.',
+      'No setting is available.',
+      'None available.',
+    ]
+    const fitting = wordings.find(text => visibleWidth(text) <= width)
+    return fitting === undefined ? '' : color.textDim(fitting)
   }
 
   private rowLine(row: SettingsWorkspaceRow | undefined, width: number): string {
@@ -2522,7 +2545,12 @@ export class SettingsWorkspacePanel implements Component {
         ? 'Account'
         : 'this page'
     const content = row === undefined
-      ? [color.textDim(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`)]
+      // Two DIFFERENT absences: a direct category has no Rows level at all, while
+      // a configuration category whose rows are all unavailable has no
+      // SELECTABLE row (never "press Enter to open a page" — it has none).
+      ? [isDirectCategory(this.categoryId)
+          ? color.textDim(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`)
+          : color.textDim('No setting is available in this category right now.')]
       : this.detailContent(row, width, includeTitle)
     const offset = Math.min(Math.max(0, this.detailOffset), Math.max(0, content.length - scrollViewport))
     this.detailOffset = offset
@@ -3170,11 +3198,18 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  /** The picker committed something: re-read the snapshot the rows project
-   *  from (the row summary follows the official section), with the picker
-   *  still mounted. */
+  /**
+   * The picker settled ONE of its writes: re-read the snapshot the rows project
+   * from, so the Agent row summary follows the official section.
+   *
+   * A write that settles AFTER the user closed the picker still refreshes the
+   * facts of the workspace the user is now looking at — the page instance is
+   * spent, but the workspace is not. This refreshes the ROW FACTS only: it
+   * never re-mounts a picker, never moves the row/focus selection and never
+   * touches a closed screen.
+   */
   private refreshSpecialistSummary(): void {
-    if (this.disposed || this.specialistPage === undefined) return
+    if (this.disposed) return
     this.snapshot = this.source.readSnapshot()
     this.bumpRevision()
     this.intents.requestRender()

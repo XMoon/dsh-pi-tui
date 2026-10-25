@@ -58,12 +58,30 @@ export interface AllowlistCatalogServices {
   loadDirectory(signal?: AbortSignal): Promise<ModelDirectoryDto>
 }
 
+/**
+ * The precise permission edit one toggle performs. The picker's own working copy
+ * is a VIEW of a section it read earlier, so replaying its whole list would drop
+ * whatever another surface committed in between; the queue applies THIS diff to
+ * the section it really holds at write time instead.
+ */
+export interface SubagentRouteIntentWriter {
+  add(route: SubagentAllowedModelRoute): Promise<void>
+  remove(route: SubagentAllowedModelRoute): Promise<void>
+}
+
 export interface SubagentAllowlistPickerDeps {
   /** The official settings sub-domain (read + whole-section writes).
    *  `available()` answers "may a route be written RIGHT NOW": it is checked
    *  before every toggle, so a stale/unavailable authority refuses instead of
    *  painting an optimistic marker that can never commit. */
   selection: SubagentModelSelectionConfig
+  /**
+   * The route-diff write seam. When composed, a toggle submits exactly the
+   * `(provider, model)` pair it changed instead of replaying the picker's whole
+   * list, so two picker instances cannot erase each other's grants. Absent (the
+   * picker's own unit tests) keeps the whole-section `selection.set` path.
+   */
+  routeIntent?: SubagentRouteIntentWriter
   /** The provider/model discovery catalog for the picker rows. */
   catalog: AllowlistCatalogServices
   /** Surface notice for refused toggles (never a bare console write). */
@@ -79,7 +97,9 @@ export interface SubagentAllowlistPickerDeps {
    * row's displayed summary through this narrow seam instead — it never
    * re-opens the submenu or moves the cursor.
    */
-  summarize(value: string): void
+  /** @param summary the committed allowlist summary (display only — the outer
+   *  surface re-reads its own authority; it never trusts this string as fact). */
+  summarize(summary: string): void
   /** The owned-task entry (runOwned shape): async loads route through it
    *  instead of a bare `void promise` (AGENTS.md hard rule). */
   runOwned<T>(
@@ -264,9 +284,18 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
 
   constructor(deps: SubagentAllowlistPickerDeps) {
     this.deps = deps
-    const current = deps.selection.get()
-    this.allowed = current.allowedModels.map(route => ({ ...route }))
-    this.enabled = current.enabled
+    // An UNREADABLE section must not crash the surface that hosts the picker.
+    // The picker then starts EMPTY and every write is refused by the queue's
+    // own unreadable guard, so nothing can be written from this state; the
+    // first successful settle re-derives the real section.
+    let current: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } | undefined
+    try {
+      current = deps.selection.get()
+    } catch {
+      current = undefined
+    }
+    this.allowed = current === undefined ? [] : current.allowedModels.map(route => ({ ...route }))
+    this.enabled = current?.enabled === true
     this.picker = new SearchablePicker([], 8, selectListTheme, {}, {
       enableSearch: true,
       showHint: true,
@@ -403,13 +432,11 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     const present = this.allowed.some(existing =>
       existing.provider === route.provider && existing.model === route.model)
     if (present) {
-      // Removing the LAST route while enabled would leave the official
-      // section invalid; the Host would reject the write, so the toggle is
-      // refused before it — the panel's markers stay truthful.
-      if (lastRouteWhileEnabled(this.enabled, this.allowed, route)) {
-        this.deps.notify('disable subagent model selection before removing the last route', 'error')
-        return
-      }
+      // NO local last-route pre-check here: this working copy is a VIEW of a
+      // section read earlier, and other intents may already be queued ahead of
+      // this one (a disable, an enable, another grant). The queue's FRESH guard
+      // owns that decision, in FIFO order — deciding it locally would refuse an
+      // operation that is legal by the time it runs.
       this.allowed = this.allowed.filter(existing =>
         !(existing.provider === route.provider && existing.model === route.model))
     } else {
@@ -424,7 +451,7 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     this.deps.requestRender()
     const payload = this.allowed.map(existing => ({ ...existing }))
     this.mutationChain = this.mutationChain
-      .then(() => this.deps.selection.set({ enabled: this.enabled, allowedModels: payload }))
+      .then(() => this.writeIntent(route, present, payload))
       .then(
         () => { this.syncFromSection() },
         (error: unknown) => {
@@ -439,14 +466,52 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
       )
   }
 
+  /**
+   * Submit ONE route change. With the composed `routeIntent` seam the write is
+   * the exact `(provider, model)` add/remove; without it (the picker's own unit
+   * composition) the whole-section `set` keeps its historical contract.
+   */
+  private writeIntent(
+    route: SubagentAllowedModelRoute,
+    removed: boolean,
+    payload: readonly SubagentAllowedModelRoute[],
+  ): Promise<void> {
+    const intent = this.deps.routeIntent
+    // With the composed seam the QUEUE decides legality from the fresh section
+    // (in FIFO order), so a locally-decided refusal would be wrong.
+    if (intent !== undefined) return removed ? intent.remove(route) : intent.add(route)
+    // The whole-section fallback (this picker's own unit composition and any
+    // caller that does not compose the seam) must still honour the official
+    // rule: an enabled section can never be written with zero routes.
+    if (lastRouteWhileEnabled(this.enabled, payload, route) || (this.enabled && payload.length === 0)) {
+      return Promise.reject(new Error('enabled subagent model selection requires at least one allowed model'))
+    }
+    return Promise.resolve(this.deps.selection.set({ enabled: this.enabled, allowedModels: [...payload] }))
+  }
+
   /** Re-read the committed section and re-derive the working copy plus every
    *  visible marker. When the picker is already CLOSED, the outer /settings
    *  row must still converge to the COMMITTED summary — the fork rejects a
    *  `done` from a closed submenu, so the post-close convergence goes through
    *  `summarize` (a row-display update, never navigation), and the late
    *  failure keeps its no-toast contract. */
+  /**
+   * Re-read the committed section and re-derive the working copy plus every
+   * visible marker. A settle after CLOSE still converges the outer row's
+   * summary (the fork rejects a `done` from a closed submenu), and the late
+   * failure keeps its no-toast contract.
+   *
+   * An UNREADABLE section is not a value: the working copy is left untouched
+   * and no summary is invented, so the display never claims a state the
+   * authority could not confirm.
+   */
   private syncFromSection(): void {
-    const committed = this.deps.selection.get().allowedModels
+    let committed: readonly SubagentAllowedModelRoute[]
+    try {
+      committed = this.deps.selection.get().allowedModels
+    } catch {
+      return
+    }
     this.allowed = committed.map(existing => ({ ...existing }))
     if (this.disposed) {
       this.deps.summarize(allowlistSummary(this.allowed))

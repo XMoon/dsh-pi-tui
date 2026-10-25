@@ -312,14 +312,21 @@ test('Enter on an already-allowed row removes the route and keeps enabled', asyn
 })
 
 test('removing the LAST route while enabled is refused with the official rule', async () => {
+  // WITHOUT the composed route-intent seam this picker's whole-section writer is
+  // the last line of defence: it rejects the illegal payload instead of sending
+  // an enabled section with zero routes. (With the seam composed, the QUEUE's
+  // fresh guard owns this decision in FIFO order — see the workspace suite.)
   const harness = rig({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
   menu.handleInput(ENTER) // cursor starts on the only allowed route -> refused
   await settle(harness, 0)
+  // The refusal travels through the picker's mutation chain: let it drain.
+  for (let i = 0; i < 8 && harness.notices.length === 0; i += 1) await Promise.resolve()
   assert.deepEqual(harness.store.writes, [], 'the refused toggle never writes')
   assert.equal(harness.notices.at(-1)?.kind, 'error')
-  assert.match(harness.notices.at(-1)?.message ?? '', /disable subagent model selection before removing the last route/u)
+  assert.match(harness.notices.at(-1)?.message ?? '',
+    /disable subagent model selection before removing the last route|requires at least one allowed model/u)
 })
 
 test('a REJECTED official write rolls the optimistic marker back to the committed section', async () => {
