@@ -68,9 +68,6 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // The observable editor sink.
   let editorText = ''
   const recorded: { editor: string[]; notices: string[] } = { editor: [], notices: [] }
-  /** How many prompt writes the released submission committed (the OTHER
-   *  observable end of the same continuation). */
-  let committedWrites = 0
   const composer = {
     getDraft: () => editorText,
     setDraft: (text: string): void => { editorText = text; recorded.editor.push(`draft:${text}`) },
@@ -88,6 +85,15 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // capture and the session write.
   let releaseHistory!: () => void
   const historyGate = new Promise<void>(resolve => { releaseHistory = resolve })
+  /** Resolved when the submission REALLY reached the parked history write.
+   *
+   *  The editor is cleared synchronously by `submit()`, but the production path
+   *  awaits `submitTurn.wait` BEFORE `persistAfterSession`
+   *  (src/app/submission/controller.ts:954). Clearing alone therefore does not
+   *  prove the write is parked, and switching the owner before that await lands
+   *  would exercise a different (earlier) interleaving than the case names. */
+  let historyEntered!: () => void
+  const enteredHistory = new Promise<void>(resolve => { historyEntered = resolve })
 
   // The controller's LIFETIME (round 11): the real signal + cleaned-up pair
   // teardown sets, driven here independently of the ownership slot.
@@ -142,7 +148,8 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
         persist: (sessionId: string | undefined) => void,
       ) => {
         // The parked window: the owner change (or the lifetime end) lands
-        // while this awaits.
+        // while this awaits. Announce that the submission is REALLY here.
+        historyEntered()
         await historyGate
         if (options.historyRejects !== undefined) {
           // The REAL shapes the probe observed: the teardown cancellation (a
@@ -188,7 +195,11 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // The submission: the editor text is captured and cleared synchronously,
   // then the history persist parks.
   controller.submit('queued from A', 'enter')
-  assert.equal(editorText, '', 'fixture check: the submit cleared the editor synchronously, before the parking window')
+  assert.equal(editorText, '', 'fixture check: the submit cleared the editor synchronously')
+  // Wait for the REAL parking point (see `enteredHistory`): the owner change
+  // below must land while the history write is in flight, which is the race
+  // this case exists to prove.
+  await enteredHistory
 
   // The owner change (or the lifetime end) lands INSIDE the awaited window.
   let lifetimeEditorMark = -1
@@ -214,12 +225,16 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // `isCleanedUp()` / `captureMatches()` reads and the notice — with NO timer,
   // retry or detached task (src/app/submission/controller.ts). Draining the
   // microtask queue therefore reaches its end, and one macrotask turn proves no
-  // later turn was scheduled behind it. A live branch announces itself or
-  // commits a write, so it must be observable after the same drain.
+  // later turn was scheduled behind it.
+  //
+  // Every LIVE branch of this scenario ends in a NOTICE (the replaced owner, the
+  // same-owner invalidation and the retaining renderer all announce
+  // themselves); this scenario never reaches a prompt write, so the notice is
+  // its only sink. The ended-lifetime branch is the one with no sink at all.
   await drainContinuation()
   if (!options.endLifetime) {
-    assert.ok(recorded.notices.length > 0 || committedWrites > 0,
-      'a released LIVE submission must reach a notice or a committed write')
+    assert.ok(recorded.notices.length > 0,
+      'a released LIVE submission must announce its outcome')
   }
 
   return {

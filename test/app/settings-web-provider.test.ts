@@ -330,14 +330,11 @@ async function openWebSection(h: Harness): Promise<void> {
   // authoritative read; every assertion below is about the settled facts (the
   // transient frames have their own tests, which hold the read themselves).
   // `Loading…` disappearing is not enough: the rows can be painted before the
-  // section's Current facts arrive. Wait for the settled section fact as well,
-  // so key sequences never run against a half-loaded editor under suite load.
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    const view = h.view()
-    if (!view.includes('Loading…') && /Current: |\[unavailable\]/u.test(view)) return
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
+  // section's Current facts arrive. Waiting on the PAINTED settled fact also
+  // fails loudly (with the Host read/write counters) instead of returning
+  // silently when the section never settles.
+  await settlePainted(h, 'the Web section to paint its settled facts', frame =>
+    !frame.includes('Loading…') && /Current: |\[unavailable\]/u.test(frame))
 }
 
 /** Wait until the PAINTED frame satisfies `predicate`, with the read/write
@@ -400,17 +397,36 @@ async function awaitReadSettlement(h: Harness, expected: number, label: string):
   return h.view()
 }
 
-/** Wait until the named Host write has SETTLED (committed or rejected). */
-async function awaitWriteSettlement(h: Harness, label: string): Promise<string> {
+/** The write labels that have SETTLED so far (the ordering witness).
+ *
+ *  A test that will write the SAME label twice takes this snapshot BEFORE the
+ *  action and waits for the entry after it: `settledWrites` is cumulative
+ *  history, so "the label appears somewhere" would be satisfied by the earlier
+ *  write and the second one could still be in flight. */
+function settledWritesMark(h: Harness): number {
+  return h.settledWrites().length
+}
+
+/** Wait for the write dispatched AFTER `mark` to settle (committed or rejected).
+ *
+ *  `mark` is {@link settledWritesMark} taken immediately before the gesture, so
+ *  a repeated label cannot satisfy the wait with an older record. `label` is
+ *  asserted on the NEW entry, which also proves the wait observed THIS write. */
+async function awaitWriteSettlement(h: Harness, label: string, mark: number): Promise<string> {
+  const matches = (): boolean => {
+    const settled = h.settledWrites()
+    return settled.length > mark
+      && settled.slice(mark).some(entry => entry.endsWith(`:${label}`) || entry === label)
+  }
   try {
     await waitForFrame(
       () => h.view(),
-      () => h.settledWrites().some(entry => entry.endsWith(`:${label}`) || entry === label),
+      matches,
       () => h.vt.waitForRender(),
-      `the Host write ${label} to settle`,
+      `the Host write ${label} to settle after mark ${mark}`,
     )
   } catch (error) {
-    throw new Error(`${(error as Error).message}\nsettled writes: ${JSON.stringify(h.settledWrites())}`)
+    throw new Error(`${(error as Error).message}\nsettled writes: ${JSON.stringify(h.settledWrites())} (mark ${mark})`)
   }
   await h.vt.waitForRender()
   return h.view()
@@ -527,8 +543,9 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
   // The selector went back to the value the Host HOLDS: the next Enter resumes
   // the cycle from Messages (-> DeepSeek Search API), never from the rejected
   // intent — which would have submitted Messages a second time.
+  const markSecondIntent = settledWritesMark(h)
   await key(h, ENTER)
-  await awaitWriteSettlement(h, 'search:deepseek-search-api')
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markSecondIntent)
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-search-api'],
     'the selector sits on the Host value, not on the rejected intent')
 })
@@ -539,9 +556,14 @@ test('two selections on the same row end on the Host value when the second is no
   await openWebSection(h)
 
   // First intent (Messages -> DeepSeek Search API): committed and verified.
+  // The section already paints `[current]` on Messages, so a chip-only predicate
+  // would be satisfied by the PRE-write frame. Wait for THIS write's settlement
+  // and then for the specific verified value.
+  const markFirst = settledWritesMark(h)
   await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markFirst)
   await settlePainted(h, 'the first selection to paint the verified value', frame =>
-    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('[Not saved]'))
+    frame.includes('Current: DeepSeek Search API') && !frame.includes('[Not saved]'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   const verifiedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
@@ -550,7 +572,9 @@ test('two selections on the same row end on the Host value when the second is no
   // Second intent on the SAME row (back to Messages) resolves, but the Host
   // keeps the first selection.
   h.store.keptProviderValue = 'deepseek-search-api'
+  const markSecond = settledWritesMark(h)
   await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-official', markSecond)
   await settlePainted(h, 'the refused second intent to paint [Not saved]', frame =>
     /Web Search Provider .*\[Not saved\]/u.test(frame))
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-official'],
@@ -562,8 +586,9 @@ test('two selections on the same row end on the Host value when the second is no
   // The row's cursor is the value the Host kept, so the next cycle submits
   // Messages again; a transient verdict word in that field (or the rejected
   // intent left in it) would have resumed the cycle from the wrong position.
+  const markThirdIntent = settledWritesMark(h)
   await key(h, ENTER)
-  await awaitWriteSettlement(h, 'search:deepseek-official')
+  await awaitWriteSettlement(h, 'search:deepseek-official', markThirdIntent)
   assert.deepEqual(
     h.writes,
     ['search:deepseek-search-api', 'search:deepseek-official', 'search:deepseek-official'],
@@ -670,11 +695,12 @@ test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', a
   await key(h, ENTER)
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
   await key(h, ENTER)
+  const markEndpoint = settledWritesMark(h)
   await key(h, ENTER)
   // The FIFO's own completion: the endpoint write is queued BEHIND the slow
   // provider write, so waiting for BOTH to settle is the authoritative fact
   // (a 200ms window only guessed that the 150ms delay had elapsed).
-  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools')
+  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools', markEndpoint)
   assert.deepEqual(h.log, [
     'begin:search:deepseek-search-api',
     'search:deepseek-search-api',
@@ -888,8 +914,9 @@ test('an OLD read settling after a write never repaints the reopened Workspace (
 
   // A real write, then Esc back to the Workspace (whose own read is newer).
   const settledReadsBeforeWrite = h.settledReadCount()
+  const markWrite = settledWritesMark(h)
   await key(h, ENTER)
-  await awaitWriteSettlement(h, 'search:deepseek-search-api')
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markWrite)
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the write committed')
   await key(h, ESC)
   // The Workspace's newer read must SETTLE before the stale one is released:
@@ -920,8 +947,9 @@ test('a SUPERSEDED write readback never decides the verdict (owner-generation fe
   h.store.readUndefined = true
   const release = h.holdRead()
   t.after(release)
+  const markMutation = settledWritesMark(h)
   await key(h, ENTER)
-  await awaitWriteSettlement(h, 'search:deepseek-search-api')
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markMutation)
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
   assert.match(h.view(), /Saving…/u, 'the write really issues its verification read (R1 is pending)')
 
@@ -965,10 +993,11 @@ test('a superseded readback settling while the newer read is STILL pending never
   const releaseR1 = h.holdRead()
   t.after(releaseR1)
   const settledBeforeR1 = h.settledReadCount()
+  const markR1Write = settledWritesMark(h)
   await key(h, ENTER)
   // The WRITE's own settlement (not a window) is the fact that R1 exists: the
   // row is already `Saving…` because its verification read is pending.
-  await awaitWriteSettlement(h, 'search:deepseek-search-api')
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markR1Write)
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
   assert.match(h.view(), /Saving…/u, 'the write really issued its verification read (R1 is pending)')
 
@@ -1142,11 +1171,12 @@ test('a superseded write holds the ONE owner FIFO until the newest read settles'
   t.after(releaseR1)
   await key(h, ENTER)
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+  const markWrite1 = settledWritesMark(h)
   await key(h, ENTER)
   await key(h, ENTER)
   // Wait for write1's OWN settlement (it is deliberately slow): that is the
   // fact "write1 committed", not the fact that 250ms happened to elapse.
-  await awaitWriteSettlement(h, 'search:deepseek-search-api')
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markWrite1)
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'write1 committed while write2 still waits')
   assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
   const readsBeforeR2 = h.readCount()
@@ -1167,8 +1197,9 @@ test('a superseded write holds the ONE owner FIFO until the newest read settles'
   assert.ok(!h.log.some(entry => entry.startsWith('begin:endpoint:')),
     `write2 must not start while the newest read is pending:\n${h.log.join('\n')}`)
   // R2 settles: write2 is unblocked, and its OWN settlement proves it really ran.
+  const markWrite2 = settledWritesMark(h)
   releaseR2()
-  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools')
+  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools', markWrite2)
   assert.ok(h.log.some(entry => entry.startsWith('begin:endpoint:')),
     `write2 starts once the newest read settled:\n${h.log.join('\n')}`)
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'endpoint:https://api.deepseek.com/v1/tools'])

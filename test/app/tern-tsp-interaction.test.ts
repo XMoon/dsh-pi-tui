@@ -51,20 +51,27 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 3_
 }
 
 /**
- * Flush every op the SDK has queued so far.
+ * Flush the SDK's queued ops and wait for THIS barrier's own frame.
  *
  * A key is routed SYNCHRONOUSLY into the seat, but the resulting View reaches
- * the wire only when the SDK flushes. A `notify` is a complete new View queued
- * BEHIND whatever this key produced, so its landing frame is a lockstep barrier:
- * once it is recorded, every earlier effect has been sent too. This replaces a
- * fixed "wait 40ms and hope the flush happened" with the renderer's own
- * documented frame ordering.
+ * the wire only when the SDK flushes. The barrier is a `notify` carrying a
+ * UNIQUE label: the renderer stores it as a dock notice (`session.ts`'s
+ * `notify` → `dock.notices` with its own `n<seq>` id) and the SDK sends it as a
+ * later View. Waiting for the wire node that carries that exact label — not for
+ * "the op count grew" — binds the observation to THIS barrier, so a frame
+ * produced by something else cannot satisfy it. Because the barrier is queued
+ * behind the earlier key's effect, its landing proves that effect was sent.
  */
 async function flushFrames(harness: Harness, label: string): Promise<void> {
-  const before = harness.ops().length
-  harness.renderer.display.notify(label, 'info')
-  await waitFor(() => harness.ops().length > before, `the frame barrier after ${label} landed`)
+  // A unique marker per call: two barriers must never satisfy each other.
+  const marker = `flush-barrier ${label} ${++flushBarrierSerial}`
+  harness.renderer.display.notify(marker, 'info')
+  await waitFor(() => wireText(harness.pane).includes(marker),
+    `the frame carrying "${marker}" to reach the wire`)
 }
+
+/** Makes every flush barrier's notice text unique within the file. */
+let flushBarrierSerial = 0
 
 interface ContinuedRow {
   readonly sessionId: string
