@@ -1970,7 +1970,7 @@ const walkToConversationRow = (h: Harness, label: (typeof CONVERSATION_LABELS)[n
   assert.match(plain(h), new RegExp(`> ${label}`, 'u'), `the ${label} row owns the selection`)
 }
 
-test('R1-P1 Appearance holds Theme, Icon style and the Footer launcher only', () => {
+test('Appearance holds Theme, Icon style and the Footer launcher only', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'appearance')
@@ -1984,7 +1984,7 @@ test('R1-P1 Appearance holds Theme, Icon style and the Footer launcher only', ()
   assert.match(rows, /Rows \(3\)/u, 'the Appearance rows count is the real three')
 })
 
-test('R1-P2 Conversation keeps the frozen six-row order', () => {
+test('Conversation keeps the frozen six-row order', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'conversation')
@@ -2007,7 +2007,7 @@ test('R1-P2 Conversation keeps the frozen six-row order', () => {
   assert.match(all, /Rows \(6\)/u, 'the Conversation rows count is the real six')
 })
 
-test('R1-P3 browsing the five rows writes nothing; only an explicit Confirm dispatches', () => {
+test('browsing the five rows writes nothing; only an explicit Confirm dispatches', () => {
   for (const [label, field] of [
     ['Icon style', 'icon-style'],
     ['Transcript detail', 'expand'],
@@ -2049,7 +2049,7 @@ test('R1-P3 browsing the five rows writes nothing; only an explicit Confirm disp
   }
 })
 
-test('R1-P4 the confirm request carries the chosen candidate identity', () => {
+test('the confirm request carries the chosen candidate identity', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h)
   walkToConversationRow(h, 'Progress updates')
@@ -2070,7 +2070,7 @@ test('R1-P4 the confirm request carries the chosen candidate identity', () => {
   assert.equal(h.commits(), 1, 'painting the settlement dispatches nothing')
 })
 
-test('R1-P5 the runtime-only rows state that no document holds them', () => {
+test('the runtime-only rows state that no document holds them', () => {
   for (const label of ['Transcript detail', 'Thinking detail'] as const) {
     const h = setup({ columns: 120, rows: 40 })
     plain(h)
@@ -2086,7 +2086,7 @@ test('R1-P5 the runtime-only rows state that no document holds them', () => {
   assert.match(plain(persisted), /Value\s+milestones/u, 'the row value stays the live runtime fact')
 })
 
-test('R1-P6 the five new rows expose no copy verb', () => {
+test('the five new rows expose no copy verb', () => {
   const copied: string[] = []
   for (const label of ['Transcript detail', 'Thinking detail', 'Progress updates', 'Response style'] as const) {
     const h = setup({ columns: 120, rows: 40, onCopy: text => { copied.push(text) } })

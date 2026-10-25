@@ -3180,6 +3180,9 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.transcriptDetailExpanded = expanded
     this.rebuildMessages('focus-disclosure')
+    // A runtime-only Settings row reads this fact through the pull snapshot.
+    this.refreshSettingsWorkspaceFacts()
+    this.requestRender()
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
@@ -8407,6 +8410,9 @@ export class TuiApp {
     // set (extension/advanced indicator) is never overwritten.
     this.working.setIconStyleFrames(workingFramesFor(style))
     this.rebuildMessages('theme-keymap')
+    // The open Settings workspace projects the runtime fact from a PULL
+    // snapshot: an apply-first commit must reach it NOW, not at settlement.
+    this.refreshSettingsWorkspaceFacts()
     this.requestRender()
   }
 
@@ -19317,6 +19323,22 @@ export class TuiApp {
    * bypasses the render throttle (used to repaint the autocomplete list on
    * the keystroke's own frame). After a final dispose the request is a
    * benign no-op (M0 stale-generation contract). */
+  /**
+   * Push the LIVE runtime facts of an open Settings workspace through its pull
+   * projection without waiting for a commit settlement. The owners that do not
+   * live on this class (the shared prompt-policy objects) call this right after
+   * they mutate, so a pending row's `Runtime` fact follows the change that has
+   * really happened while `Persisted` still reports the stored value.
+   *
+   * It never becomes a second state: the projection re-reads the same
+   * authorities the snapshot builder reads on every frame.
+   */
+  refreshSettingsWorkspaceRuntimeFacts(): void {
+    if (this.disposed) return
+    this.refreshSettingsWorkspaceFacts()
+    this.requestRender()
+  }
+
   requestRender(force = false): void {
     if (this.disposed) return
     // One monotonic tick for the frame-scoped caches (the Task Quick
@@ -19779,6 +19801,9 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.thinkingExpanded = expanded
     this.rebuildMessages()
+    // A runtime-only Settings row reads this fact through the pull snapshot.
+    this.refreshSettingsWorkspaceFacts()
+    this.requestRender()
   }
 
   /** Drop every per-message Thinking override. Alt+T calls this FIRST so

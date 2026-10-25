@@ -275,29 +275,45 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   `Plugins` remain direct content pages.
 - Eight configuration rows are writable, in three writer kinds that are never
   conflated: the configured theme, the transcript display preset, the icon style,
-  the mid-turn progress-updates cadence and the response style are applied first
-  through their live owner and then persisted through the ONE serialized TUI
-  settings document; the profile-wide `Visual tools` switch is the Host
-  profile's revision-checked form section; transcript detail (`Ctrl+O`) and
-  thinking detail (`Alt+T`) are Client-local RUNTIME-ONLY disclosure states with
-  no document field at all, so their Detail states `not applicable —
-  runtime-only` and their `Verified` claims only the live runtime fact. A
-  persisted row's Detail keeps the live runtime value and the stored document
-  value as separate facts: the `[current]` candidate chip follows the LIVE value,
-  the `Persisted` fact reports the raw stored value (`not set` when the readable
-  document carries none, an explicit unknown when it cannot be read), and a
-  normalizer's fallback is never presented as the stored value. Browsing never
-  writes, and the configuration rows expose no copy verb at all. Every other
-  setting stays in the existing complete editor behind a per-category TRANSITION
-  row (`Agent settings…`, `Footer & status line…`, `More conversation
-  settings…`, `Input & terminal settings…`, `Configure extension settings…`,
-  and the relocated `Web Search / Fetch`): each row is `open-legacy` with its
-  exact legacy target, states the `Existing settings editor` scope, runs no
-  write of its own and starts the editor only on explicit activation — never on
-  focus, Tab, read, resize or a summary render. A launcher names only the fields
-  that are still unmigrated, so `More conversation settings…` targets `Submit
-  while busy` and advertises that plus `Git attribution` — never a row this
-  workspace already edits.
+  the mid-turn progress-updates cadence and the response style are persisted
+  through the ONE serialized TUI settings document; the profile-wide `Visual
+  tools` switch is the Host profile's revision-checked form section; transcript
+  detail (`Ctrl+O`) and thinking detail (`Alt+T`) are Client-local RUNTIME-ONLY
+  disclosure states with no document field at all, so their Detail states
+  `not applicable — runtime-only` and their `Verified` claims only the live
+  runtime fact. Browsing never writes, and the configuration rows expose no copy
+  verb at all.
+- The five document-backed rows do NOT share one apply/persist order, and the
+  contract keeps their differences instead of normalizing them:
+  - `icon-style`, `progress-updates` and `response-style` are APPLY-FIRST: the
+    live owner changes immediately, the document write follows, and a failed
+    persistence never rolls the runtime back. Their Detail therefore keeps two
+    separately named facts — the `Runtime` value that already took effect and
+    the `Persisted` stored value — and their `[current]` candidate chip follows
+    the LIVE value. While such a commit is pending, the Runtime fact already
+    shows the applied value (the projection is re-read when the owner changes,
+    not at settlement); the `Persisted` fact keeps reporting the stored value
+    until an authoritative re-read agrees.
+  - `theme` and `display-preset` keep their pre-existing semantics unchanged.
+    The theme is a Host-persisted preference: a non-`ready` backend refuses the
+    commit BEFORE any runtime apply, and its `[current]` chip follows the
+    persisted, source-qualified identity. The display preset applies through the
+    shared `DisplayState` owner and then persists, but its `[current]` chip also
+    follows the persisted preference. Both keep their existing writer code.
+  - In every case the `Persisted` fact reports the raw stored value (`not set`
+    when the readable document carries none, an explicit unknown when it cannot
+    be read), and a normalizer's fallback is never presented as the stored
+    value.
+- Every other setting stays in the existing complete editor behind a
+  per-category TRANSITION row (`Agent settings…`, `Footer & status line…`, `More
+  conversation settings…`, `Input & terminal settings…`, `Configure extension
+  settings…`, and the relocated `Web Search / Fetch`): each row is `open-legacy`
+  with its exact legacy target, states the `Existing settings editor` scope,
+  runs no write of its own and starts the editor only on explicit activation —
+  never on focus, Tab, read, resize or a summary render. A launcher names only
+  the fields that are still unmigrated, so `More conversation settings…` targets
+  `Submit while busy` and advertises that plus `Git attribution` — never a row
+  this workspace already edits.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
   `Web Search / Fetch` transition launcher whose existing-editor return path is

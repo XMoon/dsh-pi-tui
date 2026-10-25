@@ -5707,7 +5707,8 @@ async function chooseCandidate(h: Harness, steps: number): Promise<void> {
   await settle(h)
 }
 
-test('R1-01 Appearance keeps Theme + Icon style + the Footer launcher; Conversation is the frozen six', async () => {
+// Regression: C2-R1 acceptance R1-01.
+test('Appearance keeps Theme + Icon style + the Footer launcher; Conversation is the frozen six', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await h.open('Appearance')
   await key(h, '\r')
@@ -5742,7 +5743,8 @@ async function walkToConversation(h: Harness): Promise<void> {
   assert.fail(`the rail never reached Conversation:\n${h.view()}`)
 }
 
-test('R1-02 browsing, moving, Tab, wheel and Esc never mutate any of the five', async () => {
+// Regression: C2-R1 acceptance R1-02.
+test('browsing, moving, Tab, wheel and Esc never mutate any of the five', async () => {
   const h = setup({ columns: 120, rows: 40, iconStyle: 'emoji' })
   const iconBefore = h.app.currentIconStyle()
   const expandBefore = h.app.isTranscriptDetailExpanded()
@@ -5781,7 +5783,8 @@ test('R1-02 browsing, moving, Tab, wheel and Esc never mutate any of the five', 
   h.dispose()
 })
 
-test('R1-03 Icon style applies live and persists only its own document field', async () => {
+// Regression: C2-R1 acceptance R1-03.
+test('Icon style applies live and persists only its own document field', async () => {
   const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: 'emoji' })
   const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings, iconStyle: 'emoji' })
   await h.open('Appearance')
@@ -5803,7 +5806,8 @@ test('R1-03 Icon style applies live and persists only its own document field', a
   h.dispose()
 })
 
-test('R1-04 a missing or invalid stored iconStyle keeps its raw persisted fact while the runtime normalizes', async () => {
+// Regression: C2-R1 acceptance R1-04.
+test('a missing or invalid stored iconStyle keeps its raw persisted fact while the runtime normalizes', async () => {
   for (const stored of [undefined, 'garbage'] as const) {
     const h = setup({
       columns: 140,
@@ -5830,7 +5834,8 @@ test('R1-04 a missing or invalid stored iconStyle keeps its raw persisted fact w
   }
 })
 
-test('R1-05 Transcript detail confirms into the SAME Ctrl+O owner and writes no document', async () => {
+// Regression: C2-R1 acceptance R1-05.
+test('Transcript detail confirms into the SAME Ctrl+O owner and writes no document', async () => {
   const h = setup({ columns: 140, rows: 40 })
   const before = h.app.isTranscriptDetailExpanded()
   await h.open('Conversation')
@@ -5863,7 +5868,8 @@ test('R1-05 Transcript detail confirms into the SAME Ctrl+O owner and writes no 
   h.dispose()
 })
 
-test('R1-06 Thinking detail confirms into the SAME Alt+T owner and writes no document', async () => {
+// Regression: C2-R1 acceptance R1-06.
+test('Thinking detail confirms into the SAME Alt+T owner and writes no document', async () => {
   const h = setup({ columns: 140, rows: 40 })
   await h.open('Conversation')
   await key(h, '\r')
@@ -5879,7 +5885,8 @@ test('R1-06 Thinking detail confirms into the SAME Alt+T owner and writes no doc
   h.dispose()
 })
 
-test('R1-07 Progress updates writes the SAME shared state and persists Off / Milestones / Frequent', async () => {
+// Regression: C2-R1 acceptance R1-07.
+test('Progress updates writes the SAME shared state and persists Off / Milestones / Frequent', async () => {
   const fixture = createDirectSettingsFixture({ progressUpdates: 'milestones' })
   const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
   await h.open('Conversation')
@@ -5900,7 +5907,8 @@ test('R1-07 Progress updates writes the SAME shared state and persists Off / Mil
   h.dispose()
 })
 
-test('R1-08 Response style writes the SAME shared state and never touches the progress axis', async () => {
+// Regression: C2-R1 acceptance R1-08.
+test('Response style writes the SAME shared state and never touches the progress axis', async () => {
   const fixture = createDirectSettingsFixture({ progressUpdates: 'frequent', responseStyle: 'default' })
   const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
   h.progressUpdatesState.mode = 'frequent'
@@ -5920,7 +5928,8 @@ test('R1-08 Response style writes the SAME shared state and never touches the pr
   h.dispose()
 })
 
-test('R1-09 every persisted field needs an agreeing authoritative re-read to be Verified', async () => {
+// Regression: C2-R1 acceptance R1-09.
+test('every persisted field needs an agreeing authoritative re-read to be Verified', async () => {
   for (const [field, steps, category] of [
     ['icon-style', 1, 'Appearance'],
     ['progress-updates', 3, 'Conversation'],
@@ -5937,7 +5946,8 @@ test('R1-09 every persisted field needs an agreeing authoritative re-read to be 
   }
 })
 
-test('R1-10 a completed write whose re-read is unavailable is Commit accepted, never Verified', async () => {
+// Regression: C2-R1 acceptance R1-10.
+test('a completed write whose re-read is unavailable is Commit accepted, never Verified', async () => {
   // The write REALLY completes (the document stores the new value) and only the
   // authoritative RE-READ then fails: `verifyCommittedField` must report
   // `Commit accepted · verification unavailable` and keep the applied runtime.
@@ -5958,7 +5968,8 @@ test('R1-10 a completed write whose re-read is unavailable is Commit accepted, n
   h.dispose()
 })
 
-test('R1-11 a write the authority readably disagrees with is Not saved and keeps both facts apart', async () => {
+// Regression: C2-R1 acceptance R1-11.
+test('a write the authority readably disagrees with is Not saved and keeps both facts apart', async () => {
   const h = setup({
     columns: 140,
     rows: 40,
@@ -5983,7 +5994,8 @@ test('R1-11 a write the authority readably disagrees with is Not saved and keeps
   h.dispose()
 })
 
-test('R1-12 a refused write is attributed from a fresh read: base, expected and unreadable all stay unblamed', async () => {
+// Regression: C2-R1 acceptance R1-12.
+test('a refused write is attributed from a fresh read: base, expected and unreadable all stay unblamed', async () => {
   const notSaved = setup({
     columns: 140,
     rows: 40,
@@ -6103,7 +6115,8 @@ test('R1-12 a refused write is attributed from a fresh read: base, expected and 
   unreadable.dispose()
 })
 
-test('R1-13 a QUEUED second write re-reads the live document and preserves the pass-through fields', async () => {
+// Regression: C2-R1 acceptance R1-13.
+test('a QUEUED second write re-reads the live document and preserves the pass-through fields', async () => {
   const userItems = [{ schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }]
   const trust = { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 }
   const keybindings = { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } }
@@ -6171,7 +6184,8 @@ test('R1-13 a QUEUED second write re-reads the live document and preserves the p
   )
 })
 
-test('R1-15 More conversation settings… opens the existing editor on Submit while busy', async () => {
+// Regression: C2-R1 acceptance R1-15.
+test('More conversation settings… opens the existing editor on Submit while busy', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await h.open('Conversation')
   await key(h, '\r')
@@ -6185,7 +6199,8 @@ test('R1-15 More conversation settings… opens the existing editor on Submit wh
   h.dispose()
 })
 
-test('R1-18 every migrated row never copies, at every responsive width', async () => {
+// Regression: C2-R1 acceptance R1-18.
+test('every migrated row never copies, at every responsive width', async () => {
   // The copy keys are the retired configuration verb: they must carry nothing
   // from ANY migrated row (Detail AND its open choice), at every width.
   const MIGRATED: readonly (readonly [string, string])[] = [
@@ -6221,7 +6236,8 @@ test('R1-18 every migrated row never copies, at every responsive width', async (
   }
 })
 
-test('R1-01b every required size walks the real rows: frozen order and Appearance membership', async () => {
+// Regression: C2-R1 acceptance R1-01.
+test('every required size walks the real rows: frozen order and Appearance membership', async () => {
   /** Walk a category's Rows level from the TOP, pressing Down until the
    *  selection reaches the last row, collecting every row label the frame
    *  really paints. A scrolled-away row is therefore VISITED, never skipped. */
@@ -6280,7 +6296,8 @@ test('R1-01b every required size walks the real rows: frozen order and Appearanc
   }
 })
 
-test('R1-03b every icon candidate applies live and persists through its ONE field', async () => {
+// Regression: C2-R1 acceptance R1-03.
+test('every icon candidate applies live and persists through its ONE field', async () => {
   // emoji -> symbols -> minimal -> emoji, each a separate confirmed write.
   for (const [start, next] of [['emoji', 'symbols'], ['symbols', 'minimal'], ['minimal', 'emoji']] as const) {
     const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: start })
@@ -6302,7 +6319,8 @@ test('R1-03b every icon candidate applies live and persists through its ONE fiel
   }
 })
 
-test('R1-04b the runtime fact drives [current] even when the document disagrees', async () => {
+// Regression: C2-R1 acceptance R1-04.
+test('the runtime fact drives [current] even when the document disagrees', async () => {
   // The apply-first contract leaves the runtime live on a failed persistence, so
   // the document legitimately lags: the row must report the LIVE style.
   const h = setup({
@@ -6337,7 +6355,8 @@ test('R1-04b the runtime fact drives [current] even when the document disagrees'
   h.dispose()
 })
 
-test('R1-07b every progress cadence persists and clears its own axis only', async () => {
+// Regression: C2-R1 acceptance R1-07.
+test('every progress cadence persists and clears its own axis only', async () => {
   for (const target of ['off', 'frequent', 'milestones'] as const) {
     const fixture = createDirectSettingsFixture({ progressUpdates: target === 'off' ? 'milestones' : 'off', responseStyle: 'concise' })
     const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
@@ -6357,7 +6376,8 @@ test('R1-07b every progress cadence persists and clears its own axis only', asyn
   }
 })
 
-test('R1-08b every response style persists and clears its own axis only', async () => {
+// Regression: C2-R1 acceptance R1-08.
+test('every response style persists and clears its own axis only', async () => {
   for (const target of ['concise', 'explanatory', 'default'] as const) {
     const fixture = createDirectSettingsFixture({
       progressUpdates: 'frequent',
@@ -6381,7 +6401,8 @@ test('R1-08b every response style persists and clears its own axis only', async 
   }
 })
 
-test('R1-15b the lease return stays ONE stack: Esc ends the editor, never a second Settings', async () => {
+// Regression: C2-R1 acceptance R1-15.
+test('the lease return stays ONE stack: Esc ends the editor, never a second Settings', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await h.open('Conversation')
   await key(h, '\r')
@@ -6404,7 +6425,8 @@ test('R1-15b the lease return stays ONE stack: Esc ends the editor, never a seco
   h.dispose()
 })
 
-test('R1-16 a held new-field commit never settles a closed or replacement workspace', async () => {
+// Regression: C2-R1 acceptance R1-16.
+test('a held new-field commit never settles a closed or replacement workspace', async () => {
   const h = setup({ columns: 120, rows: 40, holdOwned: true })
   await h.open('Conversation')
   await key(h, '\r')
@@ -6438,7 +6460,8 @@ test('R1-16 a held new-field commit never settles a closed or replacement worksp
   h.dispose()
 })
 
-test('R1-16b a FAILED new-field save retries the same value through the same writer', async () => {
+// Regression: C2-R1 acceptance R1-16.
+test('a FAILED new-field save retries the same value through the same writer', async () => {
   let refuse = true
   const h = setup({
     columns: 140,
@@ -6477,7 +6500,8 @@ test('R1-16b a FAILED new-field save retries the same value through the same wri
   h.dispose()
 })
 
-test('R1-17 a real Registry revision change keeps an open new-field choice and revokes only the frame', async () => {
+// Regression: C2-R1 acceptance R1-17.
+test('a real Registry revision change keeps an open new-field choice and revokes only the frame', async () => {
   let requestRender: () => void = () => {}
   const registry = new SettingsRegistry(() => requestRender())
   const h = setup({ columns: 120, rows: 40, settingsRegistry: registry })
@@ -6521,7 +6545,8 @@ test('R1-17 a real Registry revision change keeps an open new-field choice and r
   h.dispose()
 })
 
-test('R1-13b a held Settings commit and a queued LEGACY write share the ONE production writer', async () => {
+// Regression: C2-R1 acceptance R1-13.
+test('a held Settings commit and a queued LEGACY write share the ONE production writer', async () => {
   // The production system admits ONE Settings workspace lease and ONE pending
   // write per workspace, so two overlapping Settings commits are not reachable.
   // What IS reachable is a Settings commit overlapping another settings-document
@@ -6587,4 +6612,63 @@ test('R1-13b a held Settings commit and a queued LEGACY write share the ONE prod
     'the QUEUED write read the document AFTER the first write — never the open-time snapshot')
   assert.equal(queued.busyEnter, 'steer')
   h.dispose()
+})
+
+test('a PENDING apply-first commit already shows the RUNTIME value it applied', async () => {
+  // The apply-first writers mutate their live owner SYNCHRONOUSLY; only the
+  // document write is slow. While that write is held, the row must already show
+  // the runtime value that really took effect and the OLD stored value — never
+  // the stale pre-commit pair. (The two runtime-only disclosure rows have no
+  // document write at all, so they never enter this pending phase.)
+  const cases = [
+    {
+      label: 'Icon style',
+      category: 'Appearance',
+      steps: 1,
+      applied: 'symbols',
+      doc: { iconStyle: 'emoji' } as Partial<TuiSettingsDoc>,
+      runtimeFact: /Value\s+symbols/u,
+      persistedFact: /Persisted\s+emoji/u,
+    },
+    {
+      label: 'Progress updates',
+      category: 'Conversation',
+      steps: 3,
+      applied: 'off',
+      doc: { progressUpdates: 'milestones' } as Partial<TuiSettingsDoc>,
+      runtimeFact: /Value\s+off/u,
+      persistedFact: /Persisted\s+milestones/u,
+    },
+    {
+      label: 'Response style',
+      category: 'Conversation',
+      steps: 4,
+      applied: 'concise',
+      doc: { responseStyle: 'default' } as Partial<TuiSettingsDoc>,
+      runtimeFact: /Value\s+concise/u,
+      persistedFact: /Persisted\s+default/u,
+    },
+  ] as const
+
+  for (const entry of cases) {
+    const h = setup({ columns: 140, rows: 40, doc: entry.doc, holdFirstReplace: true })
+    await h.open(entry.category)
+    await key(h, '\r')
+    for (let step = 0; step < entry.steps; step += 1) await key(h, '\x1b[B')
+    await key(h, '\r') // Detail -> the choice
+    await h.vt.waitForRender()
+    await highlightCandidate(h, entry.applied)
+    await key(h, '\r') // Confirm: the document write is held
+    await h.firstWriteStarted()
+    const pending = h.view()
+    assert.match(pending, /Saving…/u, `${entry.label} states the pending phase:\n${pending}`)
+    assert.match(pending, entry.runtimeFact,
+      `${entry.label} already shows the runtime value it applied, not the stale snapshot:\n${pending}`)
+    assert.match(pending, entry.persistedFact,
+      `${entry.label} still reports the stored value separately while pending:\n${pending}`)
+    assert.doesNotMatch(pending, /Status\s+Verified/u, `${entry.label} is not Verified before settlement`)
+    h.releaseFirstReplace()
+    await settle(h, 10)
+    h.dispose()
+  }
 })

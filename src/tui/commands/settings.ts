@@ -1766,6 +1766,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // reads on its next step: no section is re-registered and no second state
     // is created.
     runner.progressUpdatesState.mode = parseProgressUpdates(value)
+    // The Detail's `Runtime` fact is a PULL projection of this same object: a
+    // pending commit must show the cadence that already took effect, while
+    // `Persisted` keeps reporting the stored value.
+    app.refreshSettingsWorkspaceRuntimeFacts()
     if (settings === undefined) {
       return {
         outcome: 'not-saved',
@@ -1791,6 +1795,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // The ONE shared prompt-state object, exactly like progress updates and
     // deliberately independent of it.
     runner.responseStyleState.style = parseResponseStyle(value)
+    // Same rule as progress updates: the live axis reaches the pending row now.
+    app.refreshSettingsWorkspaceRuntimeFacts()
     if (settings === undefined) {
       return {
         outcome: 'not-saved',
@@ -2216,7 +2222,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           'conversation',
           'More conversation settings…',
           'Submit while busy and Git attribution are not yet editable in this workspace. '
-            + 'This row only opens the existing settings editor on its own row.',
+            + 'Open the existing settings editor at Submit while busy.',
           'busy-enter',
         ),
         transitionRow(
