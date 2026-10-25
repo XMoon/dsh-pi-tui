@@ -487,10 +487,14 @@ provider reads) and then persist through the one serialized whole-document
 write; `Transcript detail` (the `Ctrl+O` switch) and `Thinking detail` (the
 `Alt+T` switch) are runtime-only and have no document field, so their Detail says
 `not applicable — runtime-only` and their Verified covers the live runtime fact
-only. `[current]` always marks the live value, `Persisted` reports the raw stored
-value separately (`not set` when the readable document declares none, an explicit
-unknown when it cannot be read), and a normalizer's fallback is never presented as
-a stored value. `Progress updates` and `Response style` take effect on the next
+only. Those three mark `[current]` from the live value they apply first, while
+`Persisted` reports the raw stored value separately (`not set` when the readable
+document declares none, an explicit unknown when it cannot be read), and a
+normalizer's fallback is never presented as
+a stored value. `Configured theme` and `Transcript display` keep their existing
+semantics: the theme refuses a non-ready backend before any runtime apply, and
+both mark `[current]` from the persisted preference rather than the live value.
+`Progress updates` and `Response style` take effect on the next
 prompt assembly without re-registering a section or rebuilding the Agent, and
 Focus only suppresses progress narration without changing the saved cadence. The
 existing complete settings editor is still available: every setting that has not migrated yet
