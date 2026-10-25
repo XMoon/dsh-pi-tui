@@ -72,7 +72,59 @@ export function parseOfficialReferenceBlock(text: string): string | undefined {
   return VISUAL_REFERENCE_PATTERN.test(ref) ? ref : undefined
 }
 
-/** Parse exactly `<fact block>` down to its version/type and field set. */
+/**
+ * The official serializers' own value bounds.
+ *
+ * These mirror `domain/visual/constants.ts`. They are duplicated here rather
+ * than imported because `domain/transcript/**` may only import its own subtree
+ * (the architecture gate is closed-world there). They serve ONE purpose: the
+ * readable projection must refuse a machine-SHAPED line that the official
+ * serializer could not have produced. Drawing semantics and every budget that
+ * governs admission stay owned by `domain/visual/**`.
+ */
+const FACT_LIMITS = {
+  chartMaxPoints: 12,
+  chartMaxTitleCodePoints: 100,
+  chartMaxUnitCodePoints: 32,
+  chartMaxLabelCodePoints: 48,
+  svgMaxSourceBytes: 128 * 1024,
+  svgMaxTitleCodePoints: 100,
+  svgMaxDescriptionCodePoints: 500,
+} as const
+
+const CHART_KINDS: ReadonlySet<string> = new Set(['bars', 'spark'])
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/u
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys)
+  return Object.keys(value).every(key => allowed.has(key))
+}
+
+function codePointLength(text: string): number {
+  let count = 0
+  for (const _ of text) count += 1
+  return count
+}
+
+function isBoundedText(value: unknown, max: number): boolean {
+  return typeof value === 'string' && value.trim() !== '' && codePointLength(value) <= max
+}
+
+/**
+ * Parse exactly `<fact block>` down to a fully valid official fact.
+ *
+ * The line must satisfy the official serializer's own value rules — the chart
+ * kind enum, the ordered series of finite numbered points with non-empty
+ * bounded labels, the bounded title/unit, the SVG's 64-hex digest and bounded
+ * credential — so ordinary prose that merely carries the right KEY SETS is not
+ * mistaken for a machine block.
+ * @param text - one result block's text.
+ * @returns the fact type when the line is a valid official fact.
+ */
 export function parseOfficialFactBlock(text: string): { readonly type: 'chart' | 'svg' } | undefined {
   if (!text.startsWith(VISUAL_FACT_PREFIX)) return undefined
   let parsed: unknown
@@ -81,20 +133,29 @@ export function parseOfficialFactBlock(text: string): { readonly type: 'chart' |
   } catch {
     return undefined
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
-  const record = parsed as Record<string, unknown>
-  if (record.version !== 1) return undefined
-  const keys = Object.keys(record).sort()
-  if (record.type === 'chart') {
-    const allowed = ['kind', 'series', 'title', 'type', 'unit', 'version']
-    if (!keys.every(key => allowed.includes(key))) return undefined
-    if (!keys.includes('kind') || !keys.includes('series') || !keys.includes('title')) return undefined
+  if (!isRecord(parsed) || parsed.version !== 1) return undefined
+  if (parsed.type === 'chart') {
+    if (!hasOnlyKeys(parsed, ['version', 'type', 'kind', 'title', 'unit', 'series'])) return undefined
+    if (typeof parsed.kind !== 'string' || !CHART_KINDS.has(parsed.kind)) return undefined
+    if (!isBoundedText(parsed.title, FACT_LIMITS.chartMaxTitleCodePoints)) return undefined
+    if (parsed.unit !== undefined && !isBoundedText(parsed.unit, FACT_LIMITS.chartMaxUnitCodePoints)) return undefined
+    if (!Array.isArray(parsed.series)) return undefined
+    const series = parsed.series as unknown[]
+    if (series.length < 2 || series.length > FACT_LIMITS.chartMaxPoints) return undefined
+    for (const point of series) {
+      if (!isRecord(point) || !hasOnlyKeys(point, ['label', 'value'])) return undefined
+      if (!isBoundedText(point.label, FACT_LIMITS.chartMaxLabelCodePoints)) return undefined
+      if (typeof point.value !== 'number' || !Number.isFinite(point.value)) return undefined
+    }
     return { type: 'chart' }
   }
-  if (record.type === 'svg') {
-    const allowed = ['bytes', 'description', 'digest', 'title', 'type', 'version']
-    if (!keys.every(key => allowed.includes(key))) return undefined
-    if (!keys.includes('description') || !keys.includes('digest') || !keys.includes('bytes')) return undefined
+  if (parsed.type === 'svg') {
+    if (!hasOnlyKeys(parsed, ['version', 'type', 'title', 'description', 'digest', 'bytes'])) return undefined
+    if (!isBoundedText(parsed.title, FACT_LIMITS.svgMaxTitleCodePoints)) return undefined
+    if (!isBoundedText(parsed.description, FACT_LIMITS.svgMaxDescriptionCodePoints)) return undefined
+    if (typeof parsed.digest !== 'string' || !DIGEST_PATTERN.test(parsed.digest)) return undefined
+    if (typeof parsed.bytes !== 'number' || !Number.isSafeInteger(parsed.bytes)) return undefined
+    if (parsed.bytes < 0 || parsed.bytes > FACT_LIMITS.svgMaxSourceBytes) return undefined
     return { type: 'svg' }
   }
   return undefined
@@ -139,6 +200,29 @@ export function isOfficialVisualMachineBlock(text: string): boolean {
 }
 
 /**
+ * Whether one text is an official machine block the given tool could produce.
+ *
+ * The tool-to-fact pairing is part of the identity: a chart tool never emits an
+ * SVG fact and vice versa, so a mismatched line is prose, not a machine block.
+ * The publication tool emits only a receipt.
+ * @param toolName - the durable `tool/call` name.
+ * @param text - one result block's text.
+ * @returns true only for a block this exact tool can produce.
+ */
+export function isOfficialBlockOfTool(toolName: string, text: string): boolean {
+  if (toolName === CHART_TOOL_NAME) {
+    return parseOfficialReferenceBlock(text) !== undefined
+      || parseOfficialFactBlock(text)?.type === 'chart'
+  }
+  if (toolName === SVG_TOOL_NAME) {
+    return parseOfficialReferenceBlock(text) !== undefined
+      || parseOfficialFactBlock(text)?.type === 'svg'
+  }
+  if (toolName === PRESENT_VISUAL_TOOL_NAME) return parseOfficialReceiptBlock(text) !== undefined
+  return false
+}
+
+/**
  * The human-readable projection of one result.
  *
  * Only the three official tools lose their official TAIL machine blocks, and
@@ -162,14 +246,14 @@ export function humanFacingVisualResult(input: {
   if (blocks === undefined) {
     const lines = text.split('\n')
     let end = lines.length
-    while (end > 0 && isOfficialVisualMachineBlock(lines[end - 1] as string)) end -= 1
+    while (end > 0 && isOfficialBlockOfTool(toolName, lines[end - 1] as string)) end -= 1
     const human = lines.slice(0, end).join('\n')
     return { blocks: human === '' ? [] : [{ type: 'text', text: human }], text: human }
   }
   let end = blocks.length
   while (end > 0) {
     const block = blocks[end - 1]
-    if (block === undefined || block.type !== 'text' || !isOfficialVisualMachineBlock(block.text)) break
+    if (block === undefined || block.type !== 'text' || !isOfficialBlockOfTool(toolName, block.text)) break
     end -= 1
   }
   const human = blocks.slice(0, end)
