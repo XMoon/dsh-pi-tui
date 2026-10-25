@@ -446,7 +446,9 @@ or clear always requires an explicit confirmation in the page. Account authoriza
 separate from generic provider flows: it signs in only through the official PlatformAccount and
 the Host loopback `/oauth/callback`, and is never cleared as a generic credential record.
 
-The **`Configured theme` and `Transcript display` rows are directly editable**:
+The **`Configured theme`, `Transcript display`, `Icon style`, `Transcript detail`,
+`Thinking detail`, `Progress updates` and `Response style` rows — plus the `Visual
+tools` switch under Tools — are directly editable**:
 from L1, `Right` or `Enter`, the painted `[Change…]` button, or ordinary visible
 Detail content opens the candidate choice in the SAME L2 pane. Current-value and
 Runtime/Persisted facts stay in the same pane above the candidate region and scroll
@@ -478,11 +480,25 @@ neither applied nor written; a display preset may already be live locally and
 then says that it was not stored instead of pretending it was. A plugin theme is
 resolved again by its source-qualified identity at confirm time, so an unloaded
 plugin theme is listed as unavailable and refused rather than degrading into a
-same-named file theme. Icon style and Thinking detail stay read-only rows. The
+same-named file theme. The writers never blur together: `Icon style`,
+`Progress updates` and `Response style` apply their live owner first (the icon
+palette; the very same progress/response state objects the Agent's prompt
+provider reads) and then persist through the one serialized whole-document
+write; `Transcript detail` (the `Ctrl+O` switch) and `Thinking detail` (the
+`Alt+T` switch) are runtime-only and have no document field, so their Detail says
+`not applicable — runtime-only` and their Verified covers the live runtime fact
+only. `[current]` always marks the live value, `Persisted` reports the raw stored
+value separately (`not set` when the readable document declares none, an explicit
+unknown when it cannot be read), and a normalizer's fallback is never presented as
+a stored value. `Progress updates` and `Response style` take effect on the next
+prompt assembly without re-registering a section or rebuilding the Agent, and
+Focus only suppresses progress narration without changing the saved cadence. The
 existing complete settings editor is still available: every setting that has not migrated yet
 has a transition row in its own category that explicitly says `Existing settings editor`
 (`Agent → Agent settings…`, `Appearance → Footer & status line…`,
-`Conversation → More conversation settings…`, `Input & Terminal → Input & terminal settings…`,
+`Conversation → More conversation settings…` (naming only the still-unmigrated
+`Submit while busy` and `Git attribution`, and landing on `Submit while busy`),
+`Input & Terminal → Input & terminal settings…`,
 `Extensions → Configure extension settings…`). Activating one retires the workspace and restores
 the surface it paused before opening the original editor on that exact row, so Theme, the Plugin
 Manager, keybindings, permissions and extension settings keep every existing write path.
@@ -517,7 +533,7 @@ or clear it through the masked API Key Reference in Models after the current Web
 `Web Search / Fetch` row; the original `Open existing settings…` entry still returns to the
 conversation. A Remote backend reports the section unavailable and names no Host namespace.
 
-The `Icon style` option in `/settings` switches the TUI's structural icons:
+The `Icon style` option in `/settings` (also directly editable under Appearance) switches the TUI's structural icons:
 `Emoji` (default, colorful), `Symbols` (compact single-cell terminal
 symbols), or `Minimal` (decorative icons hidden; only status/interaction
 markers remain). Switching applies immediately and persists.

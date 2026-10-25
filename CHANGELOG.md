@@ -9,6 +9,20 @@
 
 ### 新增
 
+- **`/settings` 的 Appearance / Conversation 现在可以直接修改更多配置，不必再进旧编辑器。**
+  Appearance 新增可编辑的 `Icon style`（`emoji` / `symbols` / `minimal`），切换立即
+  改变结构图标并只持久化这一个字段。Conversation 的顺序固定为 Transcript display →
+  Transcript detail → Thinking detail → Progress updates → Response style → More conversation
+  settings…，其中新增可编辑的 `Transcript detail`、`Progress updates` 与 `Response style`，
+  原本只读的 `Thinking detail` 也可编辑。`Transcript detail` 与 `Ctrl+O`、`Thinking detail` 与
+  `Alt+T` 各自共享同一份运行态开关，它们是纯显示状态、不会被持久化，详情里会直接写
+  `not applicable — runtime-only`；`Progress updates` 与 `Response style` 修改的是 Agent 下一次
+  组装提示词时实际读取的同一份状态，并各自持久化，Focus 只是暂时抑制进度叙述而不改变已选
+  节奏。`More conversation settings…` 现在只声明仍未迁移的 `Submit while busy` 与
+  `Git attribution`，并把旧编辑器定位到 `Submit while busy`。浏览、移动候选、Tab、滚轮、
+  缩放与 Esc 都不会写入；只有显式 Confirm 才提交，结果仍分 `Verified` / `Not saved` /
+  `Commit accepted` / `Outcome unknown`，并分别显示实时值与文档里的持久值。
+
 - **Ctrl+V 粘贴与 `/attach`、`/image` 现在都写入当前真实挂载的编辑器。**
   连续两次 Ctrl+V 会按触发顺序逐个读取并落稿：后一次的剪贴板读取要等前一次读完并写入才
   真正开始，前一次失败也不会卡住后一次；粘贴文字插在当前光标处，不发送、不覆盖已输入内容，

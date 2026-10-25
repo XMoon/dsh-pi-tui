@@ -273,16 +273,31 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   Terminal`, `Tools`, and the conditional `Extensions`) keep their three-level
   browse (L0 categories, L1 rows, L2 detail). `About`, `Models`, `Account` and
   `Plugins` remain direct content pages.
-- Three configuration rows are writable: the configured theme, the transcript
-  display setting, and the profile-wide `Visual tools` switch. Browsing never
+- Eight configuration rows are writable, in three writer kinds that are never
+  conflated: the configured theme, the transcript display preset, the icon style,
+  the mid-turn progress-updates cadence and the response style are applied first
+  through their live owner and then persisted through the ONE serialized TUI
+  settings document; the profile-wide `Visual tools` switch is the Host
+  profile's revision-checked form section; transcript detail (`Ctrl+O`) and
+  thinking detail (`Alt+T`) are Client-local RUNTIME-ONLY disclosure states with
+  no document field at all, so their Detail states `not applicable —
+  runtime-only` and their `Verified` claims only the live runtime fact. A
+  persisted row's Detail keeps the live runtime value and the stored document
+  value as separate facts: the `[current]` candidate chip follows the LIVE value,
+  the `Persisted` fact reports the raw stored value (`not set` when the readable
+  document carries none, an explicit unknown when it cannot be read), and a
+  normalizer's fallback is never presented as the stored value. Browsing never
   writes, and the configuration rows expose no copy verb at all. Every other
-  setting stays in the existing complete editor behind a per-category
-  TRANSITION row (`Agent settings…`, `Footer & status line…`, `More conversation
+  setting stays in the existing complete editor behind a per-category TRANSITION
+  row (`Agent settings…`, `Footer & status line…`, `More conversation
   settings…`, `Input & terminal settings…`, `Configure extension settings…`,
   and the relocated `Web Search / Fetch`): each row is `open-legacy` with its
   exact legacy target, states the `Existing settings editor` scope, runs no
   write of its own and starts the editor only on explicit activation — never on
-  focus, Tab, read, resize or a summary render.
+  focus, Tab, read, resize or a summary render. A launcher names only the fields
+  that are still unmigrated, so `More conversation settings…` targets `Submit
+  while busy` and advertises that plus `Git attribution` — never a row this
+  workspace already edits.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
   `Web Search / Fetch` transition launcher whose existing-editor return path is
@@ -299,11 +314,23 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   agree; Remote has no registry read and states the runtime half as
   unobservable instead of claiming success.
 - An L2 choice is transient; only an explicit Confirm commits one field through
-  its own authority path (the serialized TUI settings document, or the Host
-  `pi-tui-visual-tools` form section) and re-reads the authority.
+  its own authority path (the serialized TUI settings document, the Host
+  `pi-tui-visual-tools` form section, or — for the two runtime-only disclosure
+  fields — the `TuiApp` state owner `Ctrl+O`/`Alt+T` share, with no persistence
+  step) and re-reads the authority. A writer refuses a value outside its frozen
+  candidate set BEFORE it mutates anything: the parsers' fail-safe defaults are
+  normalization, never validation. The progress-updates and response-style
+  writers mutate the ONE shared prompt-state object the registered
+  SystemPrompt providers read (`ProgressUpdatesState` / `ResponseStyleState`):
+  no section is re-registered, no Agent is recomposed and nothing reaches the
+  Focus/Compact presentation state.
 - `Verified` requires a ready read-back with a matching value. Rejected/unknown
   outcomes are attributed from a fresh read, never guessed. A refused write is
-  reported as `Not saved`/unknown, never as success.
+  reported as `Not saved`/unknown, never as success. For the apply-first fields
+  a failed persistence never rolls the live runtime back, so the screen must
+  keep stating BOTH facts (the applied runtime value and the unchanged stored
+  one); the runtime-only fields carry no document read at all, so they never
+  paint a persistence phase.
 - Theme auto is fenced on the runtime selection intent.
 - `Plugins` is a DIRECT page inside the same lease (see Plugin Manager): the
   embedded `PluginManagerWorkspacePanel` paints only its own business body,

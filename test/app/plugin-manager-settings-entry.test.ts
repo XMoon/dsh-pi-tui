@@ -173,6 +173,12 @@ function setup(options: { columns?: number; rows?: number } = {}): {
     backendKind: 'direct' as const,
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
+    // The prompt-state objects are REQUIRED runner facts: the Conversation rows
+    // read their live values through the same shared objects the registered
+    // prompt providers read.
+    progressUpdatesState: { mode: 'milestones' as const },
+    responseStyleState: { style: 'default' as const },
+    gitAttributionState: { mode: 'off' as const },
     tuiSettings: undefined,
     extensions: undefined,
     createPluginManagerPage: (onYieldNavigation: () => void) => {
