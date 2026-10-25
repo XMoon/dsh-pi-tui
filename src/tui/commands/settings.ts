@@ -1343,14 +1343,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * named as such rather than labelled with a preset the user is not running.
    */
   const homeEndLiveModeOf = (): string => {
-    const manager = getKeybindings()
-    const resolved = manager.getResolvedBindings()
+    // The preset is the PAIR OF USER BINDINGS `applyHomeEndKeyMode` writes; the
+    // fork's `input` default IS that same pair, so the two presets are the only
+    // pairs a preset can produce. Any other pair is a user's own mapping and is
+    // reported as such instead of being labelled with a preset it is not.
+    const bindings = getKeybindings().getUserBindings()
     const asList = (value: string | readonly string[] | undefined): readonly string[] =>
       value === undefined ? [] : typeof value === 'string' ? [value] : value
     const same = (left: readonly string[], right: readonly string[]): boolean =>
       left.length === right.length && left.every((entry, index) => entry === right[index])
-    const top = asList(resolved['tui.altScreen.top'])
-    const bottom = asList(resolved['tui.altScreen.bottom'])
+    const top = asList(bindings['tui.altScreen.top'])
+    const bottom = asList(bindings['tui.altScreen.bottom'])
+    // The fork's own `input` defaults, read from the resolver's definitions
+    // rather than restating the chords here.
+    const manager = getKeybindings()
     const defaultTop = asList(manager.getDefinition('tui.altScreen.top').defaultKeys)
     const defaultBottom = asList(manager.getDefinition('tui.altScreen.bottom').defaultKeys)
     if (same(top, defaultTop) && same(bottom, defaultBottom)) return 'input'
@@ -2438,7 +2444,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const runtimeNotificationMode = runner.currentNotificationMode()
     const runtimeNotificationMethod = runner.currentNotificationMethod()
     const runtimeTerminalProgress = app.currentTerminalProgressMode()
-    const runtimeWheel = String(app.currentWheelScrollLines())
+    // The wheel step is a NEXT-mount preference: the live fact must say so,
+    // never imply the already-mounted viewport changed (plan §3.2).
+    const runtimeWheel = `${app.currentWheelScrollLines()} (next fullscreen entry)`
     // The persist-first rows report the DOCUMENT as their primary fact, so the
     // stored raw value (never the consumer default) is what the Detail shows.
     const storedBusyEnter = storedCandidateFactOf(doc?.busyEnter, doc !== undefined, BUSY_ENTER_CANDIDATES, 'unknown — document unavailable')
@@ -2720,7 +2728,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           action: 'inspect',
           edit: persistedPreferenceEditOf(
             'wheel-scroll-lines',
-            runtimeWheel,
+            String(app.currentWheelScrollLines()),
             WHEEL_SCROLL_LINE_VALUES,
             doc?.wheelScrollLines,
             doc !== undefined,
