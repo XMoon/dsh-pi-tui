@@ -359,3 +359,24 @@ test('a bare path segment is never a declared attachment command', () => {
   assert.equal(classify('hello /image foo').kind, 'path-argument')
   assert.equal(classify('/attach foo').kind, 'path-argument')
 })
+
+test('a Unicode whitespace inside a filename is NOT a token separator', () => {
+  // The path argument's own separator set rejects only an ASCII space and tab
+  // when unquoted, so U+3000 is a legal FILENAME character. Treating it as a
+  // separator stopped mid-name and duplicated the tail.
+  const name = '文\u3000件.png'
+  const line = `请看 /image ${name}`
+  const cursorCol = '请看 /image 文'.length
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), COMMANDS)
+  assert.ok(seat !== undefined)
+  assert.equal(seat.argument, '文', 'the seat holds only the typed prefix')
+  const applied = applyInlineAttachmentPath(line, seat, cursorCol, 0, name)
+  assert.equal(applied.line, `请看 /image ${name} `,
+    'the whole U+3000 name is one token, terminated once')
+  // The ASCII separator still terminates (the documented boundary).
+  assert.deepEqual(splitTokenRemainder('件.png 为什么', false, true),
+    { consumed: '件.png', suffix: ' 为什么' })
+  // And a LEADING U+3000 is a filename character too, not an empty seat.
+  assert.deepEqual(splitTokenRemainder('\u3000件.png', false, true),
+    { consumed: '\u3000件.png', suffix: '' })
+})

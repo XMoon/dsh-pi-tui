@@ -122,9 +122,12 @@ function setup(
     /** Extra workspace files, written BEFORE the app boots so the real path
      *  discovery sees them. */
     files?: readonly string[]
+    /** Extra workspace directories (recursive), created before the app boots. */
+    dirs?: readonly string[]
   } = {},
 ): Harness {
   const { root, image } = fixture(life)
+  for (const name of options.dirs ?? []) mkdirSync(join(root, name), { recursive: true })
   for (const name of options.files ?? []) writeFileSync(join(root, name), pngBytes())
   let markPostRead!: () => void
   const postRead = new Promise<void>(resolve => { markPostRead = resolve })
@@ -1025,5 +1028,50 @@ test('switching from one file to another leaves no stale path remainder', async 
   assert.equal(app.seatTextForTest(), 'see [image #1 (1×1)] ',
     'the old path remainder never survives as stray prose')
   assert.equal(h.imageStore.size(), 1, 'the real file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('a directory with SPACES stays continuable after accepting it', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life, { dirs: ['my dir/nested'], files: ['my dir/child.png', 'my dir/nested/deep.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'look /image my')
+  await waitForDraft(app, draft => draft === 'look /image my', 'the partial directory query')
+  await waitForCandidate(vt, app, 'my dir/', 'the spaced directory candidate')
+  // Accept the DIRECTORY: it must stay an OPEN quoted token so children are
+  // reachable — a closed quote would end the argument.
+  vt.sendInput('\t')
+  await waitForDraft(app, draft => draft === 'look /image "my dir/', 'the directory keeps its quote open')
+  await waitForCandidate(vt, app, 'nested/', 'the children of the accepted directory')
+  // Continue one level deeper, then accept a FILE (which closes the quote).
+  vt.sendInput('\t')
+  await waitForDraft(app, draft => draft === 'look /image "my dir/nested/', 'the second level continues')
+  await waitForOnlyRow(vt, app, 'deep.png', 'the nested file candidate')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the nested file lands')
+  assert.equal(app.seatTextForTest(), 'look [image #1 (1×1)] ',
+    'the multi-level quoted directory chain ends in one placeholder plus the accept separator')
+  assert.equal(h.imageStore.size(), 1, 'the real nested file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('an EXPLICITLY quoted directory stays continuable too', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life, { dirs: ['sub dir'], files: ['sub dir/deep.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  // The user opens the quote themselves even though the path has a space.
+  type(vt, 'see /image "sub')
+  await waitForDraft(app, draft => draft === 'see /image "sub', 'the explicit quoted query')
+  await waitForCandidate(vt, app, 'sub dir/', 'the explicitly quoted directory candidate')
+  vt.sendInput('\t')
+  await waitForDraft(app, draft => draft === 'see /image "sub dir/', 'the explicit quote stays open')
+  await waitForOnlyRow(vt, app, 'deep.png', 'the children of the explicitly quoted directory')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the child file lands')
+  assert.equal(app.seatTextForTest(), 'see [image #1 (1×1)] ',
+    'the explicit-quote directory chain completes and closes only at the file')
+  assert.equal(h.imageStore.size(), 1, 'the real child file was read')
   assert.equal(h.submissions(), 0, 'never submits')
 })

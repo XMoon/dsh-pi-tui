@@ -126,7 +126,13 @@ export function splitTokenRemainder(
     const end = close === -1 ? afterCursor.length : close + 1
     return { consumed: afterCursor.slice(0, end), suffix: afterCursor.slice(end) }
   }
-  if (!caretInsideToken || afterCursor === '' || /^\s/.test(afterCursor)) {
+  // The SEPARATOR set must be the path argument's own, which rejects ONLY an
+  // ASCII space and tab for an unquoted token (`path-argument.ts`) — the same
+  // rule the completion formatter uses when it decides that a name needs
+  // quoting. A Unicode whitespace such as U+3000 is therefore a legal filename
+  // character: treating it as a separator here would stop mid-name and duplicate
+  // the tail (`文　件.png` → `文　件.png 　件.png`).
+  if (!caretInsideToken || afterCursor === '' || /^[ \t]/.test(afterCursor)) {
     return { consumed: '', suffix: afterCursor }
   }
   const word = /^[^ \t]*/.exec(afterCursor)?.[0] ?? ''
