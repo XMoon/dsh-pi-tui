@@ -769,8 +769,11 @@ Attachment completion and intake are Client-local:
 - Tab on an empty argument is a file-completion site only for commands that
   declare path-argument completion; accepting a directory reopens its children.
   The Client cwd is read at call time and stays independent of the Session/Host
-  cwd. `@` whole-tree search remains Host-scoped. Multi-word/quoted arguments do
-  not complete.
+  cwd. `@` whole-tree search remains Host-scoped. An UNCLOSED quoted argument
+  completes inside the quotes (a quoted name may contain spaces); a CLOSED
+  quote is treated as a complete token and does not complete. An accepted
+  DIRECTORY keeps its quote open so the next completion continues in the same
+  token, while an accepted FILE closes it.
 - `/attach` and `/image` are ALSO inline attachment sites: the
   FIRST logical line's leading command token stays the leading command seat
   above, while a declared attachment command token at any other cursor position

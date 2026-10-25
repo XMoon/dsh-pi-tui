@@ -262,7 +262,9 @@ test('quoted /image directory acceptance keeps the quote open for child completi
   await waitForDropdownRow(vt, 'sub dir/', 'quoted image directory')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.equal(app.seatTextForTest(), '/image "sub dir/"', 'the accepted value keeps balanced quote text')
+  // The token stays OPEN so the next completion continues inside it: a closed
+  // quote would end the argument and make the children unreachable.
+  assert.equal(app.seatTextForTest(), '/image "sub dir/', 'a directory keeps its quote open')
   assert.equal(app.seatEditorForTest().getCursor(), '/image "sub dir/'.length, 'the cursor remains inside the open quote')
   await waitForDropdownRow(vt, 'deep.png', 'quoted image children after Tab')
 })

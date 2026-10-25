@@ -68,7 +68,15 @@ export function presentPathCandidate(
   // user's `/image "file` continuation stays quoted), like the old local
   // behavior this layer keeps owning for the non-@ forms.
   const needsQuotes = context.quoted || pathValue.includes(' ')
-  const value = needsQuotes ? `"${pathValue}"` : pathValue
+  // A DIRECTORY keeps its quote OPEN: the next completion continues inside the
+  // same token, and a closed quote would end the argument (the path parser
+  // returns null for a closed quote, so the children would be unreachable).
+  // Only a FILE closes the quote.
+  const value = !needsQuotes
+    ? pathValue
+    : candidate.kind === 'directory'
+      ? `"${pathValue}`
+      : `"${pathValue}"`
   return {
     value,
     // The vendored SelectList uses the slash marker to recognize a directory
