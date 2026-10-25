@@ -25,6 +25,17 @@ import {
 import { shellCompletionContext, suggestShellCompletion } from './shell.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
+import {
+  INLINE_ATTACHMENT_ACTIONS,
+  applyInlineAttachmentAction,
+  applyInlineAttachmentPath,
+  isInlineAttachmentAction,
+  isInlineAttachmentPath,
+  unquoteCandidateValue,
+  type InlineAttachmentAcceptance,
+  type InlineAttachmentActionItem,
+  type InlineAttachmentPathItem,
+} from './inline-attachment.ts'
 import type { HumanSkillSummary } from '../../../domain/catalog/skill.ts'
 import {
   classifyFileCompletionContext,
@@ -127,6 +138,10 @@ export class MentionProvider implements AutocompleteProvider {
      * legacy shell-word adapter keeps its prefix-only behavior for direct
      * shell apply callers. */
     strict: boolean
+    /** Image UX PR5: the inline attachment rows THIS request produced (object
+     * identity is the permission — see {@link InlineAttachmentAcceptance}).
+     * Empty for every request that offered none. */
+    attachments: readonly AutocompleteItem[]
   } | null = null
   /** The monotonically increasing request generation (plan §9.2 latest-
    * only): minted at REQUEST START (getSuggestions entry). A result —
@@ -162,6 +177,22 @@ export class MentionProvider implements AutocompleteProvider {
     // Client PATH (fd then fdfind), `null` FORCES the bounded local fallback
     // (deterministic tests), a string pins the finder.
     this.localDiscovery = new ClientLocalDiscoveryDriver(localFdPath)
+  }
+
+  /** The inline-attachment ACCEPTANCE sink (Image UX PR5). The provider
+   * captures the immutable acceptance synchronously and hands it here; the
+   * SINK owns the post-apply timing (the vendored editor installs the applied
+   * document AFTER applyCompletion returns, so the sink must observe the real
+   * editor state, not this method's input). `undefined` = no attachment plane
+   * on this assembly: an inline acceptance then only inserts text, exactly
+   * like a skill reference. */
+  private onInlineAttachmentAccept: ((acceptance: InlineAttachmentAcceptance) => void) | undefined
+
+  /** Install the acceptance sink (see {@link onInlineAttachmentAccept}). The
+   * application supplies it: the provider never reads a file, never touches a
+   * DraftStore and never edits the editor itself. */
+  setInlineAttachmentAcceptSink(sink: ((acceptance: InlineAttachmentAcceptance) => void) | undefined): void {
+    this.onInlineAttachmentAccept = sink
   }
 
   /** The virtual serialized line for a shell-mode editor position on the
@@ -252,8 +283,8 @@ export class MentionProvider implements AutocompleteProvider {
     // `none`, and step 4 keeps the shell completion non-goal alive).
     const semantic = this.virtualShellSemanticContext(currentLine, cursorCol)
     const context = semantic !== null
-      ? classifyFileCompletionContext(semantic.line, this.pathArgumentCommands)
-      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
+      ? classifyFileCompletionContext(semantic.line, this.pathArgumentCommands, { line: cursorLine })
+      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands, { line: cursorLine })
 
     if (context.kind === 'mention') {
       return this.withRequestSnapshot(
@@ -268,6 +299,28 @@ export class MentionProvider implements AutocompleteProvider {
       )
     }
     if (context.kind === 'path-argument') {
+      const suggestions = await this.completePathArgument(context.query, requestLocalCwd, options.signal)
+      // The LEGACY seat (the FIRST line's leading command token) keeps the
+      // fork's plain rows and its argument apply prefix: its Enter still
+      // follows the command policy, which the attachment plane must never take
+      // over.
+      if (context.leading || suggestions === null) {
+        return this.withRequestSnapshot(
+          generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions,
+        )
+      }
+      // THE INLINE seat (any other position): the rows are tagged so an
+      // acceptance can be recognized as an attachment selection, and their
+      // EDITOR PREFIX is neutral. The vendored editor submits the whole draft
+      // when the OPEN dropdown's prefix starts with `/` — on Enter AND on a
+      // mouse confirm — and an absolute-path candidate (`/tmp/a.png`) produces
+      // exactly such a prefix. A neutral prefix is the truthful "this list is
+      // not a leading-command completion" fact: every confirm gesture is then
+      // accept-only (the guard reaches Tab, Enter, click and the single-item
+      // Tab shortcut alike) without a fork change, while the rows keep their
+      // ranked order (the dropdown highlights the top candidate). The replaced
+      // span is re-derived in applyCompletion from the live document, so the
+      // prefix is not needed there either.
       return this.withRequestSnapshot(
         generation,
         requestScope,
@@ -276,7 +329,7 @@ export class MentionProvider implements AutocompleteProvider {
         lines,
         cursorLine,
         cursorCol,
-        await this.completePathArgument(context.query, requestLocalCwd, options.signal),
+        { prefix: '', items: this.tagInlinePathItems(suggestions.items, context.command) },
       )
     }
 
@@ -322,7 +375,23 @@ export class MentionProvider implements AutocompleteProvider {
     // completion (plan §27) that never touches file paths.
     const inline = extractInlineSkillPrefix(lines, cursorLine, cursorCol)
     if (inline !== undefined) {
-      const items = this.suggestInlineSkills(inline.query)
+      // Image UX PR5: the FIXED Client-local attachment actions ride the same
+      // inline `/name` seat as the skill catalog, as their own rows (a skill
+      // with the SAME name stays a distinct row and only inserts text). An
+      // accepted action inserts `/image ` / `/attach ` — the existing path
+      // argument seat — and never reads a file by itself.
+      const items = [
+        ...INLINE_ATTACHMENT_ACTIONS
+          .filter(action => action.name.startsWith(inline.query))
+          .map((action): InlineAttachmentActionItem => ({
+            value: action.name,
+            label: action.label,
+            description: action.description,
+            inlineAttachment: 'action',
+            command: action.name,
+          })),
+        ...this.suggestInlineSkills(inline.query),
+      ]
       if (items.length > 0) {
         // The inline prefix is the QUERY part only — never `/`-prefixed:
         // the vendored editor's confirm treats a `/`-prefixed prefix as a
@@ -350,6 +419,30 @@ export class MentionProvider implements AutocompleteProvider {
       }
     }
     return null
+  }
+
+  /** Tag one inline path candidate list with its declared command and its
+   * candidate KIND, so an acceptance can tell a directory (continuation only)
+   * from a file (the intake's trigger) without re-deriving it from label text.
+   * The vendored SelectList's directory marker is a trailing `/` on the label;
+   * this layer's presentation appends exactly that for directories, and the
+   * accepted VALUE keeps the user's own separator, so the label — not the
+   * value — is the continuation fact.
+   * @param items - the presented path candidates of THIS request.
+   * @param command - the declared command name whose argument they complete.
+   */
+  private tagInlinePathItems(
+    items: readonly AutocompleteItem[],
+    command: string,
+  ): InlineAttachmentPathItem[] {
+    return items.map(item => ({
+      ...item,
+      inlineAttachment: 'path',
+      command,
+      // A Windows-dialect directory keeps its trailing `\` in the value while
+      // the label always carries the `/` marker (presentation.ts).
+      directory: item.label.endsWith('/'),
+    }))
   }
 
   /** The inline skill candidates for one query: the detached human skill
@@ -499,7 +592,8 @@ export class MentionProvider implements AutocompleteProvider {
       mode,
       scope,
       localCwd,
-       strict,
+      strict,
+      attachments: result.items.filter(item => isInlineAttachmentAction(item) || isInlineAttachmentPath(item)),
     }
     return result
   }
@@ -664,6 +758,23 @@ export class MentionProvider implements AutocompleteProvider {
     // argument-apply (which would mangle the reference).
     const inline = extractInlineSkillPrefix(lines, cursorLine, cursorCol)
     if (inline !== undefined && inline.query === prefix) {
+      // Image UX PR5: an attachment ACTION row is this provider's own row for
+      // THIS request (identity), and it only inserts `/image ` — the path
+      // argument seat — never a file read.
+      if (isInlineAttachmentAction(item) && this.requestSnapshot?.attachments.includes(item) === true) {
+        const applied = applyInlineAttachmentAction(currentLine, inline.slashStart, cursorCol, item.command)
+        const newLines = [...lines]
+        newLines[cursorLine] = applied.line
+        this.acceptInlineAttachment({
+          kind: 'action',
+          command: item.command,
+          path: '',
+          lines: newLines,
+          cursorLine,
+          cursorCol: applied.cursorCol,
+        })
+        return { lines: newLines, cursorLine, cursorCol: applied.cursorCol }
+      }
       const isSkill = this.skillReferences.some(skill => skill.name === item.value)
       if (isSkill && this.requestSnapshot?.strict !== true) {
         return { lines, cursorLine, cursorCol }
@@ -679,7 +790,47 @@ export class MentionProvider implements AutocompleteProvider {
         }
       }
     }
+    // INLINE ATTACHMENT PATH apply (Image UX PR5): a DIRECTORY continues the
+    // path seat in place; a FILE also applies the selected value in place and
+    // hands the application the immutable acceptance that starts the ONE
+    // Client-local intake — the canonical placeholder then replaces this
+    // fragment as the ONE further edit. The replaced span is re-derived from
+    // the LIVE document through the ONE classifier, never from the row's
+    // label, and the row must be one THIS request produced under the strict
+    // snapshot (identity is the permission — a stale list or an extension row
+    // can never fake an attachment read).
+    if (this.requestSnapshot?.strict === true && this.requestSnapshot.attachments.includes(item)
+      && isInlineAttachmentPath(item)) {
+      const seat = classifyFileCompletionContext(
+        currentLine.slice(0, cursorCol),
+        this.pathArgumentCommands,
+        { line: cursorLine },
+      )
+      if (seat.kind === 'path-argument' && !seat.leading && seat.command === item.command) {
+        const applied = applyInlineAttachmentPath(currentLine, seat, cursorCol, cursorLine, item.value)
+        const newLines = [...lines]
+        newLines[cursorLine] = applied.line
+        this.acceptInlineAttachment({
+          kind: item.directory ? 'directory' : 'path',
+          command: item.command,
+          path: unquoteCandidateValue(item.value),
+          lines: newLines,
+          cursorLine,
+          cursorCol: applied.cursorCol,
+          span: applied.span,
+        })
+        return { lines: newLines, cursorLine, cursorCol: applied.cursorCol }
+      }
+    }
     return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix)
+  }
+
+  /** Hand ONE acceptance to the application sink (see
+   *  {@link setInlineAttachmentAcceptSink}). The acceptance is frozen before
+   *  the call: a sink that synchronously re-enters the editor can never make
+   *  this call observe a later state. */
+  private acceptInlineAttachment(acceptance: InlineAttachmentAcceptance): void {
+    this.onInlineAttachmentAccept?.(acceptance)
   }
 
   shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {

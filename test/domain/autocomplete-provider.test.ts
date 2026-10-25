@@ -710,11 +710,26 @@ test('inline skill completion returns ONLY skill candidates at ordinary position
   const second = await provider.getSuggestions(['foo', '/ht'], 1, 3, { signal: abort })
   assert.ok(second !== null, `line-2 /ht must suggest:\n${JSON.stringify(second)}`)
   assert.deepEqual(second.items.map(item => item.value), ['html-maker'])
-  // An empty query lists the whole catalog (typing a bare `/`).
+  // An empty query lists the whole catalog (typing a bare `/`). Image UX PR5
+  // adds the two FIXED Client-local attachment actions to this same inline
+  // seat as their own rows; they are not skills and carry the structural
+  // action marker instead of a catalog name.
   const all = await provider.getSuggestions(['请用 /'], 0, 4, { signal: abort })
   assert.ok(all !== null, `请用 / must suggest:\n${JSON.stringify(all)}`)
   assert.equal(all.prefix, '')
-  assert.deepEqual(all.items.map(item => item.value), ['eli5', 'html-maker', 'diagnosing-skills'])
+  assert.deepEqual(
+    all.items.map(item => item.value),
+    ['image', 'attach', 'eli5', 'html-maker', 'diagnosing-skills'],
+    'the two attachment actions lead, then the skill catalog',
+  )
+  const actions = all.items.filter(item => (item as { inlineAttachment?: string }).inlineAttachment === 'action')
+  assert.deepEqual(actions.map(item => item.value), ['image', 'attach'],
+    'the attachment actions are structural rows, not catalog entries')
+  assert.deepEqual(actions.map(item => item.description), ['Insert local image', 'Attach local file or image'],
+    'each action states what it does')
+  const skills = all.items.filter(item => (item as { inlineAttachment?: string }).inlineAttachment === undefined)
+  assert.deepEqual(skills.map(item => item.value), ['eli5', 'html-maker', 'diagnosing-skills'],
+    'the skill rows keep their own shape (a same-name skill stays a DISTINCT row)')
 })
 
 test('inline skill completion never leaks commands and never claims the command seat', async (t) => {

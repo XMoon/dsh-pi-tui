@@ -92,8 +92,8 @@ const PROMPT_WIDTH = 2
 /** Whether the cursor sits in a declared path-argument position (`/attach`/`/image
  * <arg>`): the classifier's `path-argument` kind, which the reopen gate
  * consumes (plan §11 — ONE classifier, never a per-command hardcode). */
-function isFileArgumentContext(textBeforeCursor: string): boolean {
-  return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS).kind !== 'none'
+function isFileArgumentContext(textBeforeCursor: string, line: number): boolean {
+  return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS, { line }).kind === 'path-argument'
 }
 
 /**
@@ -283,6 +283,25 @@ export class TuiEditor extends Editor {
     this.cancelAutocomplete()
   }
 
+  /**
+   * Open the completion dropdown for the CURRENT cursor position (Image UX
+   * PR5): an accepted inline attachment ACTION lands the cursor inside the
+   * path argument (`/image `), and the path candidates must appear WITHOUT a
+   * further keystroke — the vendored editor's natural trigger fires on
+   * characters, not on a programmatic replacement. The ONE classifier decides
+   * whether the position is really a path seat, so this seam can never open
+   * the file list on ordinary prose. A forced request keeps the open
+   * independent of the fork's trigger patterns (the same route the host's Tab
+   * handler uses), and an already-open dropdown is refreshed, not duplicated.
+   */
+  openPathCompletion(): void {
+    if (this.inputMode !== 'prompt') return
+    const { line, col } = this.getCursor()
+    const before = this.getLines()[line]?.slice(0, col) ?? ''
+    if (classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS, { line }).kind !== 'path-argument') return
+    this.requestAutocomplete({ force: true, explicitTab: true })
+  }
+
   /** Switch the input mode. A real change fires onChange (the host's
    * viewer-draft mirror and seat subscribers must observe the wire form
    * changing even when the body text did not) and CANCELS any open
@@ -338,6 +357,7 @@ export class TuiEditor extends Editor {
     const context = classifyFileCompletionContext(
       textBeforeCursor,
       FILE_ARGUMENT_COMMANDS,
+      { line: cursor.line },
     )
 
     if (context.kind === 'none') {
@@ -430,7 +450,7 @@ export class TuiEditor extends Editor {
     if (matchesKey(data, 'tab') && !this.isShowingAutocomplete() && this.inputMode === 'prompt') {
       const { line, col } = this.getCursor()
       const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
-      const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS)
+      const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS, { line })
       if (context.kind === 'mention' || context.kind === 'path-argument') {
         this.requestAutocomplete({ force: true, explicitTab: true })
         return
@@ -503,7 +523,7 @@ export class TuiEditor extends Editor {
     if (printable === undefined && ![...data].some(character => character.charCodeAt(0) >= 32)) return
     const { line, col } = this.getCursor()
     const before = this.getLines()[line]?.slice(0, col) ?? ''
-    const context = classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS)
+    const context = classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS, { line })
     if (context.kind !== 'mention') return
     const beforeAt = before[context.range.start - 1]
     // Start/space/tab are already handled by the fork for bare mentions. Its
@@ -671,7 +691,7 @@ export class TuiEditor extends Editor {
     // reopen through the same directory-shaped context gate — never a
     // per-command hardcode, and never a plain trailing `/` (a `see /tmp/`
     // position stays closed).
-    if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileArgumentContext(textBeforeCursor)) {
+    if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileArgumentContext(textBeforeCursor, line)) {
       this.requestAutocomplete({ force: false, explicitTab: false })
     }
   }

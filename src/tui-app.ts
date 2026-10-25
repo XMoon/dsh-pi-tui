@@ -3425,6 +3425,11 @@ export class TuiApp {
   /** The last installed slash-command rows (host catalog + client command
    * contributions) — the headless-test read of the `/` menu source. */
   private installedCommandCompletions: readonly SlashCommand[] = []
+  /** Image UX PR5: the inline attachment stager the command plane supplies
+   * (read + stage through the ONE Client-local intake). `undefined` on an
+   * assembly without an attachment plane — an inline acceptance then only
+   * edits text, exactly like an inline skill reference. */
+  private inlineAttachmentStager: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentStager | undefined
   /** The latest window metadata, retained so remapped key hints stay live. */
   private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
@@ -21622,6 +21627,10 @@ export class TuiApp {
       hostShellCompletion,
     )
     this.installedCommandCompletions = [...commands]
+    // Image UX PR5: the inline attachment acceptance rides THIS provider (the
+    // base one owns the strict snapshot; the delegating wrap only forwards
+    // applyCompletion, so either installation must install the same sink).
+    base.setInlineAttachmentAcceptSink(acceptance => this.acceptInlineAttachment(acceptance))
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return
@@ -21720,6 +21729,126 @@ export class TuiApp {
         base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol),
     }
     this.editor.setAutocompleteProvider(delegated)
+  }
+
+  /**
+   * Install the INLINE ATTACHMENT stager (Image UX PR5): the command plane's
+   * ONE Client-local read + `DraftImageStore`/`DraftFileStore` staging entry,
+   * reused by the leading `/image` `/attach` commands. The app never reads a
+   * file and the command plane never edits the editor — the stager is handed a
+   * narrow stake whose `commit` is this surface's ONE undoable edit.
+   *
+   * `undefined` disables inline attachment staging on this assembly (an
+   * accepted file then only inserts its path, like any other completion). It
+   * is a setter, not another position on `setCommandCompletions`: the stager
+   * is a command-plane capability, independent of which completion catalog is
+   * installed.
+   */
+  setInlineAttachmentStager(stager: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentStager | undefined): void {
+    this.inlineAttachmentStager = stager
+  }
+
+  /**
+   * Settle ONE inline attachment acceptance (Image UX PR5 Step B.1): the
+   * vendored editor installs the applied document AFTER `applyCompletion`
+   * returns, so the acceptance is settled in a microtask that FIRST proves the
+   * live editor really holds the accepted document at the accepted cursor.
+   * Nothing is read, staged or edited otherwise.
+   *
+   * A FILE acceptance then hands a stake to the command plane. The stake's
+   * `commit` is the ONE real undoable edit: it re-proves the seat, the raw
+   * draft and the exact fragment immediately before writing the canonical
+   * placeholder in place. A stale stake never edits the live draft (the user
+   * kept typing, Undo'd, switched the seat or the session) — it refuses, and
+   * the intake's own fence reports it.
+   */
+  private acceptInlineAttachment(acceptance: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentAcceptance): void {
+    queueMicrotask(() => {
+      if (this.disposed) return
+      // ACTION: the cursor now sits inside the path argument — open the
+      // existing Client-local path candidates without another keystroke.
+      if (acceptance.kind === 'action') {
+        this.editor.openPathCompletion()
+        return
+      }
+      // A DIRECTORY only continued the path seat: the ordinary reopen gate
+      // (the accepted value may end with a separator) has already run through
+      // the editor's own input path; nothing is read.
+      if (acceptance.kind === 'directory') return
+      // The accepted document must be the LIVE one: the editor state the fork
+      // installed after applyCompletion. A canonical comparison (line array +
+      // cursor) rejects every interleaved edit that landed in between.
+      const seat = this.seatEditor()
+      const raw = seat.getText()
+      if (seat.id !== 'host' || raw !== acceptance.lines.join('\n')) return
+      const cursor = this.editor.getCursor()
+      if (cursor.line !== acceptance.cursorLine || cursor.col !== acceptance.cursorCol) return
+      const stager = this.inlineAttachmentStager
+      if (stager === undefined) return
+      const span = acceptance.span
+      if (span === undefined) return
+      const generation = this.generation
+      const source = { seat, raw }
+      stager({
+        command: acceptance.command,
+        path: acceptance.path,
+        rawDraft: raw,
+        span,
+        // The seat identity AND the surface generation: a plugin editor taking
+        // the seat (or a remount) is a different owner, even for identical
+        // text.
+        current: () => !this.disposed
+          && this.generation === generation
+          && this.seatEditor() === source.seat
+          && this.seatEditor().getText() === source.raw,
+        draft: () => {
+          if (this.disposed || this.generation !== generation) return undefined
+          const live = this.seatEditor()
+          return live === source.seat ? live.getText() : undefined
+        },
+        commit: (placeholder: string) => this.commitInlineAttachment(source.seat, source.raw, span, placeholder),
+        notify: (message, kind) => this.notify(message, kind ?? 'info'),
+      })
+    })
+  }
+
+  /**
+   * Commit ONE canonical attachment placeholder in place (Image UX PR5
+   * Step B): replace exactly the accepted fragment of the RAW draft through
+   * the host editor's real undoable-edit seam, and place the cursor right
+   * after the placeholder. The whole raw document is sliced — never rebuilt
+   * from expanded text — so paste markers, other tokens and every other line
+   * survive byte for byte, and ONE Undo restores the editable fragment.
+   *
+   * Returns false (and edits nothing) when the seat moved, the raw draft is no
+   * longer the accepted one, or the fragment no longer reads as the accepted
+   * one. The caller's owned task keeps its ordinary failure classification for
+   * an editor-level throw.
+   */
+  private commitInlineAttachment(
+    seat: import('./tui/interaction/editor-seat-holder.ts').SeatEditor,
+    expectedRaw: string,
+    span: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentSpan,
+    placeholder: string,
+  ): boolean {
+    if (this.disposed || this.seatEditor() !== seat) return false
+    const raw = seat.getText()
+    if (raw !== expectedRaw) return false
+    const lines = raw.split('\n')
+    const line = lines[span.line]
+    if (line === undefined || span.end > line.length || span.start >= span.end) return false
+    const nextLine = `${line.slice(0, span.start)}${placeholder}${line.slice(span.end)}`
+    const nextLines = [...lines]
+    nextLines[span.line] = nextLine
+    const next = nextLines.join('\n')
+    // The seat's undoable seam takes a FLAT offset; the placeholder spans one
+    // line, so the cursor is the sum of the preceding lines plus its end.
+    let cursor = span.start + placeholder.length
+    for (let index = 0; index < span.line; index += 1) cursor += (lines[index]?.length ?? 0) + 1
+    if (seat.replaceTextUndoable === undefined) return false
+    this.invalidateDraftPreviewCaches()
+    seat.replaceTextUndoable(next, cursor)
+    return true
   }
 
   /**

@@ -2199,6 +2199,12 @@ export function registerTuiCommands(
 
   artifactCommands.registerAttach()
 
+  // Image UX PR5: the INLINE completion route stages through the SAME intake.
+  // The stager is installed on the mounted app (which owns the editor, the one
+  // undoable in-place edit and the seat fence); a renderer without a PiTui app
+  // has no inline completion plane at all, so nothing is installed.
+  app?.setInlineAttachmentStager(artifactCommands.inlineAttachmentStager())
+
   // Image UX PR2: `/view-image` is a PiTui-local product surface (it lists the
   // CURRENTLY MOUNTED transcript window and opens the PiTui Viewer), so it is
   // registered ONLY where a PiTui `TuiApp` is mounted — the TSP read-only mount
