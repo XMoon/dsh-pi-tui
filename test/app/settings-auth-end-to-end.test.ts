@@ -118,6 +118,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     progressUpdatesState: { mode: 'milestones' },
     responseStyleState: { style: 'default' },
     gitAttributionState: { mode: 'off' },
+    // C2-R2: the completion controller's read-only facts. This composition's
+    // Settings rows read them back; /settings itself stays the same surface.
+    currentNotificationMode: () => 'unfocused' as const,
+    currentNotificationMethod: () => 'auto' as const,
     signal: new AbortController().signal,
     commandRegistry: commands,
     clientCommands: createClientCommandRegistry(parseCommand),

@@ -307,6 +307,17 @@ test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inven
     backendKind: 'direct' as const,
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
+    // C2-R2: the Settings rows read the ONE completion controller's live facts;
+    // this fixture composes no controller, so it answers the defaults the same
+    // composition would have started with.
+    progressUpdatesState: { mode: 'milestones' as const },
+    responseStyleState: { style: 'default' as const },
+    gitAttributionState: { mode: 'off' as const },
+    currentNotificationMode: () => 'unfocused' as const,
+    currentNotificationMethod: () => 'auto' as const,
+    setNotificationMode: () => {},
+    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {},
     tuiSettings: undefined,
     extensions: undefined,
     // The PRODUCTION composition factory (the same one bootstrap injects).
