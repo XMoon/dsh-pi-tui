@@ -286,17 +286,19 @@ test('the token remainder follows the PATH grammar, not an ASCII allowlist', () 
   const quotedApplied = applyInlineAttachmentPath(quoted, quotedSeat, quotedCursor, 0, '"my shot.png"')
   assert.equal(quotedApplied.line, '请看 /image "my shot.png" 为什么失败',
     'a quoted token keeps its spaces and closes exactly once')
-  // The pure helper, stated directly. An UNQUOTED boundary comes from the
-  // accepted value (a POSIX name may be any non-separator character), while a
-  // QUOTED one runs to its closing quote.
-  assert.deepEqual(splitTokenRemainder('件.png', false, '文件.png', true), { consumed: '件.png', suffix: '' })
-  assert.deepEqual(splitTokenRemainder('件.png', false, '文件.png', false),
+  // The SINGLE boundary authority, stated directly. An unquoted token runs to
+  // the next separator but ONLY when the caret is already inside it; a quoted
+  // token runs to its closing quote, so spaces inside stay part of the name.
+  assert.deepEqual(splitTokenRemainder('件.png', false, true), { consumed: '件.png', suffix: '' })
+  assert.deepEqual(splitTokenRemainder('件.png', false, false),
     { consumed: '', suffix: '件.png' }, 'at an EMPTY seat nothing is consumed')
-  assert.deepEqual(splitTokenRemainder('为什么连接失败', false, 'shot.png'),
-    { consumed: '', suffix: '为什么连接失败' }, 'prose that completes no value is preserved')
-  assert.deepEqual(splitTokenRemainder('t" 为什么', true), { consumed: 't"', suffix: ' 为什么' })
-  assert.deepEqual(splitTokenRemainder(' name.png" 为什么', true),
+  assert.deepEqual(splitTokenRemainder('为什么连接失败', false, false),
+    { consumed: '', suffix: '为什么连接失败' }, 'prose after an empty seat is preserved whole')
+  assert.deepEqual(splitTokenRemainder('t" 为什么', true, true), { consumed: 't"', suffix: ' 为什么' })
+  assert.deepEqual(splitTokenRemainder(' name.png" 为什么', true, true),
     { consumed: ' name.png"', suffix: ' 为什么' }, 'quoted spaces belong to the token')
+  assert.deepEqual(splitTokenRemainder('age world', false, true),
+    { consumed: 'age', suffix: ' world' }, 'the unquoted remainder stops at the separator')
 })
 
 test('an existing separator after the query tail is never doubled', () => {

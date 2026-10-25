@@ -93,76 +93,44 @@ export function isInlineAttachmentPath(
 }
 
 /**
- * How many characters of `afterCursor` complete the SAME token as the accepted
- * value, i.e. the longest prefix that is a suffix of `value`.
+ * The boundary of ONE attachment path token at the caret: how much of the text
+ * after the caret still belongs to the token being completed, and what must be
+ * preserved as the user's prose.
  *
- * This is the only sound unquoted boundary: a POSIX name may contain Unicode,
- * `#`, `+`, `%` and any other non-separator character, so neither an ASCII
- * allowlist nor "stop at the first non-letter" can tell a filename remainder
- * from prose. The accepted value itself is the authority.
- * @param afterCursor - text after the caret.
- * @param value - the accepted candidate value (unquoted form).
- * @returns the length of the matching remainder (0 when none matches).
- */
-export function acceptedRemainderLength(afterCursor: string, value: string): number {
-  if (value === '') return 0
-  for (let length = Math.min(afterCursor.length, value.length - 1); length > 0; length -= 1) {
-    if (value.endsWith(afterCursor.slice(0, length))) return length
-  }
-  return 0
-}
-
-/**
- * How much of the text AFTER the cursor still belongs to the attachment token
- * being completed.
+ * This is the ONLY token-boundary authority for the attachment accept; there is
+ * deliberately no second, value-derived model, because two models disagree on
+ * exactly the cases that matter.
  *
- * The rule is the path argument's OWN grammar, never a character allowlist:
- * - inside an OPEN quoted token (`/image "sho|t" more`), spaces are part of the
- *   path, so the remainder runs to the matching quote (or to the end of the
- *   line when the quote is still open);
- * - outside quotes, the remainder is the rest of the current WORD — every
- *   character up to whitespace, since a POSIX filename may legitimately carry
- *   Unicode, `#`, `+`, `@`, `%` and so on.
- *
- * An allowlist cannot express this: it would both truncate valid CJK filenames
- * and swallow prose that happens to look like a path.
- * @param afterCursor - the raw line text after the cursor.
- * @param quoted - whether the token being completed is inside an open quote,
- *   i.e. the seat's argument started with `"` and has not closed before the
- *   cursor (the same fact the completion engine uses for its own values).
+ * The rule is the path argument's own grammar:
+ * - inside an OPEN quoted token, spaces are path content, so the remainder runs
+ *   to the matching quote (or to the end of the line while it is still open);
+ * - otherwise the remainder is the current WORD up to the next separator — a
+ *   POSIX filename may carry Unicode, `#`, `+`, `@`, `%` and so on, so a
+ *   character allowlist cannot express this;
+ * - at an EMPTY argument seat (the caret sits at the seat's first column) there
+ *   is no token before the caret, so the text to the right is the user's PROSE
+ *   and nothing may be consumed.
+ * @param afterCursor - the raw line text after the caret.
+ * @param quoted - whether the seat's argument is inside an open quote.
+ * @param caretInsideToken - whether the seat already holds an argument before
+ *   the caret (the fact that makes the remainder part of the token).
  * @returns the token remainder to consume and the prose suffix to preserve.
  */
 export function splitTokenRemainder(
   afterCursor: string,
   quoted: boolean,
-  /** The value being accepted: the unquoted boundary is derived from it, never
-   *  from a character allowlist. */
-  accepted = '',
-  /** Whether the caret sits inside an existing token (the seat's argument before
-   *  the caret is non-empty). At an EMPTY seat nothing may be consumed. */
-  caretInsideToken = false,
+  caretInsideToken: boolean,
 ): { consumed: string; suffix: string } {
-  if (!quoted) {
-    // An UNQUOTED token's end cannot be inferred from characters, and it must
-    // not be inferred from "the text right of the caret happens to be a suffix
-    // of the accepted name" either: `请看 /image |png为什么失败` completed with
-    // `shot.png` would then delete the user's own `png`, because `png` IS a
-    // suffix of `shot.png` while being ordinary prose.
-    //
-    // The only sound fact is whether the caret sits INSIDE a token at all, which
-    // the caller establishes from the seat (the argument before the caret is
-    // non-empty). At an EMPTY seat the text to the right is prose, full stop.
-    if (afterCursor === '' || /^\s/.test(afterCursor)) return { consumed: '', suffix: afterCursor }
-    if (!caretInsideToken) return { consumed: '', suffix: afterCursor }
-    const typed = acceptedRemainderLength(afterCursor, accepted)
-    if (typed > 0) return { consumed: afterCursor.slice(0, typed), suffix: afterCursor.slice(typed) }
+  if (quoted) {
+    const close = afterCursor.indexOf('"')
+    const end = close === -1 ? afterCursor.length : close + 1
+    return { consumed: afterCursor.slice(0, end), suffix: afterCursor.slice(end) }
+  }
+  if (!caretInsideToken || afterCursor === '' || /^\s/.test(afterCursor)) {
     return { consumed: '', suffix: afterCursor }
   }
-  // Quoted: run to the closing quote. An unclosed quote keeps going, so a
-  // half-typed quoted filename is consumed whole.
-  const close = afterCursor.indexOf('"')
-  if (close === -1) return { consumed: afterCursor, suffix: '' }
-  return { consumed: afterCursor.slice(0, close + 1), suffix: afterCursor.slice(close + 1) }
+  const word = /^[^ \t]*/.exec(afterCursor)?.[0] ?? ''
+  return { consumed: word, suffix: afterCursor.slice(word.length) }
 }
 
 /**
@@ -270,24 +238,13 @@ export function applyInlineAttachmentPath(
   // after the caret is carried over verbatim, and the space guarantees the
   // placeholder can never be glued to it. A quote the value itself closes takes
   // the space AFTER the quote (`"my file name.png" `), never inside it.
+  // The ONE boundary authority decides how much of the tail is still this token.
+  // The seat supplies both facts it needs: whether the argument is inside an
+  // open quote, and whether it already holds text before the caret (an EMPTY
+  // argument means the tail is prose).
   const quoted = isOpenQuotedToken(seat.argument ?? '')
-  const tail = line.slice(cursorCol)
-  // A caret INSIDE an existing token still has to consume that token's own
-  // remainder (`文|件.png`), which the seat proves: it already holds an
-  // argument before the caret. At an EMPTY seat the tail is prose, untouched.
-  // The seat's argument is the text BEFORE the caret only: an EMPTY argument
-  // means the caret sits at the seat's first column, so the text to its right is
-  // the user's prose (even when a Tab-triggered list made the provider read that
-  // prose as a query).
   const argumentBeforeCaret = (seat.argument ?? '').replace(/^[ \t]+/, '')
-  // Inside a token, the accept replaces that ENTIRE token, so the remainder is
-  // everything up to the next separator — not just the part that happens to
-  // match the new value. Otherwise switching `shot.txt` → `shot.png` would
-  // leave `txt` behind as stray prose.
-  const remainder = quoted
-    ? { consumed: tail.slice(0, tail.indexOf('"') === -1 ? tail.length : tail.indexOf('"') + 1) }
-    : { consumed: argumentBeforeCaret === '' ? '' : (/^[^ \t]*/.exec(tail)?.[0] ?? '') }
-  const suffix = tail.slice(remainder.consumed.length)
+  const { suffix } = splitTokenRemainder(line.slice(cursorCol), quoted, argumentBeforeCaret !== '')
   // ONE separating space ends the accepted token, so the placeholder can never
   // touch whatever follows it.
   const trailing = terminal && !/^[ \t]/.test(suffix) ? ' ' : ''
