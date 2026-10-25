@@ -518,3 +518,71 @@ test('an ABSOLUTE-path candidate is accept-only on ENTER too', async (t) => {
   await waitForDraft(app, draft => draft.includes('[image #1'), 'the placeholder lands for an absolute path')
   assert.equal(h.submissions(), 0, 'an absolute-path confirm is accept-only (the / prefix trap)')
 })
+
+test('CJK body text around the fragment survives byte for byte', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, '帮我分析这个报错，重点看看 ')
+  type(vt, '/image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === '帮我分析这个报错，重点看看 /image shot', 'the CJK body with the filter')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the image candidate after CJK prose')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder after CJK prose')
+  assert.equal(app.seatTextForTest(), '帮我分析这个报错，重点看看 [image #1 (1×1)]',
+    'the CJK prefix and the suffix survive; only the fragment changed')
+  assert.equal(h.submissions(), 0)
+})
+
+test('a multi-line draft keeps every other line untouched (third line, leading command)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  // Ctrl+J is the editor's newline (Enter SUBMITS — that is the policy this
+  // feature must never change).
+  type(vt, 'first line')
+  vt.sendInput('\n')
+  type(vt, 'second stays')
+  vt.sendInput('\n')
+  // The THIRD line's leading `/attach` is an INLINE seat (only the first
+  // line's leading token is the legacy command).
+  type(vt, '/attach ')
+  await vt.waitForRender()
+  type(vt, 'notes')
+  await waitForDraft(app, draft => draft.endsWith('/attach notes'), 'the third-line filter')
+  await waitForOnlyRow(vt, app, 'notes.txt', 'the file candidate on line 3')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[file #1'), 'the file token on line 3')
+  assert.equal(app.seatTextForTest(), `first line\nsecond stays\n[file #1 (11 B)]`,
+    'the earlier lines are byte-identical; only the third-line fragment changed')
+  assert.equal(h.imageStore.size(), 0)
+  assert.equal(h.fileStore.values().length, 1)
+  assert.equal(h.submissions(), 0)
+})
+
+test('a large pasted block keeps its marker text and the fragment edits in place', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  // A bracketed paste long enough for the fork's paste REGISTRY (>10 lines).
+  const block = Array.from({ length: 12 }, (_, index) => `pasted line ${index + 1}`).join('\r\n')
+  vt.sendInput(`\x1b[200~${block}\x1b[201~`)
+  await vt.waitForRender()
+  assert.ok(app.seatTextForTest().includes('[paste #'), 'the large paste stays a registry marker in the raw draft')
+  type(vt, ' append /image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft.endsWith('/image shot'), 'the filter after a pasted block')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the candidate after a pasted block')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder after a pasted block')
+  const draft = app.seatTextForTest()
+  assert.ok(draft.includes('[paste #'), 'the paste marker text is preserved (the raw draft was sliced, never rebuilt)')
+  assert.ok(draft.endsWith('append [image #1 (1×1)]'), `the fragment was replaced in place: ${JSON.stringify(draft)}`)
+  assert.equal(h.submissions(), 0)
+})
