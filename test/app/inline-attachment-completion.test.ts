@@ -86,14 +86,6 @@ interface Harness {
   /** The absolute path of the fixture image (the `/`-prefixed-candidate case). */
   readonly absoluteImagePath: string
   /**
-   * The READ WITNESS: how many times the intake's file-read call evaluated
-   * `runner.cwd`. The shared intake passes it as a direct argument of
-   * `readImageFile`/`probeAttachment`, so this counter moves exactly when a
-   * read genuinely starts — a store/notice assertion cannot see that, and a
-   * microtask fence that refuses BEFORE any IO leaves it at 0.
-   */
-  cwdReads(): number
-  /**
    * Resolves when the intake reached its POST-READ fence. The shared intake
    * issues a real `isSessionScopeCurrent` call only after the read settled, so
    * this is the authoritative "the async intake finished its read" signal —
@@ -124,7 +116,6 @@ function fixture(life: TestLifecycle): { root: string; image: string; plain: str
 
 function setup(life: TestLifecycle, options: { attachFileStore?: boolean; onSubmitCapture?: (text: string) => void } = {}): Harness {
   const { root, image } = fixture(life)
-  let cwdReads = 0
   let markPostRead!: () => void
   const postRead = new Promise<void>(resolve => { markPostRead = resolve })
   // The UNINJECTED production read: the gate delegates to it, so the intake
@@ -220,7 +211,7 @@ function setup(life: TestLifecycle, options: { attachFileStore?: boolean; onSubm
       rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
-    get cwd() { cwdReads += 1; return root },
+    cwd: root,
     // Wraps the REAL scope authority: the intake still decides exactly as
     // production does, and its call is the deterministic post-read signal.
     isSessionScopeCurrent: (scope) => {
@@ -275,7 +266,6 @@ function setup(life: TestLifecycle, options: { attachFileStore?: boolean; onSubm
     fileStore,
     absoluteImagePath: image,
     submissions: () => submissions,
-    cwdReads: () => cwdReads,
     postRead: () => postRead,
     // Consecutive holds share one gate; each test holds at most once.
     holdImageRead,
