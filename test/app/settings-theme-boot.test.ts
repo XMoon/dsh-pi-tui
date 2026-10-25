@@ -27,6 +27,10 @@ type ThemeHarness = {
   applied: string[]
   detectCalls: number[]
   trackCalls: boolean[]
+  /** Every `setFullscreen` the boot application issued. */
+  fullscreenCalls: boolean[]
+  /** Set the persisted fullscreen preference the boot application reads. */
+  setFullscreenPreference(value: string): void
   report(scheme: 'dark' | 'light'): void
   setTheme(theme: string | undefined): void
   /** Record ONLY the selection intent (a write still in flight). */
@@ -37,6 +41,8 @@ function mountThemeRuntime(): ThemeHarness {
   const applied: string[] = []
   const detectCalls: number[] = []
   const trackCalls: boolean[] = []
+  const fullscreenCalls: boolean[] = []
+  let fullscreen = 'off'
   let report: ((scheme: 'dark' | 'light') => void) | undefined
   let theme: string | undefined = 'auto'
   /** The runtime owner's deliberate-selection intent (the real `TuiApp` keeps it). */
@@ -44,7 +50,7 @@ function mountThemeRuntime(): ThemeHarness {
   const app = {
     setHomeEndMode: noop,
     setWheelScrollLines: noop,
-    setFullscreen: noop,
+    setFullscreen: (enabled: boolean): void => { fullscreenCalls.push(enabled) },
     autoDetectTheme: (): Promise<void> => {
       detectCalls.push(1)
       return Promise.resolve()
@@ -75,7 +81,7 @@ function mountThemeRuntime(): ThemeHarness {
         theme,
         homeEndKeys: 'viewport',
         wheelScrollLines: '1',
-        fullscreen: 'off',
+        fullscreen,
       }),
     } as never,
     settingsForms: undefined,
@@ -91,6 +97,8 @@ function mountThemeRuntime(): ThemeHarness {
     applied,
     detectCalls,
     trackCalls,
+    fullscreenCalls,
+    setFullscreenPreference: (value) => { fullscreen = value },
     report: (scheme) => report?.(scheme),
     // Changing the persisted preference IS a deliberate selection in production (the
     // legacy editor, the reload re-apply, the workspace), so the helper records the
@@ -166,4 +174,23 @@ test('a manual persisted theme applies itself and does not track', () => {
   assert.deepEqual(harness.applied, ['light'], 'the persisted palette is applied')
   assert.deepEqual(harness.trackCalls, [false], 'a manual theme stops tracking')
   assert.equal(harness.detectCalls.length, 0, 'a manual theme never samples the terminal')
+})
+
+// Regression: C2-R2 acceptance R2-08 (the "next app mount" clause).
+test('a stored fullscreen preference is restored by the boot application, and an off/absent one is not', () => {
+  // The persisted preference the Settings workspace verified is what a LATER
+  // mount applies: this is the clause a refused post-close hand-off relies on.
+  const on = mountThemeRuntime()
+  on.setFullscreenPreference('on')
+  on.runtime.applyBootDisplay()
+  assert.deepEqual(on.fullscreenCalls, [true], 'a stored `on` mounts the alt screen at boot')
+  assert.equal(on.trackCalls.length, 1, 'and the rest of the boot display step still runs once')
+
+  for (const stored of ['off', undefined] as const) {
+    const other = mountThemeRuntime()
+    other.setFullscreenPreference(stored as string)
+    other.runtime.applyBootDisplay()
+    assert.deepEqual(other.fullscreenCalls, [],
+      `a stored ${JSON.stringify(stored)} fullscreen preference never requests the alt screen`)
+  }
 })
