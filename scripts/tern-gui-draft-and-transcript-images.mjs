@@ -396,7 +396,10 @@ async function splitPaneBusyGate(h) {
   const after = blocks()
   h.check('the busy case really split into two panes', after.length === before.length + 1,
     `blocks ${before.length} -> ${after.length}`)
-  h.measure('the busy split pane rows', JSON.stringify(after.map(block => block.rows)))
+  // The SAME T4 premises as the plain split gate, asserted — not measured — so a
+  // nearby height can never stand in for the contract's 2 x 22 case.
+  h.check('each busy split pane is EXACTLY the contract 22 rows (so the window rule cannot help)',
+    after.every(block => block.rows === 22), JSON.stringify(after.map(block => block.rows)))
 
   // The launcher does not forward arbitrary env, so the busy shape is selected by
   // a marker file inside the run directory (which the subject can read).
@@ -408,10 +411,21 @@ async function splitPaneBusyGate(h) {
   if (!booted) return
 
   const snap = h.snapshot()
-  h.check('the queue row and the notices are painted', snap.nodes.some(node =>
-    String(node.text ?? '').includes('queued (queue)'))
-    && String(JSON.stringify(h.texts(snap))).includes('a previous attempt failed'),
-  h.texts(snap).join(' | '))
+  const busyViewport = h.ctl('stats').viewport ?? [0, 0, 0, 0]
+  h.check('the busy WINDOW is still taller than the CSS breakpoint (the sheet cannot fire)',
+    busyViewport[1] > 640, `height=${busyViewport[1]}`)
+  const busyText = h.texts(snap).join(' | ')
+  h.check('the queue row is painted', busyText.includes('queued (queue)'), busyText)
+  h.check('BOTH notices are painted',
+    busyText.includes('a previous attempt failed') && busyText.includes('compacting (summarizing)'),
+    busyText)
+  h.check('the draft count is on the status line in the busy pane',
+    h.has(snap, 'Draft 3 · '), busyText)
+  h.check('the busy pane still draws the bounded preview chips', snap.nodes.filter(node => {
+    if (node.tag !== 'img') return false
+    const box = rect(node)
+    return box[2] > 0 && box[2] <= 12 * 8.2 && box[3] > 0 && box[3] <= 4 * 18
+  }).length === 2, JSON.stringify(snap.nodes.filter(node => node.tag === 'img').map(node => rect(node))))
 
   const composerOf = snapshot => snapshot.nodes.find(node => String(node.text ?? '').includes('see attached'))
   const composer = composerOf(snap)
