@@ -87,6 +87,7 @@ interface WireFrame {
 /** One wire event, in the order the SDK wrote it. */
 type WireEvent =
   | { readonly kind: 'blob'; readonly id: string }
+  | { readonly kind: 'sheet'; readonly name: string; readonly css: string | undefined }
   | { readonly kind: 'frame'; readonly frame: WireFrame }
 
 class ScriptedTern {
@@ -112,6 +113,11 @@ class ScriptedTern {
       for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]*);/g)) {
         this.events.push({ kind: 'blob', id: match[1]! })
       }
+      // Stylesheet messages: `ESC_tsp;s;{"sf":…,"name":…,"css":…}ESC\\`.
+      for (const match of text.matchAll(/\u001b_tsp;s;([\s\S]*?)\u001b\\/g)) {
+        const body = JSON.parse(match[1]!) as { name?: string; css?: string }
+        if (body.name !== undefined) this.events.push({ kind: 'sheet', name: body.name, css: body.css })
+      }
       for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
         const frame = JSON.parse(match[1]!) as WireFrame
         this.events.push({ kind: 'frame', frame })
@@ -126,6 +132,12 @@ class ScriptedTern {
   blobIds(): string[] {
     return this.events.filter((event): event is { kind: 'blob'; id: string } => event.kind === 'blob')
       .map(event => event.id)
+  }
+
+  /** The stylesheet messages the SDK actually sent, in order. */
+  sheets(): { name: string; css: string | undefined }[] {
+    return this.events.filter((event): event is { kind: 'sheet'; name: string; css: string | undefined } => event.kind === 'sheet')
+      .map(event => ({ name: event.name, css: event.css }))
   }
 
   /** The frames the SDK actually sent, in order. */
@@ -711,7 +723,7 @@ function dockDraftRows(tern: ScriptedTern): { id: string; kind: string; text?: s
     for (let at: string | undefined = node.id; at !== undefined; at = parentOf.get(at)) {
       if (live.get(at) === undefined) return
     }
-    if (node.id.includes('dock.draft-image')) {
+    if (node.id.includes('dock.draft-preview') || node.id.includes('dock.draft-chip-')) {
       rows.push({
         id: node.id,
         kind: node.kind,
@@ -723,6 +735,12 @@ function dockDraftRows(tern: ScriptedTern): { id: string; kind: string; text?: s
   }
   visit(dock)
   return rows
+}
+
+/** The dock's status line text (the ONE line that carries `Draft N · …`). */
+function dockStatusText(tern: ScriptedTern): string | undefined {
+  const node = currentNodes(tern).find(candidate => candidate.id === 'dock.status')
+  return typeof node?.props.text === 'string' ? node.props.text : undefined
 }
 
 test('an unreferenced draft is never drawn: only LIVE occurrences become dock rows', async () => {
@@ -744,15 +762,15 @@ test('one referenced draft draws its identity line and one native preview over t
   await until('the dock preview to be drawn', () => dockDraftRows(harness.tern).some(row => row.kind === 'image'))
 
   const rows = dockDraftRows(harness.tern)
-  assert.deepEqual(rows.map(row => row.id.replace(/^.*dock\./, '')).sort(), [
-    'draft-image-1-0',
-    'draft-image-1-0-info',
-    'draft-images',
+  // The amendment's shape: ONE row, ONE chip, an image and one compact caption.
+  assert.deepEqual(rows.map(row => row.id.replace(/^.*dock\./, '')), [
+    'draft-preview',
+    'draft-preview.draft-chip-1-0',
+    'draft-preview.draft-chip-1-0.image',
+    'draft-preview.draft-chip-1-0.caption',
   ])
-  assert.match(String(rows.find(row => row.id.endsWith('dock.draft-images'))?.text),
-    /^Draft images · 1 occurrence$/u)
-  assert.equal(rows.find(row => row.id.endsWith('-info'))?.text, '[IMAGE] shot.png · 640×360 · 2.0 KiB',
-    'the identity line names the staged image through the ONE shared vocabulary')
+  assert.equal(rows.find(row => row.id.endsWith('draft-chip-1-0.caption'))?.text, '#1 · 640×360',
+    'the chip carries the compact identity caption')
   const blobs = harness.tern.blobIds()
   assert.equal(blobs.length, 1, 'the staged bytes reached the ONE SDK blob sender')
   assert.equal(rows.find(row => row.kind === 'image')?.blob, blobs[0], 'the native node names the sent blob')
@@ -768,9 +786,10 @@ test('a repeated token draws TWO preview nodes while the SAME bytes are sent onc
     () => dockDraftRows(harness.tern).filter(row => row.kind === 'image').length === 2)
 
   const images = dockDraftRows(harness.tern).filter(row => row.kind === 'image')
-  assert.deepEqual(images.map(row => row.id.replace(/^.*dock\./, '')).sort(),
-    ['draft-image-1-0', 'draft-image-1-1'],
-    'each occurrence carries its own text rank, not an array index')
+  assert.deepEqual(images.map(row => row.id.replace(/^.*dock\./, '')).sort(), [
+    'draft-preview.draft-chip-1-0.image',
+    'draft-preview.draft-chip-1-1.image',
+  ], 'each occurrence is its own chip under the ONE row, keyed by its text rank')
   assert.equal(images[0]?.blob, images[1]?.blob, 'both nodes name the one content-addressed blob')
   assert.equal(harness.tern.blobIds().length, 1, 'the SDK content dedupe kept ONE blob send')
   await harness.dispose()
@@ -788,10 +807,10 @@ test('deleting the token removes exactly that preview on the next frame', async 
     () => dockDraftRows(harness.tern).filter(row => row.kind === 'image').length === 1)
 
   const rows = dockDraftRows(harness.tern)
-  assert.equal(rows.some(row => row.id.includes('draft-image-1-')), false,
-    'the deleted token no longer draws a node')
-  assert.equal(rows.find(row => row.kind === 'image')?.id.includes('draft-image-2-0'), true,
-    'the remaining token keeps its own occurrence identity')
+  assert.equal(rows.some(row => row.id.includes('draft-chip-1-')), false,
+    'the deleted token no longer draws a chip')
+  assert.equal(rows.filter(row => row.kind === 'image').length, 1,
+    'exactly the remaining occurrence keeps its preview')
   await harness.dispose()
 })
 
@@ -815,13 +834,13 @@ test('a pane WITHOUT the native capability never reads or sends draft pixels', a
   })
   const staged = localDraft(1, '[image #1 (640×360)]', 1024, 'shot.png')
   harness.stageDrafts(staged.placeholder, [staged])
-  await until('the narrow degradation row', () => dockDraftRows(harness.tern).length > 0)
+  await until('the dock status to carry the draft count', () =>
+    dockStatusText(harness.tern)?.startsWith('Draft 1') === true)
 
-  const rows = dockDraftRows(harness.tern)
-  assert.equal(rows.some(row => row.kind === 'image'), false, 'the pane draws no native image')
+  assert.deepEqual(dockDraftRows(harness.tern), [],
+    'without image+blobs the amendment projects NO preview band at all')
   assert.deepEqual(harness.tern.blobIds(), [], 'and sends no blob at all')
-  assert.match(String(rows[0]?.text), /^Draft images · 1 occurrence · \[IMAGE\] shot\.png/u,
-    'the count and the first identity still tell the reader what the draft holds')
+  assert.equal(harness.draftText(), staged.placeholder, 'the composer token is untouched')
   await harness.dispose()
 })
 
@@ -957,5 +976,79 @@ test('a recalled draft staged through the COMPOSER ALONE is read and painted (no
     () => dockDraftRows(harness.tern).some(row => row.kind === 'image'), 5_000)
   assert.equal(harness.tern.blobIds().length, 1,
     'the read bytes reached the ONE SDK blob sender')
+  await harness.dispose()
+})
+
+// ── T3: the short-window stylesheet on the real SDK wire ────────────────────
+
+test('a pane with `styles` installs the ONE preview sheet before the first frame', async () => {
+  const harness = await mountHarness()
+  const sheets = harness.tern.sheets()
+
+  assert.equal(sheets.length, 1, 'exactly ONE sheet, installed once')
+  assert.equal(sheets[0]?.name, 'dsh-draft-preview', 'the sheet name carries no dot')
+  const css = String(sheets[0]?.css ?? '')
+  assert.match(css, /@media \(max-height: 640px\)/u, 'the rule keys on the WINDOW height breakpoint')
+  assert.match(css, /\[data-role="dsh\.draft-preview"\]\s*\{\s*display:\s*none;?\s*\}/u,
+    'the selector targets only the preview row role')
+  assert.equal(css.includes('.sf-dock'), false, 'no high-risk global dock selector')
+  // The sheet must precede the first frame: it is installed at mount.
+  const sheetIndex = harness.tern.events.findIndex(event => event.kind === 'sheet')
+  const firstFrame = harness.tern.events.findIndex(event => event.kind === 'frame')
+  assert.equal(sheetIndex >= 0 && firstFrame > sheetIndex, true,
+    'the sheet is on the wire before the first frame that relies on it')
+  await harness.dispose()
+})
+
+test('a pane WITHOUT `styles` installs no sheet and sends no draft pixels', async () => {
+  const harness = await mountHarness({
+    hello: { ...HELLO, features: HELLO.features.filter(feature => feature !== 'styles') },
+  })
+  const staged = localDraft(1, '[image #1 (640×360)]', 1024, 'shot.png')
+  harness.stageDrafts(staged.placeholder, [staged])
+  await until('the dock to repaint', () => harness.tern.frames().length > 0)
+
+  assert.deepEqual(harness.tern.sheets(), [], 'no sheet without the negotiated feature')
+  assert.deepEqual(harness.tern.blobIds(), [], 'no draft blob without `styles`')
+  assert.equal(dockDraftRows(harness.tern).some(row => row.kind === 'image'), false,
+    'the frozen degradation draws no draft image')
+  await harness.dispose()
+})
+
+test('a resize never re-installs the sheet', async () => {
+  const harness = await mountHarness()
+  const before = harness.tern.sheets().length
+  // Several repaints and a real resize event: the sheet is a MOUNT-time fact.
+  harness.stageDrafts('[image #1 (640×360)]', [localDraft(1, '[image #1 (640×360)]', 512, 'a.png')])
+  harness.tern.input.type('') // no-op keystroke frame
+  await until('the repaint', () => harness.tern.frames().length > 0)
+
+  assert.equal(harness.tern.sheets().length, before, 'still exactly one sheet after repaints')
+  await harness.dispose()
+})
+
+// ── S3.5: the draft count rides the EXISTING status line, never a new row ───
+
+test('the live draft count prefixes the ONE status line and adds no extra title row', async () => {
+  const harness = await mountHarness()
+  const first = localDraft(1, '[image #1 (640×360)]', 256, 'a.png')
+  const second = localDraft(2, '[image #2 (640×360)]', 256, 'b.png')
+
+  harness.stageDrafts(`${first.placeholder} ${second.placeholder}`, [first, second])
+  await until('the status to report two drafts', () => dockStatusText(harness.tern)?.startsWith('Draft 2') === true)
+  assert.equal(dockStatusText(harness.tern)?.startsWith('Draft 2 · '), true,
+    'the count is a PREFIX on the existing status text')
+
+  // Exactly one status line, and no second `Draft images …` heading exists.
+  const texts = dockDraftRows(harness.tern).filter(row => row.kind === 'text')
+  assert.equal(texts.some(row => String(row.text ?? '').startsWith('Draft images')), false,
+    'the amendment removed the separate title line')
+
+  harness.stageDrafts(first.placeholder, [first, second])
+  await until('the status to drop to one draft', () => dockStatusText(harness.tern)?.startsWith('Draft 1') === true)
+
+  // Back to an empty draft: the status text and key are byte-identical to before.
+  harness.stageDrafts('', [first, second])
+  await until('the status prefix to disappear', () => (dockStatusText(harness.tern) ?? '').startsWith('Draft') === false)
   await harness.dispose()
 })

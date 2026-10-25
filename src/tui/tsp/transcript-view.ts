@@ -435,70 +435,95 @@ export const DOCK_DRAFT_MAX_PREVIEWS = 2
 
 /** PR4: one staged draft occurrence, already reduced to its display facts. */
 export interface DockDraftImageEntry {
-  /** The occurrence's stable presentation identity (`draft-image-<id>-<rank>`). */
-  readonly key: string
-  /** The `[IMAGE] name · WxH · bytes` identity line of the staged image. */
-  readonly identity: string
-  /** The native node's accessible name (the same display name). */
+  /** The staged draft's own id (the `[image #N …]` token identity). */
+  readonly id: number
+  /** The occurrence's 0-based rank among the draft's canonical occurrences. */
+  readonly ordinal: number
+  /** The `#N · WxH` caption the chip shows (already sanitized by the caller). */
+  readonly caption: string
+  /** The native node's accessible name (the sanitized display identity). */
   readonly name: string
   /** The prepared render state, or `undefined` when none was prepared. */
   readonly state: ToolImageState | undefined
 }
 
 /**
- * PR4: the dock's draft-image rows — a PURE projection of already-prepared
+ * The frozen per-preview node bounds (Owner amendendment, 2026-10-25): OMP's
+ * `12ch × 4lines` cap on the native image node. This is a RESPONSIVE CEILING,
+ * not a fixed pixel size — the image keeps its own aspect ratio inside it, and
+ * it is the reason a split pane stays compact even where the window media query
+ * cannot fire.
+ */
+export const DOCK_DRAFT_PREVIEW_MAX = { w: '12ch', h: '4lines' } as const
+
+/** The stylesheet role the ONE preview row carries (the sheet's selector). */
+export const DOCK_DRAFT_PREVIEW_ROLE = 'dsh.draft-preview'
+
+/**
+ * PR4: the dock's draft-preview band — a PURE projection of already-prepared
  * state, exactly like the transcript image nodes.
  *
- * The caller prepares the blob/read state first; this function never reads
- * bytes, never calls the SDK and never consults a store. The layout follows the
- * frozen width policy, and the identity line is ALWAYS drawn for every shown
- * occurrence (it is the only place the reader learns which staged image the
- * draft holds and what happened to it).
+ * The shape is fixed by the product contract: ONE `ui.row` holding up to
+ * `previewLimit` chips side by side, each chip being its native image plus one
+ * compact `#id · W×H` caption. There is deliberately no extra title line and no
+ * per-image identity line outside the chip, because every extra row competes
+ * with the controlled editor for the dock's height.
+ *
+ * The caller prepares the blob/read state and decides `previewLimit` from the
+ * negotiated capabilities alone; this function never reads bytes, never calls
+ * the SDK and never consults a store. It returns `undefined` when nothing may
+ * be drawn, so a caller cannot wrap the result in a second preview container.
  */
 export function dockDraftImageNodes(
   entries: readonly DockDraftImageEntry[],
-  cols: number,
-  nativeImagesSupported: boolean,
-): Node[] {
-  if (entries.length === 0) return []
-  const shown = !nativeImagesSupported || cols < DOCK_DRAFT_SINGLE_PREVIEW_COLS
-    ? 0
-    : cols >= DOCK_DRAFT_TWO_PREVIEW_COLS
-      ? Math.min(DOCK_DRAFT_MAX_PREVIEWS, entries.length)
-      : Math.min(1, entries.length)
-  const noun = entries.length === 1 ? 'occurrence' : 'occurrences'
-  if (shown === 0) {
-    // Narrow pane (or no native capability): the count plus the FIRST identity,
-    // so the reader still knows what the draft holds.
-    const first = entries[0]!
-    return [ui.text({
-      key: 'draft-images',
-      text: sanitizeDisplayText(`Draft images · ${entries.length} ${noun} · ${first.identity}`),
-    })]
-  }
-  const nodes: Node[] = [ui.text({ key: 'draft-images', text: `Draft images · ${entries.length} ${noun}` })]
-  for (const entry of entries.slice(0, shown)) {
-    const status = entry.state === undefined ? undefined : imageStatusText(entry.state)
-    nodes.push(ui.text({
-      key: `${entry.key}-info`,
-      text: sanitizeDisplayText(status === undefined ? entry.identity : `${entry.identity} · ${status}`),
-    }))
-    if (entry.state?.state === 'ready') {
-      nodes.push(ui.image({ key: entry.key, blob: entry.state.blobId, alt: sanitizeDisplayText(entry.name) }))
-    } else if (entry.state?.state === 'loading') {
+  previewLimit: number,
+): Node | undefined {
+  if (entries.length === 0 || previewLimit <= 0) return undefined
+  const shown = entries.slice(0, previewLimit)
+  const chips: Node[] = []
+  for (const entry of shown) {
+    const children: Node[] = []
+    const state = entry.state
+    if (state?.state === 'ready') {
+      children.push(ui.image({
+        key: 'image',
+        blob: state.blobId,
+        alt: sanitizeDisplayText(entry.name),
+        max: DOCK_DRAFT_PREVIEW_MAX,
+      }))
+    } else if (state?.state === 'loading') {
       // The client's own placeholder for a read that has not settled: the SAME
-      // node key, so the real blob replaces it in place.
-      nodes.push(ui.image({ key: entry.key, blob: PENDING_IMAGE_BLOB_ID, alt: sanitizeDisplayText(entry.name) }))
+      // node shape, so the real blob replaces it in place.
+      children.push(ui.image({
+        key: 'image',
+        blob: PENDING_IMAGE_BLOB_ID,
+        alt: sanitizeDisplayText(entry.name),
+        max: DOCK_DRAFT_PREVIEW_MAX,
+      }))
+    } else {
+      // No pixels may be drawn (unsupported pane, no scope, failed read, too
+      // large, or no state prepared): the chip states that truthfully and
+      // NEVER fabricates a blob.
+      const reason = state === undefined ? undefined : imageStatusText(state)
+      children.push(ui.text({
+        key: 'unavailable',
+        text: sanitizeDisplayText(reason ?? 'Preview unavailable'),
+        wrap: 'none',
+        max: { w: DOCK_DRAFT_PREVIEW_MAX.w },
+      }))
     }
-  }
-  if (shown < entries.length) {
-    const rest = entries.length - shown
-    nodes.push(ui.text({
-      key: 'draft-images-more',
-      text: `… ${rest} more image ${rest === 1 ? 'occurrence' : 'occurrences'}`,
+    children.push(ui.text({
+      key: 'caption',
+      text: sanitizeDisplayText(entry.caption),
+      wrap: 'none',
+      max: { w: DOCK_DRAFT_PREVIEW_MAX.w },
     }))
+    chips.push(ui.col({ key: `draft-chip-${entry.id}-${entry.ordinal}`, gap: 'none' }, ...children))
   }
-  return nodes
+  return ui.row(
+    { key: 'draft-preview', role: DOCK_DRAFT_PREVIEW_ROLE, wrap: false, gap: 'sm' },
+    ...chips,
+  )
 }
 
 /**

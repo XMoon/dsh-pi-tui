@@ -30,9 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ctrl+V uses the existing clipboard-paste chain (concurrent pastes are still read one at a time,
   in trigger order): an image gets its canonical placeholder and a draft preview while pasted text
   lands at the live caret, and a bracketed text paste stays one ordinary text edit instead of
-  becoming an image paste. Draft images appear above the editor: up to two native previews at
-  ≥100 columns, one between 72 and 99, and only the count plus the first identity on a narrower
-  pane or a client without native images. Image blocks in user messages, assistant messages and
+  becoming an image paste. Draft thumbnails sit in one row directly above the composer: up to two
+  at ≥100 columns, one between 72 and 99, and none on a narrower pane or a client without native
+  images. On a short window the client stylesheet hides that whole row, the composer stays usable
+  and sending is unaffected, and the status line still reports the real draft count. Image blocks
+  in user messages, assistant messages and
   tool results are shown in their original order as an identity line plus a native image, and the
   same image appearing several times stays several visible occurrences while being read and
   uploaded once. Clicking an image, zooming and moving between neighbouring images are the Tern

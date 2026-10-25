@@ -387,37 +387,42 @@ unchanged.
 #### The staged draft
 
 The composer's OWN staged images are Client-local draft state, never durable
-attachments: they are presented on the dock, above the controlled editor, from
-a READ-ONLY projection of the live composer text and the ONE draft store. The
-projection window is:
+attachments: they are presented on the dock, immediately above the controlled
+editor, from a READ-ONLY projection of the live composer text and the ONE draft
+store.
 
-| SDK `caps.cols` | native draft previews | text |
-|---|---|---|
-| `>= 100` | up to two | total count, each identity, plus the hidden count |
-| `72 … 99` | at most one | the same |
-| `< 72`, or no `image`/`blobs` | none | `Draft images · N` plus the first identity |
-
-- The width authority is the SDK's `caps.cols` ONLY. The protocol publishes no
-  pane-rows fact, so no height-driven degradation is designed or claimed here;
-  a short pane's clipping is a client behaviour measured in a real run.
-- The dock is ONE scrolling document, not a pinned footer: the editor is its
-  last child, and nothing in the protocol pins it. Because a native preview
-  carries the staging image's own pixel size and no pane-rows fact exists, a
-  short pane can therefore lay the controlled editor below the visible viewport
-  once previews sit above it. A claim that the editor is visible on a short pane
-  is a per-run client observation, not something this contract guarantees, and
-  the two tempting fixes are both wrong here: a height probe has no protocol
-  authority, and a fixed preview size is a forbidden pane-pixel budget.
+- **Shape.** ONE preview row holds up to N chips side by side, each chip being
+  its native image plus one compact `#id · W×H` caption. There is no separate
+  title row and no per-image identity line outside the chip: every extra row
+  competes with the controlled editor for the dock's height. The images carry a
+  responsive CEILING (`12ch × 4lines`) and keep their own aspect ratio; the
+  ceiling is a bound, never a fixed pixel size.
+- **Count.** The limit is decided ONCE per render from the negotiated
+  capabilities only: two previews at `cols >= 100`, one from `72`, none below,
+  and none at all when `styles`, `image` or `blobs` is missing. The protocol
+  publishes no pane-rows fact, so no height-derived count exists here.
+- **Short window.** With `styles` negotiated, ONE scoped stylesheet hides the
+  whole preview row under a `max-height: 640px` WINDOW media query. That rule
+  speaks about the WINDOW only: a split pane inside a tall window does not match
+  it, which is exactly why the per-node ceiling above exists. CSS is a visual
+  degradation, never a substitute for the ceiling and never a reason to withhold
+  the composer.
+- **Count summary.** The draft count prefixes the EXISTING dock status line
+  (`Draft N · …`); with no staged image the status text and its key are
+  unchanged. Occurrences beyond the shown ones are not deleted — they are simply
+  not drawn, and the count still reports them.
 - The canonical `[image #N (W×H)]` token parser is the ONE source of WHICH
   occurrences a draft references, so the preview and the submission expansion
   cannot disagree. A staged image that no live token references is not a
-  preview; deleting a token retires its node on the next frame.
-- A LOCAL draft's own bytes go through the same one blob sender. A RECALLED
-  draft (a queue pull-back) carries NO local bytes: it reuses the existing read
-  port under the scope it really has, and with no usable scope it states that
-  rather than sending an empty image.
+  preview; deleting a token retires its chip on the next frame.
+- **Capability gate before IO.** When the count is zero the renderer performs no
+  draft blob IO at all. A LOCAL draft's own bytes go through the same one blob
+  sender; a RECALLED draft (a queue pull-back) carries NO local bytes and reuses
+  the existing read port under the scope it really has, showing `Preview
+  unavailable` when it has none rather than sending an empty image.
 - The projection never writes back to the draft store: a preview that cannot be
-  sent changes no token, deletes no bytes and blocks no submission.
+  sent changes no token, deletes no bytes and blocks no submission, and the
+  editor keeps the final say on every token.
 
 #### The paste intent
 

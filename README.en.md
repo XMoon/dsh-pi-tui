@@ -565,7 +565,7 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 
 ### Images
 
-Ctrl+V reads the system clipboard: an image becomes the canonical placeholder `[image #N (WxH)]` with a draft preview above the editor, while text is inserted at the live caret. `/image` and `/attach` can also add an image or a regular file to the current draft. A placeholder that appears several times shows several positions while the bytes are read and uploaded once.
+Ctrl+V reads the system clipboard: an image becomes the canonical placeholder `[image #N (WxH)]` with draft thumbnails in one row above the composer (a short window lets the client hide that row, while typing and sending still work and the status line keeps reporting the real draft count); text is inserted at the live caret. `/image` and `/attach` can also add an image or a regular file to the current draft. A placeholder that appears several times shows several positions while the bytes are read and uploaded once.
 
 Images in user messages, assistant messages and tool results are shown inside their own card, in their original order: one identity line (name, pixel size, byte count) plus one image. Clicking an image, zooming and moving between neighbouring images are the terminal client's own affordances; this project adds no window or page for them. When an image cannot be read, its format is unsupported, or it exceeds the 16 MiB single-image limit, the card states the identity and the real reason instead of drawing a fabricated image.
 

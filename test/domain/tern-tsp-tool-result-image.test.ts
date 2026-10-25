@@ -20,13 +20,17 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { Node } from '@stencil-hq/tern'
 import { textOf } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptMessage, TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import {
+  DOCK_DRAFT_PREVIEW_ROLE,
   PENDING_IMAGE_BLOB_ID,
   TranscriptNodeKeys,
+  dockDraftImageNodes,
   transcriptView,
+  type DockDraftImageEntry,
   type ToolImageState,
 } from '../../src/tui/tsp/transcript-view.ts'
 
@@ -538,110 +542,115 @@ test('the User image identity line runs an untrusted attachment name through the
   assert.equal(info.includes('31m'), false, 'the SGR body is dropped with its introducer')
 })
 
-// ── T5: the dock's PURE draft-image projection (PR4) ────────────────────────
+// ── T5: the dock's PURE draft-preview band (responsive amendment) ──────────
 
-import { dockDraftImageNodes, type DockDraftImageEntry } from '../../src/tui/tsp/transcript-view.ts'
-
-/** One prepared dock entry. */
-function dockEntry(id: number, ordinal: number, state?: ToolImageState, name = 'shot.png'): DockDraftImageEntry {
+/** One prepared dock entry (the chip's display facts only). */
+function dockEntry(id: number, ordinal: number, state?: ToolImageState): DockDraftImageEntry {
   return {
-    key: `draft-image-${id}-${ordinal}`,
-    identity: `[IMAGE] ${name} · 640×360 · 2.0 KiB`,
-    name,
+    id,
+    ordinal,
+    caption: `#${id} · 640×360`,
+    name: `draft-${id}.png`,
     state,
   }
 }
 
-test('the dock projection draws one identity line plus one native node per shown occurrence', () => {
-  const nodes = dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) })], 120, true)
-  const rows = rowsOf({ children: nodes })
+/** The child chips of the ONE preview row. */
+function chipsOf(node: Node | undefined): readonly Node[] {
+  assert.ok(node !== undefined, 'a preview row must be projected')
+  return node.children
+}
 
-  assert.deepEqual(rows.map(row => row.key), ['draft-images', 'draft-image-1-0-info', 'draft-image-1-0'],
-    'the identity line precedes its native node, under one count line')
-  assert.equal(rows[0]?.text, 'Draft images · 1 occurrence')
-  assert.equal(rows[1]?.text, '[IMAGE] shot.png · 640×360 · 2.0 KiB')
-  assert.equal(rows[2]?.blob, 'a'.repeat(64))
+/** One chip's image node, if it drew one. */
+function chipImage(chip: Node): Node | undefined {
+  return chip.children.find(child => child.kind === 'image')
+}
+
+test('the preview band is ONE row carrying two bordered chips side by side', () => {
+  const row = dockDraftImageNodes([
+    dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) }),
+    dockEntry(2, 1, { state: 'ready', blobId: 'b'.repeat(64) }),
+  ], 2)
+
+  assert.ok(row !== undefined)
+  assert.equal(row.kind, 'row', 'the band is a single row, never a vertical stack')
+  assert.equal(row.props.key, 'draft-preview')
+  assert.equal(row.props.role, DOCK_DRAFT_PREVIEW_ROLE, 'the stylesheet role names the row')
+  assert.equal(row.props.wrap, false, 'the client must not wrap two chips onto two lines')
+  assert.deepEqual(chipsOf(row).map(chip => chip.props.key), ['draft-chip-1-0', 'draft-chip-2-1'],
+    'each chip is keyed by the draft id and the occurrence rank')
 })
 
-test('the frozen width policy picks 2 / 1 / 0 previews at 100 / 72 / below', () => {
+test('each chip draws its bounded native image plus one compact caption, and nothing else', () => {
+  const row = dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'c'.repeat(64) })], 2)
+  const [chip] = chipsOf(row)
+  assert.ok(chip !== undefined)
+
+  assert.deepEqual(chip.children.map(child => child.props.key), ['image', 'caption'],
+    'exactly an image and a caption — no out-of-row identity line')
+  const image = chipImage(chip)!
+  assert.equal(image.props.blob, 'c'.repeat(64))
+  assert.deepEqual(image.props.max, { w: '12ch', h: '4lines' },
+    'the node carries the OMP-style responsive ceiling, not a fixed pixel size')
+  const caption = chip.children[1]!
+  assert.equal(caption.props.text, '#1 · 640×360')
+  assert.equal(caption.props.wrap, 'none')
+  assert.deepEqual(caption.props.max, { w: '12ch' })
+})
+
+test('the frozen preview limit is 2 / 1 / 0 across the 100 and 72 column edges', () => {
   const entries = [
-    dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) }, 'a.png'),
-    dockEntry(2, 1, { state: 'ready', blobId: 'b'.repeat(64) }, 'b.png'),
-    dockEntry(3, 2, { state: 'ready', blobId: 'c'.repeat(64) }, 'c.png'),
+    dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) }),
+    dockEntry(2, 1, { state: 'ready', blobId: 'b'.repeat(64) }),
+    dockEntry(3, 2, { state: 'ready', blobId: 'c'.repeat(64) }),
   ]
-  const images = (cols: number): number =>
-    dockDraftImageNodes(entries, cols, true).filter(node => node.kind === 'image').length
+  const chips = (limit: number): number => chipsOf(dockDraftImageNodes(entries, limit)).length
 
-  assert.equal(images(100), 2, 'exactly 100 columns shows two previews')
-  assert.equal(images(160), 2, 'a wider pane still caps at two')
-  assert.equal(images(99), 1, '99 columns shows one')
-  assert.equal(images(72), 1, 'exactly 72 columns still shows one')
-  assert.equal(images(71), 0, 'below 72 columns shows none')
-  assert.equal(images(100), 2, 'the cap is the two-preview limit, never the occurrence count')
+  assert.equal(chips(2), 2, 'the 100+ band shows two')
+  assert.equal(chips(1), 1, 'the 72..99 band shows one')
+  assert.equal(dockDraftImageNodes(entries, 0), undefined, 'below 72 nothing is projected at all')
+  assert.equal(chips(2), 2, 'a third occurrence never makes the row wrap — it is simply not shown')
 })
 
-test('a pane without the native capability degrades to the count plus the FIRST identity', () => {
-  const entries = [
-    dockEntry(1, 0, { state: 'unsupported' }, 'a.png'),
-    dockEntry(2, 1, { state: 'unsupported' }, 'b.png'),
-  ]
-  const nodes = dockDraftImageNodes(entries, 160, false)
-
-  assert.deepEqual(rowsOf({ children: nodes }).length, 1, 'one line only')
-  assert.equal(nodes[0]?.kind, 'text')
-  assert.match(String(nodes[0]?.props.text), /^Draft images · 2 occurrences · \[IMAGE\] a\.png/u)
-  assert.equal(nodes.some(node => node.kind === 'image'), false, 'no native node without the capability')
+test('an empty draft projects NO row at all, keeping the pre-amendment dock', () => {
+  assert.equal(dockDraftImageNodes([], 2), undefined)
+  assert.equal(dockDraftImageNodes([], 0), undefined)
 })
 
-test('a panel below 72 columns degrades the same way even WITH the native capability', () => {
-  const nodes = dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) })], 60, true)
-
-  assert.equal(nodes.length, 1, 'a narrow pane draws no preview')
-  assert.equal(nodes.some(node => node.kind === 'image'), false)
-  assert.match(String(nodes[0]?.props.text), /^Draft images · 1 occurrence · \[IMAGE\] shot\.png/u)
-})
-
-test('a shown occurrence states its own reason and draws no image when it cannot be sent', () => {
-  const cases: readonly [ToolImageState, RegExp][] = [
-    [{ state: 'too-large' }, /Image exceeds 16 MiB Blob limit$/u],
-    [{ state: 'error' }, /Image read failed$/u],
-    [{ state: 'no-scope' }, /Image unavailable for this session$/u],
-  ]
-  for (const [state, pattern] of cases) {
-    const nodes = dockDraftImageNodes([dockEntry(1, 0, state)], 160, true)
-    const info = nodes.find(node => node.kind === 'text' && String(node.props.key).endsWith('-info'))
-    assert.match(String(info?.props.text), pattern, `${state.state} states its reason`)
-    assert.equal(nodes.some(node => node.kind === 'image'), false,
-      `${state.state} draws no native node`)
+test('a chip with no drawable pixels states the reason and fabricates no blob', () => {
+  for (const state of [
+    { state: 'too-large' },
+    { state: 'error' },
+    { state: 'no-scope' },
+    { state: 'unsupported' },
+  ] as unknown as ToolImageState[]) {
+    const row = dockDraftImageNodes([dockEntry(1, 0, state)], 2)
+    const [chip] = chipsOf(row)
+    assert.ok(chip !== undefined)
+    assert.equal(chipImage(chip), undefined, 'no native image node without drawable bytes')
+    const unavailable = chip.children.find(child => child.props.key === 'unavailable')
+    assert.ok(unavailable !== undefined, 'the chip states that the preview is unavailable')
+    assert.equal(unavailable.props.wrap, 'none')
+    assert.equal(chip.children.some(child => child.props.key === 'caption'), true,
+      'the identity caption still tells the reader which image it is')
   }
 })
 
-test('a LOADING occurrence draws the client placeholder under the SAME node key as the real blob', () => {
-  const loading = dockDraftImageNodes([dockEntry(1, 0, { state: 'loading' })], 160, true)
-  const ready = dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'd'.repeat(64) })], 160, true)
-  const loadingImage = loading.find(node => node.kind === 'image')
-  const readyImage = ready.find(node => node.kind === 'image')
+test('a LOADING chip uses the client placeholder under the SAME node shape as the real blob', () => {
+  const loading = chipImage(chipsOf(dockDraftImageNodes([dockEntry(1, 0, { state: 'loading' })], 2))[0]!)
+  const ready = chipImage(chipsOf(dockDraftImageNodes([dockEntry(1, 0, { state: 'ready', blobId: 'd'.repeat(64) })], 2))[0]!)
 
-  assert.equal(loadingImage?.props.blob, PENDING_IMAGE_BLOB_ID)
-  assert.equal(loadingImage?.props.key, readyImage?.props.key,
-    'the placeholder is replaced in place, never beside a second node')
+  assert.equal(loading?.props.blob, PENDING_IMAGE_BLOB_ID)
+  assert.equal(loading?.props.key, ready?.props.key, 'the placeholder is replaced in place')
+  assert.deepEqual(loading?.props.max, ready?.props.max)
 })
 
-test('a lane wider than the preview cap states how many occurrences are hidden', () => {
-  const entries = [
-    dockEntry(1, 0, { state: 'ready', blobId: 'a'.repeat(64) }, 'a.png'),
-    dockEntry(2, 1, { state: 'ready', blobId: 'b'.repeat(64) }, 'b.png'),
-    dockEntry(3, 2, { state: 'ready', blobId: 'c'.repeat(64) }, 'c.png'),
-  ]
-  const nodes = dockDraftImageNodes(entries, 100, true)
-  const more = nodes.find(node => node.props.key === 'draft-images-more')
+test('a repeated token yields two chips with distinct keys over the same bytes', () => {
+  const row = dockDraftImageNodes([
+    dockEntry(1, 0, { state: 'ready', blobId: 'e'.repeat(64) }),
+    dockEntry(1, 1, { state: 'ready', blobId: 'e'.repeat(64) }),
+  ], 2)
 
-  assert.equal(more?.props.text, '… 1 more image occurrence',
-    'the third occurrence is counted, never silently dropped')
-  assert.equal(nodes.filter(node => node.kind === 'image').length, 2)
-})
-
-test('an empty draft projects NO dock node at all', () => {
-  assert.deepEqual(dockDraftImageNodes([], 160, true), [],
-    'an empty draft must be byte-identical to the pre-PR4 dock')
+  assert.deepEqual(chipsOf(row).map(chip => chip.props.key), ['draft-chip-1-0', 'draft-chip-1-1'],
+    'the same draft id under two ranks is two occurrences, never one attachment')
 })

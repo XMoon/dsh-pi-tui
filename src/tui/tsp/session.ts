@@ -57,6 +57,7 @@ import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
@@ -81,7 +82,7 @@ import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -348,6 +349,29 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // release, so there is exactly ONE close and no bare fire-and-forget
   // promise inside this synchronous function.
   const surface: Surface = session.open({ mode: 'inline', title: 'dsh' })
+  /**
+   * The dock's draft-preview stylesheet role. The attribute VALUE may contain a
+   * period; the sheet NAME may not (the client rejects a dotted sheet name).
+   */
+  const DRAFT_PREVIEW_ROLE = 'dsh.draft-preview'
+  const DRAFT_PREVIEW_SHEET = 'dsh-draft-preview'
+  /**
+   * Whether this pane negotiated the `styles` feature. Without it the frozen
+   * product contract shows NO draft thumbnail at all (summary + composer token
+   * only), so this flag gates the preview row instead of faking a rule.
+   */
+  const previewStylesSupported = (): boolean => session.caps.features.includes('styles')
+  if (previewStylesSupported()) {
+    // ONE sheet, installed once: it hides the whole preview row on a SHORT
+    // WINDOW. It is a window media query, so it says nothing about a split
+    // pane's own rows — the per-node `max` bounds below are what keep the dock
+    // compact there.
+    surface.stylesheet(DRAFT_PREVIEW_SHEET, `
+      @media (max-height: 640px) {
+        [data-role="${DRAFT_PREVIEW_ROLE}"] { display: none; }
+      }
+    `)
+  }
   let disposed = false
   let exitRequested = false
   /** Monotonic renderer-local identities (notices; scope epochs). */
@@ -1309,6 +1333,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (binding === undefined) return undefined
     const occurrences = binding.draftImages.occurrences()
     if (occurrences.length === 0) return new Map()
+    // The frozen capability gate comes FIRST: with no drawable preview (no
+    // `styles`, no `image`/`blobs`, or too few columns) the dock must not touch
+    // draft blob IO at all. Preparing state first would send bytes for a band
+    // that can never be drawn.
+    if (dockPreviewLimit() === 0) return new Map()
     const states = new Map<string, ToolImageState>()
     if (!nativeImagesSupported()) {
       for (const occurrence of occurrences) states.set(draftOccurrenceKey(occurrence), { state: 'unsupported' })
@@ -1531,19 +1560,41 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * and consults no store, so the dock's node shape is testable without a
    * session and cannot drift from the transcript's image vocabulary.
    */
-  const dockDraftNodes = (states: ReadonlyMap<string, ToolImageState> | undefined): Node[] => {
+  /**
+   * The frozen preview-count decision (Owner amendment, 2026-10-25). It reads
+   * the NEGOTIATED capabilities and `cols` only — never a terminal height, never
+   * `process.stdout.rows`, never a CSS guess about pane geometry:
+   *
+   * - no `styles`, or no `image`/`blobs`: 0 (the sheet is the only short-window
+   *   mechanism, and a bitmap needs the image+blob capability);
+   * - `cols < 72`: 0; `72 … 99`: 1; `>= 100`: 2.
+   *
+   * Any other count would have to infer pane rows, which the protocol does not
+   * publish.
+   */
+  const dockPreviewLimit = (): number => {
+    const canPreview = previewStylesSupported()
+      && session.caps.features.includes('blobs')
+      && session.caps.kinds.includes('image')
+    if (!canPreview) return 0
+    const cols = session.caps.cols
+    return cols < DOCK_DRAFT_SINGLE_PREVIEW_COLS ? 0 : cols < DOCK_DRAFT_TWO_PREVIEW_COLS ? 1 : 2
+  }
+
+  const dockDraftNodes = (states: ReadonlyMap<string, ToolImageState> | undefined): Node | undefined => {
     const binding = imageBinding
-    if (binding === undefined || states === undefined) return []
+    if (binding === undefined || states === undefined) return undefined
     const entries: DockDraftImageEntry[] = binding.draftImages.occurrences().map(occurrence => {
       const identity = draftIdentityOf(occurrence.image)
       return {
-        key: draftOccurrenceKey(occurrence),
-        identity: imageIdentityText(identity),
+        id: occurrence.image.id,
+        ordinal: occurrence.ordinal,
+        caption: `#${occurrence.image.id} · ${identity.width}×${identity.height}`,
         name: imageDisplayName(identity),
         state: states.get(draftOccurrenceKey(occurrence)),
       }
     })
-    return dockDraftImageNodes(entries, session.caps.cols, nativeImagesSupported())
+    return dockDraftImageNodes(entries, dockPreviewLimit())
   }
 
   const dockView = (draftStates: ReadonlyMap<string, ToolImageState> | undefined): Node | undefined => {
@@ -1569,7 +1620,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (pendingSubmit !== undefined) {
       lines.push(ui.text({ key: 'pending-submit', text: pendingSubmit === 'submit' ? 'Submitting…' : 'Queued…' }))
     }
-    if (dock.statusLine !== '') lines.push(ui.text({ key: 'status', text: sanitizeDisplayText(dock.statusLine) }))
+    // PR4: the draft count rides the EXISTING status line as a single prefix
+    // (`Draft N · <status>`), so the dock gains no second title row. With no
+    // draft the text and the key stay byte-identical to before.
+    const draftCount = imageBinding?.draftImages.occurrences().length ?? 0
+    const statusLine = draftCount === 0
+      ? dock.statusLine
+      : `Draft ${draftCount} · ${dock.statusLine === '' ? DOCK_BANNER : dock.statusLine}`
+    if (statusLine !== '') lines.push(ui.text({ key: 'status', wrap: 'none', text: sanitizedPhysicalLine(statusLine) }))
     // PR3-B B3 (§3.8): the parked-Question count is a PRESENTATION of the ONE
     // controller's read (`InteractionRuntime.publishAttention` → presenter);
     // the Alt+Q entry is the inspection route, never an answerability fact.
@@ -1580,10 +1638,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const noticeText = sanitizeDisplayText(notice.text)
       lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${noticeText}` : noticeText }))
     }
-    // PR4: the staged draft images sit directly above the editor (the queue,
-    // notice and status order above is unchanged), so the token text and its
-    // previews are one seat and the caret never leaves the visible band.
-    lines.push(...dockDraftNodes(draftStates))
+    // PR4: the staged draft thumbnails are ONE row directly above the editor
+    // (the queue, notice and status order above is unchanged), so the token
+    // text and its previews are one seat. `undefined` = the frozen degradation
+    // (no styles / no image+blobs / too narrow / nothing staged): the dock then
+    // has exactly its pre-amendment rows and the editor still follows.
+    const preview = dockDraftNodes(draftStates)
+    if (preview !== undefined) lines.push(preview)
     // The controlled composer: SDK `ui.editor` with client-supplied
     // text/cursor (UTF-16). The native edit/undo/send features are NOT
     // advertised (`sendable` stays unset); the program owns every edit.
