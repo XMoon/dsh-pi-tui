@@ -1348,9 +1348,9 @@ function settingsWorkspaceSource(): SettingsWorkspaceSource {
       rows: [
         { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette', action: 'inspect' },
         { id: 'icon-style', category: 'appearance', label: 'Icon style', summary: 'emoji', value: 'emoji', scope: 'TUI settings document', freshness: 'ready', description: 'icons', action: 'inspect' },
-        { id: 'display-preset', category: 'display', label: 'Transcript display', summary: 'full', value: 'full', scope: 'Client runtime', freshness: 'runtime', description: 'display', action: 'inspect' },
-        { id: 'thinking', category: 'display', label: 'Thinking detail', summary: 'collapsed', value: 'collapsed', scope: 'Current TUI display state', freshness: 'runtime', description: 'thinking', action: 'inspect' },
-        { id: 'legacy-settings', category: 'other', label: 'Open existing settings…', summary: 'Existing settings editor', scope: 'Existing settings editor', freshness: 'ready', description: 'legacy', action: 'open-legacy' },
+        { id: 'display-preset', category: 'conversation', label: 'Transcript display', summary: 'full', value: 'full', scope: 'Client runtime', freshness: 'runtime', description: 'display', action: 'inspect' },
+        { id: 'thinking', category: 'conversation', label: 'Thinking detail', summary: 'collapsed', value: 'collapsed', scope: 'Current TUI display state', freshness: 'runtime', description: 'thinking', action: 'inspect' },
+        { id: 'agent-settings-legacy', category: 'agent', label: 'Agent settings…', summary: 'Existing settings editor', scope: 'Existing settings editor', freshness: 'ready', description: 'legacy', action: 'open-legacy', legacyTargetId: 'default-permission' },
       ],
     }),
   }
@@ -1468,10 +1468,10 @@ test('a legacy handoff that loses the surface to a NEWER workspace never mounts 
   })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
-  // Wide (80x24): the About home -> Other settings -> rows -> activate the row.
-  // The rail order is About, Models, Account, Appearance, Display, Tools,
-  // Plugins, Other settings: seven Down presses reach the legacy launcher row.
-  for (let step = 0; step < 7; step += 1) {
+  // Wide (80x24): the About home -> Agent -> rows -> activate the row.
+  // The rail order is About, Models, Account, Agent, ...: three Down presses
+  // reach the transition launcher row.
+  for (let step = 0; step < 3; step += 1) {
     vt.sendInput('\x1b[B'); await vt.waitForRender()
   }
   vt.sendInput('\r'); await vt.waitForRender()
@@ -1595,10 +1595,10 @@ test('a legacy handoff never crosses a blocking owner started by its own close',
     },
   })
   await vt.waitForRender()
-  // Wide (80x24): the About home -> Other settings -> rows -> activate the row.
-  // The rail order is About, Models, Account, Appearance, Display, Tools,
-  // Plugins, Other settings: seven Down presses reach the legacy launcher row.
-  for (let step = 0; step < 7; step += 1) {
+  // Wide (80x24): the About home -> Agent -> rows -> activate the row.
+  // The rail order is About, Models, Account, Agent, ...: three Down presses
+  // reach the transition launcher row.
+  for (let step = 0; step < 3; step += 1) {
     vt.sendInput('\x1b[B'); await vt.waitForRender()
   }
   vt.sendInput('\r'); await vt.waitForRender()

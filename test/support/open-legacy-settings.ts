@@ -26,16 +26,16 @@ export interface SettingsNavTerminal extends SettingsRailTerminal {
 const ENTER = '\r'
 
 /**
- * Navigate an ALREADY-OPEN Settings workspace to the legacy editor. The key
- * sequence follows the workspace's real focus model: walk the category rail to
- * `Other settings`, Enter into its Rows level, and Enter the single legacy
- * launcher row.
+ * Navigate an ALREADY-OPEN Settings workspace to the existing settings editor.
+ * The key sequence follows the workspace's real focus model: walk the category
+ * rail to `Agent`, Enter into its Rows level, and Enter its transition launcher
+ * row (which opens the SAME complete editor on the agent preset row).
  */
 export async function navigateToLegacySettings(vt: SettingsNavTerminal): Promise<void> {
   // The walk reads the painted frame to find the rail, so the FIRST frame of
   // the workspace must be on screen before the walk starts.
   await vt.waitForRender()
-  await selectSettingsCategory(vt, 'Other settings')
+  await selectSettingsCategory(vt, 'Agent')
   for (const key of [ENTER, ENTER]) {
     vt.sendInput(key)
     await vt.waitForRender()

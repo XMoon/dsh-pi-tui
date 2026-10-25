@@ -92,8 +92,8 @@ test('T05 every breakpoint projects the frozen plugin columns in all three stage
       assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 0, `${width}: the list starts at x=0`)
     } else {
       // >=120: `Categories | List | Details`; the rail stays visible.
-      const header = rowOf(harness, 'Categories (8)')
-      assert.equal(columnOf(harness, header, 'Categories (8)'), 0, `${width}: the rail owns the leading column`)
+      const header = rowOf(harness, 'Categories (9)')
+      assert.equal(columnOf(harness, header, 'Categories (9)'), 0, `${width}: the rail owns the leading column`)
       assert.equal(columnOf(harness, header, '[Plugins]'), 24, `${width}: the list starts after the rail + gutter`)
       assert.match(listRows[header]!, /Details/u, `${width}: the third column is painted`)
       assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, `${width}: the list body starts at x=24`)
@@ -128,8 +128,8 @@ test('T05 every breakpoint projects the frozen plugin columns in all three stage
       assert.doesNotMatch(harness.view(), /Search: \//u, `${width}: a narrow rail paints no plugin content`)
       assert.match(harness.view(), /> Plugins/u, `${width}: Plugins stays selected`)
     } else {
-      const header = rowOf(harness, 'Categories (8)')
-      assert.equal(columnOf(harness, header, '[Categories (8)]'), 0, `${width}: the rail is the ONE active device`)
+      const header = rowOf(harness, 'Categories (9)')
+      assert.equal(columnOf(harness, header, '[Categories (9)]'), 0, `${width}: the rail is the ONE active device`)
       assert.equal(columnOf(harness, header, 'Plugins'), 24, `${width}: the preview starts after the rail`)
       if (width >= 120) {
         assert.match(railRows[header]!, /Details/u, `${width}: >=120 previews the Details column`)
@@ -309,6 +309,10 @@ test('T08 the wheel scrolls the pane under the pointer and header/bar/gutter are
 test('T08 the wheel over the Categories rail scrolls the rail on a short frame', async () => {
   const harness = await open({ columns: 120, rows: 12 })
   await yieldToRail(harness)
+  // Home returns the rail window to its first row, so the wheel below really
+  // has room to scroll (the yield reveals the LAST selected category).
+  harness.vt.sendInput('\u001b[H')
+  await harness.waitForFrame()
   const railOf = (): string[] => frameRows(harness).slice(4, 11).map(line => line.slice(0, 22))
   const before = railOf()
   assert.ok(before.some(line => line.includes('About')), `the rail starts at About:\n${harness.view()}`)
@@ -473,7 +477,7 @@ test('T09 a same-category rail click never steals a plugin sub-view Esc gradient
 
   const fullWidth = await open({ columns: 120, rows: 24 })
   await openRemoveConfirm(fullWidth)
-  assert.doesNotMatch(fullWidth.view(), /Categories \(8\)/u, 'the confirmation paints no Categories rail to click')
+  assert.doesNotMatch(fullWidth.view(), /Categories \(9\)/u, 'the confirmation paints no Categories rail to click')
   assert.equal(fullWidth.panel.focused, true)
   fullWidth.vt.sendInput('\x1b')
   await fullWidth.waitForFrame()
@@ -482,7 +486,7 @@ test('T09 a same-category rail click never steals a plugin sub-view Esc gradient
 
   const install = await open({ columns: 120, rows: 24 })
   await openInstall(install)
-  assert.doesNotMatch(install.view(), /Categories \(8\)/u, 'the install view paints no Categories rail to click')
+  assert.doesNotMatch(install.view(), /Categories \(9\)/u, 'the install view paints no Categories rail to click')
   assert.equal(install.panel.focused, true)
   // The page's own Esc gradient (edit -> hide) runs first and never closes the
   // Settings lease: the same sub-view safety the rail click must not bypass.
@@ -615,7 +619,9 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   // only variable is whether the stale wheel was admitted.
   const railWheel = await open({ columns: 120, rows: 8 })
   await yieldToRail(railWheel)
-  const railLabels = ['About', 'Models', 'Account', 'Appearance', 'Display', 'Tools', 'Plugins', 'Other settings']
+  railWheel.vt.sendInput('\u001b[H') // Home -> the rail window starts at About
+  await railWheel.waitForFrame()
+  const railLabels = ['About', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins', 'Extensions']
   const visibleRail = (): string[] => frameRows(railWheel)
     .map(line => line.slice(0, 22).trim())
     .map(cell => cell.replace(/^> /u, ''))
@@ -637,31 +643,31 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   // prevents the release from completing the pre-repaint click.
   const repainted = await open({ columns: 120, rows: 8 })
   await yieldToRail(repainted)
-  press(repainted, railRow(repainted, 'Display'), 3)
+  press(repainted, railRow(repainted, 'Tools'), 3)
   repainted.app.notify('notice repaints before the release', 'error')
   await repainted.waitForFrame()
   assert.match(repainted.view(), /notice repaints before the release/u, 'the notice really repainted')
-  release(repainted, railRow(repainted, 'Display'), 3)
+  release(repainted, railRow(repainted, 'Tools'), 3)
   await repainted.waitForFrame()
   assert.match(repainted.view(), /^> Plugins\b/mu, 'the release after a chrome-changing repaint never switches category')
-  assert.doesNotMatch(repainted.view(), /Scope: Display/u)
+  assert.doesNotMatch(repainted.view(), /Scope: TUI preferences/u)
   // Positive control on a fresh cell: the panel still admits a new gesture.
-  click(repainted, railRow(repainted, 'Tools'), 3)
+  click(repainted, railRow(repainted, 'Input & Terminal'), 3)
   await repainted.waitForFrame()
-  assert.match(repainted.view(), /Scope: TUI preferences/u, 'a fresh rail gesture still switches category')
+  assert.match(repainted.view(), /^> Input & Terminal\b/mu, 'a fresh rail gesture still switches category')
   repainted.app.dispose()
 
   // The other half of the contract: a repaint that keeps the SAME row
   // allocation is benign and must NOT drop an accepted press.
   const benign = await open({ columns: 120, rows: 8 })
   await yieldToRail(benign)
-  press(benign, railRow(benign, 'Display'), 3)
+  press(benign, railRow(benign, 'Tools'), 3)
   benign.app.requestRender()
   await benign.waitForFrame()
-  release(benign, railRow(benign, 'Display'), 3)
+  release(benign, railRow(benign, 'Tools'), 3)
   await benign.waitForFrame()
-  assert.match(benign.view(), /^> Display\b/mu, 'a same-plan repaint keeps the pending press alive')
-  assert.match(benign.view(), /Scope: TUI preferences/u, 'the preserved press really switched to Display')
+  assert.match(benign.view(), /^> Tools\b/mu, 'a same-plan repaint keeps the pending press alive')
+  assert.match(benign.view(), /Scope: TUI preferences/u, 'the preserved press really switched to Tools')
   benign.app.dispose()
 
   // The interleaving that neither single case covers: a pending rail press, a
@@ -670,23 +676,22 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   // across the notice, so only the revoked press prevents the category change.
   const interleaved = await open({ columns: 120, rows: 8 })
   await yieldToRail(interleaved)
-  const displayRow = railRow(interleaved, 'Display')
-  press(interleaved, displayRow, 3)
+  const toolsRow = railRow(interleaved, 'Tools')
+  press(interleaved, toolsRow, 3)
   interleaved.app.notify('notice between press and wheel', 'error')
   wheel(interleaved, 6, 2)
   await interleaved.waitForFrame()
-  release(interleaved, railRow(interleaved, 'Display'), 3)
+  release(interleaved, railRow(interleaved, 'Tools'), 3)
   await interleaved.waitForFrame()
   assert.match(interleaved.view(), /^> Plugins\b/mu, 'the category is still Plugins after the stale release')
-  assert.doesNotMatch(interleaved.view(), /Scope: Display/u, 'the release after a refused stale wheel never switches category')
+  assert.doesNotMatch(interleaved.view(), /Scope: TUI preferences/u, 'the release after a refused stale wheel never switches category')
   assert.equal(interleaved.panel.focused, false, 'the rail still owns the keyboard after the repaint')
   // Positive control on a DIFFERENT rail row: the fork withholds a click whose
-  // press lands on the same cell inside its multi-click window, so reusing the
-  // Display cell here would prove the fork's double-click rule rather than the
-  // panel's admission. The neighboring Tools row is a fresh cell and switches.
-  click(interleaved, railRow(interleaved, 'Tools'), 3)
+  // press lands on the same cell inside its multi-click window, so the
+  // neighbouring Input & Terminal row is a fresh cell and switches.
+  click(interleaved, railRow(interleaved, 'Input & Terminal'), 3)
   await interleaved.waitForFrame()
-  assert.match(interleaved.view(), /Scope: TUI preferences/u, 'a fresh rail gesture still switches category')
+  assert.match(interleaved.view(), /^> Input & Terminal\b/mu, 'a fresh rail gesture still switches category')
   interleaved.app.dispose()
 
   // The same notice moves the ROOT-owned rail hit map. A press on the old About
@@ -858,7 +863,7 @@ test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture
   await selectCard(toWide, 'bundle:@vendor/foo')
   // 76..119 with the content focused is the adjacent pair WITHOUT the rail, so
   // the same screen cell changes meaning across the boundary.
-  assert.doesNotMatch(toWide.view(), /Categories \(8\)/u, '119 content focus paints no Categories rail')
+  assert.doesNotMatch(toWide.view(), /Categories \(9\)/u, '119 content focus paints no Categories rail')
   assert.match(toWide.view(), /\[Plugins\]/u, '119 paints the shared pane header')
   const wideRow = rowOf(toWide, '> @vendor/foo')
   press(toWide, wideRow, 6)
@@ -1235,7 +1240,7 @@ test('T08 the 76..119 Categories+List preview reprojects the mouse after the foc
   // the content at x=0 — so the same screen cell changes meaning.
   const harness = await open({ columns: 100, rows: 24 })
   await yieldToRail(harness)
-  assert.match(harness.view(), /Categories \(8\)/u, 'the rail-focused medium frame paints the Categories column')
+  assert.match(harness.view(), /Categories \(9\)/u, 'the rail-focused medium frame paints the Categories column')
   assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, 'the preview starts after the rail')
   const previewCard = rowOf(harness, '@vendor/foo')
   assert.ok(previewCard >= 0, `the preview paints the third-party card:
@@ -1255,7 +1260,7 @@ ${harness.view()}`)
 
   // The focus switch changed the projection: the content column is now x=0.
   assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 0, 'the content took the leading column')
-  assert.doesNotMatch(harness.view(), /Categories \(8\)/u, 'the rail is gone while the content owns the keys')
+  assert.doesNotMatch(harness.view(), /Categories \(9\)/u, 'the rail is gone while the content owns the keys')
 
   // A click at the NEW coordinate on the SELECTED card opens Details.
   const reprojected = rowOf(harness, '> @vendor/foo')
@@ -1303,13 +1308,13 @@ test('T09 a no-op wheel never cancels a legal rail click', async () => {
   assert.equal(harness.panel.gestureRevision(), before, 'a no-op List wheel does not bump the revision')
 
   // A rail press held across that no-op wheel must still be admitted.
-  const aboutRow = railRow(harness, 'About')
+  const aboutRow = railRow(harness, 'Account')
   press(harness, aboutRow, 3)
   wheel(harness, listRow + 1, 30, false)
   await harness.waitForFrame()
   release(harness, aboutRow, 3)
   await harness.waitForFrame()
-  assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives an immaterial wheel')
+  assert.match(harness.view(), /^> Account\b/mu, 'the legal rail press survives an immaterial wheel')
   harness.app.dispose()
 })
 
@@ -1358,13 +1363,13 @@ test('T09 a wheel at the END of a scroll window never cancels a legal rail click
   assert.equal(harness.panel.gestureRevision(), before, 'a wheel past the end of the List does not bump')
 
   // A rail press held across that immaterial wheel must still be admitted.
-  const aboutRow = railRow(harness, 'About')
+  const aboutRow = railRow(harness, 'Account')
   press(harness, aboutRow, 3)
   wheel(harness, listRow + 1, 30, true)
   await harness.waitForFrame()
   release(harness, aboutRow, 3)
   await harness.waitForFrame()
-  assert.match(harness.view(), /^> About\b/mu, 'the legal rail press survives a wheel past the List end')
+  assert.match(harness.view(), /^> Account\b/mu, 'the legal rail press survives a wheel past the List end')
   harness.app.dispose()
 })
 
@@ -1735,13 +1740,13 @@ test('T09 rail keys are refused until the yield paints the new projection', asyn
   // One burst: the page Esc yields to the rail (installing the new grant), then a
   // rail key arrives before that projection paints.
   harness.vt.sendInput('\x1b')
-  harness.vt.sendInput('\x1b[B') // Down on the rail
+  harness.vt.sendInput('\x1b[A') // Up on the rail (Down is clamped on the last category)
   assert.equal(harness.panel.grantAwaitingPaint(), true, 'the yield installed the new grant and awaits its paint')
   assert.equal(rootPanel['categoryId'], categoryBefore,
-    'the rail Down did not move the category before the new projection painted')
+    'the rail Up did not move the category before the new projection painted')
   await harness.waitForFrame()
   // Positive control: on the painted frame the same rail key really moves.
-  harness.vt.sendInput('\x1b[B')
+  harness.vt.sendInput('\x1b[A')
   await harness.waitForFrame()
   assert.notEqual(rootPanel['categoryId'], categoryBefore,
     'the same rail key moves the category once the projection has painted')
@@ -2012,7 +2017,7 @@ test('T10 the plugin Host notice and the ONE root App notice never overwrite eac
   const appNoticeRow = rowOf(harness, 'context measurement failed')
   const hostNoticeRow = rowOf(harness, 'plugin inventory is stale')
   const headerRow = rowOf(harness, 'Settings · Plugins')
-  const paneHeaderRow = rowOf(harness, 'Categories (8)')
+  const paneHeaderRow = rowOf(harness, 'Categories (9)')
   assert.ok(appNoticeRow > headerRow && appNoticeRow < paneHeaderRow, 'the App notice is ONE root row above the pane header')
   assert.ok(hostNoticeRow > paneHeaderRow, 'the plugin Host notice stays inside the business body')
   assert.equal(frame.filter(line => line.includes('context measurement failed')).length, 1, 'the App notice is painted exactly once')

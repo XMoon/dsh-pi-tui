@@ -151,10 +151,27 @@ Command page.
 `/settings` and its real alias `/status` open ONE fullscreen lease with ONE
 navigation focus state. The category rail is the selection owner; the right
 column is the content. Width only projects panes (≥108 three, 76–107 two, <76
-one). The category order is `About, Models, Account, Appearance, Display, Tools,
-Plugins, Other settings`; both names run the same handler and land on `About`
-with identical initial focus and entry-refresh behavior. `/statusline` remains
-the `/footer` alias and never enters this workspace.
+one). The category order is the fixed `About, Models, Account, Agent, Appearance,
+Conversation, Input & Terminal, Tools, Plugins`, and ONE conditional
+`Extensions` is appended while the extension settings registry reports live
+rows (nine vs ten painted categories; no hardcoded count anywhere). Both
+`/settings` and `/status` run the same handler and land on `About` with
+identical initial focus and entry-refresh behavior. `/statusline` remains the
+`/footer` alias and never enters this workspace.
+- The extension-settings DIRECTORY is a live projection of the in-process
+  `SettingsRegistry`: the panel reads its `{revision,count}` synchronously before
+  every input, pointer and render decision (no second registry, no subscription
+  split). A changed revision revokes the previous frame's pressed gesture and
+  whole hit map before dispatch, re-reads the one snapshot, re-anchors the
+  selected row on a live row of its category, and withholds every key except the
+  real `Esc` until a frame composed against the current directory has painted.
+  The count alone is never the fence: a same-id owner replacement keeps the
+  count and moves only the revision. The event that discovers the change never
+  navigates with it; a frame whose directory moved inside its own render
+  publishes no grant and schedules the next frame. When the registry empties
+  while `Extensions` is selected, the selection lands on `Plugins` with the rail
+  focused and nothing is installed, enabled or removed; a stale internal
+  `initialCategory: 'extensions'` request lands on `Plugins` too.
 
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single
@@ -246,14 +263,24 @@ the `/footer` alias and never enters this workspace.
   A transient choice, a pending write and the in-place Plugin Manager keep their
   own keys; every region jump lands on the destination's first candidate and
   bumps the pointer-press revision, so a straddling click cannot activate it.
-- The four configuration categories (`Appearance`, `Display`, `Tools`, `Other
-  settings`) keep their three-level browse (L0 categories, L1 rows, L2 detail)
-  and their existing writers.
+- The configuration categories (`Agent`, `Appearance`, `Conversation`, `Input &
+  Terminal`, `Tools`, and the conditional `Extensions`) keep their three-level
+  browse (L0 categories, L1 rows, L2 detail). `About`, `Models`, `Account` and
+  `Plugins` remain direct content pages.
 - Three configuration rows are writable: the configured theme, the transcript
   display setting, and the profile-wide `Visual tools` switch. Browsing never
-  writes, and the configuration rows expose no copy verb at all.
-- `Tools` holds exactly one built-in row, `Visual tools`, backed by the Host
-  profile's `pi-tui-visual-tools.enabled` volatile Config (schema default On).
+  writes, and the configuration rows expose no copy verb at all. Every other
+  setting stays in the existing complete editor behind a per-category
+  TRANSITION row (`Agent settings…`, `Footer & status line…`, `More conversation
+  settings…`, `Input & terminal settings…`, `Configure extension settings…`,
+  and the relocated `Web Search / Fetch`): each row is `open-legacy` with its
+  exact legacy target, states the `Existing settings editor` scope, runs no
+  write of its own and starts the editor only on explicit activation — never on
+  focus, Tab, read, resize or a summary render.
+- `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
+  `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
+  `Web Search / Fetch` transition launcher whose existing-editor return path is
+  unchanged (Esc restores the workspace on that same row).
   Its stated value is the effective Host form value; `[default]` marks a value
   the USER layer does not declare. Confirm writes that ONE field through the
   official revision-checked settings mutation and re-reads the Host. Off
@@ -289,7 +316,9 @@ the `/footer` alias and never enters this workspace.
   rail with the page instance, its view/query/selection/scroll and the
   controller's install request id intact. Only a real category change or the
   Settings teardown disposes the page and releases its Host claim. The legacy
-  complete editor stays reachable through `Other settings`.
+  complete editor stays reachable through the per-category transition rows, and
+  `Extensions` is a DIRECTORY entry only: the per-owner extension settings list
+  is not part of this contract.
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 

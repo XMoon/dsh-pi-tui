@@ -28,6 +28,7 @@ import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.t
 import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
@@ -84,6 +85,11 @@ interface HarnessOptions {
   throwOnGet?: boolean
   displayPreset?: string
   themes?: ThemeRegistry
+  /** The REAL in-process extension settings registry the workspace reads its
+   *  conditional `Extensions` directory from. A case registers rows on it and
+   *  drives the production `/settings` handler, or supplies the same instance
+   *  the extension service owns. */
+  settingsRegistry?: SettingsRegistry
   /** The live clipboard strategy; a promise lets a case hold the settlement. */
   copySelection?: (text: string) => Promise<boolean>
   /** Real provider options the Models page reads. Supplying them enables the
@@ -267,15 +273,20 @@ interface Harness {
   readonly dispose: () => void
 }
 
-/** The painted category order of the Settings rail (the harness walks it). */
-const CATEGORY_ORDER = ['About', 'Models', 'Account', 'Appearance', 'Display', 'Tools', 'Plugins', 'Other settings']
+/** The painted category order of the Settings rail (the harness walks it). The
+ *  conditional `Extensions` category is appended only while the extension
+ *  settings registry has live rows, so a case that needs it walks by label. */
+const CATEGORY_ORDER = [
+  'About', 'Models', 'Account', 'Agent', 'Appearance',
+  'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
+]
 
 /** Whether the painted frame shows the Settings category rail. A narrow
  *  terminal paints the single-column category list OR the About content, so
  *  the rail's own labels are the witness. */
 const railVisible = (vt: VirtualTerminal): boolean =>
   vt.getViewport().map(stripTerminalSequences)
-    .some(line => /^(?:> | {2})(?:About|Models|Account|Appearance|Display|Tools|Plugins|Other settings)(?: {2,}|\s*$)/u.test(line))
+    .some(line => /^(?:> | {2})(?:About|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
 
 function setup(options: HarnessOptions = {}): Harness {
   const columns = options.columns ?? 120
@@ -412,7 +423,11 @@ function setup(options: HarnessOptions = {}): Harness {
             else return options.applyReplace(next)
           },
         },
-    extensions: options.themes === undefined ? undefined : { themes: options.themes },
+    // The Settings workspace reads the LIVE extension-settings directory on
+    // every snapshot; the registry here is the real in-process owner.
+    extensions: options.themes === undefined && options.settingsRegistry === undefined
+      ? undefined
+      : { themes: options.themes ?? new ThemeRegistry(), settings: options.settingsRegistry ?? new SettingsRegistry() },
     createPluginManagerPage: (onYieldNavigation: () => void) => {
       if (options.pluginPage !== true) return undefined
       pluginPages += 1
@@ -659,7 +674,7 @@ test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome ow
   assert.match(rows[0]!, /Settings · Categories/, 'every width opens on the L0 categories level')
   assert.ok(!h.view().includes('❯'), `no editor/transcript row may render behind the workspace:\n${h.view()}`)
   assert.match(rows.at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
-  assert.match(h.view(), /Rows \(2\)/, 'the row list column is part of the workspace body')
+  assert.match(h.view(), /Rows \(3\)/, 'the row list column is part of the workspace body')
   h.dispose()
 })
 
@@ -669,9 +684,9 @@ test('A-02 200x60 and 160x40 paint the three-column projection with the real val
   for (const [columns, rows] of [[200, 60], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    const paneRow = rowOf(h, 'Categories (8)')
+    const paneRow = rowOf(h, 'Categories (9)')
     const paneLine = h.rowsPlain()[paneRow]!
-    assert.match(paneLine, /Rows \(2\)/, 'the middle column is the current category rows')
+    assert.match(paneLine, /Rows \(3\)/, 'the middle column is the current category rows')
     assert.match(paneLine, /Details/, 'the third column is the detail pane')
     assert.match(h.view(), /Solarized/, 'the friendly theme label is in the detail')
     assert.match(h.view(), /plugin:acme\/solarized/, 'the raw source-qualified identity is the copy source')
@@ -685,19 +700,19 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   // L0 paints categories + rows only; the retired header arrows never paint.
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'L0 owns the categories level')
-  assert.ok(h.rowsPlain().some(line => line.includes('Rows (2)')), `the rows column exists:\n${h.view()}`)
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'L0 owns the categories level')
+  assert.ok(h.rowsPlain().some(line => line.includes('Rows (3)')), `the rows column exists:\n${h.view()}`)
   assert.ok(!h.view().includes('Details'), 'L0 does not paint the Detail column')
   assert.ok(!h.view().includes('←'), 'no medium header category arrows')
   // The categories level moves with ↑↓.
   await key(h, '\x1b[B')
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), `Down selects the next category:\n${h.view()}`)
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')), `Down selects the next category:\n${h.view()}`)
   await key(h, '\x1b[A')
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Appearance')))
   // Enter advances to L1: rows + detail, no categories column.
   await key(h, '\r')
   assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'L1 paints the Detail column')
-  assert.ok(!h.view().includes('Categories (8)'), 'L1 hides the categories column')
+  assert.ok(!h.view().includes('Categories (9)'), 'L1 hides the categories column')
   // Right enters L2's inline choice directly from L1 on the same projection.
   await key(h, '\x1b[C')
   assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
@@ -714,8 +729,8 @@ test('A-03b the wide inline choice keeps the focused pane title as its phase cha
   const h = setup({ columns: 200, rows: 50, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // Categories -> Rows
-  const before = h.rowsPlain()[rowOf(h, 'Rows (2)')]!
-  assert.match(before, /\[Rows \(2\)\]/, 'the Rows pane owns focus before editing')
+  const before = h.rowsPlain()[rowOf(h, 'Rows (3)')]!
+  assert.match(before, /\[Rows \(3\)\]/, 'the Rows pane owns focus before editing')
   await key(h, '\x1b[C') // Rows -> inline choice
   const after = h.rowsPlain()[rowOf(h, 'Details')]!
   assert.match(after, /\[Details\]/, 'the Detail pane remains visibly focused while choosing')
@@ -849,21 +864,21 @@ test('A-05 every height keeps the pinned bar last, grants a real body from 3 row
 test('A-06 200 → 72 → 44 → 200 preserves the category, the row, the level and the focus', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
-  await key(h, '\x1b[B') // Appearance -> Display on the categories level
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')))
+  await key(h, '\x1b[B') // Appearance -> Conversation on the categories level
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')))
   await key(h, '\r') // L0 -> L1
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Rows/)
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Rows/)
   await key(h, '\r') // L1 -> L2 (detail)
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Transcript display/)
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Transcript display/)
   h.vt.resize(72, 24)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Transcript d/, 'the level, category and row survive the narrow resize')
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Transcript d/, 'the level, category and row survive the narrow resize')
   h.vt.resize(44, 24)
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Transcript d/, 'the selected row survives the resize')
   h.vt.resize(200, 40)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Transcript display/, 'the wide projection returns on the same detail context')
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Transcript display/, 'the wide projection returns on the same detail context')
   assert.match(h.view(), /Transcript display/, 'the narrow detail level upgrades to the same row')
   assertRowWidths(h, 200)
   h.dispose()
@@ -1170,16 +1185,13 @@ test('A-10b a copy settled after the workspace closed never notifies the restore
 
 // ── A-11: the legacy compatibility bridge ─────────────────────────────────
 
-test('A-11 Other settings opens the existing complete editor after retiring the workspace, and Esc returns', async () => {
+test('A-11 Agent settings opens the existing complete editor after retiring the workspace, and Esc returns', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
-  await h.open()
-  await key(h, '\x1b[B') // Appearance -> Display
-  await key(h, '\x1b[B') // Display -> Tools
-  await key(h, '\x1b[B') // Tools -> Plugins
-  await key(h, '\x1b[B') // Plugins -> Other settings
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Other settings')), `the other category is selected:\n${h.view()}`)
-  await key(h, '\r') // L0 -> L1 (the Other settings rows level)
-  assert.match(h.rowsPlain()[0]!, /Settings · Other settings · Rows/)
+  await h.open('Agent')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Agent')), `the Agent category is selected:\n${h.view()}`)
+  await key(h, '\r') // L0 -> L1 (the Agent rows level)
+  assert.match(h.rowsPlain()[0]!, /Settings · Agent · Rows/)
+  assert.match(h.view(), /Agent settings…/u, 'the transition launcher is painted')
   await key(h, '\r') // Enter on the explicit open-legacy row hands off
   const legacy = h.view()
   assert.match(legacy, /Type to search/, `the legacy SettingsList is the physical owner:\n${legacy}`)
@@ -1224,8 +1236,8 @@ test('A-15 the workspace chrome paints the live palette tokens (dark → light)'
   // The active device and the cursor share `primary`; the identity word above
   // does NOT (it is weight-only). This is the exact split the vocabulary fixes:
   // ordinary focus is never the amber `borderFocus` (which equals `warning`).
-  const paneHeadRow = rowOf(h, '[Categories (8)]')
-  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (8)]')
+  const paneHeadRow = rowOf(h, '[Categories (9)]')
+  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (9)]')
   assert.equal(h.vt.getCellFgRgb(paneHeadRow, paneHeadCol), hexToRgb(currentPalette.primary),
     'the focused pane label wears the bracketed bold primary active device')
   const cursorRow = rowOf(h, '> Appearance')
@@ -1251,27 +1263,27 @@ test('narrow item clicks select and focus, never drill past the level', async ()
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
-  const displayRow = rowOf(h, 'Display')
-  const displayCol = cellIndexOf(h, displayRow, 'Display')
+  const displayRow = rowOf(h, 'Conversation')
+  const displayCol = cellIndexOf(h, displayRow, 'Conversation')
   press(h, displayRow, displayCol)
   release(h, displayRow, displayCol)
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'a category click stays on the categories level')
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), 'the clicked category is selected')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')), 'the clicked category is selected')
   assert.ok(!h.view().includes('· Rows'), 'the click never drilled into the rows level')
   // Enter/Right is the only keyboard level advance; a row click stays at L1.
   await key(h, '\r')
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Rows/)
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Rows/)
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Transcript display')))
   const rowIndex = rowOf(h, 'Transcript display')
   const rowCol = cellIndexOf(h, rowIndex, 'Transcript display')
   press(h, rowIndex, rowCol)
   release(h, rowIndex, rowCol)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Rows/, 'a row click stays on the rows level')
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Rows/, 'a row click stays on the rows level')
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Transcript display')))
   await key(h, '\r')
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Transcript display/, 'Enter enters the detail')
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Transcript display/, 'Enter enters the detail')
   h.dispose()
 })
 
@@ -1280,7 +1292,7 @@ test('the retired Legacy Copy cells are inert while the rails Copy All stays a r
   await h.open()
   assert.ok(!/c copy value/.test(h.rowsPlain().at(-1) ?? ''), 'c is never advertised outside the Detail level')
   await key(h, '\r') // L0 -> L1: the rows keep the keyboard while the Detail is visible
-  assert.match(h.rowsPlain()[rowOf(h, 'Rows (2)')]!, /\[Rows \(2\)\]/, 'the rows level owns the keyboard')
+  assert.match(h.rowsPlain()[rowOf(h, 'Rows (3)')]!, /\[Rows \(3\)\]/, 'the rows level owns the keyboard')
   // The old painted button's coordinates (the Detail action row) are inert now.
   const detailRow = rowOf(h, 'Change…')
   const detailActionCol = cellIndexOf(h, detailRow, 'Change…') + 2
@@ -1309,7 +1321,7 @@ test('the retired Legacy Copy cells are inert while the rails Copy All stays a r
 test('a click anywhere in a visible column takes that column focus', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'the categories level owns focus at open')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the categories level owns focus at open')
   // Clicking a row selects it and takes the rows level's focus (and therefore
   // the rows + detail composition).
   const iconRow = rowOf(h, 'Icon style')
@@ -1317,7 +1329,7 @@ test('a click anywhere in a visible column takes that column focus', async () =>
   press(h, iconRow, iconCol)
   release(h, iconRow, iconCol)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[rowOf(h, 'Rows (2)')]!, /\[Rows \(2\)\]/, 'a row click takes the rows level focus')
+  assert.match(h.rowsPlain()[rowOf(h, 'Rows (3)')]!, /\[Rows \(3\)\]/, 'a row click takes the rows level focus')
   const detailRow = rowOf(h, 'Value')
   press(h, detailRow, 96) // inside the Detail pane, away from the Copy button
   release(h, detailRow, 96)
@@ -1334,7 +1346,7 @@ test('100x3 paints real content in its only body row, not pane headers', async (
   const painted = h.rowsPlain()
   assert.equal(painted.length, 3)
   assert.ok(painted.some(line => line.includes('Configured theme')), `the only body row is real content:\n${h.view()}`)
-  assert.ok(!painted.some(line => line.includes('Categories (8)')), 'the pane header yields to the content row')
+  assert.ok(!painted.some(line => line.includes('Categories (9)')), 'the pane header yields to the content row')
   h.dispose()
 })
 
@@ -1400,17 +1412,17 @@ test('the wheel scrolls the pane under the pointer without pulling the selection
   const h = setup({ columns: 72, rows: 4, doc: { theme: 'dark' } })
   await h.open()
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Appearance')))
-  assert.ok(!h.view().includes('Other settings'), 'the third category starts out of view')
+  assert.ok(!h.view().includes('Extensions'), 'no conditional category starts out of view')
   wheel(h, rowOf(h, 'Appearance'), 4, true)
   wheel(h, rowOf(h, 'Appearance'), 4, true)
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('> Appearance'), 'the selection left the viewport instead of forcing a rebase')
-  assert.ok(h.view().includes('Plugins') || h.view().includes('Display') || h.view().includes('Other settings'), `the wheel scrolled the list:\n${h.view()}`)
+  assert.ok(h.view().includes('Plugins') || h.view().includes('Tools') || h.view().includes('Input & Terminal'), `the wheel scrolled the list:\n${h.view()}`)
   await key(h, '\x1b[B')
   await key(h, '\x1b[B')
   await key(h, '\x1b[B')
   await key(h, '\x1b[B')
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Other settings')), 'a selection change still rebases to the selected row')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Plugins')), 'a selection change still rebases to the selected row')
   h.dispose()
 })
 
@@ -1419,7 +1431,7 @@ test('the wheel scrolls the pane under the pointer without pulling the selection
 test('an unreadable document never fabricates a "not set" persisted preference', async () => {
   const missing = setup({ columns: 100, rows: 40, settingsService: false })
   await missing.open()
-  await key(missing, '\x1b[B') // Appearance -> Display
+  await key(missing, '\x1b[B') // Appearance -> Conversation
   await key(missing, '\r') // L0 -> L1
   await key(missing, '\r') // L1 -> L2 (the Transcript display row's detail)
   const missingView = missing.view().replace(/\s+/g, ' ')
@@ -1435,7 +1447,10 @@ test('an unreadable document never fabricates a "not set" persisted preference',
   const throwingView = throwing.view().replace(/\s+/g, ' ')
   assert.match(throwingView, /Persisted\s+unknown/, 'a failed read remains explicitly unknown')
   for (let page = 0; page < 3; page += 1) await key(throwing, '\x1b[6~')
-  assert.match(throwing.view().replace(/\s+/g, ' '), /settings read exploded/, 'PgDn reaches the complete read error fact')
+  // The Detail is one column beside the rows pane, so the wrapped error text is
+  // split by the row gutter: assert the reachable fact, not an unwrapped phrase.
+  assert.match(throwing.view().replace(/\s+/g, ' '), /read exploded/, 'PgDn reaches the complete read error fact')
+  assert.match(throwing.view().replace(/\s+/g, ' '), /could not be read/, 'the read error states its cause')
   throwing.dispose()
 })
 
@@ -1457,9 +1472,9 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   const long = `file:${'x'.repeat(300)}`
   const h = setup({ columns: 200, rows: 60, doc: { theme: long } })
   await h.open()
-  const paneRow = rowOf(h, 'Categories (8)')
-  assert.equal(cellIndexOf(h, paneRow, '[Categories (8)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
-  assert.equal(cellIndexOf(h, paneRow, 'Rows (2)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
+  const paneRow = rowOf(h, 'Categories (9)')
+  assert.equal(cellIndexOf(h, paneRow, '[Categories (9)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
+  assert.equal(cellIndexOf(h, paneRow, 'Rows (3)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
   assert.equal(cellIndexOf(h, paneRow, 'Details'), 22 + 2 + 42 + 2, 'the detail column starts after the 42-cell row column and a 2-cell gap')
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 200, `row ${index} must fit the terminal`)
@@ -1537,15 +1552,15 @@ test('A-15c an unhandled printable key is inert inside the workspace', async () 
 test('a real category/row item click takes that level and selects the item', async () => {
   const wide = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await wide.open()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'the categories level owns focus at open')
-  const displayRow = rowOf(wide, 'Display')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the categories level owns focus at open')
+  const displayRow = rowOf(wide, 'Conversation')
   press(wide, displayRow, 2)
   release(wide, displayRow, 2)
   await wide.vt.waitForRender()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (8)')]!, /\[Categories \(8\)\]/, 'the clicked category keeps the categories level')
-  assert.ok(wide.rowsPlain().some(line => line.startsWith('> Display')), 'and selects the clicked category')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the clicked category keeps the categories level')
+  assert.ok(wide.rowsPlain().some(line => line.startsWith('> Conversation')), 'and selects the clicked category')
   await key(wide, '\x1b[B')
-  assert.ok(wide.rowsPlain().some(line => line.startsWith('> Tools')), 'Down now moves the CATEGORY, not the row')
+  assert.ok(wide.rowsPlain().some(line => line.startsWith('> Input & Terminal')), 'Down now moves the CATEGORY, not the row')
   wide.dispose()
 
   const medium = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
@@ -1555,7 +1570,7 @@ test('a real category/row item click takes that level and selects the item', asy
   press(medium, iconRow, iconCol)
   release(medium, iconRow, iconCol)
   await medium.vt.waitForRender()
-  assert.match(medium.rowsPlain()[rowOf(medium, 'Rows (2)')]!, /\[Rows \(2\)\]/, 'a row click takes the rows level')
+  assert.match(medium.rowsPlain()[rowOf(medium, 'Rows (3)')]!, /\[Rows \(3\)\]/, 'a row click takes the rows level')
   assert.ok(medium.view().includes('> Icon style'), 'and selects that row')
   medium.dispose()
 })
@@ -1769,7 +1784,7 @@ test('A-05b the decorative rules yield before readable content on short screens'
   assert.equal(painted.length, 5)
   assert.match(painted.at(-1)!, /Right open · Enter open · Esc close/)
   assert.equal(painted.filter(line => /^─+$/.test(line)).length, 0, 'the decorative rules yield at 5 rows')
-  for (const label of ['Models', 'Account', 'Appearance']) {
+  for (const label of ['Account', 'Agent', 'Appearance']) {
     assert.ok(painted.some(line => line.includes(label)), `the body keeps the real ${label} row:\n${short.view()}`)
   }
   short.dispose()
@@ -1895,9 +1910,9 @@ test('every width opens at L0, ↑↓ changes the category and Enter enters the 
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/, `L0 at ${columns} columns`)
     assert.ok(!h.view().includes('· Rows'), `no level is pre-entered at ${columns}`)
     await key(h, '\x1b[B')
-    assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), `↓ selects Display at ${columns}:\n${h.view()}`)
+    assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')), `↓ selects Conversation at ${columns}:\n${h.view()}`)
     await key(h, '\r')
-    assert.match(h.rowsPlain()[0]!, /Settings · Display · Rows/, `Enter enters the Display rows at ${columns}`)
+    assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Rows/, `Enter enters the Conversation rows at ${columns}`)
     h.dispose()
   }
 })
@@ -1927,20 +1942,20 @@ test('the medium projection is a pure function of focus: L0 categories+rows, L1/
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (8)')), `L0 categories at ${columns}:\n${h.view()}`)
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (9)')), `L0 categories at ${columns}:\n${h.view()}`)
     assert.ok(!h.view().includes('Details'), 'L0 paints no Detail pane')
     assert.ok(!h.view().includes('Copy value [C]'), 'L0 publishes no Detail button')
     await key(h, '\r')
     assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'L1 paints rows+detail')
-    assert.ok(!h.view().includes('Categories (8)'), 'L1 drops the categories column')
+    assert.ok(!h.view().includes('Categories (9)'), 'L1 drops the categories column')
     await key(h, '\r')
     assert.ok(h.view().includes('Choose value'), 'L2 enters an inline choice without a second browse Enter')
     assert.ok(h.view().includes('Solarized'), 'the selected source identity remains visible')
-    assert.ok(!h.view().includes('Categories (8)'), 'L2 keeps the rows+detail projection')
+    assert.ok(!h.view().includes('Categories (9)'), 'L2 keeps the rows+detail projection')
     await key(h, '\x1b')
     assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc cancels L2 directly back to L1')
     await key(h, '\x1b')
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (8)')), 'Esc from L1 returns to categories+rows')
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (9)')), 'Esc from L1 returns to categories+rows')
     assert.ok(!h.view().includes('Details'), 'and hides the detail again')
     h.dispose()
   }
@@ -1954,7 +1969,7 @@ test('the narrow projection keeps the inline choice across resize and exposes no
   assert.ok(!h.view().includes('Configured theme'), 'L0 shows only the categories')
   await key(h, '\r')
   assert.match(h.rowsPlain()[0]!, /· Rows/)
-  assert.ok(!h.view().includes('Display'), 'L1 shows only the current category rows')
+  assert.ok(!h.view().includes('Transcript display'), 'L1 shows only the current category rows')
   await key(h, '\r')
   assert.match(h.rowsPlain()[0]!, /Configured theme/)
   assert.ok(h.view().includes('Choose value'), 'a writable L1 row enters the inline choice')
@@ -1986,7 +2001,7 @@ test('the narrow projection keeps the inline choice across resize and exposes no
 test('a resize keeps focus/category/row and invalidates the previous painted Confirm hit map', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' } })
   await h.open()
-  await key(h, '\x1b[B') // Display
+  await key(h, '\x1b[B') // Conversation
   await key(h, '\r') // L1
   await key(h, '\r') // L2 choice
   const buttonRow = rowOf(h, 'Confirm')
@@ -1998,7 +2013,7 @@ test('a resize keeps focus/category/row and invalidates the previous painted Con
   await settle(h)
   assert.equal(h.replacements(), 0, 'a press recorded against the wide geometry is refused after resize')
   assert.equal(h.doc.theme, 'dark', 'the stale Confirm did not write any preference')
-  assert.match(h.rowsPlain()[0]!, /Settings · Display/, 'the category and level survive the resize')
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation/, 'the category and level survive the resize')
   h.dispose()
 })
 
@@ -2050,18 +2065,18 @@ test('clicking another category or row cancels an inline choice atomically', asy
   await key(h, '\r') // L1 -> inline choice
   assert.ok(h.view().includes('Choose value'))
 
-  const displayRow = rowOf(h, 'Display')
-  const displayCol = cellIndexOf(h, displayRow, 'Display')
+  const displayRow = rowOf(h, 'Conversation')
+  const displayCol = cellIndexOf(h, displayRow, 'Conversation')
   press(h, displayRow, displayCol)
   release(h, displayRow, displayCol)
   await settle(h)
   assert.ok(!h.view().includes('Choose value'), 'a category click retires the old chooser')
   assert.ok(!h.view().includes('Confirm'), 'the old candidate confirm is no longer painted')
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), 'the clicked category is selected')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')), 'the clicked category is selected')
   assert.equal(h.replacements(), 0)
 
   await key(h, '\x1b[C') // L0 -> L1
-  await key(h, '\x1b[C') // L1 -> Display preset choice
+  await key(h, '\x1b[C') // L1 -> Conversation display-preset choice
   assert.ok(h.view().includes('Choose value'))
   const thinkingRow = rowOf(h, 'Thinking detail')
   const thinkingCol = cellIndexOf(h, thinkingRow, 'Thinking detail')
@@ -2070,7 +2085,7 @@ test('clicking another category or row cancels an inline choice atomically', asy
   await settle(h)
   assert.ok(!h.view().includes('Choose value'), 'a row click cancels the chooser before changing selection')
   assert.ok(!h.view().includes('Confirm'))
-  assert.match(h.rowsPlain()[0]!, /Settings · Display · Rows/)
+  assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Rows/)
   assert.ok(h.view().includes('> Thinking detail'), 'the clicked row is selected at L1')
   assert.equal(h.replacements(), 0, 'neither navigation click commits a candidate')
   h.dispose()
@@ -2103,16 +2118,16 @@ test('changing category refreshes the row selection and the detail; browsing nev
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.ok(h.view().includes('Configured theme'), 'the appearance rows are the L0 list')
-  await key(h, '\x1b[B') // Appearance -> Display
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')))
+  await key(h, '\x1b[B') // Appearance -> Conversation
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')))
   await key(h, '\r') // L1
-  assert.ok(h.view().includes('Transcript display'), 'the Display rows replace the appearance rows')
+  assert.ok(h.view().includes('Transcript display'), 'the Conversation rows replace the appearance rows')
   await key(h, '\x1b[B') // display-preset -> thinking
   await key(h, '\r') // L2
   assert.match(h.rowsPlain()[0]!, /Thinking detail/, 'the detail follows the new stable row id')
   await key(h, '\x1b') // L1
   await key(h, '\x1b') // L0
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), 'the selected category id survives')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Conversation')), 'the selected category id survives')
   assert.equal(h.replacements(), 0, 'navigation never writes the configuration')
   h.dispose()
 })
@@ -2211,7 +2226,7 @@ test('the projection table is frozen: below 76 columns one pane, 76..107 two, 10
     await h.open()
     await key(h, '\r') // L0 -> L1: the rows pane always, plus the detail when the width grants it
     const painted = h.rowsPlain()
-    assert.equal(painted.some(line => line.includes('Categories (8)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
+    assert.equal(painted.some(line => line.includes('Categories (9)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
     assert.equal(painted.some(line => line.includes('Details')), panes >= 2, `the detail pane at ${columns} columns:\n${h.view()}`)
     assertRowWidths(h, columns)
     h.dispose()
@@ -2230,7 +2245,7 @@ test('the projection table is frozen: below 76 columns one pane, 76..107 two, 10
 /** Select one row at L1; writable rows enter the inline choice with one Enter or Right. */
 async function openSelectedRow(h: Harness, row: 'theme' | 'display-preset'): Promise<void> {
   await h.open()
-  if (row === 'display-preset') await key(h, '\x1b[B') // Appearance -> Display
+  if (row === 'display-preset') await key(h, '\x1b[B') // Appearance -> Conversation
   await key(h, '\r') // L0 -> L1
 }
 
@@ -3817,7 +3832,7 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
 
       // §11.3.2/§4.5: exactly ONE chrome active device, and it is the focused pane
       // label. Wide/medium put the shared pane header on the body's first row, so
-      // the focused `[Categories (8)]` is the ONE primary label. The narrow
+      // the focused `[Categories (9)]` is the ONE primary label. The narrow
       // projection paints NO pane header at all: the plain list cursor is not a
       // chrome active device, so the returned device list is EMPTY there.
       const device = assertOneActiveDevice(frame, {
@@ -3861,11 +3876,10 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
 
 // ── PR2: the embedded Plugin Manager inside the ONE Settings chrome ───────
 
-/** Move the L0 selection from Appearance to Plugins (three categories down). */
+/** Move the L0 selection from Appearance to Plugins (four categories down:
+ *  Agent, Conversation, Input & Terminal, Tools). */
 const toPlugins = async (h: Harness): Promise<void> => {
-  await key(h, '\x1b[B')
-  await key(h, '\x1b[B')
-  await key(h, '\x1b[B')
+  for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B')
 }
 
 test('selecting Plugins previews the live plugin list inside ONE Settings chrome', async () => {
@@ -3877,7 +3891,7 @@ test('selecting Plugins previews the live plugin list inside ONE Settings chrome
     const frame = h.rowsPlain()
     // ONE shared pane header: the rail label plus the plugin column labels.
     // header0 / metadata1 / rule2 / pane header3 at both widths.
-    assert.match(frame[3]!, /^\[Categories \(8\)\]/, `the rail label owns the header:\n${h.view()}`)
+    assert.match(frame[3]!, /^\[Categories \(9\)\]/, `the rail label owns the header:\n${h.view()}`)
     assert.equal(cellIndexOf(h, 3, 'Plugins'), 24, `the plugin label starts the content column:\n${h.view()}`)
     if (dual) {
       assert.ok(frame[3]!.includes('Details'), `the >=120 preview also paints the Details column:\n${h.view()}`)
@@ -3896,7 +3910,7 @@ test('selecting Plugins previews the live plugin list inside ONE Settings chrome
       assert.equal(cellIndexOf(h, bodyRow, 'PLUGIN DETAIL'), 24 + 39 + 2, 'the Details column starts after the gutter')
       assert.equal(cellIndexOf(h, 3, 'Details'), 24 + 39 + 2, 'the shared header label sits on the same column')
     }
-    assert.match(frame[3]!, /\[Categories \(8\)\]/, 'the rail keeps the ONE active device')
+    assert.match(frame[3]!, /\[Categories \(9\)\]/, 'the rail keeps the ONE active device')
     assert.doesNotMatch(frame[3]!, /\[Plugins\]/, 'an unfocused preview is never the active device')
     assertBarIsLastRow(frame, (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
     assert.match(frame[frame.length - 1]!, /Tab focus/, 'the rail advertises the real Tab focus key')
@@ -4039,19 +4053,19 @@ test('the direct pages paint exactly the category rail and the content column', 
 })
 
 test('a short wide terminal scrolls the category rail to the last category and hits the painted id', async () => {
-  const h = setup({ columns: 80, rows: 8 })
+  const h = setup({ columns: 80, rows: 8, pluginPage: true })
   await h.openHome()
-  assert.ok(!h.view().includes('Other settings'), `the last category is not painted yet:\n${h.view()}`)
+  assert.ok(!h.view().includes('Plugins'), `the last category is not painted yet:\n${h.view()}`)
   // The rail is the only selection owner: End reaches its last entry.
   await key(h, '\u001b[F')
-  assert.match(h.view(), /^> Other settings/mu, `End reaches the last category:\n${h.view()}`)
+  assert.match(h.view(), /^> Plugins/mu, `End reaches the last category:\n${h.view()}`)
   // The painted entry is the hit target: a click on it selects that category.
-  const lastRow = rowOf(h, 'Other settings')
-  press(h, lastRow, cellIndexOf(h, lastRow, 'Other settings'))
-  release(h, lastRow, cellIndexOf(h, lastRow, 'Other settings'))
+  const lastRow = rowOf(h, 'Plugins')
+  press(h, lastRow, cellIndexOf(h, lastRow, 'Plugins'))
+  release(h, lastRow, cellIndexOf(h, lastRow, 'Plugins'))
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the rail click keeps the keyboard on the rail')
-  assert.match(h.view(), /^> Other settings/mu, 'the click hit the painted category id')
+  assert.match(h.view(), /^> Plugins/mu, 'the click hit the painted category id')
   h.dispose()
 })
 
@@ -4592,7 +4606,7 @@ const SETTINGS_PROVIDERS: readonly CredentialProviderOption[] = [{
 /** The physical rows every multi-column frame must agree on. */
 const pr1Geometry = (h: Harness): { paneY: number; contentY: number; barY: number } => {
   const rows = h.rowsPlain()
-  const paneY = rows.findIndex(line => line.includes('Categories (8)'))
+  const paneY = rows.findIndex(line => line.includes('Categories (9)'))
   assert.ok(paneY >= 0, `the shared pane header must be painted:\n${h.view()}`)
   const contentY = paneY + 1
   assert.notEqual((rows[contentY] ?? '').trim(), '', `the first content row must carry real content:\n${h.view()}`)
@@ -4600,14 +4614,14 @@ const pr1Geometry = (h: Harness): { paneY: number; contentY: number; barY: numbe
 }
 
 test('direct and legacy settings categories share the pane-header, first-body and action-bar rows at medium and wide widths', async () => {
-  const pairs = [['About', 'Appearance'], ['Models', 'Display'], ['Account', 'Tools']] as const
+  const pairs = [['About', 'Appearance'], ['Models', 'Conversation'], ['Account', 'Tools']] as const
   for (const columns of [80, 100, 107, 108, 120] as const) {
     for (const [directCategory, legacyCategory] of pairs) {
       const direct = setup({ columns, rows: 24 })
       await direct.open(directCategory)
       const directGeometry = pr1Geometry(direct)
       const directHead = direct.rowsPlain()[directGeometry.paneY]!
-      assert.match(directHead, /\[Categories \(8\)\]/u, `the rail is the active device:\n${directHead}`)
+      assert.match(directHead, /\[Categories \(9\)\]/u, `the rail is the active device:\n${directHead}`)
       assert.match(directHead, new RegExp(`\\b${directCategory}\\b`, 'u'), `the right label names the page:\n${directHead}`)
       assert.doesNotMatch(directHead, /Rows \(|Details/u, 'the direct header fakes no legacy panes')
       assert.match(direct.rowsPlain().at(-1) ?? '', /Esc close/u, 'the last row is the rail action bar')
@@ -4617,7 +4631,7 @@ test('direct and legacy settings categories share the pane-header, first-body an
       await legacy.open(legacyCategory)
       const legacyGeometry = pr1Geometry(legacy)
       const legacyHead = legacy.rowsPlain()[legacyGeometry.paneY]!
-      assert.match(legacyHead, /\[Categories \(8\)\].*Rows \(\d+\)/u, `the legacy panes stay adjacent:\n${legacyHead}`)
+      assert.match(legacyHead, /\[Categories \(9\)\].*Rows \(\d+\)/u, `the legacy panes stay adjacent:\n${legacyHead}`)
       legacy.dispose()
 
       assert.deepEqual(directGeometry, legacyGeometry,
@@ -4635,7 +4649,7 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(frame[0]!, /^Settings · Categories/u)
     assert.match(frame[1]!, /^Scope: /u)
     assert.match(frame[2]!, /^─+$/u)
-    assert.match(frame[3]!, /^\[Categories \(8\)\].*About/u)
+    assert.match(frame[3]!, /^\[Categories \(9\)\].*About/u)
     assert.doesNotMatch(frame[3]!, /Rows \(|Details/u, 'the direct projection paints exactly two labels')
     assert.match(frame[4]!, /^> About/u, 'the first real content row follows the pane header')
     assert.match(frame.at(-1) ?? '', /Esc close/u)
@@ -4648,7 +4662,7 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(legacyFrame[0]!, /^Settings · Categories/u)
     assert.match(legacyFrame[1]!, /^Scope: /u)
     assert.match(legacyFrame[2]!, /^─+$/u)
-    assert.match(legacyFrame[3]!, /^\[Categories \(8\)\].*Rows \(2\).*Details/u,
+    assert.match(legacyFrame[3]!, /^\[Categories \(9\)\].*Rows \(3\).*Details/u,
       'the wide legacy frame keeps all three pane headers')
     assert.match(legacyFrame[4]!, /^ {2}About/u)
     assert.match(legacyFrame.at(-1) ?? '', /Esc close/u)
@@ -4661,23 +4675,23 @@ test('medium legacy levels keep Categories+Rows at L0 and Rows+Details at L1/L2'
     const h = setup({ columns, rows: 24 })
     await h.open('Appearance')
     let frame = h.rowsPlain()
-    let pane = frame.findIndex(line => line.includes('Categories (8)'))
+    let pane = frame.findIndex(line => line.includes('Categories (9)'))
     assert.ok(pane >= 0)
-    assert.match(frame[pane]!, /\[Categories \(8\)\].*Rows \(2\)/u, 'L0 is Categories + Rows')
+    assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(3\)/u, 'L0 is Categories + Rows')
     assert.doesNotMatch(frame[pane]!, /Details/u)
 
     await key(h, '\r') // L0 -> L1
     frame = h.rowsPlain()
-    pane = frame.findIndex(line => line.includes('[Rows (2)]'))
+    pane = frame.findIndex(line => line.includes('[Rows (3)]'))
     assert.ok(pane >= 0, `L1 must paint the focused Rows header at ${columns}:\n${h.view()}`)
-    assert.match(frame[pane]!, /\[Rows \(2\)\].*Details/u, 'L1 is Rows + Details')
+    assert.match(frame[pane]!, /\[Rows \(3\)\].*Details/u, 'L1 is Rows + Details')
     assert.doesNotMatch(frame[pane]!, /Categories/u, 'the categories column is NOT pinned at L1/L2')
 
     await key(h, '\x1b[C') // L1 -> L2 inline choice
     frame = h.rowsPlain()
     pane = frame.findIndex(line => line.includes('[Details]'))
     assert.ok(pane >= 0)
-    assert.match(frame[pane]!, /Rows \(2\).*\[Details\]/u, 'L2 keeps Rows + the focused Details')
+    assert.match(frame[pane]!, /Rows \(3\).*\[Details\]/u, 'L2 keeps Rows + the focused Details')
     assert.doesNotMatch(frame[pane]!, /Categories/u)
     h.dispose()
   }
@@ -4693,9 +4707,9 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
     if (columns < 76) {
       assert.ok(!direct.view().includes('Categories ('), `narrow paints no pane header:\n${direct.view()}`)
     } else {
-      const pane = frame.findIndex(line => line.includes('[Categories (8)]'))
+      const pane = frame.findIndex(line => line.includes('[Categories (9)]'))
       assert.ok(pane >= 0)
-      assert.match(frame[pane]!, /\[Categories \(8\)\].*About/u)
+      assert.match(frame[pane]!, /\[Categories \(9\)\].*About/u)
       assert.doesNotMatch(frame[pane]!, /Rows \(|Details/u)
     }
     direct.dispose()
@@ -4709,9 +4723,9 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
       assert.ok(!legacy.view().includes('Categories ('), `narrow paints no pane header:\n${legacy.view()}`)
       assert.ok(frame.some(line => line.startsWith('> Appearance')), 'the narrow list is the one pane')
     } else {
-      const pane = frame.findIndex(line => line.includes('Categories (8)'))
+      const pane = frame.findIndex(line => line.includes('Categories (9)'))
       assert.ok(pane >= 0)
-      assert.match(frame[pane]!, /\[Categories \(8\)\].*Rows \(2\)/u)
+      assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(3\)/u)
       if (columns >= 108) assert.match(frame[pane]!, /Details/u, '108 is the three-column edge')
       else assert.doesNotMatch(frame[pane]!, /Details/u, '76..107 stays two-column')
     }
@@ -4776,7 +4790,7 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
     assert.equal(painted.some(line => line.startsWith('Settings ·')), headerRows === 1, 'the header needs two rows')
     assert.equal(painted.some(line => line.startsWith('Scope: ')), grant.meta, 'the diagnostic keeps its floor')
     assert.equal(painted.filter(line => /^─+$/.test(line)).length, grant.rule ? 1 : 0, 'the one rule keeps its floor')
-    assert.equal(painted.some(line => line.includes('Categories (8)')), grant.pane, 'the pane header keeps one content row')
+    assert.equal(painted.some(line => line.includes('Categories (9)')), grant.pane, 'the pane header keeps one content row')
     if (grant.pane) assert.notEqual((painted[contentY] ?? '').trim(), '', 'a granted pane header leaves real content below it')
     assert.match(painted.at(-1) ?? '', /Esc close/u, 'the bar is the physical last row')
     assert.equal(contentY + grant.content, height - 1, 'the granted body ends directly above the bar')
@@ -4888,7 +4902,7 @@ test('pointer and wheel act only on the last-painted body cells', async () => {
   assert.equal(about.copied.length, 1, 'the painted Copy All button is the action')
   const stable = about.view()
 
-  const paneRow = about.rowsPlain().findIndex(line => line.includes('[Categories (8)]'))
+  const paneRow = about.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
   assert.ok(paneRow >= 0)
   press(about, paneRow, 30)
   release(about, paneRow, 30)
@@ -4933,7 +4947,7 @@ test('pointer and wheel act only on the last-painted body cells', async () => {
   const wheelHarness = setup({ columns: 80, rows: 10 })
   await wheelHarness.openHome()
   const frame0 = wheelHarness.view()
-  const wheelPane = wheelHarness.rowsPlain().findIndex(line => line.includes('Categories (8)'))
+  const wheelPane = wheelHarness.rowsPlain().findIndex(line => line.includes('Categories (9)'))
   assert.ok(wheelPane >= 0)
   wheel(wheelHarness, wheelPane, 2, true)
   await wheelHarness.vt.waitForRender()
@@ -5008,13 +5022,13 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
     const h = setup({ columns, rows, doc: { theme: longValue } })
     await h.open('Appearance')
     if (columns >= 76) {
-      const pane = h.rowsPlain().findIndex(line => line.includes('[Categories (8)]'))
+      const pane = h.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
       assert.ok(pane >= 0)
       assert.ok(visibleWidth(h.vt.getViewport()[pane]!) <= columns, `the pane header fits ${columns}`)
     }
     await key(h, '\r') // L0 -> L1
     if (columns >= 76) {
-      const pane = h.rowsPlain().findIndex(line => line.includes('Rows (2)'))
+      const pane = h.rowsPlain().findIndex(line => line.includes('Rows (3)'))
       assert.ok(pane >= 0)
       assert.ok(visibleWidth(h.vt.getViewport()[pane]!) <= columns, `the rows pane header fits ${columns}`)
     }
@@ -5026,7 +5040,7 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
 
   const h = setup({ columns: 120, rows: 24 })
   await h.openHome()
-  let paneRow = h.rowsPlain().findIndex(line => line.includes('[Categories (8)]'))
+  let paneRow = h.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
   assert.ok(paneRow >= 0)
   assert.equal(h.vt.getCellFgRgb(paneRow, 0), hexToRgb(currentPalette.primary), 'the focused rail label uses primary')
   assert.equal(h.vt.getCellFgRgb(paneRow, cellIndexOf(h, paneRow, 'About')), hexToRgb(currentPalette.textDim),
@@ -5264,4 +5278,65 @@ test('a resize that keeps the child grant still fails closed until the new termi
   await account.vt.waitForRender()
   assert.equal(account.hostReads(), accountReads, 'the same-grant Account resize rejects the clipped r before repaint')
   account.dispose()
+})
+
+// ── C2-R0: the LIVE extension settings directory (L6, no faked count) ─────
+//
+// The count is never pre-seeded in the snapshot: a real in-process
+// `SettingsRegistry` (the object the extension service exposes as
+// `runner.extensions.settings`) is registered/unregistered, its invalidation
+// reaches the surface's render path, and the production `/settings` handler
+// reads the live directory on every frame.
+
+test('C2-R0 a live registration appends Extensions and its launcher reaches the existing editor row', async () => {
+  let invalidations = 0
+  let requestRender: () => void = () => {}
+  const registry = new SettingsRegistry(() => { invalidations += 1; requestRender() })
+  const h = setup({ columns: 120, rows: 40, settingsRegistry: registry, pluginPage: true })
+  requestRender = () => h.app.requestRender()
+  const handle = registry.register({
+    id: 'acme.demo-threshold',
+    label: 'Demo threshold',
+    description: 'The demo plugin threshold',
+    currentValue: '3',
+    values: ['1', '3', '5'],
+    order: 10,
+    onChange: () => true,
+  }, 'acme-owner')
+  assert.equal(invalidations, 1, 'the registry invalidation reached the surface render path')
+  await h.vt.waitForRender()
+  await h.openHome()
+  assert.match(h.view(), /Categories \(10\)/u, 'the live directory appends the tenth category')
+  await key(h, '\u001b[F')
+  assert.match(h.view(), /^> Extensions/mu, `End reaches the live category:\n${h.view()}`)
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u)
+  assert.match(h.view(), /Configure extension settings…/u, 'the transition launcher is painted')
+  assert.match(h.view(), /1 setting · 1 contributor/u, 'the summary counts the live rows and owners')
+  assert.match(h.view(), /Existing settings editor/u, 'the transition scope is stated')
+  await key(h, '\r')
+  const legacy = h.view()
+  assert.match(legacy, /Type to search/u, `the existing editor is the physical owner:\n${legacy}`)
+  assert.ok(!legacy.includes('Settings · '), 'the workspace is retired, not stacked underneath')
+  assert.match(legacy, /Demo threshold/u, 'the editor opens on the registered row')
+
+  // The live unregistration is the same chain in reverse: the category and its
+  // launcher disappear, and Esc still has a legal return.
+  await key(h, '\u001b') // legacy -> conversation
+  await h.openHome()
+  assert.match(h.view(), /Categories \(10\)/u)
+  await key(h, '\u001b[F')
+  await key(h, '\r') // Extensions rows
+  handle.dispose()
+  assert.equal(invalidations, 2, 'the unregistration invalidated the surface too')
+  // The gesture that discovers the empty directory never opens the old editor.
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Type to search'), 'no stale launcher opens the editor')
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the rail owns the keyboard again')
+  assert.match(h.view(), /^> Plugins/mu, 'the selected Extensions category fell back to Plugins')
+  assert.match(h.view(), /Categories \(9\)/u, 'the empty directory paints the nine fixed categories')
+  await key(h, '\u001b')
+  assert.ok(h.view().includes('❯'), 'Esc still closes the workspace legally')
+  h.dispose()
 })

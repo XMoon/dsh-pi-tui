@@ -215,16 +215,17 @@ async function key(h: Harness, data: string): Promise<void> {
   await h.vt.waitForRender()
 }
 
-/** Reach the `Other settings` rows level of the real Settings workspace. */
+/** Reach the `Tools` rows level of the real Settings workspace (the Web
+ *  launcher lives there; Visual tools is the first row). */
 async function openOtherRows(h: Harness): Promise<void> {
   h.invoke('settings')
   for (let attempt = 0; attempt < 20 && !h.view().includes('Settings ·'); attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
-  // The workspace opens on the About home: walk the rail to the legacy
-  // launcher category, then enter its Rows level.
-  await selectSettingsCategory(h.vt, 'Other settings')
+  // The workspace opens on the About home: walk the rail to the Tools
+  // category, then enter its Rows level.
+  await selectSettingsCategory(h.vt, 'Tools')
   await key(h, ENTER)
 }
 
@@ -263,7 +264,7 @@ for (const [columns, rows] of SIZES) {
     // description instead, and the key itself always works.
     assert.ok(section.some(line => line.includes('Esc')), `Esc is stated at ${columns}x${rows}:\n${section.join('\n')}`)
     await key(h, ESC)
-    assert.ok(h.view().includes('Settings · Other'),
+    assert.ok(h.view().includes('Settings · Tools'),
       `Esc returns to the Workspace at ${columns}x${rows}`)
     const [narrowest] = [section.find(line => line.includes('Web Search Provider')) ?? '']
     assert.ok(narrowest.length > 0, 'the provider row exists')
@@ -581,7 +582,9 @@ test('the launcher and Web rows explain opt-in billing, defaults and ori_questio
   // a detail line that wraps gets the rail's own cells between the two lines.
   // Assert the contiguous semantic halves instead of a cross-column sentence.
   assert.match(compact(), /Messages search · HTTP fetch/u)
-  assert.match(compact(), /never change them and the defaults call no billed API/u)
+  // The sentence wraps across the rail column: assert its contiguous halves.
+  assert.match(compact(), /never change them and the/u)
+  assert.match(compact(), /defaults call no billed API/u)
   assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /Share Original Question is on by default/u)
   assert.match(compact(), /up to 128 characters of the human question/u)

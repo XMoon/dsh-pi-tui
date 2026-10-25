@@ -1262,7 +1262,7 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     assert.ok(tuiSettings !== undefined, 'the settings section is served over the wire')
 
     await fixture.open()
-    await fixture.selectCategory('Display')
+    await fixture.selectCategory('Conversation')
     await fixture.key('\r') // L0 -> L1
     await fixture.key('\r') // writable L1 -> L2 inline choice
     const initialChoice = fixture.view().replace(/\s+/gu, ' ')

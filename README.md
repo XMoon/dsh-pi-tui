@@ -323,7 +323,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 `Left` 返回一层（在最外层无效）；`Enter` 遵循相同层级，`Esc`/`Backspace` 逐级返回，
 最外层关闭工作区。`Tab`/`Shift+Tab` 不承担导航，底部操作栏始终固定在最后一行。多栏编辑态仍
 保留 `[Details]` 焦点标识；只有标题会占掉唯一内容行时才让位。
-它展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好名称、
+它展示 Appearance / Conversation 的真实事实：主题的 source-qualified 原始值与友好名称、
 Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
 态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取；浏览与选择本身都不写入配置。
 普通配置详情只保留查看：它没有内置复制动作，也没有替代的复制入口。About 的 `c`/`C` 只
@@ -336,8 +336,10 @@ About 的复制入口只留在键盘上：选中一事实按 `c` 复制该事实
 
 `/status` 是 `/settings` 的真实别名：同一 handler、同一初始 About 焦点与同一套读取；无 Session
 时两者都不创建会话、不读统计。`/statusline` 仍是 `/footer` 的别名，不经过 Settings。
-Settings 的一级分类现在是 `About / Models / Account / Appearance / Display / Tools / Plugins / Other settings`；`/settings`
-（以及 `/status`）默认落在 About。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
+Settings 的一级分类是固定的 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal / Tools / Plugins`，
+并且只在扩展设置注册表确实有设置行时才在末尾追加 `Extensions`；`/settings`
+（以及 `/status`）默认落在 About。`Extensions` 的增删与同一 id 重新注册都会先作废旧帧的
+键盘与鼠标授权，重绘完成前只有 `Esc` 还能安全返回。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
 不是连通性测试）与 DeepSeek Account 入口；可查看 provider 事实、在遮蔽输入中写入/清除 API key、
 完成 Add Provider 草稿向导，以及发起 provider-native 登录（页面内持续显示 URL、提示与取消）。
 `Account` 是独立的 DeepSeek Account 页：显示 Host 的登录状态、浏览器授权 URL 与 SSH 隧道提示、
@@ -374,10 +376,13 @@ Host profile（跨会话、跨 Agent，不只是当前 TUI）；关闭只影响�
 transcript 里的图表/SVG 结果仍可正常显示、复制、搜索与导出。Direct 后端会同时核对 Host 注册表
 状态后才显示 `Verified`；Remote 没有注册表读取通道，只如实显示配置已保存，不宣称运行态已生效。
 
-旧的完整设置编辑器仍然可用：`Other settings` → `Open existing settings…`
-会先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
+旧的完整设置编辑器仍然可用：尚未迁移到新工作区的设置在各自所属分类里有一个明确标注
+`Existing settings editor` 的过渡行（`Agent → Agent settings…`、`Appearance → Footer & status line…`、
+`Conversation → More conversation settings…`、`Input & Terminal → Input & terminal settings…`、
+`Extensions → Configure extension settings…`）；激活它才会先关闭工作区、恢复原界面，再打开原有
+编辑器并定位到对应的一项，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
 
-`/settings` 的 `Other settings` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
+`/settings` 的 `Tools` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
 的 Web 段并定位到第一项。段内可切换搜索 Provider（`Messages`，官方默认，或独立计费的
 `DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`），设置 Search API
 结果数（1–50，快选 5/10/20/50）、`Share Original Question`（官方默认为开启；每次新的 Search API
