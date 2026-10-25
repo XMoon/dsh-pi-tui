@@ -606,3 +606,42 @@ test('a generated visual card never paints the projected reference block', async
   assert.ok(!view.includes('visual-v1:'), 'nor the fact machine line')
   app.stop()
 })
+
+test('the machine blocks stay hidden across the design-language size matrix', async () => {
+  // docs/architecture/design-language.md §11.2 frozen matrix: the visual cards
+  // must not leak a machine block at ANY of these widths, and the human values
+  // must stay readable at each one.
+  const fact = chartFactFromArgs({
+    kind: 'bars',
+    title: 'Request latency',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  })
+  const blocks = chartContentBlocks(fact)
+  for (const [width, height] of [[200, 50], [120, 40], [100, 40], [80, 24], [72, 24], [44, 20]] as const) {
+    const vt = new VirtualTerminal(width, height)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { imageTheme: { fallbackColor: text => text } })
+    app.start()
+    startedApps.add(app)
+    app.setTranscriptDetailExpanded(true)
+    const folder = new TranscriptFolder()
+    folder.apply(toolEvents('dsh_pi_tui_chart', {
+      kind: 'bars',
+      title: 'Request latency',
+      unit: 'ms',
+      series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+    }, [
+      blocks[0] as ContentBlock,
+      { type: 'text', text: 'visual-ref-v1:sv1_0123456789abcdef0123' },
+      blocks[1] as ContentBlock,
+    ]) as never)
+    app.setTranscript(folder.messages())
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(!view.includes('visual-ref-v1:'), `${width}x${height}: the reference block must never paint:\n${view}`)
+    assert.ok(!view.includes('visual-v1:'), `${width}x${height}: the fact block must never paint:\n${view}`)
+    assert.ok(view.includes('Request latency'), `${width}x${height}: the chart identity stays readable:\n${view}`)
+    app.stop()
+    disposeStartedApps()
+  }
+})
