@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The model can now declare that specific visuals are meant for the user.** A new
   `present_visual` tool joins the existing `dsh_pi_tui_chart` and `dsh_pi_tui_svg` under the SAME
-  Visual tools switch (On by default): one switch atomically adds or removes all three, and a
-  same-name conflict or failed registration rolls the whole group back. A successful chart/SVG
+  Visual tools switch (On by default): one switch adds or removes all three, and the settled group
+  is all-or-none — a successful On ends up holding all three, a successful Off holds none, and a
+  failed registration rolls back the definitions that transition already added. A successful chart/SVG
   result now also carries a stable, model-visible reference `visual-ref-v1:sv1_…` derived from the
   session, turn, current step's event seq and `callId`; in a later step the model passes 1–8 of
   those references to `present_visual` to publish them explicitly. Publication only accepts

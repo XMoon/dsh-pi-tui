@@ -720,7 +720,6 @@ function presentVisualResultNodes(
     toolName: PRESENT_VISUAL_TOOL_NAME,
     blocks: message.resultBlocks,
     text: flatText,
-    status: message.status,
   })
   return human.text === ''
     ? []

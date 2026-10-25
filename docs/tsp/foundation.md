@@ -460,10 +460,16 @@ Their availability is the DSH Host profile's `pi-tui-visual-tools.enabled`
 volatile Config (schema default On), never a Session, renderer or Client
 capability. It is ONE switch for all three: Off releases the whole group from
 the global Host tool registry, so a later model request neither sees the names
-nor carries their schemas; On restores the original definitions. Registration is
-atomic — a same-name conflict or a failed registration rolls the group back, so
-a half-enabled group can never be observed. `applied` reports the live registry
-identity of all three definitions, never a second enable value. The switch lives
+nor carries their schemas; On restores the original definitions. Group
+consistency is a SETTLED-state guarantee: after the outermost synchronous
+reconciliation drain a successful On holds all three registrations, a successful
+Off holds none, and a failed registration removes the definitions that
+transition already added when its rollback succeeds. The official registry emits
+one `tools/change` notification per registration and has no transactional seam,
+so a synchronous observer can see the running transition's intermediate states;
+those notifications are not transactional, and what the contract forbids is a
+half-enabled group after the drain. `applied` reports the live registry identity
+of all three definitions, never a second enable value. The switch lives
 in the Settings `Tools` category and applies to every Agent on that Host. It
 governs only future model tool availability: already-recorded chart/SVG results,
 their projected references and their publications remain readable, copyable,
@@ -545,7 +551,7 @@ the current switch value.
   rasterizer. Neither derivative is a durable fact: cold replay, search and
   Markdown export read the final result content and the durable call arguments,
   never a blob id, a PNG or a cache.
-- The two tool definitions are Host-plane registrations (explicit `inject` +
+- All three tool definitions are Host-plane registrations (explicit `inject` +
   `ctx.reflect.get`) independent of the renderer, Tern hello, client capability,
   session or resize. Direct and Remote consume the same durable facts; a
   missing `chart`/`image`/`blobs` capability changes only the presentation, not

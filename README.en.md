@@ -549,8 +549,12 @@ Host's `pi-tui-visual-tools.enabled` configuration. That one switch governs THRE
 the generators `dsh_pi_tui_chart` and `dsh_pi_tui_svg`, and the explicit publication tool
 `present_visual`. Turning it Off unregisters all three from that Host's global tool registry, so
 later model requests no longer see them; turning it back On restores the original definitions.
-The three registrations are atomic: a same-name conflict or a failed registration rolls the
-whole group back, so a half-enabled group is never observable. The setting belongs to the whole
+Group consistency is a settled-state guarantee: a successful On ends up holding all three
+registrations, a successful Off holds none, and a failed registration rolls back the definitions
+that transition already added. The official registry publishes one change notification per
+registration and offers no transactional seam, so a synchronous observer can see the running
+transition's intermediate states — but no half-enabled group survives the drain. The setting
+belongs to the whole
 DSH Host profile (across sessions and agents, not just the current TUI). Off affects only future
 tool availability: chart/SVG results already recorded in a transcript, their model-visible
 `visual-ref-v1` references and their historical publications still render, copy, search and

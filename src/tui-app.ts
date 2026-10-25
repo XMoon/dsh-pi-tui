@@ -18143,7 +18143,6 @@ export class TuiApp {
           toolName: message.name,
           blocks: message.resultBlocks,
           text: message.result,
-          status: message.status,
         })
         resultPreview = human.text === '' ? '' : ` — ${preview(human.text, RESULT_PREVIEW_LINES)}`
       } else if (message.name === 'ask_user_question') {
@@ -18738,7 +18737,6 @@ export class TuiApp {
         toolName: message.name,
         blocks: message.resultBlocks,
         text: message.result,
-        status: message.status,
       })
       for (const line of human.text.split('\n')) {
         if (line !== '') card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
@@ -18814,7 +18812,6 @@ export class TuiApp {
         toolName: child.name,
         blocks: child.resultBlocks,
         text: child.result,
-        status: child.status,
       })
       lines.push(...human.text.split('\n'))
     } else {

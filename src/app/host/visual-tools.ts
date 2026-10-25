@@ -19,9 +19,16 @@
  *   the next model request neither sees the tools nor pays their schema tokens;
  * - On registers all three definitions again under their original identity.
  *
- * Registration is atomic: a same-name conflict never leaves a half-enabled
- * group, and a failed re-enable keeps the row reporting `applied: false` through
- * {@link VISUAL_TOOLS_STATUS_SERVICE} (the Direct adapter reads that fact; a
+ * Group consistency is guaranteed for the SETTLED state after the outermost
+ * synchronous reconciliation drain completes: a successful On holds all three
+ * registrations, a successful Off holds none, and a failed registration removes
+ * the definitions this transition already added when its rollback succeeds. The
+ * official registry publishes one `tools/change` notification per registration
+ * and exposes no transactional seam, so a SYNCHRONOUS observer can see the
+ * intermediate states while a transition is running; notifications are not
+ * transactional. What the contract forbids is a half-enabled group AFTER the
+ * drain — that state is what {@link VISUAL_TOOLS_STATUS_SERVICE} reports, so the
+ * Direct adapter never claims a registration the registry does not hold (a
  * Remote Client has no equivalent wire and must not claim runtime success).
  *
  * The result contract follows the revised PR-D D0 decision: no
@@ -579,9 +586,11 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** Register all three definitions atomically in the fixed order; a failure
-   *  rolls back the ones this transaction already registered, so the registry
-   *  never carries a partial group. */
+  /** Register all three definitions in the fixed order; a failure rolls back the
+   *  ones this transition already registered, so the SETTLED group is all-or-none.
+   *  Each `tools.register()` publishes its own `tools/change` synchronously (the
+   *  registry has no batch seam), so a synchronous observer can see the
+   *  intermediate additions of a transition that is still running. */
   const register = (): void => {
     for (const [name] of group()) assertNameFree(tools, name)
     const created: RegisteredVisualTool[] = []
