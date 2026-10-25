@@ -309,6 +309,11 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     still applies through the shared `DisplayState` owner before it persists,
     so its `Value` is the live preset while its `[current]` chip follows the
     stored one. Both keep their existing writer code.
+  - The Host-authority `visual-tools` switch marks `[current]` from the Host
+    profile's CONFIGURED value (`enabled`), never from the live registry
+    registration: whether the registration took effect is the separate `Runtime`
+    fact, so a configured On the Host did not apply is a stated mismatch rather
+    than a moved `[current]` chip.
   - In every case the `Persisted` fact reports the raw stored value (`not set`
     when the readable document carries none, an explicit unknown when it cannot
     be read), and a normalizer's fallback is never presented as the stored

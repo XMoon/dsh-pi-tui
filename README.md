@@ -363,8 +363,10 @@ L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选
 详情把两类事实分开显示：以运行态为主的行（`Icon style`、`Transcript display`、`Progress updates`、
 `Response style`）用 `Value` 呈现已生效的运行值、另用 `Persisted` 呈现存储值；主事实是持久值的
 只有 `Configured theme` 与 Tools 下的 `Visual tools`，它们因此额外画出 `Runtime` 行（如当前 palette）。
-`[current]` 是另一件事：
-`Configured theme` 与 `Transcript display` 按持久偏好标记，其余按实时值标记。两类行都会显示
+`[current]` 是另一件事：`Configured theme` 与 `Transcript display` 按持久偏好标记，`Icon style`、
+`Progress updates`、`Response style` 按实时值标记；Tools 下的 `Visual tools` 单独一类，它的候选项
+`[current]` 反映 **Host 配置值**（`state.enabled`），运行态注册是否生效另由 `Runtime` 行表达。
+两类行都会显示
 `Saving…` / `Verified` / `Not saved · 原因` / `Commit accepted · verification unavailable` /
 `Outcome unknown · 原因`，只有写入完成、backend `ready` 且权威回读一致才显示 Verified；
 被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，出现第三个值、已是目标值或无法读取
