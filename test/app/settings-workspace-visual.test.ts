@@ -126,6 +126,13 @@ interface HarnessOptions {
   getFailureAfterWrite?: boolean
   /** The USER-layer footer definitions the persistence guard must preserve. */
   footerCustomItemsRaw?: unknown
+  /**
+   * Hold the NEXT document `replace` open until `releaseFirstReplace()` runs.
+   * This is what makes a SECOND writer really QUEUE behind the first through
+   * the production `serializeTuiSettingsMutation` instead of running after it
+   * settled.
+   */
+  holdFirstReplace?: boolean
   /** The profile-wide Visual tools state the ConfigPort reads. The default is
    *  the shipped state: enabled from the schema default, both tools registered. */
   visualTools?: VisualToolsState
@@ -287,6 +294,10 @@ interface Harness {
   readonly hostReads: () => number
   /** Move the LIVE backend readiness the ConfigPort answers. */
   readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
+  /** Resolves once the held first document write really started. */
+  readonly firstWriteStarted: () => Promise<void>
+  /** Release the held first document write. */
+  readonly releaseFirstReplace: () => void
   readonly dispose: () => void
 }
 
@@ -331,6 +342,16 @@ function setup(options: HarnessOptions = {}): Harness {
   /** Whether a replace already ran: the configured re-read failure only applies
    *  to the readback of a COMPLETED write. */
   let wroteOnce = false
+  /** The first held `replace` dispatch (the concurrency witness releases it). */
+  let releaseFirstReplace: (() => void) | undefined
+  let firstReplaceStarted: (() => void) | undefined
+  const firstReplaceRunning = options.holdFirstReplace === true
+    ? new Promise<void>(resolve => { firstReplaceStarted = resolve })
+    : undefined
+  let heldReplaceOpen = options.holdFirstReplace === true
+  let firstReplaceGate: Promise<void> | undefined = options.holdFirstReplace === true
+    ? new Promise<void>(resolve => { releaseFirstReplace = resolve })
+    : undefined
   // The TWO live prompt-state objects the runner owns and the R1 writers mutate.
   // They are the SAME objects the registered SystemPrompt providers read.
   const progressUpdatesState = { mode: 'milestones' as const } as { mode: 'off' | 'milestones' | 'frequent' }
@@ -450,6 +471,18 @@ function setup(options: HarnessOptions = {}): Harness {
             replacements += 1
             replaced.push(next)
             wroteOnce = true
+            if (heldReplaceOpen && firstReplaceGate !== undefined) {
+              // The FIRST document write stays in flight; anything after it runs
+              // only once this resolves.
+              heldReplaceOpen = false
+              firstReplaceStarted?.()
+              const gate = firstReplaceGate
+              firstReplaceGate = undefined
+              return gate.then(() => {
+                if (options.applyReplace === undefined) Object.assign(doc, next)
+                else return options.applyReplace(next)
+              })
+            }
             if (options.applyReplace === undefined) Object.assign(doc, next)
             else return options.applyReplace(next)
           },
@@ -632,6 +665,10 @@ function setup(options: HarnessOptions = {}): Harness {
       for (const run of list) run()
     },
     setReadiness: (next: 'ready' | 'stale' | 'unavailable') => { readiness = next },
+    /** Resolves once the first held document write really started. */
+    firstWriteStarted: () => firstReplaceRunning ?? Promise.resolve(),
+    /** Release the held first document write. */
+    releaseFirstReplace: () => { releaseFirstReplace?.() },
     dispose,
   }
 }
@@ -6449,5 +6486,73 @@ test('R1-17 a real Registry revision change keeps an open new-field choice and r
   assert.equal(h.replacements(), 1, 'the preserved choice dispatches exactly one write')
   assert.equal(h.doc.responseStyle, 'concise')
   handle.dispose()
+  h.dispose()
+})
+
+test('R1-13b a held Settings commit and a queued LEGACY write share the ONE production writer', async () => {
+  // The production system admits ONE Settings workspace lease and ONE pending
+  // write per workspace, so two overlapping Settings commits are not reachable.
+  // What IS reachable is a Settings commit overlapping another settings-document
+  // writer — and every such writer goes through the SAME
+  // `serializeTuiSettingsMutation` + `withUserFooterCustomItems` pair. This case
+  // holds the DELIVERED Settings commit inside its queued task and submits the
+  // pre-existing complete editor's own `Submit while busy` write behind it.
+  const userItems = [{ schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }]
+  const trust = { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 }
+  const keybindings = { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } }
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { theme: 'dark', iconStyle: 'emoji', busyEnter: 'queue' },
+    footerCustomItemsRaw: userItems,
+    holdFirstReplace: true,
+  })
+  Object.assign(h.doc, { footerCommand: trust, keybindings })
+
+  // 1. The Settings workspace commits Icon style emoji -> symbols; its document
+  //    write is held INSIDE the queue.
+  await h.open('Appearance')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // Icon style
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  await key(h, '\x1b[B') // emoji -> symbols
+  await key(h, '\r')
+  await h.firstWriteStarted()
+  assert.equal(h.replacements(), 1, 'the Settings write started and is held inside the queue')
+
+  // 2. While it is held, the real handoff opens the existing complete editor on
+  //    the remaining Conversation row, and THAT editor's own write is queued.
+  await key(h, '\x1b') // Detail -> Rows
+  await key(h, '\x1b') // Rows -> Categories
+  await h.vt.waitForRender()
+  await walkToConversation(h)
+  await key(h, '\r') // L0 -> L1
+  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // the launcher's handoff
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Type to search/u, `the legacy editor owns the screen:\n${h.view()}`)
+  assert.match(h.view(), />\s*Submit while busy/u, 'it landed on the remaining row')
+  await key(h, '\r') // queue -> steer: the legacy writer
+  await settle(h, 8)
+  assert.equal(h.replacements(), 1, 'the legacy write is QUEUED behind the held Settings write')
+
+  // 3. Release the first write: both land, and the queued one carries the FIRST
+  //    write's result plus the production USER-layer footer projection.
+  h.releaseFirstReplace()
+  await settle(h, 12)
+  assert.equal(h.replacements(), 2, 'both delivered writes reached the document writer')
+  const document = h.doc as unknown as Record<string, unknown>
+  assert.equal(document.iconStyle, 'symbols', 'the Settings field landed')
+  assert.equal(document.busyEnter, 'steer', 'the queued legacy field landed too')
+  assert.equal(document.theme, 'dark', 'no unrelated field was rewritten')
+  assert.deepEqual(document.footerCustomItems, userItems,
+    'the production writer projected the detached USER footer definitions')
+  assert.deepEqual(document.footerCommand, trust, 'the trusted footer command survived verbatim')
+  assert.deepEqual(document.keybindings, keybindings, 'the keybinding pass-through survived verbatim')
+  const queued = h.replaced()[1]!
+  assert.equal(queued.iconStyle, 'symbols',
+    'the QUEUED write read the document AFTER the first write — never the open-time snapshot')
+  assert.equal(queued.busyEnter, 'steer')
   h.dispose()
 })
