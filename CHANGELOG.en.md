@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Verified` / `Not saved` / `Commit accepted` / `Outcome unknown` while showing the live value
   and the stored document value separately.
 
+- **Type `/image` or `/attach` anywhere in the body to attach a local image or file in place.**
+  There is no need to start a new line or clear what you already wrote: typing `/ima` or `/att`
+  mid-body (or at the start of a later line) opens the inline dropdown, where
+  `Insert local image` and `Attach local file or image` are the local-attachment actions — a
+  same-named skill is a separate row, never the same choice. Accepting one expands it to
+  `/image ` in place and continues into the existing local path completion. Accepting a
+  **directory** only keeps browsing; accepting a **file** reads and stages it and replaces just
+  the accepted `/image <path>` fragment with the canonical placeholder (for example
+  `[image #1 (1920×1080)]`), leaving the surrounding prose, other lines and existing attachment
+  placeholders untouched, with the cursor right after it so you can keep writing. The draft is
+  **never** submitted, queued or steered by this — every confirm gesture (Tab, Enter, a mouse
+  click) only accepts the candidate, and sending still needs your own send key. The accept adds
+  exactly one real undoable edit, so a single Undo restores the editable `/image <path>` text.
+  If the draft changed, the session switched or the editor seat was replaced while the file was
+  being read, the stale result never overwrites the newer draft and never leaves an unreferenced
+  placeholder. The leading `/image PATH` and `/attach PATH` commands keep their existing
+  semantics on the first line, and a plain `/image` in prose is still never sent to the model.
+  The experimental TSP renderer does not use this inline dropdown and is unchanged.
+
 - **Ctrl+V pastes and `/attach` / `/image` now commit into the editor that is really mounted.**
   Two quick Ctrl+V presses are read and committed one after the other, in the order they were
   triggered: the second clipboard read only starts once the first one has been read AND written,

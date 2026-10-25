@@ -771,6 +771,23 @@ Attachment completion and intake are Client-local:
   The Client cwd is read at call time and stays independent of the Session/Host
   cwd. `@` whole-tree search remains Host-scoped. Multi-word/quoted arguments do
   not complete.
+- `/attach` and `/image` are ALSO inline attachment sites (Image UX PR5): the
+  FIRST logical line's leading command token stays the leading command seat
+  above, while a declared attachment command token at any other cursor position
+  (mid-body prose, or a later line's leading token) opens the same inline
+  `/name` dropdown with two fixed actions (`Insert local image`, `Attach local
+  file or image`) and then the SAME Client-local path candidates. Accepting a
+  DIRECTORY only continues that path seat. Accepting a FILE replaces exactly
+  the accepted inline fragment with the canonical placeholder through one real
+  undoable edit of the live draft and never submits, queues or steers it;
+  `weird/image`, URLs, `/usr/bin` and ordinary paths are never such a site. The
+  intake is the same one `/attach <path>` uses (one read, the existing draft
+  stores, no second draft copy); the inline route differs only in its commit
+  target. Every confirm gesture (Tab, Enter, mouse click and the single-candidate
+  Tab shortcut) is accept-only there because those rows bind no leading-command
+  prefix, and the acceptance is honored only while the accepted request's strict
+  snapshot, the accepting row's own identity, the live editor document/cursor,
+  the seat and the surface generation all still match.
 - `/attach <path>` is the canonical Client intake. Images go through the image
   pipeline; other regular files stage as metadata-only drafts and are streamed
   through `ctx.attachments.saveFileStream()` only when an agent-bound submission
