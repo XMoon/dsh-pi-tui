@@ -32,9 +32,12 @@
  * @module scripts/tern-gui-drive
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename } from 'node:path'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { index, visiblePoint } from './tern-pane-geometry.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '..')
@@ -73,6 +76,60 @@ async function createHarness({ ternBin, root, display }) {
   const configDir = join(root, 'config')
   mkdirSync(configDir, { recursive: true })
   mkdirSync(join(root, 'shots'), { recursive: true })
+  // The run's OWN session daemon. MEASURED: a window does not start one — it
+  // attaches to the daemon already running for this user, so without this every
+  // `tern split` lands on the OPERATOR'S window (`@focused` is the pane they
+  // work in). The socket's directory must be 0700, or the daemon refuses to
+  // start ("the socket needs a private directory").
+  // MEASURED: a Unix socket path must stay under SUN_LEN (~107 bytes), and a
+  // run directory under `temp/` easily exceeds it. The daemon's own directory
+  // therefore lives in the system temp dir, keyed by this run's basename, so two
+  // concurrent runs still get different sockets.
+  const daemonDir = join(tmpdir(), `tern-gui-daemon-${basename(root)}`)
+  mkdirSync(daemonDir, { recursive: true })
+  chmodSync(daemonDir, 0o700)
+  const daemonSocket = join(daemonDir, 'daemon.sock')
+  // The window's env: the run's own config AND daemon, so nothing it does can
+  // reach another session's panes.
+  const windowEnv = {
+    ...process.env,
+    DISPLAY: display,
+    TERN_CONFIG_DIR: configDir,
+    TERN_DAEMON_SOCKET: daemonSocket,
+  }
+  const daemon = spawn(ternBin, ['daemon', '--socket', daemonSocket], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: root,
+    env: { ...process.env, DISPLAY: display, TERN_CONFIG_DIR: configDir },
+  })
+  daemon.stdout.on('data', (d) => log(`daemon.out ${String(d).trim()}`))
+  daemon.stderr.on('data', (d) => log(`daemon.err ${String(d).trim()}`))
+  const stopDaemon = () => {
+    daemon.kill('SIGKILL')
+    rmSync(daemonDir, { recursive: true, force: true })
+  }
+  process.on('exit', stopDaemon)
+  // The window itself: spawned HERE, after its private daemon exists, so it
+  // attaches to THIS run's daemon instead of the operator's.
+  // The client writes its own PNGs into a directory of ITS choice and reuses the
+  // file names across runs, so a later run would silently overwrite an earlier
+  // run's picture while that run's ledger still names it. Each run therefore gets
+  // its own client-side shot directory.
+  const windowShots = join(root, 'client-shots')
+  mkdirSync(windowShots, { recursive: true })
+  const window = spawn(ternBin, ['--control', socket, '--out', windowShots], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: root,
+    env: windowEnv,
+  })
+  const stopWindow = () => window.kill('SIGKILL')
+  process.on('exit', stopWindow)
+  window.stdout.on('data', (d) => log(`window.out ${String(d).trim()}`))
+  window.stderr.on('data', (d) => log(`window.err ${String(d).trim()}`))
+  // Every control command talks to the window; the CLI commands a flow issues
+  // (`tern split`) need the SAME daemon env, or they resolve `@focused` against
+  // whichever daemon they happen to find.
+  const cliEnv = { ...windowEnv, DISPLAY: display }
   const log = (line) => appendFileSync(join(root, 'run.log'), `${line}\n`)
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -141,20 +198,11 @@ async function createHarness({ ternBin, root, display }) {
     return out.filter(Boolean).join('')
   }
   /** Index the client's tree the way the headless driver's `index` does. */
-  const snapshot = () => {
-    const tree = ctl('tree').tree ?? []
-    const nodes = []
-    const chains = new Map()
-    const walk = (node, chain) => {
-      const id = node.id ?? `n${nodes.length}`
-      nodes.push(node)
-      chains.set(id, chain)
-      const next = [...chain, node]
-      for (const child of node.children ?? []) walk(child, next)
-    }
-    for (const root of tree) walk(root, [])
-    return { nodes, chains }
-  }
+  // The shared index: chains keyed by the NODE OBJECT, exactly as the headless
+  // driver and every oracle expect. A per-driver chain shape makes
+  // `visiblePoint(chains, node)` find no chain, treat the node as having no sized
+  // ancestor, and report a clipped node as clickable.
+  const snapshot = () => index(ctl('tree').tree ?? [])
 
   // -------------------------------------------------------------- real input
   const key = async (name, settleMs = 500) => {
@@ -189,9 +237,12 @@ async function createHarness({ ternBin, root, display }) {
    * geometry is in the tree, and a node's own centre can fall in a clipped
    * region. The GUI's own `pick` command answers what is really at a point.
    */
-  const click = async (chains, node, settleMs = 900) => {
-    const rect = node.rect ?? [0, 0, 0, 0]
-    const point = { x: rect[0] + rect[2] / 2, y: rect[1] + rect[3] / 2 }
+  const click = async (chains, node, settleMs = 900, minSpan = 4) => {
+    // The node's own centre can fall outside the fragment the client shows (a
+    // short pane pushes the dock's editor past the pane's bottom edge), so click
+    // the centre of the SURVIVING fragment and report when nothing survives.
+    const point = visiblePoint(chains, node, minSpan)
+    if (point === undefined) return false
     await clickAt(point.x, point.y, settleMs)
     return true
   }
@@ -225,9 +276,11 @@ async function createHarness({ ternBin, root, display }) {
     const reply = shot(id)
     const produced = reply.png ?? reply.path
     if (produced !== undefined && produced !== null) {
-      // The client reports the path RELATIVE to its own working directory, so
-      // it is resolved against the repository root before it is read.
-      const absolute = existsSync(produced) ? produced : join(repo, produced)
+      // The client reports the path it wrote; resolve it against this run's own
+      // client-shot directory first, then the repository root (older builds).
+      const absolute = existsSync(produced) ? produced
+        : existsSync(join(windowShots, basename(produced))) ? join(windowShots, basename(produced))
+        : join(repo, produced)
       if (existsSync(absolute)) {
         mkdirSync(join(root, 'shots'), { recursive: true })
         copyFileSync(absolute, join(root, 'shots', `${id}.png`))
@@ -250,7 +303,7 @@ async function createHarness({ ternBin, root, display }) {
     writeFileSync(launcher, `#!/bin/bash
 export TERN_PANE_DIR=${JSON.stringify(root)}
 export TERN_CONFIG_DIR=${JSON.stringify(configDir)}
-export TERN_DAEMON_SOCKET=${JSON.stringify(join(root, 'daemon.sock'))}
+export TERN_DAEMON_SOCKET=${JSON.stringify(daemonSocket)}
 export DISPLAY=${JSON.stringify(display)}
 cd ${JSON.stringify(repo)} || exit 1
 exec node --import tsx/esm ${JSON.stringify(subject)} 2>> ${JSON.stringify(join(root, 'subject.err'))}
@@ -279,11 +332,47 @@ exec node --import tsx/esm ${JSON.stringify(subject)} 2>> ${JSON.stringify(join(
     return failed.length === 0 ? 0 : 1
   }
 
+  /**
+   * Split the focused pane, the ONLY way that reaches THIS window: the command
+   * runs inside the window's own pane (where `TERN_PANE` names it) against the
+   * run's own daemon. MEASURED: `tern split` from outside always resolves
+   * `@focused` against whatever daemon the caller's env names, which is how a
+   * run ends up splitting the operator's window.
+   */
+  async function splitPane(direction = 'down', keepOpen = 'sleep 180') {
+    const before = ctl('state')?.focused?.id
+    const script = join(root, `split-${direction}.sh`)
+    writeFileSync(script, `#!/bin/bash
+export TERN_DAEMON_SOCKET=${JSON.stringify(daemonSocket)}
+exec ${JSON.stringify(ternBin)} split @focused ${direction} -- ${keepOpen}
+`, { mode: 0o755 })
+    ctl('run', script)
+    await sleep(2500)
+    const panes = ctl('state')?.panes ?? []
+    // MEASURED: after the split the focus stays on the NEW pane, so a subject
+    // launched next would be typed into the placeholder. Focus the pane the
+    // probe must own: the one whose id is NOT the new pane's sentinel id.
+    if (panes.length === 2) {
+      const keep = panes.find((pane) => pane.id === before ?? pane.id) ?? panes[0]
+      const focusScript = join(root, 'focus-pane.sh')
+      writeFileSync(focusScript, `#!/bin/bash
+export TERN_DAEMON_SOCKET=${JSON.stringify(daemonSocket)}
+exec ${JSON.stringify(ternBin)} focus ${keep.id}
+`, { mode: 0o755 })
+      ctl('run', focusScript)
+      await sleep(800)
+    }
+    return ctl('state')?.panes ?? []
+  }
+
   return {
     ctl, send, log, sleep, root, results, repo, check, measure, finish,
     snapshot, vis, texts, has, classNodes, descendantsText,
     key, resize, click, clickAt, hover, shot, capture, launch,
+    splitPane, cliEnv,
     quit: () => { ctlOnce('quit') },
+    stopWindow,
+    stopDaemon,
   }
 }
 
@@ -322,20 +411,7 @@ const socket = join(root, 'gui.sock')
 const configDir = join(root, 'config')
 mkdirSync(configDir, { recursive: true })
 
-// The GUI window: an ISOLATED config dir and daemon socket, so the user's
-// real Tern profile is never read or written.
-const window = spawn(ternBin, ['--control', socket], {
-  stdio: ['ignore', 'pipe', 'pipe'],
-  env: {
-    ...process.env,
-    DISPLAY: display,
-    TERN_CONFIG_DIR: configDir,
-    TERN_DAEMON_SOCKET: join(root, 'daemon.sock'),
-  },
-})
 const windowLog = (line) => appendFileSync(join(root, 'run.log'), `${line}\n`)
-window.stdout.on('data', (d) => windowLog(`window.out ${String(d).trim()}`))
-window.stderr.on('data', (d) => windowLog(`window.err ${String(d).trim()}`))
 
 const harness = await createHarness({ ternBin, root, display })
 harness.log(`TERN ${ternBin} :: ${ternVersion}`)
@@ -360,7 +436,8 @@ for (let i = 0; i < 60 && !ready; i += 1) {
 }
 if (!ready) {
   console.error(`the GUI window's control socket never answered (${root})`)
-  window.kill('SIGKILL')
+  harness.stopWindow()
+  harness.stopDaemon()
   process.exit(2)
 }
 harness.log('the GUI window answered the control socket')
@@ -377,6 +454,7 @@ try {
   harness.check('the flow ran to completion', false, String(error?.message ?? error))
 } finally {
   harness.quit()
-  window.kill('SIGKILL')
+  harness.stopWindow()
+  harness.stopDaemon()
 }
 process.exit(harness.finish({ tern: ternVersion, flow: flowPath, mode: 'GUI', display }))

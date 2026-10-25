@@ -147,6 +147,7 @@ Unchanged from the headless lane, and it is what makes the subject's record the
 | `snapshot()` | the client's real node tree, indexed (`{nodes, chains}`) |
 | `vis` / `texts` / `has` / `classNodes` / `descendantsText` | tree queries |
 | `key` / `resize` / `click` / `clickAt` / `hover` | real input |
+| `splitPane(direction)` | splits the focused pane through the client's OWN `tern split`, run **inside** the window's pane against the run's private daemon; returns the client's pane list |
 | `capture(name, note)` | the node tree + a PNG + the layout under one id |
 | `check(label, ok, detail)` / `measure(label, detail)` | an assertion / a measurement |
 | `finish(extra)` | the ledger, and the process exit code |
@@ -185,6 +186,11 @@ These are the ones that make the lane worth its extra setup.
   CHROME (`mermaid - graph`, `Source`, `Copy`, `Open`) and the graphic's
   element, but **not** the text inside it. The PNG is the evidence for the
   drawn content; the tree is the evidence for the chrome and the box.
+- **THE SNAPSHOT MUST USE THE SHARED INDEX.** `snapshot()` returns
+  `index(ctl('tree').tree ?? [])` — chains keyed by the NODE OBJECT, exactly as
+  the headless driver returns them. A driver that keys chains by an id STRING
+  makes `visiblePoint(chains, node)` find no chain, treat the node as having no
+  sized ancestor, and report a CLIPPED node as clickable.
 - **A CLICK ONLY LANDS ON WHAT IS IN VIEW.** A surface that scrolls (a
   transcript, a long list) lays out its off-screen controls with real boxes,
   and a click on one lands on whatever covers it. The flow must address a
@@ -239,6 +245,34 @@ These are the ones that make the lane worth its extra setup.
 13. **AN SVG IS NOT THEMED BY THE CLIENT.** A drawn SVG keeps its OWN colours:
     its hardcoded background stays in the client's dark theme. Only the
     client's own widgets (`chart`, `picker`, `tool`) follow the theme.
+14. **A WINDOW DOES NOT START A SESSION DAEMON.** `TERN_CONFIG_DIR` isolates
+    the profile, but the window still attaches to the daemon already running
+    for the user — so a `tern split` issued from a flow lands on the
+    OPERATOR'S window (`@focused` is the pane they are working in) while the
+    run's own control endpoint still reports one pane. MEASURED: `tern split
+    @focused down` with no launch argument reports success and creates
+    nothing; with a launch command it works, but only against the daemon whose
+    pane it runs in. The driver therefore starts a PRIVATE daemon per run,
+    points the window and every `ctl` at it, and runs `tern split` from INSIDE
+    the window's pane (`splitPane`).
+15. **THE DAEMON'S SOCKET NEEDS A PRIVATE, SHORT PATH.** Its directory must be
+    `0700` (`the socket needs a private directory`), and the socket path must
+    stay under `SUN_LEN` (~107 bytes) — a run directory under `temp/` is long
+    enough to trip `path must be shorter than SUN_LEN`. The driver keeps it in
+    the system temp dir instead.
+16. **SPLIT AN EMPTY PANE, THEN LAUNCH.** Splitting a pane that already runs a
+    live TSP subject silently produces no second pane; splitting an empty one
+    works. The driver's `splitPane` is therefore called BEFORE `launch`.
+17. **THE SHOT DIRECTORY IS SHARED ACROSS RUNS BY DEFAULT.** The client writes
+    its PNG into its own tree and reuses the file names, so a later run
+    overwrites an earlier run's picture while that run's ledger still names
+    it. The driver passes `--out <run>/client-shots` so every run copies from
+    its own directory.
+18. **A GUI `click` NEEDS THE VISIBILITY ORACLE.** The driver's `click` uses
+    `visiblePoint` from `tern-pane-geometry.mjs`: a node's own centre can fall
+    outside the fragment the client shows (a short pane pushes the dock's
+    editor past the pane's bottom edge), and clicking there lands on whatever
+    covers it.
 
 ## Scripts
 
