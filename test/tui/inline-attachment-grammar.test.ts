@@ -218,3 +218,39 @@ test('the read path never inherits the editor replacement spacing', () => {
   // editor text for the NEXT seat, and directories are never read).
   assert.equal(candidatePath('   sub/'), 'sub/')
 })
+
+test('a quoted token does not let its own `/name` text become a second command', () => {
+  // The quoted run is PATH CONTENT: the outer `/image` stays the only command.
+  const unclosed = classify('look /image "my /attach file.png')
+  assert.equal(unclosed.kind, 'path-argument')
+  if (unclosed.kind !== 'path-argument') return
+  assert.equal(unclosed.command, 'image', 'the outer command owns the quoted argument')
+  assert.equal(unclosed.argument, '"my /attach file.png')
+  // The legacy first-line seat behaves the same way.
+  const leading = classify('/image "my /attach file.png')
+  assert.equal(leading.kind, 'path-argument')
+  if (leading.kind !== 'path-argument') return
+  assert.equal(leading.command, 'image')
+  assert.equal(leading.leading, true)
+  // A CLOSED quoted run is skipped, and a real command after it still wins.
+  const closed = classify('look /image "a /attach b" /attach c')
+  assert.equal(closed.kind, 'path-argument')
+  if (closed.kind !== 'path-argument') return
+  assert.equal(closed.command, 'attach', 'a command outside the quotes is still a command')
+  assert.equal(closed.argument, 'c')
+})
+
+test('a candidate closing quote is consumed with the token it closes', () => {
+  const line = 'look /image "sho" now'
+  const cursorCol = line.indexOf('sho') + 3
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), COMMANDS)
+  assert.ok(seat !== undefined)
+  const applied = applyInlineAttachmentPath(line, seat, cursorCol, 0, '"shot.png"')
+  // No stranded quote: value and the user's closing quote become ONE token.
+  assert.equal(applied.line, 'look /image "shot.png" now')
+  // The reported fragment is exactly what the canonical placeholder replaces.
+  assert.equal(applied.line.slice(applied.span.start, applied.span.end), '/image "shot.png"')
+  // An UNQUOTED candidate never eats a following quote (it did not open it).
+  const plain = applyInlineAttachmentPath('look /image sho" now', seat, 'look /image sho'.length, 0, 'shot.png')
+  assert.equal(plain.line, 'look /image shot.png" now', 'an unquoted value leaves the quote alone')
+})

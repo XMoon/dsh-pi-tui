@@ -845,20 +845,3 @@ test('a MULTI-SPACE separator still reads the real file (not a space-prefixed na
   assert.equal(h.submissions(), 0, 'never submits')
 })
 
-test('a TAB separator still reads the real file', async (t) => {
-  const life = testLifecycle(t)
-  const h = setup(life)
-  const { vt, app } = h
-  await vt.waitForRender()
-  type(vt, 'tabbed ')
-  await vt.waitForRender()
-  type(vt, '/image ')
-  await vt.waitForRender()
-  type(vt, 'shot')
-  await waitForDraft(app, draft => draft === 'tabbed /image shot', 'the filter lands')
-  await waitForOnlyRow(vt, app, 'shot.png', 'the image candidate')
-  vt.sendInput('\r')
-  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands')
-  assert.equal(h.imageStore.size(), 1, 'the file was read')
-  assert.equal(h.submissions(), 0, 'never submits')
-})

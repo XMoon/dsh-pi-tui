@@ -155,9 +155,18 @@ export function applyInlineAttachmentPath(
   value: string,
 ): { line: string; cursorCol: number; span: InlineAttachmentSpan } {
   const start = seat.range.start
+  // A QUOTED candidate value ends with the closing quote it completes. When the
+  // cursor sits right before the user's own closing quote (`/image "sho|"`),
+  // that quote belongs to the token the value just closed: consuming it keeps
+  // the editor text, the replaced range and the final placeholder range
+  // agreeing (the same rule the vendored coupled path apply uses). Leaving it
+  // behind would strand a `"` after the canonical placeholder.
+  const afterCursor = line.slice(cursorCol)
+  const consumeClosingQuote = value.endsWith('"') && afterCursor.startsWith('"')
+  const suffix = consumeClosingQuote ? afterCursor.slice(1) : afterCursor
   const end = start + value.length
   return {
-    line: `${line.slice(0, start)}${value}${line.slice(cursorCol)}`,
+    line: `${line.slice(0, start)}${value}${suffix}`,
     cursorCol: end,
     span: { line: cursorLine, start: seat.commandStart, end },
   }

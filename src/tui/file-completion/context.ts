@@ -212,6 +212,21 @@ export function pathArgumentSeat(
 ): PathArgumentSeat | undefined {
   let last: { command: string; commandStart: number; argumentStart: number | undefined } | undefined
   for (let index = 0; index < textBeforeCursor.length; index += 1) {
+    // A `/name` INSIDE a quoted token is PATH CONTENT, never a command: in
+    // `look /image "my /attach file.png` the only command is `/image`, and the
+    // quoted text (including the unclosed quote the user is still typing in)
+    // must not be re-interpreted as a second attachment command. Skip the whole
+    // quoted run so its `/` characters are never candidates.
+    if (textBeforeCursor[index] === '"') {
+      const close = textBeforeCursor.indexOf('"', index + 1)
+      if (close === -1) {
+        // Unclosed: the rest of the line is inside this token, so no later
+        // `/name` can be a command seat.
+        break
+      }
+      index = close
+      continue
+    }
     if (textBeforeCursor[index] !== '/') continue
     const before = index === 0 ? '' : textBeforeCursor[index - 1] ?? ''
     if (before !== '' && !isWhitespaceChar(before)) continue
