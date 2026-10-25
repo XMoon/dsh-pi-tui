@@ -34,12 +34,12 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
+import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
 import {
-  apply as applyVisualTools,
   CHART_TOOL_NAME,
   PRESENT_VISUAL_TOOL_NAME,
   SVG_TOOL_NAME,
-} from '../../src/app/host/visual-tools.ts'
+} from '../../src/domain/visual/tools.ts'
 import {
   collectPublishedVisuals,
   collectVisualSources,

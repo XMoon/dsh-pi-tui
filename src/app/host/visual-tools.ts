@@ -85,7 +85,11 @@ export const name = 'pi-tui-visual-tools'
  */
 export const inject = ['tools', 'agents', 'sessionQuery', 'sessionProjections']
 
-export { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME }
+// The three tool names are owned by `domain/visual/tools.ts` (whose vocabulary
+// lives with the transcript's readable projection). This row does NOT re-export
+// them: the public `./visual-tools` declaration region must stay exactly
+// `app/host/visual-tools.d.ts`, and every consumer imports the names from the
+// domain owner directly.
 
 /**
  * The row's profile-wide availability switch. `enabled` is a volatile field:
