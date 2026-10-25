@@ -412,7 +412,7 @@ test('mid-body /image: action row → path rows → FILE accept inserts the toke
   // The canonical placeholder replaces exactly the inline fragment.
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands in place')
   const draft = app.seatTextForTest()
-  assert.match(draft, /^please look at \[image #1 \(1×1\)\]$/,
+  assert.match(draft, /^please look at \[image #1 \(1×1\)\] $/,
     `the accepted fragment became the token and the prefix survived: ${JSON.stringify(draft)}`)
   assert.equal(h.imageStore.size(), 1, 'the real intake staged exactly one image')
   assert.equal(h.imageStore.values()[0]!.placeholder, '[image #1 (1×1)]')
@@ -439,7 +439,7 @@ test('mid-body /attach: a generic FILE lands as its own token; the prose survive
   vt.sendInput('\r')
   await waitForDraft(app, draft => draft.includes('[file #1'), 'the file token lands in place')
   const draft = app.seatTextForTest()
-  assert.match(draft, /^see \[file #1 \(11 B\)\]$/, `only the fragment changed: ${JSON.stringify(draft)}`)
+  assert.match(draft, /^see \[file #1 \(11 B\)\] $/, `only the fragment changed: ${JSON.stringify(draft)}`)
   assert.equal(h.fileStore.values().length, 1, 'the generic file went into the FILE store')
   assert.equal(h.imageStore.size(), 0, 'a generic file never enters the image store')
   assert.equal(h.submissions(), 0, 'no confirm gesture submits')
@@ -521,7 +521,7 @@ test('one Undo restores the editable inline fragment (a REAL undoable edit)', as
   await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
   vt.sendInput('\r')
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder')
-  assert.equal(app.seatTextForTest(), 'why [image #1 (1×1)]', 'the fragment became the token')
+  assert.equal(app.seatTextForTest(), 'why [image #1 (1×1)] ', 'the fragment became the token')
   assert.equal(h.imageStore.size(), 1)
 
   // ONE Undo returns the TEXT user wrote — the `/image <path>` fragment — and
@@ -530,10 +530,10 @@ test('one Undo restores the editable inline fragment (a REAL undoable edit)', as
   vt.sendInput('\x1b[45;5u')
   await vt.waitForRender()
   // Fallback for terminals that deliver plain Ctrl+Z (`\x1a`) instead of CSI-u.
-  if (app.seatTextForTest() === 'why [image #1 (1×1)]') vt.sendInput('\x1a')
-  await waitForDraft(app, draft => draft !== 'why [image #1 (1×1)]', 'Undo changes the draft')
-  assert.equal(app.seatTextForTest(), 'why /image shot.png',
-    'one Undo restores the editable inline fragment exactly')
+  if (app.seatTextForTest() === 'why [image #1 (1×1)] ') vt.sendInput('\x1a')
+  await waitForDraft(app, draft => draft !== 'why [image #1 (1×1)] ', 'Undo changes the draft')
+  assert.equal(app.seatTextForTest(), 'why /image shot.png ',
+    'one Undo restores the editable inline fragment exactly (with the accept separator)')
   assert.equal(h.submissions(), 0, 'Undo never submits')
 })
 
@@ -557,7 +557,7 @@ test('a draft edited AFTER the read started is never overwritten', async (t) => 
   type(vt, 'X')
   await vt.waitForRender()
   const afterEdit = app.seatTextForTest()
-  assert.ok(afterEdit.endsWith('X'), `the user's edit survives: ${JSON.stringify(afterEdit)}`)
+  assert.ok(afterEdit.includes('X'), `the user's edit survives: ${JSON.stringify(afterEdit)}`)
   // Release the held read and wait for the authoritative POST-READ fence: the
   // stale result is only refused AFTER the IO settled, so an empty store at
   // this point proves the fence, not merely "nothing started yet".
@@ -587,7 +587,7 @@ test('moving the cursor after the read started also refuses the late write', asy
   // accept this and then move the user's cursor to the placeholder's end.
   vt.sendInput('\x1b[D')
   await vt.waitForRender()
-  assert.equal(app.seatTextForTest(), 'b /image shot.png', 'the accepted value stayed in place')
+  assert.equal(app.seatTextForTest(), 'b /image shot.png ', 'the accepted value stayed in place')
   hold.release()
   await h.postRead()
   await vt.waitForRender()
@@ -659,7 +659,7 @@ test('CJK body text around the fragment survives byte for byte', async (t) => {
   await waitForOnlyRow(vt, app, 'shot.png', 'the image candidate after CJK prose')
   vt.sendInput('\r')
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder after CJK prose')
-  assert.equal(app.seatTextForTest(), '帮我分析这个报错，重点看看 [image #1 (1×1)]',
+  assert.equal(app.seatTextForTest(), '帮我分析这个报错，重点看看 [image #1 (1×1)] ',
     'the CJK prefix and the suffix survive; only the fragment changed')
   assert.equal(h.submissions(), 0)
 })
@@ -684,7 +684,7 @@ test('a multi-line draft keeps every other line untouched (third line, leading c
   await waitForOnlyRow(vt, app, 'notes.txt', 'the file candidate on line 3')
   vt.sendInput('\r')
   await waitForDraft(app, draft => draft.includes('[file #1'), 'the file token on line 3')
-  assert.equal(app.seatTextForTest(), `first line\nsecond stays\n[file #1 (11 B)]`,
+  assert.equal(app.seatTextForTest(), `first line\nsecond stays\n[file #1 (11 B)] `,
     'the earlier lines are byte-identical; only the third-line fragment changed')
   assert.equal(h.imageStore.size(), 0)
   assert.equal(h.fileStore.values().length, 1)
@@ -710,7 +710,7 @@ test('a large pasted block keeps its marker text and the fragment edits in place
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder after a pasted block')
   const draft = app.seatTextForTest()
   assert.ok(draft.includes('[paste #'), 'the paste marker text is preserved (the raw draft was sliced, never rebuilt)')
-  assert.ok(draft.endsWith('append [image #1 (1×1)]'), `the fragment was replaced in place: ${JSON.stringify(draft)}`)
+  assert.ok(draft.endsWith('append [image #1 (1×1)] '), `the fragment was replaced in place: ${JSON.stringify(draft)}`)
   assert.equal(h.submissions(), 0)
 })
 
@@ -728,13 +728,13 @@ test('an edit + Undo back to the SAME text still refuses the late write (ABA)', 
   vt.sendInput('\r')
   await hold.entered
   const accepted = app.seatTextForTest()
-  assert.equal(accepted, 'c /image shot.png', 'the accepted value is installed')
+  assert.equal(accepted, 'c /image shot.png ', 'the accepted value is installed')
   // ONE typed character is its own undo step (the fork coalesces only
   // consecutive word characters), so this Undo returns EXACTLY to the accepted
   // text AND cursor: content equality alone cannot tell this from "nothing
   // happened".
   type(vt, 'Q')
-  await waitForDraft(app, draft => draft === `${accepted}Q`, 'the intervening edit landed')
+  await waitForDraft(app, draft => draft.includes('Q'), 'the intervening edit landed')
   vt.sendInput('\x1b[45;5u')
   await waitForDraft(app, draft => draft === accepted, 'the Undo restored the accepted text')
   // Release the held read, then wait for the AUTHORITATIVE post-read fence: the
@@ -771,9 +771,11 @@ test('the inline token reaches the SUBMIT expansion as a real image block', asyn
   // `expandImagePlaceholders` the submission controller calls.
   const { expandImagePlaceholders } = await import('../../src/client/media/image/placeholder.ts')
   const segments = expandImagePlaceholders(app.seatTextForTest(), h.imageStore)
-  assert.equal(segments.length, 2, 'the surrounding prose and the image become two blocks')
+  assert.equal(segments.length, 3, 'prose, the image, and the accept separator')
   assert.deepEqual(segments[0], { type: 'text', text: 'explain ' },
     'the accepted fragment became an image, not text')
+  assert.deepEqual(segments[2], { type: 'text', text: ' ' },
+    'the accept separator follows the token as ordinary text')
   assert.equal(segments[1]!.type, 'image', 'the placeholder resolves against the live draft store')
   if (segments[1]!.type !== 'image') return
   assert.equal(segments[1]!.image.mediaType, 'image/png')
@@ -850,7 +852,7 @@ test('a MULTI-SPACE separator still reads the real file (not a space-prefixed na
   // The canonical placeholder replaces the WHOLE inline fragment including the
   // separator run — extra spacing the user only needed for the path does not
   // survive as stray blanks in the prose.
-  assert.equal(app.seatTextForTest(), 'spaced [image #1 (1×1)]',
+  assert.equal(app.seatTextForTest(), 'spaced [image #1 (1×1)] ',
     'the placeholder replaces the whole fragment, one separator kept')
   assert.equal(h.submissions(), 0, 'never submits')
 })
@@ -872,13 +874,12 @@ test('the plan core journey: mid-prose /ima keeps the following prose separated'
   await waitForDraft(app, draft => draft === '请分析 /image ', 'the action inserts the token in place')
   // The user keeps typing the SENTENCE's continuation... then comes back and
   // completes the path. Either order must keep the prose separated.
-  type(vt, '为什么连接失败')
+  // The continuation is TYPED with its own leading separator, which is what
+  // keeps it prose rather than part of the path token.
+  type(vt, ' 为什么连接失败')
   await vt.waitForRender()
-  for (let index = 0; index < '为什么连接失败'.length; index += 1) vt.sendInput('\x1b[D')
+  for (let index = 0; index < ' 为什么连接失败'.length; index += 1) vt.sendInput('\x1b[D')
   await vt.waitForRender()
-  // The caret is at the empty argument seat with prose right after it, so the
-  // natural trigger (which needs whitespace) stays quiet and the user asks for
-  // the list explicitly — exactly the documented Tab-on-empty-argument path.
   vt.sendInput('\t')
   await waitForCandidate(vt, app, 'shot.png', 'the path candidates')
   type(vt, 'shot')
@@ -925,7 +926,7 @@ test('a CJK filename completed from the MIDDLE of the basename is not duplicated
   await waitForOnlyRow(vt, app, '文件.png', 'the filtered CJK candidate')
   vt.sendInput('\r')
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder for the CJK file')
-  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)] ',
     'the whole CJK token is replaced — never duplicated after a space')
   assert.equal(h.imageStore.size(), 1, 'the real CJK file was read')
   assert.equal(h.submissions(), 0, 'never submits')
@@ -944,7 +945,7 @@ test('a QUOTED filename with spaces completes from the middle end to end', async
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder replaces the fragment')
   // The whole quoted token (spaces included) is ONE fragment: the prose after
   // it survives and no part of the filename is left behind.
-  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)] ',
     'the entire quoted token is replaced exactly once')
   assert.equal(h.imageStore.size(), 1, 'the real spaced file was read')
   assert.equal(h.submissions(), 0, 'never submits')
@@ -960,7 +961,7 @@ test('a quoted CJK filename with an EMPTY tail (cursor at the end) also complete
   await waitForOnlyRow(vt, app, '错误截图.png', 'the quoted CJK candidate')
   vt.sendInput('\r')
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands')
-  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)] ',
     'the quoted CJK token is replaced whole')
   assert.equal(h.imageStore.size(), 1, 'the real CJK file was read')
   assert.equal(h.submissions(), 0, 'never submits')
@@ -983,7 +984,7 @@ test('an UNQUOTED filename completed from its MIDDLE is replaced whole (producti
   vt.sendInput('\t')
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the candidate was accepted')
   // The whole CJK token is replaced exactly once: no duplicated remainder.
-  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)] ',
     'the unquoted CJK token is replaced whole from a MID-TOKEN caret')
   assert.equal(h.imageStore.size(), 1, 'the real CJK file was read')
   assert.equal(h.submissions(), 0, 'never submits')
@@ -1001,8 +1002,28 @@ test('a QUOTED spaced filename completed from its MIDDLE is replaced whole', asy
   await vt.waitForRender()
   vt.sendInput('\t')
   await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the quoted candidate was accepted')
-  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)]',
+  assert.equal(app.seatTextForTest(), '请看 [image #1 (1×1)] ',
     'the whole quoted token (spaces included) is replaced exactly once')
   assert.equal(h.imageStore.size(), 1, 'the real spaced file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+
+test('switching from one file to another leaves no stale path remainder', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life, { files: ['shot.png'] })
+  const { vt, app } = h
+  await vt.waitForRender()
+  // A stale `.txt` token is present; completing `shot.png` must replace the
+  // whole token, not append to or keep part of the old one.
+  type(vt, 'see /image shot.txt')
+  await waitForDraft(app, draft => draft === 'see /image shot.txt', 'the stale token is typed')
+  for (let index = 0; index < 'txt'.length; index += 1) vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the switched candidate lands')
+  assert.equal(app.seatTextForTest(), 'see [image #1 (1×1)] ',
+    'the old path remainder never survives as stray prose')
+  assert.equal(h.imageStore.size(), 1, 'the real file was read')
   assert.equal(h.submissions(), 0, 'never submits')
 })

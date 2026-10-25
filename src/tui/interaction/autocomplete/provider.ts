@@ -828,7 +828,7 @@ export class MentionProvider implements AutocompleteProvider {
         },
       )
       if (seat.kind === 'path-argument' && !seat.leading && seat.command === item.command) {
-        const applied = applyInlineAttachmentPath(currentLine, seat, cursorCol, cursorLine, item.value)
+        const applied = applyInlineAttachmentPath(currentLine, seat, cursorCol, cursorLine, item.value, !item.directory)
         const newLines = [...lines]
         newLines[cursorLine] = applied.line
         this.acceptInlineAttachment({
