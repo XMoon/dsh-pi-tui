@@ -35,7 +35,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename } from 'node:path'
-import { dirname, extname, join, resolve } from 'node:path'
+import { dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { index, visiblePoint } from './tern-pane-geometry.mjs'
 
@@ -89,6 +89,10 @@ async function createHarness({ ternBin, root, display }) {
   // other's daemon.
   const daemonDir = mkdtempSync(join(tmpdir(), 'tern-gui-daemon-'))
   chmodSync(daemonDir, 0o700)
+  // The directory exists NOW, so its removal is registered NOW: a signal that
+  // arrives before the daemon handlers below would otherwise leave it behind.
+  const removeDaemonDir = () => rmSync(daemonDir, { recursive: true, force: true })
+  process.on('exit', removeDaemonDir)
   const daemonSocket = join(daemonDir, 'daemon.sock')
   // The window's env: the run's own config AND daemon, so nothing it does can
   // reach another session's panes.
@@ -107,7 +111,7 @@ async function createHarness({ ternBin, root, display }) {
   daemon.stderr.on('data', (d) => log(`daemon.err ${String(d).trim()}`))
   const stopDaemon = () => {
     daemon.kill('SIGKILL')
-    rmSync(daemonDir, { recursive: true, force: true })
+    removeDaemonDir()
   }
   process.on('exit', stopDaemon)
   // The window itself: spawned HERE, after its private daemon exists, so it
@@ -125,6 +129,24 @@ async function createHarness({ ternBin, root, display }) {
   })
   const stopWindow = () => window.kill('SIGKILL')
   process.on('exit', stopWindow)
+  // MEASURED: a process that receives SIGTERM without a handler dies immediately
+  // and NEVER runs its `exit` hooks, so the private daemon, the window and the
+  // socket directory would outlive a cancelled run. Both signals get ONE
+  // idempotent teardown that then re-raises the signal, so the exit status still
+  // reflects the interruption instead of being masked by a clean exit.
+  let stopped = false
+  const stopAll = (signal) => {
+    if (stopped) return
+    stopped = true
+    try { stopWindow() } catch { /* the window is already gone */ }
+    try { stopDaemon() } catch { /* the daemon is already gone */ }
+    // Re-raise only AFTER the handlers are gone: with a handler still installed,
+    // `process.kill(self, signal)` just re-enters it and the process lives on.
+    process.removeAllListeners(signal)
+    process.kill(process.pid, signal)
+  }
+  process.on('SIGINT', () => stopAll('SIGINT'))
+  process.on('SIGTERM', () => stopAll('SIGTERM'))
   window.stdout.on('data', (d) => log(`window.out ${String(d).trim()}`))
   window.stderr.on('data', (d) => log(`window.err ${String(d).trim()}`))
   // Every control command talks to the window; the CLI commands a flow issues
@@ -247,13 +269,22 @@ async function createHarness({ ternBin, root, display }) {
     await clickAt(point.x, point.y, settleMs)
     return true
   }
-  /** Move the REAL pointer over a node WITHOUT clicking: the hover the
-   *  headless control channel cannot deliver. The GUI's `move X Y` moves the
-   *  real pointer and the client's own `stats.pointer` follows it. */
-  const hover = async (chains, node, settleMs = 700) => {
-    const rect = node.rect ?? [0, 0, 0, 0]
-    const x = Math.round(rect[0] + rect[2] / 2)
-    const y = Math.round(rect[1] + rect[3] / 2)
+  /**
+   * Move the REAL pointer over a node WITHOUT clicking: the hover the headless
+   * control channel cannot deliver. The GUI's `move X Y` moves the real pointer
+   * and the client's own `stats.pointer` follows it.
+   *
+   * The pointer goes to the centre of the fragment the client SHOWS, through the
+   * same oracle `click` uses: a node's own centre can fall in a clipped-away
+   * part, and `stats.pointer` would still report the move, so `moved: true`
+   * alone never proved the pointer was over the target. Returns `undefined` when
+   * nothing of the node survives — that is not a hover.
+   */
+  const hover = async (chains, node, settleMs = 700, minSpan = 4) => {
+    const point = visiblePoint(chains, node, minSpan)
+    if (point === undefined) return undefined
+    const x = Math.round(point.x)
+    const y = Math.round(point.y)
     send('move', x, y)
     await sleep(settleMs)
     const pointer = ctl('stats').pointer ?? []
@@ -266,9 +297,16 @@ async function createHarness({ ternBin, root, display }) {
   /**
    * Capture the node tree, the PNG and the layout under one id.
    *
-   * The GUI's `shot` writes the PNG into the CLIENT's own directory
-   * (`target/shots/tern/live/<id>.png`), NOT into the run directory, so the
-   * file is COPIED here: a run's evidence must not live outside the run.
+   * The client writes its PNG into the directory the WINDOW was started with
+   * (`<run>/client-shots`), NOT into the run directory, so the file is COPIED
+   * here: a run's evidence must not live outside the run.
+   *
+   * A capture is EVIDENCE. When the client acknowledges a `shot` but no PNG can
+   * be found in THIS run's directory, the run has no picture to show, and
+   * silently returning an id would let a flow pass on evidence that does not
+   * exist. It fails instead. Only this run's own client-shot directory is
+   * accepted: falling back to a shared location would make the picture's origin
+   * unknowable and could copy a stale file from an earlier run.
    */
   function capture(name, note = '') {
     step += 1
@@ -276,18 +314,29 @@ async function createHarness({ ternBin, root, display }) {
     writeFileSync(join(root, `${id}.tree.json`), JSON.stringify(ctl('tree'), null, 1))
     const reply = shot(id)
     const produced = reply.png ?? reply.path
-    if (produced !== undefined && produced !== null) {
-      // The client reports the path it wrote; resolve it against this run's own
-      // client-shot directory first, then the repository root (older builds).
-      const absolute = existsSync(produced) ? produced
-        : existsSync(join(windowShots, basename(produced))) ? join(windowShots, basename(produced))
-        : join(repo, produced)
-      if (existsSync(absolute)) {
-        mkdirSync(join(root, 'shots'), { recursive: true })
-        copyFileSync(absolute, join(root, 'shots', `${id}.png`))
-      }
+    if (typeof produced !== 'string' || produced === '') {
+      log(`SHOT-FAIL ${id} :: ${note} :: the client reported no png path`)
+      throw new Error(`capture ${id}: the client reported no PNG path for the shot`)
     }
-    log(`SHOT ${id} :: ${note} :: elements=${reply.elements} :: png=${produced ?? 'none'}`)
+    // Accept the reported path only when it IS this run's own file. MEASURED:
+    // the client nests its shots (`<out>/live/<id>.png`), so a file anywhere
+    // UNDER this run's client-shot directory is this run's; a relative path is
+    // resolved against that directory, never against the driver's working
+    // directory (where a same-named stale file may sit).
+    const reported = resolve(produced)
+    const underOwnDir = reported.startsWith(`${resolve(windowShots)}${sep}`)
+    const own = join(windowShots, basename(produced))
+    const absolute = existsSync(reported) && underOwnDir
+      ? reported
+      : existsSync(own) ? own : undefined
+    if (absolute === undefined) {
+      log(`SHOT-FAIL ${id} :: ${note} :: no PNG in ${windowShots} (client said ${produced})`)
+      throw new Error(`capture ${id}: the client acknowledged the shot but wrote no PNG into `
+        + `${windowShots} (reported: ${produced})`)
+    }
+    mkdirSync(join(root, 'shots'), { recursive: true })
+    copyFileSync(absolute, join(root, 'shots', `${id}.png`))
+    log(`SHOT ${id} :: ${note} :: elements=${reply.elements} :: png=${absolute}`)
     return id
   }
 

@@ -287,11 +287,24 @@ These are the ones that make the lane worth its extra setup.
     overwrites an earlier run's picture while that run's ledger still names
     it. The driver passes `--out <run>/client-shots` so every run copies from
     its own directory.
-19. **A GUI `click` NEEDS THE VISIBILITY ORACLE.** The driver's `click` uses
+19. **A GUI `click` AND `hover` NEED THE VISIBILITY ORACLE.** The driver's `click` uses
     `visiblePoint` from `tern-pane-geometry.mjs`: a node's own centre can fall
     outside the fragment the client shows (a short pane pushes the dock's
     editor past the pane's bottom edge), and clicking there lands on whatever
-    covers it.
+    covers it. `hover` uses the SAME oracle and returns `undefined` for a node
+    that survives nothing: `stats.pointer` echoes any coordinate it was given, so
+    `moved: true` never proved the pointer was over the target.
+20. **A CAPTURE WITHOUT ITS PNG IS NOT A CAPTURE.** `capture()` throws when the
+    client acknowledges the `shot` but no PNG lands in THIS run's
+    `<run>/client-shots`. Silently returning an id would let a flow pass on
+    evidence that does not exist, and falling back to a shared directory would
+    make the picture's origin unknowable (a same-named stale file can sit there).
+21. **`exit` HOOKS DO NOT RUN ON A DEFAULT SIGNAL EXIT.** A process killed with
+    `SIGTERM` never runs its `process.on('exit')` hooks, so the private daemon,
+    the window and the socket directory outlive a cancelled run. The driver
+    installs ONE idempotent `SIGINT`/`SIGTERM` teardown and then removes the
+    handlers before re-raising the signal — with a handler still installed,
+    `process.kill(self, signal)` simply re-enters it and the process lives on.
 
 ## Scripts
 

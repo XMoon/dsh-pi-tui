@@ -87,8 +87,8 @@ export default async function (h) {
   const hoverTarget = hoverSnap.nodes.find((node) => node.tag === 'button')
   if (hoverTarget !== undefined) {
     const moved = await h.hover(hoverSnap.chains, hoverTarget)
-    h.check('the REAL pointer moves to the node it was sent to', moved.moved === true,
-      JSON.stringify(moved))
+    h.check('the REAL pointer moves to the node it was sent to', moved?.moved === true,
+      JSON.stringify(moved ?? null))
   }
 
   // The client has a real accessibility tree: what a screen reader reads.
