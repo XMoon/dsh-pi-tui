@@ -467,10 +467,14 @@ before a write.
 An identity beyond the remaining candidate capacity stays unconfirmable. Only
 buttons and candidates that are really painted can be clicked. A confirmed change is stored through the existing
 serialized whole-document write path and then re-read from the authority: the
-detail keeps the two facts apart: an apply-first row shows the value that took
-effect as `Value` and the stored preference as `Persisted`, while a
-persisted-primary row (`Configured theme`, `Transcript display`) also carries an
-explicit `Runtime` row (e.g. the current palette). Both kinds state `Saving…`, `Verified`,
+detail keeps the two facts apart: a runtime-primary row (`Icon style`,
+`Transcript display`, `Progress updates`, `Response style`) shows the value that
+took effect as `Value` and the stored preference as `Persisted`, while
+`Configured theme` and the `Visual tools` switch — the only rows whose primary
+fact IS the persisted value — also carry an explicit `Runtime` row (e.g. the
+current palette). `[current]` is a separate decision: `Configured theme` and
+`Transcript display` mark it from the persisted preference, every other row from
+the live value. Both kinds state `Saving…`, `Verified`,
 `Not saved · <reason>`, `Commit accepted · verification unavailable` or
 `Outcome unknown · <reason>` — only a completed write whose authoritative
 re-read agrees is called Verified; a rejected write re-reads the authority first
