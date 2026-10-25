@@ -287,13 +287,16 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   contract keeps their differences instead of normalizing them:
   - `icon-style`, `progress-updates` and `response-style` are APPLY-FIRST: the
     live owner changes immediately, the document write follows, and a failed
-    persistence never rolls the runtime back. Their Detail therefore keeps two
-    separately named facts — the `Runtime` value that already took effect and
+    persistence never rolls the runtime back. Their Detail keeps two separately
+    named facts — the value that already took effect as the primary `Value`, and
     the `Persisted` stored value — and their `[current]` candidate chip follows
-    the LIVE value. While such a commit is pending, the Runtime fact already
-    shows the applied value (the projection is re-read when the owner changes,
-    not at settlement); the `Persisted` fact keeps reporting the stored value
-    until an authoritative re-read agrees.
+    the LIVE value. The explicit `Runtime` label exists only on a
+    PERSISTED-PRIMARY row (`theme`, `display-preset`), whose `Value` is the
+    stored fact; it is never painted on the apply-first rows. While such a
+    commit is pending, that primary `Value` already shows the applied value (the
+    projection is re-read when the owner changes, not at settlement), and the
+    `Persisted` fact keeps reporting the stored value until an authoritative
+    re-read agrees.
   - `theme` and `display-preset` keep their pre-existing semantics unchanged.
     The theme is a Host-persisted preference: a non-`ready` backend refuses the
     commit BEFORE any runtime apply, and its `[current]` chip follows the
