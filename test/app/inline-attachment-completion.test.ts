@@ -845,3 +845,66 @@ test('a MULTI-SPACE separator still reads the real file (not a space-prefixed na
   assert.equal(h.submissions(), 0, 'never submits')
 })
 
+
+test('the plan core journey: mid-prose /ima keeps the following prose separated', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  // The frozen plan's central journey: the command is typed in the MIDDLE of a
+  // sentence that already has text after it.
+  // Type up to the token first (the real journey: the caret is at the end of
+  // what has been typed so far), then continue the sentence afterwards.
+  type(vt, '请分析 /ima')
+  await vt.waitForRender()
+  await waitForViewport(vt, 'Insert local image', 'the inline action row mid-prose')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft === '请分析 /image ', 'the action inserts the token in place')
+  // The user keeps typing the SENTENCE's continuation... then comes back and
+  // completes the path. Either order must keep the prose separated.
+  type(vt, '为什么连接失败')
+  await vt.waitForRender()
+  for (let index = 0; index < '为什么连接失败'.length; index += 1) vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  // The caret is at the empty argument seat with prose right after it, so the
+  // natural trigger (which needs whitespace) stays quiet and the user asks for
+  // the list explicitly — exactly the documented Tab-on-empty-argument path.
+  vt.sendInput('\t')
+  await waitForCandidate(vt, app, 'shot.png', 'the path candidates')
+  type(vt, 'shot')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the filtered image candidate mid-prose')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands mid-prose')
+  // The plan's expected end state exactly: the fragment became the token and
+  // the following prose kept its own separator.
+  assert.equal(app.seatTextForTest(), '请分析 [image #1 (1×1)] 为什么连接失败',
+    'the placeholder replaces the fragment and the following CJK prose keeps its separator')
+  assert.equal(h.imageStore.size(), 1, 'the real file was read')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('completing INSIDE a quoted filename consumes the rest of that token', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  const { applyInlineAttachmentPath } = await import('../../src/tui/interaction/autocomplete/inline-attachment.ts')
+  const { pathArgumentSeat } = await import('../../src/tui/file-completion/context.ts')
+  const { FILE_ARGUMENT_COMMANDS } = await import('../../src/domain/file-completion/path-argument-commands.ts')
+  await vt.waitForRender()
+  // The cursor sits INSIDE the filename (`"sho|t"`), so the remainder `t"` is
+  // still part of the token; the prose after the closing quote is preserved.
+  const line = '请看 /image "shot" 为什么失败'
+  const cursorCol = line.indexOf('"shot') + 4
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), FILE_ARGUMENT_COMMANDS, 0)
+  assert.ok(seat !== undefined, 'the quoted argument is a path seat')
+  const applied = applyInlineAttachmentPath(line, seat, cursorCol, 0, '"shot.png"')
+  assert.equal(applied.line, '请看 /image "shot.png" 为什么失败',
+    'the rest of the filename and its quote are consumed, the prose survives')
+  // And the whole chain reaches the draft store through the real UI.
+  type(vt, '请看 /image "sho')
+  await vt.waitForRender()
+  await waitForCandidate(vt, app, 'shot.png', 'the quoted path candidate')
+  type(vt, 't" 为什么失败')
+  await vt.waitForRender()
+  assert.equal(h.imageStore.size(), 0, 'typing alone reads nothing')
+})

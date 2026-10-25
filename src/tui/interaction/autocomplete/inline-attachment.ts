@@ -93,6 +93,35 @@ export function isInlineAttachmentPath(
 }
 
 /**
+ * How much of the text AFTER the cursor still belongs to the attachment token
+ * being completed. Completion only knows what is left of the cursor, so the
+ * remainder of the same token — a half-typed filename, its closing quote, or
+ * the rest of a path segment — must be consumed too; otherwise it is glued to
+ * the accepted value and the prose suffix loses its separation.
+ *
+ * The token ends at whitespace, at a quote, or at any character a path name
+ * cannot contain. Everything from there on is PRESERVED PROSE.
+ * @param afterCursor - the raw line text after the cursor.
+ * @returns the token remainder to consume and the prose suffix to preserve.
+ */
+export function splitTokenRemainder(afterCursor: string): { consumed: string; suffix: string } {
+  let index = 0
+  while (index < afterCursor.length) {
+    const char = afterCursor[index]!
+    if (char === '"') {
+      index += 1
+      break
+    }
+    if (/\s/.test(char)) break
+    // A path NAME cannot continue through a non-ASCII character: CJK prose that
+    // follows the cursor is the user's text, never the rest of the filename.
+    if (!/[A-Za-z0-9._/\-]/.test(char)) break
+    index += 1
+  }
+  return { consumed: afterCursor.slice(0, index), suffix: afterCursor.slice(index) }
+}
+
+/**
  * The accepted ACTION replacement: replace the `/` + query span with
  * `/name ` (exactly one separator; an existing separator after the cursor is
  * kept, never doubled) and place the cursor right after the separator, which
@@ -110,9 +139,14 @@ export function applyInlineAttachmentAction(
 ): { line: string; cursorCol: number } {
   const before = line.slice(0, slashStart)
   const after = line.slice(cursorCol)
-  const firstAfter = after[0]
-  const hasSeparator = firstAfter !== undefined && /\s/.test(firstAfter)
-  const newLine = hasSeparator ? `${before}/${name}${after}` : `${before}/${name} ${after}`
+  // The rest of the QUERY token (`ge` of a half-typed `/image`) is part of what
+  // this accept replaces, never prose.
+  const remainder = splitTokenRemainder(after)
+  // An existing separator already opens the argument seat; otherwise insert
+  // exactly one. Either way the preserved prose keeps its own spacing.
+  const hasSeparator = remainder.consumed === '' && after[0] !== undefined && /\s/.test(after[0]!)
+  const rest = hasSeparator ? after : remainder.suffix
+  const newLine = hasSeparator ? `${before}/${name}${rest}` : `${before}/${name} ${rest}`
   return { line: newLine, cursorCol: before.length + 1 + name.length + 1 }
 }
 
@@ -155,18 +189,19 @@ export function applyInlineAttachmentPath(
   value: string,
 ): { line: string; cursorCol: number; span: InlineAttachmentSpan } {
   const start = seat.range.start
-  // A QUOTED candidate value ends with the closing quote it completes. When the
-  // cursor sits right before the user's own closing quote (`/image "sho|"`),
-  // that quote belongs to the token the value just closed: consuming it keeps
-  // the editor text, the replaced range and the final placeholder range
-  // agreeing (the same rule the vendored coupled path apply uses). Leaving it
-  // behind would strand a `"` after the canonical placeholder.
-  const afterCursor = line.slice(cursorCol)
-  const consumeClosingQuote = value.endsWith('"') && afterCursor.startsWith('"')
-  const suffix = consumeClosingQuote ? afterCursor.slice(1) : afterCursor
+  // The remainder of the token being completed (`t"` when the cursor sits
+  // inside `"shot|t"`, or just a closing quote) belongs to the replaced
+  // fragment; the prose after it is preserved verbatim. This is ONE boundary
+  // rule shared with the action step, never a per-shape special case.
+  const { suffix } = splitTokenRemainder(line.slice(cursorCol))
+  // When the accepted value ENDS the fragment and prose continues right after
+  // the cursor, the separator that introduced the argument still has to keep
+  // the placeholder and the prose apart (`/image |为什么` must not become
+  // `shot.png为什么`). The separator is re-emitted once, never doubled.
+  const trailing = suffix !== '' && !/^\s/.test(suffix) ? ' ' : ''
   const end = start + value.length
   return {
-    line: `${line.slice(0, start)}${value}${suffix}`,
+    line: `${line.slice(0, start)}${value}${trailing}${suffix}`,
     cursorCol: end,
     span: { line: cursorLine, start: seat.commandStart, end },
   }
