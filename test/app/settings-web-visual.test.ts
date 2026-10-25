@@ -161,7 +161,7 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
     gitAttributionState: { mode: 'off' },
     setFocusMode: () => {},
     setNotificationMethod: () => {},
-    setNotificationMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
     setTerminalProgressMode: () => {},
     setSessionApprovalPolicy: () => 'applied',
     currentApprovalOverride: () => undefined,

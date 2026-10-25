@@ -161,7 +161,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
-    setNotificationMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},

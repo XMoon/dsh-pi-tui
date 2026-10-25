@@ -178,7 +178,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     setDisplayPreset: () => ({ kind: 'applied' as const, preset: 'full' }),
     focusEnabled: () => false,
     setFocusMode: () => {},
-    setNotificationMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},

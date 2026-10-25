@@ -645,7 +645,7 @@ function setupSettings() {
     progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
-    setNotificationMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},

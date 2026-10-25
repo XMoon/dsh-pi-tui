@@ -662,6 +662,12 @@ export interface TuiCommandRunner {
    * 'osc777' | 'bell') to the runtime controller (the /settings panel
    * write; the panel persists the raw string through the config port). */
   setNotificationMethod(method: string): void
+  /** The completion-notification mode the ONE controller currently applies.
+   *  Read-only: the Settings workspace's live fact is a pull of this owner,
+   *  never a second copy of the policy. */
+  currentNotificationMode(): import('./domain/notification/settings.ts').NotificationMode
+  /** The delivery method that controller currently applies. */
+  currentNotificationMethod(): import('./domain/notification/settings.ts').NotificationMethod
   /** Apply the terminal-progress protocol selection ('off' | '9;4' | '7501' |
    * the dual '9;4+7501' default) to the mounted surface (the /settings panel
    * write; the panel persists the raw string through the config port).

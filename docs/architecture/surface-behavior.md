@@ -273,18 +273,51 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   Terminal`, `Tools`, and the conditional `Extensions`) keep their three-level
   browse (L0 categories, L1 rows, L2 detail). `About`, `Models`, `Account` and
   `Plugins` remain direct content pages.
-- Eight configuration rows are writable, in three writer kinds that are never
+- Sixteen configuration rows are writable, in three writer kinds that are never
   conflated: the configured theme, the transcript display preset, the icon style,
-  the mid-turn progress-updates cadence and the response style are persisted
-  through the ONE serialized TUI settings document; the profile-wide `Visual
-  tools` switch is the Host profile's revision-checked form section; transcript
-  detail (`Ctrl+O`) and thinking detail (`Alt+T`) are Client-local RUNTIME-ONLY
-  disclosure states with no document field at all, so their Detail states
-  `not applicable — runtime-only` and their `Verified` claims only the live
-  runtime fact. Browsing never writes, and the configuration rows expose no copy
-  verb at all.
-- The five document-backed rows do NOT share one apply/persist order, and the
+  the mid-turn progress-updates cadence, the response style, Git attribution,
+  Home/End keys, Mouse wheel lines, Notifications, Notification method and
+  Terminal progress are persisted through the ONE serialized TUI settings
+  document; the profile-wide `Visual tools` switch is the Host profile's
+  revision-checked form section; transcript detail (`Ctrl+O`) and thinking detail
+  (`Alt+T`) are Client-local RUNTIME-ONLY disclosure states with no document
+  field at all, so their Detail states `not applicable — runtime-only` and their
+  `Verified` claims only the live runtime fact. `Submit while busy` and
+  `Fullscreen` are the two PERSIST-FIRST document rows (see below). Browsing
+  never writes, and the configuration rows expose no copy verb at all.
+- The document-backed rows do NOT share one apply/persist order, and the
   contract keeps their differences instead of normalizing them:
+  - `Submit while busy` and `Fullscreen` are PERSIST-FIRST: the stored document
+    is the authority the row reports as its primary `Value` and as its
+    `[current]` chip. A missing/illegal raw value is stated exactly (`not set`,
+    `invalid stored value: <raw>`) and never replaced by the consumer's
+    fallback; the `Runtime` half names the effect the next read of that document
+    will have (`Next busy Enter: …`; the paused transcript mode plus the
+    post-close apply). A non-ready/unreadable document refuses the write and
+    changes nothing, and only a completed write whose fresh same-field read
+    agrees is `Verified`.
+  - `Fullscreen` never swaps the screen during the commit. The verified target
+    is a transient per-open intent: after the workspace closes through the
+    user's own exit, and only while the re-read document still carries exactly
+    that value and the app is still idle (no Job/workspace lease, no
+    Question/Approval/Save owner, same return screen), the restored transcript
+    surface receives ONE physical switch with the preference persistence
+    skipped. A Legacy hand-off, a forced teardown, a newer blocking owner or any
+    unverified outcome switches nothing; the stored preference then applies at
+    the next TUI mount.
+  - `Git attribution`, `Home/End keys`, `Mouse wheel lines`, `Notifications`,
+    `Notification method` and `Terminal progress` are APPLY-FIRST like
+    `icon-style`/`progress-updates`/`response-style`, each driving its ONE
+    existing owner: the shared `gitAttributionState` the registered
+    `tui:git-attribution` SystemPrompt section reads, the keymap bindings the
+    fullscreen viewport really resolves, the NEXT alt-screen mount option, the
+    one completion controller's mode/method, and the terminal-native progress
+    protocol selection. `Mouse wheel lines` applies to the NEXT fullscreen entry
+    only (the mounted viewport keeps its constructor-time step), notification
+    writes never emit a notification, and the terminal-progress preference is
+    never confused with the Agent's `Progress updates` narration cadence. A
+    legacy `on` terminal-progress value is a READ compatibility only and is
+    never written back without an explicit confirmation.
   - `icon-style`, `progress-updates` and `response-style` are APPLY-FIRST: the
     live owner changes immediately, the document write follows, and a failed
     persistence never rolls the runtime back. Their Detail keeps two separately
@@ -319,15 +352,16 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     be read), and a normalizer's fallback is never presented as the stored
     value.
 - Every other setting stays in the existing complete editor behind a
-  per-category TRANSITION row (`Agent settings…`, `Footer & status line…`, `More
-  conversation settings…`, `Input & terminal settings…`, `Configure extension
-  settings…`, and the relocated `Web Search / Fetch`): each row is `open-legacy`
-  with its exact legacy target, states the `Existing settings editor` scope,
-  runs no write of its own and starts the editor only on explicit activation —
-  never on focus, Tab, read, resize or a summary render. A launcher names only
-  the fields that are still unmigrated, so `More conversation settings…` targets
-  `Submit while busy` and advertises that plus `Git attribution` — never a row
-  this workspace already edits.
+  per-category TRANSITION row (`Agent settings…`, `Footer & status line…`,
+  `Input & terminal settings…`, `Configure extension settings…`, and the
+  relocated `Web Search / Fetch`): each row is `open-legacy` with its exact
+  legacy target, states the `Existing settings editor` scope, runs no write of
+  its own and starts the editor only on explicit activation — never on focus,
+  Tab, read, resize or a summary render. A launcher names only the fields that
+  are still unmigrated, so `Input & terminal settings…` targets
+  `Keyboard shortcuts` and advertises just that left row — never a row this
+  workspace already edits. A category with nothing left to migrate carries NO
+  launcher: a launcher for an empty remainder would be a false affordance.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
   `Web Search / Fetch` transition launcher whose existing-editor return path is

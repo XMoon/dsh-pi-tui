@@ -1699,6 +1699,8 @@ export function applyRunnerWithRuntime(
       surface: {
         setNotificationMode: (mode) => surface.setNotificationMode(mode),
         setNotificationMethod: (method) => surface.setNotificationMethod(method),
+        currentNotificationMode: () => surface.currentNotificationMode(),
+        currentNotificationMethod: () => surface.currentNotificationMethod(),
         setTerminalProgressMode: (mode) => surface.setTerminalProgressMode(mode),
         openJobView: (jobId) => surface.openJobView(jobId),
         openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),

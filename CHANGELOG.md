@@ -11,17 +11,33 @@
 
 - **`/settings` 的 Appearance / Conversation 现在可以直接修改更多配置，不必再进旧编辑器。**
   Appearance 新增可编辑的 `Icon style`（`emoji` / `symbols` / `minimal`），切换立即
-  改变结构图标并只持久化这一个字段。Conversation 的顺序固定为 Transcript display →
-  Transcript detail → Thinking detail → Progress updates → Response style → More conversation
-  settings…，其中新增可编辑的 `Transcript detail`、`Progress updates` 与 `Response style`，
-  原本只读的 `Thinking detail` 也可编辑。`Transcript detail` 与 `Ctrl+O`、`Thinking detail` 与
+  改变结构图标并只持久化这一个字段。Conversation 新增可编辑的 `Transcript detail`、
+  `Progress updates` 与 `Response style`，原本只读的 `Thinking detail` 也可编辑。`Transcript detail` 与 `Ctrl+O`、`Thinking detail` 与
   `Alt+T` 各自共享同一份运行态开关，它们是纯显示状态、不会被持久化，详情里会直接写
   `not applicable — runtime-only`；`Progress updates` 与 `Response style` 修改的是 Agent 下一次
   组装提示词时实际读取的同一份状态，并各自持久化，Focus 只是暂时抑制进度叙述而不改变已选
-  节奏。`More conversation settings…` 现在只声明仍未迁移的 `Submit while busy` 与
-  `Git attribution`，并把旧编辑器定位到 `Submit while busy`。浏览、移动候选、Tab、滚轮、
-  缩放与 Esc 都不会写入；只有显式 Confirm 才提交，结果仍分 `Verified` / `Not saved` /
-  `Commit accepted` / `Outcome unknown`，并分别显示实时值与文档里的持久值。
+  节奏。浏览、移动候选、Tab、滚轮、缩放与 Esc 都不会写入；只有显式 Confirm 才提交，
+  结果仍分 `Verified` / `Not saved` / `Commit accepted` / `Outcome unknown`，并分别显示
+  实时值与文档里的持久值。
+
+- **`/settings` 的 Conversation 与 Input & Terminal 现在可以直接修改全部八个历史设置。**
+  Conversation 的固定顺序变为 Transcript display → Transcript detail → Thinking detail →
+  Progress updates → Response style → Submit while busy → Git attribution，原来的
+  `More conversation settings…` 过渡行随之退休（Conversation 已无未迁移项）；Input & Terminal
+  固定为 Home/End keys → Fullscreen → Mouse wheel lines → Notifications →
+  Notification method → Terminal progress → Input & terminal settings…，最后一行只剩
+  `Keyboard shortcuts` 仍需打开原编辑器。八个字段分两类语义：`Submit while busy` 与
+  `Fullscreen` 先写文档、回读一致才 `Verified`（浏览器时代码从不假装即时生效）；其余六项先改真实
+  运行态再持久化，失败不回滚运行态，且 `Persisted` 永远单独显示文档原始值。`Submit while busy`
+  的下一次忙时 Enter 使用新策略，不追溯正在进行的回合；`Git attribution` 改的是同一个
+  `tui:git-attribution` 提示词状态（仍是提示词引导，不生成 Git hook、不自动改 commit，`minimal`
+  persona 依旧不接收该引导）；Home/End 改的是全屏视口实际生效的按键绑定，其他键位不变；
+  Mouse wheel lines 只对**下一次**全屏生效，当前视口保持进入时的步进；Notifications 与
+  Notification method 改同一个完成通知控制器；Terminal progress 只改终端原生状态协议，与
+  Progress updates 的叙述节奏互不影响。Fullscreen 的选择只保存偏好：确认后工作区照常可操作，
+  **正常退出 Settings 后才切屏**；从过渡行跳去旧编辑器、被 Question/Approval 抢占、强制关闭或
+  写入未确认都不会切屏，已保存的偏好仍会在下次 TUI 启动时生效。浏览、Tab、滚轮、缩放与 Esc
+  依旧零写入，只有完整可见候选的显式 Confirm 才提交。
 
 - **在正文任意位置输入 `/image` 或 `/attach`，即可就地把本地图片/文件插成占位符。**
   不必另起一行、也不必删除已写内容：正文中间（或非首行的行首）输入 `/ima`、`/att` 会

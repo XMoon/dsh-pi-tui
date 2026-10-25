@@ -361,8 +361,10 @@ L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选
 44×8 短屏在长身份需要空间时先省略可选的 `Choose value` 标题；若仍不足，再将事实区压到只保留旧 `Value` 的一行。只有完整身份、`Confirm` 与 `Enter confirm` 同屏可见时才能确认，超过剩余容量仍拒绝写入。只有实际绘制出来的
 按钮与候选行可以点击。确认后走既有的串行整文档写入路径落盘，再从权威来源重读目标字段核对：
 详情把两类事实分开显示：以运行态为主的行（`Icon style`、`Transcript display`、`Progress updates`、
-`Response style`）用 `Value` 呈现已生效的运行值、另用 `Persisted` 呈现存储值；主事实是持久值的
-只有 `Configured theme` 与 Tools 下的 `Visual tools`，它们因此额外画出 `Runtime` 行（如当前 palette）。
+`Response style`、`Git attribution`、`Home/End keys`、`Mouse wheel lines`、`Notifications`、
+`Notification method`、`Terminal progress`）用 `Value` 呈现已生效的运行值、另用 `Persisted` 呈现存储值；
+主事实是持久值的只有 `Configured theme`、Tools 下的 `Visual tools`、`Submit while busy` 与
+`Fullscreen`，它们因此额外画出 `Runtime` 行（如当前 palette、下一次忙时提交策略、当前 transcript 模式）。
 `[current]` 是另一件事：`Configured theme` 与 `Transcript display` 按持久偏好标记，`Icon style`、
 `Progress updates`、`Response style` 按实时值标记；Tools 下的 `Visual tools` 单独一类，它的候选项
 `[current]` 反映 **Host 配置值**（`state.enabled`），运行态注册是否生效另由 `Runtime` 行表达。
@@ -392,10 +394,31 @@ Host profile（跨会话、跨 Agent，不只是当前 TUI）；关闭只影响�
 transcript 里的图表/SVG 结果仍可正常显示、复制、搜索与导出。Direct 后端会同时核对 Host 注册表
 状态后才显示 `Verified`；Remote 没有注册表读取通道，只如实显示配置已保存，不宣称运行态已生效。
 
+Conversation 与 Input & Terminal 的八个历史设置现在都在工作区里直接编辑：Conversation 顺序固定
+为 Transcript display → Transcript detail → Thinking detail → Progress updates → Response style →
+Submit while busy → Git attribution；Input & Terminal 固定为 Home/End keys → Fullscreen →
+Mouse wheel lines → Notifications → Notification method → Terminal progress →
+Input & terminal settings…，最后一行只剩 `Keyboard shortcuts` 仍需打开原编辑器。
+
+`Submit while busy` 与 `Fullscreen` 是**先写文档**的两项：只有写入完成且权威回读一致才显示
+`Verified`，运行态不会被假装已切换。`Submit while busy` 的 `Value` 就是文档里的原始值（缺失显示
+`not set`，非法显示 `invalid stored value: <原值>`），`Runtime` 明确写出下一次忙时 Enter 的策略，
+默认值会标注为 `queue (default; no valid saved value)`，绝不冒充已保存值；确认后不影响正在进行的
+回合。`Fullscreen` 的偏好确认后工作区照常可操作，**正常退出 Settings 后才切换 transcript 屏幕**；
+从过渡行跳去旧编辑器、被 Question/Approval 抢占、被强制关闭或写入未确认都不会切屏，已保存的偏好
+会在下次 TUI 启动时生效。
+
+其余六项先改真实运行态再持久化（失败不回滚运行态，`Persisted` 单独显示文档原始值）：
+`Git attribution` 改的是同一个 `tui:git-attribution` 提示词状态，仍只是提示词引导（不生成 Git hook、
+不自动修改 commit，`minimal` persona 依旧不接收该引导）；`Home/End keys` 改的是全屏视口实际生效的
+按键绑定，其他键位不受影响；`Mouse wheel lines` 只对**下一次**全屏生效，当前视口保持进入时的步进；
+`Notifications` 与 `Notification method` 改同一个完成通知控制器，改 method 本身不会发出通知；
+`Terminal progress` 只控制终端原生状态协议（OSC 9;4 / OSC 7501），与 `Progress updates` 的叙述节奏
+互不影响；旧文档里的 `on` 只在读取时归一为 `9;4+7501`，不会在未确认时被写回。
+
 旧的完整设置编辑器仍然可用：尚未迁移到新工作区的设置在各自所属分类里有一个明确标注
 `Existing settings editor` 的过渡行（`Agent → Agent settings…`、`Appearance → Footer & status line…`、
-`Conversation → More conversation settings…`（只声明尚未迁移的 `Submit while busy` 与
-`Git attribution`，并定位到 `Submit while busy`）、`Input & Terminal → Input & terminal settings…`、
+`Input & Terminal → Input & terminal settings…`（只剩 `Keyboard shortcuts`）、
 `Extensions → Configure extension settings…`）；激活它才会先关闭工作区、恢复原界面，再打开原有
 编辑器并定位到对应的一项，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
 
