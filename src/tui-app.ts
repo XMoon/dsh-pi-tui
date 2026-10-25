@@ -3430,6 +3430,12 @@ export class TuiApp {
    * assembly without an attachment plane — an inline acceptance then only
    * edits text, exactly like an inline skill reference. */
   private inlineAttachmentStager: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentStager | undefined
+  /** Monotonic EDIT epoch of the host editor (bumped by every onChange —
+   *  typing, deletion, paste, Undo, programmatic restore). An inline
+   *  attachment acceptance captures it and re-checks it before any store
+   *  write, so an edit+Undo round trip that restores the same text/cursor
+   *  can never pass an equality-only fence (ABA). */
+  private editorEditEpoch = 0
   /** The latest window metadata, retained so remapped key hints stay live. */
   private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
@@ -4359,6 +4365,9 @@ export class TuiApp {
       // pending exit confirmation. Ctrl+C clear-draft arms again after its
       // own setText mutation completes.
       this.clearExitConfirmation()
+      // An INLINE ATTACHMENT acceptance in flight binds to this epoch: any
+      // edit (including the Undo that restores identical text) invalidates it.
+      this.editorEditEpoch += 1
       // The host editor's REAL Undo snapshots are the authority for what can
       // still come back: converge the store's undo leases to them after every
       // mutation (typing, deletion, paste, Undo, programmatic restore). An
@@ -21788,7 +21797,26 @@ export class TuiApp {
       const span = acceptance.span
       if (span === undefined) return
       const generation = this.generation
+      // `SeatEditor.getCursor()` is the FLAT offset (line lengths summed +
+      // col), so the accepted {line,col} is converted once here.
+      let acceptanceCursorOffset = acceptance.cursorCol
+      for (let index = 0; index < acceptance.cursorLine; index += 1) {
+        acceptanceCursorOffset += (acceptance.lines[index]?.length ?? 0) + 1
+      }
+      const acceptanceEpoch = this.editorEditEpoch
       const source = { seat, raw }
+      /** The accepted OPERATION still owns the surface: same seat, same raw
+       *  draft, same cursor AND the same edit epoch (no typing/Undo since).
+       *  Text equality alone cannot tell "nothing happened" from
+       *  "edit → Undo" (ABA). */
+      const sourceCurrent = (): boolean => {
+        if (this.disposed || this.generation !== generation) return false
+        const live = this.seatEditor()
+        if (live !== source.seat || live.getText() !== source.raw) return false
+        if (this.editorEditEpoch !== acceptanceEpoch) return false
+        const cursor = live.getCursor?.()
+        return cursor === undefined || cursor === acceptanceCursorOffset
+      }
       stager({
         command: acceptance.command,
         path: acceptance.path,
@@ -21797,16 +21825,15 @@ export class TuiApp {
         // The seat identity AND the surface generation: a plugin editor taking
         // the seat (or a remount) is a different owner, even for identical
         // text.
-        current: () => !this.disposed
-          && this.generation === generation
-          && this.seatEditor() === source.seat
-          && this.seatEditor().getText() === source.raw,
+        current: sourceCurrent,
         draft: () => {
           if (this.disposed || this.generation !== generation) return undefined
           const live = this.seatEditor()
           return live === source.seat ? live.getText() : undefined
         },
-        commit: (placeholder: string) => this.commitInlineAttachment(source.seat, source.raw, span, placeholder),
+        commit: (placeholder: string) => this.commitInlineAttachment(
+          source.seat, source.raw, span, placeholder, sourceCurrent,
+        ),
         notify: (message, kind) => this.notify(message, kind ?? 'info'),
       })
     })
@@ -21820,18 +21847,22 @@ export class TuiApp {
    * from expanded text — so paste markers, other tokens and every other line
    * survive byte for byte, and ONE Undo restores the editable fragment.
    *
-   * Returns false (and edits nothing) when the seat moved, the raw draft is no
-   * longer the accepted one, or the fragment no longer reads as the accepted
-   * one. The caller's owned task keeps its ordinary failure classification for
-   * an editor-level throw.
+   * Returns false (and edits nothing) when the accepted OPERATION no longer
+   * owns the surface — `sourceCurrent()` is the ONE fence (seat, raw draft,
+   * cursor AND edit epoch), re-evaluated here, immediately before the write,
+   * because the async intake may have taken any amount of time. The caller's
+   * owned task keeps its ordinary failure classification for an editor-level
+   * throw.
    */
   private commitInlineAttachment(
     seat: import('./tui/interaction/editor-seat-holder.ts').SeatEditor,
     expectedRaw: string,
     span: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentSpan,
     placeholder: string,
+    sourceCurrent: () => boolean,
   ): boolean {
-    if (this.disposed || this.seatEditor() !== seat) return false
+    if (!sourceCurrent()) return false
+    if (this.seatEditor() !== seat) return false
     const raw = seat.getText()
     if (raw !== expectedRaw) return false
     const lines = raw.split('\n')

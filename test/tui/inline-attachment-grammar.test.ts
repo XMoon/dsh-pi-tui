@@ -182,3 +182,23 @@ test('a fully quoted candidate value is unquoted; anything else stays verbatim',
   assert.equal(unquoteCandidateValue('"unclosed'), '"unclosed')
   assert.equal(unquoteCandidateValue(''), '')
 })
+
+test('a SHELL document never yields an attachment seat (the shell plane owns it)', () => {
+  // The shell bridge owns `!`/`!!` arguments; a literal `/image <path>` there
+  // is a shell WORD, not a Client-local attachment site. Classifying it as a
+  // path argument would let attachment candidates (and their apply) rewrite a
+  // shell command line.
+  for (const line of ['!echo /image ./foo', '!!echo /attach ./bar', '/image ./foo']) {
+    assert.equal(classifyFileCompletionContext(line, COMMANDS, { line: 0, shell: true }).kind, 'none',
+      `a shell document must not expose a path-argument seat: ${JSON.stringify(line)}`)
+  }
+  // The SAME text in an ordinary PROMPT document is the attachment seat: the
+  // classifier takes the shell fact from its caller (the caller owns the
+  // input mode and the literal wire form), so it never guesses.
+  assert.equal(classify('echo /image ./foo').kind, 'path-argument', 'ordinary prompt prose is the seat')
+  assert.equal(
+    classifyFileCompletionContext('!echo /image ./foo', COMMANDS, { line: 0, shell: true }).kind,
+    'none',
+    'a prompt-mode buffer holding the literal `!` wire form is classified as shell by its caller',
+  )
+})

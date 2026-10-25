@@ -167,7 +167,9 @@ export async function runAttachmentIntake(deps: AttachmentIntakeDeps): Promise<v
   const { runner, intent, path, signal, scope, target } = deps
   signal.throwIfAborted()
   if (runner.sessionTransitionPending()) {
-    target.notify('a session transition is in progress — try again in a moment', 'error')
+    // A FENCE explanation, not an outcome: it exists BECAUSE the session owner
+    // is (about to be) different, so it is gated by the seat only.
+    target.explain('a session transition is in progress — try again in a moment', 'error')
     return
   }
   const initialDraft = target.draft()
@@ -290,10 +292,6 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
     const signal = invocation.signal === undefined || invocation.signal === runner.signal
       ? runner.signal
       : AbortSignal.any([runner.signal, invocation.signal])
-    const notifyOn = (message: string, kind?: 'info' | 'error'): void => {
-      if (!outcomeCurrent()) return
-      composer.notify(message, kind)
-    }
     detach('attachment intake', () => {
       runOwned('attachment intake', async () => {
         await runAttachmentIntake({
@@ -357,10 +355,6 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
     /** The intake may act only while the stake's seat is still the live one
      *  AND the session owner did not move. */
     const stillOwned = (): boolean => stake.current() && runner.isSessionScopeCurrent(scope)
-    const notifyOn = (message: string, kind?: 'info' | 'error'): void => {
-      if (!stillOwned()) return
-      stake.notify(message, kind)
-    }
     detach('attachment intake', () => {
       runOwned('attachment intake', async () => {
         await runAttachmentIntake({

@@ -84,6 +84,22 @@ interface Harness {
   readonly fileStore: DraftFileStore
   /** The absolute path of the fixture image (the `/`-prefixed-candidate case). */
   readonly absoluteImagePath: string
+  /**
+   * The READ WITNESS: how many times the intake's file-read call evaluated
+   * `runner.cwd`. The shared intake passes it as a direct argument of
+   * `readImageFile`/`probeAttachment`, so this counter moves exactly when a
+   * read genuinely starts — a store/notice assertion cannot see that, and a
+   * microtask fence that refuses BEFORE any IO leaves it at 0.
+   */
+  cwdReads(): number
+  /**
+   * Resolves when the intake reached its POST-READ fence. The shared intake
+   * issues a real `isSessionScopeCurrent` call only after the read settled, so
+   * this is the authoritative "the async intake finished its read" signal —
+   * needed to assert that a late write did NOT happen without guessing at a
+   * sleep.
+   */
+  postRead(): Promise<void>
   /** Submissions the REAL app owner observed (Enter, accelerated, steer). */
   submissions(): number
 }
@@ -100,6 +116,9 @@ function fixture(life: TestLifecycle): { root: string; image: string; plain: str
 
 function setup(life: TestLifecycle, options: { attachFileStore?: boolean } = {}): Harness {
   const { root, image } = fixture(life)
+  let cwdReads = 0
+  let markPostRead!: () => void
+  const postRead = new Promise<void>(resolve => { markPostRead = resolve })
   const vt = new VirtualTerminal(100, 24)
   let submissions = 0
   const app = new TuiApp(vt, {
@@ -112,6 +131,7 @@ function setup(life: TestLifecycle, options: { attachFileStore?: boolean } = {})
   const imageStore = new DraftImageStore()
   const fileStore = new DraftFileStore()
   const ctx = new Context()
+  const scopeFacts = sessionScopeFacts(() => undefined, () => 0)
   const { commands } = fakeCommands()
   ctx.provide('commands', commands as never)
   const runner: TuiCommandRunner = {
@@ -119,7 +139,7 @@ function setup(life: TestLifecycle, options: { attachFileStore?: boolean } = {})
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
-    ...sessionScopeFacts(() => undefined, () => 0),
+    ...scopeFacts,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -163,7 +183,13 @@ function setup(life: TestLifecycle, options: { attachFileStore?: boolean } = {})
       rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
-    cwd: root,
+    get cwd() { cwdReads += 1; return root },
+    // Wraps the REAL scope authority: the intake still decides exactly as
+    // production does, and its call is the deterministic post-read signal.
+    isSessionScopeCurrent: (scope) => {
+      markPostRead()
+      return scopeFacts.isSessionScopeCurrent(scope)
+    },
     sessionCwd: () => root,
     imageStore,
     fileStore: options.attachFileStore === false ? undefined : fileStore,
@@ -212,6 +238,8 @@ function setup(life: TestLifecycle, options: { attachFileStore?: boolean } = {})
     fileStore,
     absoluteImagePath: image,
     submissions: () => submissions,
+    cwdReads: () => cwdReads,
+    postRead: () => postRead,
   }
 }
 
@@ -294,6 +322,16 @@ async function waitForOnlyRow(vt: VirtualTerminal, app: TuiApp, needle: string, 
     if (Date.now() > deadline) {
       assert.fail(`${label}: expected exactly ${JSON.stringify(needle)} for ${JSON.stringify(app.seatTextForTest())}, saw ${JSON.stringify(rows)}:\n${vt.getViewport().join('\n')}`)
     }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+/** Poll `predicate` until it holds (asserts on failure with the label). */
+async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 3000
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) assert.fail(`timed out: ${label}`)
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
@@ -412,8 +450,20 @@ test('ordinary prose and paths open no attachment plane', async (t) => {
   const { vt, app } = h
   await vt.waitForRender()
   type(vt, 'see /usr/bin and weird/image /x')
-  await vt.waitForRender()
-  assert.equal(app.isShowingAutocompleteForTest(), false, 'neither a path segment nor a URL opens completion')
+  // A NEGATIVE autocomplete assertion needs a bounded settle window: the
+  // provider request is async (the fork's natural trigger awaits a round
+  // trip), so "still closed right after one render" would also pass if the
+  // wrong dropdown opened a tick later. 300ms covers the fork's default
+  // debounce plus the local path request this fixture performs; the window is
+  // the reason, not a sleep for timing.
+  const deadline = Date.now() + 300
+  for (;;) {
+    assert.equal(app.isShowingAutocompleteForTest(), false,
+      `neither a path segment nor a URL may open completion (${Date.now() - (deadline - 300)}ms into the window)`)
+    if (Date.now() >= deadline) break
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  assert.equal(app.seatTextForTest(), 'see /usr/bin and weird/image /x', 'typing never applies anything')
   assert.equal(h.imageStore.size(), 0)
   assert.equal(h.submissions(), 0)
 })
@@ -448,7 +498,7 @@ test('one Undo restores the editable inline fragment (a REAL undoable edit)', as
   assert.equal(h.submissions(), 0, 'Undo never submits')
 })
 
-test('a draft edited while the read is in flight is never overwritten', async (t) => {
+test('a draft edited AFTER the read started is never overwritten', async (t) => {
   const life = testLifecycle(t)
   const h = setup(life)
   const { vt, app } = h
@@ -458,14 +508,46 @@ test('a draft edited while the read is in flight is never overwritten', async (t
   type(vt, 'shot')
   await waitForDraft(app, draft => draft === 'a /image shot', 'the filter lands in the draft')
   await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  const readsBefore = h.cwdReads()
   vt.sendInput('\r')
-  // The accept is settled in a microtask; edit the draft IMMEDIATELY. The
-  // placeholder write must refuse rather than overwrite the newer text.
+  // The READ WITNESS decides: the acceptance microtask has already handed the
+  // stake to the intake, and the intake's read evaluated `cwd`. Only NOW is
+  // "the read is in flight" a fact rather than an assumption — editing before
+  // this point would exercise the microtask fence instead.
+  await waitFor(() => h.cwdReads() > readsBefore, 'the intake read started')
   type(vt, 'X')
   await vt.waitForRender()
   const afterEdit = app.seatTextForTest()
   assert.ok(afterEdit.endsWith('X'), `the user's edit survives: ${JSON.stringify(afterEdit)}`)
-  assert.equal(h.imageStore.size(), 0, 'a refused intake stages no bytes')
+  // The late intake settles: it must neither paste a placeholder into the
+  // newer draft nor keep an unreferenced staged item.
+  await waitFor(() => h.imageStore.size() === 0, 'the stale intake kept no bytes')
+  await vt.waitForRender()
+  assert.ok(app.seatTextForTest().endsWith('X'), 'the placeholder never overwrote the newer draft')
+  assert.ok(!app.seatTextForTest().includes('[image #'), 'no placeholder was written')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('moving the cursor after the read started also refuses the late write', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'b /image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'b /image shot', 'the filter lands in the draft')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  const readsBefore = h.cwdReads()
+  vt.sendInput('\r')
+  await waitFor(() => h.cwdReads() > readsBefore, 'the intake read started')
+  // The TEXT is untouched — only the caret moves. A content-only fence would
+  // accept this and then move the user's cursor to the placeholder's end.
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'b /image shot.png', 'the accepted value stayed in place')
+  await waitFor(() => h.imageStore.size() === 0, 'the cursor change kept no bytes')
+  assert.ok(!app.seatTextForTest().includes('[image #'), 'a caret move must refuse the late placeholder write')
   assert.equal(h.submissions(), 0, 'never submits')
 })
 
@@ -585,4 +667,87 @@ test('a large pasted block keeps its marker text and the fragment edits in place
   assert.ok(draft.includes('[paste #'), 'the paste marker text is preserved (the raw draft was sliced, never rebuilt)')
   assert.ok(draft.endsWith('append [image #1 (1×1)]'), `the fragment was replaced in place: ${JSON.stringify(draft)}`)
   assert.equal(h.submissions(), 0)
+})
+
+test('an edit + Undo back to the SAME text still refuses the late write (ABA)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'c /image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'c /image shot', 'the filter lands in the draft')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  const readsBefore = h.cwdReads()
+  vt.sendInput('\r')
+  await waitFor(() => h.cwdReads() > readsBefore, 'the intake read started')
+  const accepted = app.seatTextForTest()
+  assert.equal(accepted, 'c /image shot.png', 'the accepted value is installed')
+  // ONE typed character is its own undo step (the fork coalesces only
+  // consecutive word characters), so this Undo returns EXACTLY to the accepted
+  // text AND cursor: content equality alone cannot tell this from "nothing
+  // happened".
+  type(vt, 'Q')
+  await waitForDraft(app, draft => draft === `${accepted}Q`, 'the intervening edit landed')
+  vt.sendInput('\x1b[45;5u')
+  await waitForDraft(app, draft => draft === accepted, 'the Undo restored the accepted text')
+  // Wait for the AUTHORITATIVE post-read fence: the intake really finished its
+  // read while the document looked unchanged, so a late write would have
+  // happened by now if the fence compared text (and cursor) only.
+  await h.postRead()
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), accepted,
+    'a late intake must not act on a document that only LOOKS unchanged')
+  assert.equal(h.imageStore.size(), 0, 'no bytes are staged for a refused intake')
+  assert.equal(h.submissions(), 0, 'never submits')
+})
+
+test('the inline token reaches the SUBMIT expansion as a real image block', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'explain ')
+  await vt.waitForRender()
+  type(vt, '/ima')
+  await waitForViewport(vt, 'Insert local image', 'the inline action row')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft === 'explain /image ', 'the action inserts the token')
+  await waitForCandidate(vt, app, 'shot.png', 'the path candidates')
+  type(vt, 'shot')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  vt.sendInput('\r')
+  await waitForDraft(app, draft => draft.includes('[image #1'), 'the placeholder')
+  // The SUBMIT side is the real authority that turns the draft into blocks:
+  // the SAME live store the inline intake staged into, through the production
+  // `expandImagePlaceholders` the submission controller calls.
+  const { expandImagePlaceholders } = await import('../../src/client/media/image/placeholder.ts')
+  const segments = expandImagePlaceholders(app.seatTextForTest(), h.imageStore)
+  assert.equal(segments.length, 2, 'the surrounding prose and the image become two blocks')
+  assert.deepEqual(segments[0], { type: 'text', text: 'explain ' },
+    'the accepted fragment became an image, not text')
+  assert.equal(segments[1]!.type, 'image', 'the placeholder resolves against the live draft store')
+  if (segments[1]!.type !== 'image') return
+  assert.equal(segments[1]!.image.mediaType, 'image/png')
+  assert.equal(segments[1]!.image.width, 1)
+  assert.equal(segments[1]!.image.height, 1)
+  assert.equal(h.submissions(), 0, 'the whole chain still never submitted anything')
+})
+
+test('a FILE confirm through TAB is accept-only (no submit, no queue, no steer)', async (t) => {
+  const life = testLifecycle(t)
+  const h = setup(life)
+  const { vt, app } = h
+  await vt.waitForRender()
+  type(vt, 'tabbed /image ')
+  await vt.waitForRender()
+  type(vt, 'shot')
+  await waitForDraft(app, draft => draft === 'tabbed /image shot', 'the filter lands in the draft')
+  await waitForOnlyRow(vt, app, 'shot.png', 'the single filtered image candidate')
+  // TAB is a FILE confirm gesture, exactly like Enter — never a submit path.
+  vt.sendInput('\t')
+  await waitForDraft(app, draft => draft.includes('[image #1 (1×1)]'), 'the placeholder lands via Tab')
+  assert.equal(h.imageStore.size(), 1, 'the real intake staged exactly one image')
+  assert.equal(h.submissions(), 0, 'Tab accepts only: never submits, queues or steers')
 })

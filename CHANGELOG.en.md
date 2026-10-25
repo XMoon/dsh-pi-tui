@@ -42,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   If the draft changed, the session switched or the editor seat was replaced while the file was
   being read, the stale result never overwrites the newer draft and never leaves an unreferenced
   placeholder. The leading `/image PATH` and `/attach PATH` commands keep their existing
-  semantics on the first line, and a plain `/image` in prose is still never sent to the model.
+  semantics on the first line, and accepting a completion never submits the draft by itself — a
+  plain `/image` you leave in the text is ordinary draft text and is sent only when you submit.
   The experimental TSP renderer does not use this inline dropdown and is unchanged.
 
 - **Ctrl+V pastes and `/attach` / `/image` now commit into the editor that is really mounted.**

@@ -771,7 +771,7 @@ Attachment completion and intake are Client-local:
   The Client cwd is read at call time and stays independent of the Session/Host
   cwd. `@` whole-tree search remains Host-scoped. Multi-word/quoted arguments do
   not complete.
-- `/attach` and `/image` are ALSO inline attachment sites (Image UX PR5): the
+- `/attach` and `/image` are ALSO inline attachment sites: the
   FIRST logical line's leading command token stays the leading command seat
   above, while a declared attachment command token at any other cursor position
   (mid-body prose, or a later line's leading token) opens the same inline

@@ -282,9 +282,12 @@ export class MentionProvider implements AutocompleteProvider {
     // shell line through the same grammar — the classifier leaves it
     // `none`, and step 4 keeps the shell completion non-goal alive).
     const semantic = this.virtualShellSemanticContext(currentLine, cursorCol)
+    // A shell document's arguments are SHELL words: the attachment seat never
+    // claims them (the shell bridge/fork path provider own that plane).
+    const shellDocument = semantic !== null || textBeforeCursor.trimStart().startsWith('!')
     const context = semantic !== null
-      ? classifyFileCompletionContext(semantic.line, this.pathArgumentCommands, { line: cursorLine })
-      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands, { line: cursorLine })
+      ? classifyFileCompletionContext(semantic.line, this.pathArgumentCommands, { line: cursorLine, shell: true })
+      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands, { line: cursorLine, shell: shellDocument })
 
     if (context.kind === 'mention') {
       return this.withRequestSnapshot(
@@ -804,7 +807,7 @@ export class MentionProvider implements AutocompleteProvider {
       const seat = classifyFileCompletionContext(
         currentLine.slice(0, cursorCol),
         this.pathArgumentCommands,
-        { line: cursorLine },
+        { line: cursorLine, shell: this.virtualShellSemanticContext(currentLine, cursorCol) !== null },
       )
       if (seat.kind === 'path-argument' && !seat.leading && seat.command === item.command) {
         const applied = applyInlineAttachmentPath(currentLine, seat, cursorCol, cursorLine, item.value)
@@ -841,8 +844,10 @@ export class MentionProvider implements AutocompleteProvider {
     // bare-slash-command block must not swallow Tab on a shell line).
     const semantic = this.virtualShellSemanticContext(currentLine, cursorCol)
     const context = semantic !== null
-      ? classifyFileCompletionContext(semantic.line, this.pathArgumentCommands)
-      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands)
+      ? classifyFileCompletionContext(semantic.line, this.pathArgumentCommands, { shell: true })
+      : classifyFileCompletionContext(textBeforeCursor, this.pathArgumentCommands, {
+          shell: textBeforeCursor.trimStart().startsWith('!'),
+        })
     // SHELL documents (a shell MODE, or a literal `!` shell line): keep the
     // fork's own gate — BUT on the VIRTUAL serialized line (the synthetic
     // `!` prefix makes the fork's line-start judgment see a shell line, so
