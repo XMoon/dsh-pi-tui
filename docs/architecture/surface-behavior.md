@@ -289,20 +289,26 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     live owner changes immediately, the document write follows, and a failed
     persistence never rolls the runtime back. Their Detail keeps two separately
     named facts — the value that already took effect as the primary `Value`, and
-    the `Persisted` stored value — and their `[current]` candidate chip follows
-    the LIVE value. The explicit `Runtime` label exists only on a
-    PERSISTED-PRIMARY row (`theme`, `display-preset`), whose `Value` is the
-    stored fact; it is never painted on the apply-first rows. While such a
-    commit is pending, that primary `Value` already shows the applied value (the
-    projection is re-read when the owner changes, not at settlement), and the
-    `Persisted` fact keeps reporting the stored value until an authoritative
-    re-read agrees.
-  - `theme` and `display-preset` keep their pre-existing semantics unchanged.
-    The theme is a Host-persisted preference: a non-`ready` backend refuses the
-    commit BEFORE any runtime apply, and its `[current]` chip follows the
-    persisted, source-qualified identity. The display preset applies through the
-    shared `DisplayState` owner and then persists, but its `[current]` chip also
-    follows the persisted preference. Both keep their existing writer code.
+    the `Persisted` stored value. While such a commit is pending, that primary
+    `Value` already shows the applied value (the projection is re-read when the
+    owner changes, not at settlement), and the `Persisted` fact keeps reporting
+    the stored value until an authoritative re-read agrees.
+  - The explicit `Runtime` label is a property of the row's PRIMARY fact, not of
+    its writer kind: the panel paints it only when `edit.primary` is the
+    PERSISTED fact, because then `Value` is the stored fact and the live one
+    needs its own name. Exactly two rows are built that way — `theme` and the
+    Host-authority `visual-tools` switch; every other document row
+    (`display-preset` included) is runtime-primary and therefore paints
+    `Value` + `Persisted` with no `Runtime` row.
+  - `[current]` is a SEPARATE decision from `Value`/`Runtime`: it marks the
+    candidate the row considers current, and the two must not be conflated.
+    `theme` and `display-preset` keep their pre-existing semantics unchanged —
+    the theme is a Host-persisted preference whose non-`ready` backend refuses
+    the commit BEFORE any runtime apply, and BOTH mark `[current]` from the
+    persisted preference rather than from the live value. The display preset
+    still applies through the shared `DisplayState` owner before it persists,
+    so its `Value` is the live preset while its `[current]` chip follows the
+    stored one. Both keep their existing writer code.
   - In every case the `Persisted` fact reports the raw stored value (`not set`
     when the readable document carries none, an explicit unknown when it cannot
     be read), and a normalizer's fallback is never presented as the stored

@@ -360,9 +360,11 @@ updates、Response style 七行，以及 Tools 里的 Visual tools 开关，都�
 L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选择；pending 写入时不触发新选择。若当前候选身份已滚出可见区域，第一次 `Enter` 只将其重新显示，之后才能确认；
 44×8 短屏在长身份需要空间时先省略可选的 `Choose value` 标题；若仍不足，再将事实区压到只保留旧 `Value` 的一行。只有完整身份、`Confirm` 与 `Enter confirm` 同屏可见时才能确认，超过剩余容量仍拒绝写入。只有实际绘制出来的
 按钮与候选行可以点击。确认后走既有的串行整文档写入路径落盘，再从权威来源重读目标字段核对：
-详情把两类事实分开显示：apply-first 行以 `Value` 呈现已生效的运行值、另以 `Persisted` 呈现存储值；
-`Configured theme` / `Transcript display` 这类以持久偏好为主的行才额外有 `Runtime` 行（如当前 palette）。
-两类行都会显示
+详情把两类事实分开显示：以运行态为主的行（`Icon style`、`Transcript display`、`Progress updates`、
+`Response style`）用 `Value` 呈现已生效的运行值、另用 `Persisted` 呈现存储值；主事实是持久值的
+只有 `Configured theme` 与 Tools 下的 `Visual tools`，它们因此额外画出 `Runtime` 行（如当前 palette）。
+`[current]` 是另一件事：
+`Configured theme` 与 `Transcript display` 按持久偏好标记，其余按实时值标记。两类行都会显示
 `Saving…` / `Verified` / `Not saved · 原因` / `Commit accepted · verification unavailable` /
 `Outcome unknown · 原因`，只有写入完成、backend `ready` 且权威回读一致才显示 Verified；
 被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，出现第三个值、已是目标值或无法读取
