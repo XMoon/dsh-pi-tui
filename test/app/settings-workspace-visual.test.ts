@@ -186,8 +186,6 @@ interface HarnessOptions {
     setCompletionOwner(identity: string | undefined): void
     onAgentStatus(agentId: string, status: 'idle' | 'running'): void
   }
-  /** An additional sink that records every notification write the seam performs. */
-  notificationWritesSink?: string[]
   /** The terminal-progress mode the REAL `TuiApp` starts with (the boot read). */
   appTerminalProgress?: 'off' | '9;4' | '7501' | '9;4+7501'
 }
@@ -399,7 +397,7 @@ function setup(options: HarnessOptions = {}): Harness {
   // values (setNotificationMode/Method are the only writers).
   let notificationMode = 'unfocused'
   let notificationMethod = 'auto'
-  const notificationWrites: string[] = (options.notificationWritesSink ?? [])
+  const notificationWrites: string[] = []
   const terminalProgressWrites: string[] = []
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
