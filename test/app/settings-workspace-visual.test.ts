@@ -932,7 +932,7 @@ test('A-08 the ready snapshot distinguishes the raw theme identity, the runtime 
   // Display: the runtime value is the current one; the persisted preference is a
   // separate last-read fact and never overwrites it. Wide paints the Detail at
   // every level, but the walk still goes through the same Enter ladder.
-  await key(h, '\x1b[B') // Appearance -> Display (its first row is Transcript display)
+  await key(h, '\x1b[B') // Appearance -> Conversation (its first row is Transcript display)
   await key(h, '\r') // L0 -> L1
   await key(h, '\r') // L1 -> inline choice
   assert.match(h.view(), /Persisted\s+compact/, 'the persisted fact is separately named')
@@ -5338,5 +5338,70 @@ test('C2-R0 a live registration appends Extensions and its launcher reaches the 
   assert.match(h.view(), /Categories \(9\)/u, 'the empty directory paints the nine fixed categories')
   await key(h, '\u001b')
   assert.ok(h.view().includes('❯'), 'Esc still closes the workspace legally')
+  h.dispose()
+})
+
+test('C2-R0 a same-id replacement is refused until repaint, then opens the CURRENT row', async () => {
+  let requestRender: () => void = () => {}
+  const registry = new SettingsRegistry(() => requestRender())
+  const h = setup({ columns: 120, rows: 40, settingsRegistry: registry, pluginPage: true })
+  requestRender = () => h.app.requestRender()
+  const oldCalls: string[] = []
+  const newCalls: string[] = []
+  const oldOwner = registry.register({
+    id: 'acme.replaced',
+    label: 'Replaced setting v1',
+    description: 'The first owner generation',
+    currentValue: '5',
+    values: ['3', '5'],
+    order: 5,
+    onChange: (value) => { oldCalls.push(value); return true },
+  }, 'acme-owner-old')
+  await h.vt.waitForRender()
+  await h.openHome()
+  await key(h, '\u001b[F') // End -> Extensions
+  await key(h, '\r') // its Rows level
+  const frame = h.rowsPlain()
+  const row = frame.findIndex(line => line.includes('Configure extension settings…'))
+  assert.ok(row >= 0, `the launcher must be painted:\n${h.view()}`)
+  const col = cellIndexOf(h, row, 'Configure extension settings…') + 1
+  // A pointer press is recorded against the frame that painted owner A.
+  press(h, row, col)
+  // The SAME id is unregistered and re-registered under a different owner and
+  // callback BEFORE any repaint; the count stays 1 and only the revision moves.
+  oldOwner.dispose()
+  registry.register({
+    id: 'acme.replaced',
+    label: 'Replaced setting v2',
+    description: 'The second owner generation',
+    currentValue: '3',
+    values: ['3', '5'],
+    order: 5,
+    onChange: (value) => { newCalls.push(value); return true },
+  }, 'acme-owner-new')
+  // The frame on screen is spent: a keyboard Enter and the release of the
+  // recorded press arrive BEFORE the repaint and may not open the old editor.
+  h.vt.sendInput('\r')
+  release(h, row, col)
+  assert.ok(!h.view().includes('Type to search'), 'no stale gesture may mount the legacy editor')
+  assert.deepEqual(oldCalls, [], 'the replaced owner callback never runs')
+  assert.deepEqual(newCalls, [], 'the current owner callback does not run from a stale gesture either')
+  // The next frame is composed against the CURRENT registry and only then is
+  // the launcher actionable again. The fresh activation is a keyboard Enter:
+  // the fork withholds a SECOND click on the same cell inside its multi-click
+  // window, which would prove the fork's rule instead of the panel's admission.
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Configure extension settings…/u, 'the repainted launcher is still reachable')
+  await key(h, '\r')
+  const legacy = h.view()
+  assert.match(legacy, /Type to search/u, `the existing editor is the physical owner:\n${legacy}`)
+  assert.match(legacy, /Replaced setting v2/u, 'the editor opened on the CURRENT registration')
+  assert.ok(!legacy.includes('Replaced setting v1'), 'the replaced label is gone')
+  // Activating the row runs the CURRENT callback through the registry's own
+  // apply path; the replaced generation is never invoked.
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(oldCalls.length, 0, 'the replaced owner callback still never ran')
+  assert.equal(newCalls.length, 1, 'the current owner callback ran exactly once')
   h.dispose()
 })

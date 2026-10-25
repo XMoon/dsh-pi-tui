@@ -230,9 +230,8 @@ test('the real Settings → Plugins category hosts the same page in place and Ba
   assert.match(plain(vt.getViewport()), /Settings · Categories/)
   // The workspace opens on its About home; the rail order is About, Models,
   // Account, Agent, Appearance, Conversation, Input & Terminal, Tools, Plugins,
-  // so eight Down
-  // presses reach Plugins.
-  for (let step = 0; step < 6; step += 1) vt.sendInput('\x1b[B')
+  // so eight Down presses reach Plugins.
+  for (let step = 0; step < 8; step += 1) vt.sendInput('\x1b[B')
   await vt.waitForRender()
   // The rail selection already previews the page; Enter only moves the keys.
   assert.match(plain(vt.getViewport()), /Settings · Categories/)
@@ -280,7 +279,7 @@ test('an external surface teardown releases the Manager owner so a later /plugin
   const { vt, harness, app } = await mountPluginRunner(t)
   invokeCommand(harness, 'settings')
   await vt.waitForRender()
-  for (let step = 0; step < 6; step += 1) vt.sendInput('\x1b[B')
+  for (let step = 0; step < 8; step += 1) vt.sendInput('\x1b[B')
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
