@@ -230,6 +230,8 @@ import { ChartBody } from './tui/components/transcript/chart-body.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
 import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
+import { humanFacingVisualResult } from './domain/visual/publication.ts'
+import { isVisualToolName, PRESENT_VISUAL_TOOL_NAME } from './domain/visual/tools.ts'
 import { chartDisplayTitle, chartTextRows } from './domain/visual/chart.ts'
 import { authorizeSvg, svgDetailRows } from './domain/visual/svg.ts'
 import type { SvgRasterLoader } from './client/media/svg/raster-loader.ts'
@@ -18131,6 +18133,19 @@ export class TuiApp {
         // folded row shows the content summary (e.g. ` — PNG image ·
         // 800x600 px`), never the raw envelope.
         resultPreview = imageFoldedPreview(message.result)
+      } else if (isVisualToolName(message.name)) {
+        // The three visual tools carry machine blocks (the projected
+        // `visual-ref-v1:` line, the chart/SVG fact and present_visual's
+        // `visual-published-v1:` receipt) beside their human text. The folded
+        // preview reads the SAME source-aware projection as the expanded body,
+        // so no machine line ever appears in one row of the folded card.
+        const human = humanFacingVisualResult({
+          toolName: message.name,
+          blocks: message.resultBlocks,
+          text: message.result,
+          status: message.status,
+        })
+        resultPreview = human.text === '' ? '' : ` — ${preview(human.text, RESULT_PREVIEW_LINES)}`
       } else if (message.name === 'ask_user_question') {
         // The folded preview never shows the raw `{"answers":[…]}` JSON the
         // tool's render text carries (Web AskQuestionRow parity): the
@@ -18325,7 +18340,7 @@ export class TuiApp {
         card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizedPhysicalLine(command))}`, width, '…'), 0, 0))
         rows += 1
       }
-      if (child.name === 'dsh_pi_tui_chart' || child.name === 'dsh_pi_tui_svg') {
+      if (isVisualToolName(child.name)) {
         const resultStart = row + rows
         const rendered = this.renderVisualChildBody(card, child, width, indent, bodyExpanded)
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + rendered, enumerable: false })
@@ -18716,6 +18731,20 @@ export class TuiApp {
       }
       return
     }
+    if (message.name === PRESENT_VISUAL_TOOL_NAME) {
+      // The publication tool's body is its human summary line; the receipt
+      // machine block never reaches the card (C1's source-aware filter).
+      const human = humanFacingVisualResult({
+        toolName: message.name,
+        blocks: message.resultBlocks,
+        text: message.result,
+        status: message.status,
+      })
+      for (const line of human.text.split('\n')) {
+        if (line !== '') card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
+      }
+      return
+    }
     // SVG: the readable description is ALWAYS visible; the drawing is an
     // enhancement authorized by the final content, the durable call source AND
     // a successful result. A block/error result keeps its feedback text only.
@@ -18777,6 +18806,17 @@ export class TuiApp {
       } else {
         lines.push(...(parts.humanText === '' ? child.result : parts.humanText).split('\n'))
       }
+    } else if (child.name === PRESENT_VISUAL_TOOL_NAME) {
+      // The publication tool has no drawing: its child body is the human
+      // summary, with the receipt machine block filtered by the same
+      // source-aware projection the top-level card uses.
+      const human = humanFacingVisualResult({
+        toolName: child.name,
+        blocks: child.resultBlocks,
+        text: child.result,
+        status: child.status,
+      })
+      lines.push(...human.text.split('\n'))
     } else {
       const authorization = authorizeSvg(child.args, blocks, child.status)
       if (authorization.state === 'ready') {
@@ -19168,10 +19208,11 @@ export class TuiApp {
       }
     }
     if (emptyResult) return
-    // PR-D visual tools: the FINAL durable content is the admission source.
-    // The chart draws from its machine line; the SVG draws only when the
-    // credential matches the call source and the source passes admission.
-    if (message.name === 'dsh_pi_tui_chart' || message.name === 'dsh_pi_tui_svg') {
+    // The visual tools: the FINAL durable content is the admission source. The
+    // chart draws from its machine line; the SVG draws only when the credential
+    // matches the call source and the source passes admission; the publication
+    // tool paints only its human summary.
+    if (isVisualToolName(message.name)) {
       this.renderVisualToolBody(card, message, explicitlyExpanded)
       return
     }

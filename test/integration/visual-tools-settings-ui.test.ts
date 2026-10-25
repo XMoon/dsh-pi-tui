@@ -44,7 +44,12 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
-import { CHART_TOOL_NAME, SVG_TOOL_NAME } from '../../src/app/host/visual-tools.ts'
+import {
+  CHART_TOOL_NAME,
+  PRESENT_VISUAL_TOOL_NAME,
+  SVG_TOOL_NAME,
+} from '../../src/app/host/visual-tools.ts'
+import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -224,11 +229,15 @@ test('a real Settings Confirm drives the Host registry and the next model reques
   life.defer(() => ctx.fiber.dispose())
   await mountAgentLoopTestDependencies(ctx)
   await mountAgentLoopTestHarness(ctx)
+  // The production visual row injects the official Session read service; this
+  // suite proves the REGISTRY/catalog contract, so a stand-in that never serves
+  // an observation is sufficient (no model turn publishes here).
+  await ctx.plugin(SessionQuerySqlite, { path: ':memory:', openAt: 'never' })
   await ctx.plugin(Loader)
   await mountVisualToolsSettingsPlane(ctx, join(life.tempDir('visual-tools-ui-host-'), 'plane'))
   const port = new DirectConfigPort(ctx, undefined, () => undefined)
 
-  // An unrelated resident tool proves the switch changes only the visual pair.
+  // An unrelated resident tool proves the switch changes only the visual group.
   ctx.tools.register({
     name: 'probe_unrelated_tool',
     description: 'an unrelated Host tool',
@@ -242,6 +251,7 @@ test('a real Settings Confirm drives the Host registry and the next model reques
   const before = await requestTools(ctx, 'ui-probe-before', 'ui-before')
   assert.ok(before.includes(CHART_TOOL_NAME))
   assert.ok(before.includes(SVG_TOOL_NAME))
+  assert.ok(before.includes(PRESENT_VISUAL_TOOL_NAME), 'the NEXT request carries the publication tool')
   assert.ok(before.includes('probe_unrelated_tool'))
 
   const ui = mountSettingsUi(port)
@@ -271,13 +281,16 @@ test('a real Settings Confirm drives the Host registry and the next model reques
   assert.equal(port.visualTools.read()?.applied, false)
   assert.equal(ctx.tools.get(CHART_TOOL_NAME), undefined)
   assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.equal(ctx.tools.get(PRESENT_VISUAL_TOOL_NAME), undefined)
   assert.notEqual(ctx.tools.get('probe_unrelated_tool'), undefined, 'the unrelated tool was untouched')
   assert.doesNotMatch(ptcSdkOf(ctx), /dsh_pi_tui_chart/u)
   assert.doesNotMatch(ptcSdkOf(ctx), /dsh_pi_tui_svg/u)
+  assert.doesNotMatch(ptcSdkOf(ctx), /present_visual/u)
   assert.match(ptcSdkOf(ctx), /probe_unrelated_tool/u)
   const afterOff = await requestTools(ctx, 'ui-probe-off', 'ui-off')
   assert.equal(afterOff.includes(CHART_TOOL_NAME), false, 'the NEXT model request does not carry the chart tool')
   assert.equal(afterOff.includes(SVG_TOOL_NAME), false, 'the NEXT model request does not carry the SVG tool')
+  assert.equal(afterOff.includes(PRESENT_VISUAL_TOOL_NAME), false, 'nor the publication tool')
   assert.ok(afterOff.includes('probe_unrelated_tool'), 'and unrelated tools stay in the request catalog')
 
   // Confirm On again through the SAME workspace and Host: both definitions
@@ -297,9 +310,12 @@ test('a real Settings Confirm drives the Host registry and the next model reques
   assert.equal(port.visualTools.read()?.applied, true)
   assert.notEqual(ctx.tools.get(CHART_TOOL_NAME), undefined)
   assert.notEqual(ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.notEqual(ctx.tools.get(PRESENT_VISUAL_TOOL_NAME), undefined)
   assert.match(ptcSdkOf(ctx), /dsh_pi_tui_chart/u)
   assert.match(ptcSdkOf(ctx), /dsh_pi_tui_svg/u)
+  assert.match(ptcSdkOf(ctx), /present_visual/u)
   const afterOn = await requestTools(ctx, 'ui-probe-on', 'ui-on')
   assert.equal(afterOn.filter(name => name === CHART_TOOL_NAME).length, 1)
   assert.equal(afterOn.filter(name => name === SVG_TOOL_NAME).length, 1)
+  assert.equal(afterOn.filter(name => name === PRESENT_VISUAL_TOOL_NAME).length, 1)
 })

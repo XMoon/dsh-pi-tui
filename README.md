@@ -388,11 +388,14 @@ detail`（与 `Ctrl+O` 同一份开关）与 `Thinking detail`（与 `Alt+T` 同
 只是暂时抑制进度叙述，不修改已选择的节奏。
 
 `/settings → Tools` 提供一个 profile 级 **Visual tools** 总开关（默认 On）：它对应 Host 的
-`pi-tui-visual-tools.enabled` 配置，关闭后 `dsh_pi_tui_chart` 与 `dsh_pi_tui_svg` 会从该 Host
-的全局工具注册表注销，之后新的模型请求不会再看到它们；重新打开会恢复原定义。设置属于整个 DSH
-Host profile（跨会话、跨 Agent，不只是当前 TUI）；关闭只影响未来的工具可用性，已经记录在
-transcript 里的图表/SVG 结果仍可正常显示、复制、搜索与导出。Direct 后端会同时核对 Host 注册表
-状态后才显示 `Verified`；Remote 没有注册表读取通道，只如实显示配置已保存，不宣称运行态已生效。
+`pi-tui-visual-tools.enabled` 配置，一处开关同时管三个模型工具 —— 生成图的 `dsh_pi_tui_chart`、
+`dsh_pi_tui_svg`，以及显式发布的 `present_visual`。关闭后三者会从该 Host 的全局工具注册表一起
+注销，之后新的模型请求不会再看到它们；重新打开会一起恢复原定义，且三个注册是原子的：同名冲突
+或任一注册失败会整组回滚，不会出现半启用的中间态。设置属于整个 DSH Host profile（跨会话、
+跨 Agent，不只是当前 TUI）；关闭只影响未来的工具可用性，已经记录在 transcript 里的图表/SVG
+结果、模型可见的 `visual-ref-v1` 引用与历史发布记录仍可正常显示、复制、搜索与导出。Direct
+后端会同时核对 Host 注册表状态后才显示 `Verified`；Remote 没有注册表读取通道，只如实显示配置
+已保存，不宣称运行态已生效。
 
 Conversation 与 Input & Terminal 的八个历史设置现在都在工作区里直接编辑：Conversation 顺序固定
 为 Transcript display → Transcript detail → Thinking detail → Progress updates → Response style →

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The model can now declare that specific visuals are meant for the user.** A new
+  `present_visual` tool joins the existing `dsh_pi_tui_chart` and `dsh_pi_tui_svg` under the SAME
+  Visual tools switch (On by default): one switch atomically adds or removes all three, and a
+  same-name conflict or failed registration rolls the whole group back. A successful chart/SVG
+  result now also carries a stable, model-visible reference `visual-ref-v1:sv1_…` derived from the
+  session, turn, current step's event seq and `callId`; in a later step the model passes 1–8 of
+  those references to `present_visual` to publish them explicitly. Publication only accepts
+  successful chart/SVG results from THIS session and turn in an EARLIER committed model step — a
+  same-step source is refused even when it committed first, and an unknown, repeated, cross-turn
+  or not-yet-committed reference fails the whole call. There is no waiting, no partial success
+  and no hidden retry, and a policy replacement of either the generating or the publication
+  result removes the qualification. A successful receipt is a human "selected N visuals" summary
+  plus one strict `visual-published-v1` machine line; a failed result carries only its readable
+  reason. Publication adds no session event, durable publication table or cache — cold replay
+  derives the same facts from the same log — and the human-facing cards, search and `/transcript`
+  export never show these machine lines while the raw session log keeps them intact. The existing
+  Tool Card still renders the visuals; inlining them into the final answer is a later stage.
+
 - **`/settings` Appearance and Conversation now edit more configuration in place, without the
   existing editor.** Appearance gains an editable `Icon style` (`emoji` / `symbols` / `minimal`)
   that changes the structural glyphs immediately and persists only that field. Conversation keeps

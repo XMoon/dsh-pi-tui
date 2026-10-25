@@ -42,6 +42,8 @@ import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { chartHumanText, chartProjection, chartValueRows, type ChartFact } from '../../domain/visual/chart.ts'
 import { svgDetailRows, type SvgFact } from '../../domain/visual/svg.ts'
 import { visualParts, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
+import { humanFacingVisualResult } from '../../domain/visual/publication.ts'
+import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
 
 /**
  * One replay-local allocator of presentation keys, scoped to a single
@@ -704,6 +706,28 @@ function svgResultNodes(
 }
 
 /**
+ * The publication tool's result segment: its human summary as one `ui.code`
+ * row. The `visual-published-v1:` receipt is a durable machine block that no
+ * human-facing surface displays, so the SAME source-aware projection the PiTui
+ * cards use strips it here; a failure keeps its own readable reason.
+ */
+function presentVisualResultNodes(
+  message: TranscriptToolMessage,
+  wrap: boolean,
+  flatText: string,
+): Node[] {
+  const human = humanFacingVisualResult({
+    toolName: PRESENT_VISUAL_TOOL_NAME,
+    blocks: message.resultBlocks,
+    text: flatText,
+    status: message.status,
+  })
+  return human.text === ''
+    ? []
+    : [ui.code({ key: 'result', text: sanitizeDisplayText(human.text), ...(wrap ? { wrap: true } : {}) })]
+}
+
+/**
  * PR-C: the result segment of one tool row.
  *
  * A row WITHOUT an image block keeps its EXACT previous shape: ONE `ui.code`
@@ -723,8 +747,9 @@ function toolResultNodes(
   flatText: string,
   collapsed = false,
 ): Node[] {
-  if (message.name === 'dsh_pi_tui_chart') return chartResultNodes(message, options, wrap, flatText)
-  if (message.name === 'dsh_pi_tui_svg') return svgResultNodes(message, options, wrap, flatText, collapsed)
+  if (message.name === CHART_TOOL_NAME) return chartResultNodes(message, options, wrap, flatText)
+  if (message.name === SVG_TOOL_NAME) return svgResultNodes(message, options, wrap, flatText, collapsed)
+  if (message.name === PRESENT_VISUAL_TOOL_NAME) return presentVisualResultNodes(message, wrap, flatText)
   if (toolRowProjectsImages(message)) {
     return imageResultNodes(message.resultBlocks ?? [], options, wrap)
   }
@@ -791,10 +816,10 @@ function childToolNode(child: TranscriptToolMessage, options: TranscriptViewOpti
   // that reuse a subCallId cannot share expansion without changing node ids.
   const childKey = `sub-${child.subCallId!}`
   const childDisclosure = `${parentDisclosure}/${childKey}`
-  const svgState = child.name === 'dsh_pi_tui_svg' && child.status === 'ok'
+  const svgState = child.name === SVG_TOOL_NAME && child.status === 'ok'
     ? options.toolSvgStates?.get(child)
     : undefined
-  const collapsible = child.name === 'dsh_pi_tui_svg' && svgState?.state === 'ready'
+  const collapsible = child.name === SVG_TOOL_NAME && svgState?.state === 'ready'
   const collapsed = collapsible
     && options.expandedToolKeys !== undefined
     && !options.expandedToolKeys.has(childDisclosure)
@@ -846,10 +871,10 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
   // shape and SDK props byte-identically. The order is fixed:
   // parent args -> child block -> parent result.
   const hasChildren = (message.subCalls?.length ?? 0) > 0
-  const svgState = message.name === 'dsh_pi_tui_svg' && message.status === 'ok'
+  const svgState = message.name === SVG_TOOL_NAME && message.status === 'ok'
     ? options.toolSvgStates?.get(message)
     : undefined
-  const collapsible = message.name === 'dsh_pi_tui_svg' && svgState?.state === 'ready'
+  const collapsible = message.name === SVG_TOOL_NAME && svgState?.state === 'ready'
   // The top-level disclosure identity is the message key WITHOUT the outer
   // source scope: a standalone card's SDK key is `s1-msg-N`, while a Work card
   // is already `msg-N`. The SDK node key itself stays unchanged.

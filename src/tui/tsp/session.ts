@@ -86,6 +86,7 @@ import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
+import { SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
 import type { ToolImageState } from './transcript-view.ts'
 
 /**
@@ -1452,7 +1453,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     const visit = (message: TranscriptMessage): boolean => {
       if (message.kind !== 'tool') return true
-      if (message.name === 'dsh_pi_tui_svg') {
+      if (message.name === SVG_TOOL_NAME) {
         // The exact row object is the key: the fold may reuse a bare
         // call/sub-call id across turns/steps, and only THIS row's final
         // content may authorize its drawing.

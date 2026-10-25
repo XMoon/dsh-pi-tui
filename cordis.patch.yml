@@ -36,20 +36,25 @@
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
 
-    # PR-D visual tools: two Host tool definitions (`dsh_pi_tui_chart` and
-    # `dsh_pi_tui_svg`) on the official `ctx.tools` registry. The row owns the
-    # profile-wide `enabled` volatile Config (default On) and keeps the pair
+    # Visual tools: three Host tool definitions — the two generators
+    # (`dsh_pi_tui_chart`, `dsh_pi_tui_svg`) and the publication tool
+    # (`present_visual`) — on the official `ctx.tools` registry. The row owns the
+    # profile-wide `enabled` volatile Config (default On) and keeps the GROUP
     # registered only while it is on: `/settings → Tools → Visual tools` writes
     # that value, and the Loader commits it live (no restart / row remount).
     # The row itself is deliberately NOT gated on `tuiStartup`, a renderer, a
     # Tern hello, a client capability or a session: the same Host profile (and
-    # the in-process Remote Host built on it) serves every Client, and the
-    # plugin's own `inject: ['tools']` waits for the registry. The result
-    # contract carries no `presentationMeta` — the final durable content is the
-    # drawing's admission source.
+    # the in-process Remote Host built on it) serves every Client. `tools` is
+    # the registry the row owns; `agents` supplies the executing Agent/Session
+    # identity, `sessionQuery` reads the committed log through one caller-owned
+    # observation lease, and `sessionProjections` supplies the authoritative
+    # `turnBoundary` fold the publisher fences on (the same seam the official
+    # `present` and `agent-instructions` rows read). The result contract carries
+    # no `presentationMeta` — the final durable content is the drawing's
+    # admission source.
     - id: pi-tui-visual-tools
       name: '@xmoon76/dsh-pi-tui/visual-tools'
-      inject: [tools]
+      inject: [tools, agents, sessionQuery, sessionProjections]
 
     # The OFFICIAL Host browser-callback listener for DeepSeek Account sign-in.
     # The account provider registers `/oauth/callback` on this instance while an

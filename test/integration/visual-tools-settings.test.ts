@@ -31,6 +31,7 @@ import ToolRuntime, { defineTool, renderToolsSdk } from '@deepseek-ai/dsh-tools'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import {
   CHART_TOOL_NAME,
+  PRESENT_VISUAL_TOOL_NAME,
   SVG_TOOL_NAME,
 } from '../../src/app/host/visual-tools.ts'
 import { VISUAL_TOOLS_STATUS_SERVICE } from '../../src/domain/visual/runtime-status.ts'
@@ -64,12 +65,25 @@ interface Plane {
   dispose(): Promise<void>
 }
 
+/** The services the production visual row injects besides the registry.
+ *  This plane never runs a model turn, so the Agent/Session reads are minimal
+ *  structural stand-ins: the row only needs them to be PRESENT for the Loader
+ *  to activate it. */
+function provideVisualRowDependencies(ctx: Context): void {
+  ctx.provide('agents', { get: () => undefined } as never)
+  ctx.provide('sessionQuery', {
+    observeSession: async () => { throw new Error('this plane never observes a Session') },
+  } as never)
+  ctx.provide('sessionProjections', { stateOf: () => undefined } as never)
+}
+
 async function bootPlane(life: TestLifecycle, root: string, resetUserDocument = false): Promise<Plane> {
   const ctx = new Context()
   ctx.provide('systemPrompt', {
     tools: () => {},
     section: () => () => {},
   } as never)
+  provideVisualRowDependencies(ctx)
   new ToolRuntime(ctx)
   await ctx.plugin(Loader)
   const { profileDir } = await mountVisualToolsSettingsPlane(ctx, root, { resetUserDocument })
@@ -115,7 +129,7 @@ async function submitVisualTools(port: DirectConfigPort, enabled: boolean): Prom
   await port.visualTools.setEnabled(enabled, state.revision)
 }
 
-test('a default profile exposes both visual tools and a live Off write unregisters the exact pair', async t => {
+test('a default profile exposes all three visual tools and a live Off write unregisters the exact group', async t => {
   const life = testLifecycle(t)
   const plane = await bootPlane(life, life.tempDir('visual-tools-plane-'))
   const { ctx, port } = plane
@@ -136,9 +150,11 @@ test('a default profile exposes both visual tools and a live Off write unregiste
   assert.equal(descriptor?.user?.enabled, undefined, 'no USER override was required for the default')
   assert.equal(ctx.tools.get(CHART_TOOL_NAME)?.description.includes('Render a small static chart'), true)
   assert.equal(ctx.tools.get(SVG_TOOL_NAME)?.description.includes('Render one static, self-contained SVG'), true)
+  assert.equal(ctx.tools.get(PRESENT_VISUAL_TOOL_NAME)?.description.includes('Select previously generated'), true)
   const sdkWhileOn = ptcSdkOf(ctx)
   assert.match(sdkWhileOn, /dsh_pi_tui_chart/u, 'the PTC SDK lists the chart tool')
   assert.match(sdkWhileOn, /dsh_pi_tui_svg/u, 'the PTC SDK lists the SVG tool')
+  assert.match(sdkWhileOn, /present_visual/u, 'the PTC SDK lists the publication tool')
   assert.match(sdkWhileOn, /probe_unrelated_tool/u, 'the PTC SDK lists unrelated resident tools too')
   const schemasWhileOn = ctx.tools.schemas().filter(schema => schema.name !== 'probe_unrelated_tool')
 
@@ -149,14 +165,16 @@ test('a default profile exposes both visual tools and a live Off write unregiste
   assert.equal(settingsDescriptor(plane)?.user?.enabled, false, 'the USER layer owns the persisted Off')
   assert.equal(ctx.tools.get(CHART_TOOL_NAME), undefined)
   assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined)
+  assert.equal(ctx.tools.get(PRESENT_VISUAL_TOOL_NAME), undefined)
   assert.deepEqual(
     ctx.tools.schemas().map(schema => schema.name),
     ['probe_unrelated_tool'],
-    'the next request catalog loses both visual schemas and keeps the unrelated tool',
+    'the next request catalog loses all three visual schemas and keeps the unrelated tool',
   )
   const sdkWhileOff = ptcSdkOf(ctx)
   assert.doesNotMatch(sdkWhileOff, /dsh_pi_tui_chart/u)
   assert.doesNotMatch(sdkWhileOff, /dsh_pi_tui_svg/u)
+  assert.doesNotMatch(sdkWhileOff, /present_visual/u)
   assert.match(sdkWhileOff, /probe_unrelated_tool/u, 'the unrelated tool stays visible to PTC')
   assert.notEqual(ctx.get(VISUAL_TOOLS_STATUS_SERVICE), undefined, 'the Host row itself stays loaded')
 
@@ -168,6 +186,7 @@ test('a default profile exposes both visual tools and a live Off write unregiste
   assert.deepEqual(visualSchemasBack, schemasWhileOn, 'the re-registered definitions are byte-identical')
   assert.equal(visualSchemasBack.filter(schema => schema.name === CHART_TOOL_NAME).length, 1)
   assert.equal(visualSchemasBack.filter(schema => schema.name === SVG_TOOL_NAME).length, 1)
+  assert.equal(visualSchemasBack.filter(schema => schema.name === PRESENT_VISUAL_TOOL_NAME).length, 1)
   const sdkBackOn = ptcSdkOf(ctx)
   assert.match(sdkBackOn, /dsh_pi_tui_chart/u)
   assert.match(sdkBackOn, /dsh_pi_tui_svg/u)
@@ -212,18 +231,22 @@ test('a re-enable blocked by a foreign same-name definition stays atomic and rep
   }))
 
   // The persisted value commits (the Loader catches a throwing volatile
-  // listener), but the row's own status reports the truth: no live pair.
+  // listener), but the row's own status reports the truth: no live group.
   await submitVisualTools(port, true)
   expectVisualState(port, { enabled: true, userOverridden: true, applied: false })
-  assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined, 'the second registration was rolled back')
+  assert.equal(ctx.tools.get(SVG_TOOL_NAME), undefined, 'the SVG registration was rolled back')
+  assert.equal(ctx.tools.get(PRESENT_VISUAL_TOOL_NAME), undefined, 'the publication registration was rolled back')
   assert.equal(ctx.tools.get(CHART_TOOL_NAME)?.description, 'foreign chart owner', 'the foreign definition was not shadowed')
 
-  // Releasing the foreign owner and toggling Off -> On applies the pair again.
+  // Releasing the foreign owner and toggling Off -> On applies the group again.
   foreign()
   await submitVisualTools(port, false)
   await submitVisualTools(port, true)
   expectVisualState(port, { enabled: true, userOverridden: true, applied: true })
-  assert.deepEqual(ctx.tools.schemas().map(schema => schema.name).sort(), [CHART_TOOL_NAME, SVG_TOOL_NAME].sort())
+  assert.deepEqual(
+    ctx.tools.schemas().map(schema => schema.name).sort(),
+    [CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME].sort(),
+  )
 })
 
 test('a Confirm based on a stale revision is refused and the external edit survives', async t => {
