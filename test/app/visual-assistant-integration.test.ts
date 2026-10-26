@@ -1387,6 +1387,54 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
     assert.equal(view.indexOf('Child topology', cBefore), -1,
       `the parent figure never leaks into C the child answer:\n${view}`)
 
+    // F02's exact discriminator: every distinct figure appears EXACTLY ONCE in
+    // its OWNING Assistant answer and ZERO times in the other answers. Counting
+    // per answer range is stricter than a positional indexOf: a duplicated
+    // inline figure or a cross-answer leak cannot pass.
+    const answers = {
+      a: { start: aBefore, end: aAfter + 'After.'.length },
+      b: { start: bBefore, end: bAfter + 'Child after.'.length },
+      c: { start: cBefore, end: cAfter + 'Grandchild after.'.length },
+    }
+    assert.ok(answers.a.start >= 0 && answers.a.end > answers.a.start
+      && answers.b.start > answers.a.end && answers.b.end > answers.b.start
+      && answers.c.start > answers.b.end && answers.c.end > answers.c.start,
+      `the three answers form distinct, ordered ranges:\n${view}`)
+    const figures = {
+      aChart: 'Request latency',
+      aSvg: 'Service topology',
+      bSvg: 'Child topology',
+      cChart: 'Grandchild latency',
+    }
+    const occurrencesIn = (needle: string, range: { readonly start: number; readonly end: number }): number => {
+      let count = 0
+      let at = view.indexOf(needle, range.start)
+      while (at >= 0 && at < range.end) {
+        count += 1
+        at = view.indexOf(needle, at + needle.length)
+      }
+      return count
+    }
+    const owners: ReadonlyArray<readonly [keyof typeof answers, keyof typeof figures]> = [
+      ['a', 'aChart'],
+      ['a', 'aSvg'],
+      ['b', 'bSvg'],
+      ['c', 'cChart'],
+    ]
+    for (const [answer, figure] of owners) {
+      assert.equal(occurrencesIn(figures[figure], answers[answer]), 1,
+        `${figure} appears exactly once in answer ${answer}:\n${view}`)
+    }
+    const answersOf = ['a', 'b', 'c'] as const
+    const figuresOf = ['aChart', 'aSvg', 'bSvg', 'cChart'] as const
+    for (const answer of answersOf) {
+      for (const figure of figuresOf) {
+        if (owners.some(([ownerAnswer, ownerFigure]) => ownerAnswer === answer && ownerFigure === figure)) continue
+        assert.equal(occurrencesIn(figures[figure], answers[answer]), 0,
+          `${figure} never appears in the foreign answer ${answer}:\n${view}`)
+      }
+    }
+
     const snapshot = subject.snapshot()
     assert.ok(snapshot !== undefined)
     assert.deepEqual(snapshot.verifiedOriginSpans.map(span => span.sessionId), [
