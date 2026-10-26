@@ -13,7 +13,7 @@ import test from 'node:test'
 import { setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
 import {
   KittyGraphicsCore,
-  MAX_RESIDENT_IMAGES,
+  MAX_RESIDENT_DECODED_BYTES,
   MAX_RESIDENT_PAYLOAD_BYTES,
   type KittyGraphicsEvent,
 } from '../../src/tui/graphics/kitty-core.ts'
@@ -374,49 +374,43 @@ test('a PAINTED occurrence is terminal-retained: never hard-deleted, id never re
   assert.notEqual(second.imageId, firstImageId, 'a retained id is never handed out again')
 })
 
-test('the budget falls back instead of evicting a possibly visible image', () => {
-  const { core } = harness()
-  const images = []
-  for (let index = 0; index < MAX_RESIDENT_IMAGES; index++) {
-    const image = core.register(source(PNG, 4, 4))
-    assert.ok(image, `image ${index} admits`)
-    images.push(image)
-  }
-  assert.equal(core.residentImageCount, MAX_RESIDENT_IMAGES)
-  assert.equal(core.register(source(PNG, 4, 4)), undefined, 'the next occurrence falls back')
-  // Dropping one occurrence makes room again; nothing was force-deleted.
-  core.retire(images[0]!)
-  core.commitRetirements(core.takeRetirements().ids)
-  assert.ok(core.register(source(PNG, 4, 4)), 'a released slot is reusable')
-})
-
-test('the ID budget counts terminal-retained painted ids too', () => {
-  const { core } = harness()
-  for (let index = 0; index < MAX_RESIDENT_IMAGES; index++) {
-    const component = new NativeKittyImage(core, source(PNG, 4, 4), { maxWidthCells: 40, fallback: '[image]' })
-    component.render(80)
-    // Painted, then the occurrence goes away: the id is terminal-retained.
-    component.dispose()
-  }
-  assert.equal(core.residentImageCount, MAX_RESIDENT_IMAGES, 'retained ids still occupy the ledger')
-  assert.equal(core.register(source(PNG, 4, 4)), undefined, 'a 33rd id falls back instead of growing the terminal')
-})
-
-test('a retained id whose buffer released its pixels is retired from the ledger', () => {
+test('a session-long run of painted thumbnails never exhausts the budget', () => {
   const { core, facade } = harness()
+  // 100 distinct occurrences, each painted and then gone: the terminal keeps
+  // their pixels, so none of them may hold an app-side slot or be re-used.
+  const seen = new Set<number>()
+  for (let index = 0; index < 100; index++) {
+    const component = new NativeKittyImage(core, source(PNG, 4, 4), { maxWidthCells: 40, fallback: '[image]' })
+    facade.write(component.render(80).join('\r\n'))
+    const imageId = component.imageId!
+    assert.equal(seen.has(imageId), false, `occurrence ${index} got a fresh id`)
+    seen.add(imageId)
+    component.dispose()
+    assert.equal(core.residentImageCount, 0, 'a painted occurrence leaves the ACTIVE set')
+    assert.equal(core.residentPayloadBytes, 0, 'and keeps no payload')
+  }
+  assert.ok(core.retainedImageCount <= 256, 'the retained id memory is bounded')
+  assert.ok(core.register(source(PNG, 4, 4)), 'a new occurrence still admits after 100 images')
+})
+
+test('the decoded budget refuses an occurrence it cannot hold', () => {
+  const { core } = harness()
+  const side = Math.floor(Math.sqrt(MAX_RESIDENT_DECODED_BYTES / 4)) + 1
+  assert.equal(core.register(source(PNG, side, side)), undefined, 'the decoded ceiling is enforced')
+})
+
+test('a retained id is still recognized, so a late legacy delete stays scoped', () => {
+  const { core, facade, terminal } = harness()
   const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
-  // Painted in the ALT buffer only.
-  facade.write('\x1b[?1049h')
   facade.write(component.render(80).join('\r\n'))
   const imageId = component.imageId!
   component.dispose()
-  assert.equal(core.residentImageCount, 1, 'the painted id is retained')
-  // The alt buffer's own release frees the only copy: the id is now provably
-  // gone and must not keep occupying the budget.
-  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
-  assert.equal(core.residentImageCount, 0, 'the provably released id left the ledger')
-  assert.equal(core.owns(imageId), false)
-  assert.equal(core.wasOwned(imageId), true, 'a late legacy delete for it stays a no-op')
+  assert.equal(core.residentImageCount, 0, 'the painted occurrence left the active set')
+  assert.equal(core.owns(imageId), true, 'but its id is still known')
+  terminal.writes.length = 0
+  facade.write(encodeKittyDeleteImage(imageId))
+  assert.equal(terminal.text, encodeKittyDeletePlacement(imageId),
+    'the legacy delete became a placement removal, never a hard delete')
 })
 
 test('the payload budget refuses an oversized resident set', () => {
