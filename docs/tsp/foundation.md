@@ -595,9 +595,11 @@ a new page or a Viewer owned by this renderer.
   (CLIENT_LOCAL), injected through the renderer's ONE `copyVisual` callback; the
   SDK's own `actions.click:'copy'` text copy is not used.
 - **Keyboard.** `Alt+V` selects the next figure of the current window in its
-  committed paint order (wrap) and reveals it through the existing main-surface
-  scroll; `Alt+C` copies only the current selection and never guesses another
-  figure. The chords are renderer-local product bindings, admitted after every
+  committed paint order (wrap) and requests the existing main-surface
+  `reveal(targetId, 'nearest')`; `Alt+C` copies only the current selection and
+  never guesses another figure. The terminal scrollback remains the client's own
+  scroll owner: the renderer adds no page, Reader or second scroll owner and
+  makes no visibility promise for the revealed figure. The chords are renderer-local product bindings, admitted after every
   existing owner: a modal seat, the temporary Reader, an open Picker/Work Hub and
   the hydration window all outrank them. Selection is scoped to the current
   `(projection source, scope, row, published ref)`; a source/scope change, a
@@ -678,10 +680,10 @@ universal/version-independent claim; a tier qualifies a claim, not a repository.
   client tree, not the wire. A disabled
   entry is `off` opacity plus a tooltip/title reason; the client paints no
   in-place reason text, so the reason also rides a detail fact. A stylesheet
-  paints border/background/padding on an `el` button when the rule targets the
-  node's own `role`/`class` (measured on the pinned 0.9.5 client); a
-  descendant/global selector is not a substitute, and native button activation
-  is not assumed — the program admits the action itself. The way back is a native `ui.row({onClick})` navigation row at the top
+  paints border/background/padding on an `el` button only when the rule targets
+  the node's own `role`/`class`; a descendant/global selector is not a
+  substitute, and native button activation is not assumed — the program admits
+  the action itself. The way back is a native `ui.row({onClick})` navigation row at the top
   of the reading body, with an Esc twin; at the tail, Esc must stay bound to
   back. OSC52 emission into the Tern tty is not an OS-clipboard proof; the agent
   lane may not claim `CLIPBOARD_CHANGED`, and the OS half is Owner-attested.

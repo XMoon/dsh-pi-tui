@@ -27,7 +27,8 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import type { ChartFact } from '../../src/domain/visual/chart.ts'
-import type { SvgFact } from '../../src/domain/visual/svg.ts'
+import { svgDigest, svgHumanText, type SvgFact } from '../../src/domain/visual/svg.ts'
+import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import { mountTspRenderer, type TspInputHandlers, type TspRenderer } from '../../src/tui/tsp/session.ts'
 
@@ -354,6 +355,9 @@ interface Harness {
 async function mountHarness(options: {
   readonly hello?: typeof HELLO
   readonly failBlobWrite?: boolean
+  /** Bind the input handlers (default true). A false case models the pre-bind
+   *  window, where no application intent may run yet. */
+  readonly bind?: boolean
 } = {}): Promise<Harness> {
   const tern = new ScriptedTern(options.hello ?? HELLO, { failBlobWrite: options.failBlobWrite })
   const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
@@ -388,7 +392,7 @@ async function mountHarness(options: {
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
   }
-  renderer.bindInput(handlers)
+  if (options.bind !== false) renderer.bindInput(handlers)
   return {
     renderer,
     tern,
@@ -713,6 +717,131 @@ test('a fatal SVG blob failure aborts the frame instead of painting a fake image
     assert.equal(nodesWhere(harness.tern, node => node.kind === 'image').length, 0,
       'no image node references a blob that was never sent')
     assert.equal(harness.tern.blobs().length, 0)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── Additional owner/negative coverage ─────────────────────────────────────
+
+test('an unbound renderer refuses both the pointer action and the chords', async () => {
+  const harness = await mountHarness({ bind: false })
+  try {
+    harness.commit(bothFiguresAnswer().messages, {})
+    const button = copyButtonIds(harness.tern)[0] as string
+    harness.tern.event({ ev: 'action', sf: surfaceId(harness.tern), id: button, act: 'dsh-visual-copy' })
+    harness.tern.input.type('\u001bv')
+    harness.tern.input.type('\u001bc')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(harness.copies.length, 0, 'no pre-bind application intent may run')
+    assert.deepEqual(badgeTexts(harness.tern).filter(text => text.startsWith('Selected ·')), [])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('switching A -> B -> A clears the old selection and every old Copy id', async () => {
+  const harness = await mountHarness()
+  try {
+    const first = bothFiguresAnswer()
+    harness.commit(first.messages, {})
+    harness.tern.input.type('\u001bv')
+    await until('the first selection badge', () => badgeTexts(harness.tern).includes('Selected · 1/2'))
+    const firstButton = copyButtonIds(harness.tern)[0] as string
+
+    harness.commit(bothFiguresAnswer().messages, {})
+    harness.commit(bothFiguresAnswer().messages, {})
+    assert.deepEqual(badgeTexts(harness.tern).filter(text => text.startsWith('Selected ·')), [],
+      'the returned subject starts with no inherited selection')
+    const currentButton = copyButtonIds(harness.tern)[0] as string
+    assert.notEqual(currentButton, firstButton)
+    harness.tern.event({ ev: 'action', sf: surfaceId(harness.tern), id: firstButton, act: 'dsh-visual-copy' })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(harness.copies.length, 0)
+    harness.tern.input.type('\u001bc')
+    await until('the selection prompt', () => textNodes(harness.tern).includes('Alt+V to select a visual'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a pane without the styles feature installs no visual sheet and still copies', async () => {
+  const withoutStyles = { ...HELLO, features: HELLO.features.filter(feature => feature !== 'styles') }
+  const harness = await mountHarness({ hello: withoutStyles })
+  try {
+    harness.commit(bothFiguresAnswer().messages, {})
+    assert.equal(harness.tern.sheets().some(sheet => sheet.name === 'dsh-visual-copy'), false)
+    const button = copyButtonIds(harness.tern)[0] as string
+    assert.ok(button !== undefined)
+    harness.tern.event({ ev: 'action', sf: surfaceId(harness.tern), id: button, act: 'dsh-visual-copy' })
+    await until('the clipboard write', () => harness.copies.length === 1)
+    assert.deepEqual(harness.copies, [{ text: JSON.stringify(CHART, null, 2) }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+/** The real SVG tool row whose credential matches the given admitted source. */
+function svgToolRow(source: string): TranscriptMessage {
+  const fact = {
+    version: 1 as const,
+    type: 'svg' as const,
+    title: SVG.title,
+    description: SVG.description,
+    digest: svgDigest(source),
+    bytes: Buffer.byteLength(source, 'utf8'),
+  }
+  return {
+    kind: 'tool',
+    turn: 1,
+    name: SVG_TOOL_NAME,
+    args: JSON.stringify({ title: SVG.title, description: SVG.description, svg: source }),
+    result: svgHumanText(fact),
+    status: 'ok',
+    resultBlocks: [
+      { type: 'text', text: svgHumanText(fact) },
+      { type: 'text', text: `visual-v1:${JSON.stringify(fact)}` },
+    ],
+  } as unknown as TranscriptMessage
+}
+
+/** The same admitted SVG published into the Assistant body. */
+function svgPublicationFor(source: string): PublishedVisual {
+  const publication = svgPublication()
+  return {
+    ...publication,
+    source: {
+      ...publication.source,
+      svg: {
+        ...(publication.source.svg as SvgFact),
+        digest: svgDigest(source),
+        bytes: Buffer.byteLength(source, 'utf8'),
+      },
+      svgSource: source,
+    },
+  }
+}
+
+test('a Tool SVG and the Assistant image of the same source share ONE sent blob, even after expansion', async () => {
+  const harness = await mountHarness()
+  try {
+    const tool = svgToolRow(SVG_SOURCE)
+    const publication = svgPublicationFor(SVG_SOURCE)
+    const answer = assistantRow(`SVG:\n\n${marker(publication.ref)}`)
+    present(answer, [publication])
+    harness.commit([answer, tool], {})
+
+    await until('the assistant SVG blob', () => harness.tern.blobs().length === 1)
+    assert.equal(nodesWhere(harness.tern, node => node.kind === 'image').length, 1,
+      'the collapsed Tool card draws no image; the Assistant figure draws one')
+    assert.equal(harness.tern.sheets().some(sheet => sheet.name === 'dsh-visual-copy'), true)
+
+    const toolNode = nodesWhere(harness.tern, node => node.kind === 'tool')[0]
+    assert.ok(toolNode !== undefined)
+    harness.tern.event({ ev: 'toggle', sf: surfaceId(harness.tern), id: toolNode.id, collapsed: false })
+    await until('the expanded Tool SVG image', () => nodesWhere(harness.tern, node => node.kind === 'image').length === 2)
+    assert.equal(harness.tern.blobs().length, 1,
+      'expanding the Tool card reuses the content-addressed blob id instead of re-sending bytes')
   } finally {
     await harness.dispose()
   }
