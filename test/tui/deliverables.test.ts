@@ -584,3 +584,25 @@ test('long declared filenames keep their distinguishing tail in the transcript t
   assert.ok(rows[0]!.includes('alpha.md'), `the tail survives: ${rows[0]}`)
   assert.ok(rows[1]!.includes('beta.md'), `the tail survives: ${rows[1]}`)
 })
+
+test('a middle-only discriminator survives the transcript clamp', async () => {
+  const vt = new VirtualTerminal(40, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  const middle = (discriminator: string): string =>
+    `/ws/docs/report-${'a'.repeat(24)}${discriminator}${'b'.repeat(24)}.md`
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [{ path: middle('X') }, { path: middle('Y') }],
+  }])
+  const view = await viewport(vt)
+  const rows = view.split('\n').filter(line => line.includes('report-') && line.includes('…'))
+  assert.equal(rows.length, 2, `both rows are clamped and painted:\n${view}`)
+  assert.notEqual(rows[0]!.trim(), rows[1]!.trim(),
+    `a middle-only difference must still produce distinct rows:\n${rows.join('\n')}`)
+})

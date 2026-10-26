@@ -702,8 +702,17 @@ one that paints it), so two declarations that differ only in bytes the
 projection removes cannot collapse into one visible label; when even that
 projection is identical, a visible ordinal suffix (`name (2)`) keeps the rows
 distinguishable, and that ordinal never takes a label another declaration of the
-same delivery naturally carries (the final labels are globally unique). The RAW
-declared path stays the Copy and search authority. Collapsed shows at most four files; the marker row names the command. An
+same delivery naturally carries (the final labels are globally unique).
+
+The same two devices apply to the DISPLAY-WIDTH clamp: an over-wide label keeps
+both ends, and when that clamp would still paint two different declarations
+identically, the later row gains a visible ordinal inside the fitted width. The
+browser fits ONE label set per page width and reuses it for the list, the wide
+side pane and the Details title, so those surfaces can never disagree. Because a
+clamp cannot promise to keep an arbitrary middle character, the Details page
+always paints the COMPLETE safe projection of the declared path (wrapped, never
+clipped) — that is the identity of last resort, and Copy stays byte-exact on the
+RAW path. Collapsed shows at most four files; the marker row names the command. An
 expanded tail (an explicit master expansion or a granted search reveal) renders
 the complete declaration list. `Browse all` / per-file `Details` are painted
 ONLY where a real pointer owner exists (fullscreen Full); the regular surface's

@@ -21,7 +21,7 @@ import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-
 import { color } from '../theme/runtime.ts'
 import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { DELIVERED_FILES_CHORDS } from '../keybindings/hints.ts'
-import { abbreviateName } from '../pickers/name-label.ts'
+import { fitDeliveredLabels } from '../presentation/labels.ts'
 import {
   deliveredFileBasename,
   deliveredFileLabels,
@@ -213,15 +213,30 @@ export class DeliveredFilesPanel implements Component {
     return filterDeliveredFiles(this.currentFiles(), this.filter)
   }
 
-  private labelOf(file: PresentedFilePresentation): string {
+  /** The current Turn's projected labels, cached per Turn. */
+  private projectedLabels(): readonly string[] {
     const turn = this.currentTurn()
     let labels = this.labelsByTurn.get(turn)
     if (labels === undefined) {
       labels = deliveredFileLabels(this.currentFiles(), { project: sanitizeDisplaySegment })
       this.labelsByTurn.set(turn, labels)
     }
+    return labels
+  }
+
+  private labelOf(file: PresentedFilePresentation): string {
     const index = this.currentFiles().indexOf(file)
-    return labels[index] ?? deliveredFileBasename(file.path)
+    return this.projectedLabels()[index] ?? deliveredFileBasename(file.path)
+  }
+
+  /**
+   * The delivery's labels fitted to ONE room, shared by the list rows, the
+   * wide side pane and the Details title, so every surface of this page shows
+   * the SAME text for the same file (and no two rows can paint the same text
+   * after the clamp).
+   */
+  private fittedLabels(room: number): readonly string[] {
+    return fitDeliveredLabels(this.projectedLabels(), Math.max(1, room))
   }
 
   private selectedFile(): PresentedFilePresentation | undefined {
@@ -498,7 +513,13 @@ export class DeliveredFilesPanel implements Component {
     if (file === undefined) return []
     const contentWidth = Math.max(8, Math.floor(width))
     const lines: string[] = []
-    lines.push(`${color.textDim('Host: ')}${sanitizeDisplayText(file.path)}`)
+    // The COMPLETE projected path is wrapped, never clipped: it is the identity
+    // the (necessarily clamped) title cannot always show.
+    const hostPrefix = 'Host: '
+    const hostChunks = wrapPlainText(sanitizeDisplayText(file.path), Math.max(8, contentWidth - hostPrefix.length))
+    hostChunks.forEach((chunk, index) => {
+      lines.push(`${index === 0 ? color.textDim(hostPrefix) : ' '.repeat(hostPrefix.length)}${chunk}`)
+    })
     if (file.description !== undefined && file.description !== '') {
       const wrapped = wrapPlainText(sanitizeDisplayText(file.description), Math.max(4, contentWidth - 'Description: '.length))
       wrapped.forEach((line, index) => {
@@ -519,7 +540,14 @@ export class DeliveredFilesPanel implements Component {
 
     if (this.page === 'details') {
       const file = this.selectedFile()
-      const title = file === undefined ? 'Details' : `${sanitizeDisplaySegment(this.labelOf(file))} · Details`
+      const titleSuffix = ' · Details'
+      const titleRoom = Math.max(8, safeWidth - titleSuffix.length)
+      const fitted = this.fittedLabels(titleRoom)
+      const titleIndex = file === undefined ? -1 : this.currentFiles().indexOf(file)
+      const titleLabel = titleIndex >= 0 && file !== undefined
+        ? fitted[titleIndex] ?? sanitizeDisplaySegment(deliveredFileBasename(file.path))
+        : ''
+      const title = file === undefined ? 'Details' : `${titleLabel}${titleSuffix}`
       rows.push(truncateToWidth(color.textDim(title), safeWidth, '…'))
       const bodyRows = Math.max(1, this.maxRows - 2)
       const body = this.detailsBodyLines(safeWidth)
@@ -579,17 +607,25 @@ export class DeliveredFilesPanel implements Component {
     const selectedIndex = this.selectedIndex()
     const actions = safeWidth >= ACTION_COLUMN_MIN_WIDTH
     const actionColumn = visibleWidth(DETAILS_VERB) + 2
+    // ONE fitting room for every surface of this page (the Details title is the
+    // narrowest consumer), so the list, the side pane and the Details title
+    // agree on each file's text and no clamp can collapse two rows.
+    const fitted = this.fittedLabels(Math.min(
+      Math.max(1, listWidth - (actions ? actionColumn : 0) - 2),
+      Math.max(8, safeWidth - ' · Details'.length),
+    ))
+    const fittedByPath = new Map(this.currentFiles().map((file, index) => [file.path, fitted[index]!]))
 
     for (const [offset, file] of visible.entries()) {
       const index = listTop + offset
       const selected = index === selectedIndex
       const marker = selected ? color.primary('>') : ' '
-      const label = sanitizeDisplaySegment(this.labelOf(file))
+      const label = fittedByPath.get(file.path) ?? sanitizeDisplaySegment(this.labelOf(file))
       const bodyWidth = Math.max(1, listWidth - (actions ? actionColumn : 0))
       // Both ends survive the clamp (design-language §6.4): a long filename
       // differs from its sibling near the END, and a head-only cut would paint
       // two identical rows.
-      const labelText = abbreviateName(label, Math.max(1, bodyWidth - 2))
+      const labelText = label
       const gap = actions ? Math.max(1, bodyWidth - 2 - visibleWidth(labelText)) : 0
       const painted = actions
         ? `${marker} ${color.textDim(labelText)}${' '.repeat(gap)}${color.primary(DETAILS_VERB)}`
