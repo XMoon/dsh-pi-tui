@@ -776,3 +776,63 @@ test('the visual Assistant keeps its layout facts across the frozen size matrix'
   }
   app.stop()
 })
+
+// ── F2: adjacent text blocks stay ONE Markdown document ───────────────────
+
+test('cross-block bold around a skipped reasoning block survives a tail-only publication', async () => {
+  const content: ContentBlock[] = [
+    { type: 'text' as const, text: '**重要' },
+    { type: 'reasoning' as const, text: 'internal reasoning' },
+    { type: 'text' as const, text: '提醒**' },
+  ]
+  const { folder, assistant } = answerFolder('', content)
+  const { vt, app } = mountApp({ width: 100, height: 60 })
+  await vt.waitForRender()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const baselineComponent = app.messageCacheEntryForTest(assistant)?.component
+  assert.ok(baselineComponent !== undefined)
+  const baseline = baselineComponent.render(100)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A)])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const visualComponent = app.messageCacheEntryForTest(assistant)?.component
+  assert.ok(visualComponent !== undefined)
+  const visual = visualComponent.render(100)
+  const chart = visual.findIndex(line => line.includes('Request latency'))
+  assert.ok(chart > 0, `tail chart exists:\n${visual.join('\n')}`)
+  assert.deepEqual(visual.slice(0, chart), baseline,
+    'the text body must remain the original merged Markdown document')
+  assert.ok(!visual.slice(0, chart).join('\n').includes('**'), 'the bold span is not split')
+  assert.ok(visual.slice(0, chart).join('\n').includes('重要提醒'), 'the complete bold text is present')
+  app.dispose()
+})
+
+test('cross-block fenced code around a skipped reasoning block matches the original Markdown body', async () => {
+  const content: ContentBlock[] = [
+    { type: 'text' as const, text: '```ts\nconst x = 1' },
+    { type: 'reasoning' as const, text: 'internal reasoning' },
+    { type: 'text' as const, text: '\nconst y = 2\n```' },
+  ]
+  const { folder, assistant } = answerFolder('', content)
+  const { vt, app } = mountApp({ width: 100, height: 60 })
+  await vt.waitForRender()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const baselineComponent = app.messageCacheEntryForTest(assistant)?.component
+  assert.ok(baselineComponent !== undefined)
+  const baseline = baselineComponent.render(100)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A)])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const visualComponent = app.messageCacheEntryForTest(assistant)?.component
+  assert.ok(visualComponent !== undefined)
+  const visual = visualComponent.render(100)
+  const chart = visual.findIndex(line => line.includes('Request latency'))
+  assert.ok(chart > 0, `tail chart exists:\n${visual.join('\n')}`)
+  assert.deepEqual(visual.slice(0, chart), baseline,
+    'a fenced code block spanning ContentBlocks stays one Markdown document')
+  const body = visual.slice(0, chart).join('\n')
+  assert.ok(body.includes('const x = 1') && body.includes('const y = 2'))
+  app.dispose()
+})
