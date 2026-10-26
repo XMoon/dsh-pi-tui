@@ -209,7 +209,9 @@ function makeHarness(home: string, events: readonly SessionEvent[]) {
   return { persistence, sessionQuery, agents, sessions, defaultModel, llm, commands, live }
 }
 
-async function settle(): Promise<void> {
+/** Drain the composition's microtask chain to its current quiescent point.
+ *  This is NOT a fixed wait: no timer is armed and no wall clock is spent. */
+async function drainMicrotasks(): Promise<void> {
   for (let index = 0; index < 80; index += 1) await Promise.resolve()
 }
 
@@ -263,7 +265,7 @@ async function mountRunner(
   ctx.provide('loader', { await: async () => {} } as never)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: SESSION_ID, fullscreen: 'off' } as never)))
   await fiber
-  await settle()
+  await drainMicrotasks()
   life.defer(() => fiber.dispose())
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
@@ -274,10 +276,11 @@ async function mountRunner(
 /** Wait for the real painted frame to carry the hydrated answer. */
 async function waitForAnswer(vt: VirtualTerminal): Promise<string> {
   for (let round = 0; round < 80; round += 1) {
-    await settle()
+    await drainMicrotasks()
     const view = vt.getViewport().join('\n')
     if (view.includes(ANSWER_BEFORE)) return view
-    await new Promise<void>(resolve => setTimeout(resolve, 5))
+    // Yield ONE macrotask so the fork's scheduled frame can run; no delay.
+    await new Promise<void>(resolve => setImmediate(resolve))
   }
   assert.fail(`the hydrated answer never painted:\n${vt.getViewport().join('\n')}`)
 }
@@ -295,7 +298,7 @@ test('the real /copy command copies the display body through the production brid
   const harness = makeHarness(home, events)
   const { vt, commands } = await mountRunner(life, home, harness)
   await waitForAnswer(vt)
-  for (let round = 0; round < 40 && commands.handler('copy') === undefined; round += 1) await settle()
+  for (let round = 0; round < 40 && commands.handler('copy') === undefined; round += 1) await drainMicrotasks()
   const handler = commands.handler('copy')
   assert.ok(handler !== undefined, 'the real /copy command was registered by the live-session composition')
 

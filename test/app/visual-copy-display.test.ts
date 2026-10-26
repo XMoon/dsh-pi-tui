@@ -19,6 +19,7 @@ import { createPresentationBridge, type DirectSessionReads } from '../../src/app
 import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src/domain/visual/chart.ts'
 import { visualReference, visualReferenceLine } from '../../src/domain/visual/reference.ts'
 import { VISUAL_PUBLISHED_PREFIX } from '../../src/domain/transcript/visual-text.ts'
+import { asVisualSessionEvents } from '../../src/domain/visual/publication.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
@@ -167,14 +168,21 @@ function bridgeOf(options: {
   readonly sessionId?: string
 }): ReturnType<typeof createPresentationBridge> {
   const events = options.events
+  const session = sessionOf(events)
   return createPresentationBridge({
     remoteSources: undefined,
     currentSessionId: () => options.sessionId ?? SESSION,
     currentDirectAgent: () => undefined,
     assistantStreamBaselineFor: () => [],
-    directSessionFor: () => sessionOf(events),
+    directSessionFor: () => session,
     mainFolder: () => options.folder,
     currentGeneration: options.generation ?? (() => 1),
+    mainVisualSnapshot: () => ({
+      session,
+      sessionId: SESSION,
+      seq: events.length,
+      events: asVisualSessionEvents(events),
+    }),
   })
 }
 

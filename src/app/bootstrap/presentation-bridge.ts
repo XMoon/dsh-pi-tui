@@ -22,8 +22,8 @@ import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { assistantStepOf } from '../../domain/transcript/folder.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { visibleAssistantTextForCopy } from '../../domain/visual/display-copy.ts'
+import type { VisualEventSnapshot } from '../../domain/visual/presentation.ts'
 import {
-  asVisualSessionEvents,
   collectPublishedVisuals,
   isModelOnlyReplacement,
 } from '../../domain/visual/publication.ts'
@@ -90,6 +90,13 @@ export interface PresentationBridgeDeps {
   readonly mainFolder: () => TranscriptFolder | undefined
   /** The ownership generation (bumped by every owner/binding commit). */
   readonly currentGeneration: () => number
+  /**
+   * The EXISTING visual-event snapshot selector for the CURRENT Direct main
+   * subject: the exact committed log the PR2 sidecar was derived from, or
+   * undefined on Remote / no live owner. The display copy reuses this one
+   * read-only seam rather than opening a second session-log reader.
+   */
+  readonly mainVisualSnapshot: () => VisualEventSnapshot | undefined
 }
 
 /** The composition-facing presentation reads the root consumes. */
@@ -124,7 +131,16 @@ export interface PresentationBridge {
  * narrow functions; it registers nothing and owns no state.
  */
 export function createPresentationBridge(deps: PresentationBridgeDeps): PresentationBridge {
-  const { remoteSources, currentSessionId, currentDirectAgent, assistantStreamBaselineFor, directSessionFor } = deps
+  const {
+    remoteSources,
+    currentSessionId,
+    currentDirectAgent,
+    assistantStreamBaselineFor,
+    directSessionFor,
+    mainFolder,
+    currentGeneration,
+    mainVisualSnapshot,
+  } = deps
 
   /** The Direct presentation reader (PR4 §4.3): the full-coverage adapter
    *  over the exact attachment map + the assistant-stream baseline — the
@@ -236,31 +252,38 @@ export function createPresentationBridge(deps: PresentationBridgeDeps): Presenta
     if (latest === undefined) return undefined
     // A candidate only BUYS the proof; it never authorizes a deletion.
     if (!latest.text.includes('[dsh-visual-')) return latest.text
-    const generation = deps.currentGeneration()
+    const generation = currentGeneration()
     if (currentSessionId() !== sessionId) {
       throw new SupersededReadError('the session changed while reading the last assistant text')
     }
-    const publications = collectPublishedVisuals(sessionId, asVisualSessionEvents(session.snapshotEvents()))
+    // Reuse the EXISTING render-time visual snapshot seam: it is the exact
+    // committed log the PR1/PR2 projection was derived from, fenced to the
+    // current main Direct Session. No second session-log reader.
+    const snapshot = mainVisualSnapshot()
+    if (snapshot === undefined || snapshot.session !== session || snapshot.sessionId !== sessionId) {
+      throw new SupersededReadError('the session changed while reading the last assistant text')
+    }
+    const publications = collectPublishedVisuals(sessionId, snapshot.events)
     const turnPublications = publications.filter(publication => publication.turn === latest.turn)
     // No PR1-authorized publication for this turn: the marker-shaped bytes are
     // ordinary prose, never a consumed display span.
     if (turnPublications.length === 0) return latest.text
-    const folder = deps.mainFolder()
-    if (folder === undefined) {
+    const transcript = mainFolder()
+    if (transcript === undefined) {
       throw new SupersededReadError('the published visual source cannot be qualified in the current transcript')
     }
-    const settlementSeq = folder.assistantSettlementSeq(latest.turn, latest.step)
+    const settlementSeq = transcript.assistantSettlementSeq(latest.turn, latest.step)
     if (settlementSeq !== latest.seq) {
       throw new SupersededReadError('the latest assistant message is not the committed final step of this transcript')
     }
-    const group = folder.messages().filter(message => 'turn' in message && message.turn === latest.turn)
-    const final = eligibleFinalAssistant(folder.turnActivity(latest.turn), group)
+    const group = transcript.messages().filter(message => 'turn' in message && message.turn === latest.turn)
+    const final = eligibleFinalAssistant(transcript.turnActivity(latest.turn), group)
     if (final === undefined
       || assistantStepOf(final.message) !== latest.step
       || final.message.text !== latest.text) {
       throw new SupersededReadError('the published visual source does not match the eligible final assistant row')
     }
-    if (deps.currentGeneration() !== generation || currentSessionId() !== sessionId) {
+    if (currentGeneration() !== generation || currentSessionId() !== sessionId) {
       throw new SupersededReadError('the session changed while deriving the last assistant text')
     }
     return visibleAssistantTextForCopy({

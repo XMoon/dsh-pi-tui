@@ -670,6 +670,10 @@ export function applyRunnerWithRuntime(
       directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session,
       mainFolder: () => mainFolderForBridge?.(),
       currentGeneration: () => ownership.generation(),
+      mainVisualSnapshot: () => visualEventSnapshotFor({
+        subjectKind: 'main',
+        subjectId: ownership.currentSessionId(),
+      }),
     })
     /**
      * Whether the ownership subject captured at ADMISSION is still the CURRENT
