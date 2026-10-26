@@ -976,15 +976,28 @@ Attachment completion and intake are Client-local:
   four rows. Under 50 columns or with a 1–3 row grant the band degrades to a
   one-line count/latest-identity summary with no pixel card and no removal
   control; with no safe space it paints zero rows. The line/total identity
-  uses the canonical `🖼️ ` marker (VS16). Pixel rendering is limited to PNG on
-  Kitty and the original format on iTerm2 at or under 4 MiB; unsupported/
-  oversized/recalled drafts paint the real MIME, name, dimensions and
-  `Preview unavailable` in the **card identity row**. The one-line summary
-  fallback paints only the occurrence count plus the latest `#id W×H`, never
-  a pixel claim. The band reads no new file
-  and registers no decoder. Its row grant participates in the unified
-  fullscreen pinned-chrome/footer/widget budget; the widget/footer reservation
-  is bounded to avoid a feedback cycle and may under-grant, never overflow.
+  uses the canonical `🖼️ ` marker (VS16). Pixel rendering uses raw PNG on
+  Kitty, the original format on iTerm2, and — on Kitty — a bounded
+  ASYNCHRONOUS PNG derivative of a local JPEG/WebP draft, all within the
+  existing 4 MiB staged-source cap. That derivative is the SAME Client-local
+  decoder the transcript uses (first frame only, EXIF orientation applied,
+  fitted inside 768×768 without enlargement). The identity row, the `x` hit
+  and the submitted bytes keep the ORIGINAL draft dimensions, media type and
+  encoded bytes; while the derivative is pending the card paints the original
+  identity plus `…`, and only an admission or decoder failure shows
+  `Preview unavailable`. The derived state belongs to the ONE last-visible
+  card of the mounted component (at most one running conversion) and is
+  retired on a card switch, session switch, invalidation or dispose: a late
+  result never repaints another card or a destroyed surface, and an
+  Undo-restored draft is re-derived on the next visible paint. Unsupported/
+  oversized/empty/recalled drafts and GIFs paint the real MIME, name,
+  dimensions and `Preview unavailable` in the **card identity row**. The
+  one-line summary fallback paints only the occurrence count plus the latest
+  `#id W×H`, never a pixel claim. The band reads no new file, never reads a
+  recalled durable ref and registers no global decoder or pixel cache. Its row
+  grant participates in the unified fullscreen pinned-chrome/footer/widget
+  budget; the widget/footer reservation is bounded to avoid a feedback cycle
+  and may under-grant, never overflow.
 - The fullscreen `x` control edits exactly ONE canonical placeholder occurrence
   in the **visible editor text** (removing at most one adjacent separator
   space), preserves the cursor's relative position, paste markers and mode.

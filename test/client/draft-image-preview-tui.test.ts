@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
@@ -1801,4 +1802,151 @@ test('short/tall and narrow/wide combinations keep the editor and footer visible
     assert.ok(editorRow < footerRow, `${columns}×${rows}: editor stays above the footer`)
     disposeStartedApps()
   }
+})
+
+// ---------------------------------------------------------------------------
+// Image-6B: real JPEG/WebP draft cards inside the mounted TuiApp.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_JPEG = readFileSync(new URL('../fixtures/images/transcript-sample.jpg', import.meta.url))
+const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
+
+function addRealImage(
+  store: DraftImageStore,
+  bytes: Buffer,
+  mediaType: 'image/jpeg' | 'image/webp',
+  width: number,
+  height: number,
+  name: string,
+) {
+  return store.add({ bytes, mediaType, width, height, name })
+}
+
+/** Wait for an authoritative terminal fact, not a fixed window. */
+async function until(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.fail(`timed out waiting for ${label}`)
+}
+
+/** Every Kitty f=100 image header the TUI actually wrote. */
+function writtenKittyHeaders(vt: VirtualTerminal): string[] {
+  const headers: string[] = []
+  for (const chunk of vt.writes) {
+    for (const match of chunk.matchAll(/\x1b_G([^;\x1b]*);[^\x1b]*\x1b\\/g)) {
+      if (match[1]!.includes('f=100')) headers.push(match[1]!)
+    }
+  }
+  return headers
+}
+
+test('a real JPEG draft card paints real Kitty pixels above the editor (Image-6B)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(100, 32, store)
+  const image = addRealImage(store, SAMPLE_JPEG, 'image/jpeg', 120, 80, 'photo.jpg')
+  await vt.waitForRender()
+  assert.equal(writtenKittyHeaders(vt).length, 0, 'fixture: no pixel placement before the draft')
+
+  app.setDraft(`${image.placeholder} compare`)
+  await until(() => writtenKittyHeaders(vt).length === 1, 'the draft Kitty placement')
+  const view = await viewport(vt)
+  const identityRow = view.split('\n').findIndex(line => line.includes('#1/1 · 120×80 · 968 B'))
+  assert.notEqual(identityRow, -1, `the draft identity uses the ORIGINAL JPEG dimensions:\n${view}`)
+  const draftRow = view.split('\n').findIndex(line => line.includes('compare'))
+  assert.ok(identityRow < draftRow, 'the preview band sits above the editor draft')
+  assert.ok(!stripAnsi(view).includes('Preview unavailable'), 'the ready JPEG card is not unavailable')
+  assert.ok(!vt.writes.join('').includes('\x1b]1337;File='), 'no iTerm2 sequence on a Kitty terminal')
+  const header = writtenKittyHeaders(vt)[0]!
+  assert.ok(Number(/(?:^|,)c=(\d+)/.exec(header)![1]) <= 44, `the draft card never exceeds 44 cells: ${header}`)
+  assert.ok(Number(/(?:^|,)r=(\d+)/.exec(header)![1]) <= 3, `the draft card never exceeds 3 rows: ${header}`)
+  app.stop()
+})
+
+test('a real WebP draft card uses the 22×3 split slot and keeps its original identity (Image-6B)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(60, 32, store)
+  const image = addRealImage(store, SAMPLE_WEBP, 'image/webp', 120, 80, 'graphic.webp')
+  app.setDraft(image.placeholder)
+  await until(() => writtenKittyHeaders(vt).length === 1, 'the split-width WebP placement')
+  const view = await viewport(vt)
+  assert.ok(view.includes('#1/1 · 120×80 · 138 B'), `the original WebP identity:\n${view}`)
+  const header = writtenKittyHeaders(vt)[0]!
+  assert.ok(Number(/(?:^|,)c=(\d+)/.exec(header)![1]) <= 22, `the split card never exceeds 22 cells: ${header}`)
+  assert.ok(Number(/(?:^|,)r=(\d+)/.exec(header)![1]) <= 3, `the split card never exceeds 3 rows: ${header}`)
+  app.stop()
+})
+
+test('a session switch drops the local JPEG derivative and the next paint re-derives it', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(100, 32, store)
+  const image = addRealImage(store, SAMPLE_JPEG, 'image/jpeg', 120, 80, 'photo.jpg')
+  app.setDraft(image.placeholder)
+  await until(() => writtenKittyHeaders(vt).length === 1, 'the first derivative')
+  const preview = (app as unknown as {
+    draftImagePreview: {
+      draftGeneration: number
+      draftCandidate: unknown
+      draftReady: unknown
+      imageCache: Map<string, unknown>
+      base64Cache: Map<string, unknown>
+    }
+  }).draftImagePreview
+  assert.notEqual(preview.draftReady, undefined, 'fixture: the card is READY')
+
+  app.clearSessionOverrides()
+  assert.equal(preview.draftCandidate, undefined, 'the switch retires the candidate')
+  assert.equal(preview.draftReady, undefined, 'the switch drops the READY derivative')
+  assert.equal(preview.imageCache.size, 0, 'no local pixel cache survives the switch')
+  assert.equal(preview.base64Cache.size, 0)
+
+  // The retained draft still references the SAME staged object: the next
+  // visible paint derives it again from the store-owned bytes.
+  ;(app as unknown as { requestRender(): void }).requestRender()
+  await until(() => preview.draftReady !== undefined, 'the re-derived card')
+  await vt.waitForRender()
+  const view = await viewport(vt)
+  assert.ok(view.includes('#1/1 · 120×80 · 968 B'), `the identity survives the switch:\n${view}`)
+  assert.ok(writtenKittyHeaders(vt).length >= 2, 'the new session paints a fresh real PNG placement')
+  app.stop()
+})
+
+test('x → Undo on a real JPEG keeps the ORIGINAL encoded bytes for submission (Image-6B)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(100, 32, store)
+  const image = addRealImage(store, SAMPLE_JPEG, 'image/jpeg', 120, 80, 'photo.jpg')
+  app.setDraft('')
+  app.insertIntoEditor(image.placeholder)
+  vt.sendInput(' hello')
+  await vt.waitForRender()
+  await until(() => writtenKittyHeaders(vt).length >= 1, 'the derived card before the removal')
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const labelRow = await rowOf(vt, '#1/1 · 120×80', 'preview identity')
+  click(vt, 100, labelRow)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'hello', 'the x removes the occurrence')
+  assert.ok(store.get(image.id) !== undefined, 'the store keeps the staged JPEG for undo')
+
+  vt.sendInput(storedUndoKey)
+  await vt.waitForRender()
+  const restored = app.getDraft()
+  assert.ok(restored.includes(image.placeholder), 'Undo restores the canonical placeholder')
+  const prepared = preparePrompt('session-6b-jpeg', restored, { images: store })
+  const segments = prepared.segments.filter(segment => segment.type === 'image')
+  assert.equal(segments.length, 1, 'PreparedPrompt carries the restored image')
+  assert.deepEqual([...segments[0]!.image.bytes], [...SAMPLE_JPEG], 'the submitted bytes are the ORIGINAL JPEG bytes')
+  assert.equal(segments[0]!.image.mediaType, 'image/jpeg')
+  assert.deepEqual([segments[0]!.image.width, segments[0]!.image.height], [120, 80])
+  app.setFullscreen(false)
+  app.stop()
 })

@@ -5,11 +5,17 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { Image, resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { ImageViewerPanel } from '../../src/tui/components/media/image-viewer.ts'
 import { Frame } from '../../src/tui/components/frame.ts'
+import { ImageCache } from '../../src/client/media/image/cache.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import {
+  MAX_KITTY_THUMBNAIL_SOURCE_BYTES,
+  convertKittyThumbnail,
+} from '../../src/client/media/image/kitty-thumbnail.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 
 const PNG_REF: ImageAttachmentRefLike = {
@@ -33,6 +39,30 @@ const JPEG_REF: ImageAttachmentRefLike = {
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
 const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0])
 const THEME = { fallbackColor: (text: string) => `[${text}]` }
+
+const SAMPLE_JPEG = readFileSync(new URL('../fixtures/images/transcript-sample.jpg', import.meta.url))
+const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
+const ORIENTED_JPEG = readFileSync(new URL('../fixtures/images/transcript-oriented.jpg', import.meta.url))
+const CORRUPT_JPEG = readFileSync(new URL('../fixtures/images/transcript-corrupt.jpg', import.meta.url))
+
+/** A real JPEG ref (120×80, the committed fixture's stored dimensions). */
+const REAL_JPEG_REF: ImageAttachmentRefLike = {
+  attachmentId: 'att-real-jpeg',
+  mediaType: 'image/jpeg',
+  bytes: SAMPLE_JPEG.byteLength,
+  width: 120,
+  height: 80,
+  name: 'photo.jpg',
+}
+
+/** Wait for an authoritative loader/panel state, not a wall-clock window. */
+async function until(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.fail(`timed out waiting for ${label}`)
+}
 
 /** Override the detected graphics protocol for one test. */
 function capabilities(images: 'kitty' | 'iterm2' | null): void {
@@ -83,7 +113,9 @@ function panelOf(
 ): ImageViewerPanel {
   return new ImageViewerPanel({
     ref: options.ref ?? PNG_REF,
-    scope: options.scope ?? {},
+    // An EXPLICIT `undefined` means the loader's default scope (used by tests
+    // that prime the loader's custom-cache scope directly).
+    scope: 'scope' in options ? options.scope : {},
     loader,
     theme: THEME,
     requestRender: options.requestRender ?? (() => {}),
@@ -196,20 +228,206 @@ test('a rejected read paints Read failed and folds hostile whitespace into one r
   assert.ok(visibleWidth(body) <= 60)
 })
 
-test('kitty refuses non-PNG refs instead of building an Image or reading bytes', async () => {
+test('a real JPEG reads once, derives the scoped PNG and paints it with ORIGINAL metadata', async () => {
+  capabilities('kitty')
+  const ref = REAL_JPEG_REF
+  const scope = { key: 'viewer-jpeg:1' }
+  let reads = 0
+  let conversions = 0
+  const loader = new ImageLoader(
+    async () => {
+      reads += 1
+      return { ref: {}, data: SAMPLE_JPEG }
+    },
+    new ImageCache(),
+    async (input, mediaType) => {
+      conversions += 1
+      return convertKittyThumbnail(input, mediaType)
+    },
+  )
+  let requested = 0
+  const panel = panelOf(loader, { ref, scope, requestRender: () => { requested += 1 } })
+  panel.setMaxRows(10)
+  const first = panel.render(60)
+  assert.ok(stripSgr(first[1]!).includes('Loading…'), `idle JPEG body asks for the read: ${stripSgr(first[1]!)}`)
+  await until(() => loader.get(ref, scope).state === 'ready', 'the raw read')
+  await drainLoaderSettle()
+  panel.render(60) // the next visible paint schedules the ONE conversion
+  await until(() => loader.getKittyThumbnail(ref, scope).state === 'ready', 'the derived PNG')
+  await drainLoaderSettle()
+  const lines = panel.render(60)
+  assert.equal(reads, 1, 'one scoped raw read')
+  assert.equal(conversions, 1, 'one 6A conversion for the same (scope, attachment)')
+  assert.ok(requested >= 1, 'the asynchronous settle requested a repaint')
+  assert.ok(lines.join('\n').includes('\x1b_G'), 'the real kitty sequence is painted')
+  assert.ok(lines.length <= 10, `rows stay inside the grant (${lines.length} <= 10)`)
+  assert.equal(stripSgr(lines[0]!), 'Image · photo.jpg')
+  const bottom = stripSgr(lines[lines.length - 1]!)
+  assert.ok(bottom.includes('120×80 · image/jpeg'), `the ORIGINAL dimensions/MIME stay in metadata: ${bottom}`)
+  assert.ok(bottom.includes(`${SAMPLE_JPEG.byteLength} B`), `the ORIGINAL byte count stays: ${bottom}`)
+  assert.ok(bottom.endsWith('Esc close'), 'the close route is unchanged')
+})
+
+test('the derived payload drives placement while the ORIGINAL metadata is untouched', async () => {
+  capabilities('kitty')
+  // Stored 60×30 with EXIF orientation 6: the DERIVED png is 30×60 while the
+  // durable ref keeps its stored 60×30 identity.
+  const ref: ImageAttachmentRefLike = {
+    attachmentId: 'att-oriented-jpeg',
+    mediaType: 'image/jpeg',
+    bytes: ORIENTED_JPEG.byteLength,
+    width: 60,
+    height: 30,
+    name: 'oriented.jpg',
+  }
+  const scope = { key: 'viewer-jpeg:oriented' }
+  const loader = new ImageLoader(async () => ({ ref: {}, data: ORIENTED_JPEG }))
+  const panel = panelOf(loader, { ref, scope })
+  panel.setMaxRows(12)
+  panel.render(50)
+  await until(() => loader.get(ref, scope).state === 'ready', 'the oriented raw read')
+  panel.render(50)
+  await until(() => loader.getKittyThumbnail(ref, scope).state === 'ready', 'the oriented derivative')
+  const lines = panel.render(50)
+  const internals = panel as unknown as { instanceWidthPx?: number; instanceHeightPx?: number }
+  assert.deepEqual([internals.instanceWidthPx, internals.instanceHeightPx], [30, 60], 'placement follows the oriented PNG')
+  assert.ok(lines.join('\n').includes('\x1b_G'))
+  const bottom = stripSgr(lines[lines.length - 1]!)
+  assert.ok(bottom.includes('60×30 · image/jpeg'), `metadata keeps the stored ref identity: ${bottom}`)
+})
+
+test('a READY 6A derivative is reused after the raw cache was evicted, without another read', async () => {
+  capabilities('kitty')
+  const ref: ImageAttachmentRefLike = { ...REAL_JPEG_REF, attachmentId: 'att-evicted-jpeg' }
+  const filler: ImageAttachmentRefLike = {
+    attachmentId: 'att-filler-webp',
+    mediaType: 'image/webp',
+    bytes: SAMPLE_WEBP.byteLength,
+    width: 120,
+    height: 80,
+    name: 'filler.webp',
+  }
+  const reads = new Map<string, number>()
+  // Small raw cache: the filler read evicts the JPEG's raw entry while the
+  // DERIVED cache (a separate 6A budget) keeps the derivative. The constructor
+  // cache only backs the DEFAULT scope, so this test primes that scope.
+  const loader = new ImageLoader(
+    async (attachmentRef) => {
+      reads.set(attachmentRef.attachmentId, (reads.get(attachmentRef.attachmentId) ?? 0) + 1)
+      return {
+        ref: {},
+        data: attachmentRef.attachmentId === ref.attachmentId ? SAMPLE_JPEG : SAMPLE_WEBP,
+      }
+    },
+    new ImageCache(32, 2500),
+  )
+  loader.load(ref)
+  await until(() => loader.get(ref).state === 'ready', 'the JPEG raw read')
+  loader.loadKittyThumbnail(ref)
+  await until(() => loader.getKittyThumbnail(ref).state === 'ready', 'the JPEG derivative')
+  loader.load(filler)
+  await until(() => loader.get(filler).state === 'ready', 'the filler read')
+  assert.equal(loader.get(ref).state, 'idle', 'fixture: the raw JPEG entry was really evicted')
+  assert.equal(loader.getKittyThumbnail(ref).state, 'ready', 'the derivative survived the raw eviction')
+
+  const panel = panelOf(loader, { ref, scope: undefined })
+  panel.setMaxRows(10)
+  const lines = panel.render(60)
+  assert.ok(lines.join('\n').includes('\x1b_G'), 'the first visible frame paints the READY derivative')
+  assert.equal(reads.get(ref.attachmentId), 1, 'no re-read of the original bytes')
+
+  // A DIFFERENT immutable scope never borrows this scope's derivative.
+  const otherScope = { key: 'viewer-jpeg:other' }
+  assert.equal(loader.getKittyThumbnail(ref, otherScope).state, 'idle', 'another scope owns no derivative')
+  const otherPanel = panelOf(loader, { ref, scope: otherScope })
+  otherPanel.setMaxRows(10)
+  assert.ok(!otherPanel.render(60).join('\n').includes('\x1b_G'), 'another scope paints no borrowed pixels')
+})
+
+test('a corrupt JPEG degrades to the bounded unavailable row, never a native error or fake body', async () => {
+  capabilities('kitty')
+  const ref: ImageAttachmentRefLike = {
+    attachmentId: 'att-corrupt-viewer',
+    mediaType: 'image/jpeg',
+    bytes: CORRUPT_JPEG.byteLength,
+    width: 120,
+    height: 80,
+    name: 'broken.jpg',
+  }
+  const scope = { key: 'viewer-jpeg:corrupt' }
+  const loader = new ImageLoader(async () => ({ ref: {}, data: CORRUPT_JPEG }))
+  const panel = panelOf(loader, { ref, scope })
+  panel.setMaxRows(8)
+  panel.render(60)
+  await until(() => loader.get(ref, scope).state === 'ready', 'the corrupt raw read')
+  panel.render(60)
+  await until(() => loader.getKittyThumbnail(ref, scope).state === 'error', 'the sanitized preview failure')
+  await drainLoaderSettle()
+  const lines = panel.render(60)
+  const text = lines.map(line => stripSgr(line)).join('\n')
+  const bodyText = lines.slice(1, -1).map(line => stripSgr(line)).join('\n')
+  assert.ok(text.includes('Preview unavailable'), `safe failure row:\n${text}`)
+  assert.ok(!text.includes('\x1b_G'), 'no pixel placement for a failed derivative')
+  assert.ok(!/corrupt|premature|Invalid|JPEG/i.test(bodyText), `the native decoder error never reaches the terminal:\n${bodyText}`)
+  assert.ok(stripSgr(lines[lines.length - 1]!).includes('120×80 · image/jpeg · 300 B'), 'original metadata survives')
+  assert.ok(visibleWidth(lines[1]!) <= 60, 'the status is one bounded physical row')
+})
+
+test('over-budget JPEGs and unsupported rasters are refused before any read', async () => {
+  capabilities('kitty')
+  const cases: ImageAttachmentRefLike[] = [
+    {
+      attachmentId: 'att-too-large',
+      mediaType: 'image/jpeg',
+      bytes: MAX_KITTY_THUMBNAIL_SOURCE_BYTES + 1,
+      width: 5001,
+      height: 5000,
+      name: 'huge.jpg',
+    },
+    {
+      attachmentId: 'att-gif',
+      mediaType: 'image/gif',
+      bytes: 1024,
+      width: 64,
+      height: 40,
+      name: 'anim.gif',
+    },
+  ]
+  for (const ref of cases) {
+    let reads = 0
+    const loader = new ImageLoader(async () => {
+      reads += 1
+      return { ref: {}, data: JPEG_BYTES }
+    })
+    const panel = panelOf(loader, { ref })
+    panel.setMaxRows(8)
+    const lines = panel.render(60)
+    assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'), `${ref.mediaType} states the real reason`)
+    await drainLoaderSettle()
+    assert.equal(reads, 0, `${ref.mediaType} starts no read`)
+    assert.ok(!panel.render(60).join('\n').includes('\x1b_G'), `${ref.mediaType} paints no fake body`)
+  }
+})
+
+test('one and two granted rows start no read for a JPEG and keep the close chrome', () => {
   capabilities('kitty')
   let reads = 0
   const loader = new ImageLoader(async () => {
     reads += 1
-    return { ref: {}, data: JPEG_BYTES }
+    return { ref: {}, data: SAMPLE_JPEG }
   })
-  const panel = panelOf(loader, { ref: JPEG_REF })
-  panel.setMaxRows(8)
-  const lines = panel.render(60)
-  assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'))
-  await drainLoaderSettle()
-  assert.equal(reads, 0, 'an undisplayable ref triggers no read')
-  assert.ok(!panel.render(60).join('\n').includes('\x1b_G'), 'no kitty placement for a non-PNG ref')
+  const one = panelOf(loader, { ref: REAL_JPEG_REF })
+  one.setMaxRows(1)
+  const short = one.render(60)
+  assert.equal(short.length, 1)
+  assert.ok(short[0]!.includes('Image · photo.jpg'))
+  assert.ok(short[0]!.endsWith('Esc close'))
+  const two = panelOf(loader, { ref: REAL_JPEG_REF })
+  two.setMaxRows(2)
+  const twoLines = two.render(60)
+  assert.equal(twoLines.length, 2)
+  assert.ok(!twoLines.join('\n').includes('\x1b_G'), 'no body on the two-row layout')
+  assert.equal(reads, 0, 'no I/O without a body grant')
 })
 
 test('iTerm2 keeps metadata + Preview unavailable (PR2 workspace scope) and never reads', async () => {

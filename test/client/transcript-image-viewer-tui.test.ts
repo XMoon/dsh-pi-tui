@@ -1020,14 +1020,16 @@ test('JPEG and WebP paint real Kitty pixels after their derived PNGs, and body c
   assert.ok(view.includes('🖼️ photo.jpg · 120×80'), `JPEG info row:\n${view}`)
   assert.ok(view.includes('🖼️ graphic.webp · 48×32'), `WebP info row:\n${view}`)
 
-  // Click the JPEG body: the Viewer opens the ORIGINAL attachment ref.
+  // Click the JPEG body: the Viewer opens the ORIGINAL attachment ref and
+  // paints the SAME scoped 6A derivative as real pixels (Image-6B).
+  const transcriptIds = ids.length
   const jpegRow = rowOfNth(view, '🖼️ photo.jpg · 120×80', 0)
   await clickCell(vt, 4, jpegRow + 1)
   const jpegViewer = await viewport(vt)
   assert.ok(jpegViewer.includes('Image · photo.jpg'), `JPEG body click opens the Viewer:\n${jpegViewer}`)
   assert.ok(jpegViewer.includes('120×80 · image/jpeg'), `Viewer keeps the ORIGINAL ref metadata:\n${jpegViewer}`)
-  // 6A deliberately leaves the Viewer PNG-only; this is the expected 6B boundary.
-  assert.ok(jpegViewer.includes('Preview unavailable'), `6B boundary stays explicit:\n${jpegViewer}`)
+  assert.ok(!jpegViewer.includes('Preview unavailable'), `the Viewer paints its JPEG body:\n${jpegViewer}`)
+  assert.ok(writtenKittyImageIds(vt).length > transcriptIds, 'the Viewer wrote its own real Kitty PNG placement')
   vt.sendInput('\x1b')
   await settleClick(vt)
 
@@ -1038,6 +1040,65 @@ test('JPEG and WebP paint real Kitty pixels after their derived PNGs, and body c
   const webpViewer = await viewport(vt)
   assert.ok(webpViewer.includes('Image · graphic.webp'), `WebP body click opens the Viewer:\n${webpViewer}`)
   assert.ok(webpViewer.includes('48×32 · image/webp'), `Viewer keeps the ORIGINAL WebP ref:\n${webpViewer}`)
+  assert.ok(!webpViewer.includes('Preview unavailable'), `the Viewer paints its WebP body:\n${webpViewer}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('/view-image list → Viewer paints real JPEG pixels; Esc back then Esc close restores the transcript', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const jpeg = jpegRef()
+  const webp = webpRef()
+  const refs = new Map([[jpeg.attachmentId, jpeg], [webp.attachmentId, webp]])
+  const loader = new ImageLoader(async (ref) => ({
+    ref: {},
+    data: ref.attachmentId === jpeg.attachmentId ? SAMPLE_JPEG : SAMPLE_WEBP,
+  }))
+  const { vt, app } = await startTallApp(loader)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([
+    { type: 'text', text: 'two formats' },
+    { type: 'image', attachment: jpeg },
+    { type: 'text', text: 'and' },
+    { type: 'image', attachment: webp },
+  ], 1)])
+  app.setTranscript(folder.messages())
+  await until(() => refs.size > 0
+    && loader.getKittyThumbnail(jpeg).state === 'ready'
+    && loader.getKittyThumbnail(webp).state === 'ready', 'both derived PNGs')
+  await vt.waitForRender()
+
+  const internals = app as unknown as { openTranscriptImagePicker(): void }
+  internals.openTranscriptImagePicker()
+  const listView = await viewport(vt)
+  assert.ok(listView.includes('Images · current transcript'), `the list opened:\n${listView}`)
+  assert.ok(listView.includes('#1 · photo.jpg · 120×80 · image/jpeg'), `the JPEG candidate is listed:\n${listView}`)
+  assert.ok(listView.includes('#2 · graphic.webp · 48×32 · image/webp'), `the WebP candidate is listed:\n${listView}`)
+  assert.ok(listView.includes('Esc close'), 'the list advertises its real close route')
+
+  const transcriptIds = writtenKittyImageIds(vt).length
+  vt.sendInput('\r')
+  const viewer = await viewport(vt)
+  assert.ok(viewer.includes('Image · photo.jpg'), `Enter opens the Viewer:\n${viewer}`)
+  assert.ok(viewer.includes('120×80 · image/jpeg'), `the Viewer keeps the ORIGINAL ref metadata:\n${viewer}`)
+  assert.ok(!viewer.includes('Preview unavailable'), `the 6A derivative paints real JPEG pixels:\n${viewer}`)
+  assert.ok(viewer.includes('Esc back'), 'a Viewer opened from the list returns to it')
+  assert.ok(writtenKittyImageIds(vt).length > transcriptIds, 'the Viewer wrote its own PNG placement')
+
+  vt.sendInput('\x1b')
+  await settleClick(vt)
+  const back = await viewport(vt)
+  assert.ok(back.includes('Images · current transcript'), `Esc back returns to the SAME list:\n${back}`)
+  assert.ok(back.includes('Esc close'), 'the list still advertises Esc close')
+
+  vt.sendInput('\x1b')
+  await settleClick(vt)
+  const restored = await viewport(vt)
+  assert.ok(restored.includes('🖼️ photo.jpg · 120×80'), `the transcript is restored untouched:\n${restored}`)
+  assert.ok(restored.includes('🖼️ graphic.webp · 48×32'))
+  assert.ok(!restored.includes('Images · current transcript'), 'the workspace really closed')
   app.setFullscreen(false)
   app.stop()
 })

@@ -4651,7 +4651,10 @@ export class TuiApp {
       maxRows: (width) => this.draftImagePreviewMaxRows(width),
       fullscreenMouse: () => this.fullscreen !== undefined,
       removable: (occurrence) => this.draftPreviewCanRemove(occurrence),
-    }, this.imageTheme ?? { fallbackColor: text => color.textDim(text) })
+      // Image-6B: a settled JPEG/WebP derivation must repaint the mounted
+      // surface; the component owns no screen and never paints by itself.
+      requestRender: () => this.requestRender(),
+    }, this.imageTheme ?? { fallbackColor: text => text })
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
     // statusContainer). The widget zones sit directly around the editor

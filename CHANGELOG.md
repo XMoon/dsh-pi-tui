@@ -9,13 +9,21 @@
 
 ### 新增
 
+- **原生 Kitty 终端的草稿图片预览与全屏图片查看页现在也能显示 JPEG/WebP 的真实像素。**
+  之前这两处只画 PNG，JPEG/WebP 只能显示 `Preview unavailable`。现在输入框上方的草稿
+  预览卡与全屏图片查看页都会复用 Transcript 缩略图的同一份后台 PNG 派生（WebP 只取
+  第一帧、按 EXIF 方向摆正、最长边不超过 768 像素）：草稿卡一次只派生当前最后一张有
+  权限显示的本地图片，转换中显示 `…`、失败才显示 `Preview unavailable`；查看页保留
+  原始名称、尺寸、格式与字节数，展示的是同一份受限缩略图而非高清原图。草稿提交仍然
+  发送原始 JPEG/WebP 字节；`x` 删除、Undo、PNG/iTerm2/GIF、窄屏与不支持图形的终端行为
+  不变。
+
 - **原生 Kitty 终端的 Transcript 缩略图现在也支持 JPEG/WebP。**
   之前只有 PNG 能画出像素，JPEG/WebP 只能退化成文字行。现在这两种格式会在后台生成一份
   受限的 PNG 缩略图再绘制：WebP 只取第一帧、按 EXIF 方向摆正、最长边不超过 768 像素；
   信息行始终使用原始名称、像素尺寸与字节数，折叠状态不会触发转换，转换中或失败时只显示
   文字（失败为 `Preview unavailable`），只有真正画出像素的正文才能点击。PNG、iTerm2 原有
-  图片路径、GIF，以及窄屏/不支持图形的终端行为不变；从缩略图打开的全屏查看页仍只显示
-  PNG 原图，JPEG/WebP 在那里继续显示 `Preview unavailable`。
+  图片路径、GIF，以及窄屏/不支持图形的终端行为不变。
 
 - **模型现在可以显式声明“这些图是要给用户看的”。** 新增 `present_visual` 工具，与既有的
   `dsh_pi_tui_chart`、`dsh_pi_tui_svg` 共享同一个 Visual tools 开关（默认 On，一处开关三个
