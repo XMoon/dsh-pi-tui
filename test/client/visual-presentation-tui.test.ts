@@ -351,25 +351,30 @@ test('a chart Copy Data click copies the final ChartFact as pretty JSON, and Alt
   app.stop()
 })
 
-test('Alt+V cycles only the current published figures; Alt+C copies the selected one', async () => {
+test('Alt+V cycles figures in their RENDERED order when marker order differs from publication order', async () => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const { vt, app, copied } = mountApp()
   app.setFullscreen(true)
-  const doc = `Charts.\n\n${marker(REF_A)}\n\n${marker(REF_B)}\n\nEnd.`
+  // AUTHORIZATION order is A then B (the publication list), but the final
+  // answer places B's marker first. The screen therefore reads B → A, and the
+  // selection cycle must follow the SCREEN, not the publication array.
+  const doc = `Charts.\n\n${marker(REF_B)}\n\n${marker(REF_A)}\n\nEnd.`
   const { folder, assistant } = answerFolder(doc)
   setAssistantVisualPresentation(assistant, key(), [
-    chartPublication(REF_B, CHART_B),
     chartPublication(REF_A, CHART),
+    chartPublication(REF_B, CHART_B),
   ])
   app.setTranscript(folder.messages())
   await vt.waitForRender()
-  const view = await viewport(vt)
-  assert.ok(view.includes('Request latency') && view.includes('Second latency'), view)
-  // The publication order is durable (REF_B then REF_A), not marker order.
+  const view = stripSgr(await viewport(vt))
+  const secondAt = view.indexOf('Second latency')
+  const requestAt = view.indexOf('Request latency', view.indexOf('Charts.'))
+  assert.ok(secondAt >= 0 && requestAt > secondAt, `the marker order paints B before A:\n${view}`)
   vt.sendInput('\x1bv')
   await vt.waitForRender()
   const firstSelected = stripSgr(await viewport(vt))
-  assert.ok(firstSelected.includes('Selected 1/2 · Second latency'))
+  assert.ok(firstSelected.includes('Selected 1/2 · Second latency'),
+    `the first selection is the FIRST PAINTED figure, not the first publication:\n${firstSelected}`)
   assert.ok(firstSelected.includes('[Selected]'), 'the figure paints the textual selection device')
   vt.sendInput('\x1bv')
   await vt.waitForRender()
