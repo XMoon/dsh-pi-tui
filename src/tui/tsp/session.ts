@@ -54,7 +54,7 @@ import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL } from '../keybindings/hints.ts'
+import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -95,6 +95,7 @@ import {
   VISUAL_COPY_ROLE,
   VISUAL_FIGURE_KEY_PREFIX,
   VISUAL_FIGURE_ROLE,
+  publishedVisualTitle,
   type SelectedVisualState,
 } from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
@@ -1882,6 +1883,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // carries a figure. They are renderer-local product chords, not public
     // keymap entries, so the dock names them directly.
     if (visualOrder.length > 0) {
+      // The selected figure's identity and position stay visible in the dock
+      // even when the client's own transcript scrollback does not show the
+      // figure: the dock states WHICH figure Alt+C would copy, and never claims
+      // that it was scrolled into view.
+      const selection = selectedVisual
+      const selectedTarget = selection === undefined ? undefined : visualTargets.get(selection.ref)
+      if (selection !== undefined && selectedTarget !== undefined) {
+        lines.push(ui.text({
+          key: 'visual-selected',
+          text: sanitizeDisplayText(`Selected ${selection.index}/${selection.count} · ${publishedVisualTitle(selectedTarget.publication)}`),
+        }))
+      }
       lines.push(ui.text({
         key: 'visual-actions',
         text: `${TSP_VISUAL_SELECT_LABEL} select visual · ${TSP_VISUAL_COPY_LABEL} copy`,
@@ -2313,18 +2326,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     // PR3: the two visual chords are inserted AFTER every existing owner
     // (Reader/modal/Alt+Q/cancel/pickers/Esc) and BEFORE Ctrl+V and the
-    // composer, so an older owner always wins. They are consumed even when no
-    // figure exists (a no-op that leaves the composer draft untouched), and
-    // they never match another modifier combination.
-    if (key.alt === true && key.ctrl !== true && key.meta !== true && key.shift !== true) {
-      if (key.name === 'v') {
-        selectNextVisual()
-        return false
-      }
-      if (key.name === 'c') {
-        copySelectedVisual()
-        return false
-      }
+    // composer, so an older owner always wins. The matcher consumes the SAME
+    // `TSP_VISUAL_CHORDS` table the dock labels are derived from, so a display
+    // label can never disagree with the executed chord. They are consumed even
+    // when no figure exists (a no-op that leaves the composer draft untouched).
+    if (matchesKeyId(key, TSP_VISUAL_CHORDS.select)) {
+      selectNextVisual()
+      return false
+    }
+    if (matchesKeyId(key, TSP_VISUAL_CHORDS.copy)) {
+      copySelectedVisual()
+      return false
     }
     // PR4: the paste-media gesture. The SDK decodes Ctrl+V as the formal
     // `Key` fields (`name === 'v'`, lowercase, `ctrl === true`) — a bracketed

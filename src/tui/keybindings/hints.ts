@@ -21,18 +21,6 @@ import type { KeyId } from '@xmoon76/pi-tui'
 export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'
 
 /**
- * The TSP renderer's FIXED published-visual selection/copy chords (PR3 §2.4).
- *
- * Same category as {@link TSP_CONTINUED_INSPECTION_LABEL}: the TSP surface owns
- * no Host keymap action, so these chords are dispatched from the raw SDK key
- * stream and can never come from `keyHint`/`keysFor`. They also cannot go stale
- * under a remap, because no remap exists for them. The labels live HERE, with
- * the key-label vocabulary, so a renderer module never hard-codes the chords.
- */
-export const TSP_VISUAL_SELECT_LABEL = 'Alt+V'
-export const TSP_VISUAL_COPY_LABEL = 'Alt+C'
-
-/**
  * The History editor-seat tenant's FIXED labels (Phase 3B / B3-A).
  *
  * The seat is a per-surface COMPONENT contract, not a Host command: it owns no
@@ -118,6 +106,39 @@ export function formatLeaderSequence(completingKey: KeyId): string {
 export function formatKeyList(keys: readonly KeyId[]): string {
   return keys.map(formatKeyId).join(' / ')
 }
+
+/** Whether one raw SDK key matches a fixed `KeyId` chord exactly. */
+export function matchesKeyId(
+  key: { readonly name: string; readonly ctrl?: boolean; readonly alt?: boolean; readonly shift?: boolean; readonly meta?: boolean },
+  chord: KeyId,
+): boolean {
+  const parts = chord.split('+')
+  const base = parts[parts.length - 1] as string
+  return key.name === base
+    && (key.ctrl === true) === parts.includes('ctrl')
+    && (key.alt === true) === parts.includes('alt')
+    && (key.shift === true) === parts.includes('shift')
+    && (key.meta === true) === parts.includes('super')
+}
+
+/**
+ * The TSP renderer's FIXED published-visual chords (PR3 §2.4): ONE machine
+ * definition that serves BOTH the raw-key dispatch and the dock/notice labels.
+ *
+ * The TSP surface owns no Host keymap action, so these chords are dispatched
+ * from the raw SDK key stream and can never come from `keyHint`/`keysFor`. They
+ * also cannot go stale under a remap, because no remap exists for them. Keeping
+ * the machine ids HERE — with the key-label vocabulary — means the handler and
+ * the displayed label can never become two independent string authorities.
+ */
+export const TSP_VISUAL_CHORDS = {
+  select: 'alt+v',
+  copy: 'alt+c',
+} as const satisfies Record<'select' | 'copy', KeyId>
+
+/** The dock/notice labels DERIVED from the one chord table. */
+export const TSP_VISUAL_SELECT_LABEL = formatKeyId(TSP_VISUAL_CHORDS.select)
+export const TSP_VISUAL_COPY_LABEL = formatKeyId(TSP_VISUAL_CHORDS.copy)
 
 /** The Job workspace's FIXED local keys (B1-C/B1-D, the same category as the
  *  History editor seat's labels below): the workspace owns NO keymap action for

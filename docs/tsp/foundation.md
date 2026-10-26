@@ -602,7 +602,10 @@ a new page or a Viewer owned by this renderer.
   makes no visibility promise for the revealed figure. The chords are renderer-local product bindings, admitted after every
   existing owner: a modal seat, the temporary Reader, an open Picker/Work Hub and
   the hydration window all outrank them. Selection is scoped to the current
-  `(projection source, scope, row, published ref)`; a source/scope change, a
+  `(projection source, scope, row, published ref)`; while a selection exists the
+  dock states its position and committed title (`Selected i/n · <title>`) so the
+  Copy target is identifiable even when the client's scrollback does not show
+  the figure; a source/scope change, a
   disappeared target or a new subject clears it, and an asynchronously settling
   clipboard write notifies the dock only while its own source/row/publication is
   still current.
