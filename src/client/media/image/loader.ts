@@ -485,6 +485,10 @@ export class ImageLoader {
    * the per-scope failure record for diagnostics.
    */
   private async runKittyThumbnail(job: KittyThumbnailJob): Promise<void> {
+    // Yield before touching the decoder: a render() call may schedule this job,
+    // and `import('sharp')`/libvips loading must NEVER run in the render stack.
+    // The concurrency slot is already claimed by the synchronous pump.
+    await Promise.resolve()
     const id = job.ref.attachmentId
     let png: KittyThumbnailPng | undefined
     let failure: KittyThumbnailFailure | undefined
