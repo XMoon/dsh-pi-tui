@@ -29,7 +29,7 @@ import { formatKeyId } from '../keybindings/hints.ts'
 import type { AppKeybindingId } from '../keybindings/types.ts'
 import { KeybindingEditorController } from '../keybindings/ui/controller.ts'
 import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../keybindings/ui/list.ts'
-import type { KeybindingEditorModel } from '../keybindings/ui/model.ts'
+import { buildKeybindingEditorModel, type KeybindingEditorModel } from '../keybindings/ui/model.ts'
 import { parseFooterLayout, isFooterLayout } from '../../domain/footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../domain/footer/presets.ts'
 import { FooterComposer } from '../footer/composer.ts'
@@ -81,6 +81,7 @@ import type {
   SettingsWorkspaceRowId,
   SettingsWorkspaceSnapshot,
 } from '../panels/settings-workspace-panel.ts'
+import { SETTINGS_SPECIALIST_ROUTE_ROW } from '../panels/settings-workspace-panel.ts'
 import { displaySessionId } from './sessions.ts'
 import type {
   DetachTask,
@@ -157,6 +158,11 @@ const TERMINAL_PROGRESS_CANDIDATES = ['9;4+7501', '9;4', '7501', 'off'] as const
 const APPROVAL_CANDIDATES = ['ask', 'never'] as const
 const SUBAGENT_SELECTION_CANDIDATES = ['off', 'on'] as const
 const LOCAL_SHELL_SANDBOX_CANDIDATES = ['bypass', 'sandbox'] as const
+
+/** C2-R5: the Footer page's native-mode candidates, in their frozen order. The
+ *  raw stored `command` value is a USER opt-in that this page DISPLAYS but
+ *  never offers as a candidate (choosing a native mode replaces it). */
+const FOOTER_MODE_CANDIDATES = ['default', 'compact', 'custom'] as const
 
 /** Whether a confirmed value really is one of a field's frozen candidates. The
  *  parsers' default fallbacks are NOT a validation substitute: a writer must
@@ -988,6 +994,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     readonly initialCategory?: import('../panels/settings-workspace-panel.ts').SettingsWorkspaceCategoryId
     readonly initialModelsView?: ModelsInitialView
     readonly initialAccountView?: AccountInitialView
+    /** C2-R5: the typed professional page the first painted body mounts. It is
+     *  valid ONLY with the exact `initialRowId` the panel's route table names. */
+    readonly initialSpecialist?: import('../panels/settings-workspace-panel.ts').SettingsWorkspaceSpecialistRoute
   }
 
   /**
@@ -1139,7 +1148,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     throw new Error(refusalMessage(outcome.refusal))
   }
 
-  const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): void => {
+  const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): import('../../tui-app.ts').SettingsWorkspaceHandle => {
+    // C2-R5: a typed deeplink NEVER guesses its row. Validate the exact pair
+    // BEFORE the screen lease is taken, so a mismatched request fails as a real
+    // command error and leaves no Settings/overlay behind.
+    if (spec.initialSpecialist !== undefined) {
+      const requires = SETTINGS_SPECIALIST_ROUTE_ROW[spec.initialSpecialist]
+      if (spec.initialRowId !== requires) {
+        throw new Error(`the ${spec.initialSpecialist} deeplink requires the ${requires} row`)
+      }
+    }
     const token = {}
     // C2-R3: ONE pinned session scope per workspace open. The approval row
     // targets EXACTLY this captured owner generation: a session switch never
@@ -1282,6 +1300,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           activeWebPage = page
           return page
         },
+        // C2-R5: the two same-lease professional pages. Each factory returns
+        // the EXISTING editor over its ONE authority; the root mounts it in this
+        // workspace's body and never opens a second overlay.
+        createFooterConfiguratorPage: (done, onAuthoritativeChange) => createFooterWorkspacePage(done, onAuthoritativeChange),
+        createKeybindingsPage: (done, onAuthoritativeChange) => createKeybindingsWorkspacePage(done, onAuthoritativeChange),
         // The About page's two version facts: read ONCE per workspace open on
         // the Client side. `tui` is this bundle's own version and `dsh` the
         // installed Harness version — neither is derived from the other, and
@@ -1348,6 +1371,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       && spec.initialModelsView === undefined && spec.initialAccountView === undefined) {
       aboutStatusSource().enter()
     }
+    return handle
   }
 
   const openSettingsWorkspaceAt = (initialRowId?: SettingsWorkspaceRowId): void => {
@@ -1791,7 +1815,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * `[current]` lights up only on an exact raw match.
    */
   const persistedOnlyEditOf = (
-    field: 'busy-enter' | 'fullscreen' | 'local-shell-sandbox',
+    field: 'busy-enter' | 'fullscreen' | 'local-shell-sandbox' | 'footer-mode',
     candidates: readonly string[],
     raw: string | undefined,
     readable: boolean,
@@ -1976,6 +2000,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
     | 'notification-mode' | 'notification-method' | 'terminal-progress'
     | 'local-shell-sandbox'
+    | 'footer-mode'
 
   /**
    * The STORED value of one document field, read exactly as the document holds
@@ -1999,6 +2024,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       case 'notification-method': return doc.notificationMethod
       case 'terminal-progress': return doc.terminalProgress
       case 'local-shell-sandbox': return doc.localShellSandbox
+      case 'footer-mode': return doc.footer
       default: {
         // Exhaustiveness fence: a new TuiSettingsField must add its own
         // document mapping here instead of inheriting another field's value.
@@ -2160,6 +2186,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'default-permission': return commitDefaultPermission(request.value)
         case 'subagent-model-selection': return commitSubagentSelection(request.value)
         case 'local-shell-sandbox': return commitLocalShellSandbox(request.value)
+        case 'footer-mode': return commitFooterMode(request.value)
         default: {
           // Exhaustiveness fence: a new writable field must name its writer
           // here instead of falling into another field's branch.
@@ -2676,6 +2703,110 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
+   * C2-R5: the ONE Footer-mode document transaction, shared by the Settings
+   * workspace row and the still-supported legacy editor row. It runs INSIDE
+   * the shared TUI-settings FIFO, re-reads the whole document and the detached
+   * USER custom-item layer at the commit point, and replaces exactly the three
+   * footer fields it owns (`footer`, `footerFallbackMode`, and — for `custom` —
+   * a valid `footerLayout`). A `command` mode or any unknown/trust field rides
+   * through verbatim; an unreadable USER layer aborts the whole write instead
+   * of overwriting future definitions with a merged projection.
+   */
+  const writeFooterModeDocument = async (
+    value: (typeof FOOTER_MODE_CANDIDATES)[number],
+    settings: { get(): TuiSettingsDoc; replace(doc: TuiSettingsDoc): unknown },
+  ): Promise<{ readonly layout: unknown; readonly customItems: unknown }> => serializeTuiSettingsMutation(settings, async () => {
+    const doc = settings.get()
+    // Selecting custom with no (valid) layout initializes an editable copy of
+    // the default layout (the same rule the legacy row states).
+    const layout = value === 'custom'
+      ? !isFooterLayout(parseFooterLayout(doc.footerLayout))
+        ? DEFAULT_FOOTER_LAYOUT
+        : doc.footerLayout
+      : doc.footerLayout
+    const raw = runner.config.footerCustomItems.rawForPersistence()
+    if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
+    await settings.replace({
+      ...doc,
+      footer: value,
+      footerLayout: layout,
+      footerFallbackMode: value,
+      footerCustomItems: raw.value,
+    })
+    return { layout, customItems: raw.value }
+  })
+
+  /** The authoritative re-read of the ONE Footer-mode commit: the stored mode,
+   *  its restart fallback and (for `custom`) the SAME valid layout must agree. */
+  const verifyFooterMode = (value: string, expectedLayout: unknown): SettingsWorkspaceCommitOutcome => {
+    const settings = runner.tuiSettings
+    if (settings === undefined) {
+      return { outcome: 'unverified', reason: 'the footer mode was stored, but no settings document is readable to verify it' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the footer mode was stored, but the configuration is ${readiness} so it could not be verified` }
+    }
+    let doc: TuiSettingsDoc
+    try {
+      doc = settings.get()
+    } catch (error) {
+      return { outcome: 'unverified', reason: `the footer mode was stored, but the document could not be re-read: ${safeErrorMessage(error)}` }
+    }
+    const writtenLayout = parseFooterLayout(expectedLayout)
+    const readLayout = parseFooterLayout(doc.footerLayout)
+    // Identity, not merely validity: a concurrent writer replacing the layout
+    // with another VALID one must not be reported as this commit's Verified.
+    const layoutAgrees = value !== 'custom'
+      || (isFooterLayout(writtenLayout) && isFooterLayout(readLayout)
+        && JSON.stringify(readLayout) === JSON.stringify(writtenLayout))
+    if (doc.footer === value && doc.footerFallbackMode === value && layoutAgrees) return { outcome: 'verified' }
+    return {
+      outcome: 'not-saved',
+      reason: `the write reported success, but the authoritative document reads footer ${doc.footer}, fallback ${doc.footerFallbackMode ?? 'not set'}`
+        + (value === 'custom' && !layoutAgrees ? ', with no valid custom layout' : ''),
+    }
+  }
+
+  /** C2-R5: PERSIST-FIRST Footer mode. The document is the authority; the live
+   *  footer is applied ONLY from a completed write, and only an agreeing fresh
+   *  read is `Verified`. A non-ready/unreadable document refuses with zero
+   *  writes and zero runtime change. */
+  const commitFooterMode = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isCandidateOf(value, FOOTER_MODE_CANDIDATES)) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a footer mode candidate` }
+    }
+    const settings = runner.tuiSettings
+    if (settings === undefined) {
+      return { outcome: 'not-saved', reason: 'no authoritative TUI settings document is available to store the footer mode' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the footer mode was not stored` }
+    }
+    let base: string | undefined
+    try {
+      base = readDocumentField(settings.get(), 'footer-mode')
+    } catch (error) {
+      return {
+        outcome: 'not-saved',
+        reason: `the footer mode was not stored: the TUI settings document could not be read (${safeErrorMessage(error)})`,
+      }
+    }
+    let next: { readonly layout: unknown; readonly customItems: unknown }
+    try {
+      next = await writeFooterModeDocument(value, settings)
+    } catch (error) {
+      return classifyRejectedWrite('footer-mode', value, base, safeErrorMessage(error), 'storing the footer mode failed: ')
+    }
+    if (app.isDisposed()) {
+      return { outcome: 'unverified', reason: 'the footer mode was stored, but the surface was disposed before it could be applied' }
+    }
+    runner.applyFooterSettings({ footer: value, footerLayout: next.layout, footerCustomItems: next.customItems })
+    return verifyFooterMode(value, next.layout)
+  }
+
+  /**
    * C2-R3: RUNTIME-ONLY approval policy of the EXACT session this workspace was
    * opened on. The pinned scope is the whole target identity: a scope that is no
    * longer current is refused SYNCHRONOUSLY with no dispatch at all, so a stale
@@ -3062,6 +3193,43 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // stored raw value (never the consumer default) is what the Detail shows.
     const storedBusyEnter = storedCandidateFactOf(doc?.busyEnter, doc !== undefined, BUSY_ENTER_CANDIDATES, 'unknown — document unavailable')
     const storedFullscreen = storedCandidateFactOf(doc?.fullscreen, doc !== undefined, FULLSCREEN_CANDIDATES, 'unknown')
+    // C2-R5: the Footer mode is a PERSIST-FIRST TUI-document field. `command` is
+    // a real USER opt-in whose live surface is the persisted fallback, so it is
+    // displayed as `command (manual)` — never as an invalid value and never as a
+    // confirmable candidate.
+    const storedFooterMode = doc === undefined
+      ? 'unknown — document unavailable'
+      : doc.footer === undefined || doc.footer === ''
+        ? 'not set'
+        : doc.footer === 'command'
+          ? 'command (manual)'
+          : isCandidateOf(doc.footer, FOOTER_MODE_CANDIDATES)
+            ? doc.footer
+            : `invalid stored value: ${doc.footer}`
+    const runtimeFooterMode = app.getFooterMode()
+    const footerFallbackFact = doc?.footer === 'command'
+      ? `command surface · fallback ${runtimeFooterMode}`
+      : `Runtime: ${runtimeFooterMode}`
+    const footerLayoutRows = app.getEffectiveFooterLayout().rows.length
+    const footerSurfaceSummary = doc?.footer === 'command'
+      ? `command → ${runtimeFooterMode} · ${footerLayoutRows} ${footerLayoutRows === 1 ? 'row' : 'rows'}`
+      : `${runtimeFooterMode} · ${footerLayoutRows} ${footerLayoutRows === 1 ? 'row' : 'rows'}`
+    // C2-R5: the Keyboard shortcuts row's summary comes from the SAME
+    // controller the page mutates — read once for this snapshot, never a second
+    // keymap store. A missing/unreadable settings document leaves the row
+    // discoverable but unopenable.
+    let keybindingModel: KeybindingEditorModel | undefined
+    if (runner.tuiSettings !== undefined && doc !== undefined) {
+      try {
+        // The summary is derived from the ONE document read this snapshot
+        // already made: no second guarded read per workspace open.
+        const parsed = parseUserKeybindings(doc.keybindings)
+        for (const message of parsed.diagnostics) runner.diag.debug('keybinding configuration', { message })
+        keybindingModel = buildKeybindingEditorModel(app.keybindingsManager(), parsed)
+      } catch (error) {
+        runner.diag.warn('keybinding editor read', { error: safeErrorMessage(error) })
+      }
+    }
     // The consumer's NEXT busy Enter policy: the raw document read through the
     // SAME rule `resolveComposerDelivery` applies, with the default called out
     // as such instead of being presented as a saved value.
@@ -3235,26 +3403,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         : doc.localShellSandbox === 'bypass'
           ? 'Next ! / !! uses bypass'
           : 'Next ! / !! uses bypass (default; no valid saved value)'
-    // The R0 transition rows: each one only NAMES the existing-editor row it
-    // focuses. They run no write of their own and never stand in for the real
-    // editor, which stays reachable behind them until R1–R6 migrate the field.
-    const transitionRow = (
-      id: SettingsWorkspaceRowId,
-      category: SettingsWorkspaceCategoryId,
-      label: string,
-      description: string,
-      legacyTargetId: string,
-    ): SettingsWorkspaceRow => ({
-      id,
-      category,
-      label,
-      summary: 'Existing settings editor',
-      scope: 'Existing settings editor',
-      freshness: 'ready',
-      description,
-      action: 'open-legacy',
-      legacyTargetId,
-    })
+    // The R0 transition rows were removed by C2-R5: Footer layout and Keyboard
+    // shortcuts are now same-lease professional pages, so no row may open the
+    // legacy editor for them. The Extensions transition row remains until R6.
     return {
       configReadiness,
       capturedAt: Date.now(),
@@ -3298,6 +3449,54 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             iconRaw,
             doc !== undefined,
           ),
+        },
+        {
+          // C2-R5: PERSIST-FIRST. The document's raw `footer` is the authority;
+          // `command` is a USER opt-in whose live surface is the persisted
+          // fallback, so it is reported as `command (manual)` and is never a
+          // confirmable candidate. A non-current/unreadable document offers NO
+          // candidate at all.
+          id: 'footer-mode',
+          category: 'appearance',
+          label: 'Status line mode',
+          summary: storedFooterMode,
+          ...doc === undefined || doc.footer === undefined ? {} : { value: doc.footer },
+          scope: 'TUI settings document · Footer runtime',
+          freshness: configuredFreshness,
+          description: 'Which footer THIS Client paints: Default (two rows), Compact (one row), or Custom (the saved layout). '
+            + 'A stored command-mode footer is reported as command (manual) and is never offered as a candidate here. '
+            + 'Confirm stores the mode and its restart fallback first, then applies it to the live footer.',
+          action: 'inspect',
+          edit: {
+            ...persistedOnlyEditOf(
+              'footer-mode',
+              FOOTER_MODE_CANDIDATES,
+              doc?.footer,
+              doc !== undefined,
+              footerFallbackFact,
+              storedFooterMode,
+            ),
+            ...configuredFreshness === 'ready' ? {} : { options: [] },
+          },
+        },
+        {
+          // C2-R5: the ONE full-screen Footer layout editor. It is a same-lease
+          // specialist page (never a second overlay); the row carries no `edit`
+          // because the page owns its own model, draft and explicit Save.
+          id: 'footer-configurator',
+          category: 'appearance',
+          label: 'Configure footer layout…',
+          summary: footerSurfaceSummary,
+          scope: 'Footer runtime · TUI settings document',
+          freshness: 'runtime',
+          description: 'Open the full-screen footer layout editor: row selector, item/zone/style editors, custom text/command '
+            + 'definitions and a live draft preview. Save writes the SAME TUI settings document first and then applies the '
+            + 'layout to the running footer; a failed save keeps the draft and changes nothing. The preview never executes a draft command.',
+          action: 'inspect',
+          specialist: 'footer-configurator',
+          // The runtime-only path (no settings service) is still a real editor:
+          // it states `Not persisted (session only)` instead of pretending to save.
+          specialistAvailable: doc !== undefined || runner.tuiSettings === undefined,
         },
         {
           id: 'display-preset',
@@ -3557,6 +3756,25 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             doc !== undefined,
           ),
         },
+        {
+          // C2-R5: the ONE full-screen Keyboard shortcuts page. Its summary is
+          // the SAME controller's own projection; the page is a same-lease
+          // specialist, never the old 88-column overlay and never a second
+          // keymap store.
+          id: 'keyboard-shortcuts',
+          category: 'input-terminal',
+          label: 'Keyboard shortcuts…',
+          summary: keybindingModel?.summary ?? 'Unavailable',
+          scope: 'Client keymap · TUI settings document',
+          freshness: configuredFreshness,
+          description: 'Open the full-screen keyboard shortcuts editor: search every action by name, description or key, '
+            + 'open an action detail, record a direct or leader-completion binding, reset one action or the leader key, '
+            + 'and see conflicts or safe mode. Changes write the TUI settings document and apply to the running keymap. '
+            + 'Read-only when the settings document cannot be read; writes are refused while the configuration is not current.',
+          action: 'inspect',
+          specialist: 'keybindings',
+          specialistAvailable: keybindingModel !== undefined,
+        },
         // ── C2-R3: the Agent category's five real rows, in their FROZEN order
         //    (the detail descriptions keep the Permissions / Delegation /
         //    Execution policy grouping without adding focusable section rows).
@@ -3615,20 +3833,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           action: 'inspect',
           edit: visualToolsEditOf(visualTools, configReadiness),
         },
-        transitionRow(
-          'footer-settings-legacy',
-          'appearance',
-          'Footer & status line…',
-          'The footer layout is configured by the existing settings editor. This row only opens that editor on its own row.',
-          'footer',
-        ),
-        transitionRow(
-          'input-terminal-settings-legacy',
-          'input-terminal',
-          'Input & terminal settings…',
-          'Keyboard shortcuts are still configured by the existing settings editor. This row only opens that editor on that row.',
-          'keyboard-shortcuts',
-        ),
         {
           // C2-R4: the ONE discoverable entry to the Web provider settings
           // page. It opens the embedded `WebSettingsPage` in THIS workspace's
@@ -4338,24 +4542,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                   // the document (the next reload would silently revert).
                   detach('settings footer write', async () => {
                     if (app.isDisposed()) return
-                    const next = await serializeTuiSettingsMutation(settings, async () => {
-                      if (app.isDisposed()) return undefined
-                      const doc = settings.get()
-                      // Selecting custom with no (valid) layout initializes an
-                      // editable copy of the default layout (plan §14.8).
-                      const layout = value === 'custom'
-                        ? !isFooterLayout(parseFooterLayout(doc.footerLayout))
-                          ? DEFAULT_FOOTER_LAYOUT
-                          : doc.footerLayout
-                        : doc.footerLayout
-                      // Preserve the detached USER value, not a merged/project
-                      // projection, while the whole-document write is queued.
-                      const raw = runner.config.footerCustomItems.rawForPersistence()
-                      if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
-                      await settings.replace({ ...doc, footer: value, footerLayout: layout, footerFallbackMode: value, footerCustomItems: raw.value })
-                      return { layout, customItems: raw.value }
-                    })
-                    if (app.isDisposed() || next === undefined) return
+                    // The SAME command-owned Footer-mode transaction the Settings
+                    // workspace row uses: ONE FIFO turn, queue-head document/USER
+                    // raw re-read, footer/fallback/layout replaced, apply only from
+                    // the completed write.
+                    const next = await writeFooterModeDocument(value, settings)
+                    if (app.isDisposed()) return
                     runner.applyFooterSettings({ footer: value, footerLayout: next.layout, footerCustomItems: next.customItems })
                   }, { notify: true })
                 } else {
@@ -4637,118 +4829,184 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // unambiguous. The completion catalog marks both aliases. The alias
     // rides the same LOCAL/SESSIONLESS ownership sets, so it never steers
     // while busy.
+  /**
+   * C2-R5: build the ONE same-lease Footer layout page. The model/catalog/
+   * composer composition is the command-owned one the old `/footer` handler
+   * used; the app supplies only its live preview dependencies and mounts the
+   * panel inside the already-leased Settings body. The save chain is the SAME
+   * persist-first transaction: validate the draft, re-read the USER raw layer at
+   * the queue head, replace the document, apply the runtime ONLY from the
+   * completed write, then close through `done`.
+   */
+  function createFooterWorkspacePage(
+    done: () => void,
+    _onAuthoritativeChange: () => void,
+  ): import('../panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined {
+    const settings = runner.tuiSettings
+    let doc: TuiSettingsDoc | undefined
+    if (settings !== undefined) {
+      try {
+        doc = settings.get()
+      } catch (error) {
+        runner.diag.warn('footer configurator read', { error: safeErrorMessage(error) })
+        return undefined
+      }
+    }
+    const sessionOnly = settings === undefined
+    // The page starts from the CURRENT EFFECTIVE layout: the persisted custom
+    // layout when active, else whatever the composer renders right now —
+    // getEffectiveFooterLayout() maps the active MODE (default/compact/custom).
+    // Keeping the compact mode here is what stops an unchanged save from
+    // silently becoming the full two-row default.
+    const persisted = doc !== undefined && doc.footer === 'custom' ? parseFooterLayout(doc.footerLayout) : undefined
+    const initial = persisted !== undefined && isFooterLayout(persisted)
+      ? persisted
+      : app.getEffectiveFooterLayout()
+    // Layer the draft catalog over the live app registry. Unsaved create / edit /
+    // rename / delete operations stay inside this catalog, so Esc cannot mutate
+    // the active footer or its persisted definitions.
+    const registry = new FooterItemRegistry(app.getFooterItemRegistry())
+    const customItems = new FooterCustomItemCatalog(app.getFooterCustomItems())
+    // PR D preview contract: the preview NEVER executes a command. A draft
+    // command item shows the committed cache ONLY while its definition is
+    // unchanged, and the dim `[command]` placeholder otherwise.
+    customItems.setCommandValueSource({
+      value: (id) => {
+        const draft = customItems.get(id)
+        if (draft === undefined || draft.kind !== 'command') return undefined
+        const committed = app.getFooterCustomItems().find(item => item.id === id)
+        if (committed === undefined || !sameFooterCustomItem(draft, committed)) return { kind: 'placeholder' }
+        const text = app.getFooterCommandItemValue(id)
+        return text === undefined ? { kind: 'placeholder' } : { kind: 'value', text }
+      },
+    })
+    registry.setCustomSource(customItems)
+    const composer = new FooterComposer(registry)
+    const model = new FooterConfiguratorModel(initial, registry, customItems)
+    let page: ReturnType<TuiApp['createFooterConfiguratorPanel']> | undefined
+    page = app.createFooterConfiguratorPanel({
+      model,
+      registry,
+      composer,
+      sessionOnly,
+      onSave: async (layout, draftCustomItems) => {
+        // RESOLVE = persisted/ session-applied AND the runtime applied (the page
+        // then closes); THROW = failed — the page stays open with the draft intact,
+        // and THIS layer owns the user-facing notify.
+        const parsed = parseFooterLayout(layout)
+        if (!isFooterLayout(parsed)) {
+          app.notify(`footer layout invalid: ${parsed.message}`, 'error')
+          throw new Error(`footer layout invalid: ${parsed.message}`)
+        }
+        const customResult = parseFooterCustomItems(draftCustomItems ?? [])
+        if (customResult.invalidCount > 0 || customResult.items.length !== (draftCustomItems ?? []).length) {
+          app.notify('custom footer items invalid', 'error')
+          throw new Error('custom footer items invalid')
+        }
+        const savedCustomItems = customResult.items.map(item => ({ ...item }))
+        if (sessionOnly) {
+          // No settings backend: the memory commit IS the save (PR E §9.3), and
+          // the page states `Not persisted (session only)` rather than claiming a
+          // document write.
+          if (app.isDisposed()) return
+          app.setFooterCustomItems(savedCustomItems)
+          runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
+          if (page === undefined || page.isDisposed()) return
+          app.notify('footer layout saved for this session only', 'info')
+          done()
+          return
+        }
+        const currentSettings = runner.tuiSettings
+        if (currentSettings === undefined) throw new Error('settings service unavailable')
+        try {
+          await serializeTuiSettingsMutation(currentSettings, async () => {
+            if (app.isDisposed()) return
+            // `/footer` intentionally edits the custom-definition collection,
+            // but it only owns the v1 text entries this client understands.
+            // Re-read the detached USER value at the commit point so queued saves
+            // do not erase intervening future data.
+            const raw = runner.config.footerCustomItems.rawForPersistence()
+            if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
+            const persistedCustomItems = mergeFooterCustomItemsForSave(raw.value, savedCustomItems)
+            await currentSettings.replace({
+              ...currentSettings.get(),
+              footer: 'custom',
+              footerFallbackMode: 'custom',
+              footerLayout: parsed,
+              footerCustomItems: persistedCustomItems,
+            })
+          })
+        } catch (error) {
+          // A failed write changed nothing: the notice states the failure to
+          // the still-running app even when the page that started it is gone.
+          if (!app.isDisposed()) {
+            app.notify(`footer layout save failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+          }
+          throw error
+        }
+        if (app.isDisposed()) return
+        // The DOCUMENT write succeeded, so the runtime must follow the authority
+        // even when the page that started the save was torn down meanwhile
+        // (forced workspace close, a question/approval takeover). The page
+        // lifetime fences the page's OWN UI (notify + return), never the
+        // business transaction this command owns.
+        app.setFooterCustomItems(savedCustomItems)
+        runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
+        if (page === undefined || page.isDisposed()) return
+        app.notify('footer layout saved', 'info')
+        done()
+      },
+      onCancel: () => {
+        // Clean Save / Discard & Exit / Esc: close WITHOUT writing. The live
+        // preview never touched the active layout.
+        done()
+      },
+    })
+    return page
+  }
+
+  /** C2-R5: build the ONE same-lease Keyboard shortcuts page over the EXISTING
+   *  `createKeybindingEditorPanel` (the same controller/projector/recorder). A
+   *  successful mutation refreshes the row summary from the controller's own
+   *  read; `done` returns to the Input & Terminal row. */
+  function createKeybindingsWorkspacePage(
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ): import('../panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined {
+    return createKeybindingEditorPanel(done, () => { onAuthoritativeChange() })
+  }
+
   const registerFooter = (): void => {
     registerTuiCommand({
       name: 'footer',
       description: 'Configure the footer layout interactively',
       aliases: ['statusline'],
-      handler: () => {
+      handler: async () => {
+        // C2-R5: `/footer` (and its `/statusline` alias) is a TYPED DEEPLINK into
+        // the ONE fullscreen Settings workspace — never a second overlay. A
+        // present-but-unreadable document is a real command error, not a fake page.
         const settings = runner.tuiSettings
-        const doc = settings?.get()
-        // The configurator starts from the CURRENT EFFECTIVE layout: the
-        // persisted custom layout when active, else whatever the composer
-        // renders right now — getEffectiveFooterLayout() maps the active
-        // MODE (default/compact/custom). The old `getFooterLayout() ??
-        // DEFAULT` fallback lost the compact mode: a compact user opening
-        // /footer and pressing Enter unchanged would have saved the full
-        // two-row default as their custom layout (the review's P2).
-        const persisted = doc !== undefined && doc.footer === 'custom' ? parseFooterLayout(doc.footerLayout) : undefined
-        const initial = persisted !== undefined && isFooterLayout(persisted)
-          ? persisted
-          : app.getEffectiveFooterLayout()
-        // Layer the draft catalog over the live app registry. Unsaved create /
-        // edit / rename / delete operations stay inside this catalog, so Esc
-        // cannot mutate the active footer or its persisted definitions.
-        const registry = new FooterItemRegistry(app.getFooterItemRegistry())
-        const customItems = new FooterCustomItemCatalog(app.getFooterCustomItems())
-        // PR D preview contract (§14): the preview NEVER executes a command.
-        // A draft command item shows the committed cache ONLY while its
-        // definition is unchanged (same command/refresh/timeout/tone) — a
-        // modified draft must not pretend the old cache is the new command's
-        // result — and the dim `[command]` placeholder otherwise.
-        customItems.setCommandValueSource({
-          value: (id) => {
-            const draft = customItems.get(id)
-            if (draft === undefined || draft.kind !== 'command') return undefined
-            const committed = app.getFooterCustomItems().find(item => item.id === id)
-            if (committed === undefined || !sameFooterCustomItem(draft, committed)) return { kind: 'placeholder' }
-            const text = app.getFooterCommandItemValue(id)
-            return text === undefined ? { kind: 'placeholder' } : { kind: 'value', text }
-          },
-        })
-        registry.setCustomSource(customItems)
-        const composer = new FooterComposer(registry)
-        const model = new FooterConfiguratorModel(initial, registry, customItems)
-        app.openFooterConfigurator({
-          model,
-          registry,
-          composer,
-          onSave: async (layout, draftCustomItems) => {
-            // PR E contract: RESOLVE = persisted + applied (the overlay then
-            // closes); THROW = failed — the configurator stays open with the
-            // draft intact, and THIS layer owns the user-facing notify.
-            //
-            // Validate the draft (the model's operations keep it well-formed,
-            // but the persisted value is never trusted).
-            const parsed = parseFooterLayout(layout)
-            if (!isFooterLayout(parsed)) {
-              app.notify(`footer layout invalid: ${parsed.message}`, 'error')
-              throw new Error(`footer layout invalid: ${parsed.message}`)
-            }
-            const customResult = parseFooterCustomItems(draftCustomItems ?? [])
-            if (customResult.invalidCount > 0 || customResult.items.length !== (draftCustomItems ?? []).length) {
-              app.notify('custom footer items invalid', 'error')
-              throw new Error('custom footer items invalid')
-            }
-            const savedCustomItems = customResult.items.map(item => ({ ...item }))
-            if (settings !== undefined) {
-              // Persist FIRST; the memory commit happens only after the
-              // settings write succeeds (plan §15.7 — a failed write keeps
-              // the old layout and definitions). footerFallbackMode rides
-              // ALONG: the /settings path records the last native mode, and
-              // saving a custom layout IS a native-mode change — the command
-              // surface's restart fallback must resolve to THIS custom layout.
-              try {
-                await serializeTuiSettingsMutation(settings, async () => {
-                  if (app.isDisposed()) return
-                  // `/footer` intentionally edits the custom-definition
-                  // collection, but it only owns the v1 text entries this client
-                  // understands. Re-read the detached USER value at the commit
-                  // point so queued saves do not erase intervening future data.
-                  const raw = runner.config.footerCustomItems.rawForPersistence()
-                  if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
-                  const persistedCustomItems = mergeFooterCustomItemsForSave(raw.value, savedCustomItems)
-                  await settings.replace({
-                    ...settings.get(),
-                    footer: 'custom',
-                    footerFallbackMode: 'custom',
-                    footerLayout: parsed,
-                    footerCustomItems: persistedCustomItems,
-                  })
-                })
-              } catch (error) {
-                if (!app.isDisposed()) {
-                  app.notify(`footer layout save failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
-                }
-                throw error
-              }
-              if (app.isDisposed()) return
-              app.setFooterCustomItems(savedCustomItems)
-              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
-              app.notify('footer layout saved', 'info')
-            } else {
-              // No settings backend: the memory commit IS the save (PR E
-              // §9.3) — resolve into an immediate close.
-              app.setFooterCustomItems(savedCustomItems)
-              runner.applyFooterSettings({ footer: 'custom', footerLayout: parsed, footerCustomItems: savedCustomItems }, savedCustomItems)
-              app.notify('footer layout saved', 'info')
-            }
-          },
-          onCancel: () => {
-            // Esc: close without writing (the configurator's live preview
-            // never touched the active layout).
-          },
-        })
+        if (settings !== undefined) {
+          try {
+            settings.get()
+          } catch (error) {
+            return { kind: 'error', text: `could not open the footer layout editor: ${safeErrorMessage(error)}` } as CommandResult
+          }
+        }
+        let handle: import('../../tui-app.ts').SettingsWorkspaceHandle
+        try {
+          handle = openSettingsWorkspaceWith({
+            initialRowId: 'footer-configurator',
+            initialSpecialist: 'footer-configurator',
+          })
+        } catch (error) {
+          return { kind: 'error', text: `could not open the settings workspace: ${safeErrorMessage(error)}` } as CommandResult
+        }
+        const settlement = await handle.whenInitialSpecialistSettled()
+        if (!settlement.ok) {
+          handle.close()
+          return { kind: 'error', text: `could not open the footer layout editor: ${settlement.reason}` } as CommandResult
+        }
         return { kind: 'success' }
       },
     })
@@ -4822,7 +5080,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       name: 'keybindings',
       description: 'Edit keyboard shortcuts (conflicts / reload / reset)',
       input: { hint: '[conflicts|reload|reset]' },
-      handler: (invocation) => {
+      handler: async (invocation) => {
         const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
         const keybindings = app.keybindingsManager()
         if (verb === 'conflicts') {
@@ -4922,12 +5180,34 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             }
           })
         }
-        // Bare /keybindings opens the action-first editor. The historical
-        // conflicts/reload/reset verbs above remain explicit diagnostics seams.
-        let closeEditor: () => void = () => {}
-        const panel = createKeybindingEditorPanel(() => closeEditor())
-        if (panel === undefined) return { kind: 'error', text: 'settings service unavailable' }
-        closeEditor = app.openKeybindingEditor(panel)
+        // C2-R5: bare /keybindings is a TYPED DEEPLINK into the SAME full-screen
+        // Settings keyboard shortcuts page. A missing/unreadable settings document
+        // is a real command error — no fake page and no legacy overlay. The
+        // controller is constructed ONLY by the page factory on the leased first
+        // paint; this preflight only proves the document is readable NOW, and the
+        // settlement below closes the workspace and reports a real error if the
+        // later authoritative read refuses.
+        const settings = runner.tuiSettings
+        if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
+        try {
+          settings.get()
+        } catch (error) {
+          return { kind: 'error', text: `could not open keyboard shortcuts: ${safeErrorMessage(error)}` }
+        }
+        let handle: import('../../tui-app.ts').SettingsWorkspaceHandle
+        try {
+          handle = openSettingsWorkspaceWith({
+            initialRowId: 'keyboard-shortcuts',
+            initialSpecialist: 'keybindings',
+          })
+        } catch (error) {
+          return { kind: 'error', text: `could not open the settings workspace: ${safeErrorMessage(error)}` }
+        }
+        const settlement = await handle.whenInitialSpecialistSettled()
+        if (!settlement.ok) {
+          handle.close()
+          return { kind: 'error', text: `could not open keyboard shortcuts: ${settlement.reason}` }
+        }
         return { kind: 'success' }
       },
     })

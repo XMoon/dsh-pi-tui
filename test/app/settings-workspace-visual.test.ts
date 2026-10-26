@@ -968,7 +968,7 @@ test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome ow
   assert.match(rows[0]!, /Settings · Categories/, 'every width opens on the L0 categories level')
   assert.ok(!h.view().includes('❯'), `no editor/transcript row may render behind the workspace:\n${h.view()}`)
   assert.match(rows.at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
-  assert.match(h.view(), /Rows \(3\)/, 'the row list column is part of the workspace body')
+  assert.match(h.view(), /Rows \(4\)/, 'the row list column is part of the workspace body')
   h.dispose()
 })
 
@@ -980,7 +980,7 @@ test('A-02 200x60 and 160x40 paint the three-column projection with the real val
     await h.open()
     const paneRow = rowOf(h, 'Categories (9)')
     const paneLine = h.rowsPlain()[paneRow]!
-    assert.match(paneLine, /Rows \(3\)/, 'the middle column is the current category rows')
+    assert.match(paneLine, /Rows \(4\)/, 'the middle column is the current category rows')
     assert.match(paneLine, /Details/, 'the third column is the detail pane')
     assert.match(h.view(), /Solarized/, 'the friendly theme label is in the detail')
     assert.match(h.view(), /plugin:acme\/solarized/, 'the raw source-qualified identity is the copy source')
@@ -995,7 +995,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   await h.open()
   // L0 paints categories + rows only; the retired header arrows never paint.
   assert.match(h.rowsPlain()[rowOf(h, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'L0 owns the categories level')
-  assert.ok(h.rowsPlain().some(line => line.includes('Rows (3)')), `the rows column exists:\n${h.view()}`)
+  assert.ok(h.rowsPlain().some(line => line.includes('Rows (4)')), `the rows column exists:\n${h.view()}`)
   assert.ok(!h.view().includes('Details'), 'L0 does not paint the Detail column')
   assert.ok(!h.view().includes('←'), 'no medium header category arrows')
   // The categories level moves with ↑↓.
@@ -1023,8 +1023,8 @@ test('A-03b the wide inline choice keeps the focused pane title as its phase cha
   const h = setup({ columns: 200, rows: 50, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // Categories -> Rows
-  const before = h.rowsPlain()[rowOf(h, 'Rows (3)')]!
-  assert.match(before, /\[Rows \(3\)\]/, 'the Rows pane owns focus before editing')
+  const before = h.rowsPlain()[rowOf(h, 'Rows (4)')]!
+  assert.match(before, /\[Rows \(4\)\]/, 'the Rows pane owns focus before editing')
   await key(h, '\x1b[C') // Rows -> inline choice
   const after = h.rowsPlain()[rowOf(h, 'Details')]!
   assert.match(after, /\[Details\]/, 'the Detail pane remains visibly focused while choosing')
@@ -2127,7 +2127,7 @@ test('the retired Legacy Copy cells are inert while the rails Copy All stays a r
   await h.open()
   assert.ok(!/c copy value/.test(h.rowsPlain().at(-1) ?? ''), 'c is never advertised outside the Detail level')
   await key(h, '\r') // L0 -> L1: the rows keep the keyboard while the Detail is visible
-  assert.match(h.rowsPlain()[rowOf(h, 'Rows (3)')]!, /\[Rows \(3\)\]/, 'the rows level owns the keyboard')
+  assert.match(h.rowsPlain()[rowOf(h, 'Rows (4)')]!, /\[Rows \(4\)\]/, 'the rows level owns the keyboard')
   // The old painted button's coordinates (the Detail action row) are inert now.
   const detailRow = rowOf(h, 'Change…')
   const detailActionCol = cellIndexOf(h, detailRow, 'Change…') + 2
@@ -2164,7 +2164,7 @@ test('a click anywhere in a visible column takes that column focus', async () =>
   press(h, iconRow, iconCol)
   release(h, iconRow, iconCol)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[rowOf(h, 'Rows (3)')]!, /\[Rows \(3\)\]/, 'a row click takes the rows level focus')
+  assert.match(h.rowsPlain()[rowOf(h, 'Rows (4)')]!, /\[Rows \(4\)\]/, 'a row click takes the rows level focus')
   const detailRow = rowOf(h, 'Value')
   press(h, detailRow, 96) // inside the Detail pane, away from the Copy button
   release(h, detailRow, 96)
@@ -2309,7 +2309,7 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   await h.open()
   const paneRow = rowOf(h, 'Categories (9)')
   assert.equal(cellIndexOf(h, paneRow, '[Categories (9)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
-  assert.equal(cellIndexOf(h, paneRow, 'Rows (3)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
+  assert.equal(cellIndexOf(h, paneRow, 'Rows (4)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
   assert.equal(cellIndexOf(h, paneRow, 'Details'), 22 + 2 + 42 + 2, 'the detail column starts after the 42-cell row column and a 2-cell gap')
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 200, `row ${index} must fit the terminal`)
@@ -2405,7 +2405,7 @@ test('a real category/row item click takes that level and selects the item', asy
   press(medium, iconRow, iconCol)
   release(medium, iconRow, iconCol)
   await medium.vt.waitForRender()
-  assert.match(medium.rowsPlain()[rowOf(medium, 'Rows (3)')]!, /\[Rows \(3\)\]/, 'a row click takes the rows level')
+  assert.match(medium.rowsPlain()[rowOf(medium, 'Rows (4)')]!, /\[Rows \(4\)\]/, 'a row click takes the rows level')
   assert.ok(medium.view().includes('> Icon style'), 'and selects that row')
   medium.dispose()
 })
@@ -3455,15 +3455,15 @@ test('B-07 a stored theme whose source is gone is listed as unavailable and can 
 })
 
 test('B-08 the Input & Terminal handoff keeps its facts readable and gains no edit channel', async () => {
-  // C2-R2 migrated every Input & Terminal configuration row, so the read-only
-  // handoff is now the ONLY non-edit row of that category: it must keep stating
-  // its facts, paint no writer and expose no copy verb.
+  // C2-R2 migrated every Input & Terminal configuration row; C2-R5 replaced the
+  // last read-only handoff with the same-lease Keyboard shortcuts page entry. It
+  // paints no scalar writer and exposes no copy verb.
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' } })
   await h.open('Input & Terminal')
   await key(h, '\r') // L0 -> L1
   for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
-  assert.ok(h.view().includes('> Input & terminal settings…'),
-    `the handoff is the selected Input & Terminal row:\n${h.view()}`)
+  assert.ok(h.view().includes('> Keyboard shortcuts…'),
+    `the page entry is the selected Input & Terminal row:\n${h.view()}`)
   // The FROZEN order, as painted in the ROWS column (the Detail repeats the
   // selected row's label, so the order is read from the list).
   const rowsColumn = h.rowsPlain().map((_, index) => rowsPaneText(h, index)).join('\n')
@@ -3473,14 +3473,17 @@ test('B-08 the Input & Terminal handoff keeps its facts readable and gains no ed
     assert.ok(at > previous, `${label} keeps the frozen Input & Terminal order:\n${h.view()}`)
     previous = at
   }
-  assert.match(h.view(), /Keyboard shortcuts are still configured by the existing settings editor/u,
-    'the handoff advertises only the field that was NOT migrated')
-  assert.ok(!h.view().includes('Copy value [C]'), 'a launcher row paints no Legacy Copy action')
-  await key(h, '\r') // the legacy handoff (a launcher owns no Detail level)
-  const legacy = h.view()
-  assert.match(legacy, /Type to search/, `the legacy editor is the physical owner:\n${legacy}`)
-  assert.match(legacy, />\s*Keyboard shortcuts/u, 'the handoff lands on the remaining row, never on a migrated field')
-  assert.equal(h.replacements(), 0, 'activating a launcher writes nothing')
+  assert.match(h.view(), /full-screen keyboard shortcuts editor/u,
+    'the entry advertises the SAME-LEASE page, not the retired legacy editor')
+  assert.ok(!h.view().includes('Copy value [C]'), 'the page entry paints no Legacy Copy action')
+  await key(h, '\r') // the same-lease page
+  const page = h.view()
+  assert.match(page, /Settings · Input & Terminal · Keyboard shortcuts/u,
+    `the Settings lease is still the ONE physical owner:\n${page}`)
+  assert.match(page, /Search: /, 'the page body owns the keyboard search input')
+  assert.match(page, /Esc close/, 'the page ends on its ONE Action Bar')
+  assert.doesNotMatch(page, /Type to search/, 'the legacy editor never mounts behind it')
+  assert.equal(h.replacements(), 0, 'opening the page writes nothing')
   h.dispose()
 })
 
@@ -5506,7 +5509,7 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(legacyFrame[0]!, /^Settings · Categories/u)
     assert.match(legacyFrame[1]!, /^Scope: /u)
     assert.match(legacyFrame[2]!, /^─+$/u)
-    assert.match(legacyFrame[3]!, /^\[Categories \(9\)\].*Rows \(3\).*Details/u,
+    assert.match(legacyFrame[3]!, /^\[Categories \(9\)\].*Rows \(4\).*Details/u,
       'the wide legacy frame keeps all three pane headers')
     assert.match(legacyFrame[4]!, /^ {2}About/u)
     assert.match(legacyFrame.at(-1) ?? '', /Esc close/u)
@@ -5521,21 +5524,21 @@ test('medium legacy levels keep Categories+Rows at L0 and Rows+Details at L1/L2'
     let frame = h.rowsPlain()
     let pane = frame.findIndex(line => line.includes('Categories (9)'))
     assert.ok(pane >= 0)
-    assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(3\)/u, 'L0 is Categories + Rows')
+    assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(4\)/u, 'L0 is Categories + Rows')
     assert.doesNotMatch(frame[pane]!, /Details/u)
 
     await key(h, '\r') // L0 -> L1
     frame = h.rowsPlain()
-    pane = frame.findIndex(line => line.includes('[Rows (3)]'))
+    pane = frame.findIndex(line => line.includes('[Rows (4)]'))
     assert.ok(pane >= 0, `L1 must paint the focused Rows header at ${columns}:\n${h.view()}`)
-    assert.match(frame[pane]!, /\[Rows \(3\)\].*Details/u, 'L1 is Rows + Details')
+    assert.match(frame[pane]!, /\[Rows \(4\)\].*Details/u, 'L1 is Rows + Details')
     assert.doesNotMatch(frame[pane]!, /Categories/u, 'the categories column is NOT pinned at L1/L2')
 
     await key(h, '\x1b[C') // L1 -> L2 inline choice
     frame = h.rowsPlain()
     pane = frame.findIndex(line => line.includes('[Details]'))
     assert.ok(pane >= 0)
-    assert.match(frame[pane]!, /Rows \(3\).*\[Details\]/u, 'L2 keeps Rows + the focused Details')
+    assert.match(frame[pane]!, /Rows \(4\).*\[Details\]/u, 'L2 keeps Rows + the focused Details')
     assert.doesNotMatch(frame[pane]!, /Categories/u)
     h.dispose()
   }
@@ -5569,7 +5572,7 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
     } else {
       const pane = frame.findIndex(line => line.includes('Categories (9)'))
       assert.ok(pane >= 0)
-      assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(3\)/u)
+      assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(4\)/u)
       if (columns >= 108) assert.match(frame[pane]!, /Details/u, '108 is the three-column edge')
       else assert.doesNotMatch(frame[pane]!, /Details/u, '76..107 stays two-column')
     }
@@ -5872,7 +5875,7 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
     }
     await key(h, '\r') // L0 -> L1
     if (columns >= 76) {
-      const pane = h.rowsPlain().findIndex(line => line.includes('Rows (3)'))
+      const pane = h.rowsPlain().findIndex(line => line.includes('Rows (4)'))
       assert.ok(pane >= 0)
       assert.ok(visibleWidth(h.vt.getViewport()[pane]!) <= columns, `the rows pane header fits ${columns}`)
     }
@@ -6410,7 +6413,7 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
 // the write really produced) — never a count of dispatched requests alone.
 
 /** The frozen Appearance row membership (C2-R1). */
-const APPEARANCE_ROWS = ['Configured theme', 'Icon style', 'Footer & status line…'] as const
+const APPEARANCE_ROWS = ['Configured theme', 'Icon style', 'Status line mode', 'Configure footer layout…'] as const
 
 /** The frozen Conversation row order (C2-R2: the launcher is retired, the two
  *  migrated policy rows sit LAST). */
@@ -6424,7 +6427,7 @@ const CONVERSATION_ROWS = [
 const INPUT_TERMINAL_ROWS = [
   'Home/End keys', 'Fullscreen', 'Mouse wheel lines',
   'Notifications', 'Notification method', 'Terminal progress',
-  'Input & terminal settings…',
+  'Keyboard shortcuts…',
 ] as const
 
 /** Select one LEGACY row of a category at L1 with the real keys. */
@@ -6476,15 +6479,16 @@ async function chooseCandidate(h: Harness, steps: number): Promise<void> {
 }
 
 // Regression: C2-R1 acceptance R1-01.
-test('Appearance keeps Theme + Icon style + the Footer launcher; Conversation is the frozen seven', async () => {
+test('Appearance keeps Theme + Icon style + the Footer mode/page; Conversation is the frozen seven', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await h.open('Appearance')
   await key(h, '\r')
   const appearance = h.view()
-  assert.match(appearance, /Rows \(3\)/u, 'Appearance states its real three rows')
+  assert.match(appearance, /Rows \(4\)/u, 'Appearance states its real four rows')
   assert.match(appearance, /Configured theme/u)
   assert.match(appearance, /Icon style/u)
-  assert.match(appearance, /Footer & status line…/u)
+  assert.match(appearance, /Status line mode/u)
+  assert.match(appearance, /Configure footer layout…/u)
   assert.doesNotMatch(appearance, /Transcript detail|Thinking detail|Progress updates|Response style/u)
 
   await key(h, '\x1b') // Rows -> Categories (narrow/wide both keep the level)
@@ -6968,13 +6972,14 @@ test('the migrated Conversation keeps no launcher while Input & Terminal hands o
   await h.open('Input & Terminal')
   await key(h, '\r')
   for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
-  assert.ok(h.view().includes('> Input & terminal settings…'),
-    `the remaining handoff owns the last Input & Terminal row:\n${h.view()}`)
+  assert.ok(h.view().includes('> Keyboard shortcuts…'),
+    `the same-lease page entry owns the last Input & Terminal row:\n${h.view()}`)
   await key(h, '\r')
-  const legacy = h.view()
-  assert.match(legacy, /Type to search/u, 'the existing complete editor is the physical owner')
-  assert.match(legacy, />\s*Keyboard shortcuts/u, 'it lands on the remaining row, never on a migrated field')
-  assert.ok(!legacy.includes('Settings · '), 'the workspace was retired, never stacked underneath')
+  const page = h.view()
+  assert.match(page, /Settings · Input & Terminal · Keyboard shortcuts/u,
+    'the SAME Settings lease hosts the page — never the retired legacy editor')
+  assert.match(page, /Search: /u, 'the page body owns the keyboard search input')
+  assert.doesNotMatch(page, /Type to search/u, 'the legacy complete editor never mounts behind it')
   h.dispose()
 })
 
@@ -7195,15 +7200,24 @@ test('the lease return stays ONE stack: Esc ends the editor, never a second Sett
   await h.open('Input & Terminal')
   await key(h, '\r')
   for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
-  await key(h, '\r') // the remaining Keyboard shortcuts handoff
-  assert.match(h.view(), /Type to search/u, 'the existing editor is the physical owner')
-  assert.ok(!h.view().includes('Settings · '), 'the workspace lease was retired, never stacked')
-  await key(h, '\x1b') // leave the editor
+  await key(h, '\r') // the same-lease Keyboard shortcuts page
+  assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts/u,
+    'the SAME Settings lease hosts the page — the legacy editor never mounts')
+  assert.match(h.view(), /Search:/u, 'the page body owns the keystroke area')
+  assert.doesNotMatch(h.view(), /Type to search/u, 'no legacy editor is stacked behind the page')
+  await key(h, '\x1b') // page -> its source row's Detail level
   await h.vt.waitForRender()
   const returned = h.view()
-  assert.ok(!returned.includes('Type to search'), 'the editor is gone')
-  assert.ok(!returned.includes('Settings · '), 'no Settings frame survives behind it either')
-  assert.match(returned, /❯/u, 'the paused conversation is the restored surface (the pre-R1 contract)')
+  assert.match(returned, /Settings · Input & Terminal/u,
+    'the page Esc returns inside the SAME Settings lease')
+  assert.doesNotMatch(returned, /Search:|Keymap:/u, 'the page body is gone')
+  await key(h, '\x1b') // detail -> rows
+  await key(h, '\x1b') // rows -> categories
+  await key(h, '\x1b') // categories -> close
+  await h.vt.waitForRender()
+  const closed = h.view()
+  assert.doesNotMatch(closed, /Settings · /u, 'only the whole Settings Esc exits')
+  assert.match(closed, /❯/u, 'the paused conversation is the restored surface')
   // No double stack: a fresh /settings takes exactly ONE lease, and its own
   // level count still closes it.
   await h.open('Conversation')
@@ -7345,12 +7359,15 @@ test('a held Settings commit and a queued LEGACY write share the ONE production 
   const userItems = [{ schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }]
   const trust = { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 }
   const keybindings = { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } }
+  const legacyRegistry = new SettingsRegistry()
+  legacyRegistry.register({ id: 'legacy-probe', label: 'Legacy settings probe', currentValue: '' }, 'test')
   const h = setup({
     columns: 140,
     rows: 40,
     doc: { theme: 'dark', iconStyle: 'emoji', busyEnter: 'queue' },
     footerCustomItemsRaw: userItems,
     holdFirstReplace: true,
+    settingsRegistry: legacyRegistry,
   })
   Object.assign(h.doc, { footerCommand: trust, keybindings })
 
@@ -7372,26 +7389,27 @@ test('a held Settings commit and a queued LEGACY write share the ONE production 
   await key(h, '\x1b') // Detail -> Rows
   await key(h, '\x1b') // Rows -> Categories
   await h.vt.waitForRender()
-  // Walk the rail DOWN from the current category (Appearance) to Input &
-  // Terminal; the rail is the only selection owner.
-  for (let step = 0; step < CATEGORY_ORDER.length; step += 1) {
-    if (h.rowsPlain().some(line => line.startsWith('> Input & Terminal'))) break
+  // Walk the rail DOWN to the conditional last category; the rail is the only
+  // selection owner. Extensions is the ONE remaining legacy launcher.
+  for (let step = 0; step < CATEGORY_ORDER.length + 1; step += 1) {
+    if (h.rowsPlain().some(line => line.startsWith('> Extensions'))) break
     await key(h, '\x1b[B')
   }
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Input & Terminal')),
-    `the rail reached Input & Terminal:\n${h.view()}`)
-  await key(h, '\r') // L0 -> L1
-  for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Extensions')),
+    `the rail reached Extensions:\n${h.view()}`)
+  await key(h, '\r') // L0 -> L1 (the single transition row)
   await key(h, '\r') // the handoff
   await h.vt.waitForRender()
   assert.match(h.view(), /Type to search/u, `the legacy editor owns the screen:\n${h.view()}`)
-  assert.match(h.view(), />\s*Keyboard shortcuts/u, 'it landed on the remaining row')
   // The legacy complete editor still owns its own `Submit while busy` writer:
-  // filter to that row and activate it (a cycle row) — its document write is
-  // queued behind the held Settings write.
-  for (const data of 'Submit while busy') await key(h, data)
+  // walk its painted rows to that field and activate it (a cycle row) — its
+  // document write is queued behind the held Settings write.
+  for (let step = 0; step < 40; step += 1) {
+    if (h.view().includes('> Submit while busy')) break
+    await key(h, '\x1b[B')
+  }
   await settle(h, 8)
-  assert.ok(h.view().includes('> Submit while busy'), `the filtered row is selected:\n${h.view()}`)
+  assert.ok(h.view().includes('> Submit while busy'), `the busy-enter row is selected:\n${h.view()}`)
   await key(h, '\r') // cycle the row: the legacy writer runs
   await settle(h, 8)
   assert.ok(h.replacements() >= 1, 'the legacy write is QUEUED behind the held Settings write')
@@ -7729,11 +7747,12 @@ test('Fullscreen never switches the screen when the workspace closes for another
   // Navigate to the remaining handoff row and activate it: `legacy-handoff`.
   await key(h, '\x1b') // back to the rows level
   for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
-  assert.ok(h.view().includes('> Input & terminal settings…'))
+  assert.ok(h.view().includes('> Keyboard shortcuts…'))
   await key(h, '\r')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Type to search/u, 'the existing editor owns the screen')
-  assert.equal(h.app.isFullscreen(), false, 'a legacy hand-off never swaps the screen')
+  assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts/u,
+    'the same-lease page still owns the Settings screen')
+  assert.equal(h.app.isFullscreen(), false, 'opening the page never swaps the screen')
   h.dispose()
 })
 
@@ -8019,7 +8038,7 @@ test('a verified Fullscreen choice does not switch when another writer changed t
 })
 
 // Regression: C2-R2 acceptance R2-08.
-test('a verified Fullscreen choice does not switch on a legacy hand-off', async () => {
+test('a verified Fullscreen choice does not switch when the same-lease page opens', async () => {
   const probe = fullscreenProbe()
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' } })
   probe.setup(h)
@@ -8029,10 +8048,12 @@ test('a verified Fullscreen choice does not switch on a legacy hand-off', async 
   await settle(h)
   await key(h, '\x1b') // back to the rows level
   for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
-  await key(h, '\r') // the legacy hand-off closes the workspace
+  await key(h, '\r') // the same-lease Keyboard shortcuts page
   await h.vt.waitForRender()
-  assert.match(h.view(), /Type to search/u, 'the existing editor owns the screen')
-  assert.deepEqual(probe.switches, [], 'a legacy hand-off is not a user exit')
+  assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u,
+    'the page opens inside the SAME Settings lease')
+  assert.match(h.view(), /Search:/u, 'the page body owns the keyboard')
+  assert.deepEqual(probe.switches, [], 'opening the page is not a Settings user exit')
   assert.equal(h.app.isFullscreen(), false)
   h.dispose()
 })

@@ -79,15 +79,37 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
-      id: 'footer-settings-legacy',
+      id: 'footer-mode',
       category: 'appearance',
-      label: 'Footer & status line…',
-      summary: 'Existing settings editor',
-      scope: 'Existing settings editor',
+      label: 'Status line mode',
+      summary: 'default',
+      value: 'default',
+      scope: 'TUI settings document · Footer runtime',
       freshness: 'ready',
-      description: 'the existing editor owns the footer layout',
-      action: 'open-legacy',
-      legacyTargetId: 'footer',
+      description: 'the stored Footer mode',
+      action: 'inspect',
+      edit: {
+        field: 'footer-mode',
+        primary: 'persisted',
+        runtime: 'Runtime: default',
+        persisted: 'default',
+        options: [
+          { value: 'default', label: 'default', available: true, current: true },
+          { value: 'compact', label: 'compact', available: true, current: false },
+          { value: 'custom', label: 'custom', available: true, current: false },
+        ],
+      },
+    },
+    {
+      id: 'footer-configurator',
+      category: 'appearance',
+      label: 'Configure footer layout…',
+      summary: 'default · 2 rows',
+      scope: 'Footer runtime · TUI settings document',
+      freshness: 'runtime',
+      description: 'the same-lease Footer layout page',
+      action: 'inspect',
+      specialist: 'footer-configurator',
     },
     {
       id: 'display-preset',
@@ -399,15 +421,15 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
-      id: 'input-terminal-settings-legacy',
+      id: 'keyboard-shortcuts',
       category: 'input-terminal',
-      label: 'Input & terminal settings…',
-      summary: 'Existing settings editor',
-      scope: 'Existing settings editor',
+      label: 'Keyboard shortcuts…',
+      summary: 'Defaults',
+      scope: 'Client keymap · TUI settings document',
       freshness: 'ready',
-      description: 'the existing editor owns the input and terminal preferences',
-      action: 'open-legacy',
-      legacyTargetId: 'keyboard-shortcuts',
+      description: 'the same-lease keyboard shortcuts page',
+      action: 'inspect',
+      specialist: 'keybindings',
     },
     {
       id: 'visual-tools',
@@ -736,6 +758,28 @@ function setup(options: {
         return page
       },
     } : {},
+    createFooterConfiguratorPage: (done: () => void, onAuthoritativeChange: () => void) => {
+      const page = new FakeSpecialistPage()
+      ;(page as unknown as { title: string }).title = 'Footer layout'
+      ;(page as unknown as { done: () => void }).done = done
+      ;(page as unknown as { refresh: () => void }).refresh = () => {
+        specialistRefreshes += 1
+        onAuthoritativeChange()
+      }
+      specialistPages.push(page)
+      return page
+    },
+    createKeybindingsPage: (done: () => void, onAuthoritativeChange: () => void) => {
+      const page = new FakeSpecialistPage()
+      ;(page as unknown as { title: string }).title = 'Keyboard shortcuts'
+      ;(page as unknown as { done: () => void }).done = done
+      ;(page as unknown as { refresh: () => void }).refresh = () => {
+        specialistRefreshes += 1
+        onAuthoritativeChange()
+      }
+      specialistPages.push(page)
+      return page
+    },
     ...options.specialistPage === true ? {
       createSubagentAllowlistPicker: (done: () => void, onAuthoritativeChange: () => void) => {
         specialistBuilds += 1
@@ -1821,12 +1865,12 @@ test('the pane header names the keyboard owner at 80 and 120 columns', () => {
     const l0 = plain(legacy, columns).split('\n')
     const l0Pane = l0.findIndex(line => line.includes('[Categories (9)]'))
     assert.ok(l0Pane >= 0)
-    assert.match(l0[l0Pane]!, /\[Categories \(9\)\].*Rows \(3\)/u)
+    assert.match(l0[l0Pane]!, /\[Categories \(9\)\].*Rows \(4\)/u)
     legacy.panel.handleInput('\t') // categories -> rows
     const l1 = plain(legacy, columns).split('\n')
-    const l1Pane = l1.findIndex(line => line.includes('[Rows (3)]'))
+    const l1Pane = l1.findIndex(line => line.includes('[Rows (4)]'))
     assert.ok(l1Pane >= 0, `the focused Rows header paints at ${columns}:\n${l1.join('\n')}`)
-    assert.match(l1[l1Pane]!, /\[Rows \(3\)\].*Details/u)
+    assert.match(l1[l1Pane]!, /\[Rows \(4\)\].*Details/u)
   }
 })
 
@@ -2083,7 +2127,8 @@ test('T03 display rows live in Conversation while Theme/Icon stay in Appearance'
   const appearance = plain(h)
   assert.match(appearance, /Configured theme/u)
   assert.match(appearance, /Icon style/u)
-  assert.match(appearance, /Footer & status line…/u)
+  assert.match(appearance, /Status line mode/u)
+  assert.match(appearance, /Configure footer layout…/u)
   assert.doesNotMatch(appearance, /Transcript display|Thinking detail/u, 'the retired display rows stay out')
   // The retired `display`/`other` ids are not categories any click can select:
   // the rail only ever publishes the CURRENT directory's ids.
@@ -2109,16 +2154,18 @@ test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboa
   const rows = plain(input)
   assert.match(rows, /Home\/End keys|Fullscreen|Mouse wheel lines/u,
     'the migrated Input & Terminal rows are painted')
-  assert.match(rows, /Input & terminal settings…/u, 'the remaining Keyboard shortcuts handoff is last')
-  // The launcher is the LAST row: walk the six writable rows before activating it.
+  assert.match(rows, /Keyboard shortcuts…/u, 'the Keyboard shortcuts page entry is last')
+  // The page entry is the LAST row: walk the six writable rows before it.
   input.panel.handleInput('\r')
   for (let step = 0; step < 6; step += 1) input.panel.handleInput('\u001b[B')
   const detail = plain(input)
-  assert.match(detail, /Existing settings editor/u, 'the handoff states its scope in a launcher row')
+  assert.match(detail, /same-lease keyboard shortcuts page/u, 'the row states its page scope')
   input.panel.handleInput('\r')
-  assert.deepEqual(input.legacyTargets(), ['keyboard-shortcuts'], 'Input & Terminal opens the shortcuts row')
-  assert.equal(input.commits(), 0, 'the handoff itself writes nothing')
-  assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'the launcher row paints no editor')
+  assert.equal(input.specialistPages.length, 1, 'Input & Terminal opens the SAME-LEASE page')
+  assert.equal(input.specialistPages[0]!.title, 'Keyboard shortcuts')
+  assert.equal(input.legacyTargets().length, 0, 'the page never opens the legacy editor')
+  assert.equal(input.commits(), 0, 'the page entry itself writes nothing')
+  assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'the page row paints no scalar editor')
 })
 
 test('T05 a width cycle keeps the selected category/row/focus and refuses old coordinates', () => {
@@ -2303,7 +2350,7 @@ const walkToConversationRow = (h: Harness, label: (typeof CONVERSATION_LABELS)[n
   assert.match(plain(h), new RegExp(`> ${label}`, 'u'), `the ${label} row owns the selection`)
 }
 
-test('Appearance holds Theme, Icon style and the Footer launcher only', () => {
+test('Appearance holds Theme, Icon style, the Footer mode and the Footer page', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'appearance')
@@ -2311,10 +2358,11 @@ test('Appearance holds Theme, Icon style and the Footer launcher only', () => {
   const rows = plain(h)
   assert.match(rows, /Configured theme/u)
   assert.match(rows, /Icon style/u)
-  assert.match(rows, /Footer & status line…/u)
+  assert.match(rows, /Status line mode/u)
+  assert.match(rows, /Configure footer layout…/u)
   assert.doesNotMatch(rows, /Transcript display|Thinking detail|Progress updates|Response style/u,
     'the Conversation rows never leak into Appearance')
-  assert.match(rows, /Rows \(3\)/u, 'the Appearance rows count is the real three')
+  assert.match(rows, /Rows \(4\)/u, 'the Appearance rows count is the real four')
 })
 
 test('Conversation keeps the frozen seven-row order', () => {

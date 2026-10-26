@@ -21,6 +21,20 @@
   Preview 明确显示 `Preview unavailable`，Source/Copy 仍然可用；鼠标只点击真实绘出的操作
   文字或缩略像素。`/copy` 现在复制用户看到的显示正文（不含已被渲染消费的 marker 行），
   原始 Session、搜索与 `/transcript` 导出保持完整。
+- **Footer 与键盘快捷键编辑器现在统一进入全屏 Settings 工作区，不再打开独立的 88 列 overlay。**
+  `/footer`、它的别名 `/statusline` 和裸 `/keybindings` 都会直接打开同一个 Settings lease 中的
+  `Appearance → Configure footer layout` 或 `Input & Terminal → Keyboard shortcuts` 页：顶部仍是
+  Settings 的唯一标题、状态与作用域，底部仍只有一条操作栏。Footer 的行/条目/样式/自定义条目、
+  实时预览、脏草稿退出确认和“先持久化再应用”的保存事务保持原语义；键盘快捷键的搜索、动作详情、
+  直接/leader 录键、冲突与安全模式、FIFO 写入与实时 keymap 也保持不变。`Esc` 先按各页自己的层级
+  返回来源行，再按 Settings 的既有层级退出，不会打开第二个全屏或第二个编辑器。`/keybindings
+  conflicts|reload|reset` 保持原有独立诊断语义。两个页面的根状态还支持 `←` 返回：Footer 行选择器
+  与搜索为空时的键盘快捷键列表按 `←` 等同 `Esc` 回到来源设置行（底栏显示 `← Back`），Footer 有
+  未保存修改时先进入 Save/Discard/Keep 确认；行编辑器的 `←` 仍是切换左右分区，搜索非空时 `←`
+  仍只移动光标。只剩一行操作栏时页面只承认并显示自己真正接受的返回键（根页面为 `← Back` 与
+  `Esc`，子页面只剩 `Esc`），不会提示或执行看不见的搜索/保存动作。写入进行中任何按键都不会
+  离开，结果会先在页面上呈现。
+
 
 - **实验性 TSP renderer 的最终回答现在支持原生图文混排，并为每张已发布图提供 Copy 操作。**
   `DSH_PI_TUI_RENDERER=tsp` 下，经 `present_visual` 发布的图表/SVG 会按各自的标记位置进入

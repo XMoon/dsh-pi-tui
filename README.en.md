@@ -425,8 +425,15 @@ clipboard delivery path, and never writes configuration.
 
 `/status` is a real alias of `/settings`: the same handler, the same initial
 About focus and the same reads; neither creates a session or reads statistics
-while sessionless. `/statusline` remains the `/footer` alias and never goes
-through Settings. The Settings categories are the fixed `About / Models / Account / Agent /
+while sessionless. `/footer` and its `/statusline` alias open the SAME full-screen Settings
+workspace at Appearance → Configure footer layout; bare `/keybindings` likewise
+opens Input & Terminal → Keyboard shortcuts. Both pages share the one Settings
+lease, the one physical Action Bar and the existing Footer / Keybinding write
+authorities — no second overlay is mounted. On each page's root state (the
+Footer row selector, the Keyboard list with an empty query) `←` goes back like
+`Esc` and the bar says `← Back`; a dirty Footer asks Save/Discard/Keep first,
+`←` still switches zones inside the row editor, and a non-empty search query
+still keeps `←` as cursor movement. The Settings categories are the fixed `About / Models / Account / Agent /
 Appearance / Conversation / Input & Terminal / Tools / Plugins`, and `Extensions` is appended only
 while the extension settings registry really has rows; `/settings` (and `/status`) land on About.
 Adding, removing or same-id re-registering an extension row revokes the previous frame's keyboard
@@ -512,7 +519,8 @@ Conversation and Input & Terminal now edit all eight historical settings in plac
 Transcript display → Transcript detail → Thinking detail → Progress updates → Response style →
 Submit while busy → Git attribution, and Input & Terminal is Home/End keys → Fullscreen →
 Mouse wheel lines → Notifications → Notification method → Terminal progress →
-Input & terminal settings… (whose launcher only needs the existing editor for `Keyboard shortcuts`).
+Keyboard shortcuts…; the last entry opens the SAME same-lease page as bare
+`/keybindings` instead of the existing editor.
 
 `Submit while busy` and `Fullscreen` are the two PERSIST-FIRST rows: only a completed write whose
 authoritative re-read agrees shows `Verified`, and no runtime state is pretended to have switched.
@@ -521,8 +529,9 @@ value: <raw>` when illegal), and its `Runtime` says what the NEXT busy Enter rea
 default is named as `queue (default; no valid saved value)` instead of being presented as saved.
 Its confirmation never rewrites a turn that is already running. A `Fullscreen` preference keeps
 the workspace usable and switches the transcript screen only after you leave Settings
-normally; a Legacy hand-off, a Question/Approval takeover, a forced close or an unverified write
-switches nothing, and the stored preference still applies at the next TUI start.
+normally; a Legacy hand-off from the remaining `Extensions` transition row, a Question/Approval
+takeover, a forced close or an unverified write switches nothing, and the stored preference still
+applies at the next TUI start.
 
 The other six apply their real runtime owner first and then persist (a failed write never rolls
 the runtime back, and `Persisted` keeps reporting the raw stored value): `Git attribution`
@@ -563,14 +572,13 @@ bypass"), and only an agreed read-back is `Verified`. It is the Host user-shell 
 not the model's tool sandbox policy and not a permission preset, which is why it does not live in
 Input & Terminal.
 
-The existing complete settings editor is still available: every setting that has not migrated yet
-has a transition row in its own category that explicitly says `Existing settings editor`
-(`Appearance → Footer & status line…`,
-`Input & Terminal → Input & terminal settings…` (only `Keyboard shortcuts` remains),
-`Extensions → Configure extension settings…`). Activating one retires the workspace and restores
-the surface it paused before opening the original editor on that exact row, so Theme, the Plugin
-Manager, keybindings and extension settings keep every existing write path. `Agent` has no
-unmigrated field left, so its `Agent settings…` transition row is retired.
+The complete legacy settings editor now has exactly ONE entry: the conditional
+`Extensions → Configure extension settings…` transition row (present only while the extension
+settings registry has rows). Activating it retires the workspace and restores the surface it paused
+before opening the original editor on that exact row, so Theme, the Plugin Manager, keybindings and
+extension settings keep every existing write path. Footer and Keyboard shortcuts are now same-lease
+pages; `Appearance` and `Input & Terminal` carry no transition row, and `Agent` has no unmigrated
+field left, so those legacy entries are retired.
 
 `/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
 Host's `pi-tui-visual-tools.enabled` configuration. That one switch governs THREE model tools:
@@ -617,8 +625,8 @@ source layer; `Configure in Models…` / `Clear in Models…` switch to the exis
 the Web page never collects the key and never runs `/login` / `/logout` text. Esc steps from a detail
 back to the Web list and then back to the `Web Search / Fetch` row; a Remote or unavailable Host
 section still opens a read-only page with its reason but offers no write. The existing complete
-editor is retained (Footer/Keybindings and Extensions transition rows keep working), and its
-historical Web rows share the SAME write queue and read authority until they are retired.
+editor is retained through the ONE remaining `Extensions` transition row, and its historical Web
+rows share the SAME write queue and read authority until they are retired.
 
 The `Icon style` option in `/settings` (also directly editable under Appearance) switches the TUI's structural icons:
 `Emoji` (default, colorful), `Symbols` (compact single-cell terminal
@@ -652,7 +660,10 @@ Slash Commands registered by other plugins through `ctx.commands` are discovered
 
 ### Footer customization
 
-`/footer` is the interactive Footer editor. You can combine builtin status items, change their side and order, choose a Style and Tone, edit Prefix/Suffix and Importance, and create your own Footer items.
+`/footer` opens the Footer editor inside the same full-screen Settings workspace
+(Appearance → Configure footer layout). You can combine builtin status items,
+change their side and order, choose a Style and Tone, edit Prefix/Suffix and
+Importance, and create your own Footer items.
 
 Four item sources are supported:
 
@@ -753,8 +764,9 @@ keybindings:
   action-first, editable Keyboard Shortcuts Editor: it groups actions by
   category, searches action IDs/descriptions/current keys/default keys, and
   marks customized, conflict, Unbound, Disabled, and fixed states. A standalone Leader key row also configures the global leader key.
-- `/settings` has one `Keyboard shortcuts` launcher that opens the same editor
-  and persistence controller as `/keybindings`.
+- `/settings` has one `Keyboard shortcuts…` entry that opens the same-lease
+  full-screen page and the same persistence controller as bare `/keybindings`
+  (no 88-column overlay).
 - The recorder reads a real terminal key, parses it with `parseKey`, and stores
   the canonical `KeyId`; known dead, typing-swallowing, terminal-ambiguous, and
   conflicting shortcuts are rejected before saving. Ordinary recording cancels

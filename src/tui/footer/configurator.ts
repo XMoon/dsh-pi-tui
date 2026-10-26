@@ -75,9 +75,14 @@ export interface FooterConfiguratorOptions {
    * hint uses) and extension footer text even while the panel is open. */
   readonly taskBrowserAvailable: () => boolean
   readonly extensionFooterText: () => string
-  /** The overlay's row budget source: re-read at EVERY render so a
-   * terminal resize never leaves the panel clipped or oversized. */
-  readonly maxVisible: () => number
+  /** The row budget source for a stand-alone mount. Embedded in the Settings
+   *  workspace the root installs the real grant through `setMaxRows`; the two
+   *  are combined, so a caller can never paint more than either allows. */
+  readonly maxVisible?: () => number
+  /** Whether this surface has NO settings document (the `/footer` runtime-only
+   *  path). The selector then states `Not persisted (session only)` instead of
+   *  implying that Save writes the TUI settings document. */
+  readonly sessionOnly?: boolean
   /** Request a render after timer-driven input replay. */
   readonly requestRender?: () => void
   /** PR E: the save is AWAITED. Resolve = persisted (and the memory
@@ -123,7 +128,10 @@ function sameMouseAction(a: ConfiguratorMouseAction | undefined, b: Configurator
   return false
 }
 
-/** The footer configurator overlay panel. */
+/** The footer configurator page: the Settings workspace's SAME-LEASE body for
+ *  `Appearance → Configure footer layout…` (C2-R5). It paints business content
+ *  plus the live preview and ends on ONE semantic Action Bar; the root owns the
+ *  header, metadata, notice and frame. */
 export class FooterConfiguratorPanel implements Component {
   private readonly model: FooterConfiguratorModel
   private readonly registry: FooterItemRegistry
@@ -132,9 +140,23 @@ export class FooterConfiguratorPanel implements Component {
   private readonly taskBrowserAvailable: () => boolean
   private readonly extensionFooterText: () => string
   private readonly maxVisible: () => number
+  private readonly sessionOnly: boolean
   private readonly requestRender: () => void
   private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('../../domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
   private readonly onCancel: () => void
+  /** The root's grant for THIS page: its content rows plus the ONE action row. */
+  private grantedRows: number | undefined
+  /** The grant the last completed render really painted (the paint fence). */
+  private paintedGrant: number | undefined
+  /** The last painted body slice: only its rows may dispatch a keyboard or
+   *  pointer action; a body-less frame admits only the real Esc. */
+  private paintedBodyRows = 0
+  private paintedSave = false
+  private paintedExitChoices: ReadonlySet<'save' | 'discard' | 'keep'> = new Set()
+  /** Focus forwarding contract: the page owns no Input, so the flag only
+   *  records that the root handed it the keyboard. */
+  focused = false
+  readonly title = 'Footer layout'
   /** The body scrollport's top offset (stable across renders — the cursor
    * scrolls the body minimally; the fixed shell never moves). */
   private scrollTop = 0
@@ -143,6 +165,11 @@ export class FooterConfiguratorPanel implements Component {
   /** The semantic action the last left press latched (mouse parity): a
    * click may only run the exact pressed action. */
   private mousePressedAction: ConfiguratorMouseAction | undefined
+  /** The grant the press was admitted against: a repaint with a DIFFERENT
+   *  grant (a resize) means the cell the user pressed no longer describes the
+   *  same body, so the release is refused even when the width is unchanged. */
+  private mousePressedGrant: number | undefined
+  private disposed = false
   /** The width the hit map was painted at; a stale-width event is rejected. */
   private lastRenderWidth = 0
   /** Bracketed-paste buffering (the fork's Input-component pattern):
@@ -166,11 +193,13 @@ export class FooterConfiguratorPanel implements Component {
     this.composer = options.composer
     this.taskBrowserAvailable = options.taskBrowserAvailable
     this.extensionFooterText = options.extensionFooterText
-    this.maxVisible = options.maxVisible
+    this.maxVisible = options.maxVisible ?? (() => Number.MAX_SAFE_INTEGER)
+    this.sessionOnly = options.sessionOnly === true
     this.requestRender = options.requestRender ?? (() => {})
     this.onSave = options.onSave
     this.onCancel = options.onCancel
     this.handleInput = (data: string): void => {
+      if (this.disposed) return
       // Any keyboard input ends the mouse gesture identity: the
       // layout/item semantic mutations (Enter/Space/A/M/F/arrows/Esc)
       // can move a different item onto the pressed cell, so a later
@@ -178,12 +207,21 @@ export class FooterConfiguratorPanel implements Component {
       // (press A → Space removes A → B moves onto the same cell →
       // release must not activate B).
       this.mousePressedAction = undefined
+      this.mousePressedGrant = undefined
       const state = this.model.state()
       // A save in flight freezes INPUT (PR E §10): the draft captured for
       // the pending write must stay the draft on screen, duplicate
       // Enter/S are refused by construction, and Esc can never race a
       // second close path. Rendering stays live (resize works).
       if (state.saving) return
+      // A frame whose body grant painted ZERO rows admits only the page's own
+      // ROOT back verbs: the real Esc, plus `←` while the Row Selector is the
+      // state (the same root back alias the painted selector offers). Every
+      // other key would act on a row/control the user cannot see, and a
+      // bracketed paste is dropped the same way.
+      if (this.paintedBodyRows === 0
+        && !matchesKey(data, 'escape')
+        && !(state.mode === 'rows' && matchesKey(data, 'left'))) return
       // Text-input pages swallow text keys FIRST (space is a query
       // character there, never the remove action). Text arrives in three
       // shapes — a plain printable chunk, a Kitty CSI-u / modifyOtherKeys
@@ -202,21 +240,28 @@ export class FooterConfiguratorPanel implements Component {
         return
       }
       if (textMode && !this.skipPasteOnce && this.feedPaste(data)) return
-      if (matchesKey(data, 'escape')) {
+      if (matchesKey(data, 'escape')
+        || (state.mode === 'rows' && matchesKey(data, 'left'))) {
         // The model navigates back page by page; a clean Row Selector's
-        // Esc closes, a dirty one opens the exit-confirm page (PR E §7).
+        // Esc/← closes, a dirty one opens the exit-confirm page (PR E §7).
+        // `←` is the back verb ONLY on the Row Selector: the item/row editors
+        // keep it as their zone switch.
         if (!this.model.cancel()) this.onCancel()
         return
       }
       if (matchesKey(data, 'enter')) {
         if (state.mode === 'rows' && this.model.homeSelection().kind === 'save') {
           // Enter on the "Save changes" action — the discoverable save
-          // path (PR E §4.1).
+          // path (PR E §4.1). It is granted only when THIS frame painted it.
+          if (!this.paintedSave) return
           this.requestSave()
           return
         }
         if (state.mode === 'exit-confirm') {
-          this.runExitChoice(this.model.exitConfirmAction())
+          const choice = this.model.exitConfirmAction()
+          // The confirm only acts on the exact choice the last frame painted.
+          if (!this.paintedExitChoices.has(choice)) return
+          this.runExitChoice(choice)
           return
         }
         this.model.activate()
@@ -239,7 +284,9 @@ export class FooterConfiguratorPanel implements Component {
       if (state.mode === 'rows' && matchesKey(data, 's')) {
         // The power-user shortcut shares the ONE save path with the
         // "Save changes" row and "Save & Exit" (PR E §13) — never a
-        // second save implementation.
+        // second save implementation. It is inert while the save row is
+        // not inside the painted body (short viewport).
+        if (!this.paintedSave) return
         this.requestSave()
         return
       }
@@ -288,6 +335,36 @@ export class FooterConfiguratorPanel implements Component {
         return
       }
     }
+  }
+
+  /** The root's live body grant (content rows + the ONE action row). A repeated
+   *  identical grant must not schedule another render: the root calls this on
+   *  every frame. */
+  setMaxRows(rows: number): void {
+    const next = Math.max(1, Math.floor(Number.isFinite(rows) ? rows : 1))
+    if (next === this.grantedRows) return
+    this.grantedRows = next
+    this.requestRender()
+  }
+
+  /** Whether a grant installed after the last completed frame has not painted
+   *  yet. The root admits only the real Esc until this is false. */
+  grantAwaitingPaint(): boolean {
+    return this.grantedRows !== undefined && this.paintedGrant !== this.grantedRows
+  }
+
+  /** The page's own exit gradient belongs to the page: a dirty draft, a
+   *  sub-page or an in-flight save refuses USER navigation away from it. */
+  blocksParentNavigation(): boolean {
+    const state = this.model.state()
+    return this.model.isDirty() || state.mode !== 'rows' || state.saving
+  }
+
+  /** The shared pane header names the page and its current sub-page. */
+  paneHeader(width: number): string {
+    const state = this.model.state()
+    const sub = state.mode === 'rows' ? 'Select row' : this.pageTitle(state)
+    return truncateToWidth(`Footer layout · ${sub}`, Math.max(1, width), '…')
   }
 
   /** The ONE save path (PR E §13): the S shortcut, the Row Selector's
@@ -346,88 +423,117 @@ export class FooterConfiguratorPanel implements Component {
     // mutation from outside (reset helpers) calls this.
   }
 
+  /** The command-owned save closure fences a late settlement on THIS page's
+   *  lifetime: a forced workspace teardown must not apply or notify from a
+   *  save that started before the page died. */
+  isDisposed(): boolean {
+    return this.disposed
+  }
+
   dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
     this.clearPasteStartPending()
     this.pasteBuffer = ''
     this.isInPaste = false
     this.skipPasteOnce = false
+    this.mousePressedAction = undefined
+    this.mousePressedGrant = undefined
+    this.paintedBodyRows = 0
+    this.paintedSave = false
+    this.paintedExitChoices = new Set()
   }
 
   render(width: number): string[] {
     const state = this.model.state()
-    // The budget is re-read EVERY render (resize-safe); the caller's
-    // getter already leaves room for the Frame's border rows.
-    const budget = Math.max(1, this.maxVisible())
-    this.lastRenderWidth = Math.max(1, width)
-    const rule = color.border('─'.repeat(Math.max(0, width - 2)))
-    const head = [
-      color.textStrong(this.title(state)),
-      color.textMuted(this.help(state)),
-    ]
+    const safeWidth = Math.max(1, width)
+    this.lastRenderWidth = safeWidth
+    // The effective budget is the LIVE terminal cap (stand-alone mount) AND the
+    // root's grant (embedded). A repeated identical grant never re-renders.
+    const budget = Math.max(1, Math.min(this.maxVisible(), this.grantedRows ?? Number.MAX_SAFE_INTEGER))
+    this.paintedGrant = this.grantedRows
+    // The bar is ALWAYS the physical last row of this page; a bar-only grant
+    // paints the way back and nothing else.
+    const bar = color.textMuted(this.actionBar(state, safeWidth, budget))
+    if (budget <= 1) {
+      this.hitMap = [{ kind: 'inert' }]
+      this.paintedBodyRows = 0
+      this.paintedSave = false
+      this.paintedExitChoices = new Set()
+      return [truncateToWidth(bar, safeWidth, '…')]
+    }
     const pre = this.preLines(state)
     const tail = this.tailLines(state)
-    const body = this.bodyLines(state, width)
-    const previewRows = this.previewLines(width)
-    // The EDITABLE body wins over the preview on a short terminal: the
-    // fixed shell is title + help (+ rule + the add page's pinned
-    // lines), the body keeps up to TWO rows (all of them when fewer) and
-    // the PREVIEW compresses to whatever remains — a footer preview can
-    // legally reach 4 physical rows, and letting it eat the shell would
-    // leave a configurator with zero editable rows visible. The preview
-    // block keeps its label only while at least one preview row fits;
-    // a hidden remainder is marked with an ellipsis.
-    const fixedCount = head.length + pre.length + tail.length + 1
-    const left = budget - fixedCount
-    if (left <= 0) {
-      // A tiny terminal: the fixed shell wins, the body drops (the Frame
-      // borders stay visible — the physical minimum).
-      const lines = [...head, ...pre].slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
-      this.hitMap = lines.map((): ConfiguratorMouseHit => ({ kind: 'inert' }))
-      return lines
-    }
+    const body = this.bodyLines(state, safeWidth)
+    const previewRows = this.previewLines(safeWidth)
+    const available = budget - 1
+    const preShown = pre.slice(0, Math.min(pre.length, available))
+    let left = available - preShown.length
+    let bodySlice: string[] = []
+    let bodyHits: ConfiguratorMouseHit[] = []
+    let tailShown: string[] = []
+    let previewBlock: string[] = []
+    // The EDITABLE body wins over the preview on a short terminal: the selector
+    // and the exit guard keep their whole body when the grant allows, other
+    // pages keep up to TWO rows; the tail description and the preview compress
+    // to whatever remains. The Action Bar never yields.
     const bodyMin = state.mode === 'exit-confirm' || state.mode === 'rows'
       ? body.lines.length // PR E §17.9: the guard's question + three actions, and the whole
       : Math.min(body.lines.length, 2) // selector (rows + Save changes), never scroll away
-    let bodyBudget: number
-    let previewBlock: string[]
-    if (left <= bodyMin + 1) {
-      // No room for a meaningful preview — the editable rows take it all.
-      bodyBudget = Math.min(body.lines.length, Math.max(1, left))
-      previewBlock = []
-    } else {
-      const previewCount = Math.min(previewRows.length, left - bodyMin - 1)
-      bodyBudget = left - 1 - previewCount
-      previewBlock = previewCount > 0
-        ? [
+    if (left > 0) {
+      let bodyBudget = 0
+      if (left <= bodyMin + 1) {
+        // No room for a meaningful preview — the editable rows take it all.
+        bodyBudget = Math.min(body.lines.length, left)
+      } else {
+        // The add picker's item description is optional context (the pinned
+        // search row is the input and stays above the body).
+        if (tail.length > 0 && left - bodyMin >= 2) tailShown = tail.slice(0, 1)
+        const afterTail = left - tailShown.length
+        const previewCount = Math.min(previewRows.length, Math.max(0, afterTail - bodyMin - 1))
+        if (previewCount > 0) {
+          bodyBudget = afterTail - 1 - previewCount
+          previewBlock = [
             color.textStrong('Preview'),
             ...previewRows.slice(0, previewCount).map((line, index) =>
               index === previewCount - 1 && previewRows.length > previewCount ? `${line}…` : line),
           ]
-        : []
+        } else {
+          bodyBudget = Math.min(body.lines.length, afterTail)
+        }
+      }
+      if (bodyBudget > 0) {
+        const scrollBudget = Math.max(1, Math.min(bodyBudget, body.lines.length))
+        this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
+        if (body.cursor < this.scrollTop) this.scrollTop = body.cursor
+        if (body.cursor >= this.scrollTop + scrollBudget) this.scrollTop = body.cursor - scrollBudget + 1
+        this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
+        bodySlice = body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget)
+        bodyHits = body.hits.slice(this.scrollTop, this.scrollTop + scrollBudget)
+      }
     }
-    const scrollBudget = Math.max(1, Math.min(bodyBudget, body.lines.length))
-    this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
-    if (body.cursor < this.scrollTop) this.scrollTop = body.cursor
-    if (body.cursor >= this.scrollTop + scrollBudget) this.scrollTop = body.cursor - scrollBudget + 1
-    this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
-    const bodySlice = body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget)
-    const bodyHits = body.hits.slice(this.scrollTop, this.scrollTop + scrollBudget)
     const lines = [
-      ...head,
-      ...previewBlock,
-      rule,
-      ...pre,
+      ...preShown,
       ...bodySlice,
-      ...tail,
-    ].map(line => truncateToWidth(line, Math.max(1, width), '…'))
+      ...tailShown,
+      ...previewBlock,
+      bar,
+    ].map(line => truncateToWidth(line, safeWidth, '…'))
     this.hitMap = [
-      ...head.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      ...preShown.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      ...bodyHits,
+      ...tailShown.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
       ...previewBlock.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
       { kind: 'inert' },
-      ...pre.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
-      ...bodyHits,
-      ...tail.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
     ]
+    // The painted-body fence: only rows this frame really painted may dispatch a
+    // keyboard activation; the Save action and the exit choices record their own
+    // painted identity (a hidden Save can never be run by `S`/Enter).
+    this.paintedBodyRows = bodySlice.length
+    this.paintedSave = bodyHits.some(hit => hit.kind === 'save')
+    const exitChoices = new Set<'save' | 'discard' | 'keep'>()
+    for (const hit of bodyHits) if (hit.kind === 'exit') exitChoices.add(hit.choice)
+    this.paintedExitChoices = exitChoices
     return lines
   }
 
@@ -442,6 +548,7 @@ export class FooterConfiguratorPanel implements Component {
    * input — no click can create a second save.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.disposed) return undefined
     // A click ends any gesture, and every left press starts a fresh
     // one: release the pressed action up front — BEFORE the width
     // guard / hit lookup / inert return / saving gate, so a press on
@@ -451,8 +558,10 @@ export class FooterConfiguratorPanel implements Component {
     // that must not match a stale action). The local copy still guards
     // the valid-row comparison below.
     const pressedAction = this.mousePressedAction
-    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+    const pressedGrant = this.mousePressedGrant
+    if (event.type === 'click' || event.type === 'wheel' || (event.type === 'press' && event.button === 'left')) {
       this.mousePressedAction = undefined
+      this.mousePressedGrant = undefined
     }
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
@@ -473,18 +582,22 @@ export class FooterConfiguratorPanel implements Component {
         if (this.model.state().mode !== 'row-move') {
           this.moveCursorTo(hit.target)
           this.mousePressedAction = { kind: 'select', target: hit.target }
+          this.mousePressedGrant = this.paintedGrant
         }
       } else if (hit.kind === 'save') {
         this.mousePressedAction = { kind: 'save' }
+        this.mousePressedGrant = this.paintedGrant
       } else if (hit.kind === 'exit') {
         this.mousePressedAction = { kind: 'exit', choice: hit.choice }
+        this.mousePressedGrant = this.paintedGrant
       }
       return { handled: true, focus: true }
     }
-    // click: the same operations as Enter, but only for the exact
-    // pressed semantic action (a resize/repaint between press and
-    // release must not transfer the click to a different action).
+    // click: the same operations as Enter, but only for the exact pressed
+    // semantic action AND the same painted grant (a resize/repaint between
+    // press and release must not transfer the click to a different action).
     if (!sameMouseAction(pressedAction, hit)) return undefined
+    if (pressedGrant === undefined || pressedGrant !== this.paintedGrant) return undefined
     if (hit.kind === 'save') {
       this.requestSave()
     } else if (hit.kind === 'exit') {
@@ -698,8 +811,8 @@ export class FooterConfiguratorPanel implements Component {
     }
   }
 
-  /** The page title (the header). */
-  private title(state: { mode: string; rowIndex: number; cursor: number; addSide: 'left' | 'right'; customKind: 'text' | 'command' }): string {
+  /** The sub-page name the shared pane header appends. */
+  private pageTitle(state: { mode: string; rowIndex: number; cursor: number; addSide: 'left' | 'right'; customKind: 'text' | 'command' }): string {
     switch (state.mode) {
       case 'row':
         return `Edit Row ${state.rowIndex + 1}`
@@ -746,46 +859,82 @@ export class FooterConfiguratorPanel implements Component {
     }
   }
 
-  /** The contextual help line (per page — never one long packed line). */
-  private help(state: { mode: string; editing: boolean }): string {
+  /** The ONE semantic Action Bar of this page: only keys the current mode
+   *  really accepts, with shorter whole-segment variants for narrow widths. It
+   *  never advertises a save while the in-flight write freezes input. */
+  private actionBar(state: ReturnType<FooterConfiguratorModel['state']>, width: number, budget: number): string {
+    // A save in flight freezes input, so it outranks even a bar-only grant: the
+    // bar must never advertise a back verb the handler refuses until the write
+    // settles.
+    if (state.saving) {
+      return fittedWording(['Saving… · one write at a time', 'Saving…'], width)
+    }
+    if (budget <= 1) {
+      // The bar-only grant cannot show a business row: it keeps only the page's
+      // ROOT back verbs — Esc everywhere, `←` on the Row Selector (where the
+      // panel really accepts it). A hidden Save/Open/Confirm is never
+      // advertised or run.
+      const verb = state.mode === 'rows' && !this.model.isDirty() ? 'Close' : 'Back'
+      const rootBack = state.mode === 'rows'
+      return fittedWording(rootBack
+        ? [`← Back · Esc ${verb} · Not enough room`, `← Back · Esc ${verb}`, `Esc ${verb}`]
+        : [`Esc ${verb} · Not enough room`, `Esc ${verb}`], width)
+    }
     switch (state.mode) {
-      case 'rows':
-        return '↑↓ Select · Enter Open · S Save · Esc Close'
+      case 'rows': {
+        const dirty = this.model.isDirty()
+        const save = dirty ? 'S Save' : 'S Done'
+        const back = dirty ? 'Esc Back' : 'Esc Close'
+        // The Row Selector is the page's root: it advertises the same `←` the
+        // panel accepts there. Sub-pages keep their own verb and never show it.
+        return fittedWording([
+          `↑↓ Select · Enter Open · ${save} · ← Back · ${back}${this.sessionOnly ? ' · Not persisted (session only)' : ''}`,
+          `↑↓ Select · Enter Open · ${save} · ← Back · ${back}`,
+          `Enter Open · ${save} · ← Back · ${back}`,
+          `${save} · ← Back · ${back}`,
+          `← Back · ${back}`,
+          back,
+        ], width)
+      }
       case 'exit-confirm':
-        return '↑↓ Select · Enter Confirm · Esc Keep Editing'
+        return fittedWording(['↑↓ Select · Enter Confirm · Esc Keep Editing', 'Enter Confirm · Esc Keep Editing', 'Esc Keep Editing'], width)
       case 'row':
-        return 'A Add · Enter Edit · M Move · ←→ Side · Space Remove · F Style · Esc Back'
+        return fittedWording([
+          'A Add · Enter Edit · M Move · ←→ Side · Space Remove · F Style · Esc Back',
+          '↑↓ Select · Enter Edit · Esc Back',
+          'Esc Back',
+        ], width)
       case 'row-move':
-        return '↑↓ Move · ←→ Side · Enter/Esc Done'
+        return fittedWording(['↑↓ Move · ←→ Side · Enter/Esc Done', 'Esc Done'], width)
       case 'item':
-        return '↑↓ Select · Enter Open · ←→ Change · Esc Back'
+        return fittedWording(['↑↓ Select · Enter Open · ←→ Change · Esc Back', 'Enter Open · Esc Back', 'Esc Back'], width)
       case 'style':
       case 'tone':
       case 'custom-tone':
       case 'custom-refresh':
       case 'custom-timeout':
-        return '↑↓ Select · Enter Apply · Esc Back'
+        return fittedWording(['↑↓ Select · Enter Apply · Esc Back', 'Enter Apply · Esc Back', 'Esc Back'], width)
       case 'advanced':
-        return state.editing ? 'Type · Enter Confirm · Esc Cancel' : '↑↓ Select · Enter Edit · Esc Back'
+        return state.editing
+          ? fittedWording(['Type · Enter Confirm · Esc Cancel', 'Esc Cancel'], width)
+          : fittedWording(['↑↓ Select · Enter Edit · Esc Back', 'Esc Back'], width)
       case 'custom-text':
       case 'custom-command':
       case 'custom-name':
-        return 'Type · Enter Confirm · Esc Cancel'
+        return fittedWording(['Type · Enter Confirm · Esc Cancel', 'Esc Cancel'], width)
       case 'custom-delete':
-        return 'Enter Confirm · Esc Cancel'
+        return fittedWording(['Enter Confirm · Esc Cancel', 'Esc Cancel'], width)
       case 'create-name':
       case 'create-text':
       case 'create-command':
-        return 'Type · Enter Next · Esc Cancel'
+        return fittedWording(['Type · Enter Next · Esc Cancel', 'Esc Cancel'], width)
       case 'create-refresh':
       case 'create-timeout':
-        return '↑↓ Select · Enter Next · Esc Cancel'
+        return fittedWording(['↑↓ Select · Enter Next · Esc Cancel', 'Esc Cancel'], width)
       case 'create-tone':
-        return '↑↓ Select · Enter Create · Esc Cancel'
+        return fittedWording(['↑↓ Select · Enter Create · Esc Cancel', 'Esc Cancel'], width)
       case 'add':
-        return 'Type to search · ↑↓ Select · Enter Add · Esc Back'
-      default:
-        return ''
+        return fittedWording(['Type to search · ↑↓ Select · Enter Add · Esc Back', '↑↓ Select · Enter Add · Esc Back', 'Esc Back'], width)
     }
   }
 
@@ -886,10 +1035,12 @@ export class FooterConfiguratorPanel implements Component {
         // The trailing "Save changes" action (PR E §4/§6): the discoverable
         // save entry with its transactional status.
         const saveActive = state.homeCursor >= state.layout.rows.length
+        const clean = !this.model.isDirty()
         const status = state.saving
           ? 'Saving…'
-          : this.model.isDirty() ? 'Unsaved' : 'No changes'
-        const statusPainted = state.saving || !this.model.isDirty()
+          : !clean ? 'Unsaved'
+            : this.sessionOnly ? 'Not persisted (session only)' : 'No changes'
+        const statusPainted = state.saving || clean
           ? color.textMuted(status)
           : color.warning(status)
         const pad = Math.max(1, width - 'Save changes'.length - status.length - 4)
@@ -1436,4 +1587,12 @@ function toneMenuLabel(kind: string): string {
 /** Clip a title-part label (titles truncate ANSI-safely anyway). */
 function clipText(text: string, max = 40): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
+}
+
+/** The FIRST whole wording that fits `width` (never a mid-segment cut); below
+ *  the shortest wording the last one is ellipsized, so a bar row never grows
+ *  past its grant. */
+function fittedWording(words: readonly string[], width: number): string {
+  return words.find(word => visibleWidth(word) <= width)
+    ?? truncateToWidth(words[words.length - 1] ?? '', Math.max(1, width), '…')
 }

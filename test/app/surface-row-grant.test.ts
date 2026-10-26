@@ -31,6 +31,7 @@ import { SettingsRegistry } from '../../src/extension/internal/settings-registry
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { openLegacySettingsPanel } from '../support/open-legacy-settings.ts'
+import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 
 /** Every TuiApp constructed here is disposed after each test: the process
@@ -108,24 +109,13 @@ function isCursorRow(vt: VirtualTerminal, row: number): boolean {
   return line.includes('│') && rowContent(line).startsWith('>')
 }
 
-interface StandaloneState {
-  readonly panel: KeybindingEditorPanel | undefined
-  readonly close: (() => void) | undefined
-  /** ACTUAL invocations of the panel's `onDispose` obligation (the command
-   * factory's unregister), i.e. the observed teardown effect. `dispose()` is
-   * reached twice on the Esc path (the panel closes itself, then the owning
-   * FocusForwardingFrame's disposeOnHide releases it); the second call must
-   * be a no-op, so this counter is the exactly-once evidence — a removed
-   * idempotence guard would make it 2. */
-  readonly teardowns: number
-}
-
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
   readonly invoke: (name: string) => unknown
   readonly panel: () => KeybindingEditorPanel | undefined
-  readonly standalone: () => StandaloneState
+  /** C2-R5: the panel the bare `/keybindings` deeplink really mounted. */
+  readonly deeplink: () => { readonly panel: KeybindingEditorPanel | undefined; readonly teardowns: number }
 }
 
 /**
@@ -200,7 +190,7 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
     tuiSettings: options.tuiSettings === false
       ? undefined
       : { get: () => doc, replace: () => undefined },
-    extensions: options.themes === undefined ? undefined : { themes: options.themes, settings: new SettingsRegistry() },
+    extensions: legacyEditorExtensions(options.themes) as never,
     createPluginManagerPage: () => undefined,
     config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
@@ -240,38 +230,31 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
     assert.ok(definition?.handler !== undefined, `${name} must be registered`)
     return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
   }
-  // Test instrumentation ONLY for the standalone `/keybindings` path:
-  // observe the panel the real command mounts and count the ACTUAL teardown
-  // effect. The command factory registers the panel first (its `unregister`
-  // IS the panel's `onDispose` callback); `openKeybindingEditor` registers it
-  // again for its own close handle, so only the FIRST registration is the
-  // panel's teardown obligation.
-  let standalonePanel: KeybindingEditorPanel | undefined
-  let standaloneClose: (() => void) | undefined
+  // Test instrumentation ONLY for the same-lease `/keybindings` page: observe
+  // the panel the factory registers and count the ACTUAL teardown effect. The
+  // command factory registers the panel exactly once; its unregister IS the
+  // panel's `onDispose` callback.
+  let deeplinkPanel: KeybindingEditorPanel | undefined
   let teardowns = 0
-  let registrations = 0
   const originalTrackKeybindingEditor = app.trackKeybindingEditor
   app.trackKeybindingEditor = ((component: Parameters<TuiApp['trackKeybindingEditor']>[0]) => {
     const unregister = originalTrackKeybindingEditor.call(app, component)
-    const registration = ++registrations
+    if (component instanceof KeybindingEditorPanel) deeplinkPanel = component
+    let released = false
     return () => {
-      if (registration === 1) teardowns += 1
+      if (!released) {
+        released = true
+        teardowns += 1
+      }
       unregister()
     }
   }) as TuiApp['trackKeybindingEditor']
-  const originalOpenKeybindingEditor = app.openKeybindingEditor
-  app.openKeybindingEditor = ((panel: Parameters<TuiApp['openKeybindingEditor']>[0]) => {
-    if (panel instanceof KeybindingEditorPanel) standalonePanel = panel
-    const close = originalOpenKeybindingEditor.call(app, panel)
-    standaloneClose = close
-    return close
-  }) as TuiApp['openKeybindingEditor']
   return {
     vt,
     app,
     invoke,
-    panel: () => captured,
-    standalone: () => ({ panel: standalonePanel, close: standaloneClose, teardowns }),
+    panel: () => captured ?? deeplinkPanel,
+    deeplink: () => ({ panel: deeplinkPanel, teardowns }),
   }
 }
 
@@ -298,10 +281,10 @@ test('C-T01: the real /settings Keyboard shortcuts submenu takes the parent cont
   assert.equal(h.app.keybindingEditorMaxRows(), 36)
   const rendered = panel.render(68)
   assert.ok(rendered.length <= 26, `the nested panel must be capped at 26 rows (got ${rendered.length})`)
-  const frame = paintedFrame(h.vt, 'Keyboard shortcuts')
+  const frame = paintedFrame(h.vt, 'Keymap:')
   assert.equal(frame.contentRows, rendered.length, 'the painted content rows must match the panel render')
   assert.ok(frame.bottomBorder, `the parent frame bottom border must be painted:\n${view}`)
-  assert.match(view, /Esc: close/, 'the bottom operation hint must survive the nested grant')
+  assert.match(view, /Esc close/, 'the bottom operation hint must survive the nested grant')
 })
 
 test('C-T02: a taller terminal does not raise the nested grant (200x60)', async () => {
@@ -312,9 +295,9 @@ test('C-T02: a taller terminal does not raise the nested grant (200x60)', async 
   assert.ok(panel !== undefined)
   assert.equal(h.app.keybindingEditorMaxRows(), 56, 'the standalone cap follows the terminal height')
   assert.ok(panel.render(68).length <= 26, 'the nested grant stays at the legacy 28-row overlay cap')
-  const frame = paintedFrame(h.vt, 'Keyboard shortcuts')
+  const frame = paintedFrame(h.vt, 'Keymap:')
   assert.ok(frame.bottomBorder, `the frame bottom border must be painted:\n${view}`)
-  assert.match(view, /Esc: close/)
+  assert.match(view, /Esc close/)
   assert.match(view, /›/, 'the selected item must stay inside the viewport')
 })
 
@@ -327,11 +310,11 @@ test('C-T03: the nested hint and frame tail survive an ordinary and a short term
     assert.ok(panel !== undefined, `${rows} rows: the panel must exist`)
     const rendered = panel.render(68)
     assert.ok(rendered.length <= h.app.keybindingEditorMaxRows(), `${rows} rows: render must fit the cap`)
-    assert.match(rendered[rendered.length - 1]!, /Esc: close/, `${rows} rows: the bottom hint must be the last row`)
-    const frame = paintedFrame(h.vt, 'Keyboard shortcuts')
+    assert.match(rendered[rendered.length - 1]!, /Esc close/, `${rows} rows: the bottom hint must be the last row`)
+    const frame = paintedFrame(h.vt, 'Keymap:')
     assert.equal(frame.contentRows, rendered.length, `${rows} rows: painted rows must match render`)
     assert.ok(frame.bottomBorder, `${rows} rows: the frame bottom border must be painted:\n${view}`)
-    assert.match(view, /Esc: close/, `${rows} rows: the hint must be visible`)
+    assert.match(view, /Esc close/, `${rows} rows: the hint must be visible`)
     h.vt.sendInput('\x1b')
     await h.vt.waitForRender()
     // One live TuiApp per process: release the slot before the next size.
@@ -354,9 +337,9 @@ test('C-T04: a nested resize re-grants without losing the query or the selection
   await h.vt.waitForRender()
   let view = viewportText(h.vt)
   assert.match(view, /Search: submit/, 'the query must survive the shrink')
-  assert.match(view, /Esc: clear/, 'a non-empty query keeps the clear verb')
+  assert.match(view, /Esc clear/, 'a non-empty query keeps the clear verb')
   assert.equal(selectedRowText(h.vt), selected, 'the selection must survive the shrink')
-  let frame = paintedFrame(h.vt, 'Keyboard shortcuts')
+  let frame = paintedFrame(h.vt, 'Keymap:')
   assert.ok(frame.bottomBorder, `the shrunk frame bottom border must be painted:\n${view}`)
   assert.ok(frame.contentRows <= 6, `the shrunk frame must fit the 10-row terminal (got ${frame.contentRows})`)
 
@@ -365,9 +348,9 @@ test('C-T04: a nested resize re-grants without losing the query or the selection
   view = viewportText(h.vt)
   assert.match(view, /Search: submit/, 'the query must survive the grow')
   assert.equal(selectedRowText(h.vt), selected, 'the selection must survive the grow')
-  frame = paintedFrame(h.vt, 'Keyboard shortcuts')
+  frame = paintedFrame(h.vt, 'Keymap:')
   assert.ok(frame.bottomBorder, `the grown frame bottom border must be painted:\n${view}`)
-  assert.match(view, /Esc: clear/)
+  assert.match(view, /Esc clear/)
 })
 
 test('C-T05: the nested binding-choice view keeps its rows, its hint and its navigation', async () => {
@@ -379,15 +362,15 @@ test('C-T05: the nested binding-choice view keeps its rows, its hint and its nav
   }
   h.vt.sendInput('\r') // Enter: open the action detail
   await h.vt.waitForRender()
-  assert.match(viewportText(h.vt), /Keyboard shortcuts › /, 'the action detail must open')
+  assert.match(viewportText(h.vt), /Action ID: /, 'the action detail must open')
   h.vt.sendInput('a') // choose a binding kind
   await h.vt.waitForRender()
   let view = viewportText(h.vt)
   assert.match(view, /Choose what to record:/)
   assert.match(view, /Direct shortcut/)
   assert.match(view, /Leader completion/)
-  assert.match(view, /Esc: back/)
-  let frame = paintedFrame(h.vt, 'Enter: choose')
+  assert.match(view, /Esc back/)
+  let frame = paintedFrame(h.vt, 'Enter choose')
   assert.ok(frame.bottomBorder, `the choice frame bottom border must be painted:\n${view}`)
   // Navigation through the REAL chain: Down/Up move the marker between the
   // two choices, and Enter accepts the selected one (starts its recorder).
@@ -403,9 +386,9 @@ test('C-T05: the nested binding-choice view keeps its rows, its hint and its nav
   h.vt.resize(120, 8)
   await h.vt.waitForRender()
   view = viewportText(h.vt)
-  assert.match(view, /Esc: back/, 'the binding-choice footer must survive the shrink')
+  assert.match(view, /Esc back/, 'the binding-choice footer must survive the shrink')
   assert.match(selectedRowText(h.vt), /Direct shortcut/, 'the selected choice row must stay painted')
-  frame = paintedFrame(h.vt, 'Enter: choose')
+  frame = paintedFrame(h.vt, 'Enter choose')
   assert.ok(frame.bottomBorder, `the choice frame bottom border must survive the shrink:\n${view}`)
   // Enter accepts the painted selection even on the short grant.
   h.vt.sendInput('\r')
@@ -419,7 +402,7 @@ test('C-T07: an unavailable settings service keeps its real error, its Esc hint 
   const view = viewportText(h.vt)
   assert.match(view, /Keyboard shortcuts unavailable/)
   assert.match(view, /The settings service could not be read\./)
-  assert.match(view, /Esc: back/)
+  assert.match(view, /Esc back/)
   const frame = paintedFrame(h.vt, 'Keyboard shortcuts unavailable')
   assert.ok(frame.bottomBorder, `the fallback frame bottom border must be painted:\n${view}`)
   // Esc returns to the parent settings list (the submenu slot closes).
@@ -601,9 +584,9 @@ test('C-T11: a question suspends the nested submenu and restores its grant and q
   await h.vt.waitForRender()
   view = viewportText(h.vt)
   assert.match(view, /Search: submit/, 'the submenu query must survive the suspension')
-  const frame = paintedFrame(h.vt, 'Keyboard shortcuts')
+  const frame = paintedFrame(h.vt, 'Keymap:')
   assert.ok(frame.bottomBorder, `the restored frame bottom border must be painted:\n${view}`)
-  assert.match(view, /Esc: clear/)
+  assert.match(view, /Esc clear/)
 })
 
 test('C-T12: a mouse press acts on the painted row and a click after a resize uses the new frame', async () => {
@@ -628,7 +611,7 @@ test('C-T12: a mouse press acts on the painted row and a click after a resize us
   h.vt.sendInput(`\x1b[<0;${column};${actionRow + 1}M`)
   h.vt.sendInput(`\x1b[<0;${column};${actionRow + 1}m`)
   await h.vt.waitForRender()
-  assert.match(viewportText(h.vt), /Keyboard shortcuts › /, 'the painted action row must open its detail')
+  assert.match(viewportText(h.vt), /Action ID: /, 'the painted action row must open its detail')
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
 
@@ -638,7 +621,7 @@ test('C-T12: a mouse press acts on the painted row and a click after a resize us
   h.vt.resize(120, 30)
   h.vt.sendInput(`\x1b[<0;${column};${actionRow + 1}m`)
   await h.vt.waitForRender()
-  assert.ok(!viewportText(h.vt).includes('Keyboard shortcuts › '), 'a click after a resize without a repaint must be fenced')
+  assert.ok(!viewportText(h.vt).includes('Action ID: '), 'a click after a resize without a repaint must be fenced')
 
   // After the repaint the SAME cell address may hold a different row: the
   // click is re-derived from the new paint.
@@ -649,7 +632,7 @@ test('C-T12: a mouse press acts on the painted row and a click after a resize us
   h.vt.sendInput(`\x1b[<0;${repaintedColumn};${repaintedRow + 1}M`)
   h.vt.sendInput(`\x1b[<0;${repaintedColumn};${repaintedRow + 1}m`)
   await h.vt.waitForRender()
-  assert.match(viewportText(h.vt), /Keyboard shortcuts › /, 'the repainted row must be clickable')
+  assert.match(viewportText(h.vt), /Action ID: /, 'the repainted row must be clickable')
 })
 
 test('C-T10: the outer settings list keeps its own filter and navigation (baseline)', async () => {
@@ -683,38 +666,34 @@ test('C-T10: the outer settings list keeps its own filter and navigation (baseli
   assert.match(marked(), /Home\/End keys/, 'the filtered row must be selectable')
 })
 
-test('C-T08: the bare /keybindings command keeps the whole-terminal budget and disposes its panel once', async () => {
+test('C-T08: bare /keybindings deeplinks into the ONE Settings lease and disposes its panel once', async () => {
   for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
     const h = setup({ columns, rows })
     h.invoke('keybindings')
     await h.vt.waitForRender()
     let view = viewportText(h.vt)
-    const panel = h.standalone().panel
-    assert.ok(panel !== undefined, `${columns}x${rows}: the real command must mount the plugin panel:\n${view}`)
-    // The standalone editor never receives `setMaxRows`: its budget is the
-    // whole-terminal cap (rows - 4), not the nested 26 content rows.
-    const cap = h.app.keybindingEditorMaxRows()
-    assert.equal(cap, rows - 4)
-    const rendered = panel.render(84)
-    assert.equal(rendered.length, cap - 1, `${columns}x${rows}: the standalone editor must use its own budget`)
-    if (rows >= 40) assert.ok(rendered.length > 26, `${columns}x${rows}: the nested cap must not shrink the standalone editor`)
-    const frame = paintedFrame(h.vt, 'Keyboard shortcuts')
-    assert.equal(frame.contentRows, rendered.length, `${columns}x${rows}: painted rows must match the standalone render`)
-    assert.ok(frame.bottomBorder, `${columns}x${rows}: the standalone frame bottom border must be painted:\n${view}`)
-    assert.match(view, /Esc: close/)
-    // Esc (empty query) closes the REAL panel: the base screen returns and
-    // the panel's teardown effect ran exactly once (the owning frame's later
-    // dispose call must not reach the teardown body again).
+    // The SAME fullscreen Settings screen: one root header/breadcrumb, one
+    // pane header and the page's ONE bar — not the legacy 88-column overlay.
+    assert.match(view, /Settings · Input & Terminal · Keyboard shortcuts/, `${columns}x${rows}: the Settings lease must own the screen:\n${view}`)
+    assert.match(view, /Search: /, `${columns}x${rows}: the page's input is painted:\n${view}`)
+    assert.match(view, /Esc close/, `${columns}x${rows}: the page bar is the physical last row:\n${view}`)
+    assert.ok(!view.includes('╭') && !view.includes('╰'), `${columns}x${rows}: no second overlay Frame may be mounted:\n${view}`)
+    const panel = h.deeplink().panel
+    assert.ok(panel !== undefined, `${columns}x${rows}: the real command must mount the KeybindingEditorPanel:\n${view}`)
+    assert.ok(panel.render(68).length <= rows, `${columns}x${rows}: the page is bounded by the Settings frame grant`)
+    // First Esc: the page closes and the SAME Settings lease returns to the row.
     h.vt.sendInput('\x1b')
     await h.vt.waitForRender()
     view = viewportText(h.vt)
-    assert.ok(!view.includes('Keyboard shortcuts'), `${columns}x${rows}: Esc must close the standalone editor:\n${view}`)
-    const closed = h.standalone()
-    assert.equal(closed.teardowns, 1, `${columns}x${rows}: the panel teardown effect must run exactly once`)
-    // A repeated close is idempotent.
-    closed.close?.()
+    assert.match(view, /Settings · Input & Terminal · Rows/, `${columns}x${rows}: the page Esc returns to the source Rows:\n${view}`)
+    assert.equal(h.deeplink().teardowns, 1, `${columns}x${rows}: the panel teardown effect must run exactly once`)
+    // Second Esc: the row level returns to the rail; third: the Settings lease closes.
+    h.vt.sendInput('\x1b')
     await h.vt.waitForRender()
-    assert.equal(h.standalone().teardowns, 1, `${columns}x${rows}: a repeated close must not re-run the teardown body`)
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+    view = viewportText(h.vt)
+    assert.ok(!view.includes('Settings ·'), `${columns}x${rows}: only the whole Settings Esc exits the workspace:\n${view}`)
     h.app.dispose()
     startedApps.delete(h.app)
   }
@@ -737,8 +716,8 @@ test('C-T11b: an approval suspends the nested submenu and restores its grant and
   await h.vt.waitForRender()
   view = viewportText(h.vt)
   assert.match(view, /Search: submit/, 'the submenu query must survive the approval')
-  assert.match(view, /Esc: clear/, 'the submenu grant must survive the approval')
-  assert.ok(paintedFrame(h.vt, 'Keyboard shortcuts').bottomBorder, `the restored frame bottom border must be painted:\n${view}`)
+  assert.match(view, /Esc clear/, 'the submenu grant must survive the approval')
+  assert.ok(paintedFrame(h.vt, 'Keymap:').bottomBorder, `the restored frame bottom border must be painted:\n${view}`)
 })
 
 test('C-T12b: a narrow terminal with a wide (CJK) query stays bounded and keeps its painted hit map', async () => {
@@ -761,9 +740,10 @@ test('C-T12b: a narrow terminal with a wide (CJK) query stays bounded and keeps 
   const frame = paintedFrame(h.vt, 'Search')
   assert.equal(frame.contentRows, panel.render(40).length, 'the narrow frame must paint the granted rows')
   assert.ok(frame.bottomBorder, `the narrow CJK frame bottom border must be painted:\n${lines.join('\n')}`)
-  // The hint ROW is mandatory; at 44 columns the frame truncation may cut
-  // its tail text (pre-existing width behavior, not a grant regression).
-  assert.ok(lines.some(line => line.includes('Enter: details')), `the operation hint row must be painted:\n${lines.join('\n')}`)
+  // The hint ROW is mandatory; with no matching action the bar truthfully
+  // omits the hidden Enter verb and keeps the search/clear affordance.
+  assert.ok(lines.some(line => line.includes('type search') && line.includes('Esc clear')),
+    `the empty-result operation hint row must be painted:\n${lines.join('\n')}`)
   // Clear the wide query, filter to one action and click its PAINTED row.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
@@ -782,7 +762,7 @@ test('C-T12b: a narrow terminal with a wide (CJK) query stays bounded and keeps 
   // At this grant the action detail's own viewport scrolls its title off,
   // so identify the detail by its footer and then prove the IDENTITY of the
   // clicked row: Esc returns to the list with the clicked action selected.
-  assert.match(viewportText(h.vt), /Enter: edit · a: add/, 'the narrow painted row must open an action detail')
+  assert.match(viewportText(h.vt), /Enter edit · a add/, 'the narrow painted row must open an action detail')
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
   assert.match(selectedRowText(h.vt), /Submit draft/, 'the detail must belong to the clicked painted row')

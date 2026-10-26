@@ -28,6 +28,7 @@ import { installProgressUpdatesPrompt, installResponseStylePrompt, installFocusP
 import type { DisplayState } from '../../src/domain/display/preset.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
@@ -202,7 +203,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: legacyEditorExtensions() as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)

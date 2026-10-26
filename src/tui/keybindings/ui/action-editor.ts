@@ -2,7 +2,7 @@
  * Detail and mutation view for one keyboard shortcut action.
  */
 
-import { matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type KeyId } from '@xmoon76/pi-tui'
+import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type KeyId } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../../theme/runtime.ts'
 import { formatKeyId, formatLeaderSequence } from '../hints.ts'
@@ -134,6 +134,10 @@ export class ActionEditorPanel implements Component {
   private selectedIndex = 0
   private recorder: KeyRecorder | undefined
   private pending = false
+  /** A settlement whose result has NOT been painted yet. The page keeps the
+   *  Esc lock until the frame carrying that result really renders, so the
+   *  user can never leave before reading what the write did. */
+  private settlementAwaitingPaint = false
   private mutationGeneration = 0
   private disposed = false
   private message: string | undefined
@@ -142,6 +146,16 @@ export class ActionEditorPanel implements Component {
   /** The pressed binding identity (mouse parity): a click may only act on
    * the exact identity that was pressed. */
   private mousePressedKey: string | undefined
+  /** The row grant the press was admitted against: a resize before release
+   *  refuses the click even when no width-dependent geometry moved. */
+  private mousePressedRows: number | undefined
+  /** The rows/choice the LAST frame really painted: hidden bindings, the Add
+   *  row and binding choices can never be activated from a shorter grant. */
+  private hasPainted = false
+  private paintedBodyRows = 0
+  private paintedSelection = false
+  private paintedAdd = false
+  private paintedChoice = false
   /** The selectable rows' stable identities from the LAST render (the
    * bindingKey per selectable ordinal; 'add' for the Add row). */
   private selectableKeys: string[] = []
@@ -158,13 +172,22 @@ export class ActionEditorPanel implements Component {
     this.maxRows = options.maxRows ?? (() => 18)
   }
 
+  /** The stable action identity this detail view edits (the page's sub-view
+   *  key and the root's paint fence). */
+  actionId(): string {
+    return this.row.id
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
+    // The frame about to be returned carries the settlement result, so the
+    // navigation lock can be released after it is composed.
+    this.settlementAwaitingPaint = false
     if (this.recorder !== undefined) return this.recorder.render(safeWidth)
     if (this.mode === 'choose-binding') return this.renderBindingChoice(safeWidth)
 
     const lines: string[] = [
-      color.textStrong(`Keyboard shortcuts › ${this.row.label}`),
+      color.textStrong(this.row.label),
       '',
     ]
     const selectableLineIndices: number[] = []
@@ -213,8 +236,11 @@ export class ActionEditorPanel implements Component {
       selectableKeys.push('add')
       lines.push(selectedLine('+ Add shortcut', this.selectedIndex === editable.length, safeWidth))
       this.selectableKeys = selectableKeys
-    } else if (this.row.defaults.length > 0) {
-      for (const binding of this.row.defaults) lines.push(`  ${bindingLabel(binding)}`)
+    } else {
+      this.selectableKeys = []
+      if (this.row.defaults.length > 0) {
+        for (const binding of this.row.defaults) lines.push(`  ${bindingLabel(binding)}`)
+      }
     }
 
     const conditionalOnly = this.row.conditional.filter(binding => !editable.some(candidate =>
@@ -241,11 +267,16 @@ export class ActionEditorPanel implements Component {
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
     if (this.pending) lines.push(color.accent('Saving…'))
     lines.push('')
-    lines.push(color.textDim(this.row.fixed || this.row.reserved || this.row.safeMode
-      ? 'Esc: back'
-      : 'Enter: edit · a: add · Delete: remove · r: reset · d: disable · Esc: back'))
     const viewport = actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows(), selectableLineIndices)
     this.lastRenderWidth = safeWidth
+    this.hasPainted = true
+    const visibleOrdinals = new Set(viewport.selectableRows.map(row => row.ordinal))
+    this.paintedBodyRows = Math.max(0, viewport.lines.length - 1)
+    this.paintedSelection = visibleOrdinals.has(this.selectedIndex)
+    const addOrdinal = this.selectableKeys.indexOf('add')
+    this.paintedAdd = addOrdinal >= 0 && visibleOrdinals.has(addOrdinal)
+    const bar = this.actionBar(editable.length, safeWidth)
+    viewport.lines[viewport.lines.length - 1] = color.textDim(truncateToWidth(bar, safeWidth, '…'))
     this.hitMap = viewport.lines.map((_, row) => {
       const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
       if (selectable === undefined) return { kind: 'inert' }
@@ -253,6 +284,36 @@ export class ActionEditorPanel implements Component {
       return key !== undefined ? { kind: 'select', key } : { kind: 'inert' }
     })
     return viewport.lines
+  }
+
+  /** The ONE bar wording for the CURRENTLY painted rows: a key the frame
+   *  cannot show is not advertised, and a bar-only grant keeps only Esc. */
+  private actionBar(editableLength: number, width: number): string {
+    if (this.pending) return 'Saving… · one write at a time'
+    if (this.paintedBodyRows === 0) return 'Esc back'
+    if (this.row.fixed || this.row.reserved || this.row.safeMode) return 'Esc back'
+    if (!this.row.configurable) return 'Esc back'
+    const selectedBinding = this.selectedIndex < editableLength
+    const enter = selectedBinding
+      ? this.paintedSelection ? 'Enter edit' : undefined
+      : this.paintedAdd ? 'Enter add' : undefined
+    const primary = enter
+    const add = this.paintedAdd ? 'a add' : undefined
+    const remove = selectedBinding && this.paintedSelection ? 'Delete remove' : undefined
+    const variant = (parts: Array<string | undefined>): string =>
+      parts.filter((part): part is string => part !== undefined).join(' · ')
+    // Preserve the PRIMARY verb as the width shrinks; Delete/a-add are optional
+    // before the Esc affordance, never the other way around.
+    const variants = [
+      variant([primary, add, remove, 'r reset', 'd disable', 'Esc back']),
+      variant([primary, add, 'r reset', 'd disable', 'Esc back']),
+      variant([primary, add, 'r reset', 'Esc back']),
+      variant([primary, add, 'Esc back']),
+      variant([primary, 'Esc back']),
+      'r reset · d disable · Esc back',
+      'Esc back',
+    ]
+    return variants.find(text => visibleWidth(text) <= width) ?? 'Esc back'
   }
 
   invalidate(): void {
@@ -284,13 +345,15 @@ export class ActionEditorPanel implements Component {
       }
       return
     }
-    if (this.pending) {
-      if (matchesKey(data, 'escape')) {
-        this.dispose()
-        this.onBack()
-      }
-      return
-    }
+    // A bar-only grant paints no action row: only the real Esc may act.
+    if (this.hasPainted && this.paintedBodyRows === 0 && !matchesKey(data, 'escape')) return
+    // An in-flight write owns the page: no key may act while its result — an
+    // added/removed/reset binding, or the failure the user must see — is still
+    // outstanding. A SETTLED but unpainted result owns the page for the same
+    // reason: the very next frame is the one that paints it, and a key that
+    // cleared the message or changed the sub-view would make that frame skip the
+    // result entirely. Both windows end at the frame that composes the outcome.
+    if (this.pending || this.settlementAwaitingPaint) return
     if (this.row.safeMode) {
       if (matchesKey(data, 'escape')) {
         this.dispose()
@@ -324,6 +387,7 @@ export class ActionEditorPanel implements Component {
       return
     }
     if (commandKey(data, 'a')) {
+      if (this.hasPainted && !this.paintedAdd) return
       this.mode = 'choose-binding'
       this.selectedIndex = 0
       this.message = undefined
@@ -340,11 +404,13 @@ export class ActionEditorPanel implements Component {
     }
     if (matchesKey(data, 'delete') || matchesKey(data, 'backspace')) {
       if (this.selectedIndex < editable.length) {
+        if (this.hasPainted && !this.paintedSelection) return
         this.startMutation({ kind: 'remove', action: this.row.id, binding: editable[this.selectedIndex]! })
       }
       return
     }
     if (matchesKey(data, 'enter') || data === '\n' || data === '\r') {
+      if (this.hasPainted && !this.paintedSelection) return
       if (this.selectedIndex >= editable.length) {
         this.mode = 'choose-binding'
         this.selectedIndex = 0
@@ -371,16 +437,20 @@ export class ActionEditorPanel implements Component {
     // a stale latch that a later click could match. The local copy still
     // guards the valid-row comparison below.
     const pressedKey = this.mousePressedKey
-    if (event.type === 'click') this.mousePressedKey = undefined
+    const pressedRows = this.mousePressedRows
+    if (event.type === 'click' || event.type === 'wheel') {
+      this.mousePressedKey = undefined
+      this.mousePressedRows = undefined
+    }
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
     if (event.width !== this.lastRenderWidth) return undefined
     if (this.recorder !== undefined) return undefined
-    // An async mutation is pending (Saving…): the edit surface is frozen
-    // (mirror the keyboard guard) — wheel/press/click must not move the
-    // selection or start a recorder while the old mutation is in flight.
-    if (this.pending) return undefined
+    // An async mutation is pending (Saving…) or settled-but-unpainted: the edit
+    // surface is frozen (mirror the keyboard guard) — wheel/press/click must not
+    // move the selection, start a recorder or leave before the result paints.
+    if (this.pending || this.settlementAwaitingPaint) return undefined
     const hit = this.hitMap[event.y]
     if (!hit || hit.kind === 'inert') return undefined
 
@@ -404,6 +474,7 @@ export class ActionEditorPanel implements Component {
         const currentIndex = hit.key === 'choice:direct' ? 0 : hit.key === 'choice:leader' ? 1 : -1
         if (currentIndex === -1) return undefined
         this.mousePressedKey = hit.key
+        this.mousePressedRows = this.maxRows()
         this.selectedIndex = currentIndex
         this.message = undefined
         return { handled: true, focus: true }
@@ -415,6 +486,7 @@ export class ActionEditorPanel implements Component {
       const currentIndex = hit.key === 'add' ? editable.length : editable.findIndex(binding => bindingKey(binding) === hit.key)
       if (currentIndex === -1) return undefined
       this.mousePressedKey = hit.key
+      this.mousePressedRows = this.maxRows()
       this.selectedIndex = currentIndex
       this.message = undefined
       return { handled: true, focus: true }
@@ -422,9 +494,9 @@ export class ActionEditorPanel implements Component {
     // click: the same action as Enter, but only for the exact pressed
     // identity (press A → model replacement → release must not act on
     // whatever moved into the row).
-    if (pressedKey !== hit.key) {
-      // A mismatch (or a click without a fresh press) is rejected; the
-      // identity was already released at handler entry.
+    if (pressedKey !== hit.key || pressedRows === undefined || pressedRows !== this.maxRows()) {
+      // A mismatch (or a click without a fresh press, or a resize under the
+      // gesture) is rejected; the identity was already released at entry.
       return undefined
     }
     if (this.mode === 'choose-binding') {
@@ -461,13 +533,21 @@ export class ActionEditorPanel implements Component {
       lines.push(color.textDim(`Leader prefix: ${formatKeyId(this.model.leader.key)}`))
     }
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, width)))
-    lines.push('', color.textDim('Enter: choose · d/l: choose directly · Esc: back'))
+    lines.push('') // reserved for the context-aware Action Bar
     // The two choice rows are the only selectable lines; the shared
     // viewport keeps them (and their painted ordinal) aligned with the
     // footer on a short grant instead of head-slicing the hint away.
     const selectableLineIndices = [3, 4]
     const viewport = actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows(), selectableLineIndices)
     this.lastRenderWidth = Math.max(1, width)
+    this.hasPainted = true
+    this.paintedBodyRows = Math.max(0, viewport.lines.length - 1)
+    this.paintedChoice = viewport.selectableRows.some(row => row.ordinal === this.selectedIndex)
+    const bar = this.paintedBodyRows === 0 || !this.paintedChoice
+      ? 'Esc back'
+      : ['Enter choose · d/l direct · Esc back', 'Esc back']
+        .find(text => visibleWidth(text) <= width) ?? 'Esc back'
+    viewport.lines[viewport.lines.length - 1] = color.textDim(truncateToWidth(bar, width, '…'))
     this.hitMap = viewport.lines.map((_, row) => {
       const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
       if (selectable === undefined) return { kind: 'inert' }
@@ -482,6 +562,7 @@ export class ActionEditorPanel implements Component {
       this.requestRender()
       return
     }
+    if (this.hasPainted && (this.paintedBodyRows === 0 || !this.paintedChoice)) return
     if (matchesKey(data, 'up') || commandKey(data, 'k')) {
       this.selectedIndex = (this.selectedIndex + 2 - 1) % 2
       this.requestRender()
@@ -529,6 +610,7 @@ export class ActionEditorPanel implements Component {
         if (!this.disposed) this.requestRender()
       },
       requestRender: this.requestRender,
+      maxRows: this.maxRows,
     })
     this.requestRender()
   }
@@ -553,6 +635,7 @@ export class ActionEditorPanel implements Component {
   private applyMutationResult(generation: number, result: KeybindingMutationResult): void {
     if (this.disposed || generation !== this.mutationGeneration) return
     this.pending = false
+    this.settlementAwaitingPaint = true
     if (result.kind !== 'applied') {
       this.message = result.message
       this.requestRender()
@@ -571,6 +654,7 @@ export class ActionEditorPanel implements Component {
   private applyMutationError(generation: number, error: unknown): void {
     if (this.disposed || generation !== this.mutationGeneration) return
     this.pending = false
+    this.settlementAwaitingPaint = true
     this.message = error instanceof Error ? error.message : 'Could not save keyboard shortcuts.'
     this.requestRender()
   }

@@ -7,9 +7,11 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { ActionEditorPanel } from '../../src/tui/keybindings/ui/action-editor.ts'
 import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../../src/tui/keybindings/ui/list.ts'
+import { KeyRecorder } from '../../src/tui/keybindings/ui/recorder.ts'
 import type { KeybindingMutationResult } from '../../src/tui/keybindings/ui/controller.ts'
 import { buildKeybindingEditorModel } from '../../src/tui/keybindings/ui/model.ts'
 import { CURSOR_MARKER, visibleWidth } from '@xmoon76/pi-tui'
+import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -44,12 +46,11 @@ test('editor renders an action-first list with a non-selectable leader row and c
   const { manager, panel } = makePanel(() => { closed += 1 })
   try {
     const view = panel.render(88).join('\n')
-    assert.match(view, /Keyboard shortcuts/)
     assert.match(view, /Leader key/)
     assert.match(view, /Input/)
     assert.match(view, /Submit draft/)
     assert.match(view, /fixed/)
-    assert.match(view, /Enter: details/)
+    assert.match(view, /Enter details/)
     assert.equal(closed, 0)
   } finally {
     manager.dispose()
@@ -94,6 +95,7 @@ test('untouched defaults are selectable and recorder replacement names the defau
   try {
     assert.match(plain(editor.render(88).join('\n')), /Ctrl\+T \(default\)/)
     editor.handleInput('\r')
+    editor.render(88) // the recorder frame
     editor.handleInput('\x1b[121;5u')
     assert.deepEqual(mutations, [{
       kind: 'replace',
@@ -129,7 +131,9 @@ test('shadowed defaults are reference-only and Add does not select them', () => 
     assert.doesNotMatch(view, /› Ctrl\+T \(default\)/)
     assert.match(view, /› \+ Add shortcut/)
     editor.handleInput('\r')
+    editor.render(88) // the choose-binding frame
     editor.handleInput('\r')
+    editor.render(88) // the recorder frame
     editor.handleInput('\x1b[121;5u')
     assert.deepEqual(mutations, [{ kind: 'add', action: 'app.todo.toggle', binding: { kind: 'direct', key: 'ctrl+y' } }])
   } finally {
@@ -186,7 +190,7 @@ test('short action details keep the selected binding in the viewport', () => {
   try {
     const view = plain(editor.render(88).join('\n'))
     assert.match(view, /› Ctrl\+F \(default\)/)
-    assert.match(view, /Esc: back/)
+    assert.match(view, /Esc back/)
   } finally {
     editor.dispose()
     manager.dispose()
@@ -232,6 +236,64 @@ test('a configured Down task shortcut is still rendered as conditional', () => {
     editor.dispose()
     manager.dispose()
   }
+})
+
+test('← on the query-less root list is the back verb; a non-empty query keeps the cursor move', () => {
+  let closed = 0
+  const { manager, panel } = makePanel(() => { closed += 1 })
+  try {
+    panel.render(88)
+    assert.match(plain(panel.render(88).join('\n')), /← Back/, 'the root bar advertises the accepted ← verb')
+    panel.handleInput('\x1b[D')
+    assert.equal(closed, 1, 'an empty query means ← returns to the source row')
+
+    const second = makePanel(() => { closed += 1 })
+    try {
+      second.panel.render(88)
+      second.panel.handleInput('sub') // non-empty query
+      const input = (second.panel as unknown as { searchInput: { getValue(): string; cursorIndex?: number } }).searchInput
+      second.panel.render(88)
+      const before = (input as unknown as { cursor?: number }).cursor
+      second.panel.handleInput('\x1b[D')
+      assert.equal(closed, 1, 'with a query, ← must never leave the page')
+      assert.equal((second.panel as unknown as { query: string }).query, 'sub', 'the query is untouched (only the cursor moved)')
+      if (before !== undefined) assert.equal((input as unknown as { cursor?: number }).cursor, Math.max(0, before - 1))
+      assert.doesNotMatch(plain(second.panel.render(88).join('\n')), /← Back/,
+        'a non-empty query never advertises the back verb')
+    } finally {
+      second.panel.dispose()
+      second.manager.dispose()
+    }
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('the action detail and leader views keep their own ← meaning', () => {
+  const { manager, panel } = makePanel(() => {})
+  const model = buildKeybindingEditorModel(manager, parseUserKeybindings(undefined))
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  let back = 0
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => { back += 1 },
+    maxRows: () => 30,
+  })
+  try {
+    editor.render(88)
+    editor.handleInput('\x1b[D')
+    assert.equal(back, 0, '← in the detail view is never the page back')
+    editor.handleInput('\x1b')
+    assert.equal(back, 1, 'Esc still leaves the detail')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+  panel.dispose()
 })
 
 test('editor search is cleared by the first Escape and closes on the second', () => {
@@ -300,6 +362,9 @@ test('late action results are ignored after a newer mutation or disposal', () =>
     assert.equal(results.length, 1)
     results[0]!(applied)
     assert.equal(changes, 1)
+    // The real surface paints the settlement frame before the next key; the
+    // pinned result is what makes the next edit legitimate.
+    editor.render(88)
 
     editor.handleInput('r')
     assert.equal(results.length, 2)
@@ -481,6 +546,8 @@ test('fullscreen teardown disposes a pending tracked editor before late results 
     panel.handleInput('\r')
     panel.handleInput('\x1b[120;5u')
     assert.equal(results.length, 1)
+    // The fullscreen transition disposes the tracked editor BEFORE this late
+    // mutation result can repaint it.
     app.setFullscreen(true)
     results[0]({ kind: 'applied', model, parsed, message: 'saved' })
     assert.equal(changes, 0)
@@ -504,7 +571,7 @@ test('Enter opens the selected action detail without making category headers sel
     panel.handleInput('\x1b[B')
     panel.handleInput('\r')
     const view = panel.render(88).join('\n')
-    assert.match(view, /Keyboard shortcuts › Submit draft/)
+    assert.match(view, /Action ID: app.input.submit/)
     assert.match(view, /Action ID: app\.input\.submit/)
     assert.match(view, /Default: Enter/)
   } finally {
@@ -577,15 +644,15 @@ test('editor search hint switches between Esc clear and Esc close', () => {
   const { manager, panel } = makePanel(() => {})
   try {
     let view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Esc: close/, 'empty query advertises Esc: close')
+    assert.match(view, /Esc close/, 'empty query advertises Esc close')
     panel.handleInput('todo')
     view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Esc: clear/, 'non-empty query advertises Esc: clear')
-    assert.doesNotMatch(view, /Esc: close/, 'non-empty query must not advertise Esc: close')
+    assert.match(view, /Esc clear/, 'non-empty query advertises Esc clear')
+    assert.doesNotMatch(view, /Esc close/, 'non-empty query must not advertise Esc close')
     // First Esc clears (not closes); the hint flips back to close.
     panel.handleInput('\x1b')
     view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Esc: close/, 'after clear the hint returns to Esc: close')
+    assert.match(view, /Esc close/, 'after clear the hint returns to Esc close')
     // Second Esc closes.
     let closed = 0
     const { manager: m2, panel: p2 } = makePanel(() => { closed += 1 })
@@ -684,7 +751,7 @@ test('keybinding list: mouse click selects and activates a row (mouse parity)', 
     assert.equal(press?.focus, true, 'press must request focus')
     panel.handleMouse(mouse('click', 10, row, 88, 30))
     const after = panel.render(88).join('\n')
-    assert.ok(after.includes('Keyboard shortcuts ›'), 'clicking an action row must open the action editor')
+    assert.ok(after.includes('Action ID:'), 'clicking an action row must open the action editor')
   } finally {
     manager.dispose()
   }
@@ -712,7 +779,7 @@ test('keybinding list: headers and hint are inert (mouse parity)', () => {
   try {
     const rendered = panel.render(88).map(plain)
     const headerRow = rendered.findIndex(line => line.trim() === 'Input')
-    const hintRow = rendered.findIndex(line => line.includes('Enter: details'))
+    const hintRow = rendered.findIndex(line => line.includes('Enter details'))
     assert.ok(headerRow >= 0 && hintRow >= 0, `chrome rows missing:\n${rendered.join('\n')}`)
     assert.equal(panel.handleMouse(mouse('press', 10, headerRow, 88, 30)), undefined, 'category header must be inert')
     assert.equal(panel.handleMouse(mouse('press', 10, hintRow, 88, 30)), undefined, 'hint must be inert')
@@ -750,9 +817,7 @@ test('keybinding list: search Input click repositions the query cursor (mouse pa
 test('keybinding recorder never records SGR mouse bytes as a keybinding (mouse parity)', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
   startedApps.add(app)
-  app.setFullscreen(true)
   await vt.waitForRender()
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings(undefined)
@@ -764,14 +829,13 @@ test('keybinding recorder never records SGR mouse bytes as a keybinding (mouse p
     runMutation: () => {},
     maxRows: () => 18,
   })
-  app.openKeybindingEditor(panel)
+  const mount = mountEmbeddedPage(vt, panel)
   await vt.waitForRender()
   // Open the first action's editor and start recording a direct shortcut.
   let viewport = vt.getViewport()
   const actionRow = viewport.findIndex(line => line.includes('Submit draft'))
   assert.ok(actionRow >= 0, `action row missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[actionRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0)
+  const leftBorder = 0
   vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}M`)
   vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}m`)
   await vt.waitForRender()
@@ -795,6 +859,7 @@ test('keybinding recorder never records SGR mouse bytes as a keybinding (mouse p
   await vt.waitForRender()
   viewport = vt.getViewport()
   assert.ok(!viewport.some(line => line.includes('Record shortcut')), 'a real key must complete the recording')
+  mount.close()
   app.dispose()
 })
 
@@ -855,7 +920,7 @@ test('keybinding list: query change WITHOUT a repaint between press and click ca
     panel.handleInput('q')
     panel.handleMouse(mouse('click', 10, row, 88, 30))
     const after = panel.render(88).join('\n')
-    assert.ok(!after.includes('Keyboard shortcuts ›'), 'the click must not open an action editor for a different action')
+    assert.ok(!after.includes('Action ID:'), 'the click must not open an action editor for a different action')
   } finally {
     manager.dispose()
   }
@@ -929,12 +994,10 @@ test('keybinding panel: the focused flag reaches the search Input (CURSOR_MARKER
   }
 })
 
-test('keybinding panel: openKeybindingEditor forwards focus to the search Input (CURSOR_MARKER)', async () => {
+test('keybinding panel: the embedded page forwards focus to the search Input (CURSOR_MARKER)', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
   startedApps.add(app)
-  app.setFullscreen(true)
   await vt.waitForRender()
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings(undefined)
@@ -946,7 +1009,7 @@ test('keybinding panel: openKeybindingEditor forwards focus to the search Input 
     runMutation: () => {},
     maxRows: () => 18,
   })
-  app.openKeybindingEditor(panel)
+  const mount = mountEmbeddedPage(vt, panel)
   await vt.waitForRender()
   // Type a query: the search row then renders the Input (with its fake
   // cursor) instead of the empty-query placeholder.
@@ -954,12 +1017,12 @@ test('keybinding panel: openKeybindingEditor forwards focus to the search Input 
   await vt.waitForRender()
   const viewport = vt.getViewport()
   assert.ok(viewport.some(line => line.includes('Search: a')), `the search row must show the query:\n${viewport.join('\n')}`)
-  // The FocusForwardingFrame must forward the focused flag through the
-  // panel to the private search Input (the alt screen extracts the
-  // CURSOR_MARKER into the terminal cursor position, so the marker is
-  // not visible in the viewport rows).
+  // The root hands the page the keyboard; the page must forward that flag to
+  // its private search Input (the alt screen extracts the CURSOR_MARKER into
+  // the terminal cursor position, so the marker is not visible in the rows).
   const state = panel as unknown as { searchInput: { focused: boolean } }
-  assert.strictEqual(state.searchInput.focused, true, 'the mounted panel must forward focus to the search Input')
+  assert.strictEqual(state.searchInput.focused, true, 'the mounted page must forward focus to the search Input')
+  mount.close()
   app.stop()
 })
 
@@ -1027,7 +1090,7 @@ test('keybinding list: a click on an inert row releases the pressed identity (no
     panel.handleMouse(mouse('press', 10, row, 88, 30))
     // A click on an INERT row (the header) must release the pressed
     // identity.
-    const headerRow = rendered.findIndex(line => line.includes('Keyboard shortcuts'))
+    const headerRow = rendered.findIndex(line => plain(line).trim() === 'Input')
     assert.ok(headerRow >= 0)
     panel.handleMouse(mouse('click', 10, headerRow, 88, 30))
     const state = panel as unknown as { mousePressedId: string | undefined }
@@ -1091,9 +1154,7 @@ test('keyboard mode transition cancels a pending mouse identity (mouse parity)',
 test('keybinding editor: keyboard mode transition before repaint cannot start a leader recorder (mouse parity)', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
   startedApps.add(app)
-  app.setFullscreen(true)
   await vt.waitForRender()
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings({ leader: 'ctrl+q' })
@@ -1105,14 +1166,13 @@ test('keybinding editor: keyboard mode transition before repaint cannot start a 
     runMutation: () => {},
     maxRows: () => 18,
   })
-  app.openKeybindingEditor(panel)
+  const mount = mountEmbeddedPage(vt, panel)
   await vt.waitForRender()
   // Open the first action's editor (edit mode).
   let viewport = vt.getViewport()
   const actionRow = viewport.findIndex(line => line.includes('Submit draft'))
   assert.ok(actionRow >= 0, `action row missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[actionRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0)
+  const leftBorder = 0
   vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}M`)
   vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}m`)
   await vt.waitForRender()
@@ -1131,6 +1191,7 @@ test('keybinding editor: keyboard mode transition before repaint cannot start a 
   viewport = vt.getViewport()
   assert.ok(viewport.some(line => line.includes('Choose what to record')), `the choose-binding page must show:\n${viewport.join('\n')}`)
   assert.ok(!viewport.some(line => line.includes('Record shortcut')), 'no recorder may start from the stale press')
+  mount.close()
   app.stop()
 })
 
@@ -1150,7 +1211,7 @@ test('keybinding editor: the parent grant caps the standalone budget without res
     assert.ok(nested.length <= 4, `the parent grant must cap the frame (got ${nested.length})`)
     const nestedText = plain(nested.join('\n'))
     assert.match(nestedText, /Search: submit/, 'setMaxRows must not reset the query')
-    assert.match(nestedText, /Esc: clear/, 'the operation hint must survive the grant')
+    assert.match(nestedText, /Esc clear/, 'the operation hint must survive the grant')
     assert.equal(nestedText.split('\n').find(line => line.includes('›')), marked, 'setMaxRows must not reset the selection')
 
     // A non-finite parent grant restores the standalone budget exactly.
@@ -1167,22 +1228,23 @@ test('keybinding editor: degenerate grants keep the operation hint and only pain
     panel.setMaxRows(1)
     let view = panel.render(88).map(plain)
     assert.equal(view.length, 1)
-    assert.match(view[0]!, /Esc: close/)
+    assert.match(view[0]!, /Esc close/)
     assert.equal(panel.handleMouse(mouse('press', 10, 0, 88, 30)), undefined, 'the hint row is inert')
 
     panel.setMaxRows(2)
     view = panel.render(88).map(plain)
     assert.equal(view.length, 2)
-    assert.match(view[0]!, /^Keyboard shortcuts$/)
-    assert.match(view[1]!, /Esc: close/)
+    assert.match(view[0]!, /^Search: /, 'the editable search row survives a two-row grant')
+    assert.match(view[1]!, /Esc close/)
 
     panel.setMaxRows(3)
     view = panel.render(88).map(plain)
     assert.deepEqual(view.length, 3)
-    assert.match(view[1]!, /^Search: /, 'the search row is the third-row survivor')
-    assert.match(view[2]!, /Esc: close/)
-    assert.equal(panel.handleMouse(mouse('press', 10, 0, 88, 30)), undefined, 'the title row is inert')
-    assert.ok(panel.handleMouse(mouse('press', 10, 1, 88, 30))?.handled, 'the painted search row must stay clickable')
+    assert.match(view[0]!, /^Search: /)
+    assert.match(view[1]!, /^Keymap: /, 'the keymap fact is the third-row survivor')
+    assert.match(view[2]!, /Esc close/)
+    assert.ok(panel.handleMouse(mouse('press', 10, 0, 88, 30))?.handled, 'the painted search row must stay clickable')
+    assert.equal(panel.handleMouse(mouse('press', 10, 1, 88, 30)), undefined, 'the keymap fact row is inert')
     assert.equal(panel.handleMouse(mouse('press', 10, 2, 88, 30)), undefined, 'the hint row is inert')
   } finally {
     manager.dispose()
@@ -1209,14 +1271,14 @@ test('keybinding editor: a short grant keeps a real error over the optional chro
     panel.setMaxRows(5)
     const short = plain(panel.render(88).join('\n'))
     assert.match(short, /could not save the leader key/, 'a real error must survive the short grant')
-    assert.match(short, /Esc: back/, 'the operation row must survive the short grant')
+    assert.match(short, /Esc back/, 'the operation row must survive the short grant')
   } finally {
     panel.dispose()
     manager.dispose()
   }
 })
 
-test('keybinding editor: the leader editor keeps Esc: back and Saving… instead of blank spacers', () => {
+test('keybinding editor: the leader editor keeps Esc back and Saving… instead of blank spacers', () => {
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings(undefined)
   manager.setUserConfiguration(parsed)
@@ -1232,19 +1294,18 @@ test('keybinding editor: the leader editor keeps Esc: back and Saving… instead
     panel.handleInput('\r') // start the recorder
     panel.handleInput('\x1b[121;5u') // capture ctrl+y → the pending mutation
     let view = panel.render(88).map(plain)
-    assert.match(view.join('\n'), /Saving…/)
-    assert.match(view.join('\n'), /Esc: back/)
+    assert.match(view.join('\n'), /Saving…/, 'the bar states the frozen write')
+    assert.doesNotMatch(view.join('\n'), /Enter record/, 'no key that the pending write ignores may be advertised')
 
     panel.setMaxRows(4)
     view = panel.render(88).map(plain)
     assert.ok(view.length <= 4, `the grant must cap the leader editor (got ${view.length})`)
     assert.match(view.join('\n'), /Saving…/, 'the pending state must not be displaced by blank spacers')
-    assert.match(view.join('\n'), /Esc: back/)
 
     panel.setMaxRows(1)
     view = panel.render(88).map(plain)
     assert.deepEqual(view.length, 1)
-    assert.match(view[0]!, /Esc: back/, 'a one-row grant shows only the operation hint')
+    assert.match(view[0]!, /Saving…/, 'a one-row grant shows only the real bar')
   } finally {
     panel.dispose()
     manager.dispose()
@@ -1269,7 +1330,7 @@ test('action editor: a short choose-binding grant keeps the painted choice hit m
     editor.handleInput('a') // enter choose-binding
     const view = editor.render(88).map(plain)
     assert.ok(view.length <= 4, `the grant must cap the binding choice (got ${view.length})`)
-    assert.match(view.join('\n'), /Esc: back/, 'the binding-choice hint must survive the short grant')
+    assert.match(view.join('\n'), /Esc back/, 'the binding-choice hint must survive the short grant')
     const directRow = view.findIndex(line => line.includes('Direct shortcut'))
     assert.ok(directRow >= 0, `the Direct choice must stay painted:\n${view.join('\n')}`)
     assert.notEqual(directRow, 3, 'the hit map must follow the painted rows, not a fixed row index')
@@ -1289,12 +1350,12 @@ test('keybinding editor: the unavailable fallback degrades to its Esc row on a s
   assert.deepEqual(panel.render(40).map(plain), [
     'Keyboard shortcuts unavailable',
     'The settings service could not be read.',
-    'Esc: back',
+    'Esc back',
   ])
   panel.setMaxRows(2)
-  assert.deepEqual(panel.render(40).map(plain), ['Keyboard shortcuts unavailable', 'Esc: back'])
+  assert.deepEqual(panel.render(40).map(plain), ['Keyboard shortcuts unavailable', 'Esc back'])
   panel.setMaxRows(1)
-  assert.deepEqual(panel.render(40).map(plain), ['Esc: back'])
+  assert.deepEqual(panel.render(40).map(plain), ['Esc back'])
   panel.setMaxRows(Number.POSITIVE_INFINITY)
   assert.equal(panel.render(40).length, 4, 'a non-finite grant restores the full fallback')
 })
@@ -1336,21 +1397,360 @@ test('action editor: the scrolled choose-binding Leader row keeps its painted or
   }
 })
 
-test('keybinding editor: the key recorder view is NOT row-budgeted (documented short-grant degradation)', () => {
+test('keybinding editor: the key recorder keeps its Esc line as the last granted row', () => {
   const { manager, panel } = makePanel(() => {})
   try {
     panel.handleInput('\r') // leader editor
     panel.handleInput('\r') // start the recorder
-    assert.match(plain(panel.render(60).join('\n')), /Record shortcut/, 'the recorder must be active')
-    const full = panel.render(60)
-    // The independent recorder view is a fixed, grant-independent assembly:
-    // plan C3 keeps this degradation instead of adding a second scrollport.
+    const full = plain(panel.render(60).join('\n'))
+    assert.match(full, /Record shortcut/, 'the recorder must be active')
+    assert.match(full, /Esc: cancel/, 'the recorder bar names its own cancel')
+    panel.setMaxRows(2)
+    const short = panel.render(60).map(plain)
+    assert.equal(short.length, 2)
+    assert.match(short[0]!, /Waiting for one key/, 'the status is the survivor above the bar')
+    assert.match(short[1]!, /Esc: cancel/, 'the recorder bar is the LAST granted row')
     panel.setMaxRows(1)
-    const short = panel.render(60)
-    assert.equal(short.length, 8, `the recorder view is fixed (${short.length} rows observed at this revision)`)
-    assert.deepEqual(short, full, 'the recorder view must ignore the panel grant')
-    assert.match(plain(short[short.length - 1]!), /Esc: cancel/, 'its own footer still ends the view')
+    const barOnly = panel.render(60).map(plain)
+    assert.equal(barOnly.length, 1)
+    assert.match(barOnly[0]!, /Esc: cancel/, 'a bar-only grant still shows the way out')
   } finally {
     manager.dispose()
   }
+})
+
+test('a pending action mutation owns the page: Esc cannot strand its result', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  let backs = 0
+  const pending: Array<{ done?: (result: unknown) => void }> = []
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: (_mutation, onResult) => {
+      pending.push({
+        done: result => {
+          onResult(result as never)
+        },
+      })
+    },
+    onModelChange: () => {},
+    onBack: () => { backs += 1 },
+    maxRows: () => 30,
+  })
+  try {
+    editor.render(88)
+    editor.handleInput('r') // reset → an in-flight write
+    editor.render(88)
+    assert.equal((editor as unknown as { pending: boolean }).pending, true, 'precondition — the write is pending')
+    editor.handleInput('\x1b')
+    assert.equal(backs, 0, 'Esc while pending must not leave the detail')
+    assert.equal((editor as unknown as { disposed: boolean }).disposed, false, 'the editor must not be disposed while pending')
+    const bar = plain(editor.render(88).join('\n'))
+    assert.match(bar, /Saving…/, 'the bar states the frozen write')
+    assert.doesNotMatch(bar, /Esc back/, 'no exit verb is advertised while the write owns the page')
+    // The settlement re-opens navigation.
+    pending[0]!.done!({
+      kind: 'rejected',
+      message: 'the write was refused by the authority',
+    })
+    const settled = plain(editor.render(88).join('\n'))
+    assert.match(settled, /the write was refused by the authority/, 'the failure reason is visible')
+    assert.match(settled, /Esc back/, 'navigation resumes once the write settles')
+    editor.handleInput('\x1b')
+    assert.equal(backs, 1, 'Esc leaves only after the settlement')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('Esc after a mutation settles but BEFORE its frame paints is still refused', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  let backs = 0
+  let settled: ((result: unknown) => void) | undefined
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: (_mutation, onResult) => {
+      settled = result => { onResult(result as never) }
+    },
+    onModelChange: () => {},
+    onBack: () => { backs += 1 },
+    maxRows: () => 30,
+  })
+  try {
+    editor.render(88)
+    editor.handleInput('r') // in-flight write
+    editor.render(88)
+    // The write settles with a rejection message, and its frame is still only
+    // QUEUED (requestRender is asynchronous in the real TUI).
+    settled!({ kind: 'rejected', message: 'the authority refused the reset' })
+    assert.equal((editor as unknown as { pending: boolean }).pending, false, 'the write itself has settled')
+    editor.handleInput('\x1b')
+    assert.equal(backs, 0, 'the result has not painted yet, so Esc must not leave the page')
+    assert.equal((editor as unknown as { disposed: boolean }).disposed, false)
+    // A NON-Esc key must not be able to erase the unread result either: Down
+    // moves the selection and clears `message`, which would let the queued frame
+    // paint nothing and release the lock.
+    const selectedBefore = (editor as unknown as { selectedIndex: number }).selectedIndex
+    editor.handleInput('\x1b[B')
+    assert.equal((editor as unknown as { selectedIndex: number }).selectedIndex, selectedBefore,
+      'Down cannot act before the result paints')
+    editor.handleMouse(mouse('wheel', 10, 9, 88, 30, 1))
+    assert.equal((editor as unknown as { selectedIndex: number }).selectedIndex, selectedBefore,
+      'mouse wheel is frozen for the same window')
+    const stillPending = editor.render(88)
+    assert.match(plain(stillPending.join('\n')), /the authority refused the reset/u,
+      'the first frame after settlement really carries the result')
+    assert.equal((editor as unknown as { settlementAwaitingPaint: boolean }).settlementAwaitingPaint, false)
+    editor.handleInput('\x1b[B')
+    assert.notEqual((editor as unknown as { selectedIndex: number }).selectedIndex, selectedBefore,
+      'normal editing resumes after the result painted')
+    // The settle frame painted the reason; Esc may leave now.
+    editor.handleInput('\x1b')
+    assert.equal(backs, 1, 'Esc leaves exactly once after the result is on screen')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('a settled action mutation restores Esc; repeated Esc while pending never leaves twice', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  let backs = 0
+  let settled: ((result: unknown) => void) | undefined
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: (_mutation, onResult) => {
+      settled = result => { onResult(result as never) }
+    },
+    onModelChange: () => {},
+    onBack: () => { backs += 1 },
+    maxRows: () => 30,
+  })
+  try {
+    editor.render(88)
+    editor.handleInput('r')
+    editor.render(88)
+    // Three Escs while the write is in flight: not one may leave or dispose.
+    for (let i = 0; i < 3; i += 1) editor.handleInput('\x1b')
+    assert.equal(backs, 0)
+    assert.equal((editor as unknown as { disposed: boolean }).disposed, false)
+    // A successful settlement restores navigation.
+    const next = buildKeybindingEditorModel(manager, { ...parsed, bindings: { ...parsed.bindings, 'app.todo.toggle': [] } } as never)
+    settled!({
+      kind: 'applied',
+      model: next,
+      parsed,
+      message: 'Shortcut reset.',
+    })
+    assert.match(plain(editor.render(88).join('\n')), /Esc back/, 'the exit verb returns with the settlement')
+    editor.handleInput('\x1b')
+    assert.equal(backs, 1, 'exactly one back after the write settled')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('a bar-only leader editor accepts only its painted Esc', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const mutations: unknown[] = []
+  const panel = new KeybindingEditorPanel({
+    model,
+    runMutation: mutation => { mutations.push(mutation) },
+    onClose: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    panel.render(88)
+    panel.handleInput('\r') // leader editor
+    panel.setMaxRows(1)
+    const bar = plain(panel.render(88).join('\n'))
+    assert.match(bar, /Esc back/, 'the bar-only leader view keeps the way back')
+    assert.doesNotMatch(bar, /Enter record|r reset/, 'no hidden leader verb is advertised')
+    panel.handleInput('r')
+    panel.handleInput('\r')
+    assert.deepEqual(mutations, [], 'no hidden reset write or recorder may start')
+    assert.equal((panel as unknown as { leaderRecorder: unknown }).leaderRecorder, undefined)
+    panel.handleInput('\x1b')
+    assert.equal((panel as unknown as { leaderEditing: boolean }).leaderEditing, false, 'the painted Esc still returns')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('a bar-only keybinding list accepts no hidden Enter action', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  let closed = 0
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => { closed += 1 },
+    runMutation: () => {},
+    maxRows: () => 1,
+  })
+  try {
+    const lines = panel.render(88)
+    assert.equal(lines.length, 1)
+    assert.match(plain(lines[0]!), /Esc close/u)
+    assert.doesNotMatch(plain(lines[0]!), /Enter details/u)
+    assert.doesNotMatch(plain(lines[0]!), /type search/u,
+      'the one-row bar must not advertise the search it refuses')
+    assert.match(plain(lines[0]!), /← Back/u, 'the admitted root back verb is advertised')
+    panel.handleInput('\r')
+    assert.equal((panel as unknown as { leaderEditing: boolean }).leaderEditing, false,
+      'Enter cannot open the hidden leader editor from a bar-only frame')
+    assert.equal(closed, 0)
+    // The advertised root back verb really works from that same frame.
+    panel.handleInput('\x1b[D')
+    assert.equal(closed, 1, 'the painted ← Back closes the bar-only root list')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('a settled detail result keeps the page navigation lock until its frame paints', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  let settled: ((result: unknown) => void) | undefined
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: (_mutation, onResult) => {
+      settled = result => { onResult(result as never) }
+    },
+    maxRows: () => 30,
+  })
+  try {
+    panel.render(88)
+    panel.handleInput('submit')
+    panel.render(88)
+    panel.handleInput('\r') // action detail
+    panel.render(88)
+    assert.equal(panel.blocksParentNavigation(), true, 'the detail already blocks the root')
+    panel.handleInput('r') // in-flight write
+    panel.render(88)
+    settled!({ kind: 'rejected', message: 'the authority refused the reset' })
+    assert.equal(panel.blocksParentNavigation(), true,
+      'a settled-but-unpainted detail result still refuses a category change')
+    const painted = plain(panel.render(88).join('\n'))
+    assert.match(painted, /the authority refused the reset/u)
+    assert.equal(panel.blocksParentNavigation(), true, 'the detail itself still owns the page')
+    panel.handleInput('\x1b') // detail -> list
+    panel.render(88)
+    assert.equal((panel as unknown as { settlementAwaitingPaint: boolean }).settlementAwaitingPaint, false,
+      'the painted result releases the settlement lock')
+    assert.equal((panel as unknown as { actionEditor?: unknown }).actionEditor, undefined,
+      'the detail really closed')
+    // The page still blocks the root for its own reason: the query is kept.
+    assert.equal(panel.blocksParentNavigation(), true, 'the preserved query still blocks navigation')
+    panel.handleInput('\x1b') // clear the query
+    panel.render(88)
+    assert.equal(panel.blocksParentNavigation(), false, 'the cleared list releases the root again')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('a bar-only root list with a query neither clears it nor claims the back verb', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  let closed = 0
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => { closed += 1 },
+    runMutation: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    panel.render(88)
+    panel.handleInput('submit') // a real query on a normal grant
+    panel.setMaxRows(1)
+    const bar = plain(panel.render(88).join('\n'))
+    assert.doesNotMatch(bar, /← Back|type search/u,
+      `a bar-only query state advertises only the Esc it accepts: ${bar}`)
+    assert.match(bar, /Esc clear/u)
+    panel.handleInput('\x1b[D')
+    assert.equal(closed, 0, 'a non-empty query keeps ← away from the page back')
+    assert.equal((panel as unknown as { query: string }).query, 'submit', 'the invisible query is untouched')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('a bar-only action detail refuses a hidden Enter and Add until its body paints', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const mutations: unknown[] = []
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: mutation => { mutations.push(mutation) },
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 1,
+  })
+  try {
+    const lines = editor.render(88)
+    assert.equal(lines.length, 1)
+    assert.match(plain(lines[0]!), /Esc back/u)
+    editor.handleInput('\r')
+    editor.handleInput('a')
+    assert.deepEqual(mutations, [], 'no hidden recorder or choose-binding transition ran')
+    assert.equal((editor as unknown as { mode: string }).mode, 'edit')
+    assert.equal((editor as unknown as { recorder: unknown }).recorder, undefined)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('a bar-only key recorder accepts only its painted Esc, never a hidden key', () => {
+  const captured: string[] = []
+  let cancelled = 0
+  const recorder = new KeyRecorder({
+    purpose: 'direct',
+    label: 'the test shortcut',
+    maxRows: () => 1,
+    requestRender: () => {},
+    onCapture: key => { captured.push(key) },
+    onCancel: () => { cancelled += 1 },
+  })
+  const lines = recorder.render(60)
+  assert.equal(lines.length, 1)
+  assert.match(plain(lines[0]!), /Esc: cancel/u)
+  recorder.handleInput('\x18')
+  assert.deepEqual(captured, [], 'a key is not captured while only the bar is painted')
+  recorder.handleInput('\x1b')
+  assert.equal(cancelled, 1, 'the painted Esc still cancels')
 })

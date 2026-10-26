@@ -2,9 +2,13 @@
 
 `dsh-pi-tui` has a composable Footer rather than a fixed status line.
 
-For most users, `/footer` is the only entry point you need. It lets you arrange
-builtin status items, create your own text or command items, and place
-plugin-provided items without editing YAML by hand.
+For most users, `/footer` is the only entry point you need. It opens the Footer
+layout page inside the full-screen Settings workspace
+(`Appearance → Configure footer layout…`), where you can arrange builtin status
+items, create your own text or command items, and place plugin-provided items
+without editing YAML by hand. The page shares the Settings lease and its ONE
+physical Action Bar; `Esc` or `←` on the row selector returns to the Appearance
+row rather than opening a second overlay.
 
 This guide covers the user-facing Footer surface. Plugin authors should also
 read [Extension API v2](../extensions/stable.md).
@@ -17,17 +21,21 @@ Open the editor:
 /footer
 ```
 
-`/statusline` is an alias of `/footer`.
+`/statusline` is an alias of `/footer` and opens the same Settings page.
 
 A typical workflow is:
 
 1. Select a row and press `Enter`.
 2. Press `A` to open the Add picker.
 3. Add builtin, custom, or extension items.
-4. Use `Left` / `Right` to move an item between sides.
+4. Use `Left` / `Right` to move an item between sides (inside the row editor;
+   on the row selector `←` goes back instead).
 5. Use Move Mode to reorder items.
 6. Open the Item Editor to change Style, Tone, Prefix/Suffix, or Importance.
-7. Return to the first page and choose **Save changes**, or press `S`.
+7. Return to the first page and choose **Save changes**, or press `S`. On the
+   row selector `←` leaves as `Esc` does — a clean draft closes, a dirty one
+   opens the Save/Discard/Keep confirmation first — and it keeps working when
+   the terminal is so short that only the Action Bar fits.
 
 The preview is rendered by the real Footer composer, so it follows the same
 layout and width rules as the live Footer.

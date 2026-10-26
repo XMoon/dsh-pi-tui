@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions or thumbnail pixels. `/copy` now copies the visible display body (without a marker
   line the renderer consumed), while the durable Session, search and `/transcript` export keep
   every byte.
+- **The Footer and keyboard shortcut editors now open inside the full-screen Settings workspace instead of a separate 88-column overlay.**
+  `/footer`, its `/statusline` alias and bare `/keybindings` deeplink into the same Settings
+  lease at `Appearance → Configure footer layout` or `Input & Terminal → Keyboard shortcuts`:
+  the one Settings header, status/scope line and single Action Bar stay the only chrome. Footer
+  row/item/style/custom-item editing, the live preview, the dirty-exit confirmation and the
+  persist-first save transaction keep their meaning; keyboard search, action details,
+  direct/leader recording, conflicts, safe mode, the FIFO write and the live keymap are
+  unchanged. `Esc` follows each page's own ladder back to its source row and then the existing
+  Settings navigation, never mounting a second fullscreen screen or editor. `/keybindings
+  conflicts|reload|reset` keep their independent diagnostic semantics. The root state of
+  both pages also accepts `←` as the back verb: the Footer row selector and the Keyboard
+  list with an empty query return to their source Settings row exactly like `Esc`, and the
+  bar says `← Back`; a dirty Footer asks Save/Discard/Keep first, `←` still switches zones
+  inside the row editor, and a non-empty search still keeps `←` for cursor movement. When only
+  the Action Bar fits, a page admits and advertises only the back verbs it really accepts (the
+  root keeps `← Back` and `Esc`; a sub-page keeps only `Esc`) and never hints at a search/save
+  it refuses. While a write is in flight no key leaves the page, and its result is painted
+  before navigation resumes.
+
 
 - **The experimental TSP renderer now mixes published figures into the final answer and offers Copy on each of them.**
   With `DSH_PI_TUI_RENDERER=tsp`, charts and SVGs published through `present_visual` enter the

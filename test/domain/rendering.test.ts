@@ -32,6 +32,7 @@ import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type Workf
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 import { hasFocusHeader } from '../support/focus-header.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
@@ -697,11 +698,12 @@ test('queued question flows transfer the seat and suspension without restoring',
   assert.ok(view.includes('Settings row A'), `settings must return after the LAST flow:\n${view}`)
 })
 
-test('standalone keybindings editor keeps the full terminal budget (PR-C standalone control)', async () => {
-  // The nested /settings submenu is capped by the parent overlay grant; the
-  // standalone /keybindings overlay is NOT (it never receives setMaxRows),
-  // so its own whole-terminal budget and navigation must be unchanged.
-  const { vt, app } = startApp(120, 40)
+test('the embedded keybindings page keeps its query/detail and its ONE last-row bar', async () => {
+  // The page is the same Settings body: the root owns the chrome, the page owns
+  // its query/detail state and ends on exactly ONE semantic bar. The standalone
+  // cap (rows - 4) still bounds the page unless the parent grant is smaller.
+  const { app } = startApp(120, 40)
+  const vt = new VirtualTerminal(120, 40)
   const manager = new HostKeybindingManager()
   const parsed = parseUserKeybindings(undefined)
   manager.setUserConfiguration(parsed)
@@ -712,16 +714,14 @@ test('standalone keybindings editor keeps the full terminal budget (PR-C standal
     runMutation: () => {},
     maxRows: () => app.keybindingEditorMaxRows(),
   })
-  const close = app.openKeybindingEditor(panel)
+  const mount = mountEmbeddedPage(vt, panel)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   try {
     await vt.waitForRender()
-    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
     let lines = vt.getViewport().map(strip)
-    const hintRow = lines.findIndex(line => line.includes('Enter: details'))
-    assert.ok(hintRow > 0, `the standalone operation hint must be painted:\n${lines.join('\n')}`)
-    assert.ok(lines[hintRow]!.includes('│'), 'the hint must be painted INSIDE the frame')
-    assert.ok((lines[hintRow + 1] ?? '').includes('╰'), 'the frame bottom border must follow the hint')
-    assert.equal(panel.render(84).length, 35, 'the standalone editor keeps its own whole-terminal budget')
+    assert.match(lines[lines.length - 1]!, /Esc close/, 'the page bar must be the physical last row')
+    assert.ok(!lines.some(line => line.includes('╭') || line.includes('╰')), 'the page paints no overlay Frame')
+    assert.ok(panel.render(84).length <= app.keybindingEditorMaxRows(), 'the standalone cap still bounds the page')
     // Search/navigation still works end to end.
     for (const character of 'submit') {
       vt.sendInput(character)
@@ -732,16 +732,13 @@ test('standalone keybindings editor keeps the full terminal budget (PR-C standal
     vt.sendInput('\r')
     await vt.waitForRender()
     lines = vt.getViewport().map(strip)
-    assert.ok(lines.some(line => line.includes('Keyboard shortcuts › ')), `the detail must open:\n${lines.join('\n')}`)
+    assert.ok(lines.some(line => line.includes('Action ID:')), `the detail must open:\n${lines.join('\n')}`)
     vt.sendInput('\x1b')
     await vt.waitForRender()
     lines = vt.getViewport().map(strip)
     assert.ok(lines.some(line => line.includes('Search: submit')), `the query must survive the return:\n${lines.join('\n')}`)
-    // The real closer removes the editor (the returned handle owns the hide).
-    close()
-    await vt.waitForRender()
-    assert.ok(!vt.getViewport().map(strip).some(line => line.includes('Enter: details')), 'the closer must remove the editor')
   } finally {
+    mount.close()
     manager.dispose()
   }
 })

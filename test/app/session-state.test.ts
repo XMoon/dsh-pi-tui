@@ -34,6 +34,7 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -229,7 +230,7 @@ function stubRunner(
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: legacyEditorExtensions() as never,
     exit: () => {},
   }
 }
@@ -1516,7 +1517,7 @@ test('/settings theme STALE pick through the REAL handler rolls the row and the 
         return next
       },
     },
-    extensions: { themes: registry, settings: new SettingsRegistry() },
+    extensions: legacyEditorExtensions(registry) as never,
   })
   registerTuiCommandsWithDirectSeams(runner)
   const settingsDef = services.defs.find(def => def.name === 'settings')

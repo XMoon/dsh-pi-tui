@@ -21,6 +21,7 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { enterChildDisplaySubject, exitChildDisplaySubject } from '../support/display-subject.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -230,15 +231,20 @@ test('the configurator lists extension items in the Available section and can ad
     const { FooterConfiguratorModel } = await import('../../src/tui/footer/configurator-model.ts')
     const { DEFAULT_FOOTER_LAYOUT } = await import('../../src/domain/footer/presets.ts')
     const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
-    app.openFooterConfigurator({
+    // The page is the Settings body, not a second overlay: stop the app's own
+    // screen and mount the page with the body+bar grant on the same terminal.
+    app.stop()
+    const page = app.createFooterConfiguratorPanel({
       model,
       registry: app.getFooterItemRegistry(),
+      sessionOnly: false,
       onSave: () => {},
       onCancel: () => {},
     })
+    const mount = mountEmbeddedPage(vt, page)
     await vt.waitForRender()
     let view = vt.getViewport().join('\n')
-    assert.ok(view.includes('Configure Footer'), `the configurator must open:\n${view}`)
+    assert.ok(view.includes('Select row to edit'), `the configurator page must open:\n${view}`)
     // Enter Row 1, then open the Add picker: Available is a picker-only
     // pool now (the hierarchical editor's A action).
     vt.sendInput('\r')
@@ -246,7 +252,7 @@ test('the configurator lists extension items in the Available section and can ad
     vt.sendInput('a')
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
-    assert.ok(view.includes('Add Item → Row 1'), `the add picker must open:\n${view}`)
+    assert.ok(view.includes('Search:'), `the add picker must open:\n${view}`)
     // Type to search: the extension item's label matches the query.
     vt.sendInput('kube')
     await vt.waitForRender()
@@ -263,6 +269,7 @@ test('the configurator lists extension items in the Available section and can ad
     assert.ok(model.addMatches().some(id => id.startsWith('ext:')), 'the definition stays addable for another placement')
     view = vt.getViewport().join('\n')
     assert.ok(view.includes('kube:prod'), `the added item must render in the preview:\n${view}`)
+    mount.close()
     app.stop()
   } finally {
     for (const runtime of [...ctx.registry.values()]) {

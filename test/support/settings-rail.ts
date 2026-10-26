@@ -41,7 +41,11 @@ export function settingsRailVisible(vt: SettingsRailTerminal): boolean {
  * the rail first when the terminal is too narrow for one.
  */
 export async function selectSettingsCategory(vt: SettingsRailTerminal, category: string): Promise<void> {
-  const target = SETTINGS_CATEGORY_ORDER.indexOf(category as (typeof SETTINGS_CATEGORY_ORDER)[number])
+  // `Extensions` is the ONE conditional category appended after the fixed nine
+  // (it exists only while the extension settings registry has live rows).
+  const target = category === 'Extensions'
+    ? SETTINGS_CATEGORY_ORDER.length
+    : SETTINGS_CATEGORY_ORDER.indexOf(category as (typeof SETTINGS_CATEGORY_ORDER)[number])
   assert.ok(target >= 0, `the harness must know the category ${JSON.stringify(category)}`)
   if (!settingsRailVisible(vt)) {
     // A narrow terminal opens on the About CONTENT: Esc returns to the rail.

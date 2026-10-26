@@ -25,6 +25,7 @@ import { FooterConfiguratorModel, itemMenuFor } from '../../src/tui/footer/confi
 import type { FooterItemDefinition } from '../../src/tui/footer/presentation-types.ts'
 import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -317,25 +318,29 @@ test('custom Text supports text/tone editing, rename, and referenced delete clea
   assert.equal(m.customItem('user:stage'), undefined)
 })
 
-test('Custom Text creation is visible in the real configurator UI and saves both parts', async () => {
+test('Custom Text creation is visible in the real configurator page and saves both parts', async () => {
   const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
+  // The page gets its own screen; the app is only the dependency provider and
+  // gets its own terminal so its background renders cannot bleed in.
+  const app = new TuiApp(new VirtualTerminal(100, 30), { onSubmit: () => {}, onExit: () => {} })
   startedApps.add(app)
   const catalog = new FooterCustomItemCatalog()
   const registry = new FooterItemRegistry(app.getFooterItemRegistry())
   registry.setCustomSource(catalog)
   const model = new FooterConfiguratorModel({ schemaVersion: 1, rows: [{ left: [], right: [] }] }, registry, catalog)
   let saved: { layout: unknown; items: readonly unknown[] } | undefined
-  app.openFooterConfigurator({
+  const page = app.createFooterConfiguratorPanel({
     model,
     registry,
     composer: new FooterComposer(registry),
+    sessionOnly: false,
     onSave: (layout, items) => { saved = { layout, items: items ?? [] } },
     onCancel: () => {},
   })
+  const mount = mountEmbeddedPage(vt, page)
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('Configure Footer'))
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Select row to edit'))
 
   vt.sendInput('\r') // row
   vt.sendInput('a') // add picker
@@ -361,15 +366,23 @@ test('Custom Text creation is visible in the real configurator UI and saves both
   assert.ok(itemView.includes('Rename definition'), `custom item editor must expose rename:\n${itemView}`)
   assert.ok(itemView.includes('Delete definition'), `custom item editor must expose delete:\n${itemView}`)
   vt.sendInput('\x1b') // item -> row
+  await vt.waitForRender()
   vt.sendInput('\x1b') // row -> selector
+  await vt.waitForRender()
+  // The selector's Save row must be PAINTED before `S` may run it (the page's
+  // painted-identity fence; a hidden action is never dispatched).
   vt.sendInput('s') // save
   await vt.waitForRender()
+  // The ONE save path is asynchronous by contract (await onSave, then endSave).
+  for (let tick = 0; tick < 10; tick += 1) await Promise.resolve()
+  await new Promise<void>(resolve => setImmediate(resolve))
   assert.ok(saved)
   assert.deepEqual(saved.items, [{ schemaVersion: 1, id: 'user:Environment', kind: 'text', text: 'PROD', tone: 'auto' }])
   assert.deepEqual(saved.layout, {
     schemaVersion: 1,
     rows: [{ left: [{ id: 'user:Environment' }], right: [] }],
   })
+  mount.close()
   app.stop()
 })
 
