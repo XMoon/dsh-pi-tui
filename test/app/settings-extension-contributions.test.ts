@@ -567,6 +567,55 @@ test('a replaced same-id registration never receives the old handle or a late se
   }
 })
 
+test('a repeated old handle release keeps the replacement registration and its health alive', async () => {
+  const h = await setupEnvironment()
+  try {
+    const calls: string[] = []
+    let replacement: SettingHandle | undefined
+    // ONE fiber: register A, release it, re-register the SAME id (B), then
+    // release the OLD A handle AGAIN. The registry keeps B; the service must
+    // not untrack B's health entry from A's repeated release.
+    const fiber = h.ctx.plugin((pluginCtx) => {
+      const service = serviceOf(pluginCtx)
+      const oldHandle = service.registerSetting({
+        id: 'mode', label: 'Mode', currentValue: 'on', values: ['on', 'off'], order: 0,
+        onChange: () => true,
+      })
+      oldHandle.dispose()
+      replacement = service.registerSetting({
+        id: 'mode', label: 'Mode', currentValue: 'on', values: ['on', 'off'], order: 0,
+        onChange: (value) => { calls.push(value); return false },
+      })
+      // The OLD service handle is released a second time after the replacement
+      // exists: it must be a no-op for BOTH the registry record and its health.
+      oldHandle.dispose()
+    })
+    await fiber
+    assert.equal(replacement?.id, 'mode')
+    assert.equal(h.registry.rows().filter(row => row.id === 'mode').length, 1,
+      'the replacement registration survives the old repeated release')
+    const active = h.health().filter(record => record.id === 'mode')
+    assert.equal(active.length, 1, 'the replacement owns exactly ONE health record')
+    assert.equal(active[0]?.state, 'active', 'the old repeated release did not untrack the replacement health')
+
+    // The replacement still rejects through the real UI, and its failure is
+    // attributable in the health ledger.
+    await openExtensionsRows(h)
+    await h.key('\r')
+    await h.key('\u001b[B')
+    await h.key('\r')
+    await h.drain()
+    assert.deepEqual(calls, ['off'], 'the replacement callback ran exactly once')
+    assert.equal(h.registry.rows()[0]?.currentValue, 'on', 'a rejection keeps the previous value')
+    const failed = h.health().find(record => record.id === 'mode')
+    assert.equal(failed?.state, 'failed', 'the replacement rejection enters health')
+    assert.match(failed?.lastError ?? '', /setting rejected/u)
+    assert.equal(h.documentWrites(), 0)
+  } finally {
+    await h.dispose()
+  }
+})
+
 test('a real 0-value registration is read-only in the Detail and never reaches its callback', async () => {
   const h = await setupEnvironment()
   try {

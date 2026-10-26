@@ -1069,23 +1069,30 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.settings.register(contribution, owner)
     this.trackRegistryHealth('setting', contribution.id, owner)
-    let dispose: () => void
-    try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.untrackRegistryHealth('setting', contribution.id, owner)
-      }, 'piTuiExtensions.registerSetting()')
-    } catch (error) {
+    // ONE release per registration. The explicit handle release and the fiber
+    // effect cleanup share this function, so a repeated old-handle release
+    // cannot run the (slot, owner, id)-keyed health untrack a SECOND time: a
+    // same-fiber, same-id re-registration owns a NEW record and a NEW health
+    // entry, and the old record's release must never remove it.
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
       handle.dispose()
       this.untrackRegistryHealth('setting', contribution.id, owner)
+    }
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerSetting()')
+    } catch (error) {
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       setValue: (value: string) => handle.setValue(value),
       dispose: () => {
-        handle.dispose()
-        this.untrackRegistryHealth('setting', contribution.id, owner)
+        cleanup()
         dispose()
       },
     }
