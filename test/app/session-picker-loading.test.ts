@@ -82,6 +82,7 @@ function harness(sessionReader: SessionReader, size: { readonly columns: number;
   const state: { agent: Agent | undefined } = { agent: undefined }
   const switched: string[] = []
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

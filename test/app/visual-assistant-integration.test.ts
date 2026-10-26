@@ -416,6 +416,7 @@ function mountSurface(
     captureHistoryScope: () => ({ sessionId: mainSessionId, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
+    deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
     openExternalUrl: () => {},
     readClipboardText: async () => undefined,
     imageFallbackColor: text => text,

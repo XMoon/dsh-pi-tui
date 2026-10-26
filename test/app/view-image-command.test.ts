@@ -83,6 +83,7 @@ function setup(options: {
   const clientCwd = options.cwd ?? '/ws'
   const sessionCwd = options.sessionCwd ?? '/ws'
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app: options.mounted === false ? undefined : app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

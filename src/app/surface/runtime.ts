@@ -132,6 +132,7 @@ import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
 import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
+import { deliveredTurnsOf, type DeliveredFilesCapability, type DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
 import { collectPublishedVisuals, type PublishedVisual } from '../../domain/visual/publication.ts'
 import {
   clearAssistantVisualPresentation,
@@ -463,6 +464,13 @@ export interface SurfaceMountDeps {
   readonly onTerminalResize: OptionCapability<'onTerminalResize'>
   /** Fullscreen drag-selection copy (the runner owns the clipboard policy). */
   readonly copySelection: OptionCapability<'copySelection'>
+  /**
+   * Delivered files (PR1): the narrow read capability the transcript tail and
+   * the browser consume. The composition root binds it to THIS surface's own
+   * display-subject decision ({@link SurfaceRuntime.deliveredFilesSnapshot}),
+   * so the mounted renderer can never re-derive "the current session" itself.
+   */
+  readonly deliveredFiles: DeliveredFilesCapability
   /** Headless-test seam (M3-4 PR3 image L6): the runner's live image draft
    * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
    * paths never read it. */
@@ -696,6 +704,25 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
     legacyFacts: Partial<StatusData>,
     presentation: DisplaySubjectPresentation | undefined,
   ): void
+  /**
+   * Delivered files (Delivered files PR1 / M2): derive the CURRENT display
+   * subject's delivered Turns from its selected Folder's FULL grouped
+   * projection.
+   *
+   * This is the business owner of "which session, which Fold" — the caller
+   * never guesses a current session id or re-projects a bounded display
+   * window. The derivation runs on demand (one explicit open of the browsing
+   * surface), never per repaint. Returns `undefined` when no display subject is
+   * selected, the surface is torn down, or the projection carries no delivery.
+   */
+  deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
+  /**
+   * Whether a snapshot captured earlier still describes the CURRENT display
+   * subject: the same subject kind/id AND the same projection source
+   * (`sourceIdentity`), so a replaced Folder under the same session id is
+   * stale. Never compares session ids alone.
+   */
+  isDeliveredFilesSnapshotCurrent(snapshot: DeliveredFilesSnapshot): boolean
   /** The notification settings write path (`/notify`, `agent/status` policy). */
   setNotificationMode(mode: string): void
   setNotificationMethod(method: string): void
@@ -1283,6 +1310,50 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       sourceIdentity: projectionTokenFor(target.folder),
       messages,
     })
+  }
+
+  /**
+   * Delivered files (Delivered files PR1 / M2): the ONE read-only derivation
+   * of the selected display subject's delivered Turns.
+   *
+   * It reuses the SAME active-target decision the repaint uses (the selected
+   * Folder + subject identity), so it can never disagree with the transcript
+   * on screen. `folder.messages()` is deliberately called WITHOUT a
+   * `maxTurns`: the bounded display window is NOT the history, and a delivery
+   * from an older Turn stays reachable. The call is on-demand only (an explicit
+   * open of the browsing surface), never from a repaint or scroll path.
+   */
+  const deliveredFilesSnapshot = (): DeliveredFilesSnapshot | undefined => {
+    if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+    const viewedChildId = routing().viewedChildId()
+    const sessionId = viewedChildId ?? routing().currentSessionId()
+    // No selected display subject: an empty overlay would lie about "this
+    // session" and a parent fallback would show another subject's files.
+    if (sessionId === undefined) return undefined
+    const folder = viewedChildId === undefined ? routing().mainFolder() : routing().viewedChildFolder()
+    const turns = deliveredTurnsOf(folder.messages())
+    if (turns.length === 0) return undefined
+    return {
+      subjectKind: viewedChildId === undefined ? 'main' : 'viewed-child',
+      sessionId,
+      sourceIdentity: projectionTokenFor(folder),
+      turns,
+    }
+  }
+
+  /**
+   * Delivered files currentness: the captured snapshot must still describe the
+   * CURRENT display subject. The opaque projection token is part of the
+   * comparison, so a Folder replaced under the same session id (cold rehydrate,
+   * session commit, viewer switch) makes an older snapshot stale instead of
+   * silently re-labelling its Turns.
+   */
+  const isDeliveredFilesSnapshotCurrent = (snapshot: DeliveredFilesSnapshot): boolean => {
+    if (disposed || isCleanedUp() || routingSource === undefined) return false
+    const current = captureProjectionTarget(activeFolder(), activeWindow())
+    return current.subjectKind === snapshot.subjectKind
+      && current.subjectId === snapshot.sessionId
+      && projectionTokenFor(current.folder) === snapshot.sourceIdentity
   }
 
   /**
@@ -2022,6 +2093,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // Issue #7: the fullscreen drag selection and /copy are the SAME user copy
     // intent and share ONE clipboard policy owned by the runner.
     copySelection: deps.copySelection,
+    deliveredFiles: deps.deliveredFiles,
     draftImageStoreForTest: deps.draftImageStoreForTest,
     draftImagePreviewSource: deps.draftImagePreviewSource,
     draftImagePreviewLiveDraft: deps.draftImagePreviewLiveDraft,
@@ -2123,6 +2195,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       notification.setCompletionOwner(undefined)
       retireMainAgentProgress()
     },
+    // Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
+    // subject and the identity fence an already-open panel re-checks.
+    deliveredFilesSnapshot,
+    isDeliveredFilesSnapshotCurrent,
     commitStatus(patch, legacyFacts, presentation) {
       // A4-4 (plan §13.1): the semantic derivation stays with the runner; the
       // commit coordination is surface-owned. The three parts are ONE atomic

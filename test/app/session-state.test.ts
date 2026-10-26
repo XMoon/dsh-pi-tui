@@ -168,6 +168,7 @@ function stubRunner(
   return {
     ctx,
     app,
+    deliveredFilesSnapshot: () => undefined,
     diag,
     ...sessionScopeFacts(() => state.agent, () => state.generation),
     get currentSessionId() { return state.agent?.session.id },

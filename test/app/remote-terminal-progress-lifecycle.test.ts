@@ -245,6 +245,7 @@ function mountSurfaceProbe(
       captureHistoryScope: () => ({ sessionId: sessionId, isCurrent: () => true }),
       onTerminalResize: () => {},
       copySelection: async () => false,
+      deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
       openExternalUrl: () => {},
       readClipboardText: async () => undefined,
       imageFallbackColor: (text) => text,

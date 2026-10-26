@@ -171,6 +171,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const settings = fakeTuiSettings(options.busyEnter ?? 'queue', options.localShellSandbox ?? 'bypass')
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

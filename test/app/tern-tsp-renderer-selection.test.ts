@@ -304,6 +304,7 @@ function mountHarness(): Harness {
         captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
         onTerminalResize: () => {},
         copySelection: async () => false,
+        deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
         openExternalUrl: () => {},
         readClipboardText: async () => undefined,
         imageFallbackColor: text => text,

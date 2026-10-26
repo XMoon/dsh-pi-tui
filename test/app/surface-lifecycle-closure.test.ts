@@ -1776,6 +1776,7 @@ function minimalSurfaceDeps(renderer?: SurfaceRendererMount): SurfaceMountDeps {
     captureHistoryScope: () => ({ sessionId: 'image-6a-lifecycle', isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
+    deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
     openExternalUrl: () => {},
     readClipboardText: async () => undefined,
     imageFallbackColor: (text: string) => text,

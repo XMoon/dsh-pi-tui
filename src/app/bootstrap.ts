@@ -1779,6 +1779,10 @@ export function applyRunnerWithRuntime(
         // registration runs AFTER the mount, so this getter (never an eagerly
         // captured value) is what the attachment intake reads.
         composer: () => surface.composer,
+        // Delivered files (PR1 / M2): the surface's own display-subject
+        // decision, exposed as a function-type read capability. The runner
+        // forwards it to `/deliverables`; no Folder instance crosses the seam.
+        deliveredFilesSnapshot: () => surface.deliveredFilesSnapshot(),
       },
       backend: {
         kind: selectedRuntime.kind,
@@ -2895,6 +2899,13 @@ export function applyRunnerWithRuntime(
       // leg — otherwise a remote host helper would strand the copy in the
       // remote clipboard.
       copySelection: (text) => clientActions.copySelection(text),
+      // Delivered files (PR1): the surface's own display-subject decision,
+      // exposed to the mounted renderer as the narrow two-function capability.
+      // The TUI never sees the Folder or the runtime object.
+      deliveredFiles: {
+        snapshot: () => surface.deliveredFilesSnapshot(),
+        isCurrent: (snapshot) => surface.isDeliveredFilesSnapshotCurrent(snapshot),
+      },
       // Headless-test seam (M3-4 PR3 image L6): the live image draft store.
       // Production paths never read it.
       draftImageStoreForTest: draftImages,

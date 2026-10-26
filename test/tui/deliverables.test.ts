@@ -5,6 +5,8 @@ import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
+import { DeliveredFilesComponent } from '../../src/tui/components/transcript-leaves.ts'
+import { deliveredFilesCapabilityStub } from '../support/delivered-files.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -314,7 +316,8 @@ test('turn-end delivery attachment invalidates the live assistant component', as
   app.setTranscript(folder.messages(), folder.turnActivities())
   const after = await viewport(vt)
   assert.ok(after.includes('Delivered files · 1'), after)
-  assert.ok(after.includes('out/report.md'), after)
+  assert.ok(after.includes('report.md'), after)
+  assert.ok(!after.includes('out/report.md'), `${after}\nthe tail shows the basename, never the declared path`)
   assert.ok(after.includes('Final report'), after)
   assert.deepEqual(folder.search('report').map(match => ({ id: match.id, turn: match.turn })), [
     { id: 0, turn: 1 },
@@ -350,10 +353,10 @@ test('Focus keeps the delivery tail on the final assistant message', async () =>
   app.setTranscriptDetailExpanded(true)
   const expanded = await viewport(vt)
   assert.ok(expanded.includes('five.txt'), expanded)
-  assert.ok(!expanded.includes('… +1'), expanded)
+  assert.ok(!expanded.includes('+1 more'), expanded)
 })
 
-test('delivered paths follow the current session workspace after a welcome update', async () => {
+test('the delivered tail paints basenames, never a raw Host path', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workspaceRoot: '/old' })
   app.start()
@@ -369,6 +372,7 @@ test('delivered paths follow the current session workspace after a welcome updat
   const view = await viewport(vt)
   assert.ok(view.includes('  a.txt'), view)
   assert.ok(!view.includes('/new/a.txt'), view)
+  assert.ok(!view.includes('/old/a.txt'), view)
 })
 
 test('delivery tails reflow without visual overflow at supported widths', async () => {
@@ -393,6 +397,94 @@ test('delivery tails reflow without visual overflow at supported widths', async 
     assert.ok(view.includes('Delivered files · 2'), view)
     for (const line of view.split('\n')) {
       assert.ok(visibleWidth(stripTerminalSequences(line)) <= columns, `${columns}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+test('the delivered tail keeps a constant row budget for 1..200 files', async () => {
+  const delivery = (count: number): { path: string; description?: string }[] =>
+    Array.from({ length: count }, (_, index) => ({ path: `/ws/file-${index + 1}.md`, description: `file ${index + 1}` }))
+  // A MOUNTED PiTui surface: the `/deliverables` entry exists (the component
+  // itself never assumes it).
+  const tail = (count: number, width: number, options: { pointerActions?: boolean } = {}): string[] =>
+    new DeliveredFilesComponent(delivery(count), false, { commandEntry: true, ...options })
+      .render(width)
+      .map(row => stripTerminalSequences(row))
+
+  // N=1..4: every file, no extra marker, and the minimal browse entry.
+  assert.equal(tail(1, 100).filter(row => row.includes('file-1.md')).length, 1)
+  for (const count of [1, 4]) {
+    const rows = tail(count, 100)
+    assert.ok(!rows.some(row => row.includes('more')), `N=${count} paints no +N marker:\n${rows.join('\n')}`)
+    assert.ok(rows[0]!.includes('/deliverables'), `N=${count} keeps the browse entry:\n${rows[0]}`)
+  }
+  // N=5 and N=200 cost the SAME number of rows: title + 4 files + one marker.
+  const five = tail(5, 100)
+  const twoHundred = tail(200, 100)
+  assert.equal(five.length, twoHundred.length, 'a large delivery never grows the transcript tail')
+  assert.equal(five.length, 6)
+  assert.ok(five.some(row => row.includes('+1 more')), five.join('\n'))
+  assert.ok(twoHundred.some(row => row.includes('+196 more')), twoHundred.join('\n'))
+  assert.ok(!twoHundred.some(row => row.includes('file-5.md')), 'only the first four are painted')
+  assert.ok(twoHundred[5]!.includes('/deliverables'), 'the tail row names the command')
+
+  // An EXPANDED tail is the explicit user request: it re-renders every file.
+  assert.equal(new DeliveredFilesComponent(delivery(5), true, { commandEntry: true }).render(100).length, 6)
+
+  // Fullscreen Full paints the real pointer verbs; a regular surface does not.
+  const pointer = tail(5, 100, { pointerActions: true })
+  assert.ok(pointer[0]!.includes('Browse all'), pointer.join('\n'))
+  assert.ok(pointer.some(row => row.includes('Details')), 'the per-file verb is painted')
+  assert.ok(pointer.some(row => row.includes('+196 more') === false))
+  assert.ok(!tail(5, 100).some(row => row.includes('Details')), 'a mouse-less surface paints no dead verb')
+
+  // The mounted PiTui transcript shows the same 4+1 shape for a 200-file turn.
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'final', deliverables: delivery(200) }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('+196 more · /deliverables'), `the mounted tail stays capped:\n${view}`)
+  assert.ok(!view.includes('file-5.md'), 'the fifth file is not painted')
+})
+
+test('the delivered tail stays inside 40/72/100/140 columns', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [
+      { path: '/ws/docs/a-rather-long-delivery-name.md', description: '一个很长的描述 with a long tail description' },
+      { path: '/ws/output/client-server-migration.md', description: '迁移 🧪 说明' },
+      { path: '/ws/c.md' },
+      { path: '/ws/d.md' },
+      { path: '/ws/e.md' },
+    ],
+  }])
+  for (const columns of [40, 72, 100, 140]) {
+    vt.resize(columns, 40)
+    const view = await viewport(vt)
+    assert.ok(view.includes('Delivered files · 5'), `${columns}: title present`)
+    assert.ok(view.includes('/deliverables'), `${columns}: the entry stays discoverable`)
+    for (const line of view.split('\n')) {
+      assert.ok(visibleWidth(stripTerminalSequences(line)) <= columns, `${columns}: ${JSON.stringify(line)}`)
+    }
+    // The narrow layout drops the description and the per-file verb.
+    if (columns === 40) {
+      assert.ok(!view.includes('一个很长的描述'), '40 columns keeps filenames only')
+      assert.ok(!view.includes('Details'), '40 columns paints no pointer verb')
+    }
+    if (columns >= 100) {
+      assert.ok(view.includes('一个很长的描述'), `${columns}: the description is visible when it fits`)
     }
   }
 })

@@ -89,6 +89,7 @@ function stubRunner(
   return {
     ctx,
     app,
+    deliveredFilesSnapshot: () => undefined,
     diag,
     ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1, catalog.skills),
     // The scoped collision baseline must read the FAKE registry (which

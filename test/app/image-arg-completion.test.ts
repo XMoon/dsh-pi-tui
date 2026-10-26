@@ -73,6 +73,7 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
   writeFileSync(join(root, 'subdir', 'deep.png'), 'x')
   const store = new DraftImageStore()
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

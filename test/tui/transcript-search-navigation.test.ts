@@ -12,6 +12,7 @@ import { MessageId, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
+import { deliveredFilesCapabilityStub } from '../support/delivered-files.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { assistantVisualPresentation, setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
@@ -23,7 +24,9 @@ afterEach(() => {
 
 function startApp(width = 100, height = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, height)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
   app.start()
   startedApps.add(app)
   return { vt, app }
@@ -807,14 +810,14 @@ test('navigation: tool args and result anchor rows are visually distinct without
   app.stop()
 })
 
-test('navigation: a wrapped deliverable description never strong-highlights a renumbered occurrence', async () => {
+test('navigation: a deliverable description truncated on its row never strong-highlights a substituted occurrence', async () => {
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
-  // The filler pushes `alpha` to the END of line 1, so `alpha beta` SPANS the
-  // wrap and a second `alpha beta` sits on line 2. Wrapping can drop a raw
-  // occurrence from the rendered corpus, so a surviving match must never be
-  // renumbered as sourceOccurrence 0 and strong-highlighted.
-  const description = `${'x'.repeat(84)} alpha beta alpha beta`
+  // The description never wraps (one file = one row), so a match beyond the
+  // truncated display is not rendered at all. The row is still anchored to the
+  // RAW description region; it must never paint a guessed strong occurrence at
+  // a cell the renderer did not derive.
+  const description = `${'x'.repeat(120)} alpha beta alpha beta`
   const folder = new TranscriptFolder()
   folder.hydrate([
     event('turn/start', { turn: 1 }, 0),
@@ -835,21 +838,21 @@ test('navigation: a wrapped deliverable description never strong-highlights a re
   app.setTranscript([card], folder.turnActivities())
   app.setTranscriptSearchTarget({ query: 'alpha beta', match, message: card })
   const lines = await viewport(vt)
-  const line1 = lines.findIndex(line => line.includes('xxxx') && line.includes('alpha'))
-  const line2 = lines.findIndex(line => line.includes('alpha') && line.includes('beta') && !line.includes('xxxx'))
-  assert.ok(line1 >= 0 && line2 >= 0, `wrapped description must render:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, line1, lines[line1]!.indexOf('alpha')), 'line 1 must not be a guessed strong occurrence')
-  assert.ok(!isStrongCell(vt, line2, lines[line2]!.indexOf('beta')), 'line 2 must not be renumbered as the current occurrence')
+  const row = lines.findIndex(line => line.includes('report.md') && line.includes('xxx'))
+  assert.ok(row >= 0, `the truncated description renders on the file row:\n${lines.join('\n')}`)
+  assert.ok(!lines[row]!.includes('alpha'), `the match is beyond the truncation, not rendered:\n${lines[row]}`)
+  for (let col = 0; col < 90; col += 1) {
+    assert.ok(!isStrongCell(vt, row, col), `no guessed strong cell at column ${col}`)
+  }
   app.stop()
 })
 
-test('navigation: a hard-wrapped description token never strong-highlights a surviving occurrence', async () => {
+test('navigation: a truncated description keeps its full RAW source in the search corpus', async () => {
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
-  // A long no-space token is hard-broken by the wrapper, so a query spanning
-  // the break (`ghij`) disappears from the rendered corpus while a later
-  // `ghij` survives — it must NOT be renumbered as sourceOccurrence 0.
-  const description = `${'abcdefghij'.repeat(12)}ijklmnop needle ghij`
+  // The display is a truncation, never the search corpus: a token the row cut
+  // away is still found by the fold's own search projection (M3 contract).
+  const description = `${'abcdefghij'.repeat(12)} needle-ghij tail`
   const folder = new TranscriptFolder()
   folder.hydrate([
     event('turn/start', { turn: 1 }, 0),
@@ -861,18 +864,18 @@ test('navigation: a hard-wrapped description token never strong-highlights a sur
     }, 2),
     event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
   ])
-  const match = folder.search('ghij')[0]!
+  const match = folder.search('needle-ghij')[0]!
   assert.deepEqual(match.source, { kind: 'assistant-deliverable', index: 0, field: 'description' })
 
   const { vt, app } = startApp()
   app.setFullscreen(true)
   const card = folder.messages()[0]!
   app.setTranscript([card], folder.turnActivities())
-  app.setTranscriptSearchTarget({ query: 'ghij', match, message: card })
+  app.setTranscriptSearchTarget({ query: 'needle-ghij', match, message: card })
   const lines = await viewport(vt)
-  const surviving = lines.findIndex(line => line.includes('ghij'))
-  assert.ok(surviving >= 0, `the surviving occurrence must render:\n${lines.join('\n')}`)
-  assert.ok(!isStrongCell(vt, surviving, lines[surviving]!.indexOf('ghij')), 'a surviving hard-wrap match must not be the current occurrence')
+  const row = lines.findIndex(line => line.includes('report.md') && line.includes('abcdefghij'))
+  assert.ok(row >= 0, `the truncated description renders:\n${lines.join('\n')}`)
+  assert.ok(!lines[row]!.includes('needle-ghij'), `the row cuts the token away:\n${lines[row]}`)
   app.stop()
 })
 
