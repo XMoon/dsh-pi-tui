@@ -150,7 +150,7 @@ async function mount(
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session, 'the scripted pane must connect through the shipped SDK')
   const fatals: unknown[] = []
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit() {},
     onFatal: (error) => { fatals.push(error) },
   })

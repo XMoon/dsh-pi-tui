@@ -306,7 +306,7 @@ async function mountTspHarness(options: {
   let mountedRenderer: TspRenderer | undefined
   const renderer: SurfaceRendererMount = {
     mount: (binding) => {
-      mountedRenderer = mountTspRenderer(session, {
+      mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false,
         requestExit: () => {
           exitCount += 1
           options.requestExit?.()
@@ -710,7 +710,7 @@ test('A-11: a real SDK iterator failure routes the SAME error to the FATAL inten
   let fatal: unknown
   let fatalCount = 0
   let exits = 0
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit: () => { exits += 1 },
     onFatal: error => { fatal = error; fatalCount += 1 },
   })
@@ -745,7 +745,7 @@ test('non-key SDK events reach no business action while no modal seat is up', as
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   const calls = { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 }
-  const renderer = mountTspRenderer(session, { requestExit: () => { calls.exits += 1 } })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => { calls.exits += 1 } })
   try {
     renderer.bindInput({
       exit: () => { calls.exits += 1 },
@@ -817,7 +817,7 @@ async function mountDiagnosed(tern: ScriptedTern) {
   const notifications: string[] = []
   const business = { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 }
   const fatals: unknown[] = []
-  const renderer = mountTspRenderer(await openSession(tern), {
+  const renderer = mountTspRenderer(await openSession(tern), { copyVisual: async () => false,
     requestExit: () => { business.exits += 1 },
     onFatal: error => { fatals.push(error) },
     logError: (message, fields) => { diagnostics.push({ message, fields }) },
@@ -1014,7 +1014,7 @@ test('A-12: a rejected mount closes the connected SDK session once (no leaked tt
   try {
     const { connectTspRenderer } = await import('../../src/tui/tsp/session.ts')
     await assert.rejects(
-      connectTspRenderer({ requestExit: () => {}, connect: async () => session, connectTimeout: 50 }),
+      connectTspRenderer({ copyVisual: async () => false, requestExit: () => {}, connect: async () => session, connectTimeout: 50 }),
       /open exploded/,
     )
     // R2-3 ownership: the CONNECTOR is the one owner that connected the session,
@@ -1040,6 +1040,7 @@ test('A-12c: a secondary tty-restoration failure never replaces the primary moun
     const { connectTspRenderer } = await import('../../src/tui/tsp/session.ts')
     await assert.rejects(
       connectTspRenderer({
+        copyVisual: async () => false,
         requestExit: () => {},
         connect: async () => session,
         connectTimeout: 50,
@@ -1062,7 +1063,7 @@ test('A-12c: a secondary tty-restoration failure never replaces the primary moun
 test('A-12d: a mounted teardown preserves BOTH close failures (never truncates the first)', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
-  const renderer = mountTspRenderer(session, { requestExit: () => {}, onFatal: () => {} })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {}, onFatal: () => {} })
   await settle()
   const sdkSurface = session.surface('s1')
   assert.ok(sdkSurface !== undefined, 'the mounted renderer owns surface s1')
@@ -1102,7 +1103,7 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
   const mount = await selectRendererMount({
     log: () => {},
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
-    connectTsp: productionTspConnector({
+    connectTsp: productionTspConnector({ copyVisual: async () => false,
       cwd: '/tmp', requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
       connect: async () => session,
     }),

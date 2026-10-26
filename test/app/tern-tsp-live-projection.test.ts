@@ -1512,7 +1512,7 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
   let mountedRenderer: TspRenderer | undefined
   const renderer: SurfaceRendererMount = {
     mount: (binding) => {
-      mountedRenderer = mountTspRenderer(session, { requestExit: () => {} })
+      mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
       // PR-C: the mount hands the renderer the ONE image binding of this
       // surface — the fake mount installs it, it never fakes success.
       mountedRenderer.bindImages(binding)

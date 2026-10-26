@@ -2670,6 +2670,10 @@ export function applyRunnerWithRuntime(
           // Direct/Remote locality is the bridge's own (a Direct lookup of
           // the scoped registry, a Remote derivation from the raw args).
           toolPresenter: present,
+          // PR3: the ONE Client-local clipboard callback for a published
+          // visual's authoritative payload. Clipboard policy stays in
+          // ClientActions; the renderer only forwards the exact payload.
+          copyVisual: text => clientActions.copySelection(text),
         }),
         env: process.env,
       })

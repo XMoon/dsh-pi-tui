@@ -56,7 +56,7 @@ test('production /model: a pane with the picker but without the Reader kinds sti
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
-  const renderer = mountTspRenderer(session, { requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
   renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   assert.equal(renderer.modelPresentation, undefined, 'the native model UI fails closed')
@@ -377,7 +377,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit() {},
     onFatal: (e) => assert.fail(String(e)),
   })
@@ -1014,7 +1014,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
-  const renderer = mountTspRenderer(session, { requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
   renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   assert.ok(renderer.modelPresentation)

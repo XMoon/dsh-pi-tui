@@ -151,7 +151,7 @@ async function mounted(
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit() {},
     onFatal: (error) => assert.fail(String(error)),
   })
@@ -1060,7 +1060,7 @@ test('native Preset: a pane missing ANY required kind (individually) or the scro
     t.after(() => pane.restore())
     const session = await connect({ timeout: 500, exitHooks: false })
     assert.ok(session)
-    const renderer = mountTspRenderer(session, { requestExit() {}, onFatal: () => {} })
+    const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: () => {} })
     t.after(() => renderer.dispose())
     assert.equal(renderer.presetPresentation, undefined, `${entry.name}: fail closed before any handler runs`)
   }
@@ -1069,7 +1069,7 @@ test('native Preset: a pane missing ANY required kind (individually) or the scro
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
-  const renderer = mountTspRenderer(session, { requestExit() {}, onFatal: () => {} })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: () => {} })
   t.after(() => renderer.dispose())
   assert.ok(renderer.presetPresentation, 'a pane with every kind and the scroll feature presents the layer')
   // Owner A4 amendment: NO stylesheet is used anywhere on this layer.

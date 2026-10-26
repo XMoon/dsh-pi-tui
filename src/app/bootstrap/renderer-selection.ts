@@ -113,6 +113,13 @@ export interface ProductionTspConnectorDeps {
    * the tool's own registered view. It changes no displayed string.
    */
   readonly toolPresenter?: import('../../tui/transcript/tool-presentation.ts').ToolPresenter
+  /**
+   * PR3: the ONE Client-local clipboard callback for a published visual's
+   * authoritative payload. The composition root injects the EXISTING
+   * `ClientActions.copySelection`; this connector forwards it unchanged to the
+   * renderer, which owns no clipboard policy of its own.
+   */
+  readonly copyVisual: (text: string) => Promise<boolean>
 }
 
 /** The PRODUCTION connector: lazy import + the official SDK connect. */

@@ -230,7 +230,7 @@ async function mountHarness(options: {
     return await options.read(ref, scope)
   })
   const fatalErrors: unknown[] = []
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit: () => {},
     onFatal: (error) => { fatalErrors.push(error) },
   })
@@ -981,22 +981,35 @@ test('a recalled draft staged through the COMPOSER ALONE is read and painted (no
 
 // ── T3: the short-window stylesheet on the real SDK wire ────────────────────
 
-test('a pane with `styles` installs the ONE preview sheet before the first frame', async () => {
+test('a pane with `styles` installs the scoped preview and visual-copy sheets before the first frame', async () => {
   const harness = await mountHarness()
   const sheets = harness.tern.sheets()
 
-  assert.equal(sheets.length, 1, 'exactly ONE sheet, installed once')
-  assert.equal(sheets[0]?.name, 'dsh-draft-preview', 'the sheet name carries no dot')
-  const css = String(sheets[0]?.css ?? '')
+  // TWO scope-local sheets, each installed once: the draft-preview short-window
+  // rule and the published-visual Copy control's theme-following presentation.
+  assert.equal(sheets.length, 2, 'the two scope-local sheets, installed once each')
+  const previewSheet = sheets.find(sheet => sheet.name === 'dsh-draft-preview')
+  assert.ok(previewSheet !== undefined, 'the draft-preview sheet was installed')
+  const css = String(previewSheet.css ?? '')
   assert.match(css, /@media \(max-height: 640px\)/u, 'the rule keys on the WINDOW height breakpoint')
   assert.match(css, /\[data-role="dsh\.draft-preview"\]\s*\{\s*display:\s*none;?\s*\}/u,
-    'the selector targets only the preview row role')
+    'the selector targets only the preview role')
   assert.equal(css.includes('.sf-dock'), false, 'no high-risk global dock selector')
-  // The sheet must precede the first frame: it is installed at mount.
-  const sheetIndex = harness.tern.events.findIndex(event => event.kind === 'sheet')
+  const visualSheet = sheets.find(sheet => sheet.name === 'dsh-visual-copy')
+  assert.ok(visualSheet !== undefined, 'the visual-copy sheet was installed')
+  const visualCss = String(visualSheet.css ?? '')
+  assert.match(visualCss,
+    /\[data-role="dsh\.visual\.figure"\] \[data-role="dsh\.visual\.copy"\]\s*\{/u,
+    'the Copy rule is scoped under the figure role')
+  assert.match(visualCss, /var\(--accent\)/u, 'the control follows the client theme variables')
+  assert.match(visualCss, /:hover/u, 'the control has a hover state')
+  assert.equal(visualCss.includes('.sf-dock'), false, 'no high-risk global dock selector')
+  // The sheets must precede the first frame: they are installed at mount.
+  const firstSheet = harness.tern.events.findIndex(event => event.kind === 'sheet')
+  const lastSheet = harness.tern.events.map(event => event.kind).lastIndexOf('sheet')
   const firstFrame = harness.tern.events.findIndex(event => event.kind === 'frame')
-  assert.equal(sheetIndex >= 0 && firstFrame > sheetIndex, true,
-    'the sheet is on the wire before the first frame that relies on it')
+  assert.equal(firstSheet >= 0 && firstFrame > lastSheet, true,
+    'both sheets are on the wire before the first frame that relies on them')
   await harness.dispose()
 })
 

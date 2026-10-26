@@ -141,7 +141,7 @@ async function mountHarness(): Promise<Harness> {
       pane.restore()
     },
   }
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit: () => { exits.push(1) },
     onFatal: error => { fatals.push(error) },
   })

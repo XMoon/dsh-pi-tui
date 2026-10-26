@@ -92,7 +92,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session, 'the scripted pane must connect through the shipped SDK')
   const fatals: unknown[] = []
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit() {},
     onFatal: (error) => { fatals.push(error) },
   })
@@ -796,7 +796,7 @@ test('capability negotiation fails closed without required Browser kinds or scro
     try {
       const session = await connect({ timeout: 500, exitHooks: false })
       assert.ok(session)
-      renderer = mountTspRenderer(session, { requestExit() {}, onFatal: (error) => assert.fail(String(error)) })
+      renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (error) => assert.fail(String(error)) })
       assert.equal(renderer.sessionBrowserPresentation, undefined, entry.name)
       assert.equal(pane.frames().flatMap((frame) => frame.ops).filter((op) => op[0] === 'scroll').length, 0)
     } finally {

@@ -119,7 +119,7 @@ async function mountPane(
   }
   const session = await sdkConnect({ env: {}, input, output, exitHooks: false, timeout: 500 })
   assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
-  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
   if (options.bind !== false) {
     renderer.bindInput({
       exit: () => { options.onExit?.() },

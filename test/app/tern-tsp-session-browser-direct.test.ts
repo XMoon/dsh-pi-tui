@@ -56,7 +56,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
 
     const session = await connect({ timeout: 500, exitHooks: false })
     assert.ok(session)
-    renderer = mountTspRenderer(session, { requestExit() {}, onFatal: (error) => assert.fail(String(error)) })
+    renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (error) => assert.fail(String(error)) })
     renderer.bindInput({
       exit() {},
       cancel() {},
@@ -169,7 +169,7 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
     pane = browserPane
     const session = await connect({ timeout: 500, exitHooks: false })
     assert.ok(session)
-    renderer = mountTspRenderer(session, { requestExit() {}, onFatal: (error) => assert.fail(String(error)) })
+    renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (error) => assert.fail(String(error)) })
     renderer.bindInput({
       exit() {},
       cancel() {},

@@ -177,7 +177,7 @@ async function selectRenderer(options: {
   readonly onLogError?: (message: string, fields?: Record<string, unknown>) => void
 }): Promise<SurfaceRendererMount | undefined> {
   const { selectRendererMount, productionTspConnector } = await import('../../src/app/bootstrap/renderer-selection.ts')
-  const production = productionTspConnector({
+  const production = productionTspConnector({ copyVisual: async () => false,
     cwd: '/tmp',
     requestExit: options.requestExit ?? ((): void => {}),
     onFatal: options.onFatal ?? ((): void => {}),

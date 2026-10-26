@@ -411,7 +411,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
   let userInputs = 0
   let cancelCount = 0
   let pasteMediaCalls = 0
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit: () => { exitCount += 1 },
   })
   // The SurfaceRuntime.start commit point binds the input projection (the
@@ -533,7 +533,7 @@ test('one accepted edit calls Surface.render exactly ONCE (no double render)', a
     }
     return surface
   }
-  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
   renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   await settle()
   const baseline = renderCalls
@@ -585,7 +585,7 @@ test('a bound Enter submits the snapshot and clears the composer BEFORE the call
   const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
   assert.ok(session !== null)
   const submissions: Array<{ text: string; request: string; draftAtCallback: string }> = []
-  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
   renderer.bindInput({
     exit: () => {},
     cancel: () => {},
@@ -626,7 +626,7 @@ test('a PRE-BIND Enter is held and submits at the bind, never before it', async 
   const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
   assert.ok(session !== null)
   const heldSubmits: string[] = []
-  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
   try {
     tern.input.type('draft text\r')
     await settle()
@@ -775,7 +775,7 @@ test('the bound exit handler routes the composer exit gesture', async () => {
   let rendererExits = 0
   let boundExits = 0
   let boundCancels = 0
-  const renderer = mountTspRenderer(session, { requestExit: () => { rendererExits += 1 } })
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => { rendererExits += 1 } })
   renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   await settle()
   try {
