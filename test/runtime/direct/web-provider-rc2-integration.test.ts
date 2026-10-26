@@ -350,6 +350,17 @@ function toolResultOf(agent: Agent, callId: string): string | undefined {
 
 const KEY = { down: '\x1b[B', home: '\x1b[H', enter: '\r', esc: '\x1b', clearLine: '\x15' } as const
 
+/**
+ * The app fixture's SHARED RENDER WAIT: it flushes the app's own event-loop
+ * rounds and then awaits the throttled frame. It is not a time window — the
+ * policy explicitly exempts a shared render wait — hence one stated reason
+ * here instead of one per keypress.
+ */
+async function renderFrames(app: S4D3Application): Promise<void> {
+  // Bounded render quiescence: the app exposes no settlement promise between a key and its frame.
+  await app.settle()
+}
+
 /** The optional extra fields the real UI flow confirms (all DEFAULT off, so the
  *  original tool test keeps its own settings). */
 interface WebTuiWrites {
@@ -372,19 +383,19 @@ async function writeWebSettingsThroughTui(
   writes: WebTuiWrites = {},
 ): Promise<void> {
   for (const character of '/settings') app.vt.sendInput(character)
-  await app.settle()
+  await renderFrames(app)
   app.vt.sendInput(KEY.enter)
-  await app.settle()
+  await renderFrames(app)
   if (app.view().includes('❯ /settings')) {
     app.vt.sendInput(KEY.enter)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
   // The workspace home is About: walk the rail to Tools, then its Rows level.
   await selectSettingsCategory(app.vt, 'Tools')
   for (const key of [KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
     'the real Web Search / Fetch page')
@@ -392,14 +403,14 @@ async function writeWebSettingsThroughTui(
   // is the ONE explicit confirm. The painted Verified proves the read-back.
   for (const key of [KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Current: DeepSeek Search API') && app.view().includes('Verified'),
     'the verified search provider write')
   // Back to the list, then row 3 (Search API Result Count): 10 -> 20.
   for (const key of [KEY.esc, KEY.home, KEY.down, KEY.down, KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Current: 20') && app.view().includes('Verified'),
     'the verified count write')
@@ -408,14 +419,14 @@ async function writeWebSettingsThroughTui(
   const listTop = async (): Promise<void> => {
     for (const key of [KEY.esc, KEY.home]) {
       app.vt.sendInput(key)
-      await app.settle()
+      await renderFrames(app)
     }
   }
   /** Home + Down*index + Enter: open one frozen row's Detail. */
   const openRow = async (index: number): Promise<void> => {
     for (let step = 0; step < index; step += 1) app.vt.sendInput(KEY.down)
     app.vt.sendInput(KEY.enter)
-    await app.settle()
+    await renderFrames(app)
   }
 
   if (writes.oriOff === true) {
@@ -423,7 +434,7 @@ async function writeWebSettingsThroughTui(
     await openRow(3) // Share Original Question
     app.vt.sendInput(KEY.down) // on -> off
     app.vt.sendInput(KEY.enter)
-    await app.settle()
+    await renderFrames(app)
     await app.waitFor(() => app.view().includes('Current: off') && app.view().includes('Verified'),
       'the verified Share Original Question off write')
   }
@@ -432,29 +443,29 @@ async function writeWebSettingsThroughTui(
     await openRow(1) // Web Fetch Provider
     app.vt.sendInput(KEY.down) // HTTP -> DeepSeek Fetch API
     app.vt.sendInput(KEY.enter)
-    await app.settle()
+    await renderFrames(app)
     await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Verified'),
       'the verified fetch provider write')
   }
   if (writes.endpoint !== undefined) {
     await listTop()
     await openRow(4) // the endpoint row opens its editor on Enter
-    await app.settle()
+    await renderFrames(app)
     app.vt.sendInput(KEY.clearLine) // replace the seeded draft
     for (const character of writes.endpoint) app.vt.sendInput(character)
-    await app.settle()
+    await renderFrames(app)
     app.vt.sendInput(KEY.enter)
-    await app.settle()
+    await renderFrames(app)
     await app.waitFor(() => app.view().includes(`Current: ${writes.endpoint}`) && app.view().includes('Verified'),
       'the verified endpoint write')
   }
   app.vt.sendInput(KEY.esc) // Detail/editor -> list
-  await app.settle()
+  await renderFrames(app)
   // A pending authoritative reload may swallow a close gesture; Esc is
   // idempotent, so close until the workspace really leaves the frame.
   for (let attempt = 0; attempt < 6 && app.view().includes('Settings ·'); attempt += 1) {
     app.vt.sendInput(KEY.esc)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => !app.view().includes('Settings ·'), 'the Settings workspace closes')
 }
@@ -463,24 +474,24 @@ async function writeWebSettingsThroughTui(
  *  (Home + five Downs inside the page list). */
 async function openWebCredentialRowInApp(app: S4D3Application): Promise<void> {
   for (const character of '/settings') app.vt.sendInput(character)
-  await app.settle()
+  await renderFrames(app)
   app.vt.sendInput(KEY.enter)
-  await app.settle()
+  await renderFrames(app)
   if (app.view().includes('❯ /settings')) {
     app.vt.sendInput(KEY.enter)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
   await selectSettingsCategory(app.vt, 'Tools')
   for (const key of [KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
     'the Web Search / Fetch page')
   for (const key of [KEY.home, KEY.down, KEY.down, KEY.down, KEY.down, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Reference: DEEPSEEK_API_KEY'),
     'the Web credential row Detail')
@@ -490,7 +501,7 @@ async function openWebCredentialRowInApp(app: S4D3Application): Promise<void> {
 async function closeSettingsInApp(app: S4D3Application): Promise<void> {
   for (let attempt = 0; attempt < 8 && app.view().includes('Settings ·'); attempt += 1) {
     app.vt.sendInput(KEY.esc)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => !app.view().includes('Settings ·'), 'the Settings workspace closes')
 }
@@ -635,18 +646,18 @@ test('the Web credential deeplink completes a real store set and clear and the p
   //    official credential store.
   await openWebCredentialRowInApp(app)
   app.vt.sendInput(KEY.enter) // Configure in Models…
-  await app.settle()
+  await renderFrames(app)
   await app.waitFor(() => app.view().includes('Settings · Models') && app.view().includes('API Key Reference'),
     'the Models reference page')
   app.vt.sendInput(KEY.enter) // open the masked key prompt
-  await app.settle()
+  await renderFrames(app)
   await app.waitFor(() => /Enter the API key/u.test(app.view()), 'the masked key prompt')
   for (const character of 'r4-store-key') app.vt.sendInput(character)
-  await app.settle()
+  await renderFrames(app)
   app.vt.sendInput(KEY.enter)
-  await app.settle()
+  await renderFrames(app)
   app.vt.sendInput(KEY.enter)
-  await app.settle()
+  await renderFrames(app)
   await app.waitFor(() => app.view().includes('Verified'), 'the verified credential set')
   assert.doesNotMatch(app.view(), /r4-store-key/u, 'the secret is never rendered back')
   const afterSet = await config.read()
@@ -683,11 +694,11 @@ test('the Web credential deeplink completes a real store set and clear and the p
   assert.match(app.view(), /State: Configured/u)
   app.vt.sendInput(KEY.down) // Configure -> the enabled Clear in Models…
   app.vt.sendInput(KEY.enter)
-  await app.settle()
+  await renderFrames(app)
   await app.waitFor(() => app.view().includes('Settings · Models') && /Clear credential/u.test(app.view()),
     'the Models clear confirmation')
   app.vt.sendInput(KEY.enter) // the ONE explicit clear confirmation
-  await app.settle()
+  await renderFrames(app)
   await app.waitFor(() => /cleared/u.test(app.view()), 'the confirmed clear result')
   const afterClear = await config.read()
   assert.equal(afterClear?.credential.configured, false, 'the REAL credential store reports the reference cleared')
@@ -700,10 +711,10 @@ test('the Web credential deeplink completes a real store set and clear and the p
   //    silently falling back to the anonymous HTTP provider.
   const requestsBeforeFetch = transport.requests.length
   app.vt.sendInput(KEY.esc) // credential Detail -> page list
-  await app.settle()
+  await renderFrames(app)
   for (const key of [KEY.home, KEY.down, KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
-    await app.settle()
+    await renderFrames(app)
   }
   await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Verified'),
     'the verified DeepSeek Fetch API write')
