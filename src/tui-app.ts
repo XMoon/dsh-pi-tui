@@ -2615,6 +2615,10 @@ type TranscriptVisualHit = {
     readonly endCol: number
   }>
   readonly thumbnailBody?: {
+    /** FIGURE-relative half-open row range of the REAL pixels: the entry row of
+     *  `startRow` is `top + startRow`. Never compare these against an entry row
+     *  directly — that mix made a figure's own title/description rows the pixel
+     *  band and left the painted pixels inert. */
     readonly startRow: number
     readonly endRow: number
     /** Entry-relative first/last+1 column of the REAL pixels (the Assistant
@@ -12787,7 +12791,13 @@ export class TuiApp {
           continue
         }
         const body = hit.thumbnailBody
-        if (body !== undefined && row >= body.startRow && row < body.endRow) {
+        // `thumbnailBody.startRow/endRow` are FIGURE-relative; `row` is the
+        // entry-relative row this loop walks (exactly like `hit.top + action.row`
+        // above). Comparing them unrebased lifted the pixel band onto the
+        // figure's own title/description rows and left the real pixels inert.
+        if (body !== undefined
+          && row >= hit.top + body.startRow
+          && row < hit.top + body.endRow) {
           rows.push({
             row,
             kind: 'body',
@@ -12875,7 +12885,9 @@ export class TuiApp {
         }
       }
       const body = hit.thumbnailBody
-      if (body !== undefined && inMessage >= body.startRow && inMessage < body.endRow) {
+      // `row` is already figure-relative (the same coordinate the action verbs
+      // compare against); the body rows are figure-relative too.
+      if (body !== undefined && row >= body.startRow && row < body.endRow) {
         const span = { startCol: body.startCol, endCol: body.endCol }
         return span.endCol > span.startCol && x >= span.startCol && x < span.endCol
           ? { hitId: `visual:view:${token}:${hit.handle.ref}`, kind: 'view', handle: hit.handle, span }
