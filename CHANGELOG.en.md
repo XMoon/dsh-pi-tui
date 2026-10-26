@@ -39,11 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both pages also accepts `←` as the back verb: the Footer row selector and the Keyboard
   list with an empty query return to their source Settings row exactly like `Esc`, and the
   bar says `← Back`; a dirty Footer asks Save/Discard/Keep first, `←` still switches zones
-  inside the row editor, and a non-empty search still keeps `←` for cursor movement. When only
-  the Action Bar fits, a page admits and advertises only the back verbs it really accepts (the
-  root keeps `← Back` and `Esc`; a sub-page keeps only `Esc`) and never hints at a search/save
-  it refuses. While a write is in flight no key leaves the page, and its result is painted
-  before navigation resumes.
+  inside the row editor, and a non-empty search still keeps `←` for cursor movement. Closing
+  either editor returns straight to the owning row's Rows list (no intermediate Detail panel),
+  so the next back key reaches the category rail. When only the Action Bar fits, a page admits
+  and advertises only the back verbs it really accepts (the root keeps `← Back` and `Esc`; a
+  sub-page keeps only `Esc`) and never hints at a search/save it refuses. While a write is in
+  flight no key leaves the page, and its result is painted before navigation resumes.
 
 
 - **The experimental TSP renderer now mixes published figures into the final answer and offers Copy on each of them.**

@@ -8,7 +8,8 @@ layout page inside the full-screen Settings workspace
 items, create your own text or command items, and place plugin-provided items
 without editing YAML by hand. The page shares the Settings lease and its ONE
 physical Action Bar; `Esc` or `←` on the row selector returns to the Appearance
-row rather than opening a second overlay.
+**Rows** list (the next back key reaches the category rail) rather than opening
+a second overlay.
 
 This guide covers the user-facing Footer surface. Plugin authors should also
 read [Extension API v2](../extensions/stable.md).

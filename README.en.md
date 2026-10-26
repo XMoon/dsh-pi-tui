@@ -429,7 +429,9 @@ while sessionless. `/footer` and its `/statusline` alias open the SAME full-scre
 workspace at Appearance → Configure footer layout; bare `/keybindings` likewise
 opens Input & Terminal → Keyboard shortcuts. Both pages share the one Settings
 lease, the one physical Action Bar and the existing Footer / Keybinding write
-authorities — no second overlay is mounted. On each page's root state (the
+authorities — no second overlay is mounted. Closing either editor returns
+straight to the owning row's Rows list (no intermediate Detail panel), so the
+next back key reaches the category rail. On each page's root state (the
 Footer row selector, the Keyboard list with an empty query) `←` goes back like
 `Esc` and the bar says `← Back`; a dirty Footer asks Save/Discard/Keep first,
 `←` still switches zones inside the row editor, and a non-empty search query

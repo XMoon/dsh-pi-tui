@@ -554,19 +554,23 @@ specialist-page contract below).
   `←` is the same back verb and the page bar advertises it as `← Back` — also
   when the grant is the single Action Bar row — while a sub-page or a
   non-empty query never advertises it. A dirty Footer turns it into the
-  Save/Discard/Keep guard, and every sub-page keeps its own meaning (`←` still
-  moves a Footer item between zones, and a non-empty Keybinding query still
-  moves the search cursor). A page that blocks USER navigation (dirty Footer
-  draft, in-flight save, non-empty query, action detail, recorder/leader,
-  pending mutation) refuses category changes, and a page whose current grant or
-  sub-view has not painted admits only the page's ROOT back verbs — the real
-  Esc, plus `←` while the page is on that same root state — never a hidden
-  save/open/search/list/leader/record control; the root's painted content box,
-  revision and child grant fence every pointer gesture. A pending Keybinding
-  mutation owns the page until its result is painted, so leaving can never
-  strand an invisible write. No second alt-screen, overlay, editor or settings
-  manager exists for these entries, and a deeplink that cannot take the lease or
-  build its page returns a real command error instead of opening an overlay.
+  Save/Discard/Keep guard. Closing either professional page returns to that
+  row's ROWS level — never to an intermediary Detail panel — so the very next
+  back key (Esc or `←`) reaches the category rail; the subagent allowlist and
+  Web Search / Fetch pages keep their own `Detail → row` ladder. Every
+  sub-page keeps its own meaning (`←` still moves a Footer item between zones,
+  and a non-empty Keybinding query still moves the search cursor). A page that
+  blocks USER navigation (dirty Footer draft, in-flight save, non-empty query,
+  action detail, recorder/leader, pending mutation) refuses category changes,
+  and a page whose current grant or sub-view has not painted admits only the
+  page's ROOT back verbs — the real Esc, plus `←` while the page is on that
+  same root state — never a hidden save/open/search/list/leader/record control;
+  the root's painted content box, revision and child grant fence every pointer
+  gesture. A pending Keybinding mutation owns the page until its result is
+  painted, so leaving can never strand an invisible write. No second
+  alt-screen, overlay, editor or settings manager exists for these entries, and
+  a deeplink that cannot take the lease or build its page returns a real command
+  error instead of opening an overlay.
 - An L2 choice is transient; only an explicit Confirm commits one field through
   its own authority path (the serialized TUI settings document, the Host
   `pi-tui-visual-tools` form section, or — for the two runtime-only disclosure

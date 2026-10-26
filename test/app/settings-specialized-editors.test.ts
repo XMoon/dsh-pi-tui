@@ -380,6 +380,57 @@ test('R5-L6-01b the Footer mode writer seeds a custom layout and persists the re
   h.app.stop()
 })
 
+/** Walk `/settings` to one professional editor through the REAL Rows list —
+ *  the user route that puts the root's focus on `detail` (a bare deeplink lands
+ *  on `rows` already, so it cannot witness the close-to-Rows fix). */
+async function openEditorFromRows(
+  h: Harness,
+  target: 'footer' | 'keybindings',
+): Promise<void> {
+  await h.invoke('settings')
+  await frames(h.vt)
+  const categoryStep = target === 'footer' ? 4 : 6
+  for (let step = 0; step < categoryStep; step += 1) await press(h.vt, '\x1b[B')
+  await press(h.vt, '\r') // the rail's Enter enters the Rows level
+  assert.match(h.view(), target === 'footer'
+    ? /Settings · Appearance · Rows/u
+    : /Settings · Input & Terminal · Rows/u, `the Rows level owns the keyboard:\n${h.view()}`)
+  const rowStep = target === 'footer' ? 3 : 6
+  for (let step = 0; step < rowStep; step += 1) await press(h.vt, '\x1b[B')
+  await press(h.vt, '\r') // Enter on the row mounts the page in this lease
+  assert.match(h.view(), target === 'footer'
+    ? /Settings · Appearance · Configure footer layout…/u
+    : /Settings · Input & Terminal · Keyboard shortcuts…/u, `the editor page is mounted:\n${h.view()}`)
+}
+
+for (const target of ['footer', 'keybindings'] as const) {
+  for (const back of ['\x1b', '\x1b[D'] as const) {
+    const label = back === '\x1b' ? 'Esc' : '←'
+    const rows = target === 'footer' ? 'Settings · Appearance · Rows' : 'Settings · Input & Terminal · Rows'
+    test(`R5-L6-02h ${label} closing the ${target} page opened from its Rows lands on Rows, then the rail`, async () => {
+      const h = setup({ fixture: createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] }) })
+      await openEditorFromRows(h, target)
+      const lease = (h.app as unknown as { workspaceLease?: object }).workspaceLease
+      assert.ok(lease !== undefined)
+      // ONE back key: the page closes AND the keyboard is on the Rows list the
+      // user came from — never on an intermediary Detail summary.
+      await press(h.vt, back)
+      assert.match(h.view(), new RegExp(rows, 'u'),
+        `one ${label} must land on the row list: \n${h.view()}`)
+      assert.doesNotMatch(h.view(), /\[Details\]/u, 'no Detail pane takes the keyboard on the way back')
+      assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease,
+        'the whole round trip never replaced the Settings lease')
+      // The NEXT back key reaches the category rail: the level really changed.
+      await press(h.vt, back)
+      assert.match(h.view(), /Settings · Categories/u,
+        `the next ${label} must reach the rail, not repeat the row level:\n${h.view()}`)
+      assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease)
+      h.app.dispose()
+      startedApps.delete(h.app)
+    })
+  }
+}
+
 test('R5-L6-02a ← is the back verb on the query-less Footer root page', async () => {
   const footerFixture = createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] })
   const footer = setup({ fixture: footerFixture })

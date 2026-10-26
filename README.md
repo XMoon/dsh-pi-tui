@@ -338,7 +338,8 @@ About 的复制入口只留在键盘上：选中一事实按 `c` 复制该事实
 时两者都不创建会话、不读统计。`/footer` 与它的别名 `/statusline` 直接打开同一个 Settings
 全屏工作区的 Appearance → Configure footer layout 页；裸 `/keybindings` 同样直接打开
 Input & Terminal → Keyboard shortcuts 页。两者共用唯一 Settings lease、唯一底栏和原有
-的 Footer / Keybinding 保存权威，不再打开第二个 overlay。在两个页面的根状态（Footer 行选择器、
+的 Footer / Keybinding 保存权威，不再打开第二个 overlay。关闭这两个编辑页会直接回到所属设置行的
+Rows 列表（不经过中间的 Detail 面板），下一次返回键即到分类栏。在两个页面的根状态（Footer 行选择器、
 键盘快捷键在搜索为空时的列表）按 `←` 与 `Esc` 一样返回来源设置行，底栏会显示 `← Back`；Footer
 有未保存修改时 `←` 先打开 Save/Discard/Keep 确认，进入行编辑器后 `←` 仍是切换左右分区，
 搜索框非空时 `←` 仍只移动光标。
