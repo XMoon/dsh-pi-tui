@@ -218,6 +218,7 @@ function fakeRunnerDeps(options: {
     }).applyPermissionPreset = options.applyPermissionPreset
   }
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: silentDiag,
@@ -359,6 +360,7 @@ function fakeRunnerDeps(options: {
       // Image UX PR3-B: the CommandSurface's live composer seam. This harness
       // mounts the real PiTui app, which is its own composer port.
       composer: () => app,
+      deliveredFilesSnapshot: () => undefined,
     },
     backend: {
       kind: options.remoteSource === undefined ? 'direct' : 'remote',

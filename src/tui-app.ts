@@ -130,6 +130,11 @@ import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
 import { ImageWorkspacePanel } from './tui/components/media/image-workspace.ts'
 import type { SvgViewerSource } from './tui/components/media/svg-viewer.ts'
 import type { ImageAttachmentRefLike } from './domain/media/types.ts'
+import type { DeliveredFilesCapability, DeliveredFilesSnapshot } from './domain/deliverables/catalog.ts'
+import {
+  DeliveredFilesPanel,
+  type DeliveredFilesOpenIntent,
+} from './tui/deliverables/delivered-files-panel.ts'
 import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
@@ -2085,6 +2090,17 @@ export interface TuiAppOptions {
    */
   readClipboardText?: () => Promise<string | undefined>
   /**
+   * Delivered files (Delivered files PR1): the narrow read capability behind
+   * the transcript tail and the `/deliverables` browser. `snapshot()` derives
+   * the CURRENT display subject's delivered Turns on demand; `isCurrent()`
+   * re-checks an already-captured snapshot against the live subject/projection.
+   *
+   * Optional: a headless/foreign renderer without it has NO operable owner for
+   * the capped tail, so the tail fails open (every file visible) instead of
+   * hiding files behind an entry nothing can execute.
+   */
+  deliveredFiles?: DeliveredFilesCapability
+  /**
    * The keyboard exit-confirmation window in ms (issue #8);
    * injectable so headless tests never wait the real 1.5s. The footer
    * hint's lifetime is EXACTLY this window — the two share one timer.
@@ -2393,6 +2409,12 @@ interface MessageComponentEntry {
    * hint resolves the EFFECTIVE key through the keymap (a remap updates
    * the copy; the identity field stays semantic). */
   expandHint: ExpandHint
+  /** The delivered-files SURFACE signature the tail was painted for
+   *  (`pointer`/`plain` × `command`/`none`). A regular→fullscreen switch (or a
+   *  preset switch, or a mount without the browser capability) changes which
+   *  actions the tail really paints, so the cache must rebuild even though the
+   *  message and the fold boundary are unchanged. */
+  deliverableSurface: string
   /** The keymap revision the fold-hint string was rendered at: the
    * RENDERED hint bakes the EFFECTIVE key, so a keymap rebuild (user
    * remap, safe-mode flip, plugin sync) must invalidate every cached
@@ -2496,6 +2518,10 @@ type TranscriptCellGesture = {
    * verb's painted cells or the thumbnail pixel body's placement width).
    * Press and release must resolve the SAME span. */
   visualSpan?: { startCol: number; endCol: number }
+  /** Delivered files PR1: the resolved column span of a delivered-files
+   * action cell (a per-file `Details` verb or the list `Browse all` verb).
+   * Press and release must resolve the SAME span. */
+  deliverableSpan?: { startCol: number; endCol: number }
 }
 
 /** The gesture hit id of the pinned viewer subject bar's `‹ back` affordance. */
@@ -2591,6 +2617,21 @@ type FullscreenVisualRowHit = {
   }>
 }
 
+/**
+ * The painted delivered-files action cells of one row (Delivered files PR1).
+ * A row listed here resolves through this descriptor: a cell outside every
+ * segment is `inert`, so the card's tail rows can never fall through to the
+ * Assistant disclosure ladder.
+ */
+type FullscreenDeliverableRowHit = {
+  readonly row: number
+  readonly segments: ReadonlyArray<{
+    readonly startCol: number
+    readonly endCol: number
+    readonly hitId: string
+  }>
+}
+
 /** The exact published-visual occurrence one mounted figure paints: the
  * Assistant row object, its ref and the EXACT publication object the sidecar
  * committed when the figure was built. */
@@ -2628,6 +2669,23 @@ type TranscriptVisualHit = {
   }
 }
 
+/**
+ * One painted delivered-files action cell of an Assistant card (Delivered
+ * files PR1): the message-relative row plus the EXACT painted columns of a
+ * per-file `Details` verb or of the list `Browse all` verb, with the stable
+ * hit identity the press/release fence compares. Only cells the component
+ * really painted exist here — the card never invents a target.
+ */
+type TranscriptDeliverableHit = {
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly action: 'browse' | 'details'
+  /** Index into the message's `deliverables` (details only). */
+  readonly fileIndex?: number
+  readonly hitId: string
+}
+
 /** One PAINTED transcript row of the committed fullscreen frame snapshot
  * (Image UX PR2 / PR2.5): the owner/height plus the row-level semantic
  * identities, the column-ranged image descriptors and the published-visual
@@ -2639,6 +2697,7 @@ type FullscreenPaintedRow = {
   readonly hits: ReadonlyArray<string>
   readonly imageHits?: ReadonlyArray<FullscreenImageRowHit>
   readonly visualHits?: ReadonlyArray<FullscreenVisualRowHit>
+  readonly deliverableHits?: ReadonlyArray<FullscreenDeliverableRowHit>
 }
 
 /** One rendered transcript block in the fullscreen row map (mouse
@@ -2670,6 +2729,8 @@ type FullscreenRowEntry = {
    * expanded). Rows matching no hit stay inert so chrome like the pending
    * status line never becomes an implicit button. */
   userDisclosureHits?: ReadonlyArray<UserDisclosureHit>
+  /** Delivered files PR1: the painted action cells of the card's tail. */
+  deliverables: ReadonlyArray<TranscriptDeliverableHit>
   hasTrailingSpacer: boolean
 }
 
@@ -2745,6 +2806,8 @@ type RenderedTranscriptBlock = {
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
   userDisclosureHits?: ReadonlyArray<UserDisclosureHit>
+  /** Delivered files PR1: the card's really-painted action cells. */
+  deliverables: ReadonlyArray<TranscriptDeliverableHit>
 }
 
 /** Presentation-only high-water for one running Focus turn. The activity
@@ -3659,6 +3722,15 @@ export class TuiApp {
    * plus native/platform compatibility); undefined keeps the vendor's raw
    * OSC 52 write. */
   private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
+  /** Delivered files (PR1): the injected read capability, if any. */
+  private readonly deliveredFiles: DeliveredFilesCapability | undefined
+  /** The ONE live delivered-files overlay lease (PR1): a repeated open reuses
+   *  it instead of mounting a second overlay. */
+  private deliveredFilesOverlay: OverlayHandle | undefined
+  private deliveredFilesFrame: ResponsiveOverlayFrame | undefined
+  private deliveredFilesPanel: DeliveredFilesPanel | undefined
+  /** The catalog the live overlay was opened for (the currentness fence). */
+  private deliveredFilesSnapshot: DeliveredFilesSnapshot | undefined
   private readonly openExternalUrl: ((url: string) => void) | undefined
   private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
   /**
@@ -4361,6 +4433,7 @@ export class TuiApp {
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
     this.copySelection = options.copySelection
+    this.deliveredFiles = options.deliveredFiles
     this.openExternalUrl = options.openExternalUrl
     this.readClipboardText = options.readClipboardText
     this.overlayBroker = new OverlayBroker({
@@ -5535,6 +5608,10 @@ export class TuiApp {
     this.optionalSeat = undefined
     if (optionalSeat !== undefined) optionalSeat.finalized = true
     runSyncDisposalSteps('tui dispose', [
+      // Delivered files (PR1): the retained panel is released BEFORE the
+      // broker's physical unmount, so its recorded hit map can never survive
+      // into a dying surface.
+      () => this.closeDeliveredFiles(),
       // Phase 3B / B1-A / B2-A: the leased workspace screen (Job OR Settings) is
       // released FIRST — through the SAME close path Esc uses, so its owner
       // notification still runs exactly once, its temporary alt screen never
@@ -8458,6 +8535,12 @@ export class TuiApp {
   ): void {
     this.searchPresentationDiagnostics.transcriptSets += 1
     this.transcriptPresentationDiagnostics.setCalls += 1
+    // Delivered files (PR1): a projection commit follows every display-subject
+    // selection (session swap, viewer enter/exit, cold rehydrate, session
+    // commit). A live browser whose captured catalog no longer describes the
+    // CURRENT subject/projection is retired BEFORE this frame can paint it
+    // beside the new subject (three identity comparisons while closed).
+    this.retireStaleDeliveredFiles()
     const profileStart = this.transcriptRenderProfiler.begin()
     const previousWindow = this.transcriptWindow
     const previousWindowHint = this.transcriptWindowHint
@@ -9196,7 +9279,7 @@ export class TuiApp {
    * dismiss (plan §35). */
   private searchNeedsMessageDisclosureReveal(message: TranscriptMessage): boolean {
     if (isDeliveredFilesDisclosureCandidate(message)) {
-      if (!this.deliveredFilesMasterOwned()) return false
+      if (!this.deliveredFilesMasterOwned() && !this.deliveredFilesEntryAvailable()) return false
       const source = this.searchTarget?.match.source
       // Only the hidden tail (index beyond the folded limit) needs a reveal; a
       // hit in the already-visible files or the assistant body does not.
@@ -11088,6 +11171,7 @@ export class TuiApp {
       let truncatedMarker = false
       let attachments: ReadonlyArray<TranscriptImageHit> = []
       let visuals: ReadonlyArray<TranscriptVisualHit> = []
+      let deliverables: ReadonlyArray<TranscriptDeliverableHit> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       let subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined
@@ -11103,6 +11187,7 @@ export class TuiApp {
         truncatedMarker = block.truncated === true
         attachments = this.attachmentHitsOf(component, width, block.message)
         visuals = this.visualHitsOf(block.message, width)
+        deliverables = this.deliverableActionHitsOf(component, width, block.message)
         if (isUserMessageDisclosureCandidate(block.message)) {
           userDisclosureHits = this.userDisclosureHitsFor(component, {
             kind: 'durable',
@@ -11147,6 +11232,7 @@ export class TuiApp {
         truncatedMarker,
         attachments,
         visuals,
+        deliverables,
         ...(containerPath === undefined ? {} : { containerPath }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
@@ -11305,6 +11391,40 @@ export class TuiApp {
     return regions
   }
 
+  /**
+   * The PAINTED action cells of an Assistant card's delivered-files tail
+   * (Delivered files PR1): the component records the row/column spans of the
+   * `Details` / `Browse all` verbs it ACTUALLY painted on its last
+   * `render(width)`; this walker only adds the component's block-relative
+   * offset (the prior children's painted heights).
+   *
+   * A card without a real pointer owner paints no verbs and therefore mints no
+   * targets, and a stale width yields none (the component's own fence).
+   */
+  private deliverableActionHitsOf(
+    component: Component,
+    width: number,
+    message: TranscriptMessage,
+  ): ReadonlyArray<TranscriptDeliverableHit> {
+    if (message.kind !== 'assistant' || message.deliverables === undefined || message.deliverables.length === 0) return []
+    if (!(component instanceof Container)) return []
+    const token = this.identityToken(message)
+    let row = 0
+    for (const child of component.children) {
+      if (child instanceof DeliveredFilesComponent) {
+        return child.paintedFileActionHits(width).map(hit => ({
+          ...hit,
+          row: row + hit.row,
+          hitId: hit.action === 'details'
+            ? `deliverable:details:${token}:${hit.fileIndex ?? 0}`
+            : `deliverable:browse:${token}`,
+        }))
+      }
+      row += child.render(width).length
+    }
+    return []
+  }
+
   /** The PROVEN path/description regions of an assistant card's delivered-files
    * tail. The owning component records each field's row/column span on render;
    * the walker only adds the component's block-relative offset (prior children
@@ -11412,6 +11532,7 @@ export class TuiApp {
       }
       const attachments = this.attachmentHitsOf(entry.component, width, entry.block.message)
       const visuals = this.visualHitsOf(entry.block.message, width)
+      const deliverables = this.deliverableActionHitsOf(entry.component, width, entry.block.message)
       const userDisclosureHits = isUserMessageDisclosureCandidate(entry.block.message)
         ? this.userDisclosureHitsFor(entry.component, {
             kind: 'durable',
@@ -11442,6 +11563,7 @@ export class TuiApp {
         rendered,
         attachments,
         visuals,
+        deliverables,
         ...(searchSelection === undefined ? { searchSelection: undefined } : { searchSelection }),
         ...(searchPresentation.selector === undefined ? { searchSelector: undefined } : { searchSelector: searchPresentation.selector }),
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
@@ -11578,6 +11700,7 @@ export class TuiApp {
       height,
       attachments: entry.attachments,
       visuals: entry.visuals,
+      deliverables: entry.deliverables,
       ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
       ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
       ...(entry.userDisclosureHits === undefined ? {} : { userDisclosureHits: entry.userDisclosureHits }),
@@ -11631,7 +11754,7 @@ export class TuiApp {
             () => this.focusLivePaddingEnabled(),
           ))
         }
-        rows.push({ height: padding, attachments: [], visuals: [], hasTrailingSpacer: false })
+        rows.push({ height: padding, attachments: [], visuals: [], deliverables: [], hasTrailingSpacer: false })
       }
       transcriptRow += height + padding
     })
@@ -11980,7 +12103,7 @@ export class TuiApp {
       }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
-      if (padding > 0) rows.push({ height: padding, attachments: [], visuals: [], hasTrailingSpacer: false })
+      if (padding > 0) rows.push({ height: padding, attachments: [], visuals: [], deliverables: [], hasTrailingSpacer: false })
       transcriptRow += height + padding
     }
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
@@ -12611,6 +12734,7 @@ export class TuiApp {
         hits: this.fullscreenRowHits(entry, index),
         ...(entry.attachments.length === 0 ? {} : { imageHits: this.fullscreenImageRowHits(entry) }),
         ...(entry.visuals.length === 0 ? {} : { visualHits: this.fullscreenVisualRowHits(entry) }),
+        ...(entry.deliverables.length === 0 ? {} : { deliverableHits: this.fullscreenDeliverableRowHits(entry) }),
       }))
       hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
     } else {
@@ -12733,6 +12857,41 @@ export class TuiApp {
       }
     }
     return rows
+  }
+
+  /** The painted delivered-files action cells of one row-map entry (PR1):
+   * each painted `Details` / `Browse all` verb keeps its EXACT cell range and
+   * hit identity; the snapshot describes only what the user actually saw. */
+  private fullscreenDeliverableRowHits(entry: FullscreenRowEntry): ReadonlyArray<FullscreenDeliverableRowHit> {
+    const byRow = new Map<number, Array<{ startCol: number; endCol: number; hitId: string }>>()
+    for (const hit of entry.deliverables) {
+      const segments = byRow.get(hit.row) ?? []
+      segments.push({ startCol: hit.startCol, endCol: hit.endCol, hitId: hit.hitId })
+      byRow.set(hit.row, segments)
+    }
+    return [...byRow].map(([row, segments]) => ({ row, segments }))
+  }
+
+  /** Resolve ONE painted delivered-files descriptor against a press/release
+   * column. A row listed here NEVER falls through to the card/container
+   * ladder: a cell outside every painted verb resolves `inert`. `undefined`
+   * means the row carries no delivered-files descriptor. */
+  private resolvePaintedDeliverableRowHit(
+    hits: ReadonlyArray<FullscreenDeliverableRowHit> | undefined,
+    inMessage: number,
+    x: number,
+  ): { hitId: string; span: { startCol: number; endCol: number } } | undefined {
+    const hit = hits?.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    for (const segment of hit.segments) {
+      if (segment.endCol > segment.startCol && x >= segment.startCol && x < segment.endCol) {
+        return { hitId: segment.hitId, span: { startCol: segment.startCol, endCol: segment.endCol } }
+      }
+    }
+    const first = hit.segments[0]
+    return first === undefined
+      ? { hitId: 'inert', span: { startCol: 0, endCol: 0 } }
+      : { hitId: 'inert', span: { startCol: first.startCol, endCol: first.endCol } }
   }
 
   /** Resolve ONE painted image descriptor against a press/release column. A
@@ -12909,6 +13068,35 @@ export class TuiApp {
    * row only acts inside its painted control span (otherwise inert), every
    * visible body row is the occurrence's view target. `undefined` means this
    * row carries no image occurrence. */
+  /** The delivered-files action under one live cell: the card's painted verb,
+   * or `inert` when the row is a tail row but the cell is not a verb (the
+   * card's own disclosure ladder must not receive it). */
+  private deliverableRowActionAt(
+    entry: Readonly<{ deliverables: ReadonlyArray<TranscriptDeliverableHit> }>,
+    inMessage: number,
+    x: number,
+  ):
+    | {
+        readonly hitId: string
+        readonly kind: 'browse' | 'details' | 'inert'
+        readonly fileIndex?: number
+        readonly span: { startCol: number; endCol: number }
+      }
+    | undefined {
+    const hit = entry.deliverables.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    const span = { startCol: hit.startCol, endCol: hit.endCol }
+    if (span.endCol <= span.startCol || x < span.startCol || x >= span.endCol) {
+      return { hitId: 'inert', kind: 'inert', span }
+    }
+    return {
+      hitId: hit.hitId,
+      kind: hit.action,
+      ...(hit.fileIndex === undefined ? {} : { fileIndex: hit.fileIndex }),
+      span,
+    }
+  }
+
   private imageRowActionAt(
     entry: Readonly<{ attachments: ReadonlyArray<TranscriptImageHit> }>,
     inMessage: number,
@@ -13038,6 +13226,11 @@ export class TuiApp {
     // Viewer, and every other figure row is inert (never a card fold).
     const visualAction = this.visualRowActionAt(entry, inMessage, x)
     if (visualAction !== undefined) return visualAction.hitId
+    // Delivered files (PR1): a painted `Details` / `Browse all` verb is its own
+    // action surface; every other cell of a tail row is inert so it can never
+    // fold the Assistant card.
+    const deliverableAction = this.deliverableRowActionAt(entry, inMessage, x)
+    if (deliverableAction !== undefined) return deliverableAction.hitId
     // Nearest semantic container from the PROJECTED ancestry: a foldable card
     // toggles ITSELF; every other process row collapses the nearest container
     // (nested Work beats the outer Thought).
@@ -13658,14 +13851,16 @@ export class TuiApp {
       const painted = snapshot.rows[cell.entryIndex]!
       const imageHit = this.resolvePaintedImageRowHit(painted.imageHits, cell.inMessage, x)
       const visualHit = this.resolvePaintedVisualRowHit(painted.visualHits, cell.inMessage, x)
+      const deliverableHit = this.resolvePaintedDeliverableRowHit(painted.deliverableHits, cell.inMessage, x)
       this.fullscreenCellGesture = {
         ownerId: painted.ownerId,
         row: cell.inMessage,
-        hitId: imageHit?.hitId ?? visualHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert',
+        hitId: imageHit?.hitId ?? visualHit?.hitId ?? deliverableHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert',
         columns: snapshot.columns,
         termRows: snapshot.termRows,
         ...(imageHit === undefined ? {} : { imageSpan: imageHit.span }),
         ...(visualHit === undefined ? {} : { visualSpan: visualHit.span }),
+        ...(deliverableHit === undefined ? {} : { deliverableSpan: deliverableHit.span }),
       }
       return
     }
@@ -13956,6 +14151,7 @@ export class TuiApp {
     const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex), x)
     const imageAction = this.imageRowActionAt(entry, inMessage, x)
     const visualAction = this.visualRowActionAt(entry, inMessage, x)
+    const deliverableAction = this.deliverableRowActionAt(entry, inMessage, x)
     const pressed = this.fullscreenCellGesture
     // A pressed image/visual hit must still resolve the SAME actionable column
     // span: a repaint/reflow that moved the control (or turned the pressed body
@@ -13971,12 +14167,18 @@ export class TuiApp {
       : visualAction !== undefined
         && visualAction.span.startCol === pressed.visualSpan.startCol
         && visualAction.span.endCol === pressed.visualSpan.endCol
+    const sameDeliverableSpan = pressed?.deliverableSpan === undefined
+      ? deliverableAction === undefined
+      : deliverableAction !== undefined
+        && deliverableAction.span.startCol === pressed.deliverableSpan.startCol
+        && deliverableAction.span.endCol === pressed.deliverableSpan.endCol
     if (
       pressed?.ownerId !== ownerId ||
       pressed?.row !== inMessage ||
       pressed?.hitId !== hitId ||
       !sameImageSpan ||
-      !sameVisualSpan
+      !sameVisualSpan ||
+      !sameDeliverableSpan
     ) {
       this.fullscreenCellGesture = undefined
       return
@@ -14094,6 +14296,15 @@ export class TuiApp {
             this.copyVisualPayload(visualAction.handle)
           } else if (visualAction.kind === 'view' && visualAction.handle !== undefined) {
             this.openSvgViewer(visualAction.handle)
+          }
+          return
+        }
+        // Delivered files (PR1): a painted verb opens THIS message's Turn (or
+        // that exact file's Details). The list verb and the per-file verb use
+        // the SAME opener as `/deliverables`, never the "latest Turn".
+        if (deliverableAction !== undefined) {
+          if (deliverableAction.kind !== 'inert') {
+            this.activateDeliveredFiles(message, deliverableAction.kind, deliverableAction.fileIndex)
           }
           return
         }
@@ -17369,11 +17580,17 @@ export class TuiApp {
     // operable owner at all, so the tail FAILS OPEN (all files visible) instead
     // of rendering a collapsed disclosure nobody can operate.
     if (isDeliveredFilesDisclosureCandidate(message)) {
-      if (!this.deliveredFilesMasterOwned()) return true
+      const masterOwned = this.deliveredFilesMasterOwned()
+      // Neither an operable Ctrl+O owner NOR the browser command exists: the
+      // tail FAILS OPEN rather than hiding files behind a dead entry.
+      if (!masterOwned && !this.deliveredFilesEntryAvailable()) return true
       if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
-      return message.turn >= boundary
+      // The master keeps its turn-boundary behaviour; a command-only surface
+      // (no operable Ctrl+O for this card) shows the folded four until the
+      // browser opens or a search reveals a hidden match.
+      return masterOwned ? message.turn >= boundary : false
     }
     // A member of an OPEN Work run (Compact, or nested Work inside an expanded
     // Focus Thought). Regular has no mouse, so the open run full-reveals its own
@@ -17471,7 +17688,7 @@ export class TuiApp {
     message: TranscriptMessage,
     boundary: number,
     userBoundary: number,
-  ): { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint } {
+  ): { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint; deliverableSurface: string } {
     const expanded = this.effectiveMessageExpanded(message, boundary, userBoundary)
     const insideFocusSecondary = 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
@@ -17516,7 +17733,14 @@ export class TuiApp {
       || !this.messageFoldDisclosureAvailable()
       || this.surfacedInteractionFailsOpen(message)
       || (this.fullscreen === undefined && (insideFocusSecondary || insideOpenWorkRun))
-    return { expanded, fullReveal, expandHint }
+    // The delivered tail's PAINTED actions depend on the surface (a real
+    // pointer owner can reach the verbs only in fullscreen Full) and on whether
+    // the browser capability exists. Both are render inputs, so the cache must
+    // rebuild when they change.
+    const deliverableSurface = (message.kind === 'assistant' && (message.deliverables?.length ?? 0) > 0)
+      ? `${this.deliveredFilesPointerOwned() ? 'pointer' : 'plain'}:${this.deliveredFilesEntryAvailable() ? 'command' : 'none'}`
+      : ''
+    return { expanded, fullReveal, expandHint, deliverableSurface }
   }
 
   private componentForMessage(
@@ -17577,6 +17801,7 @@ export class TuiApp {
           || entry.fullReveal !== state.fullReveal
           || entry.expandHint !== state.expandHint
     if (foldStateChanged
+      || entry.deliverableSurface !== state.deliverableSurface
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
@@ -17610,6 +17835,7 @@ export class TuiApp {
       entry.expanded = rebuilt.expanded
       entry.fullReveal = rebuilt.fullReveal
       entry.expandHint = rebuilt.expandHint
+      entry.deliverableSurface = rebuilt.deliverableSurface
       entry.keymapRev = rebuilt.keymapRev
       entry.searchPresentationRev = rebuilt.searchPresentationRev
       entry.rendererId = rebuilt.rendererId
@@ -17675,7 +17901,7 @@ export class TuiApp {
     message: TranscriptMessage,
     boundary: number,
     userBoundary: number,
-    state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
+    state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint; deliverableSurface: string },
     width: number,
   ): MessageComponentEntry {
     const registry = this.renderers
@@ -17728,6 +17954,7 @@ export class TuiApp {
       expanded: state.expanded,
       fullReveal: state.fullReveal,
       expandHint: state.expandHint,
+      deliverableSurface: state.deliverableSurface,
       // The RENDERED fold hints bake the EFFECTIVE key: the keymap
       // revision joins the cache identity so a remap/safe-mode/plugin
       // rebuild refreshes every hint-bearing card (review finding).
@@ -18187,7 +18414,12 @@ export class TuiApp {
     const result = new Container()
     result.addChild(body)
     result.addChild(new Text('', 0, 0))
-    result.addChild(new DeliveredFilesComponent(message.deliverables, this.workspaceRoot, expanded))
+    result.addChild(new DeliveredFilesComponent(message.deliverables, expanded, {
+      pointerActions: this.deliveredFilesPointerOwned(),
+      // A surface without the injected browser capability has no executable
+      // `/deliverables` entry, so the tail must not advertise one.
+      commandEntry: this.deliveredFilesEntryAvailable(),
+    }))
     return result
   }
 
@@ -22165,6 +22397,27 @@ export class TuiApp {
     return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
   }
 
+  /** Whether this surface can open the delivered-files browser at all: the
+   *  injected read capability exists (the PiTui mount wires it from the
+   *  application owner; a headless/foreign renderer does not). A surface
+   *  without it has no operable entry for a capped tail, so the tail fails
+   *  open instead of hiding files behind a command nothing executes. */
+  private deliveredFilesEntryAvailable(): boolean {
+    return this.deliveredFiles !== undefined
+  }
+
+  /** Whether a painted per-file `Details` / list `Browse all` verb on the
+   *  transcript tail is a REAL pointer target: only a fullscreen surface
+   *  routes transcript pointer events, and only the Full preset's click ladder
+   *  can reach a card action (Compact/Focus use the click for their own
+   *  Work/Thought owners). Regular terminals have no transcript mouse at all —
+   *  `/deliverables` is their entry, so no pointer affordance may be painted
+   *  there. */
+  private deliveredFilesPointerOwned(): boolean {
+    if (this.fullscreen === undefined) return false
+    return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
+  }
+
   /** The effective disclosure state of one ephemeral pending-user row: the
    * explicit per-row override wins, otherwise the surface rule — fullscreen
    * Focus is compact-by-default (Ctrl+O owns the Thought roots there), every
@@ -23167,6 +23420,164 @@ export class TuiApp {
       visibleItems: () => panel.visibleItems(),
       viewportItems: () => panel.viewportItems(),
     }
+  }
+
+  /**
+   * Open the ONE delivered-files browser (Delivered files PR1 / M6).
+   *
+   * NOT a second public extension API: `/deliverables` and the fullscreen
+   * transcript's painted `Browse all` / `Details` verbs are its only callers,
+   * and both pass the catalog the application owner just derived.
+   *
+   * The captured catalog is re-validated against the LIVE display subject
+   * before mounting (a session/child/Fold replacement between capture and
+   * mount must never show another subject's files), and a repeated open reuses
+   * the ONE live lease instead of stacking a second overlay.
+   */
+  openDeliveredFiles(snapshot: DeliveredFilesSnapshot, intent?: DeliveredFilesOpenIntent): void {
+    if (this.disposed) return
+    const capability = this.deliveredFiles
+    if (capability === undefined) return
+    if (!capability.isCurrent(snapshot)) return
+    if (this.deliveredFilesOverlay !== undefined) {
+      this.deliveredFilesOverlay.focus()
+      return
+    }
+    const panel = new DeliveredFilesPanel({
+      snapshot,
+      ...(intent === undefined ? {} : { initial: intent }),
+      requestRender: () => this.requestRender(),
+      close: () => this.closeDeliveredFiles(),
+      copyPath: (path, settle) => this.copyDeliveredFilePath(snapshot, path, settle),
+    })
+    const frame = this.createDeliveredFilesFrame(panel)
+    const size = this.deliveredFilesOverlaySize()
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: size.width, maxHeight: size.maxHeight, ...(size.margin === undefined ? {} : { margin: size.margin }) },
+      {
+        // REMOUNTABLE: a fullscreen screen swap must keep the SAME panel
+        // (filter/turn/selection/scroll survive it) behind a fresh projection.
+        remountable: true,
+        remount: (logical) => {
+          if (this.deliveredFilesPanel !== panel) return
+          const next = this.createDeliveredFilesFrame(panel)
+          this.deliveredFilesFrame = next
+          const nextSize = this.deliveredFilesOverlaySize()
+          this.rebindOverlayRaw(logical, next, {
+            width: nextSize.width,
+            maxHeight: nextSize.maxHeight,
+            ...(nextSize.margin === undefined ? {} : { margin: nextSize.margin }),
+          })
+        },
+      },
+    )
+    this.deliveredFilesOverlay = handle
+    this.deliveredFilesFrame = frame
+    this.deliveredFilesPanel = panel
+    this.deliveredFilesSnapshot = snapshot
+  }
+
+  /** Close the live delivered-files browser (idempotent). The lease identity is
+   *  dropped BEFORE the broker close can run focus callbacks, so a callback
+   *  that re-opens the browser mounts a NEW lease instead of writing into the
+   *  retired one. */
+  closeDeliveredFiles(): void {
+    const overlay = this.deliveredFilesOverlay
+    const panel = this.deliveredFilesPanel
+    this.deliveredFilesOverlay = undefined
+    this.deliveredFilesFrame = undefined
+    this.deliveredFilesPanel = undefined
+    this.deliveredFilesSnapshot = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
+    overlay?.hide()
+    panel?.dispose()
+  }
+
+  /** Retire a live delivered-files browser whose captured catalog no longer
+   *  describes the CURRENT display subject/projection. */
+  private retireStaleDeliveredFiles(): void {
+    const snapshot = this.deliveredFilesSnapshot
+    if (snapshot === undefined) return
+    if (this.deliveredFiles?.isCurrent(snapshot) === true) return
+    this.closeDeliveredFiles()
+  }
+
+  /** The delivered-files overlay's sizing ladder (design-language 64/72/88/full).
+   *  A wide terminal that can hold the two-column layout uses the `full` step;
+   *  the one-column pages use the standard ladder, snapped DOWN, and a sub-64
+   *  terminal takes exactly its own width (there is no minimum terminal width —
+   *  the panel degrades through its row budget instead). */
+  private deliveredFilesOverlaySize(): { width: number; maxHeight: number; margin: number | undefined } {
+    const columns = Math.max(1, this.terminal.columns)
+    const rows = Math.max(1, this.terminal.rows)
+    if (columns >= 110 && rows >= 20) {
+      return { width: Math.max(1, columns - 2), maxHeight: Math.max(1, rows - 2), margin: 1 }
+    }
+    const width = columns < 64 ? columns : columns >= 88 ? 88 : columns >= 72 ? 72 : 64
+    return { width, maxHeight: Math.max(1, Math.min(24, rows - 2)), margin: undefined }
+  }
+
+  private createDeliveredFilesFrame(panel: DeliveredFilesPanel): ResponsiveOverlayFrame {
+    return new ResponsiveOverlayFrame(
+      panel,
+      () => {
+        const size = this.deliveredFilesOverlaySize()
+        return {
+          width: size.width,
+          maxHeight: size.maxHeight,
+          key: `${this.terminal.columns}:${this.terminal.rows}:${size.width}:${size.maxHeight}`,
+        }
+      },
+      (geometry) => panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)),
+    )
+  }
+
+  /** Copy the RAW declared Host path through the ONE Client clipboard owner,
+   *  gated on the SAME currentness as the panel's data. */
+  private copyDeliveredFilePath(
+    snapshot: DeliveredFilesSnapshot,
+    path: string,
+    settle: (ok: boolean) => void,
+  ): void {
+    if (this.deliveredFiles?.isCurrent(snapshot) !== true) return
+    const copy = this.copySelection
+    const runner = this.events.runOwned
+    if (copy === undefined || runner === undefined) {
+      settle(false)
+      return
+    }
+    runner('delivered path copy', () => copy(path), {
+      onResult: ok => settle(ok),
+      onError: () => settle(false),
+    })
+  }
+
+  /**
+   * The delivered-files action of one PAINTED transcript tail cell
+   * (Delivered files PR1): the list verb opens THIS message's Turn, the
+   * per-file verb opens that exact file's Details. The catalog is captured
+   * fresh HERE, so the opener never reuses a stale projection, and it is
+   * always the SAME opener `/deliverables` uses.
+   */
+  private activateDeliveredFiles(
+    message: TranscriptMessage,
+    action: 'browse' | 'details',
+    fileIndex: number | undefined,
+  ): void {
+    if (message.kind !== 'assistant') return
+    const capability = this.deliveredFiles
+    if (capability === undefined) return
+    const snapshot = capability.snapshot()
+    if (snapshot === undefined) return
+    if (action === 'browse') {
+      this.openDeliveredFiles(snapshot, { turn: message.turn, page: 'files' })
+      return
+    }
+    const files = message.deliverables ?? []
+    const file = fileIndex === undefined ? undefined : files[fileIndex]
+    if (file === undefined) return
+    this.openDeliveredFiles(snapshot, { turn: message.turn, path: file.path, page: 'details' })
   }
 
   /**

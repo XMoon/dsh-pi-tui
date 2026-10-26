@@ -176,6 +176,7 @@ function setup(
   const { commands } = fakeCommands()
   ctx.provide('commands', commands as never)
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

@@ -113,6 +113,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     ...(options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle }),
   })
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

@@ -33,6 +33,7 @@ type ArtifactsCommandRunner = Pick<
   | 'copyToClipboard'
   | 'currentSessionId'
   | 'cwd'
+  | 'deliveredFilesSnapshot'
   | 'diag'
   | 'fileStore'
   | 'imageLimits'
@@ -77,6 +78,7 @@ type DetachTaskLike = (
 ) => void
 
 export interface ArtifactsCommandRegistrars {
+  registerDeliverables(): void
   registerCopy(): void
   registerAttach(): void
   /**
@@ -473,6 +475,39 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
     })
   }
 
+  /**
+   * `/deliverables` (Delivered files PR1): browse the CURRENT display subject's
+   * delivered files in the ONE managed overlay. It never reads file content
+   * (PR1) and never falls back to another subject: the runner captures the
+   * catalog from the application owner's own selection.
+   */
+  const registerDeliverables = (): void => {
+    registerTuiCommand({
+      name: 'deliverables',
+      description: 'Browse the files delivered in this session',
+      handler: (invocation) => {
+        if (invocation.rawInput.trim() !== '') {
+          return { kind: 'error', text: 'The /deliverables command does not accept arguments.' }
+        }
+        // Registered only where a PiTui surface is mounted (see
+        // registerTuiCommands); this guard keeps a direct headless handler
+        // call honest instead of silently doing nothing.
+        const mountedApp = runner.app
+        if (mountedApp === undefined) {
+          return { kind: 'error', text: 'the delivered files browser is unavailable on this renderer' }
+        }
+        const snapshot = runner.deliveredFilesSnapshot()
+        if (snapshot === undefined || snapshot.turns.length === 0) {
+          return { kind: 'error', text: 'No delivered files in this session' }
+        }
+        // A success means the overlay was really mounted, not that any file
+        // content was read.
+        mountedApp.openDeliveredFiles(snapshot)
+        return { kind: 'success' }
+      },
+    })
+  }
+
   const registerExport = (): void => {
     registerOne({
       name: 'export',
@@ -531,6 +566,7 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
     registerAttach,
     inlineAttachmentStager,
     registerViewImage,
+    registerDeliverables,
     registerExport,
     registerTranscript,
   }

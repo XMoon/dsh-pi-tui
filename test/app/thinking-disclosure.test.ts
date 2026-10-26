@@ -585,6 +585,7 @@ function setupSettings() {
   } as never)
   const settings = fakeTuiSettings()
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

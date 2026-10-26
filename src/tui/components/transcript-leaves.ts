@@ -11,17 +11,17 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/transcript-leaves
  */
 
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { iconLead } from '../icons.ts'
 import type { IconStyle } from '../../domain/display/icons.ts'
 import { longMessageDisclosureWindow } from '../transcript/long-message-disclosure.ts'
 import { latestLine } from '../../domain/transcript/text.ts'
-import { relativizeToCwd } from '../transcript/tool-presentation.ts'
 import { color } from '../theme/runtime.ts'
 import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
+import { deliveredFileBasename, deliveredFileLabels } from '../../domain/deliverables/catalog.ts'
 
 /** The assistant delivered-files tail folds after this many files. */
 export const DELIVERED_FILES_FOLDED_LIMIT = 4
@@ -400,14 +400,53 @@ export class UserBubbleComponent implements Component {
   }
 }
 
-/** Host-owned tail for explicit files delivered by the present tool. Paths
- * are always shown first; the folded view caps entries while an expanded
- * transcript view re-renders the complete declaration list. */
+/** One painted action cell of the delivered-files tail, in THIS component's
+ * row coordinates. Only a real painted cell may be hit: the host resolves the
+ * tail's row offset and never reconstructs the geometry itself. */
+export interface DeliveredFilesActionHit {
+  readonly row: number
+  /** Half-open visible-column range inside the row. */
+  readonly startCol: number
+  readonly endCol: number
+  /** `browse` opens the Turn's file list; `details` opens one file. */
+  readonly action: 'browse' | 'details'
+  /** Index into the component's FULL `files` array (details only). */
+  readonly fileIndex?: number
+}
+
+/** Width at which the tail paints its pointer actions. Below it there is no
+ * room for a verb beside a distinguishable filename, so the tail keeps the
+ * always-available `/deliverables` text entry instead of a dead affordance. */
+const DELIVERED_ACTION_MIN_WIDTH = 56
+/** Width at which a description joins the filename on the same row. */
+const DELIVERED_DESCRIPTION_MIN_WIDTH = 48
+/** Minimum description column before it is worth painting at all. */
+const DELIVERED_DESCRIPTION_MIN_ROOM = 12
+const DELIVERED_DETAILS_VERB = 'Details'
+const DELIVERED_BROWSE_VERB = 'Browse all'
+
+/** Host-owned tail for explicit files delivered by the present tool.
+ *
+ * The folded view caps entries while an expanded transcript view re-renders the
+ * complete declaration list. Every file is ONE row (basename first, with the
+ * shortest disambiguating directory suffix), an inline description never wraps,
+ * and the per-file/per-list `Details`/`Browse all` verbs are painted ONLY when
+ * they are real pointer targets on this surface; the plain `/deliverables` text
+ * entry is what a mouse-less terminal keeps. */
 export class DeliveredFilesComponent implements Component {
   private readonly files: readonly PresentedFilePresentation[]
-  private readonly workspaceRoot: string | undefined
   private readonly expanded: boolean
+  private readonly labels: readonly string[]
+  /** Whether this surface has a real pointer owner for the tail actions. */
+  private readonly pointerActions: boolean
+  /** Whether the `/deliverables` entry is REALLY executable on this surface.
+   *  A surface without it must not paint a dead command hint. */
+  private readonly commandEntry: boolean
   private readonly cached = new Map<number, string[]>()
+  /** The width the recorded painted rows/hits belong to (stale-geometry
+   * fence for the host's click resolution). */
+  private paintedWidth = 0
+  private paintedHits: readonly DeliveredFilesActionHit[] = []
   /** The visible row/column spans of every rendered path/description field,
    * relative to THIS component's rows (render output, refreshed on every
    * width). Consumed by the search source-geometry walker. */
@@ -421,16 +460,29 @@ export class DeliveredFilesComponent implements Component {
 
   constructor(
     files: readonly PresentedFilePresentation[],
-    workspaceRoot: string | undefined,
     expanded: boolean,
+    options: { readonly pointerActions?: boolean; readonly commandEntry?: boolean } = {},
   ) {
     this.files = files
-    this.workspaceRoot = workspaceRoot
     this.expanded = expanded
+    this.labels = deliveredFileLabels(files)
+    this.pointerActions = options.pointerActions === true
+    this.commandEntry = options.commandEntry === true
   }
 
   invalidate(): void {
     this.cached.clear()
+    this.paintedWidth = 0
+    this.paintedHits = []
+    this.lastFieldSpans = []
+  }
+
+  /** The painted action cells of the LAST `render(width)` — empty when the
+   * width handed in is not the one actually painted (a resize invalidates the
+   * hit map before the next frame). */
+  paintedFileActionHits(width: number): readonly DeliveredFilesActionHit[] {
+    if (Math.max(1, Math.floor(width)) !== this.paintedWidth) return []
+    return this.paintedHits
   }
 
   render(width: number): string[] {
@@ -439,7 +491,10 @@ export class DeliveredFilesComponent implements Component {
     if (previous !== undefined) return previous
 
     const shown = this.expanded ? this.files : this.files.slice(0, DELIVERED_FILES_FOLDED_LIMIT)
-    const rows = [truncateToWidth(color.textDim(`Delivered files · ${this.files.length}`), safeWidth, '…')]
+    const showActions = this.pointerActions && safeWidth >= DELIVERED_ACTION_MIN_WIDTH
+    const showDescriptions = safeWidth >= DELIVERED_DESCRIPTION_MIN_WIDTH
+    const rows: string[] = []
+    const hits: DeliveredFilesActionHit[] = []
     const spans: Array<{
       index: number
       pathRow: number
@@ -447,27 +502,95 @@ export class DeliveredFilesComponent implements Component {
       pathEnd: number
       descriptionRows: Array<{ row: number; start: number; end: number }>
     }> = []
+
+    // Header. With a pointer owner the list verb is a painted affordance;
+    // without one the tail row (or, when every file is already visible, the
+    // title itself) carries the always-available slash-command entry.
+    const title = `Delivered files · ${this.files.length}`
+    if (showActions) {
+      const browseWidth = visibleWidth(DELIVERED_BROWSE_VERB)
+      const head = truncateToWidth(title, Math.max(1, safeWidth - browseWidth - 1), '…')
+      const gap = Math.max(1, safeWidth - visibleWidth(head) - browseWidth)
+      rows.push(`${color.textDim(head)}${' '.repeat(gap)}${color.primary(DELIVERED_BROWSE_VERB)}`)
+      hits.push({ row: 0, startCol: safeWidth - browseWidth, endCol: safeWidth, action: 'browse' })
+    } else {
+      // Every file already visible and no pointer owner: the slash-command
+      // entry is the only way in, and only when it really exists.
+      const hinted = this.commandEntry && this.files.length <= shown.length
+        ? `${title} · /deliverables`
+        : title
+      rows.push(truncateToWidth(color.textDim(hinted), safeWidth, '…'))
+    }
+
     for (const [index, file] of shown.entries()) {
-      const path = sanitizeDisplayText(relativizeToCwd(file.path, this.workspaceRoot)).replace(/\r\n|\r|\n/g, ' ')
-      const pathRow = rows.length
-      const pathStart = visibleWidth('  ')
-      rows.push(truncateToWidth(color.textDim(`  ${path}`), safeWidth, '…'))
-      const descriptionRows: Array<{ row: number; start: number; end: number }> = []
-      if (file.description !== undefined && file.description !== '') {
-        const descriptionWidth = Math.max(1, safeWidth - 4)
-        for (const line of wrapTextWithAnsi(sanitizeDisplayText(file.description), descriptionWidth)) {
-          const descriptionRow = rows.length
-          const start = visibleWidth('    ')
-          rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))
-          descriptionRows.push({ row: descriptionRow, start, end: start + visibleWidth(line) })
+      const label = this.labels[index] ?? deliveredFileBasename(file.path)
+      const verbRoom = showActions ? visibleWidth(DELIVERED_DETAILS_VERB) + 2 : 0
+      const bodyWidth = Math.max(1, safeWidth - verbRoom)
+      const indent = 2
+      const labelText = truncateToWidth(label, Math.max(1, bodyWidth - indent), '…')
+      const labelWidth = visibleWidth(labelText)
+      const row = rows.length
+      const pathStart = indent
+      const pathEnd = indent + labelWidth
+      let descriptionText = ''
+      let descriptionStart = pathEnd
+      let descriptionEnd = pathEnd
+      if (showDescriptions && file.description !== undefined && file.description !== '') {
+        const description = sanitizeDisplayText(file.description).replace(/\r\n|\r|\n/g, ' ')
+        const room = bodyWidth - pathEnd - 2 - 1
+        if (room >= DELIVERED_DESCRIPTION_MIN_ROOM) {
+          descriptionText = truncateToWidth(description, room, '…')
+          descriptionStart = pathEnd + 2
+          descriptionEnd = descriptionStart + visibleWidth(descriptionText)
         }
       }
-      spans.push({ index, pathRow, pathStart, pathEnd: pathStart + visibleWidth(path), descriptionRows })
+      const body = descriptionText === ''
+        ? `  ${labelText}`
+        : `  ${labelText}  ${descriptionText}`
+      const gap = Math.max(1, bodyWidth - visibleWidth(body))
+      const paintedBody = descriptionText === ''
+        ? `  ${color.textDim(labelText)}`
+        : `  ${color.textDim(labelText)}  ${color.textDim(descriptionText)}`
+      rows.push(showActions
+        ? `${paintedBody}${' '.repeat(gap)}${color.primary(DELIVERED_DETAILS_VERB)}`
+        : paintedBody)
+      if (showActions) {
+        const startCol = safeWidth - visibleWidth(DELIVERED_DETAILS_VERB)
+        hits.push({ row, startCol, endCol: startCol + visibleWidth(DELIVERED_DETAILS_VERB), action: 'details', fileIndex: index })
+      }
+      spans.push({
+        index,
+        pathRow: row,
+        pathStart,
+        pathEnd,
+        descriptionRows: descriptionText === '' ? [] : [{ row, start: descriptionStart, end: descriptionEnd }],
+      })
     }
+
     if (!this.expanded && this.files.length > shown.length) {
-      rows.push(truncateToWidth(color.textDim(`  … +${this.files.length - shown.length}`), safeWidth, '…'))
+      const hidden = this.files.length - shown.length
+      const row = rows.length
+      if (showActions) {
+        const prefix = `  +${hidden} more · `
+        const browseWidth = visibleWidth(DELIVERED_BROWSE_VERB)
+        const suffix = ' (/deliverables)'
+        const startCol = visibleWidth(prefix)
+        rows.push(truncateToWidth(
+          `${color.textDim(prefix)}${color.primary(DELIVERED_BROWSE_VERB)}${color.textDim(suffix)}`,
+          safeWidth,
+          '…',
+        ))
+        hits.push({ row, startCol, endCol: startCol + browseWidth, action: 'browse' })
+      } else if (this.commandEntry) {
+        rows.push(truncateToWidth(color.textDim(`  +${hidden} more · /deliverables`), safeWidth, '…'))
+      } else {
+        rows.push(truncateToWidth(color.textDim(`  +${hidden} more`), safeWidth, '…'))
+      }
     }
+
     this.lastFieldSpans = spans
+    this.paintedWidth = safeWidth
+    this.paintedHits = hits
     this.cached.set(safeWidth, rows)
     return rows
   }

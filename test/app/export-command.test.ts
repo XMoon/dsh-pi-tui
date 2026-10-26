@@ -54,6 +54,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
   return {
     ctx,
     app,
+    deliveredFilesSnapshot: () => undefined,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => state.agent, () => 1),
         get currentSessionId() { return state.agent?.session.id },

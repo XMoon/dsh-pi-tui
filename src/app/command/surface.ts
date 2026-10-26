@@ -42,6 +42,7 @@ import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
 import { titleRefusalNoticeOwner, titleSuccessNoticeVisible } from './tsp-capability.ts'
+import type { DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
 import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
 import { draftHasImages } from '../../client/media/draft-attachments.ts'
@@ -235,6 +236,13 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      * its own port.
      */
     composer(): SubmissionComposerPort
+    /**
+     * Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
+     * subject's delivered Turns. A functional read capability — the command
+     * layer never receives the `TranscriptFolder`/runtime object, so no command
+     * can re-project, mutate or window the transcript through it.
+     */
+    deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
@@ -1147,6 +1155,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
       // it opens the FULL browser explicitly.
       openTasksBrowser: () => deps.surface.openTasksBrowser('full'),
+      // Delivered files (PR1 / M2): the functional read capability the
+      // `/deliverables` handler forwards to the mounted surface; no Folder or
+      // runtime object crosses this seam.
+      deliveredFilesSnapshot: () => deps.surface.deliveredFilesSnapshot(),
       openRewindPicker: deps.openRewindPicker,
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.

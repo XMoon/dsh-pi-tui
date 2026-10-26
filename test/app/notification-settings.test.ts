@@ -126,6 +126,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
   let liveMode = parseNotificationMode(settings.value.get().notificationMode)
   let liveMethod = parseNotificationMethod(settings.value.get().notificationMethod)
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

@@ -107,6 +107,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
   if (options.failWrite) settings.value.replace = () => { throw new Error('settings unavailable') }
   const appliedModes: string[] = []
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

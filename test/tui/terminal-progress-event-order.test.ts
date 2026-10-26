@@ -247,6 +247,7 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
     captureHistoryScope: () => ({ sessionId: MAIN, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
+    deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
     openExternalUrl: () => {},
     readClipboardText: async () => undefined,
     imageFallbackColor: (text) => text,

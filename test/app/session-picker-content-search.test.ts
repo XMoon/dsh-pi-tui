@@ -129,6 +129,7 @@ function harness(options: {
       sessionStatus: () => undefined,
   }
   const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),

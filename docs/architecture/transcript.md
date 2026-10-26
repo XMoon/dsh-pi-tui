@@ -672,16 +672,55 @@ When the key is unavailable (remapped away/disabled) every one of those folds
 fails open: no collapsed header, marker or `(ctrl+o to expand)` hint is ever
 rendered for an inoperable owner.
 
-**Delivered files** (an assistant tail with more files than the folded limit)
-are their own message-local family, converged onto the same contract: the
-regular transcript-detail master and fullscreen Full's generic master own the
-capped tail while the effective `app.transcript.toggleExpand` key exists; every
-other surface — fullscreen Compact, fullscreen Focus, or any surface without the
-key — fails the tail open (all files visible), because no operable owner exists
-there. A search reveal only opens the tail when the matched file is beyond the
-folded limit AND the tail is not already expanded; an ordinary dismiss promotes
-the durable override only on a master-owned surface and only for a genuinely
-hidden match.
+**Delivered files** are their own message-local family and have a THREE-CASE
+ownership contract, because the `/deliverables` browser is an operable owner of
+its own:
+
+- **Master-owned.** The regular transcript-detail master (or fullscreen Full's
+  generic master) owns the capped tail while the effective
+  `app.transcript.toggleExpand` key exists: Ctrl+O expands/collapses it and the
+  regular recent-turn boundary decides its default. A search reveal opens the
+  tail only when the matched file is beyond the folded limit AND the tail is not
+  already expanded; an ordinary dismiss promotes the durable override only for a
+  genuinely hidden match.
+- **Command-owned.** A surface whose Ctrl+O belongs to something else
+  (fullscreen Compact's Work bulk, fullscreen Focus's Thought roots) keeps the
+  capped tail — the first four files plus the `+N more · Browse all
+  (/deliverables)` row — because the browser command really is executable there.
+  No `(ctrl+o)` hint is painted for a key that drives another owner. A search
+  match on a hidden file reveals the tail TEMPORARILY; a dismiss releases it and
+  never mints a durable override (no master exists to undo one).
+- **No operable owner.** A mount without the browser capability has neither
+  owner, so the tail FAILS OPEN (every file visible) and paints no dead command
+  entry and no pointer verb.
+
+**Tail layout.** One file is one row: the BASENAME first, extended with the
+shortest trailing directory suffix that makes it unique inside that delivery
+(case-sensitive Host-path comparison), then an inline description that never
+wraps. Collapsed shows at most four files; the marker row names the command. An
+expanded tail (an explicit master expansion or a granted search reveal) renders
+the complete declaration list. `Browse all` / per-file `Details` are painted
+ONLY where a real pointer owner exists (fullscreen Full); the regular surface's
+entry is the slash command.
+
+**The browser** is ONE managed overlay (`Files / Turns / Details`) behind ONE
+lease, opened by `/deliverables` and by a painted tail verb. Its data is the
+CURRENT display subject's FULL grouped projection (`messages()` without a
+`maxTurns` window), derived on demand at open time — never per repaint, and never
+from the bounded display window. Selection identity is `turn + raw Host path`, so
+the same path delivered in two Turns stays two different selections. The `Files`
+page filters the selected Turn's declarations by a locale-neutral substring over
+basename/full path/description; `Turns` lists only Turns that declare files,
+newest first. A painted tail verb opens the Turn the CARD belongs to, never the
+newest Turn, and resolves through the last painted frame with column-exact hit
+cells that are checked after OSC 8 link activation and text selection.
+
+**Details is metadata in this contract**: the declared Host path and
+description, with `C` copying the RAW declared path string (the display is
+sanitized; the copy payload is not). Reading file CONTENT is a separate
+Host-owned capability and is not part of this presentation contract: the tail
+and the browser never read a file, never imply the declaration is a snapshot,
+and never claim a preview.
 
 ### Nested Focus Work
 

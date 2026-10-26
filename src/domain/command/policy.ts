@@ -49,6 +49,10 @@ export const SESSIONLESS_COMMANDS = new Set([
   // and opens the Client-local read-only Viewer: it never needs a Session and
   // must not create one on a first-boot invocation.
   'view-image',
+  // `/deliverables` (Delivered files PR1) browses the CURRENT display subject's
+  // delivered files. With no session it must answer "No delivered files"
+  // directly instead of creating a Session just to say so.
+  'deliverables',
 ])
 
 /**
@@ -82,6 +86,9 @@ export const LOCAL_COMMANDS = new Set([
   // Image UX PR2: `/view-image` is a Client-local transcript presentation
   // command (mounted window → PiTui picker/Viewer), never a Host/model line.
   'view-image',
+  // Delivered files PR1: `/deliverables` is a Client-local transcript
+  // presentation command (selected Folder → PiTui overlay), never a Host line.
+  'deliverables',
   // `/statusline` — the approved alias of `/footer`; `/status` is the
   // `/settings` alias (see the registration comments: both pairings are
   // explicit aliases, and the near-synonym rule stays for NEW commands).

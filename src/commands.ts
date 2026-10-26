@@ -45,6 +45,7 @@ import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft } from './app/submission/steer.ts'
 import type { DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
+import type { DeliveredFilesSnapshot } from './domain/deliverables/catalog.ts'
 import type { ProgressUpdatesState, ResponseStyleState } from './domain/communication/policy.ts'
 import type { GitAttributionState } from './domain/communication/git-attribution.ts'
 import type { FooterCustomItemSettings } from './domain/footer/custom-items.ts'
@@ -688,6 +689,14 @@ export interface TuiCommandRunner {
    * the on-demand Task Quick.
    */
   openTasksBrowser(): void
+  /**
+   * Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
+   * subject's delivered Turns, derived from the selected Folder's full grouped
+   * projection. `undefined` when no display subject is selected or the
+   * projection declares no delivery. `/deliverables` is the only consumer;
+   * this is a read capability, never a Folder/Transcript handle.
+   */
+  deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
   /**
    * Build the ONE embedded Plugin Manager page as a lazy `Settings → Plugins`
    * child of the Settings workspace lease. The single surface-owned controller
@@ -2221,6 +2230,13 @@ export function registerTuiCommands(
   artifactCommands.registerExport()
 
   artifactCommands.registerTranscript()
+
+  // Delivered files (PR1): a PiTui-local product surface (the mounted app's ONE
+  // managed overlay over the CURRENT display subject's catalog), so it is
+  // registered ONLY where a PiTui `TuiApp` is mounted. Its sessionless/local
+  // policy entries make the static classification agree with this live
+  // registration.
+  if (app !== undefined) artifactCommands.registerDeliverables()
 
   sessionCommands.registerFork()
 

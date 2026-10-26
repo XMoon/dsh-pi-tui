@@ -423,6 +423,7 @@ async function mountRunnerHarness(options: {
     captureHistoryScope: () => ({ sessionId: currentSessionId, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
+    deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
     openExternalUrl: () => {},
     readClipboardText: async () => undefined,
     imageFallbackColor: text => text,
