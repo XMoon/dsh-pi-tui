@@ -15,6 +15,8 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import type { CommandDefinition, CommandInvocation } from '@deepseek-ai/dsh-commands'
+import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS } from '../../src/index.ts'
+import { deliveredFolder, deliveredSurfaceRouting, mountDeliveredSurface } from '../support/delivered-files.ts'
 import type { DeliveredFilesCapability, DeliveredFilesSnapshot } from '../../src/domain/deliverables/catalog.ts'
 import type { TranscriptMessage } from '../../src/transcript.ts'
 import { createArtifactsCommands } from '../../src/tui/commands/artifacts.ts'
@@ -59,11 +61,17 @@ function capability(snap: DeliveredFilesSnapshot | undefined): DeliveredFilesCap
 /** The REAL artifacts registrar over a narrow runner (only the members the
  *  `/deliverables` handler reads) and a capturing registration seam. */
 function deliverablesCommand(app: TuiApp, readSnapshot: () => DeliveredFilesSnapshot | undefined): {
-  readonly result: () => ReturnType<typeof runHandler>
+  readonly result: () => unknown
   readonly runHandler: (rawInput: string) => unknown
   readonly invocations: CommandInvocation[]
+  /** Names registered through the TUI-LOCAL seam (never a Host/Agent route). */
+  readonly localRegistrations: string[]
+  /** Names registered through the HOST compatibility mirror (expected empty). */
+  readonly hostRegistrations: string[]
 } {
   const invocations: CommandInvocation[] = []
+  const localRegistrations: string[] = []
+  const hostRegistrations: string[] = []
   const runHandler = (rawInput: string): unknown => {
     const definitions: CommandDefinition[] = []
     const commands = createArtifactsCommands({
@@ -73,8 +81,11 @@ function deliverablesCommand(app: TuiApp, readSnapshot: () => DeliveredFilesSnap
       } as unknown as Parameters<typeof createArtifactsCommands>[0]['runner'],
       app,
       composer: () => app,
-      registerOne: () => {},
-      registerTuiCommand: (definition) => { definitions.push(definition as CommandDefinition) },
+      registerOne: (definition) => { hostRegistrations.push(definition.name) },
+      registerTuiCommand: (definition) => {
+        localRegistrations.push(definition.name)
+        definitions.push(definition as CommandDefinition)
+      },
       detach: () => {},
       notifyOutcome: () => {},
     })
@@ -85,7 +96,7 @@ function deliverablesCommand(app: TuiApp, readSnapshot: () => DeliveredFilesSnap
     invocations.push(invocation)
     return definition.handler(invocation)
   }
-  return { result: () => runHandler(''), runHandler, invocations }
+  return { result: () => runHandler(''), runHandler, invocations, localRegistrations, hostRegistrations }
 }
 
 function deliveredAssistant(turn: number, text: string, files: readonly { path: string; description?: string }[]): TranscriptMessage {
@@ -136,7 +147,7 @@ test('/deliverables really mounts the ONE managed overlay on the newest Turn', a
   const view = await viewport(vt)
   assert.ok(view.includes('Delivered files · Turn 9'), `the overlay header is painted:\n${view}`)
   assert.ok(view.includes('> report.md'), `the first file is selected:\n${view}`)
-  assert.ok(view.includes('↑↓ Select · Enter Details'), `the real key path is advertised:\n${view}`)
+  assert.ok(view.includes('Enter Details · ↑↓ Select'), `the real key path is advertised in the §7.2 order:\n${view}`)
 })
 
 test('a snapshot that stopped being current never mounts', async () => {
@@ -245,4 +256,207 @@ test('a click on plain card text never opens the browser', async () => {
   clickCell(vt, 2, row)
   const after = await viewport(vt)
   assert.ok(!after.includes('Delivered files · Turn 2'), `plain text is not a delivered-files target:\n${after}`)
+})
+
+test('/deliverables is a TUI-LOCAL admission, never a Host/Agent route', () => {
+  const vt = new VirtualTerminal(100, 30)
+  const snap = snapshot([{ turn: 1, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { deliveredFiles: capability(snap) })
+  app.start()
+  startedApps.add(app)
+  const command = deliverablesCommand(app, () => snap)
+  command.result()
+  assert.deepEqual(command.localRegistrations, ['deliverables'], 'registered through the TUI local seam')
+  assert.deepEqual(command.hostRegistrations, [], 'never through the Host compatibility mirror')
+  assert.ok(LOCAL_COMMANDS.has('deliverables'), 'the static policy agrees it is a local command')
+  assert.ok(SESSIONLESS_COMMANDS.has('deliverables'),
+    'a sessionless invocation answers honestly instead of creating a session')
+})
+
+test('the composed chain: canonical events → folder → surface snapshot → command → panel', async () => {
+  // The REAL fixture: a folder built from canonical `deliverables/presented`
+  // events, selected by a real SurfaceRuntime, read through the SAME capability
+  // the bootstrap injects, and mounted by the REAL /deliverables handler.
+  const folder = deliveredFolder([
+    { turn: 9, files: [{ path: '/ws/docs/composed-report.md', description: 'from the fold' }] },
+    { turn: 4, files: ['/ws/older.md'] },
+  ])
+  const surface = mountDeliveredSurface(deliveredSurfaceRouting({
+    sessionId: () => 'composed-session',
+    mainFolder: () => folder,
+  }))
+  try {
+    const vt = new VirtualTerminal(100, 30)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      deliveredFiles: {
+        snapshot: () => surface.deliveredFilesSnapshot(),
+        isCurrent: (candidate) => surface.isDeliveredFilesSnapshotCurrent(candidate),
+      },
+    })
+    app.start()
+    startedApps.add(app)
+    // The tail is fed by the SAME full projection (no bounded window).
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    const tail = await viewport(vt)
+    assert.ok(tail.includes('Delivered files · 1'), `the fold's declaration reaches the tail:\n${tail}`)
+
+    const command = deliverablesCommand(app, () => surface.deliveredFilesSnapshot())
+    assert.deepEqual(command.result(), { kind: 'success' })
+    const view = await viewport(vt)
+    assert.ok(view.includes('Delivered files · Turn 9'), `the newest delivered Turn opened:\n${view}`)
+    assert.ok(view.includes('> composed-report.md'), `the fold's real declaration is listed:\n${view}`)
+    assert.ok(!view.includes('older.md'), 'the newest Turn owns the Files page')
+
+    // Enter opens Details, which is the ONE place the DECLARED path and
+    // description are shown in full (the list stays one row per file).
+    vt.sendInput('\r')
+    const details = await viewport(vt)
+    assert.ok(details.includes('composed-report.md · Details'), `the Details page opened:\n${details}`)
+    assert.ok(details.includes('/ws/docs/composed-report.md'), `the declared Host path is shown:\n${details}`)
+    assert.ok(details.includes('from the fold'), 'the fold\'s description is carried through')
+  } finally {
+    surface.dispose()
+  }
+})
+
+test('a reentrant open inside the mount keeps ONE lease', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const snap = snapshot([{ turn: 6, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { deliveredFiles: capability(snap) })
+  app.start()
+  startedApps.add(app)
+  const screen = (app as unknown as { activeScreen: { showOverlay: (...args: never[]) => unknown } }).activeScreen
+  const original = screen.showOverlay.bind(screen) as (...args: never[]) => unknown
+  let mounts = 0
+  screen.showOverlay = ((...args: never[]) => {
+    mounts += 1
+    // A plugin onFocus callback re-entering the SAME command during the mount.
+    if (mounts === 1) app.openDeliveredFiles(snap)
+    return original(...args)
+  }) as typeof screen.showOverlay
+  try {
+    app.openDeliveredFiles(snap)
+  } finally {
+    screen.showOverlay = original as typeof screen.showOverlay
+  }
+  assert.equal(mounts, 1, 'the reentrant open coalesced into the committed lease')
+  const view = await viewport(vt)
+  assert.equal(view.split('\n').filter(line => line.includes('Delivered files · Turn 6')).length, 1,
+    `exactly one panel is painted:\n${view}`)
+})
+
+test('a failed mount releases the precommit so a later open still works', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const snap = snapshot([{ turn: 6, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { deliveredFiles: capability(snap) })
+  app.start()
+  startedApps.add(app)
+  const screen = (app as unknown as { activeScreen: { showOverlay: (...args: never[]) => unknown } }).activeScreen
+  const original = screen.showOverlay.bind(screen) as (...args: never[]) => unknown
+  screen.showOverlay = (() => { throw new Error('mount failed') }) as typeof screen.showOverlay
+  try {
+    assert.throws(() => app.openDeliveredFiles(snap), /mount failed/)
+  } finally {
+    screen.showOverlay = original as typeof screen.showOverlay
+  }
+  assert.ok(!(await viewport(vt)).includes('Delivered files · Turn 6'), 'no half-mounted lease survives')
+  app.openDeliveredFiles(snap)
+  assert.ok((await viewport(vt)).includes('Delivered files · Turn 6'), 'the next open starts from a clean slate')
+})
+
+test('a fullscreen swap keeps the SAME panel (state survives, one lease)', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([
+    { turn: 6, files: ['/ws/a.md'] },
+    { turn: 3, files: ['/ws/b.md'] },
+  ])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.openDeliveredFiles(snap)
+  await viewport(vt)
+  // Move the panel to its Turns page, then swap the whole screen.
+  vt.sendInput('T')
+  assert.ok((await viewport(vt)).includes('Delivered files · 2 Turns'), 'precondition: the Turns page is painted')
+  app.setFullscreen(true)
+  const swapped = await viewport(vt)
+  assert.ok(swapped.includes('Delivered files · 2 Turns'),
+    `the remounted projection keeps the panel state:\n${swapped}`)
+  assert.equal(swapped.split('\n').filter(line => line.includes('Delivered files · 2 Turns')).length, 1,
+    `one lease is remounted, never duplicated:\n${swapped}`)
+})
+
+test('a drag across the Details verb never opens the browser', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([{ turn: 2, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([deliveredAssistant(2, 'answer body', [{ path: '/ws/a.md' }])], new Map())
+  app.setFullscreen(true)
+  const before = await viewport(vt)
+  const row = before.split('\n').findIndex(line => line.includes('a.md') && line.includes('Details'))
+  assert.ok(row >= 0, before)
+  const column = before.split('\n')[row]!.lastIndexOf('Details') + 2
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 20};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 20};${row + 1}m`)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Delivered files · Turn 2'), `a drag is a selection, never a card action:\n${after}`)
+})
+
+test('a double click on the Details verb never opens the browser', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([{ turn: 2, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([deliveredAssistant(2, 'answer body', [{ path: '/ws/a.md' }])], new Map())
+  app.setFullscreen(true)
+  const before = await viewport(vt)
+  const row = before.split('\n').findIndex(line => line.includes('a.md') && line.includes('Details'))
+  assert.ok(row >= 0, before)
+  const column = before.split('\n')[row]!.lastIndexOf('Details') + 2
+  clickCell(vt, column, row)
+  clickCell(vt, column, row)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Delivered files · Turn 2'), `a word-selection click is not a card action:\n${after}`)
+})
+
+test('panel keystrokes never reach the composer draft', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const snap = snapshot([{ turn: 3, files: ['/ws/report.md', '/ws/other.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { deliveredFiles: capability(snap) })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([deliveredAssistant(3, 'done', [{ path: '/ws/report.md' }])], new Map())
+  app.setDraft('keep me')
+  const command = deliverablesCommand(app, () => snap)
+  command.result()
+  await viewport(vt)
+  // An input-seat gesture, an edit, a commit and the Esc ladder: every key is
+  // the OVERLAY's, never the composer's.
+  vt.sendInput('/')
+  vt.sendInput('rep')
+  await viewport(vt)
+  vt.sendInput('\r')
+  await viewport(vt)
+  vt.sendInput('\x1b[A')
+  await viewport(vt)
+  vt.sendInput('\r')
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  await viewport(vt)
+  assert.equal(app.getDraft(), 'keep me', 'the overlay owned every keystroke')
 })

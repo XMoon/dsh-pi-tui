@@ -193,6 +193,12 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   { file: 'src/tui/keybindings/hints.ts', line: "preview: { keys: ['alt+up', 'alt+down', 'alt+pageUp', 'alt+pageDown', 'alt+home', 'alt+end'], label: HISTORY_PREVIEW_SCROLL_LABEL }," },
   { file: 'src/tui/keybindings/hints.ts', line: "copy: { keys: ['alt+c'], label: HISTORY_COPY_LABEL }," },
   { file: 'src/tui/keybindings/hints.ts', line: "cancel: { keys: ['escape', 'ctrl+c'], label: 'Esc' }," },
+  // (11) The Delivered files browser's ONE fixed-chord table (Delivered files
+  // PR1): the same category as (10) — a per-surface COMPONENT contract with no
+  // Host keymap action and no remap, so this table is its key authority and both
+  // the panel's handler and its painted hints import it.
+  { file: 'src/tui/keybindings/hints.ts', line: "turns: { keys: ['shift+t'], label: 'Shift+T' }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "copyPath: { keys: ['shift+c'], label: 'Shift+C' }," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */

@@ -1143,3 +1143,58 @@ test('regular Focus Ctrl+O collapse revokes a nested-cluster search reveal under
     `the cluster returns to its collapsed header:\n${collapsed}`)
   assert.ok(collapsed.includes('▾ Activity'), `the manually expanded Work stays open:\n${collapsed}`)
 })
+
+test('a disabled Ctrl+O keeps the capped tail while /deliverables is available', async () => {
+  const { vt, app } = startApp('compact')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  const { messages } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  const view = await viewport(vt)
+  assert.ok(view.includes('file-4.ts'), `the folded four stay visible:\n${view}`)
+  assert.ok(!view.includes('file-5.ts'),
+    `the browser command is a real owner, so the tail must stay capped:\n${view}`)
+  assert.ok(view.includes('/deliverables'), `the command entry is the operable owner:\n${view}`)
+  assert.ok(!view.includes('ctrl+o'), 'no dead Ctrl+O hint may be painted')
+})
+
+test('a hidden delivered file is revealed temporarily on a command-only surface and released after', async () => {
+  const { vt, app } = startApp('compact')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
+  assert.ok((await viewport(vt)).includes('file-5.ts'), 'precondition: the hidden match is revealed')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  const after = await viewport(vt)
+  assert.ok(!after.includes('file-5.ts'), `the temporary reveal is released:\n${after}`)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(assistant), true,
+    'a command-only surface has no master to undo a durable expansion, so none may be minted')
+})
+
+test('a master-promoted override does not expand the tail on a command-only surface', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map([[1, activity(1)]]))
+  await viewport(vt)
+  // The regular master promotes the reveal into a durable per-card override.
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  assert.ok((await viewport(vt)).includes('file-5.ts'), 'precondition: the durable override expands the tail')
+
+  // fullscreen Focus owns Ctrl+O for the Thought, so the tail has no master:
+  // the retained override must not silently leave the whole list expanded.
+  app.setFullscreen(true)
+  app.expandFocusTurn(1)
+  const focus = await viewport(vt)
+  assert.ok(!focus.includes('file-5.ts'),
+    `a master-only override must not expand a command-only surface:\n${focus}`)
+  assert.ok(focus.includes('/deliverables'), 'the command entry stays the owner')
+
+  // Back on the regular surface the durable choice is still meaningful.
+  app.setFullscreen(false)
+  assert.ok((await viewport(vt)).includes('file-5.ts'),
+    'the durable override still applies where its master owns the tail')
+})

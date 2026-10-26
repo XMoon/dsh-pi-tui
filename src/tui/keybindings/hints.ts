@@ -55,6 +55,20 @@ export const HISTORY_CHORDS = {
 /** One History chord table key. */
 export type HistoryChordId = keyof typeof HISTORY_CHORDS
 
+/**
+ * The Delivered files browser's FIXED local chords (Delivered files PR1).
+ *
+ * The browser panel is a per-surface COMPONENT contract, not a Host command: it
+ * owns no keymap action and no remap exists for these chords, so both the
+ * handler's KeyIds and the painted labels live in ONE table in this key-label
+ * authority — the same category as the History seat's fixed chords. A hint and
+ * its handler therefore cannot drift into two string authorities.
+ */
+export const DELIVERED_FILES_CHORDS = {
+  turns: { keys: ['shift+t'], label: 'Shift+T' },
+  copyPath: { keys: ['shift+c'], label: 'Shift+C' },
+} as const
+
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {
   enter: 'Enter',

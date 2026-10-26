@@ -20,6 +20,7 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tu
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { DELIVERED_FILES_CHORDS } from '../keybindings/hints.ts'
 import {
   deliveredFileBasename,
   deliveredFileLabels,
@@ -305,7 +306,7 @@ export class DeliveredFilesPanel implements Component {
       return
     }
     if (matchesKey(data, '/') || data === '/') return this.enterFilter()
-    if (matchesKey(data, 'shift+t')) return this.openTurns()
+    if (DELIVERED_FILES_CHORDS.turns.keys.some(key => matchesKey(data, key))) return this.openTurns()
     if (matchesKey(data, 'escape')) {
       this.close()
       return
@@ -344,7 +345,7 @@ export class DeliveredFilesPanel implements Component {
       this.requestRender()
       return
     }
-    if (matchesKey(data, 'shift+c')) return this.copySelectedPath()
+    if (DELIVERED_FILES_CHORDS.copyPath.keys.some(key => matchesKey(data, key))) return this.copySelectedPath()
     const bodyRows = this.detailsBodyRows()
     const total = this.detailsBodyLines(this.paintedWidth === 0 ? 80 : this.paintedWidth).length
     if (matchesKey(data, 'up')) {
@@ -650,9 +651,10 @@ export class DeliveredFilesPanel implements Component {
       return truncateToWidth(painted, width, '…')
     }
     const hints = this.hints()
-    const segments: string[] = []
+    // §7.2 order: the primary action, then navigation, then secondary verbs,
+    // then pure browsing hints, with Esc last.
+    const segments: string[] = [hints.enter]
     if (hints.select !== undefined) segments.push(hints.select)
-    segments.push(hints.enter)
     if (hints.filter !== undefined) segments.push(hints.filter)
     if (hints.turns !== undefined) segments.push(hints.turns)
     segments.push(hints.esc)
@@ -670,7 +672,7 @@ export class DeliveredFilesPanel implements Component {
   }
 
   private hints(): HintSegments {
-    if (this.page === 'details') return { enter: 'C Copy path', esc: 'Esc Back' }
+    if (this.page === 'details') return { enter: `${DELIVERED_FILES_CHORDS.copyPath.label} Copy path`, esc: 'Esc Back' }
     if (this.page === 'turns') return { select: '↑↓ Select', enter: 'Enter Open', esc: 'Esc Back' }
     if (this.seat === 'filter') {
       return {
@@ -682,7 +684,7 @@ export class DeliveredFilesPanel implements Component {
       select: '↑↓ Select',
       enter: 'Enter Details',
       filter: '/ Filter',
-      turns: 'T Turns',
+      turns: `${DELIVERED_FILES_CHORDS.turns.label} Turns`,
       esc: 'Esc Close',
     }
   }
