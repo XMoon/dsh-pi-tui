@@ -446,6 +446,22 @@ test('the alternate screen still releases an id it painted before it retired', (
   assert.ok(!terminal.text.includes(`i=${imageId}`), 'that session is over')
 })
 
+test('a clear inside the alternate session does not end its placement ownership', () => {
+  const { core, facade, terminal } = harness()
+  facade.write('\x1b[?1049h')
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(component.render(80).join('\r\n'))
+  const imageId = component.imageId!
+  component.dispose()
+  // A repaint clear inside the SAME alternate session: residency dies, the
+  // session (and therefore the id it still owns) does not.
+  facade.write('\x1b[2J')
+  terminal.writes.length = 0
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  assert.ok(terminal.text.includes(encodeKittyDeleteImage(imageId)),
+    'the alternate screen still releases the id it painted')
+})
+
 test('a foreign id outside the Core slice still passes through', () => {
   const { core, facade, terminal } = harness()
   // Find an id outside this Core's reserved slice.
