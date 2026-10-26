@@ -128,11 +128,14 @@ export class KittyGraphicsCore {
     this.onEvent = options.onEvent
   }
 
-  /** How many images currently hold a payload (diagnostics + budget tests). */
+  /**
+   * How many image ids this terminal's ledger holds: live payload holders AND
+   * painted occurrences the terminal retains. This is the number the frozen
+   * ID budget bounds — a retained id still occupies both the terminal's image
+   * store and a ledger slot, so it may not be silently grandfathered forever.
+   */
   get residentImageCount(): number {
-    let count = 0
-    for (const record of this.records.values()) if (record.source !== undefined) count += 1
-    return count
+    return this.records.size
   }
 
   /** The retained base64 payload total (diagnostics + budget tests). */
@@ -154,7 +157,7 @@ export class KittyGraphicsCore {
    */
   register(source: KittyImageSource): KittyImage | undefined {
     if (this.disposed) return undefined
-    if (this.residentImageCount + 1 > MAX_RESIDENT_IMAGES
+    if (this.records.size + 1 > MAX_RESIDENT_IMAGES
       || this.payloadBytes + source.pngBase64.length > MAX_RESIDENT_PAYLOAD_BYTES
       || this.decodedByteTotal + decodedBytes(source) > MAX_RESIDENT_DECODED_BYTES) {
       this.emit({ type: 'budget-fallback' })
@@ -292,13 +295,20 @@ export class KittyGraphicsCore {
    */
   translateGlobalImageDelete(buffer: KittyScreenBuffer): string {
     let wire = ''
-    for (const record of this.records.values()) {
+    for (const [imageId, record] of this.records) {
       // Only the data THIS buffer holds can be released: a record that was
       // never transmitted here has nothing to delete, and the other buffer's
       // copy (the main screen's scrollback) must survive.
       if (!record.residentIn.delete(buffer)) continue
       record.placements = 0
       wire += encodeKittyDeleteImage(record.image.imageId)
+      // A painted occurrence the terminal retained is now provably gone: the
+      // buffer that held the only copy has just released it, so its id can be
+      // retired from the ledger and its slot reused.
+      if (record.source === undefined && record.residentIn.size === 0) {
+        this.records.delete(imageId)
+        this.retiredImageIds.add(imageId)
+      }
     }
     if (wire !== '') this.emit({ type: 'global-delete-translated', detail: `images:${buffer}` })
     return wire
