@@ -314,11 +314,15 @@ export class KittyTerminalFacade implements Terminal {
         // images (Kitty stores them per screen), so its data stays resident.
         this.buffer = 'alt'
         this.core.invalidateResidency('alt', 'enter-alt')
+        this.core.beginAltSession()
         return
       case 'exit-alt':
         // Leaving discards the alternate buffer's images; the main buffer's
-        // images and placements survive the round trip untouched.
+        // images and placements survive the round trip untouched. An ordinary
+        // clear INSIDE a session must never take this path: it invalidates
+        // residency without ending the session's placement ownership.
         this.core.invalidateResidency('alt', 'exit-alt')
+        this.core.endAltSession()
         this.buffer = 'main'
         return
     }

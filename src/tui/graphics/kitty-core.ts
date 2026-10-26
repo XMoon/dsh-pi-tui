@@ -369,6 +369,21 @@ export class KittyGraphicsCore {
   }
 
   /**
+   * A new alternate session starts: nothing it placed before is its to release
+   * any more. Separate from {@link invalidateResidency}, because an ordinary
+   * clear INSIDE a session invalidates residency without ending the session —
+   * ids that session painted stay its own until the session ends.
+   */
+  beginAltSession(): void {
+    this.altSessionIds.clear()
+  }
+
+  /** The alternate buffer is gone: its placement ownership dies with it. */
+  endAltSession(): void {
+    this.altSessionIds.clear()
+  }
+
+  /**
    * A destructive event in `buffer` (a real clear, or that buffer being
    * discarded) invalidated the uploaded data of the images it placed. Nothing
    * is written here: the next placement re-transmits first. Images placed in
@@ -376,8 +391,6 @@ export class KittyGraphicsCore {
    * main screen its data.
    */
   invalidateResidency(buffer: KittyScreenBuffer, reason: string): void {
-    // The alternate buffer's identity dies with the session that owned it.
-    if (buffer === 'alt') this.altSessionIds.clear()
     let invalidated = 0
     for (const record of this.records.values()) {
       if (!record.residentIn.delete(buffer)) continue
