@@ -299,8 +299,9 @@ export class DraftImagePreview implements Component {
   }
 
   /** The one-line identity/action row. A pending derivation keeps the original
-   * identity plus `…`; only a real admission/decoder failure reads
-   * `Preview unavailable`. */
+   * identity plus `…`; a real admission/decoder failure names the failure in
+   * the `error` ink while the identity facts stay `textDim` (design-language
+   * role 16). */
   private buildIdentityLine(
     width: number,
     occurrence: DraftImageOccurrence,
@@ -311,14 +312,16 @@ export class DraftImagePreview implements Component {
     const image = occurrence.image
     const name = this.displayName(image)
     const prefix = `🖼️ #${image.id}/${total}`
+    const facts = `${image.width}×${image.height} · ${formatBytes(image.byteLength)}`
+    // Pre-paint the spans before width truncation: `truncateToWidth` is ANSI
+    // aware and terminates an open span, so a narrow row can never leak the
+    // error ink into the right-aligned count/control.
     const left = status === 'unavailable'
-      ? `${prefix} · Preview unavailable${name === '' ? '' : ` · ${name}`} · ${image.mediaType} · ${image.width}×${image.height} · ${formatBytes(image.byteLength)}`
-      : status === 'pending'
-        ? `${prefix} · ${image.width}×${image.height} · ${formatBytes(image.byteLength)} · …`
-        : `${prefix} · ${image.width}×${image.height} · ${formatBytes(image.byteLength)}`
+      ? `${color.textDim(`${prefix} · `)}${color.error('Preview unavailable')}${color.textDim(`${name === '' ? '' : ` · ${name}`} · ${image.mediaType} · ${facts}`)}`
+      : color.textDim(`${prefix} · ${facts}${status === 'pending' ? ' · …' : ''}`)
     const remaining = total > 1 ? `+${total - 1}` : ''
     const rightPlain = [remaining, control ? REMOVE_CONTROL : ''].filter(part => part !== '').join(' ')
-    if (rightPlain === '') return color.textDim(truncateToWidth(left, width, '…'))
+    if (rightPlain === '') return truncateToWidth(left, width, '…')
     const leftBudget = Math.max(1, width - visibleWidth(rightPlain) - 1)
     const visibleLeft = truncateToWidth(left, leftBudget, '…')
     const gap = Math.max(1, width - visibleWidth(visibleLeft) - visibleWidth(rightPlain))
@@ -326,7 +329,7 @@ export class DraftImagePreview implements Component {
       remaining === '' ? '' : color.textMuted(remaining),
       control ? color.primary(REMOVE_CONTROL) : '',
     ].filter(part => part !== '').join(' ')
-    return `${color.textDim(visibleLeft)}${' '.repeat(gap)}${right}`
+    return `${visibleLeft}${' '.repeat(gap)}${right}`
   }
 
   /** One `x` hit at the far-right cell of the identity row. */

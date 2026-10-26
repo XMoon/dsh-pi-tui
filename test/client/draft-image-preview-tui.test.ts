@@ -10,13 +10,14 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
-import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
+import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { consumeDraftAttachments, pruneUnreferencedDraftAttachments } from '../../src/client/media/draft-attachments.ts'
 import { expandImagePlaceholders, selectDraftImageOccurrences } from '../../src/client/media/image/placeholder.ts'
 import { preparePrompt } from '../../src/app/submission/prepared-prompt.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { currentPalette } from '../../src/tui/theme/runtime.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -1810,6 +1811,7 @@ test('short/tall and narrow/wide combinations keep the editor and footer visible
 
 const SAMPLE_JPEG = readFileSync(new URL('../fixtures/images/transcript-sample.jpg', import.meta.url))
 const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
+const CORRUPT_JPEG = readFileSync(new URL('../fixtures/images/transcript-corrupt.jpg', import.meta.url))
 
 function addRealImage(
   store: DraftImageStore,
@@ -1948,5 +1950,33 @@ test('x → Undo on a real JPEG keeps the ORIGINAL encoded bytes for submission 
   assert.equal(segments[0]!.image.mediaType, 'image/jpeg')
   assert.deepEqual([segments[0]!.image.width, segments[0]!.image.height], [120, 80])
   app.setFullscreen(false)
+  app.stop()
+})
+
+
+test('a failed JPEG draft paints the failure word with the error ink (role 16)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const image = store.add({
+    bytes: CORRUPT_JPEG,
+    mediaType: 'image/jpeg',
+    width: 120,
+    height: 80,
+    name: 'broken.jpg',
+  })
+  const { vt, app } = startApp(100, 32, store)
+  app.setDraft(image.placeholder)
+  await until(() => vt.getViewport().join('\n').includes('Preview unavailable'), 'the bounded failure row')
+  await vt.waitForRender()
+  const rows = vt.getViewport()
+  const rowIndex = rows.findIndex(line => line.includes('#1/1') && line.includes('Preview unavailable'))
+  assert.notEqual(rowIndex, -1, `the failed draft identity row is painted:\n${rows.join('\n')}`)
+  const line = rows[rowIndex]!
+  const column = visibleWidth(line.slice(0, line.indexOf('Preview unavailable')))
+  assert.equal(vt.getCellFgRgb(rowIndex, column), parseInt(currentPalette.error.slice(1), 16),
+    'the failed placeholder word uses the error token')
+  assert.equal(vt.getCellFgRgb(rowIndex, 0), parseInt(currentPalette.textDim.slice(1), 16),
+    'the draft identity stays in the placeholder ink')
   app.stop()
 })

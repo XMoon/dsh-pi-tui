@@ -22,6 +22,7 @@ import {
 } from '../../src/client/media/image/kitty-thumbnail.ts'
 import type { DraftImage, DraftImagePreviewSource } from '../../src/client/media/image/types.ts'
 import type { DraftImageOccurrence } from '../../src/client/media/image/placeholder.ts'
+import { color } from '../../src/tui/theme/runtime.ts'
 
 const THEME = { fallbackColor: (text: string) => text }
 
@@ -288,6 +289,8 @@ test('unsupported terminals, GIF, oversized, empty and recalled drafts keep real
   const gifLines = component.render(100)
   const gifIdentity = stripAnsi(gifLines[0]!)
   assert.ok(gifIdentity.includes('Preview unavailable'), `kitty GIF reason: ${gifIdentity}`)
+  assert.ok(gifLines[0]!.includes(color.error('Preview unavailable')), 'the failed placeholder word uses the error ink')
+  assert.ok(!gifLines[0]!.includes(color.textDim('Preview unavailable')), 'the failure word is never borrowed from the identity ink')
   assert.ok(gifIdentity.includes('image/gif'), `kitty GIF MIME: ${gifIdentity}`)
   assert.ok(gifIdentity.includes('anim.gif'), `kitty GIF name: ${gifIdentity}`)
   assert.ok(!gifLines.join('\n').includes('\x1b_G'), 'no kitty upload for a GIF')
@@ -395,6 +398,7 @@ test('a real JPEG derives one Kitty PNG after a pending frame and keeps the orig
   assert.ok(pendingIdentity.startsWith('🖼️ #1/1 · 120×80 · 968 B'), `original pending identity: ${pendingIdentity}`)
   assert.ok(pendingIdentity.endsWith('…'), `pending marker: ${pendingIdentity}`)
   assert.ok(!pendingIdentity.includes('Preview unavailable'), 'pending is not an unavailable state')
+  assert.ok(!pendingLines[0]!.includes(color.error('Preview unavailable')), 'pending is not painted as a failure')
   assert.ok(!pendingLines.join('\n').includes('\x1b_G'), 'the first frame fabricates no pixels')
   await until(() => internals(component).draftReady !== undefined, 'the draft derivative')
   const readyLines = component.render(100)
@@ -540,6 +544,7 @@ test('a corrupt JPEG goes pending → bounded unavailable and keeps the x hit', 
   assert.equal(lines.length, 1, 'a failed derivation paints only the identity row')
   const identity = stripAnsi(lines[0]!)
   assert.ok(identity.includes('Preview unavailable'), `bounded failure text: ${identity}`)
+  assert.ok(lines[0]!.includes(color.error('Preview unavailable')), 'the failed placeholder word uses the error ink')
   assert.ok(!/corrupt|premature|Invalid/i.test(identity), `the native error never reaches the terminal: ${identity}`)
   assert.ok(identity.endsWith('x'), 'the x control survives the failure')
   assert.equal(component.hitMap()?.removes[0]?.imageId, image.id)
