@@ -761,3 +761,169 @@ test('a stale SVG viewer copy never STARTS a clipboard write', async () => {
   app.stop()
   loader.dispose()
 })
+
+// Regression (PR5 P1): the SVG thumbnail's body rows are FIGURE-relative while
+// the painted row map is ENTRY-relative. A figure that follows several text
+// rows (non-zero entry offset) must open its Viewer from the cells it really
+// paints, and its own title/description rows must stay inert.
+test('a text-preceded SVG figure opens its viewer from the real painted pixels only', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = new SvgRasterLoader(async (_source, options) => ({
+    png: new Uint8Array(),
+    base64: TINY_PNG_BASE64,
+    widthPx: options.targetWidth,
+    heightPx: 96,
+  }))
+  const { vt, app, copied } = mountApp({ svgLoader: loader })
+  app.setFullscreen(true)
+  const doc = [
+    'First paragraph that is long enough to wrap onto a second painted row at this width.',
+    '',
+    'Second paragraph.',
+    '',
+    'Third paragraph that is also long enough to wrap onto a second painted row here.',
+    '',
+    marker(REF_A),
+    '',
+    'After.',
+  ].join('\n')
+  const { folder, assistant } = answerFolder(doc)
+  setAssistantVisualPresentation(assistant, key(), [svgPublication(REF_A)])
+  app.setTranscript(folder.messages())
+  const settled = await settledViewport(vt)
+  const lines = settled.split('\n')
+  const rowOf = (needle: string): number => lines.findIndex((line) => line.includes(needle)) + 1
+  const titleRow = rowOf('Service topology')
+  const descriptionRow = rowOf('Gateway -> App -> Database')
+  const lastDescriptionRow = rowOf('SVG source available in the expanded tool call')
+  const actionRow = rowOf('Copy SVG')
+  assert.ok(titleRow > 0 && descriptionRow > 0 && lastDescriptionRow > 0 && actionRow > 0,
+    `the figure is painted:\n${settled}`)
+  // The painted pixel body = the rows between the description's last row and
+  // the action row, minus the thumbnail's own leading spacer row.
+  const pixelFirst = lastDescriptionRow + 2
+  const pixelLast = actionRow - 1
+  assert.ok(pixelLast > pixelFirst, `the image body has real rows:\n${settled}`)
+  const titleLine = lines[titleRow - 1]!
+  const contentCol = visibleWidth(titleLine.slice(0, titleLine.indexOf('Service topology'))) + 1
+  const viewerOpen = async (): Promise<boolean> => stripSgr(await viewport(vt)).includes('SVG · Service topology')
+
+  // 1) The figure's own text rows are inert: clicking them never opens the
+  //    Viewer and never folds the answer (the old row comparison made the
+  //    title/description the "pixel band").
+  // The thumbnail's leading spacer row (lastDescriptionRow + 1) belongs to the
+  // figure but paints no pixels, so it must be inert as well.
+  for (const row of [titleRow, descriptionRow, lastDescriptionRow, lastDescriptionRow + 1]) {
+    const beforeClick = stripSgr(await viewport(vt))
+    await clickCell(vt, { x: contentCol + 2, y: row })
+    assert.equal(await viewerOpen(), false, `figure text row ${row} never opens the viewer`)
+    assert.equal(stripSgr(await viewport(vt)), beforeClick, `figure text row ${row} never folds the answer`)
+  }
+
+  // 2) Every REAL painted pixel row opens the SAME authorized Viewer, once.
+  for (const row of [pixelFirst, Math.floor((pixelFirst + pixelLast) / 2), pixelLast]) {
+    await clickCell(vt, { x: contentCol + 2, y: row })
+    assert.equal(await viewerOpen(), true, `real pixel row ${row} opens the viewer`)
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+    assert.equal(await viewerOpen(), false, `the viewer closed after row ${row}`)
+  }
+
+  // 3) The indent and the blank cells right of the image are not pixel hits.
+  for (const x of [contentCol - 1, contentCol + 40]) {
+    await clickCell(vt, { x, y: pixelFirst })
+    assert.equal(await viewerOpen(), false, `column ${x} on a pixel row is inert`)
+  }
+
+  // 4) The action cells keep their own semantics: View opens, Copy SVG copies.
+  await clickCell(vt, cellOf(await viewport(vt), 'View'))
+  assert.equal(await viewerOpen(), true, 'the painted View cell opens the viewer')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const beforeCopy = copied.length
+  await clickCell(vt, cellOf(await viewport(vt), 'Copy SVG'))
+  assert.equal(await viewerOpen(), false, 'Copy SVG never opens the viewer')
+  assert.equal(copied.length, beforeCopy + 1, 'Copy SVG performs exactly one copy')
+  assert.equal(copied[copied.length - 1], SVG_SOURCE, 'Copy SVG copies the raw admitted source')
+  app.stop()
+  loader.dispose()
+})
+
+test('a loading SVG figure registers no pixel target until the raster paints', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const loader = new SvgRasterLoader(async (_source, options) => {
+    await gate
+    return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: options.targetWidth, heightPx: 96 }
+  })
+  const { vt, app } = mountApp({ svgLoader: loader })
+  app.setFullscreen(true)
+  const doc = ['First paragraph.', '', 'Second paragraph.', '', marker(REF_A), '', 'After.'].join('\n')
+  const { folder, assistant } = answerFolder(doc)
+  setAssistantVisualPresentation(assistant, key(), [svgPublication(REF_A)])
+  app.setTranscript(folder.messages())
+  const loading = await settledViewport(vt)
+  const loadingLines = loading.split('\n')
+  const description = loadingLines.findIndex((line) => line.includes('SVG source available in the expanded tool call')) + 1
+  assert.ok(description > 0, `the description is painted while the raster loads:\n${loading}`)
+  assert.ok(loading.includes('Rendering SVG image'), `the placeholder is painted:\n${loading}`)
+  const viewerOpen = async (): Promise<boolean> => stripSgr(await viewport(vt)).includes('SVG · Service topology')
+  // The row the placeholder occupies is inert: the image body may only become
+  // a target once pixels were really painted. (description + 2 is the figure's
+  // own action row in the loading layout, which is a legitimate View cell.)
+  await clickCell(vt, { x: 8, y: description + 1 })
+  assert.equal(await viewerOpen(), false, `the loading placeholder row ${description + 1} is inert`)
+  // Release the raster: the repainted body is a real pixel target.
+  release?.()
+  const settled = await settledViewport(vt)
+  const lines = settled.split('\n')
+  const lastDescription = lines.findIndex((line) => line.includes('SVG source available in the expanded tool call')) + 1
+  const actionRow = lines.findIndex((line) => line.includes('Copy SVG')) + 1
+  const pixelFirst = lastDescription + 2
+  assert.ok(actionRow > pixelFirst, `the settled image body is painted:\n${settled}`)
+  await clickCell(vt, { x: 8, y: pixelFirst })
+  assert.equal(await viewerOpen(), true, 'the first settled pixel row opens the viewer')
+  app.stop()
+  loader.dispose()
+})
+
+test('a resize between press and release retires an SVG pixel press', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = new SvgRasterLoader(async (_source, options) => ({
+    png: new Uint8Array(),
+    base64: TINY_PNG_BASE64,
+    widthPx: options.targetWidth,
+    heightPx: 96,
+  }))
+  const { vt, app } = mountApp({ svgLoader: loader })
+  app.setFullscreen(true)
+  const doc = ['First paragraph.', '', 'Second paragraph.', '', marker(REF_A), '', 'After.'].join('\n')
+  const { folder, assistant } = answerFolder(doc)
+  setAssistantVisualPresentation(assistant, key(), [svgPublication(REF_A)])
+  app.setTranscript(folder.messages())
+  const settled = await settledViewport(vt)
+  const lines = settled.split('\n')
+  const lastDescription = lines.findIndex((line) => line.includes('SVG source available in the expanded tool call')) + 1
+  const pixelRow = lastDescription + 2
+  const viewerOpen = async (): Promise<boolean> => stripSgr(await viewport(vt)).includes('SVG · Service topology')
+  // Positive control: the SAME cell really is a pixel target before the gesture.
+  // Without it this test would also pass on a hit map that has no pixel band at
+  // all, i.e. it could not tell "retired by the resize" from "never worked".
+  await clickCell(vt, { x: 8, y: pixelRow })
+  assert.equal(await viewerOpen(), true, 'the pixel cell opens the viewer before the gesture')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // Press on a REAL pixel row, then change the geometry before the release.
+  vt.sendInput(`\x1b[<0;8;${pixelRow}M`)
+  await vt.waitForRender()
+  vt.resize(90, 26)
+  await vt.waitForRender()
+  // The virtual terminal dispatches input synchronously, so the gesture has
+  // already been resolved when sendInput returns; no fixed wait is needed.
+  vt.sendInput(`\x1b[<0;8;${pixelRow}m`)
+  await vt.waitForRender()
+  assert.equal(await viewerOpen(), false, 'a press retired by a resize never opens the viewer')
+  app.stop()
+  loader.dispose()
+})
