@@ -493,10 +493,12 @@ export class DraftImagePreview implements Component {
     } = { image, generation, pending: Promise.resolve() }
     this.activeDraftConversion = record
     record.pending = Promise.resolve().then(async () => {
-      // Re-check at START: a target switch, invalidation or dispose between
-      // the scheduling frame and this microtask drops the work entirely.
-      if (!this.isCurrentDerivedTarget(image, generation)) return
+      // EVERY path through this deferred task must release the claimed slot,
+      // including the START-time currentness check: a target switch,
+      // invalidation or dispose between the scheduling frame and this
+      // microtask means the decoder never starts, but the slot is still ours.
       try {
+        if (!this.isCurrentDerivedTarget(image, generation)) return
         const png = await this.convertThumbnail(
           image.bytes,
           image.mediaType as 'image/jpeg' | 'image/webp',
