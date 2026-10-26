@@ -22,6 +22,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import test, { afterEach } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
@@ -441,6 +442,20 @@ async function awaitWriteSettlement(h: Harness, label: string, mark: number): Pr
 async function pageListSelect(h: Harness, index: number): Promise<void> {
   await key(h, HOME)
   for (let step = 0; step < index; step += 1) await key(h, DOWN)
+}
+
+/**
+ * Settle the queued authority read(s) using MICROTASK yields only. The app's
+ * render is scheduled through a timer, so the command state advances while the
+ * painted frame still shows the previous facts — the exact window a user's
+ * Enter can arrive in.
+ */
+async function settleReadsWithoutRender(h: Harness, expected: number, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 20_000; attempt += 1) {
+    if (h.settledReadCount() >= expected) return
+    await Promise.resolve()
+  }
+  assert.fail(`${label}: the read never settled on the microtask queue (issued ${h.readCount()}, settled ${h.settledReadCount()})`)
 }
 
 /**
@@ -1734,6 +1749,109 @@ test('a dispatched choice write never advertises Enter confirm while it is savin
   assert.match(h.view(), /Verified/u)
   await settlePainted(h, 'the settled bar', frame => frame.includes('Enter confirm'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+})
+
+test('an Enter on a credential action invalidated by a fresh read is refused and repaints first', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear
+  assert.match(h.view(), /› Clear in Models…/u)
+  // An EXTERNAL clear lands; the read settles, but the render timer has not
+  // painted a new frame yet (the exact stale-paint window).
+  h.store.web.credential = { configured: false }
+  const settledBefore = h.settledReadCount()
+  h.vt.sendInput('r') // start the authoritative read WITHOUT waiting for a paint
+  await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
+  assert.match(h.view(), /› Clear in Models…/u, 'the painted frame still shows the old action')
+  // Enter targets the STALE painted Clear: it must NOT silently run Configure.
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale action never routes')
+  assert.match(h.view(), /State: Not configured/u, 'the refused gesture repaints the fresh facts')
+  assert.match(h.view(), /› Configure in Models…/u, 'the reconciled action is selected for the NEXT gesture')
+  // The next Enter acts on what is now really painted.
+  await key(h, ENTER)
+  await settlePainted(h, 'the Models route after the repaint', frame => frame.includes('Settings · Models'))
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u)
+})
+
+test('a mouse click on a credential action invalidated by a fresh read is refused', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  await key(h, DOWN) // cursor on Clear
+  const line = h.view().split('\n').findIndex(text => text.includes('Clear in Models…'))
+  assert.ok(line >= 0)
+  const column = 40
+  h.store.web.credential = { configured: false }
+  const settledBefore = h.settledReadCount()
+  h.vt.sendInput('r')
+  await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
+  // Press/release on the PAINTED Clear target: the click must not redirect onto
+  // the reconciled Configure.
+  h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}M`)
+  await h.vt.waitForRender()
+  h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}m`)
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale mouse target never routes')
+  assert.match(h.view(), /› Configure in Models…/u, 'the repaint shows the reconciled cursor')
+})
+
+test('a long custom provider id is wholly readable in the scrollable Detail', async t => {
+  const longId = `acme-${'x'.repeat(220)}-TAIL-ID`
+  const h = setup({ columns: 44, rows: 8, searchProvider: longId })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0) // the provider Detail (narrow, 4 body rows)
+  const first = h.view()
+  assert.doesNotMatch(first, /TAIL-ID/u, `the tail is below the first viewport:\n${first}`)
+  // Scroll the Detail: the whole Host id is reachable, never dropped by fit().
+  let scrolled = first
+  for (let step = 0; step < 8 && !scrolled.includes('TAIL-ID'); step += 1) {
+    await key(h, '\x1b[6~')
+    scrolled = h.view()
+  }
+  assert.match(scrolled, /TAIL-ID/u, `the whole custom id is readable after scrolling:\n${scrolled}`)
+  for (const line of h.view().split('\n')) assert.ok(visibleWidth(line) <= 44)
+})
+
+test('a long CJK custom provider id wraps cell-safely and stays wholly readable', async t => {
+  const longId = `搜索-${'提供方'.repeat(40)}-尾部标记`
+  const h = setup({ columns: 44, rows: 20, searchProvider: longId })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  let frame = h.view()
+  for (let step = 0; step < 4 && !frame.includes('尾部标记'); step += 1) {
+    await key(h, '\x1b[6~')
+    frame = h.view()
+  }
+  assert.match(frame, /尾部标记/u, `the CJK id tail is reachable:\n${frame}`)
+  for (const line of h.view().split('\n')) assert.ok(visibleWidth(line) <= 44)
+})
+
+test('a long Host failure reason is wholly readable in the Detail', async t => {
+  const longReason = `mutate rejected ${'r'.repeat(600)} REASON-TAIL`
+  const h = setup({ columns: 80, rows: 24 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  h.store.failNext = longReason
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  await settlePainted(h, 'the long refused verdict', frame => frame.includes('Not saved'))
+  let frame = h.view()
+  for (let step = 0; step < 6 && !frame.includes('REASON-TAIL'); step += 1) {
+    await key(h, '\x1b[6~')
+    frame = h.view()
+  }
+  assert.match(frame, /REASON-TAIL/u, `the whole failure reason is reachable:\n${frame}`)
+  assert.match(frame, /Not saved/u)
 })
 
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
