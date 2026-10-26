@@ -3347,7 +3347,17 @@ export class SettingsWorkspacePanel implements Component {
     // The page's own `done` closes THIS instance only: a stale late callback of a
     // retired page can never close a newer one (instance-identity fence).
     const done = (): void => {
-      if (this.specialistPage === page) this.closeSpecialist()
+      if (this.specialistPage !== page) return
+      this.closeSpecialist()
+      // C2-R5: the two professional editors are opened FROM the row list and
+      // closing one returns there — a second back key (Esc or `←`) steps to the
+      // category rail like every other Settings level, instead of first landing
+      // on a Detail summary the user never asked for. The other embedded pages
+      // keep their documented `Detail → row` ladder.
+      if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings')
+        && this.focus === 'detail') {
+        this.leaveDetailTo('rows')
+      }
     }
     const changed = (): void => { this.refreshSpecialistSummary() }
     switch (row.specialist) {
