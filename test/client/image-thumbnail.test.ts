@@ -249,6 +249,16 @@ function imageLoaderWith(bytes: Uint8Array, convert?: KittyThumbnailConverter): 
   return new ImageLoader(async () => ({ ref: {}, data: bytes }), new ImageCache(), convert)
 }
 
+/**
+ * TEST-ONLY ownership probe: the local `Image` the component currently
+ * retains. It must be gone immediately after a non-pixel render (collapse /
+ * narrow / unsupported / pending / error) or dispose — the point is that no
+ * loader event or asynchronous completion is involved in that release.
+ */
+function retainedImage(component: ImageThumbnail): { readonly base64Data?: string } | undefined {
+  return (component as unknown as { instance?: { base64Data?: string } }).instance
+}
+
 /** The first Kitty APC of a rendered body, decoded to its header + PNG. */
 function kittyBody(lines: readonly string[]): { header: string; png: Buffer } | undefined {
   const match = /^\x1b_G([^;\x1b]*);([^\x1b]*)\x1b\\/.exec(lines[1] ?? '')
@@ -601,7 +611,7 @@ test('a capability flip rebuilds the body for the NEW protocol (derived PNG vs o
   assert.ok(component.paintedImageBody(80) !== undefined)
 })
 
-test('a collapsed preview releases its local payload: re-expanding after eviction re-derives', async () => {
+test('a collapsed preview re-derives its payload after invalidation (no retained old bytes)', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const first = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
@@ -622,12 +632,15 @@ test('a collapsed preview releases its local payload: re-expanding after evictio
   const firstBody = kittyBody(expanded)
   assert.ok(firstBody !== undefined)
   assert.deepEqual(pngDimensions(firstBody.png), { width: 120, height: 80 })
+  assert.ok(retainedImage(component) !== undefined, 'the painted occurrence owns a local Image')
   // Collapsing returns an info-only frame: the local Image (and its base64
-  // reference) is dropped, not just hidden.
+  // reference) is dropped IMMEDIATELY by that render — no loader event or
+  // asynchronous completion participates in this assertion.
   collapsed = true
   const folded = component.render(80)
   assert.equal(folded.length, 1)
   assert.ok(!folded.join('\n').includes('\x1b_G'))
+  assert.equal(retainedImage(component), undefined, 'collapse itself drops the local Image')
   assert.equal(component.paintedImageBody(80), undefined)
   // A trim/invalidation drops the raw and derived cache entries. If the
   // collapsed occurrence had retained its Image, re-expanding would paint the
@@ -692,4 +705,20 @@ test('iTerm2 WebP keeps the original OSC 1337 payload and never converts', async
   assert.ok(!lines.join('\n').includes('\x1b_G'), 'no Kitty conversion payload')
   assert.equal(conversions, 0, 'iTerm2 WebP never schedules a Kitty conversion')
   assert.ok(component.paintedImageBody(80) !== undefined, 'the OSC footprint is a real pixel body')
+})
+
+test('dispose drops the local Image reference immediately', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = imageLoaderWith(SAMPLE_JPEG)
+  const ref = { ...JPEG_REF, attachmentId: 'att-dispose-payload', name: 'dispose.jpg' }
+  loader.load(ref)
+  await until(() => loader.get(ref).state === 'ready', 'the raw JPEG')
+  const component = new ImageThumbnail(ref, loader, THEME, () => {})
+  component.render(80)
+  await until(() => loader.getKittyThumbnail(ref).state === 'ready', 'the derivative')
+  component.render(80)
+  assert.ok(retainedImage(component) !== undefined, 'the painted occurrence owns a local Image')
+  component.dispose()
+  assert.equal(retainedImage(component), undefined, 'dispose drops the local Image without any loader settle')
 })
