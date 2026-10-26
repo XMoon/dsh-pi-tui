@@ -278,29 +278,36 @@ function stepCallIds(events: readonly VisualSessionEvent[]): Map<string, Map<str
 }
 
 /**
- * The `(turn, step)` a `step/start` seq opened, from the assistant messages.
+ * The call index of one committed log, scanning the events once.
+ * @param sessionId - the observed session identity.
+ * @param events - the authority events.
+ * @returns the indexed calls in durable order.
+ */
+function indexCalls(sessionId: string, events: readonly VisualSessionEvent[]): IndexedCall[] {
+  return indexLog(sessionId, events).calls
+}
+
+/**
+ * The executing step's `(turn, step)` key, located by its seq range.
  *
- * The value is a plain `"turn:step"` key used by {@link stepCallIds}. A step
- * whose model response is not in the observed cut answers undefined, and the
- * caller then relies on the indexed occurrences alone.
+ * The step's model response lands AFTER its `step/start` and BEFORE the next
+ * step boundary, so the range identifies it exactly even in a multi-step turn.
+ * This reads only the boundary events, not the tool events.
  * @param events - the authority events.
  * @param turn - the executing turn.
  * @param stepStartSeq - the seq of the executing step's `step/start`.
- * @returns the step key, or undefined when no model response was observed.
+ * @returns the step key, or undefined when its response is not observed.
  */
-function assistantStepOf(
+function executingStepKey(
   events: readonly VisualSessionEvent[],
   turn: number,
   stepStartSeq: number,
 ): string | undefined {
-  // The step's model response is the `assistant/message` of the same turn that
-  // lands AFTER its `step/start` and BEFORE the next step boundary, so the seq
-  // range identifies it exactly.
   let nextBoundary = Number.POSITIVE_INFINITY
   for (const event of events) {
     if (event.seq <= stepStartSeq) continue
     if (event.type !== 'step/start' && event.type !== 'step/end' && event.type !== 'turn/end') continue
-    nextBoundary = Math.min(nextBoundary, event.seq)
+    if (event.seq < nextBoundary) nextBoundary = event.seq
   }
   for (const event of events) {
     if (event.type !== 'assistant/message' || isModelOnlyReplacement(event)) continue
@@ -323,13 +330,33 @@ function assistantStepOf(
  * that repeats the original turn/step/`callId`, and counting it would make an
  * already-accepted publication look ambiguous.
  */
-function indexCalls(sessionId: string, events: readonly VisualSessionEvent[]): IndexedCall[] {
+interface IndexedLog {
+  readonly calls: IndexedCall[]
+  /** Per-step `(turn, step) -> callId -> count` from the model responses. */
+  readonly stepCallIds: Map<string, Map<string, number>>
+}
+
+function indexLog(sessionId: string, events: readonly VisualSessionEvent[]): IndexedLog {
   const calls: IndexedCall[] = []
   const byKey = new Map<string, IndexedCall>()
+  const stepCallIds = new Map<string, Map<string, number>>()
   let openStepStartSeq: number | undefined
   for (const event of events) {
     if (isModelOnlyReplacement(event)) continue
     switch (event.type) {
+      case 'assistant/message': {
+        const key = `${event.data.turn}:${event.data.step}`
+        let counts = stepCallIds.get(key)
+        if (counts === undefined) {
+          counts = new Map<string, number>()
+          stepCallIds.set(key, counts)
+        }
+        for (const block of event.data.message.content) {
+          if (block.type !== 'tool-call' || typeof block.id !== 'string') continue
+          counts.set(block.id, (counts.get(block.id) ?? 0) + 1)
+        }
+        break
+      }
       case 'turn/start':
       case 'turn/end':
       case 'step/end':
@@ -386,7 +413,7 @@ function indexCalls(sessionId: string, events: readonly VisualSessionEvent[]): I
         break
     }
   }
-  return calls
+  return { calls, stepCallIds }
 }
 
 /** The text blocks of one result's content, in order. */
@@ -463,8 +490,20 @@ function qualifySource(call: IndexedCall): VisualSource | undefined {
  * @returns the qualified sources in durable order.
  */
 export function collectVisualSources(sessionId: string, events: readonly VisualSessionEvent[]): VisualSource[] {
+  return sourcesOf(indexCalls(sessionId, events))
+}
+
+/**
+ * The qualified sources of an ALREADY indexed log.
+ *
+ * Cold replay builds the index once and derives both the sources and the
+ * publications from it, so the event list is scanned exactly once (plan §2.3).
+ * @param calls - the indexed calls of one committed log.
+ * @returns the qualified sources in durable order.
+ */
+function sourcesOf(calls: readonly IndexedCall[]): VisualSource[] {
   const sources: VisualSource[] = []
-  for (const call of indexCalls(sessionId, events)) {
+  for (const call of calls) {
     const source = qualifySource(call)
     if (source !== undefined) sources.push(source)
   }
@@ -636,14 +675,17 @@ export function collectPublishedVisuals(sessionId: string, events: readonly Visu
   // behaviour any test can legitimately exercise; the duplicated-identity shape
   // it protects against is covered (a repeated `(turn, step, callId)` is not a
   // source at all).
+  // ONE pass over the log: the index is built once and both the sources and the
+  // publications are derived from it (plan §2.3 single-event-scan requirement).
+  const indexed = indexLog(sessionId, events)
   const sourcesByRef = new Map<string, VisualSource | null>()
-  for (const source of collectVisualSources(sessionId, events)) {
+  for (const source of sourcesOf(indexed.calls)) {
     sourcesByRef.set(source.ref, sourcesByRef.has(source.ref) ? null : source)
   }
   const published: PublishedVisual[] = []
   // First-wins across publications, in O(1) per accepted reference.
   const alreadyPublished = new Set<string>()
-  for (const call of indexCalls(sessionId, events)) {
+  for (const call of indexed.calls) {
     if (call.ambiguous || call.name !== PRESENT_VISUAL_TOOL_NAME) continue
     const result = call.result
     if (result === undefined) continue
@@ -727,20 +769,21 @@ export function decidePublication(input: {
   readonly callId: string
 }): PublicationDecision {
   const { sessionId, events, refs, turn, stepStartSeq, callId } = input
+  // The call index and the step's complete requested-id counts come from ONE
+  // traversal of the log.
+  const indexed = indexLog(sessionId, events)
   // Complete-batch identity check FIRST: the step's own model response already
   // lists every call id it requested, so a repeated id is refused before any
   // publisher can win a race against its own sibling's `tool/call` append.
-  const step = assistantStepOf(events, turn, stepStartSeq)
-  if (step !== undefined) {
-    const ids = stepCallIds(events).get(step)?.get(callId) ?? 0
-    if (ids > 1) {
-      return {
-        ok: false,
-        reason: `the model response for this step requested "${callId}" ${ids} times; a duplicated call id cannot publish`,
-      }
+  const stepKey = executingStepKey(events, turn, stepStartSeq)
+  const ids = stepKey === undefined ? 0 : indexed.stepCallIds.get(stepKey)?.get(callId) ?? 0
+  if (ids > 1) {
+    return {
+      ok: false,
+      reason: `the model response for this step requested "${callId}" ${ids} times; a duplicated call id cannot publish`,
     }
   }
-  const calls = indexCalls(sessionId, events)
+  const calls = indexed.calls
   const publishers = calls.filter(candidate =>
     candidate.name === PRESENT_VISUAL_TOOL_NAME
     && candidate.turn === turn
