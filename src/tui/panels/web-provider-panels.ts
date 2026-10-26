@@ -202,9 +202,24 @@ export class WebEndpointPanel implements Component {
       : undefined
     if (idleLine !== undefined) pushOptional(idleLine)
     const bar = !this.confirmEnabled
-      ? row(color.textDim('Esc cancel · enlarge for the trust warning'), width)
+      ? this.tooShortBar(width)
       : savingLine ?? (errorLine !== undefined && !optional.has(errorLine) ? errorLine : hint)
     return [...body.slice(0, bodyBudget), bar]
+  }
+
+  /**
+   * The bar of a grant too short for the complete trust disclosure. It must not
+   * read like a cancel affordance once a write is DISPATCHED (Esc only closes
+   * this panel; the Host mutation keeps settling in the command owner), so the
+   * live state word leads and only the idle draft says `Esc cancel`.
+   */
+  private tooShortBar(width: number): string {
+    const enlarge = 'enlarge for the warning'
+    if (this.state.kind === 'saving') return row(color.textDim(`Saving… · ${enlarge}`), width)
+    if (this.state.kind === 'error') {
+      return row(`${verdictWord(this.state.verdict)}${color.textDim(` · ${enlarge}`)}`, width)
+    }
+    return row(color.textDim(`Esc cancel · ${enlarge}`), width)
   }
 
   private statusLine(width: number): string {
