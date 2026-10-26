@@ -635,3 +635,38 @@ test('a disabled select action leaves an honest hint without a dangling separato
   assert.equal(view.includes('Select a visual first ·'), false, 'no dangling separator without a live key')
   app.stop()
 })
+
+test('a subagent parent viewer renders figure cells inert: no pointer copy and no viewer', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = new SvgRasterLoader(async (_source, options) => ({
+    png: new Uint8Array(),
+    base64: TINY_PNG_BASE64,
+    widthPx: options.targetWidth,
+    heightPx: 8,
+  }))
+  const { vt, app, copied } = mountApp({ svgLoader: loader })
+  app.setFullscreen(true)
+  const { folder, assistant } = answerFolder(`Before.\n\n${marker(REF_A)}\n\nAfter.`)
+  setAssistantVisualPresentation(assistant, key(), [svgPublication(REF_A)])
+  app.setTranscript(folder.messages())
+  const before = await settledViewport(vt)
+  app.setViewerMode({
+    parentSessionId: 'session',
+    childSessionId: 'child-1',
+    label: 'child',
+    mode: 'one-shot',
+    activity: 'inactive',
+  })
+  await vt.waitForRender()
+  // The child transcript may not be mounted here (the runner owns that
+  // repaint); the point is that the main rows now resolve through the viewer
+  // gate and expose no figure intent.
+  await clickCell(vt, cellOf(before, 'Copy SVG'))
+  assert.deepEqual(copied, [], 'the parent viewer never copies a figure payload')
+  await clickCell(vt, cellOf(before, 'View'))
+  assert.equal((await viewport(vt)).includes('SVG · Service topology'), false,
+    'the parent viewer never opens the SVG viewer')
+  app.setViewerMode(undefined)
+  app.stop()
+  loader.dispose()
+})
