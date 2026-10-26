@@ -245,6 +245,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private disposed = false
   private revision = 0
   private paint: PagePaint | undefined
+  /** The credential action the LAST frame painted as the ACTIVE cursor (Detail
+   *  region only). Enter must target exactly this identity. */
+  private paintedCredentialAction: 'configure' | 'clear' | undefined
   private pressed: {
     readonly x: number
     readonly y: number
@@ -737,10 +740,31 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Hand the typed page-switch intent to the ROOT: Models (never `/login`
-   *  text) owns the actual credential mutation. */
-  private activateCredentialAction(): void {
-    const action = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
-    if (action === undefined) return
+   *  text) owns the actual credential mutation.
+   *
+   *  The gesture must target the action the user really SAW. Enter uses the
+   *  action the LAST frame painted as the active cursor; a mouse click passes
+   *  the painted hit target's identity. A fresh read that invalidated that
+   *  action (an external clear while the cursor sat on Clear) REFUSES this
+   *  gesture and repaints first — the reconciled Configure is selected for the
+   *  NEXT gesture, never activated by the stale one. */
+  private activateCredentialAction(clicked?: 'configure' | 'clear'): void {
+    const selectable = this.selectableCredentialActions()
+    const index = clicked === undefined
+      ? this.reconcileCredentialCursor()
+      : selectable.findIndex(action => action.action === clicked)
+    const action = selectable[index]
+    if (action === undefined) {
+      // The gesture's target no longer exists: only a repaint (never a
+      // different action) may answer it.
+      this.commitPresentation(() => {})
+      return
+    }
+    const seen = clicked ?? this.paintedCredentialAction
+    if (seen === undefined || seen !== action.action) {
+      this.commitPresentation(() => {})
+      return
+    }
     if (!this.paintedActionVisible(action.action)) return
     const initial: ModelsInitialView = action.action === 'configure'
       ? { view: 'reference', ref: WEB_CREDENTIAL_REF, label: 'DeepSeek API Key' }
@@ -1091,7 +1115,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (rowId === 'web-credential') return this.credentialDetail(width, facts)
     const lines: DetailLine[] = this.currentFactLines(rowId, facts, width)
     const phase = this.phases.get(rowId)
-    if (phase !== undefined) lines.push({ text: this.phaseLine(phase) })
+    if (phase !== undefined) lines.push(...this.phaseLines(phase, width))
     const values = this.choiceValues()
     if (values.length > 0) {
       lines.push({ text: '' })
@@ -1103,13 +1127,26 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return lines
   }
 
-  /** The row's `Current:` fact. The URL is wrapped instead of claiming a
-   *  truncated tail is the stored value. */
+  /** The row's `Current:` fact. EVERY Host-origin value is wrapped (a long
+   *  custom provider id, a long URL, a long credential source) so the Detail
+   *  can scroll to the whole value instead of claiming a truncated tail is the
+   *  stored fact; short values still paint exactly one line. */
   private currentFactLines(rowId: WebSettingRowId, facts: WebSettingsFacts, width: number): DetailLine[] {
     const value = this.authorityValue(rowId, facts)
+    const head = 'Current: '
+    const headWidth = visibleWidth(head)
+    const valueLines = (raw: string): DetailLine[] => {
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(raw), Math.max(1, width - headWidth))
+      if (wrapped.length === 0) return [{ text: color.textMuted(head) }]
+      return wrapped.map((chunk, index) => ({
+        text: index === 0
+          ? `${color.textMuted(head)}${color.text(chunk)}`
+          : `${' '.repeat(headWidth)}${color.text(chunk)}`,
+      }))
+    }
     if (facts.kind === 'unavailable') {
       return [
-        { text: `${color.textMuted('Current: ')}${color.text(sanitizedPhysicalLine(value))}` },
+        ...valueLines(value),
         // `facts.reason` is HOST-origin text: sanitize at the display boundary
         // (no raw ANSI/VT/CR/LF can ever reach the terminal) before wrapping.
         ...wrapTextWithAnsi(sanitizedPhysicalLine(facts.reason), Math.max(1, width)).map(text => ({ text: color.textDim(text) })),
@@ -1118,24 +1155,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const refusal = this.intents.writableRefusal()
     if (refusal !== undefined) {
       return [
-        { text: `${color.textMuted('Current: ')}${color.text(sanitizedPhysicalLine(value))}` },
+        ...valueLines(value),
         ...wrapTextWithAnsi(refusal, Math.max(1, width)).map(text => ({ text: color.warning(text) })),
       ]
     }
-    if (rowId !== 'web-search-endpoint' || facts.kind !== 'ready') {
-      return [{ text: `${color.textMuted('Current: ')}${color.text(sanitizedPhysicalLine(value))}` }]
-    }
-    const head = 'Current: '
-    const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, width - visibleWidth(head)))
-    const lines: DetailLine[] = []
-    wrapped.forEach((chunk, index) => {
-      lines.push({
-        text: index === 0
-          ? `${color.textMuted(head)}${color.text(chunk)}`
-          : `${' '.repeat(visibleWidth(head))}${color.text(chunk)}`,
-      })
-    })
-    return lines.length === 0 ? [{ text: color.textMuted('Current: ') }] : lines
+    return valueLines(value)
   }
 
   /** ONE candidate line. The active cursor is `primary` only while the Detail
@@ -1229,17 +1253,33 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return ['', ...notes.flatMap(note => wrapTextWithAnsi(note, Math.max(1, width)))]
   }
 
-  private phaseLine(phase: WebRowPhase): string {
+  /** The state word plus its reason, wrapped so a long Host failure text is
+   *  wholly readable (scrollable) instead of being truncated mid-sentence. */
+  private phaseLines(phase: WebRowPhase, width: number): DetailLine[] {
     const word = phaseWord(phase)
-    if (phase.reason === undefined || phase.reason === '') return word
-    return `${word}${color.textDim(` · ${sanitizedPhysicalLine(phase.reason)}`)}`
+    if (phase.reason === undefined || phase.reason === '') return [{ text: word }]
+    const separator = ' · '
+    const headWidth = visibleWidth(word) + visibleWidth(separator)
+    const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(phase.reason), Math.max(1, width - headWidth))
+    if (wrapped.length === 0) return [{ text: word }]
+    return wrapped.map((chunk, index) => ({
+      text: index === 0
+        ? `${word}${color.textDim(separator)}${color.textDim(chunk)}`
+        : `${' '.repeat(headWidth)}${color.textDim(chunk)}`,
+    }))
   }
 
   private credentialDetail(width: number, facts: WebSettingsFacts): DetailLine[] {
     const state = this.credentialState(facts)
+    const stateHead = 'State: '
+    const stateWrapped = wrapTextWithAnsi(sanitizedPhysicalLine(state.value), Math.max(1, width - visibleWidth(stateHead)))
     const lines: DetailLine[] = [
       { text: color.textMuted(`Reference: ${WEB_CREDENTIAL_REF}`) },
-      { text: `${color.textMuted('State: ')}${color.text(state.value)}` },
+      ...stateWrapped.map((chunk, index) => ({
+        text: index === 0
+          ? `${color.textMuted(stateHead)}${color.text(chunk)}`
+          : `${' '.repeat(visibleWidth(stateHead))}${color.text(chunk)}`,
+      })),
     ]
     const actions = this.credentialActions()
     if (actions.length === 0 && facts.kind === 'ready') {
@@ -1251,6 +1291,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     const activeIndex = this.reconcileCredentialCursor()
+    this.paintedCredentialAction = undefined
     let selectable = -1
     for (const action of actions) {
       if (action.enabled) selectable += 1
@@ -1264,6 +1305,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         continue
       }
       const active = selectable === activeIndex
+      if (active && this.region === 'detail') this.paintedCredentialAction = action.action
       const marker = active ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
       const label = `${marker}${active && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
       lines.push({ text: truncateToWidth(label, Math.max(1, width), '…', false), action: action.action, enabled: true })
@@ -1386,9 +1428,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       this.commitPresentation(() => { this.choiceIndex = index })
       return
     }
-    const index = this.credentialActions().findIndex(action => action.action === target.id)
-    if (index < 0) return
-    this.commitPresentation(() => { this.actionIndex = index })
-    this.activateCredentialAction()
+    // A mouse activation carries the PAINTED target identity: the same
+    // seen-action fence as Enter (a stale Clear target is refused, not
+    // redirected onto the reconciled Configure).
+    this.activateCredentialAction(target.id as 'configure' | 'clear')
   }
 }
