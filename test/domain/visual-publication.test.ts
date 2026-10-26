@@ -30,6 +30,7 @@ import {
   VISUAL_PUBLISHED_PREFIX,
   type VisualSessionEvent,
 } from '../../src/domain/visual/publication.ts'
+import type { VerifiedVisualOriginSpan } from '../../src/domain/visual/origin.ts'
 
 const SESSION = 'session-under-test'
 
@@ -57,8 +58,17 @@ interface Tuple {
  * events of each entry appended in order with contiguous seqs.
  */
 class LogBuilder {
-  private readonly log: VisualSessionEvent[] = []
-  private seq = 0
+  private readonly log: VisualSessionEvent[]
+  private seq: number
+  /** The Session whose events this log records; a generating result derives
+   *  its reference from THIS identity. */
+  private readonly sessionId: string
+
+  constructor(sessionId: string = SESSION, seed: readonly VisualSessionEvent[] = []) {
+    this.sessionId = sessionId
+    this.log = [...seed]
+    this.seq = seed.length
+  }
 
   private push(event: Omit<VisualSessionEvent, 'seq'> & { type: VisualSessionEvent['type'] }): number {
     const seq = this.seq
@@ -120,11 +130,11 @@ class LogBuilder {
     return this
   }
 
-  /** Append a generating tool call + its successful result, with the ref block. */
+  /** Append one generating tool call + its successful result, with the ref block. */
   generate(turn: number, step: number, callId: string, kind: 'chart' | 'svg'): { tuple: Tuple; ref: string } {
     const tuple = this.call(turn, step, callId, kind === 'chart' ? 'dsh_pi_tui_chart' : 'dsh_pi_tui_svg',
       kind === 'chart' ? CHART_ARGS : SVG_ARGS)
-    const ref = visualReference({ sessionId: SESSION, ...tuple })
+    const ref = visualReference({ sessionId: this.sessionId, ...tuple })
     const fact = kind === 'chart' ? chartContentBlocks(chartFactFromArgs(CHART_ARGS)) : svgContentBlocks(svgFactFromArgs(SVG_ARGS))
     this.result(turn, step, callId, [
       ...fact.slice(0, -1),
@@ -132,6 +142,15 @@ class LogBuilder {
       fact[fact.length - 1] as ContentBlock,
     ])
     return { tuple, ref }
+  }
+
+  /**
+   * Append the OFFICIAL child-owned inherited marker at the fork cut, exactly
+   * where `buildForkSeed` puts it: the child's own history starts at this seq.
+   */
+  inheritedMarker(): this {
+    this.appendRaw({ type: 'session/end-seed', data: { inherited: true } })
+    return this
   }
 
   /** Append a `present_visual` call + its receipt result. */
@@ -1272,4 +1291,205 @@ test('cold replay stays linear in the number of publications', () => {
   assert.deepEqual(published.map(entry => entry.ref), [refs[0], refs[1]])
   assert.equal(published.length, 2, '200 publications of the same refs stay two entries')
   assert.equal(published[0]?.callId, 'present-0', 'the first publication wins')
+})
+
+// ── fork-inherited replay provenance ──────────────────────────────────────
+
+const PARENT = 'session-parent'
+const CHILD = 'session-child'
+const GRANDCHILD = 'session-grandchild'
+
+/** A durable origin range, written the way the lineage proof emits it. */
+function originSpan(startSeq: number, endSeqExclusive: number, sessionId: string): VerifiedVisualOriginSpan {
+  return { startSeq, endSeqExclusive, sessionId }
+}
+
+/** One completed turn of ONE Session whose chart and SVG were both published. */
+function publishedFigures(sessionId: string): {
+  readonly log: LogBuilder
+  readonly chartRef: string
+  readonly svgRef: string
+} {
+  const log = new LogBuilder(sessionId).turnStart(1)
+  const chart = log.generate(1, 0, 'chart-call', 'chart')
+  log.stepEnd(1, 0)
+  const svg = log.generate(1, 1, 'svg-call', 'svg')
+  log.stepEnd(1, 1)
+  log.publish(1, 2, 'present-call', [chart.ref, svg.ref])
+  log.stepEnd(1, 2).turnEnd(1)
+  return { log, chartRef: chart.ref, svgRef: svg.ref }
+}
+
+/**
+ * The exact official child continuation: every parent event verbatim at its own
+ * seq, then the child-owned `session/end-seed { inherited: true }` marker. This
+ * is the shape `buildForkSeed()` + `Session` construction commit, and the child
+ * id is DIFFERENT from the one that derived the inherited references.
+ */
+function forkOf(parent: LogBuilder, childSessionId: string): LogBuilder {
+  return new LogBuilder(childSessionId, parent.events()).inheritedMarker()
+}
+
+test('a fork child replays the parent published Chart and SVG once each under the parent origin', () => {
+  const parent = publishedFigures(PARENT)
+  const child = forkOf(parent.log, CHILD)
+  const inheritedLength = parent.log.events().length
+  const spans = [
+    originSpan(0, inheritedLength, PARENT),
+    originSpan(inheritedLength, child.events().length, CHILD),
+  ]
+
+  // The baseline bug: replaying the child's whole log with the CHILD id derives
+  // different references, so the receipt no longer qualifies.
+  assert.deepEqual(collectPublishedVisuals(CHILD, child.events()), [],
+    'the current-session-only replay revokes the inherited publications')
+
+  const published = collectPublishedVisuals(CHILD, child.events(), spans)
+  assert.deepEqual(published.map(entry => entry.ref), [parent.chartRef, parent.svgRef],
+    'both inherited figures replay with their ORIGINAL references, in durable order')
+  assert.deepEqual(published.map(entry => entry.source.type), ['chart', 'svg'])
+  assert.deepEqual(published.map(entry => entry.source.callId), ['chart-call', 'svg-call'],
+    'both publications keep their inherited generating identity')
+})
+
+test('A -> B -> C proves three origins and keeps every ancestor publication exactly once', () => {
+  // A publishes a chart.
+  const a = new LogBuilder('session-a').turnStart(1)
+  const aChart = a.generate(1, 0, 'a-chart', 'chart')
+  a.stepEnd(1, 0)
+  a.publish(1, 1, 'a-present', [aChart.ref])
+  a.stepEnd(1, 1).turnEnd(1)
+  const kA = a.events().length
+
+  // B forks A and publishes its own new SVG.
+  const b = forkOf(a, 'session-b').turnStart(2)
+  const bSvg = b.generate(2, 0, 'b-svg', 'svg')
+  b.stepEnd(2, 0)
+  b.publish(2, 1, 'b-present', [bSvg.ref])
+  b.stepEnd(2, 1).turnEnd(2)
+  const kB = b.events().length
+
+  // C forks B and publishes its own new chart.
+  const c = forkOf(b, 'session-c').turnStart(3)
+  const cChart = c.generate(3, 0, 'c-chart', 'chart')
+  c.stepEnd(3, 0)
+  c.publish(3, 1, 'c-present', [cChart.ref])
+  c.stepEnd(3, 1).turnEnd(3)
+
+  const spans = [
+    originSpan(0, kA, 'session-a'),
+    originSpan(kA, kB, 'session-b'),
+    originSpan(kB, c.events().length, 'session-c'),
+  ]
+  // The pre-fix replay attributes the whole log to C, so only C's OWN
+  // publication survives and both inherited figures disappear.
+  assert.deepEqual(collectPublishedVisuals('session-c', c.events()).map(entry => entry.ref), [cChart.ref],
+    'the pre-fix replay loses every inherited publication and keeps only C\'s own')
+
+  const published = collectPublishedVisuals('session-c', c.events(), spans)
+  assert.deepEqual(published.map(entry => entry.ref), [aChart.ref, bSvg.ref, cChart.ref])
+  assert.deepEqual(published.map(entry => entry.source.callId), ['a-chart', 'b-svg', 'c-chart'],
+    'A -> B -> C proves each generating call from its true origin, never `parentSession ?? current`')
+})
+
+test('attributing the whole inherited log to the direct parent loses the grandparent figure', () => {
+  const a = new LogBuilder('session-a').turnStart(1)
+  const aChart = a.generate(1, 0, 'a-chart', 'chart')
+  a.stepEnd(1, 0)
+  a.publish(1, 1, 'a-present', [aChart.ref])
+  a.stepEnd(1, 1).turnEnd(1)
+  const kA = a.events().length
+  const b = forkOf(a, 'session-b')
+  const kB = b.events().length
+  const c = forkOf(b, 'session-c')
+
+  // The forbidden one-size-fits-all attribution: everything inherited belongs
+  // to the direct parent B.
+  const naive = [
+    originSpan(0, kB, 'session-b'),
+    originSpan(kB, c.events().length, 'session-c'),
+  ]
+  assert.deepEqual(collectPublishedVisuals('session-c', c.events(), naive), [],
+    'a grandparent reference never verifies against the direct-parent id')
+  assert.deepEqual(
+    collectPublishedVisuals('session-c', c.events(), [
+      originSpan(0, kA, 'session-a'),
+      originSpan(kA, kB, 'session-b'),
+      originSpan(kB, c.events().length, 'session-c'),
+    ]).map(entry => entry.ref),
+    [aChart.ref],
+    'only the proven per-range origin recovers it',
+  )
+})
+
+test('a child call cannot publish an inherited source: pairing requires the same origin', () => {
+  // The parent generates a chart in step 0 and an SVG in step 1, then publishes
+  // only the chart in step 2.
+  const parent = new LogBuilder(PARENT).turnStart(1)
+  const chart = parent.generate(1, 0, 'chart-call', 'chart')
+  parent.stepEnd(1, 0)
+  const svg = parent.generate(1, 1, 'svg-call', 'svg')
+  parent.stepEnd(1, 1)
+  parent.publish(1, 2, 'present-call', [chart.ref])
+  parent.stepEnd(1, 2).turnEnd(1)
+  const inheritedLength = parent.events().length
+
+  // The child borrows the UNPUBLISHED inherited SVG inside its OWN new step of
+  // the SAME turn: turn, step order and seq order all line up, so only the
+  // origin mismatch can refuse it.
+  const child = forkOf(parent, CHILD)
+  child.stepStart(1, 3)
+  child.callInOpenStep(1, 3, 'borrow-present', PRESENT_VISUAL_TOOL_NAME, { visuals: [{ ref: svg.ref }] })
+  child.result(1, 3, 'borrow-present', [
+    { type: 'text', text: 'Selected 1 visual for presentation.' },
+    {
+      type: 'text',
+      text: `${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref: svg.ref }] })}`,
+    },
+  ])
+  child.stepEnd(1, 3)
+
+  const spans = [
+    originSpan(0, inheritedLength, PARENT),
+    originSpan(inheritedLength, child.events().length, CHILD),
+  ]
+  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), spans).map(entry => entry.ref), [chart.ref],
+    'the borrowed inherited source never becomes a child publication')
+})
+
+test('an unproven inherited prefix never publishes while the child own turn still does', () => {
+  const parent = publishedFigures(PARENT)
+  const child = forkOf(parent.log, CHILD)
+  const inheritedLength = parent.log.events().length
+  child.turnStart(2)
+  const ownSvg = child.generate(2, 0, 'child-svg', 'svg')
+  child.stepEnd(2, 0)
+  child.publish(2, 1, 'child-present', [ownSvg.ref])
+  child.stepEnd(2, 1).turnEnd(2)
+
+  // Only the child's own range is proven; the inherited prefix stays unproven.
+  const ownOnly = [originSpan(inheritedLength, child.events().length, CHILD)]
+  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), ownOnly).map(entry => entry.ref), [ownSvg.ref],
+    'the unprovable inherited figures stay out while the child own visual still publishes')
+})
+
+test('an overlapping, foreign or non-canonical provenance set grants nothing', () => {
+  const parent = publishedFigures(PARENT)
+  const child = forkOf(parent.log, CHILD)
+  const inheritedLength = parent.log.events().length
+  const end = child.events().length
+
+  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), [
+    originSpan(0, inheritedLength + 2, PARENT),
+    originSpan(inheritedLength, end, CHILD),
+  ]), [], 'overlap is refused instead of attributing one seq twice')
+
+  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), [
+    originSpan(0, inheritedLength, 'session-forged'),
+    originSpan(inheritedLength, end, CHILD),
+  ]), [], 'a ref-shaped claim from another Session never verifies')
+
+  assert.deepEqual(collectPublishedVisuals(CHILD, child.events(), [
+    originSpan(0, end, CHILD),
+  ]), [], 'the child id over an inherited prefix revokes it, never reassigns it')
 })

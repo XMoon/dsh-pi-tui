@@ -801,6 +801,48 @@ turn's structural latest step, with renderable content, may own a visual.
 Publication refs from a different turn, a window outside the answer, or a
 replaced/forged receipt never enter the row.
 
+### Fork-inherited history and origin provenance
+
+A forked Session inherits a durable prefix of its parent's log, and those
+events still belong to the ANCESTOR's identity: the `sv1_…` reference of an
+inherited generating result was derived from the ancestor's Session id, not the
+displayed child's. Replay therefore derives references from per-seq ORIGIN
+RANGES (`src/domain/visual/origin.ts`) instead of one session id:
+
+- a range attributes a half-open `[startSeq, endSeqExclusive)` window to one
+  Session. Ranges are ordered, non-overlapping and immutable, and a seq that no
+  range covers is UNPROVEN — never "the current Session" and never "the direct
+  parent" (`parentSession ?? current` is forbidden);
+- `src/app/bootstrap/visual-lineage.ts` is the ONE proof. It reads the live
+  Session's `header.isSeeded`, `inheritedEventCount` and the exact child-owned
+  `session/end-seed { inherited: true }` cut, then observes each recorded
+  ancestor through the official `sessionQuery.observeSession()` and requires
+  the observed header identity, the parent's own inherited cut, and full
+  durable event-prefix EQUALITY with the inherited window. An unreadable
+  parent, a mismatched prefix, a missing cut marker, a malformed cut or a
+  repeated Session id in the actual ancestor chain leaves that window unproven
+  and reports a bounded reason; the current Session's own range stays
+  authoritative in every one of those cases;
+- the current Session's own range `[inheritedEventCount, seq)` is proven
+  synchronously, so a child's own new figures work on the first frame, while
+  the inherited window is proven once per selected Session identity off the
+  render path. A settled proof advances one internal provenance revision and
+  requests a single repaint through the exact Agent/Session and
+  surface-currentness fence; a late result for a replaced subject (session
+  switch, A→B→A, disposed surface, new binding) is discarded, and a proven
+  failure is cached for that identity until a real rebind instead of being
+  retried every frame;
+- replay pairs a generating source with its `present_visual` publisher only
+  when BOTH were recorded by the same original Session, in the same turn, with
+  the generating result committed before the publishing call. A child can
+  never publish a figure it merely inherited, a cross-boundary unclosed call
+  never completes, and an unproven occurrence yields no publication at all.
+  The LIVE `decidePublication()` path is unchanged: it still authorizes only
+  the current executing Session's own turn and step.
+
+Remote has no trusted complete-log seam and keeps the pre-existing Tool/Work
+behavior; it never gains an inferred origin.
+
 `src/domain/visual/placement.ts` owns the ONE placement projection. The
 Assistant's original `ContentBlock` text is the sole coordinate authority:
 strict `[dsh-visual-sv1_…]: <#>` top-level definitions are consumed as source
@@ -891,15 +933,20 @@ projects the same text the user reads: the latest official
 `assistant/message` is proven to be the committed final row of the SAME Session
 (the Folder's `assistantSettlementSeq(turn, step)` equals the event's `seq`,
 and `eligibleFinalAssistant()` returns the same turn/step/body), then the
-existing `collectPublishedVisuals` authority supplies the publications and the
-shared `planVisualPlacement()` yields the text spans. Only consumed marker
-spans are removed; line terminators, whitespace, CJK, emoji, tabs, ordinary
-definitions and code samples survive exactly, and the display-only definitions
-prefix never enters the payload. A marker-shaped body without a publication for
-its turn is ordinary prose and is copied unchanged. A published marker whose
-final-row identity cannot be proven (torn fold, replaced body, ownership change)
-fails closed instead of guessing which bytes to drop. Remote's bounded-window
-last-assistant read is a different contract and stays byte-exact.
+existing `collectPublishedVisuals` authority supplies the publications from the
+SAME verified origin ranges the render used (see "Fork-inherited history and
+origin provenance"), and the shared `planVisualPlacement()` yields the text
+spans. Only consumed marker spans are removed; line terminators, whitespace,
+CJK, emoji, tabs, ordinary definitions and code samples survive exactly, and
+the display-only definitions prefix never enters the payload. A marker-shaped
+body without a publication for its turn is ordinary prose and is copied
+unchanged. A fork-inherited answer whose origin window is not yet proven
+(pending or failed lineage) is an UNAVAILABLE copy: its markers may already be
+consumed by an ancestor publication, so the clipboard write never starts and no
+literal marker bytes are copied. A published marker whose final-row identity
+cannot be proven (torn fold, replaced body, ownership change) fails closed
+instead of guessing which bytes to drop. Remote's bounded-window last-assistant
+read is a different contract and stays byte-exact.
 
 ## Long user messages
 

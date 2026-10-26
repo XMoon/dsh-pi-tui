@@ -20,6 +20,7 @@ import { chartContentBlocks, chartFactFromArgs, type ChartArgs } from '../../src
 import { visualReference, visualReferenceLine } from '../../src/domain/visual/reference.ts'
 import { VISUAL_PUBLISHED_PREFIX } from '../../src/domain/transcript/visual-text.ts'
 import { asVisualSessionEvents } from '../../src/domain/visual/publication.ts'
+import { ownVisualOriginSpans, type VerifiedVisualOriginSpan } from '../../src/domain/visual/origin.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
@@ -38,7 +39,19 @@ function marker(ref: string): string {
 
 /** One append-only builder for the official Session log used by BOTH sides. */
 class Log {
-  readonly events: SessionEvent[] = []
+  readonly events: SessionEvent[]
+  private readonly sessionId: string
+
+  constructor(sessionId: string = SESSION, seed: readonly SessionEvent[] = []) {
+    this.sessionId = sessionId
+    this.events = [...seed]
+  }
+
+  /** Append the official child-owned inherited cut marker. */
+  forkMarker(): this {
+    this.push('session/end-seed', { inherited: true })
+    return this
+  }
 
   private push(type: string, data: unknown): number {
     const seq = this.events.length
@@ -75,7 +88,7 @@ class Log {
   /** Append one chart generation (call + result) inside the OPEN step. */
   generateChart(turn: number, step: number, callId: string, stepStartSeq: number): string {
     this.call(turn, step, callId, 'dsh_pi_tui_chart', CHART_ARGS)
-    const ref = visualReference({ sessionId: SESSION, turn, stepStartSeq, callId })
+    const ref = visualReference({ sessionId: this.sessionId, turn, stepStartSeq, callId })
     const blocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
     this.result(turn, step, callId, [
       ...blocks.slice(0, -1),
@@ -131,13 +144,13 @@ class Log {
  * One turn: step 0 generates the chart, step 1 publishes it, step 2 is the
  * final answer that consumes the marker.
  */
-function publishedTurn(prefix: string, suffix: string): {
+function publishedTurn(prefix: string, suffix: string, sessionId: string = SESSION): {
   log: Log
   ref: string
   finalSeq: number
   answer: string
 } {
-  const log = new Log().turnStart(1).stepStart(1, 0)
+  const log = new Log(sessionId).turnStart(1).stepStart(1, 0)
   const ref = log.generateChart(1, 0, 'chart-call', 1)
   log.assistant(1, 0, [{ type: 'text', text: '' }])
   log.stepEnd(1, 0)
@@ -166,12 +179,14 @@ function bridgeOf(options: {
   readonly folder?: TranscriptFolder
   readonly generation?: () => number
   readonly sessionId?: string
+  readonly originSpans?: readonly VerifiedVisualOriginSpan[]
 }): ReturnType<typeof createPresentationBridge> {
   const events = options.events
   const session = sessionOf(events)
+  const sessionId = options.sessionId ?? SESSION
   return createPresentationBridge({
     remoteSources: undefined,
-    currentSessionId: () => options.sessionId ?? SESSION,
+    currentSessionId: () => sessionId,
     currentDirectAgent: () => undefined,
     assistantStreamBaselineFor: () => [],
     directSessionFor: () => session,
@@ -179,9 +194,11 @@ function bridgeOf(options: {
     currentGeneration: options.generation ?? (() => 1),
     mainVisualSnapshot: () => ({
       session,
-      sessionId: SESSION,
+      sessionId,
       seq: events.length,
       events: asVisualSessionEvents(events),
+      verifiedOriginSpans: options.originSpans ?? ownVisualOriginSpans(sessionId, 0, events.length),
+      originRevision: 0,
     }),
   })
 }
@@ -291,4 +308,58 @@ test('a model-only surface replacement is never the display /copy source', () =>
   assert.notEqual(folder.assistantSettlementSeq(1, 2), shadow)
   const bridge = bridgeOf({ events: log.events, folder })
   assert.equal(bridge.directLastAssistantText(SESSION), 'Before.\n\n\n\nAfter.')
+})
+
+// ── fork-inherited display copy provenance ────────────────────────────────
+
+const PARENT_SESSION = 'session-parent'
+const CHILD_SESSION = 'session-child'
+
+/** A child log: the parent log verbatim plus its own inherited cut marker. */
+function forkedLog(parent: Log): { readonly log: Log; readonly inheritedLength: number } {
+  const inheritedLength = parent.events.length
+  return { log: new Log(CHILD_SESSION, parent.events).forkMarker(), inheritedLength }
+}
+
+test('a fork-inherited final answer drops only the marker its proven parent publication consumed', () => {
+  const parent = publishedTurn('Parent before.\r\n\r\n', '\r\n\r\nParent after.\r\n', PARENT_SESSION)
+  const { log, inheritedLength } = forkedLog(parent.log)
+  const folder = new TranscriptFolder()
+  folder.apply(log.events)
+  const bridge = bridgeOf({
+    events: log.events,
+    folder,
+    sessionId: CHILD_SESSION,
+    originSpans: [
+      { startSeq: 0, endSeqExclusive: inheritedLength, sessionId: PARENT_SESSION },
+      { startSeq: inheritedLength, endSeqExclusive: log.events.length, sessionId: CHILD_SESSION },
+    ],
+  })
+  assert.equal(
+    bridge.directLastAssistantText(CHILD_SESSION),
+    'Parent before.\r\n\r\n\r\n\r\nParent after.\r\n',
+    'the inherited marker is a consumed display span and every other byte stays exact',
+  )
+})
+
+test('a fork-inherited final answer whose origin is not proven fails closed before any clipboard write', () => {
+  const parent = publishedTurn('Parent before.\n\n', '\n\nParent after.', PARENT_SESSION)
+  const { log, inheritedLength } = forkedLog(parent.log)
+  const folder = new TranscriptFolder()
+  folder.apply(log.events)
+  // Pending (or failed) lineage: only the child's own range is proven, so the
+  // inherited answer's marker may already be consumed and must never be copied.
+  const bridge = bridgeOf({
+    events: log.events,
+    folder,
+    sessionId: CHILD_SESSION,
+    originSpans: [
+      { startSeq: inheritedLength, endSeqExclusive: log.events.length, sessionId: CHILD_SESSION },
+    ],
+  })
+  assert.throws(
+    () => bridge.directLastAssistantText(CHILD_SESSION),
+    (error: unknown) => error instanceof SupersededReadError,
+    'an unproven inherited origin is an unavailable copy, never a literal marker copy',
+  )
 })

@@ -18,6 +18,7 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { PublishedVisual, VisualSessionEvent } from './publication.ts'
+import type { VerifiedVisualOriginSpan } from './origin.ts'
 
 /** One read-only snapshot of the exact Session instance that owns a display
  * subject. Supplied by the composition root; never a Host service. */
@@ -29,6 +30,22 @@ export interface VisualEventSnapshot {
   readonly seq: number
   /** The complete committed event log of that Session. */
   readonly events: readonly VisualSessionEvent[]
+  /**
+   * The PROVEN event-origin ranges of this exact log revision, in seq order.
+   *
+   * A forked Session inherits a prefix of its parent's log; those events
+   * derive their `sv1_…` references from the ANCESTOR's id. Replay therefore
+   * recomputes each call's reference from the range that recorded it, and a
+   * seq no range covers has no publication authority at all (fail closed).
+   */
+  readonly verifiedOriginSpans: readonly VerifiedVisualOriginSpan[]
+  /**
+   * The monotonic revision of {@link verifiedOriginSpans}: an async lineage
+   * proof settling for the SAME Session `seq` changes it, so a memo keyed on
+   * the Session seq alone can never mask the newly proven origins. It is NOT a
+   * second Session sequence and never a durable value.
+   */
+  readonly originRevision: number
 }
 
 /** The exact identity a visual presentation was derived from. */

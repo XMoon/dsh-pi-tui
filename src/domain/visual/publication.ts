@@ -30,6 +30,7 @@ import { authorizeSvg, type SvgFact } from './svg.ts'
 import type { ChartFact } from './chart.ts'
 import { visualParts } from './visual-facts.ts'
 import { parseVisualReferenceLine, VISUAL_REFERENCE_PREFIX, visualReference } from './reference.ts'
+import { createVisualOriginReader, type VerifiedVisualOriginSpan } from './origin.ts'
 import {
   CHART_TOOL_NAME,
   humanFacingVisualResult,
@@ -223,6 +224,16 @@ export interface PublishedVisual {
   readonly source: VisualSource
 }
 
+/**
+ * One qualified generating occurrence together with the original Session of its
+ * `tool/call` seq. The origin stays INTERNAL to the replay index: it is what
+ * makes source/publisher pairing same-origin, and it is not a display fact.
+ */
+interface QualifiedSource {
+  readonly source: VisualSource
+  readonly originSessionId: string
+}
+
 /** One call occurrence as the durable log records it. */
 interface IndexedCall {
   readonly callId: string
@@ -232,6 +243,8 @@ interface IndexedCall {
   readonly step: number
   readonly stepStartSeq: number
   readonly callSeq: number
+  /** The original Session of this call's seq (the current one or a proven ancestor). */
+  readonly originSessionId: string
   readonly ref: string
   /** Present once exactly one well-ordered result paired with this call. */
   result: IndexedResult | undefined
@@ -308,7 +321,25 @@ interface IndexedLog {
   readonly stepCallIds: Map<string, Map<string, number>>
 }
 
-function indexLog(sessionId: string, events: readonly VisualSessionEvent[]): IndexedLog {
+/**
+ * Index one committed log exactly once.
+ *
+ * Without `originOf` every event belongs to `sessionId` (the pre-lineage
+ * behaviour and the LIVE path, which only ever reads its own committed log).
+ * With `originOf` — a replay over proven fork-inherited ranges — each call is
+ * attributed to the Session its seq originally belonged to, and a call in an
+ * unproven seq is not indexed at all: it can neither be a source nor publish.
+ * @param sessionId - the observed session identity.
+ * @param events - the authority events.
+ * @param originOf - optional proven seq→origin lookup.
+ * @returns the indexed calls and the per-step requested-id counts.
+ */
+function indexLog(
+  sessionId: string,
+  events: readonly VisualSessionEvent[],
+  originOf?: (seq: number) => string | undefined,
+): IndexedLog {
+  const originAt = originOf ?? ((): string => sessionId)
   const calls: IndexedCall[] = []
   const byKey = new Map<string, IndexedCall>()
   const stepCallIds = new Map<string, Map<string, number>>()
@@ -339,6 +370,11 @@ function indexLog(sessionId: string, events: readonly VisualSessionEvent[]): Ind
         break
       case 'tool/call': {
         if (openStepStartSeq === undefined) break
+        const originSessionId = originAt(event.seq)
+        // An unproven seq has no publication authority, and a call whose step
+        // frame belongs to another original Session is a cross-boundary
+        // occurrence (a forged/partial fork): neither is indexed.
+        if (originSessionId === undefined || originAt(openStepStartSeq) !== originSessionId) break
         const call: IndexedCall = {
           callId: event.data.callId,
           name: event.data.name,
@@ -347,8 +383,9 @@ function indexLog(sessionId: string, events: readonly VisualSessionEvent[]): Ind
           step: event.data.step,
           stepStartSeq: openStepStartSeq,
           callSeq: event.seq,
+          originSessionId,
           ref: visualReference({
-            sessionId,
+            sessionId: originSessionId,
             turn: event.data.turn,
             stepStartSeq: openStepStartSeq,
             callId: event.data.callId,
@@ -370,6 +407,10 @@ function indexLog(sessionId: string, events: readonly VisualSessionEvent[]): Ind
         const key = callKey(event.data.turn, event.data.step, event.data.message.toolCallId)
         const call = byKey.get(key)
         if (call === undefined) break
+        // The result must be recorded by the SAME original Session as the call:
+        // a fork's synthetic closer (or a crafted crossing) is a different
+        // origin and never completes an inherited call.
+        if (originAt(event.seq) !== call.originSessionId) break
         if (call.result !== undefined || event.seq <= call.callSeq) {
           call.ambiguous = true
           break
@@ -418,7 +459,7 @@ export function trailingVisualReference(blocks: readonly ContentBlock[]): string
  * @param call - one indexed call occurrence.
  * @returns the source, or undefined when any qualifier is missing.
  */
-function qualifySource(call: IndexedCall): VisualSource | undefined {
+function qualifySource(call: IndexedCall): QualifiedSource | undefined {
   if (call.ambiguous) return undefined
   if (call.name !== CHART_TOOL_NAME && call.name !== SVG_TOOL_NAME) return undefined
   const result = call.result
@@ -438,7 +479,10 @@ function qualifySource(call: IndexedCall): VisualSource | undefined {
   }
   if (call.name === CHART_TOOL_NAME) {
     return fact.type === 'chart'
-      ? { ...base, type: 'chart', chart: fact, svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined }
+      ? {
+        source: { ...base, type: 'chart', chart: fact, svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined },
+        originSessionId: call.originSessionId,
+      }
       : undefined
   }
   if (fact.type !== 'svg') return undefined
@@ -447,12 +491,15 @@ function qualifySource(call: IndexedCall): VisualSource | undefined {
   const authorization = authorizeSvg(call.arguments, result.content, 'ok')
   if (authorization.state !== 'ready') return undefined
   return {
-    ...base,
-    type: 'svg',
-    chart: undefined,
-    svg: fact,
-    svgSource: authorization.source,
-    svgAdmissionWidth: authorization.admission.width,
+    source: {
+      ...base,
+      type: 'svg',
+      chart: undefined,
+      svg: fact,
+      svgSource: authorization.source,
+      svgAdmissionWidth: authorization.admission.width,
+    },
+    originSessionId: call.originSessionId,
   }
 }
 
@@ -469,7 +516,7 @@ function qualifySource(call: IndexedCall): VisualSource | undefined {
  * @returns the qualified sources in durable order.
  */
 export function collectVisualSources(sessionId: string, events: readonly VisualSessionEvent[]): VisualSource[] {
-  return sourcesOf(indexCalls(sessionId, events))
+  return sourcesOf(indexCalls(sessionId, events)).map(qualified => qualified.source)
 }
 
 /**
@@ -480,8 +527,8 @@ export function collectVisualSources(sessionId: string, events: readonly VisualS
  * @param calls - the indexed calls of one committed log.
  * @returns the qualified sources in durable order.
  */
-function sourcesOf(calls: readonly IndexedCall[]): VisualSource[] {
-  const sources: VisualSource[] = []
+function sourcesOf(calls: readonly IndexedCall[]): QualifiedSource[] {
+  const sources: QualifiedSource[] = []
   for (const call of calls) {
     const source = qualifySource(call)
     if (source !== undefined) sources.push(source)
@@ -619,17 +666,19 @@ export function parsePresentVisualArguments(args: unknown): PresentVisualArgumen
 /**
  * Whether one generating source may be published by the given publisher.
  *
- * Stated once so the live tool body and cold replay cannot disagree: the same
- * turn, an EARLIER model step, and the source result committed before the
- * publishing call.
+ * Stated once so the live tool body and cold replay cannot disagree: the SAME
+ * original Session recorded both, the same turn, an EARLIER model step, and the
+ * source result committed before the publishing call. The origin check is what
+ * stops a child from publishing a figure it merely inherited.
  */
 function isPublishableBy(
-  source: VisualSource,
-  publisher: { readonly turn: number; readonly stepStartSeq: number; readonly callSeq: number },
+  qualified: QualifiedSource,
+  publisher: { readonly turn: number; readonly stepStartSeq: number; readonly callSeq: number; readonly originSessionId: string },
 ): boolean {
-  return source.turn === publisher.turn
-    && source.stepStartSeq < publisher.stepStartSeq
-    && source.resultSeq < publisher.callSeq
+  return qualified.originSessionId === publisher.originSessionId
+    && qualified.source.turn === publisher.turn
+    && qualified.source.stepStartSeq < publisher.stepStartSeq
+    && qualified.source.resultSeq < publisher.callSeq
 }
 
 /**
@@ -644,7 +693,11 @@ function isPublishableBy(
  * @param events - the exact committed events, in `seq` order.
  * @returns the published visuals in durable order, first-wins.
  */
-export function collectPublishedVisuals(sessionId: string, events: readonly VisualSessionEvent[]): PublishedVisual[] {
+export function collectPublishedVisuals(
+  sessionId: string,
+  events: readonly VisualSessionEvent[],
+  originSpans?: readonly VerifiedVisualOriginSpan[],
+): PublishedVisual[] {
   // ONE index of the qualified sources per reference, built in a single pass
   // (plan §2.3: O(N + K), never a per-reference rescan of the log). A reference
   // is ambiguous — and therefore unpublishable — exactly when more than one
@@ -656,10 +709,11 @@ export function collectPublishedVisuals(sessionId: string, events: readonly Visu
   // source at all).
   // ONE pass over the log: the index is built once and both the sources and the
   // publications are derived from it (plan §2.3 single-event-scan requirement).
-  const indexed = indexLog(sessionId, events)
-  const sourcesByRef = new Map<string, VisualSource | null>()
-  for (const source of sourcesOf(indexed.calls)) {
-    sourcesByRef.set(source.ref, sourcesByRef.has(source.ref) ? null : source)
+  const indexed = indexLog(sessionId, events, originSpans === undefined ? undefined : createVisualOriginReader(originSpans))
+  const sourcesByRef = new Map<string, QualifiedSource | null>()
+  for (const qualified of sourcesOf(indexed.calls)) {
+    const ref = qualified.source.ref
+    sourcesByRef.set(ref, sourcesByRef.has(ref) ? null : qualified)
   }
   const published: PublishedVisual[] = []
   // First-wins across publications, in O(1) per accepted reference.
@@ -693,7 +747,7 @@ export function collectPublishedVisuals(sessionId: string, events: readonly Visu
         callSeq: call.callSeq,
         resultSeq: result.seq,
         callId: call.callId,
-        source,
+        source: source.source,
       })
     }
     if (!qualified) continue
@@ -789,15 +843,16 @@ export function decidePublication(input: {
       reason: 'the executing call arguments disagree with the durable tool/call arguments',
     }
   }
-  const sources = calls.map(call => qualifySource(call)).filter((source): source is VisualSource => source !== undefined)
+  const sources = calls.map(call => qualifySource(call)).filter((source): source is QualifiedSource => source !== undefined)
   const accepted: { ref: string }[] = []
   for (const ref of refs) {
-    const matched = sources.filter(source => source.ref === ref)
+    const matched = sources.filter(qualified => qualified.source.ref === ref)
     if (matched.length > 1) {
       return { ok: false, reason: `visual ref ${ref} is ambiguous: more than one committed source owns it` }
     }
-    const source = matched[0]
-    if (source === undefined) {
+    const qualified = matched[0]
+    const source = qualified?.source
+    if (qualified === undefined || source === undefined) {
       const pending = calls.find(candidate => candidate.ref === ref && candidate.result === undefined)
       if (pending !== undefined) {
         return {
@@ -819,7 +874,7 @@ export function decidePublication(input: {
     if (source.stepStartSeq > stepStartSeq) {
       return { ok: false, reason: `visual ref ${ref} belongs to a later model step` }
     }
-    if (!isPublishableBy(source, publisher)) {
+    if (!isPublishableBy(qualified, publisher)) {
       return {
         ok: false,
         reason: 'Source visual is not committed yet; call present_visual after the generating tool has finished.',
