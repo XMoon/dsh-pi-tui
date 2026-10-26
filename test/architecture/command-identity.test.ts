@@ -282,11 +282,22 @@ test('a superseded skill/permission interaction is refused gracefully, never thr
   // The picker SELECTION must not let the error escape the overlay callback.
   assert.ok(commandLayerSource.includes("app.notify('the session changed while loading skills — try again', 'error')"),
     'the picker selection notifies instead of throwing')
-  // The stale /settings panel CLOSES and tells the user instead of dispatching
-  // the retained scope to the replacement owner.
+  // A stale /settings approval write tells the user instead of dispatching the
+  // retained scope to the replacement owner. C2-R7 retired the legacy editor's
+  // local `closeSettings()` seam together with that editor; the SURVIVING
+  // contract is the Settings workspace's: refuse BEFORE any dispatch, return a
+  // real `not-saved` outcome, and let the row leave the next snapshot because it
+  // is gated on a CURRENT captured scope.
   assert.ok(commandLayerSource.includes("app.notify('the session changed — the approval policy was not applied', 'error')"),
     'the settings panel reports the refused write')
-  assert.ok(commandLayerSource.includes('closeSettings()'), 'the stale panel closes itself')
+  assert.equal(count(commandLayerSource, 'closeSettings()'), 0,
+    'no retired editor close seam is resurrected by a later change')
+  assert.ok(commandLayerSource.includes('if (approvalScope === undefined || !runner.isSessionScopeCurrent(approvalScope)) {'),
+    'the approval write refuses a stale captured scope before dispatching')
+  assert.ok(commandLayerSource.includes('const approvalLive = approvalScope !== undefined'),
+    'the approval row exists only for a current captured scope')
+  assert.ok(commandLayerSource.includes("reason: 'the session this workspace was opened on is no longer current"),
+    'the stale refusal is a real outcome the workspace presents')
   // /yolo maps the refused write to a command error.
   assert.ok(modelsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
     'the permission preset refusal is user-visible')
