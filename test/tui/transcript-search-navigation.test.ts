@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
-import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
@@ -1127,5 +1127,68 @@ test('a search target below an inline figure scrolls the viewport to the rendere
     `the destination row is visible after the figure:\n${lines.join('\n')}`)
   assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0,
     'the source-local destination is below the card top')
+  app.stop()
+})
+
+
+test('a message target crossing a non-text block keeps its search anchor', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const content = [
+    { type: 'text' as const, text: 'cross-' },
+    { type: 'image' as const, attachment: { type: 'image' as const, name: 'middle.png' } },
+    { type: 'text' as const, text: 'block' },
+  ] as ContentBlock[]
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as unknown as SessionEvent,
+    {
+      type: 'assistant/message',
+      seq: 1,
+      time: 2,
+      data: {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('cross-block-search'),
+          role: 'assistant',
+          content,
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: 2, time: 3, data: { turn: 0, reason: { kind: 'completed' } } } as unknown as SessionEvent,
+  ])
+  const card = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(card !== undefined)
+  assert.equal(card.text, 'cross-block', 'the raw corpus concatenates text blocks without a separator')
+  setAssistantVisualPresentation(card, {
+    subjectKind: 'main', subjectId: 'cross-block-search', sourceIdentity: {}, session: {}, sessionId: 'cross-block-search', seq: 2,
+    turn: 0, step: 0, text: card.text, content: card.content, assistantRevision: 0,
+  }, [searchChartPublication(ref)])
+  const match = folder.search('cross-block').find(candidate => candidate.source.kind === 'message')
+  assert.ok(match !== undefined, 'the raw message corpus has the cross-block hit')
+
+  const { vt, app } = startApp(100, 24)
+  app.setTranscript([card], folder.turnActivities())
+  await vt.waitForRender()
+  const plain = (await viewport(vt)).join('\n')
+  assert.ok(!plain.includes('cross-block'),
+    `precondition: the image block breaks the rendered contiguous text:\n${plain}`)
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([card]),
+    target: { query: 'cross-block', match, message: card },
+    grantReveal: false,
+  })
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { selectedIndex: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.ok(selection !== undefined,
+    'a legitimate message hit crossing a non-text block must keep its anchor; only hidden-marker-only hits are suppressed')
   app.stop()
 })
