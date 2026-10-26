@@ -18,7 +18,9 @@ import { FooterCustomItemCatalog } from '../../src/tui/footer/custom-item-catalo
 import { FooterItemRegistry } from '../../src/tui/footer/item-registry.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../src/domain/footer/presets.ts'
 import type { StatusSnapshot } from '../../src/domain/status/types.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -26,21 +28,97 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
  * keybindings are process-global) is released only by the FINAL dispose,
  * never by stop() (see src/tui/process-slot.ts). */
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+/** The mounted page teardowns of THIS test: the Settings root owns these in
+ * production, so the harness disposes them exactly like a teardown. */
+const pageScreens: Array<() => void> = []
 afterEach(() => {
+  for (const close of pageScreens.splice(0)) {
+    try { close() } catch {}
+  }
   disposeStartedApps()
 })
 
 function startApp(cols = 100, rows = 30): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(cols, rows)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
+  // The page is mounted on its OWN alt screen by `mountPage`: the app is only
+  // the dependency provider here (registry/status/footer runtime), exactly like
+  // the command layer is for the real Settings body. It gets its own terminal so
+  // its background renders can never bleed into the page viewport.
+  const app = new TuiApp(new VirtualTerminal(cols, rows), { onSubmit: () => {}, onExit: () => {} })
   startedApps.add(app)
   return { vt, app }
 }
 
-function openDefault(app: TuiApp, hooks: { onSave?: () => void; onCancel?: () => void } = {}): FooterConfiguratorModel {
+/** Mount ONE configurator page with the row grant a Settings frame gives it
+ *  (body rows plus the ONE physical Action Bar on the last terminal row). */
+function mountPage(
+  vt: VirtualTerminal,
+  panel: import('../../src/tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage,
+): { readonly close: () => void; readonly requestRender: () => void } {
+  const mount = mountEmbeddedPage(vt, panel)
+  const close = (): void => {
+    const at = pageScreens.indexOf(close)
+    if (at >= 0) pageScreens.splice(at, 1)
+    mount.close()
+  }
+  pageScreens.push(close)
+  return { close, requestRender: mount.requestRender }
+}
+
+/** Open a configurator page through the APP composition factory (the same
+ *  dependencies the Settings root uses) and mount it on the test screen. */
+function openPage(
+  vt: VirtualTerminal,
+  app: TuiApp,
+  options: {
+    readonly model: FooterConfiguratorModel
+    readonly registry: FooterItemRegistry
+    readonly composer?: FooterComposer
+    readonly onSave?: (layout: import('../../src/domain/footer/layout.ts').FooterLayoutV1, customItems?: readonly import('../../src/domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
+    readonly onCancel?: () => void
+  },
+): { readonly model: FooterConfiguratorModel; readonly close: () => void; readonly panel: ReturnType<TuiApp['createFooterConfiguratorPanel']> } {
+  let mounted: { close: () => void; requestRender: () => void } | undefined
+  let closed = false
+  // The app's `requestRender` is the production repaint trigger for the Settings
+  // frame; in this page-only harness it must also reach the mounted screen.
+  const originalRequestRender = app.requestRender.bind(app)
+  app.requestRender = (): void => {
+    originalRequestRender()
+    mounted?.requestRender()
+  }
+  const close = (): void => {
+    if (closed) return
+    closed = true
+    app.requestRender = originalRequestRender
+    mounted?.close()
+  }
+  const panel = app.createFooterConfiguratorPanel({
+    model: options.model,
+    registry: options.registry,
+    ...options.composer === undefined ? {} : { composer: options.composer },
+    sessionOnly: false,
+    onSave: async (layout, customItems) => {
+      await options.onSave?.(layout, customItems)
+      close()
+    },
+    onCancel: () => {
+      const cancel = options.onCancel
+      close()
+      cancel?.()
+    },
+  })
+  mounted = mountPage(vt, panel)
+  return { model: options.model, close, panel }
+}
+
+function openDefault(
+  vt: VirtualTerminal,
+  app: TuiApp,
+  hooks: { onSave?: () => void; onCancel?: () => void } = {},
+): FooterConfiguratorModel {
   const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: hooks.onSave ?? (() => {}),
@@ -63,32 +141,80 @@ test('the configurator opens on the Row Selector with a live preview', async () 
       steps: 5,
     },
   })
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Configure Footer'), `title missing:\n${view}`)
+  assert.ok(view.includes('Select row to edit'), `the Row Selector must be painted:\n${view}`)
   assert.ok(view.includes('Select row to edit'), `row selector missing:\n${view}`)
   assert.ok(view.includes('Preview'), `preview label missing:\n${view}`)
   assert.ok(view.includes('Row 1'), `the row list missing:\n${view}`)
   assert.ok(view.includes('deepseek/flash'), `preview must compose the real snapshot:\n${view}`)
-  assert.ok(view.includes('↑↓ Select · Enter Open · S Save · Esc Close'), `the selector help missing:\n${view}`)
+  assert.ok(view.includes('↑↓ Select · Enter Open · S Done · ← Back · Esc Close'), `the selector bar missing:\n${view}`)
+  app.stop()
+})
+
+test('← is the back verb on the Row Selector: a clean page closes, a dirty one asks first', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(vt, app)
+  await vt.waitForRender()
+  // Clean Row Selector: ← closes exactly like Esc.
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  assert.ok(model.state().mode === 'rows', 'the model still holds the clean selector')
+  // Open it again through the real factory path.
+  const reopened = openDefault(vt, app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput(' ') // remove one item → dirty
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // back to the selector
+  await vt.waitForRender()
+  assert.equal(reopened.state().mode, 'rows')
+  assert.ok(reopened.isDirty(), 'precondition — the draft is dirty')
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  assert.equal(reopened.state().mode, 'exit-confirm', 'a dirty ← opens the confirmation, never a silent discard')
+  assert.match(vt.getViewport().join('\n'), /Save changes before exiting\?/)
+  vt.sendInput('\x1b') // Esc on the confirmation IS Keep Editing
+  await vt.waitForRender()
+  assert.equal(reopened.state().mode, 'rows', 'Esc keeps editing')
+  app.stop()
+})
+
+test('← keeps moving the selected item to the Left zone inside Edit Row', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(vt, app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // Edit Row 1
+  await vt.waitForRender()
+  for (let i = 0; i < 2; i += 1) vt.sendInput('\x1b[B') // move to the 3rd left item
+  await vt.waitForRender()
+  const before = model.preview().rows[0]!.right.length
+  vt.sendInput('\x1b[C') // → the item joins the Right zone
+  await vt.waitForRender()
+  assert.equal(model.preview().rows[0]!.right.length, before + 1, '→ is the zone switch')
+  vt.sendInput('\x1b[D') // ← is the SAME zone switch, NOT the page back
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row', '← inside the row editor must not leave the page')
+  assert.equal(model.preview().rows[0]!.right.length, before, '← moved the item back into the Left zone')
   app.stop()
 })
 
 test('Enter edits the row; Esc walks back; Esc on the selector closes', async () => {
   const { vt, app } = startApp()
   let cancelled = 0
-  openDefault(app, { onCancel: () => { cancelled += 1 } })
+  openDefault(vt, app, { onCancel: () => { cancelled += 1 } })
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Edit Row 1'), `Enter must open the row editor:\n${view}`)
+  assert.ok(view.includes('A Add') && view.includes('Space Remove'), `Enter must open the row editor:\n${view}`)
   assert.ok(view.includes('Left') && view.includes('Right'), `the zones must both be visible:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Configure Footer'), `Esc must return to the selector:\n${view}`)
+  assert.ok(view.includes('Select row to edit'), `Esc must return to the selector:\n${view}`)
   assert.equal(cancelled, 0)
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -102,7 +228,7 @@ test('S saves the draft from the Row Selector', async () => {
   let saved: unknown
   let cancelled = 0
   const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: (layout) => { saved = layout },
@@ -129,7 +255,7 @@ test('S saves the draft from the Row Selector', async () => {
 test('the Edit Row page moves an item across zones with ←; Space removes; the preview follows', async () => {
   const { vt, app } = startApp()
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
@@ -165,14 +291,14 @@ function idAt(model: FooterConfiguratorModel): string | undefined {
 
 test('M enters Move Mode; arrows reorder; Enter exits', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
   vt.sendInput('m') // → Move Mode
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Edit Row 1 [MOVE]'), `the move banner must show:\n${view}`)
+  assert.ok(view.includes('◆') && view.includes('↑↓ Move'), `the move banner must show:\n${view}`)
   assert.ok(view.includes('↑↓ Move · ←→ Side · Enter/Esc Done'), `the move help must show:\n${view}`)
   vt.sendInput('\x1b[B') // ↓ reorders the first item down
   await vt.waitForRender()
@@ -188,20 +314,20 @@ test('M enters Move Mode; arrows reorder; Enter exits', async () => {
   vt.sendInput('\x1b')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Edit Row 1'), `Move Mode's Esc must return to the row editor:\n${view}`)
+  assert.ok(view.includes('A Add'), `Move Mode's Esc must return to the row editor:\n${view}`)
   app.stop()
 })
 
 test('A opens the Add picker; typing filters; Enter adds and closes', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
   vt.sendInput('a') // → Add picker
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Add Item → Row 1 · Left'), `picker title missing (the add side is shown):\n${view}`)
+  assert.ok(view.includes('Search:'), `the Add picker must show its search input:\n${view}`)
   assert.ok(view.includes('Search:'), `search line missing:\n${view}`)
   // Type to filter (one input event). The label 'cache
   // hit' pins the match: the unfiltered catalog also carries stats-line,
@@ -218,7 +344,7 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   assert.ok(model.preview().rows[0]!.left.some(ref => ref.id === 'cache-hit'), 'the item joined the draft')
   assert.equal(model.state().mode, 'row', 'a successful add closes the picker')
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Edit Row 1'), `the picker must close back into the row editor:\n${view}`)
+  assert.ok(view.includes('A Add'), `the picker must close back into the row editor:\n${view}`)
   // Reopen: the query is FRESH, and the added definition is STILL offered
   // (a definition may be placed repeatedly — another Add appends an
   // independent placement).
@@ -252,7 +378,7 @@ test('the Row Editor distinguishes the default row\'s two Performance placements
       steps: 5,
     },
   })
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   // Enter the DEFAULT stats row (Row 2): its duplicate performance
   // placements must be distinguishable through the existing style column
@@ -274,7 +400,7 @@ test('the Row Editor distinguishes the default row\'s two Performance placements
 test('the Item Editor edits style/tone; the picker renders live examples', async () => {
   const { vt, app } = startApp()
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // ↓ Row 2 (the context item lives in its right zone)
   await vt.waitForRender()
@@ -286,7 +412,7 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   vt.sendInput('\r')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Edit Item · Context'), `item editor title missing:\n${view}`)
+  assert.ok(view.includes('Style') && view.includes('Tone'), `the item editor menu missing:\n${view}`)
   assert.ok(view.includes('Style'), `the style row missing:\n${view}`)
   assert.ok(view.includes('Tone'), `the tone row missing:\n${view}`)
   assert.ok(view.includes('Advanced…'), `the advanced row missing:\n${view}`)
@@ -306,7 +432,6 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   vt.sendInput('\r')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Style · Context'), `style picker title missing:\n${view}`)
   assert.ok(view.includes('Bar'), `the bar example missing:\n${view}`)
   assert.ok(view.includes('Percent'), `the percent example missing:\n${view}`)
   assert.ok(view.includes('Full'), `the full example missing:\n${view}`)
@@ -322,7 +447,7 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
 
 test('the Advanced editor edits prefix inline and shows the values', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
@@ -334,7 +459,7 @@ test('the Advanced editor edits prefix inline and shows the values', async () =>
   vt.sendInput('\r')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Advanced · Model'), `advanced title missing:\n${view}`)
+  assert.ok(view.includes('Prefix') && view.includes('Suffix'), `the advanced fields missing:\n${view}`)
   assert.ok(view.includes('Prefix'), `prefix row missing:\n${view}`)
   assert.ok(view.includes('Importance'), `importance row missing:\n${view}`)
   assert.ok(view.includes('Reset to default'), `reset row missing:\n${view}`)
@@ -365,7 +490,7 @@ test('the Advanced page sanitizes hand-built prefix/suffix values too', async ()
       right: [],
     }],
   }, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: () => {},
@@ -399,7 +524,7 @@ test('the Add picker refuses a FULL row with an explicit hint (the parse cap)', 
   // must say WHY Enter no longer adds, and the model must not mutate.
   const row = Array.from({ length: 32 }, (_, index) => ({ id: `pad-${index}` }))
   const model = new FooterConfiguratorModel({ schemaVersion: 1, rows: [{ left: row, right: [] }] }, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: () => {},
@@ -420,7 +545,7 @@ test('the Add picker refuses a FULL row with an explicit hint (the parse cap)', 
 
 test('bracketed paste feeds the Add search (single chunk, markers included)', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
@@ -438,7 +563,7 @@ test('bracketed paste feeds the Add search (single chunk, markers included)', as
 
 test('bracketed paste feeds the Advanced prefix editor', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -462,7 +587,7 @@ test('bracketed paste feeds the Advanced prefix editor', async () => {
 
 test('bracketed paste split across terminal chunks buffers until the end marker', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -486,7 +611,7 @@ test('bracketed paste split across terminal chunks buffers until the end marker'
 
 test('a bracketed-paste start marker split across chunks is recognized', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -506,7 +631,7 @@ test('a bracketed-paste start marker split across chunks is recognized', async (
 
 test('a bracketed-paste start marker split exactly after ESC is recognized', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -524,7 +649,7 @@ test('a bracketed-paste start marker split exactly after ESC is recognized', asy
 
 test('a paste start clears stale prefix state before later chunks arrive', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -550,7 +675,7 @@ test('a paste start clears stale prefix state before later chunks arrive', async
 
 test('a real Escape before a new same-chunk paste is not discarded', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -568,7 +693,7 @@ test('a real Escape before a new same-chunk paste is not discarded', async () =>
 
 test('recovery rescans a valid paste marker after rejected prefixes', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -597,7 +722,7 @@ test('recovery rescans a valid paste marker after rejected prefixes', async () =
 
 test('a lone Escape is replayed as navigation after the paste-prefix timeout', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -614,7 +739,7 @@ test('a lone Escape is replayed as navigation after the paste-prefix timeout', a
 test('programmatic configurator close disposes a pending paste-prefix timer', async (t) => {
   const { vt, app } = startApp()
   const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
-  const close = app.openFooterConfigurator({
+  const page = openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: () => {},
@@ -630,15 +755,21 @@ test('programmatic configurator close disposes a pending paste-prefix timer', as
   t.mock.timers.enable({ apis: ['setTimeout'] })
   t.after(() => t.mock.timers.reset())
   vt.sendInput('\x1b') // arm the ambiguous paste-prefix timer
-  close()
+  page.close()
   t.mock.timers.tick(30)
   assert.equal(model.state().addQuery, 'cache', 'closing must prevent stale Escape replay')
   app.stop()
 })
 
-test('final app disposal cancels a configurator paste-prefix timer', async (t) => {
+test('the Settings teardown path disposes the page and cancels its paste-prefix timer', async (t) => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
+  const page = openPage(vt, app, {
+    model,
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => {},
+  })
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -649,14 +780,14 @@ test('final app disposal cancels a configurator paste-prefix timer', async (t) =
   t.mock.timers.enable({ apis: ['setTimeout'] })
   t.after(() => t.mock.timers.reset())
   vt.sendInput('\x1b') // arm the ambiguous paste-prefix timer
-  app.dispose()
+  page.panel.dispose()
   t.mock.timers.tick(30)
-  assert.equal(model.state().addQuery, 'cache', 'final disposal must prevent stale Escape replay')
+  assert.equal(model.state().addQuery, 'cache', 'the root teardown must prevent stale Escape replay')
 })
 
 test('malformed paste prefixes preserve Escape, arrows, and following text', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -686,7 +817,7 @@ test('malformed paste prefixes preserve Escape, arrows, and following text', asy
 
 test('CSI-u encoded printables type into the Add search and the prefix', async () => {
   const { vt, app } = startApp()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -730,12 +861,9 @@ test('resizing the terminal LARGER after opening does not clip the configurator'
   // viewport) while the overlay hard-cut the output to 10 rows — slicing
   // off the editable body, the preview tail and the bottom border.
   // maxHeight is a live '100%' now.
-  const vt = new VirtualTerminal(40, 10)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
+  const { vt, app } = startApp(40, 10)
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
-  openDefault(app)
+  openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
@@ -745,12 +873,10 @@ test('resizing the terminal LARGER after opening does not clip the configurator'
   await vt.waitForRender()
   const view = vt.getViewport()
   const text = view.join('\n')
-  const lastNonEmpty = [...view].reverse().find(line => line.trim() !== '')
-  assert.ok(lastNonEmpty !== undefined && lastNonEmpty.includes('╰'),
-    `the Frame bottom border must survive the resize:\n${text}`)
+  assert.match(view[view.length - 1]!, /Esc Back|A Add/u,
+    `the ONE Action Bar must remain the last physical row after the resize:\n${text}`)
   assert.ok(text.includes('Extension items'), `the active item must be visible after the resize:\n${text}`)
-  assert.ok(text.includes('Preview'), `the preview must stay visible after the resize:\n${text}`)
-  assert.ok(text.includes('A Add'), `the help must stay visible after the resize:\n${text}`)
+  assert.ok(text.includes('Preview'), `the preview must stay visible after the resize (80x40):\n${text}`)
   app.stop()
 })
 
@@ -764,7 +890,7 @@ test('a legal-but-unlisted persisted tone displays as ITSELF (never Auto)', asyn
     schemaVersion: 1,
     rows: [{ left: [{ id: 'model', tone: 'textStrong' }], right: [] }],
   }, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: () => {},
@@ -801,7 +927,7 @@ test('a legal-but-unlisted persisted tone displays as ITSELF (never Auto)', asyn
 
 test('the preview and the help NEVER scroll away (the fixed shell)', async () => {
   const { vt, app } = startApp(100, 24)
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
@@ -827,7 +953,7 @@ test('an UNKNOWN item id renders its label SANITIZED (control chars never reach 
     schemaVersion: 1,
     rows: [{ left: [{ id: malicious }], right: [] }],
   }, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: () => {},
@@ -865,7 +991,7 @@ test('KNOWN-item ref fields are sanitized too (prefix/suffix/format display boun
       right: [],
     }],
   }, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: () => {},
@@ -913,7 +1039,7 @@ test('a definition that ECHOES the ref format cannot paint control sequences (sp
     schemaVersion: 1,
     rows: [{ left: [{ id: 'echo', format: 'ba\u001bdge' }], right: [] }],
   }, registry)
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry,
     onSave: () => {},
@@ -941,10 +1067,7 @@ test('the whole-footer composer preview is sanitized too (SGR survives, OSC/CSI 
   const { FooterComposer } = await import('../../src/tui/footer/composer.ts')
   const { createBuiltinFooterRegistry } = await import('../../src/tui/footer/builtin-items.ts')
   const { TuiApp } = await import('../../src/tui-app.ts')
-  const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
+  const { vt, app } = startApp(100, 30)
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   const model = new FooterConfiguratorModel({
     schemaVersion: 1,
@@ -1044,57 +1167,48 @@ test('the preview task-browser getter is LIVE: a draft typed under the panel upd
   app.stop()
 })
 
-for (const rows of [3, 4, 6, 40]) {
-  test(`the configurator fits a ${rows}-row terminal (Frame borders visible, no hard cut)`, async () => {
-    // Very short AND very tall terminals: the budget must leave room for
-    // the Frame's two border rows AND the overlay's maxHeight must never
-    // hard-cut the bottom border. The viewport ALWAYS reports `rows`
-    // lines, so the meaningful assertion is that the Frame's borders are
-    // actually rendered.
-    const vt = new VirtualTerminal(100, rows)
-    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
-    startedApps.add(app)
-    openDefault(app)
+for (const rows of [1, 2, 3, 4, 6, 40]) {
+  test(`the configurator keeps ONE Action Bar on the last physical row (${rows}-row terminal)`, async () => {
+    const { vt, app } = startApp(100, rows)
+    openDefault(vt, app)
     await vt.waitForRender()
     const view = vt.getViewport()
-    const lastNonEmpty = [...view].reverse().find(line => line.trim() !== '')
-    assert.ok(lastNonEmpty !== undefined && lastNonEmpty.includes('╰'),
-      `the Frame bottom border must be visible on a ${rows}-row terminal:\n${view.join('\n')}`)
-    assert.ok(view.some(line => line.includes('╭')),
-      `the Frame top border must be visible on a ${rows}-row terminal:\n${view.join('\n')}`)
+    assert.ok(view[rows - 1]?.includes('Esc Close'),
+      `the ONE Action Bar must be the last physical row at ${rows} rows:\n${view.join('\n')}`)
+    assert.ok(!view.some(line => line.includes('╭') || line.includes('╰')),
+      `the page paints no overlay Frame chrome at ${rows} rows:\n${view.join('\n')}`)
+    if (rows >= 2) {
+      assert.ok(view.slice(0, rows - 1).some(line => line.includes('Row 1') || line.includes('Select row to edit')),
+        `at least one real body row must paint above the bar at ${rows} rows:\n${view.join('\n')}`)
+    }
     app.stop()
   })
 }
 
 for (const cols of [40, 80, 120]) {
   for (const rows of [10, 24, 40]) {
-    test(`the shell holds at ${cols}x${rows}: preview + help never scroll away`, async () => {
-      const vt = new VirtualTerminal(cols, rows)
-      const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-      app.start()
-      startedApps.add(app)
+    test(`the ONE Action Bar holds at ${cols}x${rows}: preview may yield, the bar may not`, async () => {
+      const { vt, app } = startApp(cols, rows)
       app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
-      openDefault(app)
+      openDefault(vt, app)
       await vt.waitForRender()
-      // Enter Row 1 and walk the cursor to the LAST item: the body
-      // windows around it while the fixed shell stays put.
+      // Enter Row 1 and walk the cursor to the LAST item: the body windows
+      // around it while the ONE bar stays on the physical last row.
       vt.sendInput('\r')
       await vt.waitForRender()
       for (let i = 0; i < 32; i += 1) vt.sendInput('\x1b[B')
       await vt.waitForRender()
       const view = vt.getViewport()
       const text = view.join('\n')
-      assert.ok(view.some(line => line.includes('╭')) && view.some(line => line.includes('╰')),
-        `the Frame borders must be visible at ${cols}x${rows}:\n${text}`)
-      assert.ok(text.includes('Preview'), `the preview must stay visible at ${cols}x${rows}:\n${text}`)
-      assert.ok(text.includes('A Add'), `the contextual help must not scroll away at ${cols}x${rows}:\n${text}`)
+      assert.ok(view[rows - 1]?.includes('Esc Back'),
+        `the ONE Action Bar must be the last physical row at ${cols}x${rows}:\n${text}`)
       // THE key guarantee: the EDITABLE body survives — the cursor's item
-      // (the last one: Display) must be on screen, never eaten by
-      // the fixed preview.
+      // (the last one: Display) must be on screen, never eaten by a preview.
       assert.ok(text.includes('Display'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
-      // A long label must not break the layout (ANSI-safe truncation).
-      assert.ok(!text.split('\n').some(line => line.length > cols + 20), `no line may overflow the frame at ${cols}x${rows}`)
+      assert.ok(!view.some(line => line.includes('╭') || line.includes('╰')),
+        `no overlay Frame chrome at ${cols}x${rows}:\n${text}`)
+      assert.ok(view.every(line => visibleWidth(line) <= cols),
+        `no line may overflow the terminal at ${cols}x${rows}:\n${text}`)
       app.stop()
     })
   }
@@ -1105,12 +1219,9 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   // rows: with the OLD shell-wins budget a 10-row terminal could spend
   // its entire budget on title/help/preview and show ZERO editable rows.
   // A very long model id forces the deterministic 4-row wrap.
-  const vt = new VirtualTerminal(40, 10)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
+  const { vt, app } = startApp(40, 10)
   app.setStatus({ model: `a-very-long-model-name/${'x'.repeat(120)}`, cwd: '/home/x/proj' })
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
@@ -1118,7 +1229,7 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   await vt.waitForRender()
   const view = vt.getViewport()
   const text = view.join('\n')
-  assert.ok(text.includes('A Add'), `the help must stay visible:\n${text}`)
+  assert.ok(text.includes('Enter Edit') || text.includes('A Add'), `the row-mode bar must stay visible:\n${text}`)
   assert.ok(text.includes('Preview'), `the preview must stay visible:\n${text}`)
   assert.ok(text.includes('Display'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
   app.stop()
@@ -1133,11 +1244,12 @@ async function settle(): Promise<void> {
 }
 
 function openWith(
+  vt: VirtualTerminal,
   app: TuiApp,
   hooks: { onSave?: () => void | Promise<void>; onCancel?: () => void } = {},
 ): FooterConfiguratorModel {
   const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry: app.getFooterItemRegistry(),
     onSave: hooks.onSave ?? (() => {}),
@@ -1159,7 +1271,7 @@ async function makeDirty(vt: VirtualTerminal): Promise<void> {
 
 test('the selector advertises Save changes with Unsaved / No changes', async () => {
   const { vt, app } = startApp()
-  openWith(app)
+  openWith(vt, app)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Save changes'), `the save action missing:\n${view}`)
@@ -1174,7 +1286,7 @@ test('Enter on Save changes saves and closes the configurator', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let cancelled = 0
-  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+  openWith(vt, app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
   await vt.waitForRender()
   await makeDirty(vt)
   vt.sendInput('\x1b[B') // ↓ Row 2
@@ -1187,14 +1299,14 @@ test('Enter on Save changes saves and closes the configurator', async () => {
   assert.equal(saved, 1, 'Enter on the Save action saves')
   assert.equal(cancelled, 0)
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('Configure Footer'), `a successful save closes the configurator:\n${view}`)
+  assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'), 'a successful save closes the page')
   app.stop()
 })
 
 test('dirty Esc opens the exit guard; Esc there keeps editing', async () => {
   const { vt, app } = startApp()
   let cancelled = 0
-  openWith(app, { onCancel: () => { cancelled += 1 } })
+  openWith(vt, app, { onCancel: () => { cancelled += 1 } })
   await vt.waitForRender()
   await makeDirty(vt)
   vt.sendInput('\x1b')
@@ -1219,7 +1331,7 @@ test('Save & Exit saves; Discard & Exit closes without saving', async () => {
     const { vt, app } = startApp()
     let saved = 0
     let cancelled = 0
-    openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+    openWith(vt, app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
     await vt.waitForRender()
     await makeDirty(vt)
     vt.sendInput('\x1b')
@@ -1229,7 +1341,7 @@ test('Save & Exit saves; Discard & Exit closes without saving', async () => {
     await vt.waitForRender()
     assert.equal(saved, 1)
     assert.equal(cancelled, 0)
-    assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the overlay closed after success')
+    assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'), 'the page closed after success')
     app.dispose()
   }
   // Discard & Exit.
@@ -1237,7 +1349,7 @@ test('Save & Exit saves; Discard & Exit closes without saving', async () => {
     const { vt, app } = startApp()
     let saved = 0
     let cancelled = 0
-    openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+    openWith(vt, app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
     await vt.waitForRender()
     await makeDirty(vt)
     vt.sendInput('\x1b')
@@ -1249,7 +1361,7 @@ test('Save & Exit saves; Discard & Exit closes without saving', async () => {
     await vt.waitForRender()
     assert.equal(saved, 0, 'discard never persists')
     assert.equal(cancelled, 1, 'discard closes via onCancel')
-    assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the overlay closed')
+    assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'), 'the page closed')
     app.stop()
   }
 })
@@ -1258,7 +1370,7 @@ test('Keep Editing returns to the selector with the draft intact', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let cancelled = 0
-  const model = openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+  const model = openWith(vt, app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
   await vt.waitForRender()
   await makeDirty(vt)
   const draftBefore = JSON.stringify(model.preview())
@@ -1283,7 +1395,7 @@ test('a failed save keeps the configurator open with the draft dirty', async () 
   let attempts = 0
   let cancelled = 0
   let fail = true
-  openWith(app, {
+  openWith(vt, app, {
     onSave: async () => {
       attempts += 1
       if (fail) throw new Error('write failed')
@@ -1297,7 +1409,7 @@ test('a failed save keeps the configurator open with the draft dirty', async () 
   await vt.waitForRender()
   assert.equal(attempts, 1)
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Configure Footer'), `a failed save keeps the editor open:\n${view}`)
+  assert.ok(view.includes('Unsaved'), `a failed save keeps the dirty selector open:\n${view}`)
   assert.ok(view.includes('Unsaved'), 'the draft stays dirty')
   // The retry succeeds.
   fail = false
@@ -1305,7 +1417,7 @@ test('a failed save keeps the configurator open with the draft dirty', async () 
   await settle()
   await vt.waitForRender()
   assert.equal(attempts, 2)
-  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the successful retry closes')
+  assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'), 'the successful retry closes')
   assert.equal(cancelled, 0)
   app.stop()
 })
@@ -1315,7 +1427,7 @@ test('a save in flight refuses duplicate saves and Esc-close', async () => {
   let attempts = 0
   let release: (() => void) | undefined
   const gate = new Promise<void>(resolve => { release = resolve })
-  openWith(app, { onSave: () => { attempts += 1; return gate } })
+  openWith(vt, app, { onSave: () => { attempts += 1; return gate } })
   await vt.waitForRender()
   await makeDirty(vt)
   vt.sendInput('s')
@@ -1328,17 +1440,14 @@ test('a save in flight refuses duplicate saves and Esc-close', async () => {
   release?.()
   await settle()
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the gated save still closes on success')
+  assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'), 'the gated save still closes on success')
   app.stop()
 })
 
 test('the exit guard keeps all three actions visible at 40x10', async () => {
-  const vt = new VirtualTerminal(40, 10)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
+  const { vt, app } = startApp(40, 10)
   let cancelled = 0
-  openWith(app, { onCancel: () => { cancelled += 1 } })
+  openWith(vt, app, { onCancel: () => { cancelled += 1 } })
   await vt.waitForRender()
   await makeDirty(vt)
   vt.sendInput('\x1b')
@@ -1348,7 +1457,7 @@ test('the exit guard keeps all three actions visible at 40x10', async () => {
   assert.ok(view.includes('Save & Exit'), `Save & Exit must be visible:\n${view}`)
   assert.ok(view.includes('Discard & Exit'), `Discard & Exit must be visible:\n${view}`)
   assert.ok(view.includes('Keep Editing'), `Keep Editing must be visible:\n${view}`)
-  assert.ok(view.includes('╰'), 'the frame must survive')
+  assert.ok(view.includes('Esc Keep Editing'), 'the exit guard bar must be painted')
   assert.equal(cancelled, 0)
   app.stop()
 })
@@ -1357,7 +1466,7 @@ test('a clean draft closes WITHOUT persisting (Save changes / S)', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let closed = 0
-  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { closed += 1 } })
+  openWith(vt, app, { onSave: () => { saved += 1 }, onCancel: () => { closed += 1 } })
   await vt.waitForRender()
   // ↓ ↓ lands on Save changes. Enter with NOTHING edited must close
   // without a save (plan §12: skip the meaningless settings replace — an
@@ -1372,7 +1481,7 @@ test('a clean draft closes WITHOUT persisting (Save changes / S)', async () => {
   await vt.waitForRender()
   assert.equal(saved, 0, 'a clean save must not persist')
   assert.equal(closed, 1, 'the configurator closed as the save outcome')
-  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'))
+  assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'))
   app.stop()
 })
 
@@ -1380,26 +1489,88 @@ test('S on a clean draft closes without persisting', async () => {
   const { vt, app } = startApp()
   let saved = 0
   let closed = 0
-  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { closed += 1 } })
+  openWith(vt, app, { onSave: () => { saved += 1 }, onCancel: () => { closed += 1 } })
   await vt.waitForRender()
   vt.sendInput('s')
   await settle()
   await vt.waitForRender()
   assert.equal(saved, 0, 'the clean S shortcut must not persist')
   assert.equal(closed, 1)
-  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'))
+  assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'))
+  app.stop()
+})
+
+test('a bar-only Footer grant shows the frozen save, never a back verb it refuses', async () => {
+  const { vt, app } = startApp(100, 20)
+  let release: (() => void) | undefined
+  const gate = new Promise<void>(resolve => { release = resolve })
+  openPage(vt, app, {
+    model: new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry()),
+    registry: app.getFooterItemRegistry(),
+    onSave: () => gate,
+    onCancel: () => {},
+  })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  // `requestSave` marks the model saving SYNCHRONOUSLY, so the very next frame
+  // already shows the frozen bar; the write stays held on the gate.
+  vt.sendInput('s')
+  vt.resize(100, 1) // bar-only while the write is still held
+  await vt.waitForRender()
+  const bar = vt.getViewport()[0] ?? ''
+  assert.match(bar, /Saving…/u, `a held save outranks the bar-only wording: ${bar}`)
+  assert.doesNotMatch(bar, /← Back|Esc Close|Esc Back/u,
+    `the frozen frame must not advertise a refused back verb: ${bar}`)
+  release?.()
+  vt.resize(100, 20)
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('a bar-only Footer grant advertises and accepts ← as the root back verb', async () => {
+  const { vt, app } = startApp(100, 1)
+  let cancelled = 0
+  openPage(vt, app, {
+    model: new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry()),
+    registry: app.getFooterItemRegistry(),
+    onSave: () => {},
+    onCancel: () => { cancelled += 1 },
+  })
+  await vt.waitForRender()
+  const bar = vt.getViewport()[0] ?? ''
+  assert.match(bar, /← Back/u, `the bar-only root advertises the accepted ← verb: ${bar}`)
+  assert.match(bar, /Esc Close/u, `the bar-only root keeps the Esc verb: ${bar}`)
+  assert.doesNotMatch(bar, /S Done|Enter Open/u, `no hidden save/open verb is advertised: ${bar}`)
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  assert.equal(cancelled, 1, '← on the bar-only Row Selector closes back to the source row')
+  assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'), 'the page really closed')
+  app.stop()
+})
+
+test('a bar-only Footer grant refuses ← inside a sub-page (it is not the root)', async () => {
+  const { vt, app } = startApp(100, 10)
+  const model = openDefault(vt, app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // Edit Row 1
+  await vt.waitForRender()
+  vt.resize(100, 1)
+  await vt.waitForRender()
+  const bar = vt.getViewport()[0] ?? ''
+  assert.match(bar, /Esc Back/u, `the sub-page bar keeps only Esc: ${bar}`)
+  assert.doesNotMatch(bar, /← Back/u, 'a sub-page never advertises the root back verb')
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row', '← on a bar-only sub-page cannot act on an invisible item')
   app.stop()
 })
 
 test('closing during an in-flight save is safe (no unhandled rejection)', async () => {
-  const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
+  const { vt, app } = startApp(100, 30)
   let attempts = 0
   let release: (() => void) | undefined
   const gate = new Promise<void>(resolve => { release = resolve })
-  const close = app.openFooterConfigurator({
+  const page = openPage(vt, app, {
     model: new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry()),
     registry: app.getFooterItemRegistry(),
     onSave: () => { attempts += 1; return gate },
@@ -1410,7 +1581,7 @@ test('closing during an in-flight save is safe (no unhandled rejection)', async 
   vt.sendInput('s')
   await settle()
   assert.equal(attempts, 1)
-  close() // e.g. a session switch disposes the overlay mid-write
+  page.close() // e.g. a session switch disposes the page mid-write
   release?.()
   await settle()
   await settle()
@@ -1419,14 +1590,11 @@ test('closing during an in-flight save is safe (no unhandled rejection)', async 
 })
 
 test('the Save row stays visible at 40x10 and Saving… survives a resize', async () => {
-  const vt = new VirtualTerminal(40, 10)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
+  const { vt, app } = startApp(40, 10)
   let attempts = 0
   let release: (() => void) | undefined
   const gate = new Promise<void>(resolve => { release = resolve })
-  openWith(app, { onSave: () => { attempts += 1; return gate } })
+  openWith(vt, app, { onSave: () => { attempts += 1; return gate } })
   await vt.waitForRender()
   await makeDirty(vt)
   let view = vt.getViewport().join('\n')
@@ -1441,7 +1609,7 @@ test('the Save row stays visible at 40x10 and Saving… survives a resize', asyn
   release?.()
   await settle()
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the released save closes on success')
+  assert.ok(vt.getViewport().join('\n').includes('PAGE CLOSED'), 'the released save closes on success')
   app.stop()
 })
 // ── PR D: custom command item UI ─────────────────────────────────────────
@@ -1451,6 +1619,7 @@ test('the Save row stays visible at 40x10 and Saving… survives a resize', asyn
  * while the draft definition is unchanged, the dim [command] placeholder
  * otherwise. */
 function openWithCommand(
+  vt: VirtualTerminal,
   app: TuiApp,
   committed: readonly import('../../src/domain/footer/custom-items.ts').FooterCustomItemSettings[],
   draft?: import('../../src/tui/footer/custom-item-catalog.ts').FooterCustomItemCatalog,
@@ -1473,7 +1642,7 @@ function openWithCommand(
     registry,
     customItems,
   )
-  app.openFooterConfigurator({
+  openPage(vt, app, {
     model,
     registry,
     composer: new FooterComposer(registry),
@@ -1484,7 +1653,7 @@ function openWithCommand(
 
 test('the Add picker offers Create Custom Command and the flow creates + previews it', async () => {
   const { vt, app } = startApp()
-  openWithCommand(app, [])
+  openWithCommand(vt, app, [])
   await vt.waitForRender()
   vt.sendInput('\r') // row
   vt.sendInput('a') // add
@@ -1518,7 +1687,7 @@ test('the Add picker offers Create Custom Command and the flow creates + preview
 
 test('the item editor exposes Command/Refresh/Timeout for a command item', async () => {
   const { vt, app } = startApp()
-  openWithCommand(app, [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }])
+  openWithCommand(vt, app, [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }])
   await vt.waitForRender()
   vt.sendInput('\r') // row
   vt.sendInput('\r') // item
@@ -1536,7 +1705,7 @@ test('the item editor exposes Command/Refresh/Timeout for a command item', async
 test('the preview shows the dim [command] placeholder for a draft and the committed cache when unchanged', async () => {
   const { vt, app } = startApp()
   const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
-  openWithCommand(app, committed)
+  openWithCommand(vt, app, committed)
   await vt.waitForRender()
   // No committed cache yet: the row preview shows the placeholder.
   assert.ok(vt.getViewport().join('\n').includes('[command]'), 'the draft preview must show the placeholder')
@@ -1553,7 +1722,7 @@ test('a modified draft command never shows the old committed cache', async () =>
   const { vt, app } = startApp()
   const committed = [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }]
   const draft = new FooterCustomItemCatalog(committed)
-  openWithCommand(app, committed, draft)
+  openWithCommand(vt, app, committed, draft)
   app.setFooterCommandItemValue('user:clock', '14:30')
   await vt.waitForRender()
   assert.ok(vt.getViewport().join('\n').includes('14:30'))
@@ -1579,16 +1748,14 @@ function mouseClick(vt: VirtualTerminal, row: number, leftBorder: number): void 
 
 test('configurator: rows page mouse click selects a row and Save changes saves (mouse parity)', async () => {
   const { vt, app } = startApp()
-  app.setFullscreen(true)
   await vt.waitForRender()
   let saved = 0
-  openWith(app, { onSave: () => { saved += 1 } })
+  openWith(vt, app, { onSave: () => { saved += 1 } })
   await vt.waitForRender()
   let viewport = vt.getViewport()
   const row2 = viewport.findIndex(line => line.includes('Row 2'))
   assert.ok(row2 >= 0, `Row 2 missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[row2]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'frame left border missing')
+  const leftBorder = 0
   mouseClick(vt, row2, leftBorder)
   await vt.waitForRender()
   viewport = vt.getViewport()
@@ -1610,10 +1777,9 @@ test('configurator: rows page mouse click selects a row and Save changes saves (
 
 test('configurator: exit-confirm mouse click routes Discard & Exit (mouse parity)', async () => {
   const { vt, app } = startApp()
-  app.setFullscreen(true)
   await vt.waitForRender()
   let closed = 0
-  openWith(app, { onCancel: () => { closed += 1 } })
+  openWith(vt, app, { onCancel: () => { closed += 1 } })
   await vt.waitForRender()
   await makeDirty(vt)
   vt.sendInput('\x1b') // dirty → exit-confirm
@@ -1621,66 +1787,24 @@ test('configurator: exit-confirm mouse click routes Discard & Exit (mouse parity
   const viewport = vt.getViewport()
   const discardRow = viewport.findIndex(line => line.includes('Discard & Exit'))
   assert.ok(discardRow >= 0, `Discard & Exit missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[discardRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0)
+  const leftBorder = 0
   mouseClick(vt, discardRow, leftBorder)
   await vt.waitForRender()
   assert.equal(closed, 1, 'clicking Discard & Exit must close without saving')
   app.stop()
 })
 
-test('configurator: exit-confirm click cannot transfer to a different action after a resize (mouse parity)', async () => {
-  const { vt, app } = startApp(100, 10)
-  app.setFullscreen(true)
-  await vt.waitForRender()
-  let saved = 0
-  let cancelled = 0
-  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
-  await vt.waitForRender()
-  await makeDirty(vt)
-  vt.sendInput('\x1b') // dirty → exit-confirm
-  await vt.waitForRender()
-  const viewport = vt.getViewport()
-  const keepRow = viewport.findIndex(line => line.includes('Keep Editing') && !line.includes('↑↓'))
-  assert.ok(keepRow >= 0, `Keep Editing missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[keepRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0)
-  // Press Keep Editing (no release yet): the gesture identity is the
-  // exit/keep semantic action.
-  vt.sendInput(`\x1b[<0;${leftBorder + 3};${keepRow + 1}M`)
-  await vt.waitForRender()
-  // Resize: the preview block inserts and the action rows move down —
-  // the pressed cell now shows Save & Exit.
-  vt.resize(100, 11)
-  await vt.waitForRender()
-  const after = vt.getViewport()
-  assert.ok(
-    (after[keepRow] ?? '').includes('Save & Exit'),
-    `the pressed cell must now show Save & Exit:\n${after.join('\n')}`,
-  )
-  // Release on the SAME absolute cell: the synthesized click must NOT
-  // run the repainted action (no save, no discard, no wrong transition).
-  vt.sendInput(`\x1b[<0;${leftBorder + 3};${keepRow + 1}m`)
-  await vt.waitForRender()
-  assert.equal(saved, 0, 'the transferred click must not save')
-  assert.equal(cancelled, 0, 'the transferred click must not discard/close')
-  app.stop()
-})
-
 test('configurator: keyboard mutation between press and release cannot transfer the click (mouse parity)', async () => {
   const { vt, app } = startApp(100, 30)
-  app.setFullscreen(true)
   await vt.waitForRender()
-  const model = openWith(app)
+  const model = openWith(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1 (row mode)
   await vt.waitForRender()
   const viewport = vt.getViewport()
-  const frameTop = viewport.findIndex(line => line.includes('╭'))
-  assert.ok(frameTop >= 0, `frame top missing:\n${viewport.join('\n')}`)
-  const screenRow = frameTop + 1 + 7 // panel local y 7 = first item (View scope)
-  const leftBorder = viewport[screenRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, `left border missing on row ${screenRow}`)
+  const screenRow = viewport.findIndex(line => line.includes('View scope'))
+  assert.ok(screenRow >= 0, `the first item row missing:\n${viewport.join('\n')}`)
+  const leftBorder = 0
   // Press the first item (no release yet): the gesture identity is the
   // select semantic target.
   vt.sendInput(`\x1b[<0;${leftBorder + 3};${screenRow + 1}M`)
@@ -1699,15 +1823,13 @@ test('configurator: keyboard mutation between press and release cannot transfer 
 
 test('configurator: the preview block is inert (mouse parity)', async () => {
   const { vt, app } = startApp()
-  app.setFullscreen(true)
   await vt.waitForRender()
-  openWith(app)
+  openWith(vt, app)
   await vt.waitForRender()
   const viewport = vt.getViewport()
   const previewRow = viewport.findIndex(line => line.includes('Preview'))
   assert.ok(previewRow >= 0, `Preview missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[previewRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0)
+  const leftBorder = 0
   // A click on the preview must not move the selection or open anything.
   mouseClick(vt, previewRow, leftBorder)
   await vt.waitForRender()
@@ -1718,17 +1840,16 @@ test('configurator: the preview block is inert (mouse parity)', async () => {
 
 test('configurator: a save in flight freezes mouse mutations (mouse parity)', async () => {
   const { vt, app } = startApp()
-  app.setFullscreen(true)
   await vt.waitForRender()
   let resolveSave!: () => void
   const savePromise = new Promise<void>(resolve => { resolveSave = resolve })
-  openWith(app, { onSave: () => savePromise })
+  openWith(vt, app, { onSave: () => savePromise })
   await vt.waitForRender()
   await makeDirty(vt)
   const viewport = vt.getViewport()
   const saveRow = viewport.findIndex(line => line.includes('Save changes'))
   assert.ok(saveRow >= 0)
-  const leftBorder = viewport[saveRow]?.indexOf('│') ?? -1
+  const leftBorder = 0
   mouseClick(vt, saveRow, leftBorder)
   await vt.waitForRender()
   // Saving… is painted; a click on a row must be ignored (no cursor move).
@@ -1747,16 +1868,15 @@ test('configurator: a save in flight freezes mouse mutations (mouse parity)', as
 
 test('row-move mode: a mouse click cannot reorder items or exit the mode (mouse parity)', async () => {
   const { vt, app } = startApp()
-  app.setFullscreen(true)
   await vt.waitForRender()
-  const model = openDefault(app)
+  const model = openDefault(vt, app)
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
   vt.sendInput('m') // → Move Mode
   await vt.waitForRender()
   const viewport = vt.getViewport()
-  assert.ok(viewport.join('\n').includes('[MOVE]'), `the move banner must show:\n${viewport.join('\n')}`)
+  assert.ok(viewport.join('\n').includes('◆') && viewport.join('\n').includes('↑↓ Move'), `the move banner must show:\n${viewport.join('\n')}`)
   const before = model.preview().rows[0]!.left.map(row => row.id)
   // Click a NON-active item row (the second item): a click must NOT
   // implicitly reorder (the keyboard ↑/↓ in Move Mode reorder; the
@@ -1764,8 +1884,7 @@ test('row-move mode: a mouse click cannot reorder items or exit the mode (mouse 
   // mode (Enter/Esc are the Done actions).
   const itemRow = viewport.findIndex(line => line.includes('Permission preset'))
   assert.ok(itemRow >= 0, `item row missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[itemRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'frame left border missing')
+  const leftBorder = 0
   mouseClick(vt, itemRow, leftBorder)
   await vt.waitForRender()
   const after = model.preview().rows[0]!.left.map(row => row.id)

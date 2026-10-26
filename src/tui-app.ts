@@ -1675,6 +1675,10 @@ export interface SettingsWorkspaceOpenOptions {
   /** The row this open selects first (the Web Settings return path,
    *  S2/PR-B §B3.4): a re-entry restores the SAME row instead of the default. */
   readonly initialRowId?: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceRowId
+  /** C2-R5: the typed professional page to mount on the first real body grant
+   *  (a bare `/footer` or `/keybindings` deeplink). It is valid ONLY with the
+   *  exact `initialRowId`; the command layer validates the pair before leasing. */
+  readonly initialSpecialist?: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceSpecialistRoute
   /** The category this open lands on (`/login` / `/logout` deeplinks). */
   readonly initialCategory?: SettingsWorkspaceCategoryId
   /** The Models page a deeplink opens (only with `initialCategory: 'models'`). */
@@ -1710,6 +1714,22 @@ export interface SettingsWorkspaceOpenOptions {
     done: () => void,
     navigateToModels: (initial: ModelsInitialView) => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R5: the ONE same-lease Footer layout page factory (the EXISTING
+   * `FooterConfiguratorPanel` over its model/composer/save transaction).
+   */
+  readonly createFooterConfiguratorPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R5: the ONE same-lease Keyboard shortcuts page factory (the EXISTING
+   * `KeybindingEditorPanel` over the ONE `KeybindingEditorController`).
+   */
+  readonly createKeybindingsPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
 /** The live row handle of an OPEN legacy settings list: a section whose facts
@@ -1741,6 +1761,13 @@ export interface SettingsWorkspaceHandle {
    *  the TUI settings document (S2/PR-B §B3.4 — a workspace surface keeps its
    *  ONE guarded document read). A superseded/closed lease is inert. */
   refreshRow(rowId: SettingsWorkspaceRowId, facts: SettingsWorkspaceRowFacts): void
+  /**
+   * C2-R5: settles when the typed deeplink page really mounted on the leased
+   * first frame, failed, or the workspace was torn down. Commands await this to
+   * return a REAL error instead of leaving a silently empty row. Resolves
+   * `{ok:true}` immediately for opens without a typed deeplink.
+   */
+  whenInitialSpecialistSettled(): Promise<import('./tui/panels/settings-workspace-panel.ts').SettingsInitialSpecialistSettlement>
 }
 
 /**
@@ -3438,9 +3465,6 @@ export class TuiApp {
   private modelPickerOverlay: OverlayHandle | undefined
   /** The live responsive frame of the /model picker. */
   private modelPickerFrame: ResponsiveOverlayFrame | undefined
-  /** Footer configurators own paste timers outside the generic overlay
-   * disposal path; final surface disposal closes every still-open one. */
-  private readonly footerConfiguratorClosers = new Set<() => void>()
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
@@ -5490,7 +5514,6 @@ export class TuiApp {
     const advancedLeases = [...this.advancedOverlayLeases]
     const unstableLeases = [...this.unstableMountLeases]
     const brokerSettles = [...this.pendingBrokerSettles]
-    const footerClosers = [...this.footerConfiguratorClosers]
     // Phase 3B / B3-A: the History panel is the optional seat tenant, so its
     // teardown below (`optionalSeat.close()`) is the ONE release path; the seat
     // identity is dropped with it.
@@ -5592,11 +5615,6 @@ export class TuiApp {
       // must not hang.
       ...brokerSettles.map(settle => () => settle()),
       () => { this.pendingBrokerSettles.clear() },
-      // Footer configurators are wrapped in a generic Frame, whose removal
-      // does not forward Component.dispose(); close their owned timers before
-      // the broker unmounts the physical overlay handles.
-      ...footerClosers.map(close => () => close()),
-      () => { this.footerConfiguratorClosers.clear() },
       // FINAL teardown: physically unmount every still-tracked overlay
       // (disposeOnHide releases the panels — OutputViewer's refresh
       // interval, TaskBrowser's tick — exactly once) instead of merely
@@ -7804,8 +7822,6 @@ export class TuiApp {
     // physical projections die with the old screen (detachPhysical). The
     // remount callbacks re-create them for the same logical nodes (including
     // the approval, whose logical node keeps its suppressed children hidden).
-    for (const close of [...this.footerConfiguratorClosers]) close()
-    this.footerConfiguratorClosers.clear()
     this.overlayBroker.detachPhysical()
     // The ordinary search overlay is NOT remounted across the screen swap
     // (only extension/advanced/unstable/history leases are): its raw
@@ -23320,108 +23336,42 @@ export class TuiApp {
     runSyncDisposalSteps('keybinding editor disposal', panels.map(panel => () => panel.dispose?.()))
   }
 
-  /** Open the action-first Keyboard Shortcuts Editor in the standard overlay
-   * lifecycle. The panel owns its Esc hierarchy; this method owns the Frame
-   * mount and the final disposal. */
-  openKeybindingEditor(panel: Component): () => void {
-    let handle: OverlayHandle | undefined
-    const unregister = this.trackKeybindingEditor(panel)
-    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
-    // hide (X007); `unregister` still runs first so the tracking set never
-    // holds a closing panel.
-    const close = (): void => {
-      unregister()
-      handle?.hide()
-    }
-    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
-      width: 88,
-      maxHeight: '100%',
-    })
-    return close
-  }
-
-  /** Content-row budget used by client-local editor overlays. */
+  /** The standalone content-row cap of the Keyboard shortcuts page (the
+   *  same-lease Settings body lowers it through `setMaxRows`). */
   keybindingEditorMaxRows(): number {
     return Math.max(1, this.terminal.rows - 4)
   }
 
   /**
-   * M3: open the interactive footer configurator overlay. The panel
-   * renders the model's draft layout + a live preview composed by the REAL
-   * composer against the current snapshot; the save paths (S, the "Save
-   * changes" row, "Save & Exit") AWAIT onSave, Enter navigates, and Esc
-   * walks back page by page — a clean selector closes, a dirty one opens
-   * the exit-confirm page. PR E transaction: the overlay closes only
-   * after onSave RESOLVES; a rejection keeps it open (the integration
-   * layer notifies). Returns a closer.
+   * C2-R5: compose the ONE Footer layout page over THIS app's live dependencies
+   * (status snapshot, task-browser routing gate, extension footer text and the
+   * composer). The panel is mounted by the Settings workspace root inside the
+   * SAME screen lease; this method only builds it and never opens an overlay.
+   * `onSave` stays the command owner's single persist-first transaction; the
+   * panel closes through its `onCancel` (clean/discard) or the save chain.
    */
-  openFooterConfigurator(options: {
+  createFooterConfiguratorPanel(options: {
     model: FooterConfiguratorModel
     registry: FooterItemRegistry
     /** A layered composer for an unsaved custom-definition draft. */
     composer?: FooterComposer
+    sessionOnly: boolean
     onSave: (layout: FooterLayoutV1, customItems?: readonly import('./domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
     onCancel: () => void
-  }): () => void {
-    let handle: OverlayHandle | undefined
-    let closed = false
-    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
-    // hide (X007) — the closer only unmounts the overlay; no manual
-    // panel.dispose() (a second dispose would be a double-release).
-    const close = (): void => {
-      if (closed) return
-      closed = true
-      this.footerConfiguratorClosers.delete(close)
-      handle?.hide()
-    }
-    const panel = new FooterConfiguratorPanel({
+  }): FooterConfiguratorPanel {
+    return new FooterConfiguratorPanel({
       model: options.model,
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),
       composer: options.composer ?? this.footerComposer,
       taskBrowserAvailable: () => this.taskBrowserAvailable(),
       extensionFooterText: () => this.extensionHost?.footerText() ?? '',
-      maxVisible: () => {
-        // The budget is bounded by the LIVE terminal height MINUS the
-        // Frame's two border rows — a floor above rows-2 would overflow
-        // very short terminals (the Frame never clamps). 1 is the
-        // absolute minimum (a 3-row terminal still shows the title).
-        const rows = Math.max(1, this.terminal.rows - 2)
-        return Math.min(30, rows)
-      },
+      maxVisible: () => Math.max(1, this.terminal.rows),
       requestRender: () => this.requestRender(),
-      onSave: (layout, customItems) => {
-        // PR E §9: persist FIRST, close on RESOLUTION only — the old
-        // close-before-save order destroyed the editor on a failed
-        // settings write, leaving the draft unreachable.
-        return Promise.resolve()
-          .then(() => options.onSave(layout, customItems))
-          .then(() => { close() })
-        // A rejection propagates to the panel, which clears its saving
-        // state and keeps the configurator open.
-      },
-      onCancel: () => {
-        close()
-        options.onCancel()
-      },
+      sessionOnly: options.sessionOnly,
+      onSave: options.onSave,
+      onCancel: options.onCancel,
     })
-    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
-      width: 88,
-      // The overlay's hard cut must never exceed the terminal: the panel
-      // budgets its content to rows-2 (Frame borders add 2), so the
-      // maxHeight must be at least the panel's full render + borders —
-      // a fixed 30 would slice the bottom border on tall terminals (a
-      // 40-row terminal renders 30 content rows + 2 borders = 32 > 30).
-      // It must also track the LIVE height: a NUMBER is captured at open
-      // time and never changes — opening on a 10-row terminal and growing
-      // to 40 left the overlay clamped at 10, hard-cutting the editable
-      // body and the bottom border even though the panel had re-budgeted
-      // itself for the new size. '100%' is re-resolved against the
-      // CURRENT terminal height on every overlay frame.
-      maxHeight: '100%',
-    })
-    this.footerConfiguratorClosers.add(close)
-    return close
   }
 
   /**
@@ -23727,6 +23677,12 @@ export class TuiApp {
       ...(options.createWebSettingsPage === undefined
         ? {}
         : { createWebSettingsPage: options.createWebSettingsPage }),
+      ...(options.createFooterConfiguratorPage === undefined
+        ? {}
+        : { createFooterConfiguratorPage: options.createFooterConfiguratorPage }),
+      ...(options.createKeybindingsPage === undefined
+        ? {}
+        : { createKeybindingsPage: options.createKeybindingsPage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.
@@ -23778,6 +23734,7 @@ export class TuiApp {
       // from the legacy Web section never lands the user on the default theme
       // row.
       ...options.initialRowId === undefined ? {} : { initialRowId: options.initialRowId },
+      ...options.initialSpecialist === undefined ? {} : { initialSpecialist: options.initialSpecialist },
       ...options.initialCategory === undefined ? {} : { initialCategory: options.initialCategory },
       ...options.initialModelsView === undefined ? {} : { initialModelsView: options.initialModelsView },
       ...options.initialAccountView === undefined ? {} : { initialAccountView: options.initialAccountView },
@@ -23821,6 +23778,12 @@ export class TuiApp {
         if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') return
         ;(record.panel as SettingsWorkspacePanel).refreshRow(rowId, facts)
         this.requestRender()
+      },
+      whenInitialSpecialistSettled: () => {
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') {
+          return Promise.resolve({ ok: false, reason: 'the Settings workspace was superseded before the page opened' })
+        }
+        return (record.panel as SettingsWorkspacePanel).whenInitialSpecialistSettled()
       },
     }
   }

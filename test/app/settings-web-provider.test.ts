@@ -33,6 +33,7 @@ import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
+import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -284,7 +285,7 @@ function setup(options: {
     catalog: { models: { available: () => false } },
     // Explicitly ABSENT: the Proxy fallback would otherwise hand the legacy
     // editor a truthy function for a missing optional owner.
-    extensions: undefined,
+    extensions: legacyEditorExtensions() as never,
     createPluginManagerPage: () => undefined,
     progressUpdatesState: { mode: 'milestones' },
     responseStyleState: { style: 'default' },
@@ -1271,19 +1272,10 @@ test('the page and the legacy Web row share ONE authority and one FIFO', async t
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   await closeWorkspace(h)
 
-  // The still-supported LEGACY editor is reachable through its transition row.
-  // Its Web rows read the SAME authority and write through the SAME FIFO.
-  h.invoke('settings')
-  await h.vt.waitForRender()
-  await selectSettingsCategory(h.vt, 'Input & Terminal')
-  await key(h, ENTER) // rows level
-  for (let step = 0; step < 6; step += 1) await key(h, DOWN) // the transition row
-  await key(h, ENTER) // hand off to the existing editor at Keyboard shortcuts
-  await settlePainted(h, 'the legacy editor to mount on its row', frame =>
-    frame.includes('Keyboard shortcuts'))
-  // Up from the editor's last item walks back to the Web rows; Up*4 is the
-  // Search API Result Count row.
-  for (let step = 0; step < 4; step += 1) await key(h, UP)
+  // The still-supported LEGACY editor is reachable through the ONE remaining
+  // `Extensions` transition row. Its Web rows read the SAME authority and write
+  // through the SAME FIFO.
+  await openLegacyWebRow(h, 'Search API Result Count')
   assert.match(h.view(), /Search API Result Count/u, `the legacy editor still owns the Web rows:\n${h.view()}`)
   const markLegacy = settledWritesMark(h)
   await key(h, ENTER) // cycle 10 -> 20 through the legacy row
@@ -1291,13 +1283,18 @@ test('the page and the legacy Web row share ONE authority and one FIFO', async t
   assert.equal(h.maxConcurrentWrites(), 1, 'ONE FIFO: never two Web writes in flight')
   assert.equal(h.store.web.api.count, 20)
 
-  // Up to the provider row: the legacy row reports the PAGE's committed value,
-  // so both surfaces read the same authority (never a private copy).
-  for (let step = 0; step < 2; step += 1) await key(h, UP)
+  // The provider row reports the PAGE's committed value, so both surfaces read
+  // the same authority (never a private copy). Re-enter the legacy editor (the
+  // list Esc closes it; a filter is not a persistent navigation mode).
+  await key(h, ESC)
+  await key(h, ESC)
+  await h.vt.waitForRender()
+  await openLegacyWebRow(h, 'Web Search Provider')
   const providerRow = h.view()
   assert.match(providerRow, /Web Search Provider/u)
   assert.match(providerRow, /Current: DeepSeek Search API/u,
     `the legacy row reads the value the page committed:\n${providerRow}`)
+  await key(h, ESC) // clear the query
   await key(h, ESC) // leave the legacy editor (no Web-return path any more)
 
   // Re-entering the page shows BOTH committed values from one fresh read.
@@ -1399,7 +1396,7 @@ test('R4-09 a page turn holds the FIFO while a LEGACY editor intent is already q
   await key(h, ENTER)
   await settlePainted(h, 'the page write to dispatch', frame => frame.includes('Saving…'))
   await closeWorkspace(h)
-  await openLegacyCountRow(h)
+  await openLegacyWebRow(h, 'Search API Result Count')
   const pendingReads = h.readCount() - h.settledReadCount()
   assert.ok(pendingReads >= 1, 'the held reads keep the page turn open')
   // Enqueue the LEGACY intent while the page turn is still open.
@@ -1418,12 +1415,16 @@ test('R4-09 a page turn holds the FIFO while a LEGACY editor intent is already q
   assert.equal(h.maxConcurrentWrites(), 1, 'ONE queue: never two Web writes in flight')
   assert.deepEqual(h.store.web.searchProvider, 'deepseek-search-api')
   assert.equal(h.store.web.api.count, 5)
-  // BOTH surfaces read the SAME authoritative winner: the legacy editor's
-  // provider row shows the page's committed search provider...
-  for (let step = 0; step < 2; step += 1) await key(h, UP)
+  // BOTH surfaces read the SAME authoritative winner: re-enter the legacy
+  // editor on its provider row and prove it shows the page's committed value.
+  await key(h, ESC)
+  await key(h, ESC)
+  await h.vt.waitForRender()
+  await openLegacyWebRow(h, 'Web Search Provider')
   await settlePainted(h, 'the legacy provider row to repaint the page write', frame =>
     frame.includes('Current: DeepSeek Search API'))
   assert.match(h.view(), /Current: DeepSeek Search API/u, `the legacy row reads the page write:\n${h.view()}`)
+  await key(h, ESC) // clear the query
   await key(h, ESC) // leave the legacy editor
   // ...and the re-entered page shows BOTH committed values (the legacy count
   // write included) from ONE fresh read.
@@ -1433,18 +1434,24 @@ test('R4-09 a page turn holds the FIFO while a LEGACY editor intent is already q
   assert.match(h.view(), /Current: 5/u, `the page reads the legacy write:\n${h.view()}`)
 })
 
-/** Open the LEGACY editor through its transition row and walk to the Web count
- *  row (Up*4 from the keyboard-shortcuts anchor). */
-async function openLegacyCountRow(h: Harness): Promise<void> {
+/** Type a legacy-editor filter query one character at a time (the shared
+ *  SettingsList Input consumes real key events). */
+async function typeLegacyQuery(h: Harness, text: string): Promise<void> {
+  for (const character of text) await key(h, character)
+  await h.vt.waitForRender()
+}
+
+/** Open the LEGACY editor through the ONE remaining `Extensions` launcher and
+ *  filter to one Web row. */
+async function openLegacyWebRow(h: Harness, label: string): Promise<void> {
   h.invoke('settings')
   await h.vt.waitForRender()
-  await selectSettingsCategory(h.vt, 'Input & Terminal')
-  await key(h, ENTER)
-  for (let step = 0; step < 6; step += 1) await key(h, DOWN)
-  await key(h, ENTER)
-  await settlePainted(h, 'the legacy editor to mount', frame => frame.includes('Keyboard shortcuts'))
-  for (let step = 0; step < 4; step += 1) await key(h, UP)
-  assert.match(h.view(), /Search API Result Count/u, `the legacy Web rows are reachable:\n${h.view()}`)
+  await selectSettingsCategory(h.vt, 'Extensions')
+  await key(h, ENTER) // Extensions rows
+  await key(h, ENTER) // the transition launcher
+  await settlePainted(h, 'the legacy editor to mount', frame => frame.includes('Type to search'))
+  await typeLegacyQuery(h, label)
+  assert.match(h.view(), new RegExp(`>\\s*${label}`, 'u'), `the legacy ${label} row is selected:\n${h.view()}`)
 }
 
 test('an external clear while the cursor sits on Clear clamps it to the still-enabled action', async t => {

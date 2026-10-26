@@ -43,6 +43,7 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
 
@@ -383,7 +384,7 @@ function stubRunner(options: {
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: options.extensions,
+    extensions: (options.extensions ?? legacyEditorExtensions()) as never,
     captureExtensionHealthRef: options.captureExtensionHealthRef
       ?? ((slot, id) => {
         // Real-service semantics: only a REGISTERED plugin theme resolves
@@ -477,7 +478,7 @@ function setup(options: {
     ensureCalls,
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
-    extensions: options.extensions,
+    extensions: (options.extensions ?? legacyEditorExtensions()) as never,
     agents: options.agents,
     sessionReader: options.sessionReader,
     effectivePresetId: options.effectivePresetId,
@@ -1236,7 +1237,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
 }
 
 function themeExtensions(paletteForSelectable: (value: string) => typeof darkColors | undefined): NonNullable<TuiCommandRunner['extensions']> {
-  return { themes: { paletteForSelectable } } as unknown as NonNullable<TuiCommandRunner['extensions']>
+  return { ...legacyEditorExtensions(), themes: { paletteForSelectable } } as unknown as NonNullable<TuiCommandRunner['extensions']>
 }
 
 test('/reload theme autodetect rechecks the latest persisted choice before applying', async () => {

@@ -335,7 +335,13 @@ About 的复制入口只留在键盘上：选中一事实按 `c` 复制该事实
 `Shift+C` 在分类栏焦点下同样可用。复制仍只证明已交给本地剪贴板交付路径，不写入任何配置。
 
 `/status` 是 `/settings` 的真实别名：同一 handler、同一初始 About 焦点与同一套读取；无 Session
-时两者都不创建会话、不读统计。`/statusline` 仍是 `/footer` 的别名，不经过 Settings。
+时两者都不创建会话、不读统计。`/footer` 与它的别名 `/statusline` 直接打开同一个 Settings
+全屏工作区的 Appearance → Configure footer layout 页；裸 `/keybindings` 同样直接打开
+Input & Terminal → Keyboard shortcuts 页。两者共用唯一 Settings lease、唯一底栏和原有
+的 Footer / Keybinding 保存权威，不再打开第二个 overlay。在两个页面的根状态（Footer 行选择器、
+键盘快捷键在搜索为空时的列表）按 `←` 与 `Esc` 一样返回来源设置行，底栏会显示 `← Back`；Footer
+有未保存修改时 `←` 先打开 Save/Discard/Keep 确认，进入行编辑器后 `←` 仍是切换左右分区，
+搜索框非空时 `←` 仍只移动光标。
 Settings 的一级分类是固定的 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal / Tools / Plugins`，
 并且只在扩展设置注册表确实有设置行时才在末尾追加 `Extensions`；`/settings`
 （以及 `/status`）默认落在 About。`Extensions` 的增删与同一 id 重新注册都会先作废旧帧的
@@ -403,14 +409,14 @@ Conversation 与 Input & Terminal 的八个历史设置现在都在工作区里�
 为 Transcript display → Transcript detail → Thinking detail → Progress updates → Response style →
 Submit while busy → Git attribution；Input & Terminal 固定为 Home/End keys → Fullscreen →
 Mouse wheel lines → Notifications → Notification method → Terminal progress →
-Input & terminal settings…，最后一行只剩 `Keyboard shortcuts` 仍需打开原编辑器。
+Keyboard shortcuts…；最后一项打开的是与裸 `/keybindings` 相同的同 lease 全屏页，不再进入旧编辑器。
 
 `Submit while busy` 与 `Fullscreen` 是**先写文档**的两项：只有写入完成且权威回读一致才显示
 `Verified`，运行态不会被假装已切换。`Submit while busy` 的 `Value` 就是文档里的原始值（缺失显示
 `not set`，非法显示 `invalid stored value: <原值>`），`Runtime` 明确写出下一次忙时 Enter 的策略，
 默认值会标注为 `queue (default; no valid saved value)`，绝不冒充已保存值；确认后不影响正在进行的
 回合。`Fullscreen` 的偏好确认后工作区照常可操作，**正常退出 Settings 后才切换 transcript 屏幕**；
-从过渡行跳去旧编辑器、被 Question/Approval 抢占、被强制关闭或写入未确认都不会切屏，已保存的偏好
+从剩余的 `Extensions` 过渡行跳去旧编辑器、被 Question/Approval 抢占、被强制关闭或写入未确认都不会切屏，已保存的偏好
 会在下次 TUI 启动时生效。
 
 其余六项先改真实运行态再持久化（失败不回滚运行态，`Persisted` 单独显示文档原始值）：
@@ -442,12 +448,11 @@ Host 公布的 preset 原始 id，只影响**以后新建**的会话，当前会
 只有写入完成且回读一致才 `Verified`；它是 Host 的用户 shell 执行策略，不是模型工具 sandbox 策略，
 也不是权限 preset，因此不放在 Input & Terminal。
 
-旧的完整设置编辑器仍然可用：尚未迁移到新工作区的设置在各自所属分类里有一个明确标注
-`Existing settings editor` 的过渡行（`Appearance → Footer & status line…`、
-`Input & Terminal → Input & terminal settings…`（只剩 `Keyboard shortcuts`）、
-`Extensions → Configure extension settings…`）；激活它才会先关闭工作区、恢复原界面，再打开原有
-编辑器并定位到对应的一项，Theme、Plugin Manager、键位与扩展设置的写入路径全部不变。`Agent`
-分类已经没有未迁移项，所以它的 `Agent settings…` 过渡行随之退休。
+完整的旧设置编辑器现在只剩一个入口：`Extensions → Configure extension settings…` 过渡行
+（只在扩展设置注册表有行时出现）。激活它才会先关闭工作区、恢复原界面，再打开原有编辑器并定位到
+对应的一项；Theme、Plugin Manager、键位与扩展设置的写入路径全部不变。Footer 与 Keyboard
+shortcuts 已改为同一 Settings lease 内的专页；`Appearance` 与 `Input & Terminal` 不再有过渡行，
+`Agent` 也没有未迁移项，它们的旧入口都已退休。
 
 `/settings → Tools → Web Search / Fetch` 现在是**同一个 Settings 工作区里的专页**（不再先关工作区、
 再进旧编辑器）。页面固定六行：搜索 Provider（`Messages`，官方默认，或独立计费的
@@ -469,8 +474,8 @@ DeepSeek API key 只显示是否配置与来源层，`Configure in Models…` / 
 Settings lease 里跳到既有的 Models `API Key Reference` 页完成遮蔽输入或清除确认——Web 页自身从不
 收集密钥，也不执行 `/login` / `/logout` 文本命令。按 `Esc` 从详情回到 Web 列表、再回到
 `Web Search / Fetch` 行；Remote 或不可用的 Host 段仍可打开只读说明页，但不提供任何写入入口。
-旧的完整编辑器仍然保留（Footer/Keybindings、Extensions 等过渡行照旧），其历史 Web 行在退休前与
-新页面共用同一个写入队列与读取权威。
+旧的完整编辑器仍然保留（入口只剩 `Extensions` 过渡行），其历史 Web 行在退休前与新页面共用
+同一个写入队列与读取权威。
 
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格(也可在 Appearance 里直接改):`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
@@ -497,7 +502,9 @@ DSH Host 不支持**这套上报(它没有对应的事件源)。
 
 ### Footer 自定义
 
-`/footer` 提供交互式 Footer 编辑器。你可以组合内置状态条目，调整左右位置、顺序、Style、Tone、Prefix/Suffix 和 Importance，也可以创建自己的 Footer 条目。
+`/footer` 在同一个 Settings 全屏工作区中提供 Footer 编辑器（Appearance → Configure footer
+layout）。你可以组合内置状态条目，调整左右位置、顺序、Style、Tone、Prefix/Suffix 和
+Importance，也可以创建自己的 Footer 条目。
 
 支持四类条目：
 
@@ -591,8 +598,8 @@ keybindings:
   可编辑 Keyboard Shortcuts Editor:按类别分组,搜索 action ID/描述/当前键和
   默认键,并标记 customized、conflict、Unbound、Disabled 和 fixed 状态。
   独立的 Leader key 行还可设置全局 leader key。
-- `/settings` 只有一个 `Keyboard shortcuts` 入口,打开与 `/keybindings` 相同的
-  编辑器和持久化控制器。
+- `/settings` 的 Input & Terminal 只有一个 `Keyboard shortcuts…` 入口，打开与裸
+  `/keybindings` 相同的同 lease 全屏页与同一持久化控制器（不再是 88 列 overlay）。
 - 录制器读取真实终端按键,通过 `parseKey` 规范化为 `KeyId`;保存前会拒绝
   无法匹配、吞输入、终端歧义或已知冲突的按键。普通录制器按 `Esc` 立即取消;
   Host interrupt action 的 direct recorder 使用短暂双击窗口:一次 `Esc` 取消,

@@ -150,28 +150,6 @@ test('readClipboardText strips only the SYNTHETIC PowerShell trailing newline', 
   assert.equal(text, 'line', 'Get-Clipboard synthesizes the CRLF — it is not content')
 })
 
-test('openKeybindingEditor disposes a NON-Focusable panel on close (round-5 P2)', async () => {
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  await vt.waitForRender()
-  let disposeCount = 0
-  // A plain Component panel — NOT Focusable — must still be disposed by
-  // the owning FocusForwardingFrame when the overlay closes.
-  const panel: import('@xmoon76/pi-tui').Component = {
-    render: () => ['panel'],
-    invalidate: () => {},
-    dispose: () => { disposeCount += 1 },
-  }
-  const close = app.openKeybindingEditor(panel)
-  await vt.waitForRender()
-  close()
-  await vt.waitForRender()
-  assert.equal(disposeCount, 1, 'the non-Focusable panel must be disposed exactly once on close')
-  app.stop()
-})
-
 test('right-click paste lands in the focused editor with `this` intact (round-9 P2)', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {

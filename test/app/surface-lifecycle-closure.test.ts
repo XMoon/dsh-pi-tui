@@ -1352,7 +1352,7 @@ function settingsWorkspaceSource(): SettingsWorkspaceSource {
       rows: [
         { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette', action: 'inspect' },
         { id: 'icon-style', category: 'appearance', label: 'Icon style', summary: 'emoji', value: 'emoji', scope: 'TUI settings document', freshness: 'ready', description: 'icons', action: 'inspect' },
-        { id: 'footer-settings-legacy', category: 'appearance', label: 'Footer & status line…', summary: 'Existing settings editor', scope: 'Existing settings editor', freshness: 'ready', description: 'legacy', action: 'open-legacy', legacyTargetId: 'footer' },
+        { id: 'extension-settings-legacy', category: 'appearance', label: 'Configure extension settings…', summary: 'Existing settings editor', scope: 'Existing settings editor', freshness: 'ready', description: 'legacy', action: 'open-legacy', legacyTargetId: 'keyboard-shortcuts' },
         { id: 'display-preset', category: 'conversation', label: 'Transcript display', summary: 'full', value: 'full', scope: 'Client runtime', freshness: 'runtime', description: 'display', action: 'inspect' },
         { id: 'thinking', category: 'conversation', label: 'Thinking detail', summary: 'collapsed', value: 'collapsed', scope: 'Current TUI display state', freshness: 'runtime', description: 'thinking', action: 'inspect' },
         { id: 'default-permission', category: 'agent', label: 'Default permission', summary: 'workspace-write', value: 'workspace-write', scope: 'DSH Host profile · permission default for new sessions', freshness: 'ready', description: 'permission default', action: 'inspect' },

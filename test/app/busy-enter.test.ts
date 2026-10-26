@@ -29,6 +29,7 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -254,7 +255,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: options.extensions as never,
+    extensions: (options.extensions ?? legacyEditorExtensions()) as never,
     exit: () => {},
   }
   const installed = registerTuiCommandsWithDirectSeams(runner)

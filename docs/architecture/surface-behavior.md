@@ -156,8 +156,10 @@ Conversation, Input & Terminal, Tools, Plugins`, and ONE conditional
 `Extensions` is appended while the extension settings registry reports live
 rows (nine vs ten painted categories; no hardcoded count anywhere). Both
 `/settings` and `/status` run the same handler and land on `About` with
-identical initial focus and entry-refresh behavior. `/statusline` remains the
-`/footer` alias and never enters this workspace.
+identical initial focus and entry-refresh behavior. `/footer` and its
+`/statusline` alias take this SAME lease and mount the Footer layout page;
+bare `/keybindings` takes it for the Keyboard shortcuts page (see the
+specialist-page contract below).
 - The extension-settings DIRECTORY is a live projection of the in-process
   `SettingsRegistry`: the panel reads its `{revision,count}` synchronously before
   every input, pointer and render decision (no second registry, no subscription
@@ -441,17 +443,14 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     deliberately not part of `Input & Terminal`. When the Host provides no
     user-shell the preference still stores, and the existing executor fails
     closed instead of degrading to a local spawn.
-- Every other setting stays in the existing complete editor behind a
-  per-category TRANSITION row (`Footer & status line…`,
-  `Input & terminal settings…`, `Configure extension settings…`): each row is
-  `open-legacy` with its exact legacy target, states the `Existing settings
+- The complete legacy editor remains reachable ONLY through the conditional
+  `Extensions → Configure extension settings…` transition row (R6 owns the
+  extension page/retirement): it is `open-legacy`, states the `Existing settings
   editor` scope, runs no write of its own and starts the editor only on
   explicit activation — never on focus, Tab, read, resize or a summary render.
-  A launcher names only the fields that are still unmigrated, so
-  `Input & terminal settings…` targets `Keyboard shortcuts` and advertises just
-  that left row — never a row this workspace already edits. A category with
-  nothing left to migrate carries NO launcher: a launcher for an empty
-  remainder would be a false affordance.
+  `Appearance` and `Input & Terminal` carry NO legacy launcher, because every
+  field they own is migrated; a launcher for an empty remainder would be a false
+  affordance.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
   `Web Search / Fetch` page entry, in that frozen order.
@@ -534,6 +533,40 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   unavailable (Remote or a half-mounted/malformed authority) still opens the
   page as a read-only statement with its reason, paints `Unavailable` and offers
   no Confirm or credential action at all.
+- `Footer layout` and `Keyboard shortcuts` are EMBEDDED SPECIALIST PAGES in this
+  SAME lease. `Appearance` carries the persist-first `Status line mode` row
+  (`default`/`compact`/`custom`; a stored `command` is reported as
+  `command (manual)` and is never a candidate) plus `Configure footer layout…`;
+  `Input & Terminal` carries `Keyboard shortcuts…`. `/footer`, `/statusline` and
+  bare `/keybindings` are TYPED DEEPLINKS: the command validates the exact
+  row/page pair, takes the Settings lease and mounts the page on the first real
+  body grant (never before the lease, never a fallback overlay). The page keeps
+  its ONE existing authority — the Footer model/catalog/composer and its
+  persist-first save transaction (queue-head USER raw merge, runtime apply only
+  after the write), or the ONE `KeybindingEditorController` and its serialized
+  writes/conflict checks. The root owns header, metadata, notice, pane header and
+  the ONLY physical last-row Action Bar; the page contributes its business body
+  and preview above that bar. `Esc` follows the page's own state machine (Footer
+  dirty Save/Discard/Keep guard; Keybinding recorder → action detail → query
+  clear → list root) back to its source row, then the existing Settings levels
+  close; only leaving the whole Settings workspace releases the lease. On the
+  page's ROOT state (Footer Row Selector, Keybinding list with an EMPTY query)
+  `←` is the same back verb and the page bar advertises it as `← Back` — also
+  when the grant is the single Action Bar row — while a sub-page or a
+  non-empty query never advertises it. A dirty Footer turns it into the
+  Save/Discard/Keep guard, and every sub-page keeps its own meaning (`←` still
+  moves a Footer item between zones, and a non-empty Keybinding query still
+  moves the search cursor). A page that blocks USER navigation (dirty Footer
+  draft, in-flight save, non-empty query, action detail, recorder/leader,
+  pending mutation) refuses category changes, and a page whose current grant or
+  sub-view has not painted admits only the page's ROOT back verbs — the real
+  Esc, plus `←` while the page is on that same root state — never a hidden
+  save/open/search/list/leader/record control; the root's painted content box,
+  revision and child grant fence every pointer gesture. A pending Keybinding
+  mutation owns the page until its result is painted, so leaving can never
+  strand an invisible write. No second alt-screen, overlay, editor or settings
+  manager exists for these entries, and a deeplink that cannot take the lease or
+  build its page returns a real command error instead of opening an overlay.
 - An L2 choice is transient; only an explicit Confirm commits one field through
   its own authority path (the serialized TUI settings document, the Host
   `pi-tui-visual-tools` form section, or — for the two runtime-only disclosure
@@ -570,9 +603,9 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   rail with the page instance, its view/query/selection/scroll and the
   controller's install request id intact. Only a real category change or the
   Settings teardown disposes the page and releases its Host claim. The legacy
-  complete editor stays reachable through the per-category transition rows, and
-  `Extensions` is a DIRECTORY entry only: the per-owner extension settings list
-  is not part of this contract.
+  complete editor stays reachable through the ONE conditional `Extensions`
+  transition row, and `Extensions` is a DIRECTORY entry only: the per-owner
+  extension settings list is not part of this contract.
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 

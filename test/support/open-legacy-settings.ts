@@ -12,15 +12,18 @@
  * Since Phase 3C / C2-A the workspace opens on its About home, so the walk
  * starts from there: the category rail is the only selection owner.
  *
- * C2-R3 retired the `Agent → Agent settings…` launcher (that category has no
- * unmigrated field left), so the editor is reached through a launcher that still
- * exists: `Appearance → Footer & status line…`. That launcher focuses the editor
- * on its own row, so this helper then clears the search box to put the cursor
- * back at the list top — the state the index-based legacy suites assert against.
+ * C2-R5 retired the `Appearance → Footer & status line…` and
+ * `Input & Terminal → Input & terminal settings…` launchers, so the editor is
+ * reached through the ONLY remaining launcher: the conditional
+ * `Extensions → Configure extension settings…` row. A suite must register a
+ * live extension settings row (see `legacy-settings-extensions.ts`). The
+ * launcher focuses the editor on its own row, so this helper then clears the
+ * search box to put the cursor back at the list top — the state the index-based
+ * legacy suites assert against.
  * @module @xmoon76/dsh-pi-tui/test/support/open-legacy-settings
  */
 
-import { selectSettingsCategory, type SettingsRailTerminal } from './settings-rail.ts'
+import { settingsRailVisible, type SettingsRailTerminal } from './settings-rail.ts'
 
 /** The minimal terminal surface the navigation drives. */
 export interface SettingsNavTerminal extends SettingsRailTerminal {
@@ -32,11 +35,6 @@ export interface SettingsNavTerminal extends SettingsRailTerminal {
 const ENTER = '\r'
 const DOWN = '\x1b[B'
 
-/** The launcher that still opens the legacy editor (Appearance's own fourth
- *  row: Theme, Icon style, Footer, then the transition row). */
-const REMAINING_LAUNCHER_CATEGORY = 'Appearance'
-const REMAINING_LAUNCHER_DOWNS = 2
-
 /**
  * Navigate an ALREADY-OPEN Settings workspace to the existing settings editor.
  * The key sequence follows the workspace's real focus model: walk the category
@@ -47,13 +45,27 @@ export async function navigateToLegacySettings(vt: SettingsNavTerminal): Promise
   // The walk reads the painted frame to find the rail, so the FIRST frame of
   // the workspace must be on screen before the walk starts.
   await vt.waitForRender()
-  await selectSettingsCategory(vt, REMAINING_LAUNCHER_CATEGORY)
-  vt.sendInput(ENTER)
-  await vt.waitForRender()
-  for (let step = 0; step < REMAINING_LAUNCHER_DOWNS; step += 1) {
+  if (!settingsRailVisible(vt)) {
+    // A narrow terminal opens on the About CONTENT: Esc returns to the rail.
+    vt.sendInput('\u001b')
+    await vt.waitForRender()
+  }
+  // `Extensions` is appended after the nine fixed categories and exists only
+  // while the registry has live rows: walk the rail to it by its painted label
+  // (bounded), never by a fixed index.
+  for (let step = 0; step < 10; step += 1) {
+    const painted = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+    if (painted.some(line => /^> Extensions(?:\s{2,}|\s*$)/u.test(line))) break
     vt.sendInput(DOWN)
     await vt.waitForRender()
   }
+  const selected = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  if (!selected.some(line => /^> Extensions(?:\s{2,}|\s*$)/u.test(line))) {
+    throw new Error('the Extensions category is not reachable; register a live extension settings row')
+  }
+  vt.sendInput(ENTER)
+  await vt.waitForRender()
+  // Extensions holds exactly ONE row (the transition launcher).
   vt.sendInput(ENTER)
   await vt.waitForRender()
   // The launcher focused the editor on its own section; a filter edit plus its

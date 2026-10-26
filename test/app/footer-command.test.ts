@@ -30,7 +30,7 @@ import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -41,6 +41,58 @@ const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecy
 afterEach(() => {
   disposeStartedApps()
 })
+
+/** Capture the ONE Footer-page `onSave` the `/footer` deeplink builds through
+ *  `TuiApp.openSettingsWorkspace` → `createFooterConfiguratorPage` →
+ *  `createFooterConfiguratorPanel`, without mounting a second screen. */
+function captureFooterSaves(app: TuiApp): {
+  readonly saves: Array<Parameters<TuiApp['createFooterConfiguratorPanel']>[0]['onSave']>
+  /** The LAST `/footer` deeplink's full workspace intents (same-lease page,
+   *  serialized row writer and keybinding page factory). */
+  readonly workspace: () => Parameters<TuiApp['openSettingsWorkspace']>[1] | undefined
+} {
+  const saves: Array<Parameters<TuiApp['createFooterConfiguratorPanel']>[0]['onSave']> = []
+  let lastOptions: Parameters<TuiApp['openSettingsWorkspace']>[1] | undefined
+  app.createFooterConfiguratorPanel = ((options: Parameters<TuiApp['createFooterConfiguratorPanel']>[0]) => {
+    saves.push(options.onSave)
+    return {
+      title: 'Footer layout',
+      focused: false,
+      handleInput: () => {},
+      setMaxRows: () => {},
+      dispose: () => {},
+      isDisposed: () => false,
+      render: () => [''],
+    } as unknown as ReturnType<TuiApp['createFooterConfiguratorPanel']>
+  }) as TuiApp['createFooterConfiguratorPanel']
+  app.openSettingsWorkspace = ((_source: Parameters<TuiApp['openSettingsWorkspace']>[0], options: Parameters<TuiApp['openSettingsWorkspace']>[1]) => {
+    lastOptions = options
+    // ONLY the footer deeplink mounts the page; `/settings` merely exposes the
+    // workspace intents (row writer + keyboard page).
+    if (options.initialSpecialist === 'footer-configurator') {
+      options.createFooterConfiguratorPage?.(() => {}, () => {})
+    }
+    return {
+      close: () => {},
+      refreshRow: () => {},
+      whenInitialSpecialistSettled: async () => ({ ok: true as const }),
+    }
+  }) as TuiApp['openSettingsWorkspace']
+  return {
+    saves,
+    workspace: () => lastOptions,
+  }
+}
+
+/** A ready-backend view over one real ConfigPort (the port's other semantics are
+ *  unchanged): the Footer-mode row only offers candidates on a current backend. */
+function readyConfig(port: TuiCommandRunner['config']): TuiCommandRunner['config'] {
+  return new Proxy(port, {
+    get: (target, property) => property === 'configReadiness'
+      ? () => 'ready' as const
+      : Reflect.get(target, property, target),
+  })
+}
 
 /** Bounded wall-clock spin (setImmediate turns, never a fixed setTimeout):
  * the repo's headless-test discipline for "wait a bounded window, then
@@ -320,7 +372,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   assert.deepEqual(result, { kind: 'success' })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Configure Footer'), `the configurator must open:\n${view}`)
+  assert.ok(view.includes('Select row to edit'), `the Footer page must open:\n${view}`)
   // Enter the row, toggle the first item out, walk back to the selector,
   // and save (S — the Row Selector is the save point).
   vt.sendInput('\r')
@@ -344,6 +396,13 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   assert.deepEqual(settings.doc.footerCustomItems, persistedCustomItems, 'saving the layout must preserve known and future custom definitions')
   assert.deepEqual(applied[0]!.footerCustomItems, customItems, 'apply must carry custom definitions alongside the layout')
   assert.equal(app.getFooterMode(), 'custom', 'the app must apply the custom layout')
+  // Saving closed the PAGE but the SAME Settings workspace still owns the
+  // screen (the user returns to the Appearance row). Leave it before opening
+  // the alias, exactly like a user would.
+  vt.sendInput('\x1b') // rows -> categories
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // categories -> close
+  await vt.waitForRender()
 
   // The approved `/statusline` alias (other-agent muscle memory) registers
   // the SAME handler and opens the SAME configurator — `/status` keeps
@@ -355,7 +414,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   const aliasResult = await (alias!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   assert.deepEqual(aliasResult, { kind: 'success' })
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('Configure Footer'), `the alias must open the configurator`)
+  assert.ok(vt.getViewport().join('\n').includes('Select row to edit'), `the alias must open the Footer page`)
   // Esc closes the alias-opened panel without writing (applied stays 1).
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -393,18 +452,8 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     replace: (next) => new Promise<void>(resolve => pendingWrites.push({ next, resolve })),
   }
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: userRaw } }] } as never)
-  const saveCallbacks: Array<Parameters<TuiApp['openFooterConfigurator']>[0]['onSave']> = []
-  app.openFooterConfigurator = ((options: Parameters<TuiApp['openFooterConfigurator']>[0]) => {
-    saveCallbacks.push(options.onSave)
-    return () => {}
-  }) as TuiApp['openFooterConfigurator']
-  let settingsChange: Parameters<TuiApp['openSettings']>[1] | undefined
-  let settingsItems: Parameters<TuiApp['openSettings']>[0] | undefined
-  app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
-    settingsItems = args[0]
-    settingsChange = args[1]
-    return () => {}
-  }) as TuiApp['openSettings']
+  const capturedFooter = captureFooterSaves(app)
+  const saveCallbacks = capturedFooter.saves
   const applied: Array<{ footerLayout?: unknown; footerCustomItems?: unknown }> = []
   const displayWrites: ('full' | 'focus' | 'compact')[] = []
   const persistedDisplayDocs: Record<string, unknown>[] = []
@@ -497,23 +546,16 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await (settingsCommand.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await navigateToLegacySettings(vt)
-  assert.equal(saveCallbacks.length, 2)
-  assert.ok(settingsChange !== undefined)
-  const displayRow = settingsItems?.find(item => item.id === 'display-preset')
-  assert.ok(displayRow !== undefined, 'settings must expose the canonical display row')
-  assert.deepEqual(displayRow?.values, ['full', 'compact', 'focus'])
-  assert.equal(settingsItems?.some(item => item.id === 'focus-mode'), false)
-  settingsChange!('display-preset', 'focus', () => {})
-  settingsChange!('display-preset', 'compact', () => {})
-  settingsChange!('display-preset', 'full', () => {})
-  assert.deepEqual(displayWrites, ['focus', 'compact', 'full'], 'settings choices must use the canonical setter')
-  assert.deepEqual(persistedDisplayDocs.map(doc => doc.displayPreset), ['focus', 'compact', 'full'])
+  assert.equal(saveCallbacks.length, 2, 'each /footer deeplink builds ONE page save callback')
+  const workspace = capturedFooter.workspace()
+  assert.ok(workspace?.onCommit !== undefined, 'the /settings open exposes the ONE row writer')
 
   const layoutOne: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
   const layoutTwo: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'view-scope' }], right: [] }] }
   saveCallbacks[0]!(layoutOne, [{ ...known, text: 'ONE' }])
-  settingsChange!('footer', 'compact', () => {})
+  // The workspace's Footer-mode row writer enters the SAME queue behind the
+  // first page save (fire-and-forget like the UI's owned commit).
+  void workspace!.onCommit!({ field: 'footer-mode', value: 'compact' })
   saveCallbacks[1]!(layoutTwo, [{ ...known, text: 'TWO' }])
   for (let index = 0; index < 5; index += 1) await Promise.resolve()
   assert.equal(pendingWrites.length, 1, 'the settings and second footer saves must wait for the first write')
@@ -553,15 +595,11 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   // DirectConfigPort.rawForPersistence() through the projector hook.
   const projectOnly = { schemaVersion: 1, id: 'user:project-only', kind: 'text', text: 'PROJECT', tone: 'warning' }
   currentDoc = { ...currentDoc, footerCustomItems: [projectOnly] }
-  const keyboardRow = settingsItems?.find(item => item.id === 'keyboard-shortcuts')
-  const keyboardSubmenu = keyboardRow?.submenu
-  assert.ok(keyboardRow !== undefined && keyboardSubmenu !== undefined, 'settings must expose the keyboard shortcuts submenu')
-  const panel = keyboardSubmenu(keyboardRow.currentValue, () => {})
-  const handleInput = panel.handleInput?.bind(panel)
-  assert.ok(handleInput !== undefined, 'the keyboard shortcuts submenu must accept input')
-  handleInput('app.todo.toggle')
-  handleInput('\r')
-  handleInput('r')
+  const panel = workspace!.createKeybindingsPage?.(() => {}, () => {})
+  assert.ok(panel !== undefined, 'the /settings open exposes the same-lease keyboard page')
+  panel.handleInput('app.todo.toggle')
+  panel.handleInput('\r')
+  panel.handleInput('r')
   for (let index = 0; index < 10; index += 1) await Promise.resolve()
   assert.equal(pendingWrites.length, 4, `the keybinding mutation must reach the settings writer\n${panel.render(100).join('\n')}`)
   const keybindingWrite = pendingWrites[3]!
@@ -731,13 +769,11 @@ test('/footer starts from the persisted custom layout when active', async () => 
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
-  // Enter the row: the configurator lists the persisted layout's single
-  // item (model) — the default layout's items are not present.
-  vt.sendInput('\r')
-  await vt.waitForRender()
+  // The selector lists the persisted layout's single row/item — the default
+  // layout's items are not present.
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Model'), `the persisted item must be listed:\n${view}`)
-  assert.ok(!view.includes('Permission preset'), `the default-only items must not be listed:\n${view}`)
+  assert.match(view, /Row 1\s+1 item/u, `the persisted ONE-item layout must be listed:\n${view}`)
+  assert.doesNotMatch(view, /Row 2/u, `the persisted layout has no second row:\n${view}`)
   app.stop()
 })
 
@@ -833,8 +869,14 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   await vt.waitForRender()
   for (let index = 0; index < 20; index += 1) await Promise.resolve()
   assert.equal(applied.length, 0, 'a clean S must not persist')
-  assert.ok(!vt.getViewport().join('\n').includes('Configure Footer'), 'the clean save closes')
+  assert.ok(!vt.getViewport().join('\n').includes('Select row to edit'), 'the clean save closes')
   assert.equal(app.getFooterMode(), 'compact', 'the compact mode stays untouched')
+  // The clean save closed the PAGE; the SAME Settings lease remains. Leave it
+  // (rows -> categories -> close) before the next typed deeplink.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
 
   // The seeding guarantee still holds where it matters: a DIRTY compact
   // draft saves as ONE row (the draft started from the EFFECTIVE compact
@@ -957,7 +999,20 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
 test('/settings footer change is PERSIST-FIRST: a failed write keeps the old layout', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The row writer is dispatched through the app's owned-task entry.
+    runOwned: ((_label: string, task: () => unknown, options: {
+      onResult?: (value: unknown) => void
+      onError?: (error: unknown) => void
+    }) => {
+      Promise.resolve().then(task).then(
+        value => options.onResult?.(value),
+        error => options.onError?.(error),
+      )
+    }) as never,
+  })
   app.start()
   startedApps.add(app)
   const commands = fakeCommands()
@@ -993,7 +1048,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
-    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    config: readyConfig(new DirectConfigPort(ctx as never, undefined, () => undefined)),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
     clientCommands: createClientCommandRegistry(parseCommand),
@@ -1031,11 +1086,22 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   // rows and wires the persist-first footer branch into onChange).
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  // The FIRST row is the footer Status line (default): Enter cycles it to
-  // compact → the handler runs the persist-first branch → the WRITE
-  // throws → applyFooterSettings must NEVER run.
+  // Walk the REAL Settings workspace to `Appearance → Status line mode`, open
+  // its inline choice, choose compact and Confirm. The persist-first writer
+  // throws, so applyFooterSettings must NEVER run.
+  await selectSettingsCategory(vt, 'Appearance')
   vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // Icon style -> Status line mode
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /> Status line mode/u, 'the Footer mode row is selected')
+  vt.sendInput('\r') // rows -> Detail choice
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // default -> compact
+  await vt.waitForRender()
+  vt.sendInput('\r') // explicit Confirm
   const deadline = Date.now() + 400
   while (applied.length === 0 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -1048,7 +1114,20 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
 test('/settings footer change PERSISTS footerFallbackMode (the command-mode restart fallback source)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The row writer is dispatched through the app's owned-task entry.
+    runOwned: ((_label: string, task: () => unknown, options: {
+      onResult?: (value: unknown) => void
+      onError?: (error: unknown) => void
+    }) => {
+      Promise.resolve().then(task).then(
+        value => options.onResult?.(value),
+        error => options.onError?.(error),
+      )
+    }) as never,
+  })
   app.start()
   startedApps.add(app)
   const commands = fakeCommands()
@@ -1078,7 +1157,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
-    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    config: readyConfig(new DirectConfigPort(ctx as never, undefined, () => undefined)),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
     clientCommands: createClientCommandRegistry(parseCommand),
@@ -1114,25 +1193,26 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  // Walk to the footer row: SettingsList rows cycle their value on Enter
-  // (firing onChange) and ↓ moves to the next row. The footer row is not
-  // necessarily the first row (theme/expand/thinking precede it), so keep
-  // stepping until the footer write actually persists — bounded, never a
-  // fixed walk.
-  let saved = false
-  for (let step = 0; step < 12 && !saved; step += 1) {
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    const deadline = Date.now() + 250
-    while (settings.doc.footerFallbackMode === undefined && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 10))
-    }
-    saved = settings.doc.footerFallbackMode !== undefined
-    if (!saved) {
-      vt.sendInput('\x1b[B')
-      await vt.waitForRender()
-    }
+  // The SAME Settings row the Footer page lives beside: select compact and
+  // Confirm; the persisted fallback is what a future `command` mode falls back to.
+  await selectSettingsCategory(vt, 'Appearance')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /> Status line mode/u, `the Footer mode row must be selected:\n${vt.getViewport().join('\n')}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /Choose value/u, `the inline choice must be painted:\n${vt.getViewport().join('\n')}`)
+  vt.sendInput('\x1b[B') // default -> compact
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /Enter confirm/u, `the explicit Confirm must be painted:\n${vt.getViewport().join('\n')}`)
+  vt.sendInput('\r')
+  const deadline = Date.now() + 500
+  while (settings.doc.footerFallbackMode === undefined && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
   assert.equal(settings.doc.footer, 'compact', 'the mode must persist')
   assert.equal(settings.doc.footerFallbackMode, 'compact', 'the fallback mode must persist alongside')
@@ -1151,11 +1231,8 @@ test('/footer save failures notify exactly once (validation and write failures)'
   ;(app as unknown as { notify: (message: string, level?: string) => void }).notify = (message) => {
     notifications.push(message)
   }
-  const saveCallbacks: Array<Parameters<TuiApp['openFooterConfigurator']>[0]['onSave']> = []
-  app.openFooterConfigurator = ((options: Parameters<TuiApp['openFooterConfigurator']>[0]) => {
-    saveCallbacks.push(options.onSave)
-    return () => {}
-  }) as TuiApp['openFooterConfigurator']
+  const capturedFooter = captureFooterSaves(app)
+  const saveCallbacks = capturedFooter.saves
   const known = { schemaVersion: 1 as const, id: 'user:environment', kind: 'text' as const, text: 'OLD', tone: 'warning' as const }
   let rejectReplace: ((reason?: unknown) => void) | undefined
   const settings: TuiSettingsLike = {
@@ -1355,35 +1432,55 @@ test('an unsaved custom command draft NEVER executes (preview, resize, Keep Edit
     const def = commands.defs.find(entry => entry.name === 'footer')
     await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
     await vt.waitForRender()
-    // Create a command item that would touch the marker if it ever ran.
-    vt.sendInput('\r') // row
-    vt.sendInput('a') // add
-    vt.sendInput('no-match')
-    vt.sendInput('\x1b[B') // Create Custom Command
-    vt.sendInput('\r') // create-name
-    vt.sendInput('Pwn')
-    vt.sendInput('\r') // create-command
-    vt.sendInput(`touch ${marker}`)
-    vt.sendInput('\r') // create-refresh (5s default)
-    vt.sendInput('\r') // create-timeout (300ms default)
-    vt.sendInput('\r') // create-tone
-    vt.sendInput('\r') // create with Auto
+    // Create the command draft on the SAME mounted page model: the creation UI
+    // itself is covered by the configurator suite, while THIS case owns the
+    // no-execution boundary (preview, resize, dirty-exit).
+    const page = (app as unknown as {
+      workspaceLease?: { panel: { specialistPage?: { model: Record<string, unknown> } } }
+    }).workspaceLease?.panel.specialistPage
+    assert.ok(page !== undefined, 'the /footer page is mounted in the Settings lease')
+    const model = page.model as {
+      activate(): void
+      startAdd(): void
+      text(value: string): void
+      moveDown(): void
+    }
+    model.activate() // rows -> row
+    model.startAdd()
+    model.text('no-match')
+    model.moveDown() // 0 matches: Create Custom Text -> Create Custom Command
+    model.activate() // create-name
+    model.text('Pwn')
+    model.activate() // create-command
+    model.text(`touch ${marker}`)
+    model.activate() // create-refresh
+    model.activate() // create-timeout
+    model.activate() // create-tone
+    model.activate() // create with Auto -> row (dirty)
+    app.requestRender()
     await vt.waitForRender()
     // The draft preview renders through the placeholder path — no spawn.
-    assert.ok(vt.getViewport().join('\n').includes('[command]'), 'the draft preview must show the placeholder')
+    assert.match(vt.getViewport().join('\n'), /\[command\]/, 'the draft preview must show the placeholder')
     // Resize the terminal (a repaint) — still no spawn.
     vt.resize(80, 24)
     await vt.waitForRender()
-    // Esc Keep Editing: dirty selector Esc -> exit-confirm -> Keep Editing.
+    assert.match(vt.getViewport().join('\n'), /\[command\]/, 'the resized draft preview keeps the placeholder')
+    // Esc Keep Editing: row -> selector -> exit guard -> Keep Editing.
     vt.sendInput('\x1b') // row -> selector
+    await vt.waitForRender()
     vt.sendInput('\x1b') // dirty -> exit-confirm
-    vt.sendInput('\x1b[B') // Discard & Exit
-    vt.sendInput('\x1b[B') // Keep Editing
+    await vt.waitForRender()
+    vt.sendInput('\x1b[B') // Save & Exit -> Discard & Exit
+    await vt.waitForRender()
+    vt.sendInput('\x1b[B') // Discard & Exit -> Keep Editing
+    await vt.waitForRender()
     vt.sendInput('\r') // back to the selector
     await vt.waitForRender()
-    // Esc Discard: dirty -> exit-confirm -> Discard & Exit closes.
+    // Esc Discard: selector -> exit guard -> Discard & Exit closes the page.
     vt.sendInput('\x1b')
-    vt.sendInput('\x1b[B') // Discard & Exit
+    await vt.waitForRender()
+    vt.sendInput('\x1b[B') // Save & Exit -> Discard & Exit
+    await vt.waitForRender()
     vt.sendInput('\r')
     await vt.waitForRender()
     // The marker must never exist: no preview, no repaint, no guard
@@ -1503,7 +1600,7 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
     await vt.waitForRender()
     // The configurator stays open with the draft intact; the marker must
     // never exist — a failed save must never arm the new command.
-    assert.ok(vt.getViewport().join('\n').includes('Configure Footer'), 'the configurator must stay open after a failed save')
+    assert.ok(vt.getViewport().join('\n').includes('Unsaved'), 'the dirty Footer page must stay open after a failed save')
     assert.equal(applied.length, 0, 'a failed write must not apply')
     await spin(300)
     assert.equal(existsSync(marker), false, 'a failed save must never execute the new command')

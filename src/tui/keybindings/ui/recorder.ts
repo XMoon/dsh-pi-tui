@@ -1,6 +1,6 @@
 /** A focused raw-input recorder for one semantic keybinding. */
 
-import { isKeyRelease, isKeyRepeat, matchesKey, parseKey, truncateToWidth, type Component } from '@xmoon76/pi-tui'
+import { isKeyRelease, isKeyRepeat, matchesKey, parseKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { canonicalizeKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from '../key-identity.ts'
 import { isEditorSubmitPreSubmitKey, isPhysicalEscapeAction, isTerminalAmbiguousKeyId } from '../config.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
@@ -31,6 +31,9 @@ export interface KeyRecorderOptions {
   readonly onCancel: () => void
   readonly requestRender?: () => void
   readonly timer?: KeyRecorderTimer
+  /** The parent's live row grant; the recorder keeps its Esc line as the LAST
+   *  row and degrades its optional description instead of being tail-sliced. */
+  readonly maxRows?: () => number
 }
 
 export interface KeyRecorderValidation {
@@ -83,6 +86,10 @@ export class KeyRecorder implements Component {
   private readonly onCancel: () => void
   private readonly requestRender: () => void
   private readonly timer: KeyRecorderTimer
+  private readonly maxRows: () => number
+  /** The body rows the LAST frame really painted (0 = bar-only: only Esc). */
+  private hasPainted = false
+  private paintedBodyRows = 0
   private error: string | undefined
   private escapePending = false
   private escapeTimer: unknown
@@ -96,32 +103,62 @@ export class KeyRecorder implements Component {
     this.onCancel = options.onCancel
     this.requestRender = options.requestRender ?? (() => {})
     this.timer = options.timer ?? DEFAULT_TIMER
+    this.maxRows = options.maxRows ?? (() => 8)
   }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     const interruptDirect = this.purpose === 'direct' && this.action === 'app.agent.interrupt'
-    const lines = [
-      color.textStrong('Record shortcut'),
-      '',
-      color.text(`Press a key for ${this.label}.`),
-      color.textDim(this.purpose === 'leader-key'
-        ? 'This key becomes the global leader prefix.'
-        : this.purpose === 'leader-completion'
-          ? 'This key completes the leader sequence.'
-          : 'The key is parsed from the terminal and stored canonically.'),
-      '',
-      this.error === undefined
-        ? color.accent(interruptDirect && this.escapePending
-          ? 'Esc again to assign Escape…'
-          : 'Waiting for one key…')
-        : color.error(this.error),
-      '',
-      color.textDim(interruptDirect
-        ? 'Esc: cancel · double-Esc: assign Escape'
-        : 'Esc: cancel'),
+    const barText = interruptDirect
+      ? ['Esc: cancel · double-Esc: assign Escape', 'Esc: cancel · double-Esc', 'Esc: cancel']
+        .find(text => visibleWidth(text) <= safeWidth) ?? 'Esc: cancel'
+      : 'Esc: cancel'
+    const bar = truncateToWidth(color.textDim(barText), safeWidth)
+    const budget = Math.max(1, this.maxRows())
+    this.hasPainted = true
+    if (budget <= 1) {
+      this.paintedBodyRows = 0
+      return [bar]
+    }
+    // The way back is the mandatory LAST row; everything else is optional
+    // context that yields in priority order on a short grant.
+    const status = this.error === undefined
+      ? interruptDirect && this.escapePending
+        ? color.accent('Esc again to assign Escape…')
+        : color.accent('Waiting for one key…')
+      : color.error(this.error)
+    const rows: Array<{ readonly text: string; readonly drop?: number }> = [
+      { text: color.textStrong('Record shortcut'), drop: 40 },
+      { text: '', drop: 10 },
+      { text: color.text(`Press a key for ${this.label}.`), drop: 35 },
+      {
+        text: color.textDim(this.purpose === 'leader-key'
+          ? 'This key becomes the global leader prefix.'
+          : this.purpose === 'leader-completion'
+            ? 'This key completes the leader sequence.'
+            : 'The key is parsed from the terminal and stored canonically.'),
+        drop: 20,
+      },
+      { text: '', drop: 5 },
+      { text: truncateToWidth(status, safeWidth) },
     ]
-    return lines.map(line => truncateToWidth(line, safeWidth))
+    const bodyBudget = budget - 1
+    while (rows.length > bodyBudget) {
+      let index = -1
+      let priority = Number.POSITIVE_INFINITY
+      for (let at = 0; at < rows.length; at += 1) {
+        const drop = rows[at]!.drop
+        if (drop !== undefined && drop < priority) {
+          priority = drop
+          index = at
+        }
+      }
+      if (index === -1) break
+      rows.splice(index, 1)
+    }
+    const body = rows.length > bodyBudget ? rows.slice(rows.length - bodyBudget) : rows
+    this.paintedBodyRows = body.length
+    return [...body.map(row => truncateToWidth(row.text, safeWidth)), bar]
   }
 
   invalidate(): void {}
@@ -169,6 +206,9 @@ export class KeyRecorder implements Component {
 
   handleInput(data: string): void {
     if (this.disposed || data === '') return
+    // A bar-only recorder paints no "Record shortcut" body: only the real Esc
+    // (its cancel/assign affordance) may act until a real body row paints.
+    if (this.hasPainted && this.paintedBodyRows === 0 && !matchesKey(data, 'escape')) return
     // Release/repeat reports are not a second binding. They are consumed by
     // the active editor overlay and must never reach the host editor.
     if (isKeyRelease(data) || isKeyRepeat(data)) return

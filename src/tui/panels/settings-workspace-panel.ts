@@ -100,8 +100,9 @@ export type SettingsWorkspaceRowId =
   | 'subagent-model-allowlist'
   | 'subagent-model-selection'
   | 'local-shell-sandbox'
-  | 'footer-settings-legacy'
-  | 'input-terminal-settings-legacy'
+  | 'footer-mode'
+  | 'footer-configurator'
+  | 'keyboard-shortcuts'
   | 'extension-settings-legacy'
 
 /** How current one row's value is, as the reader proved it. */
@@ -128,6 +129,7 @@ export type SettingsWorkspaceWritableField =
   | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
   | 'notification-mode' | 'notification-method' | 'terminal-progress'
   | 'approval' | 'default-permission' | 'subagent-model-selection' | 'local-shell-sandbox'
+  | 'footer-mode'
 
 /** One selectable candidate of a writable row. `value` is the EXACT identity
  *  that gets applied and persisted (a source-qualified theme id, a display
@@ -204,7 +206,7 @@ export interface SettingsWorkspaceRow {
    *  Search / Fetch settings page). It is a presentation seam only — no
    *  document field, no writer, no second lease. A row without it never has a
    *  specialist page. */
-  readonly specialist?: 'subagent-allowlist' | 'web-settings'
+  readonly specialist?: 'subagent-allowlist' | 'web-settings' | 'footer-configurator' | 'keybindings'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -365,6 +367,27 @@ export interface SettingsWorkspacePanelIntents {
     done: () => void,
     navigateToModels: (initial: ModelsInitialView) => void,
   ) => EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R5: the ONE full-screen Footer layout page factory. It returns the
+   * EXISTING `FooterConfiguratorPanel` (same model/composer/save transaction)
+   * mounted in this workspace's body under the SAME screen lease. `done`
+   * returns to the Appearance row that opened it; `onAuthoritativeChange` asks
+   * the root for a fresh row read after the page's own write really completed.
+   */
+  readonly createFooterConfiguratorPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R5: the ONE full-screen Keyboard shortcuts page factory. It returns the
+   * EXISTING `KeybindingEditorPanel` over the ONE `KeybindingEditorController`;
+   * the controller stays the write/conflict authority. `done` returns to the
+   * Input & Terminal row; `onAuthoritativeChange` asks for a fresh summary.
+   */
+  readonly createKeybindingsPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -411,6 +434,27 @@ type SettingsWorkspaceEditPhase =
 
 type SettingsLayout = 'wide' | 'medium' | 'narrow'
 
+/** The C2-R5 typed deeplink pages: the two professional editors that are
+ *  mounted inside the ONE Settings screen lease instead of a second overlay. */
+export type SettingsWorkspaceSpecialistRoute = 'footer-configurator' | 'keybindings'
+
+/** The settlement of ONE typed deeplink page: `ok` only after the page was
+ *  really created on the leased screen; a failure is the command owner's real
+ *  error (never a silent row fallback). */
+export type SettingsInitialSpecialistSettlement =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string }
+
+/** The strict row each typed deeplink page belongs to. The command layer
+ *  validates the pair before it leases the screen; the panel never guesses. */
+export const SETTINGS_SPECIALIST_ROUTE_ROW: Readonly<Record<SettingsWorkspaceSpecialistRoute, SettingsWorkspaceRowId>> = {
+  'footer-configurator': 'footer-configurator',
+  keybindings: 'keyboard-shortcuts',
+}
+
+/** The ONE per-frame row allocation the root paints (header, metadata, rule,
+ *  notice, pane header, body, action bar). Child pages receive the real
+ *  content rows plus the action row and own nothing outside that grant. */
 interface SettingsChromePlan {
   readonly width: number
   readonly rows: number
@@ -525,6 +569,14 @@ export interface EmbeddedSpecialistPage extends Component {
    *  names BOTH columns); absent = the root paints the single active-pane label
    *  from {@link title}. */
   paneHeader?(width: number): string
+  /** C2-R5: whether a USER navigation gesture may leave this page right now
+   *  (a dirty Footer draft, a Footer save in flight, a Keybinding query/detail/
+   *  recorder/mutation). A refusal never blocks a forced workspace teardown. */
+  blocksParentNavigation?(): boolean
+  /** C2-R5: whether the page holds a grant that has not been painted yet (a
+   *  resize or a sub-view transition). The root forwards only the real Esc
+   *  until that frame paints; pointer gestures are refused outright. */
+  grantAwaitingPaint?(): boolean
 }
 
 /** One pane the current frame actually paints: its level and absolute geometry.
@@ -641,8 +693,9 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'subagent-model-allowlist'
     || id === 'subagent-model-selection'
     || id === 'local-shell-sandbox'
-    || id === 'footer-settings-legacy'
-    || id === 'input-terminal-settings-legacy'
+    || id === 'footer-mode'
+    || id === 'footer-configurator'
+    || id === 'keyboard-shortcuts'
     || id === 'extension-settings-legacy'
 }
 
@@ -984,6 +1037,19 @@ export class SettingsWorkspacePanel implements Component {
    *  survives a category change, and it owns no settings authority. */
   private specialistPage: EmbeddedSpecialistPage | undefined
   private specialistRow: SettingsWorkspaceRowId | undefined
+  /** C2-R5: the typed deeplink page the FIRST real body grant consumes. The
+   *  factory is invoked only after the workspace screen lease exists, never in
+   *  this constructor. It is cleared before the factory call, so a synchronous
+   *  callback cannot mount the page twice. */
+  private pendingInitialSpecialist: {
+    readonly rowId: SettingsWorkspaceRowId
+    readonly specialist: SettingsWorkspaceSpecialistRoute
+  } | undefined
+  /** The ONE command-facing settlement of the typed deeplink: it resolves on
+   *  the frame that really mounts the page (or on a failure/teardown), so the
+   *  command can return a REAL error instead of a silent row fallback. */
+  private readonly initialSpecialistSettlement: Promise<SettingsInitialSpecialistSettlement>
+  private resolveInitialSpecialist: ((result: SettingsInitialSpecialistSettlement) => void) | undefined
   /** The panel cells the LAST specialist frame granted the picker, and the
    *  press identity a release must still match. */
   private paintedSpecialistBox: ContentBox | undefined
@@ -1026,8 +1092,14 @@ export class SettingsWorkspacePanel implements Component {
       readonly initialCategory?: SettingsWorkspaceCategoryId
       readonly initialModelsView?: ModelsInitialView
       readonly initialAccountView?: AccountInitialView
+      /** C2-R5: a typed deeplink page, valid ONLY together with the exact
+       *  `initialRowId` {@link SETTINGS_SPECIALIST_ROUTE_ROW} names. */
+      readonly initialSpecialist?: SettingsWorkspaceSpecialistRoute
     },
   ) {
+    let settleInitialSpecialist!: (result: SettingsInitialSpecialistSettlement) => void
+    this.initialSpecialistSettlement = new Promise(resolve => { settleInitialSpecialist = resolve })
+    this.resolveInitialSpecialist = settleInitialSpecialist
     this.source = source
     this.intents = intents
     this.snapshot = source.readSnapshot()
@@ -1074,6 +1146,17 @@ export class SettingsWorkspacePanel implements Component {
     if (options?.initialModelsView !== undefined || options?.initialAccountView !== undefined) {
       this.focus = 'content'
     }
+    // C2-R5: the typed deeplink is consumed by the FIRST real body grant in
+    // render(), never here — this constructor runs BEFORE the screen lease, and a
+    // page may start Host/controller IO only inside the leased frame.
+    if (options?.initialSpecialist !== undefined
+      && options.initialRowId === SETTINGS_SPECIALIST_ROUTE_ROW[options.initialSpecialist]) {
+      this.pendingInitialSpecialist = {
+        rowId: options.initialRowId,
+        specialist: options.initialSpecialist,
+      }
+    }
+    if (this.pendingInitialSpecialist === undefined) this.settleInitialSpecialist({ ok: true })
     // C3: subscribe THIS panel to the per-open About owner. The subscription
     // only schedules a repaint (the panel never reads during it); the
     // semantic `enter()` is the command layer's explicit post-mount hook.
@@ -1448,6 +1531,11 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedEnterConfirm = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
+    // C2-R5: the typed deeplink is consumed on THIS first real frame, BEFORE the
+    // direct/legacy projection is chosen. A stale/degraded snapshot that no
+    // longer carries the row (or selects a direct category) therefore fails and
+    // settles the command's promise instead of waiting forever.
+    this.consumeInitialSpecialist()
     if (direct) {
       // The content column is on screen: the SELECTED page must exist. A page
       // the rail selected without creating it is created now — once, and only
@@ -3249,18 +3337,35 @@ export class SettingsWorkspacePanel implements Component {
     if (row.specialistAvailable === false) return
     if (this.specialistPage !== undefined) return
     // A grant that cannot paint the page's real content never starts it: the
-    // allowlist picker needs a candidate row, the Web page needs one real row
-    // (its list or its detail) above the single Action Bar.
-    if (this.bodyFloor() < (row.specialist === 'subagent-allowlist' ? 2 : 1)) return
-    const page = row.specialist === 'subagent-allowlist'
-      ? this.intents.createSubagentAllowlistPicker?.(
-          () => { this.closeSpecialist() },
-          () => { this.refreshSpecialistSummary() },
-        )
-      : this.intents.createWebSettingsPage?.(
-          () => { this.closeSpecialist() },
-          (initial) => { this.navigateWebCredentialToModels(initial) },
-        )
+    // allowlist picker needs a candidate row and the Web page needs one real row
+    // (its list or its detail) above the single Action Bar. The two C2-R5 pages
+    // may be mounted with ZERO content rows (bar-only) because a command
+    // deeplink must still land on them and their own bar keeps Esc reachable.
+    const floor = row.specialist === 'subagent-allowlist' ? 2 : row.specialist === 'web-settings' ? 1 : 0
+    if (this.bodyFloor() < floor) return
+    let page: EmbeddedSpecialistPage | undefined
+    // The page's own `done` closes THIS instance only: a stale late callback of a
+    // retired page can never close a newer one (instance-identity fence).
+    const done = (): void => {
+      if (this.specialistPage === page) this.closeSpecialist()
+    }
+    const changed = (): void => { this.refreshSpecialistSummary() }
+    switch (row.specialist) {
+      case 'subagent-allowlist':
+        page = this.intents.createSubagentAllowlistPicker?.(done, changed)
+        break
+      case 'web-settings':
+        page = this.intents.createWebSettingsPage?.(done, (initial) => {
+          this.navigateWebCredentialToModels(initial)
+        })
+        break
+      case 'footer-configurator':
+        page = this.intents.createFooterConfiguratorPage?.(done, changed)
+        break
+      case 'keybindings':
+        page = this.intents.createKeybindingsPage?.(done, changed)
+        break
+    }
     if (page === undefined) return
     // The factory may run a synchronous callback that already changed the
     // workspace (a stale request): a page built for a superseded state must not
@@ -3275,6 +3380,55 @@ export class SettingsWorkspacePanel implements Component {
     this.contentPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
+  }
+
+  /**
+   * C2-R5: consume the ONE typed deeplink page on the first real frame that can
+   * paint it. The pending intent is cleared BEFORE the factory runs, so a
+   * synchronous callback can never mount it twice; a page whose row/frame is no
+   * longer the selected one is simply not mounted (the command layer already
+   * validated the pair before it took the lease).
+   */
+  private consumeInitialSpecialist(): void {
+    const pending = this.pendingInitialSpecialist
+    if (pending === undefined) return
+    this.pendingInitialSpecialist = undefined
+    this.settleInitialSpecialist(this.mountInitialSpecialist(pending))
+  }
+
+  /** The command-facing settlement: resolved on the first frame that consumes
+   *  the intent, or on a real failure/teardown. */
+  whenInitialSpecialistSettled(): Promise<SettingsInitialSpecialistSettlement> {
+    return this.initialSpecialistSettlement
+  }
+
+  private settleInitialSpecialist(result: SettingsInitialSpecialistSettlement): void {
+    const settle = this.resolveInitialSpecialist
+    if (settle === undefined) return
+    this.resolveInitialSpecialist = undefined
+    settle(result)
+  }
+
+  /** Create the pending typed page on the LEASED first frame. No page is built
+   *  before this call, and a refusal is reported to the command as a real error. */
+  private mountInitialSpecialist(pending: {
+    readonly rowId: SettingsWorkspaceRowId
+    readonly specialist: SettingsWorkspaceSpecialistRoute
+  }): SettingsInitialSpecialistSettlement {
+    if (this.disposed) return { ok: false, reason: 'the Settings workspace was disposed before the page opened' }
+    if (this.specialistPage !== undefined) return { ok: true }
+    if (this.rowId !== pending.rowId) {
+      return { ok: false, reason: `the ${pending.specialist} deeplink row is no longer selected` }
+    }
+    const row = this.snapshot.rows.find(candidate => candidate.id === pending.rowId)
+    if (row?.specialist !== pending.specialist) {
+      return { ok: false, reason: `the ${pending.specialist} row is not available in this snapshot` }
+    }
+    this.openSpecialist(row)
+    if (this.specialistPage === undefined) {
+      return { ok: false, reason: `the ${pending.specialist} page could not be created` }
+    }
+    return { ok: true }
   }
 
   /** Retire the embedded specialist page. A write it already dispatched keeps
@@ -3676,11 +3830,18 @@ export class SettingsWorkspacePanel implements Component {
     // outside the new viewport while its action/copy/navigation authorization is
     // still live. Only the back keys may pass until the resize frame paints.
     if (this.terminalGeometryStale() && !matchesKey(data, 'escape')) return
-    // C2-R3: the embedded specialist page owns the keyboard while it is
+    // C2-R3/C2-R5: the embedded specialist page owns the keyboard while it is
     // mounted. Its own Esc closes IT (never the workspace, never a category)
-    // through the factory's `done`; the root intercepts nothing else.
+    // through the factory's `done`; the root intercepts nothing else. While the
+    // page holds a grant that has not painted yet (a resize or a sub-view
+    // transition) only the real Esc is admitted — a key must never act on a
+    // body the user cannot see.
     if (this.specialistPage !== undefined) {
+      if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
       this.specialistPage.handleInput(data)
+      // The child's own model changed THIS frame's business content; the root
+      // owns the physical paint, so it schedules the frame the next key reads.
+      this.intents.requestRender()
       return
     }
     // The CONTENT focus belongs to the direct page: the root never forwards a
@@ -3986,6 +4147,11 @@ export class SettingsWorkspacePanel implements Component {
     // A category id that is not a member of the CURRENT directory can never be
     // selected — a painted id of a spent frame or a stale deep link included.
     if (!this.isSelectableCategory(category)) return
+    // C2-R5: a professional editor owns its own exit gradient. While it blocks
+    // USER navigation (dirty Footer draft, in-flight save, Keybinding query/
+    // detail/recorder/mutation) the rail — keyboard OR pointer — may not leave
+    // the page behind its business confirmation. A forced teardown bypasses this.
+    if (this.specialistPage?.blocksParentNavigation?.() === true) return
     const changed = category !== this.categoryId
     // A Host mutation owns the page: user navigation may not abandon it. The
     // gate covers the MOUSE switch too: the keyboard may never leave a page
@@ -4445,13 +4611,19 @@ export class SettingsWorkspacePanel implements Component {
     if (this.specialistPage !== undefined) {
       const box = this.paintedSpecialistBox
       if (box === undefined || !contentBoxContains(box, event.x, event.y)) return undefined
-      return this.specialistPage.handleMouse?.({
+      // A wheel may only scroll a body whose current grant really painted.
+      if (this.specialistPage.grantAwaitingPaint?.() === true) {
+        return event.type === 'wheel' ? { handled: true } : undefined
+      }
+      const result = this.specialistPage.handleMouse?.({
         ...event,
         x: event.x - box.x,
         y: event.y - box.top,
         screenX: event.screenX - box.x,
         screenY: event.screenY - box.top,
       })
+      this.intents.requestRender()
+      return result
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
@@ -4570,6 +4742,8 @@ export class SettingsWorkspacePanel implements Component {
       const box = this.paintedSpecialistBox
       this.specialistPressed = undefined
       if (box === undefined || !contentBoxContains(box, x, y)) return
+      // A press may only arm against a body whose CURRENT grant painted.
+      if (this.specialistPage.grantAwaitingPaint?.() === true) return
       this.specialistPressed = {
         x,
         y,
@@ -4591,6 +4765,7 @@ export class SettingsWorkspacePanel implements Component {
         alt: false,
         ctrl: false,
       })
+      this.intents.requestRender()
       return
     }
     if (this.categoryId === 'plugins') {
@@ -4711,6 +4886,7 @@ export class SettingsWorkspacePanel implements Component {
         || pressed.revision !== this.revision
         || !sameContentBox(pressed.box, box)
         || !contentBoxContains(box, x, y)) return
+      if (this.specialistPage.grantAwaitingPaint?.() === true) return
       this.specialistPage.handleMouse?.({
         type: 'click',
         button: 'left',
@@ -4724,6 +4900,7 @@ export class SettingsWorkspacePanel implements Component {
         alt: false,
         ctrl: false,
       })
+      this.intents.requestRender()
       return
     }
     if (this.categoryId === 'plugins') {
@@ -5023,6 +5200,7 @@ export class SettingsWorkspacePanel implements Component {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.settleInitialSpecialist({ ok: false, reason: 'the Settings workspace closed before the page opened' })
     // The C3 About subscription dies with the panel: a publication that
     // arrives after the teardown can never repaint a newer surface.
     this.aboutUnsubscribe?.()

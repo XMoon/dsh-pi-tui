@@ -32,6 +32,7 @@ import {
 } from '../../src/domain/terminal-progress/settings.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -183,7 +184,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: legacyEditorExtensions() as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)

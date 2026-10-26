@@ -338,9 +338,23 @@ test('production startup resolves both settings before compose and settings swit
   const commands = harness.commands as { handler(name: string): (input: { rawInput: string }) => unknown }
   await commands.handler('settings')({ rawInput: '' })
   await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  vt.sendInput('Response style')
-  vt.sendInput('\r') // explanatory -> default
+  // The SAME Settings workspace row (Conversation → Response style), not the
+  // retired legacy editor: explanatory -> default through the explicit choice.
+  await selectSettingsCategory(vt, 'Conversation')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  for (let step = 0; step < 4; step += 1) {
+    vt.sendInput('\x1b[B') // Transcript display -> ... -> Response style
+    await vt.waitForRender()
+  }
+  assert.match(vt.getViewport().join('\n'), /> Response style/u, 'the Response style row owns the cursor')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A') // explanatory -> concise
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A') // concise -> default
+  await vt.waitForRender()
+  vt.sendInput('\r') // explicit Confirm
   await settle()
   assert.equal(registry.text('tui:response-style'), '')
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/)
@@ -348,7 +362,11 @@ test('production startup resolves both settings before compose and settings swit
   assert.equal(doc.progressUpdates, 'off')
   assert.equal(doc.displayPreset, undefined, 'displayPreset is never pinned by an unrelated write')
   assert.deepEqual(doc.customExtension, { keep: true })
-  vt.sendInput('\x1b')
+  // Leave the Settings lease before the unrelated /display commands.
+  for (let step = 0; step < 3; step += 1) {
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+  }
   // Plan §12 behavior: switch to Focus without recompose, then back.
   await commands.handler('display')({ rawInput: 'focus' })
   await settle()
