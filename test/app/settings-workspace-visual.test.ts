@@ -1773,12 +1773,16 @@ test('R3-04 the allowlist row mounts the EXISTING picker in the same workspace a
   assert.match(reopened, /Subagent allowed models/u, `the picker is mounted again:\n${reopened}`)
   // The reopened picker's working copy comes from the OFFICIAL section, so the
   // committed route is still granted there and NO second write is dispatched by
-  // merely looking. (The per-row `allowed` badge is a right-aligned decoration
-  // this pane can drop; the section fact is what must never regress.)
+  // merely looking.
   assert.deepEqual(h.subagentSection()?.allowedModels, [{ provider: 'p1', model: 'm1' }],
     `the committed route is still in the official section:\n${JSON.stringify(h.subagentSection())}`)
   assert.equal(h.subagentWrites().length, 1,
     'reopening the picker reads the section and dispatches NO second write')
+  // The VISIBLE marker: the reopened picker paints the committed route as
+  // allowed. A picker that ignored the section would paint an unmarked list.
+  const grantedLine = reopened.split('\n').find(line => /Model One|m1/u.test(line) && /allowed/u.test(line))
+  assert.ok(grantedLine !== undefined,
+    `the reopened picker marks the committed route as allowed:\n${reopened}`)
   await key(h, '\x1b')
   assert.match(h.view(), /1 route/u, `the outer row still summarises the committed grant:\n${h.view()}`)
   h.dispose()

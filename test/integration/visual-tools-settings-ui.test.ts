@@ -160,7 +160,20 @@ interface UiHarness {
 /** Mount the REAL `/settings` command over the production Direct config port.
  *  The inert stubs mirror the established Settings visual harness; this path
  *  never reads them for the Tools row. */
-function mountSettingsUi(port: DirectConfigPort): UiHarness {
+/** Optional live-session composition seams. A test that exercises a
+ *  SESSION-SCOPED Agent row must present the captured scope as current (the
+ *  production gate for that row), which a sessionless mount deliberately does
+ *  not. */
+interface LiveSessionSeams {
+  readonly sessionId: string
+  readonly approvalOverride: () => 'ask' | 'never' | undefined
+  /** sessionId -> the live Agent the production interaction port resolves to. */
+  readonly agentFor: (sessionId: string) => unknown
+  /** The official approval service this composition really writes through. */
+  readonly officialApproval: { setPolicy(agent: unknown, policy: 'ask' | 'never'): void }
+}
+
+function mountSettingsUi(port: DirectConfigPort, live?: LiveSessionSeams): UiHarness {
   const vt = new VirtualTerminal(120, 40)
   const owned: OwnedRunner = (_label, task, options) => {
     const run = (): void => {
@@ -207,9 +220,22 @@ function mountSettingsUi(port: DirectConfigPort): UiHarness {
     recordExtensionError: () => {},
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
-    currentSessionId: undefined,
-    captureLiveSessionScope: () => undefined,
-    isSessionScopeCurrent: () => false,
+    currentSessionId: live?.sessionId,
+    captureLiveSessionScope: () => live === undefined ? undefined : { sessionId: live.sessionId },
+    isSessionScopeCurrent: (scope: { sessionId?: string } | undefined) =>
+      live !== undefined && scope?.sessionId === live.sessionId,
+    currentApprovalOverride: () => live?.approvalOverride(),
+    // The production write seam: the CAPTURED scope resolves to its live Agent
+    // and the official approval service applies the policy. This mirrors
+    // DirectInteractionPort.setApprovalPolicy (identity-based, fails closed for an
+    // unknown/superseded scope).
+    setSessionApprovalPolicy: (scope: { sessionId?: string } | undefined, value: 'ask' | 'never') => {
+      if (live === undefined || scope?.sessionId !== live.sessionId) return 'superseded' as const
+      const target = live.agentFor(scope.sessionId)
+      if (target === undefined) return 'superseded' as const
+      live.officialApproval.setPolicy(target, value)
+      return 'applied' as const
+    },
     currentSessionStats: async () => undefined,
     sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
     forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
@@ -335,8 +361,12 @@ test('a real Settings Confirm of the permission default is what the NEXT Session
 class ApprovalProbeAdapter extends LlmAdapter {
   outcome: string | undefined
   private turns = 0
-  /** The Session whose approval seat the tool consults. */
-  session: unknown
+  private readonly toolName: string
+
+  constructor(toolName = 'r3_approval_probe') {
+    super()
+    this.toolName = toolName
+  }
 
   override providerInfo(provider: string): { id: string; name: string } {
     return { id: provider, name: provider }
@@ -358,13 +388,13 @@ class ApprovalProbeAdapter extends LlmAdapter {
         type: 'tool-call-delta',
         index: 0,
         id: 'r3-approval-call' as never,
-        name: 'r3_approval_probe',
+        name: this.toolName,
         argumentsDelta: '{}',
       }
       yield {
         type: 'block-end',
         index: 0,
-        block: { type: 'tool-call', id: 'r3-approval-call' as never, name: 'r3_approval_probe', arguments: '{}' },
+        block: { type: 'tool-call', id: 'r3-approval-call' as never, name: this.toolName, arguments: '{}' },
       }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
@@ -376,11 +406,12 @@ class ApprovalProbeAdapter extends LlmAdapter {
   }
 }
 
-test('a real Default permission Confirm is what the NEXT Session\'s approval request resolves under', async t => {
-  // R3-02's missing leg: the settings write must not only change a stored value —
-  // the NEXT Session's REAL approval request must consume it and produce the
-  // outcome the policy dictates (`never` => rejected, with the durable
-  // approval/asked + approval/decided pair).
+test('a real Approval policy Confirm is what THAT Session\'s next approval request resolves under', async t => {
+  // R3-02's authority is the PER-SESSION approval override captured with the live
+  // Agent (NOT the Host `permission.defaultPreset`, which only seeds new Sessions).
+  // So this drives the previous chain in the other direction: the approval row
+  // writes `never` onto the CURRENT Session through the interaction port, and the
+  // NEXT approval request of that SAME Session must consume it.
   const life = testLifecycle(t)
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
@@ -388,12 +419,8 @@ test('a real Default permission Confirm is what the NEXT Session\'s approval req
   await mountAgentLoopTestHarness(ctx)
   await ctx.plugin(Loader)
   await mountPermissionPrerequisites(ctx)
-  await mountPermissionDefaultPlane(ctx, life.tempDir('permission-consume-plane-'))
+  await mountPermissionDefaultPlane(ctx, life.tempDir('approval-policy-plane-'))
   const port = new DirectConfigPort(ctx, undefined, () => undefined)
-  const presets = ctx.get('permissionPresets') as unknown as {
-    readonly names: readonly string[]
-    readonly defaultPreset: string
-  }
 
   // A tool whose body IS the requested action, so "rejected" is observable as
   // "the body never ran": it asks the official seat first and only then acts.
@@ -418,54 +445,107 @@ test('a real Default permission Confirm is what the NEXT Session\'s approval req
     },
   } as never)
 
-  const ui = mountSettingsUi(port)
+  // The LIVE Session, composed BEFORE the policy is changed — the override must
+  // apply to THIS Session, exactly as the per-session row promises.
+  ctx.llm.registerAdapter(['approval-probe'], probeAdapter)
+  const handle = await ctx.agents.create({
+    sessionId: SessionId('r3-approval-consumer') as never,
+    agentOptions: { provider: 'approval-probe', model: 'm' },
+  })
+  const agent = handle.agent as unknown as { session: unknown }
+  const session = agent.session
+  const approval = ctx.get('approval') as unknown as { overrideOf(session: unknown): 'ask' | 'never' | undefined }
+  // The standing composition seeds its own override; what matters is that the UI
+  // CHANGE lands on this exact Session and is what the request consumes.
+  const beforeOverride = approval.overrideOf(session)
+  assert.notEqual(beforeOverride, 'never', `the Session does not start at never (got ${String(beforeOverride)})`)
+
+  // The REAL UI: /settings -> Agent -> Approval policy (this session) -> never.
+  // A live Session makes this row the FIRST Agent row.
+  const ui = mountSettingsUi(port, {
+    sessionId: 'r3-approval-consumer',
+    approvalOverride: () => approval.overrideOf(session),
+    agentFor: (sessionId: string) => sessionId === 'r3-approval-consumer' ? handle.agent : undefined,
+    officialApproval: approval as unknown as { setPolicy(agent: unknown, policy: 'ask' | 'never'): void },
+  })
   t.after(() => ui.dispose())
   ui.invoke('settings')
   await ui.vt.waitForRender()
   await selectSettingsCategory(ui.vt, 'Agent')
   ui.vt.sendInput('\r')
   await ui.vt.waitForRender()
-  assert.match(ui.vt.getViewport().join('\n'), /> Default permission/u)
+  assert.match(ui.vt.getViewport().join('\n'), /> Approval policy \(this session\)/u,
+    `the session-scoped approval row is the one being edited:\n${ui.vt.getViewport().join('\n')}`)
   ui.vt.sendInput('\r')
   await ui.vt.waitForRender()
-  ui.vt.sendInput('\x1b[B') // workspace-write -> danger-full-access (the never preset)
+  assert.match(ui.vt.getViewport().join('\n'), /Choose value/u, 'the inline choice is open')
+  // ask -> never (the candidate list starts on the current `ask`).
+  ui.vt.sendInput('\x1b[B')
   await ui.vt.waitForRender()
   ui.vt.sendInput('\r')
   await waitForFrame(
     () => ui.vt.getViewport().join('\n'),
     frame => /Status\s+Verified/u.test(frame),
     () => ui.vt.waitForRender(),
-    'the Default permission Confirm must settle as Verified',
+    'the per-session Approval policy Confirm must settle as Verified',
   )
-  assert.equal(presets.defaultPreset, 'danger-full-access', 'the UI really changed the Host permission default')
+  assert.equal(approval.overrideOf(session), 'never',
+    'the UI wrote the per-session override onto the CAPTURED Session')
 
-  // SOURCE -> SINK: a Session composed AFTER the Confirm asks the official
-  // approval seat, and the sampled `never` policy decides it.
+  // SOURCE -> SINK: that SAME Session's next real turn asks the official seat.
   const asked: string[] = []
   ctx.on('approval/request' as never, (() => { asked.push('asked') }) as never)
-
-  ctx.llm.registerAdapter(['approval-probe'], probeAdapter)
-  const handle = await ctx.agents.create({
-    sessionId: SessionId('r3-approval-consumer') as never,
-    agentOptions: { provider: 'approval-probe', model: 'm' },
-  })
-  const agent = handle.agent as unknown as {
+  const liveAgent = handle.agent as unknown as {
     followup(message: unknown): void
     whenIdle(): Promise<void>
-    session: unknown
   }
-  agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-  await agent.whenIdle()
+  liveAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+  await liveAgent.whenIdle()
 
   assert.equal(requestOutcome, 'rejected',
-    'the next Session\'s REAL approval request resolved under the never policy sampled from the UI Confirm')
+    'the SAME Session\'s next approval request consumed the per-session override')
   assert.equal(bodyRuns, 0, 'a rejected approval never runs the requested body')
-  assert.equal(asked.length, 0, 'the never policy answers without consulting any interactive answerer')
-  const events = (agent.session as unknown as {
+  assert.equal(asked.length, 0,
+    'under `never` no answerer-facing approval/request event is dispatched')
+  const events = (session as unknown as {
     snapshotEvents(): readonly { readonly type: string }[]
   }).snapshotEvents()
   assert.ok(events.some(event => event.type === 'approval/asked'), 'the durable asked audit exists')
   assert.ok(events.some(event => event.type === 'approval/decided'), 'the durable decided audit exists')
+
+  // NEGATIVE CONTROL: a DIFFERENT Session keeps its own policy — the override is
+  // per-session, so the same probe there must still consult the answerer seat.
+  const bystanderAdapter = new ApprovalProbeAdapter('r3_approval_probe_other')
+  ctx.llm.registerAdapter(['approval-bystander'], bystanderAdapter)
+  const other = await ctx.agents.create({
+    sessionId: SessionId('r3-approval-bystander') as never,
+    agentOptions: { provider: 'approval-bystander', model: 'm' },
+  })
+  const otherSession = (other.agent as unknown as { session: unknown }).session
+  assert.notEqual(approval.overrideOf(otherSession), 'never',
+    'the other Session was never given the override')
+  let otherOutcome: string | undefined
+  ctx.tools.register({
+    name: 'r3_approval_probe_other',
+    description: 'asks the official approval seat before acting',
+    parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args: unknown, value: string) => [{ type: 'text', text: value }] },
+    isConcurrencySafe: () => false,
+    execute: async (_args: unknown, toolCtx: { agent?: unknown }) => {
+      const seat = ctx.get('approval') as unknown as { request(request: unknown): Promise<string> }
+      otherOutcome = await seat.request({ agent: toolCtx.agent, toolName: 'r3_approval_probe_other', reason: 'bystander' })
+      return 'asked'
+    },
+  } as never)
+  ;(other.agent as unknown as { followup(message: unknown): void }).followup(
+    createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }),
+  )
+  await (other.agent as unknown as { whenIdle(): Promise<void> }).whenIdle()
+  // The bystander's ask must NOT resolve the way the overridden Session's did:
+  // it reaches the answerer waterfall instead of being refused by `never`.
+  assert.notEqual(otherOutcome, 'rejected',
+    `the per-session override did not leak to another Session (got ${String(otherOutcome)})`)
+  assert.ok(otherOutcome !== undefined, 'the bystander really performed an approval ask')
 })
 
 test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samples', async t => {

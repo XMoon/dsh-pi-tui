@@ -397,14 +397,29 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     toggle and the route list to read back.
   - Both subagent surfaces write through ONE command-owner section queue (the
     workspace toggle, the embedded picker and the still-supported legacy editor
-    rows), and each user action is an intent over ONE half of the section: the
-    picker replaces the allowed-route list, the toggle sets `enabled`, and the
-    half the action does not own is re-read from the official section INSIDE the
-    queue, immediately before the write. A slow earlier write therefore can
+    rows). Every user action is an intent, and the queue applies it to the
+    official section as it stands when that intent's turn comes:
+    - the toggle owns ONLY `enabled`;
+    - a picker toggle owns exactly ONE `(provider, model)` pair, applied as an
+      add or a remove — never a replacement of the whole list, so two surfaces
+      (or two picker instances, one still writing) compose instead of erasing
+      each other's routes. Adding an existing pair is a no-op and removing an
+      absent one changes nothing.
+
+    The half an action does not own is re-read from the official section INSIDE
+    the queue, immediately before the write. A slow earlier write therefore can
     never land after a newer intent, and a payload captured before an earlier
-    write settled can never erase it. The queue is a serialization + rebase
-    barrier, not a second settings authority: the official section stays the
-    only stored value.
+    write settled can never erase it. Two intents that cannot be satisfied may
+    not resolve as success: an intent whose turn finds the backend non-current,
+    the section unavailable, the section unreadable, or the write refused
+    reports a typed refusal and performs ZERO writes (the last-route-while-
+    enabled rule is decided from the FRESH section, in FIFO order, never from a
+    picker's earlier view). The queue is a serialization + rebase barrier, not a
+    second settings authority: the official section stays the only stored value,
+    and a surface may only report facts it actually read back — an optimistic
+    marker is never summarised as saved, and a write that settles after its
+    surface closed still corrects that surface's displayed summary or leaves no
+    summary at all.
   - Every `Agent` row that owns a Host write refuses to offer a confirmable
     candidate while its authority cannot vouch for the value: a non-`ready`
     backend (or an unreadable document) keeps the row and its truthful
