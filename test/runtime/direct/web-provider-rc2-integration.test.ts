@@ -669,6 +669,7 @@ test('the Web credential deeplink completes a real store set and clear and the p
   await agent.whenIdle()
   const web = app.host.ctx.get('web') as {
     search(request: { query: string }): Promise<{ sources: readonly { url: string }[] }>
+    fetch(request: { url: string }): Promise<{ readonly url: string; readonly statusCode: number }>
   }
   const agents = app.host.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
   await agents.withInitiator(agent, () => web.search({ query: 'credentialed query' }))
@@ -694,12 +695,33 @@ test('the Web credential deeplink completes a real store set and clear and the p
   await openWebCredentialRowInApp(app)
   assert.match(app.view(), /State: Not configured/u, `the Web page reads the fresh absence:\n${app.view()}`)
 
-  const requestsBefore = transport.requests.length
+  // 5) R4-03 negative: select the DeepSeek Fetch API through the SAME page, then
+  //    clear the credential above. The next REAL fetch fails closed instead of
+  //    silently falling back to the anonymous HTTP provider.
+  const requestsBeforeFetch = transport.requests.length
+  app.vt.sendInput(KEY.esc) // credential Detail -> page list
+  await app.settle()
+  for (const key of [KEY.home, KEY.down, KEY.enter, KEY.down, KEY.enter]) {
+    app.vt.sendInput(key)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Verified'),
+    'the verified DeepSeek Fetch API write')
+  await closeSettingsInApp(app)
+  await assert.rejects(web.fetch({ url: 'https://example.test/no-key-fetch' }), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
+    assert.match((error as { message?: string }).message ?? '', /DEEPSEEK_API_KEY/u)
+    return true
+  })
+  assert.equal(transport.requests.length, requestsBeforeFetch,
+    'no silent HTTP fallback and no dispatched fetch request')
+
+  const requestsBeforeSearch = transport.requests.length
   await assert.rejects(agents.withInitiator(agent, () => web.search({ query: 'no credential' })), (error: unknown) => {
     assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
     return true
   })
-  assert.equal(transport.requests.length, requestsBefore, 'no silent fallback and no dispatched request')
+  assert.equal(transport.requests.length, requestsBeforeSearch, 'no silent fallback and no dispatched request')
 })
 
 test('the missing-credential error reaches the TUI and the selected provider is never bypassed', { skip: skippedInstallationReason([]) }, async t => {
