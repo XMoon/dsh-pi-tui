@@ -509,3 +509,38 @@ test('the list, the side pane and the Details title paint the same fitted label'
   const title = h.rows()[0]!.replace(/ · Details$/, '')
   assert.equal(title, listLabel, 'the Details title must reuse the list label')
 })
+
+test('a declared path carrying LF stays one physical row per painted line', () => {
+  const path = '/ws/archive/line\nbreak.md'
+  const h = harness(snapshotOf([{ turn: 1, files: [path] }]))
+  h.setSize(44, 20)
+  h.type('enter')
+  const rows = h.rows()
+  for (const row of rows) {
+    assert.ok(!row.includes('\n'), `a returned row must never embed LF: ${JSON.stringify(row)}`)
+  }
+  const hostStart = rows.findIndex(row => row.startsWith('Host: '))
+  assert.ok(hostStart >= 0, rows.join('\n'))
+  const chunks: string[] = []
+  for (let index = hostStart; index < rows.length; index += 1) {
+    const row = rows[index]!
+    if (index === hostStart) {
+      chunks.push(row.slice('Host: '.length).trimEnd())
+      continue
+    }
+    if (!row.startsWith('      ')) break
+    chunks.push(row.slice(6).trimEnd())
+  }
+  // The LF is a row boundary: joining with LF reproduces the projected path.
+  assert.equal(chunks.join('\n'), path, `the complete path stays readable across rows:\n${rows.join('\n')}`)
+})
+
+test('a declared path carrying LF stays one physical row in the wide side pane', () => {
+  const path = '/ws/archive/line\nbreak.md'
+  const h = harness(snapshotOf([{ turn: 1, files: [path, '/ws/archive/other.md'] }]))
+  h.setSize(140, 40)
+  const rows = h.rows()
+  for (const row of rows) {
+    assert.ok(!row.includes('\n'), `a returned row must never embed LF: ${JSON.stringify(row)}`)
+  }
+})

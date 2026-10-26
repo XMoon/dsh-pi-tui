@@ -120,19 +120,24 @@ function wrapPlainText(text: string, width: number): string[] {
 function wrapPathText(text: string, width: number): string[] {
   const limit = Math.max(1, Math.floor(width))
   const lines: string[] = []
-  let current = ''
-  let currentWidth = 0
-  for (const char of Array.from(text)) {
-    const charWidth = visibleWidth(char)
-    if (currentWidth > 0 && currentWidth + charWidth > limit) {
-      lines.push(current)
-      current = ''
-      currentWidth = 0
+  // A declared path is a raw string: the safe projection KEEPS a line feed, and
+  // a returned `string[]` element is ONE physical row. Every LF is therefore a
+  // row boundary of its own — never a byte inside an element.
+  for (const segment of text.split('\n')) {
+    let current = ''
+    let currentWidth = 0
+    for (const char of Array.from(segment)) {
+      const charWidth = visibleWidth(char)
+      if (currentWidth > 0 && currentWidth + charWidth > limit) {
+        lines.push(current)
+        current = ''
+        currentWidth = 0
+      }
+      current += char
+      currentWidth += charWidth
     }
-    current += char
-    currentWidth += charWidth
+    lines.push(current)
   }
-  lines.push(current)
   return lines
 }
 
