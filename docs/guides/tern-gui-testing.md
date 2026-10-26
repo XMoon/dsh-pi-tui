@@ -299,12 +299,20 @@ These are the ones that make the lane worth its extra setup.
     `<run>/client-shots`. Silently returning an id would let a flow pass on
     evidence that does not exist, and falling back to a shared directory would
     make the picture's origin unknowable (a same-named stale file can sit there).
-21. **`exit` HOOKS DO NOT RUN ON A DEFAULT SIGNAL EXIT.** A process killed with
-    `SIGTERM` never runs its `process.on('exit')` hooks, so the private daemon,
-    the window and the socket directory outlive a cancelled run. The driver
-    installs ONE idempotent `SIGINT`/`SIGTERM` teardown and then removes the
-    handlers before re-raising the signal — with a handler still installed,
-    `process.kill(self, signal)` simply re-enters it and the process lives on.
+21. **`exit` HOOKS DO NOT RUN ON A DEFAULT SIGNAL EXIT, AND `kill()` IS NOT THE
+    TEARDOWN.** A process killed with `SIGTERM` never runs its
+    `process.on('exit')` hooks, and `child.kill()` only REQUESTS a signal: it
+    says nothing about whether the private daemon, the window or the socket
+    directory are gone. The driver installs ONE idempotent `SIGINT`/`SIGTERM`
+    teardown that sends the stop request and WAITS for BOTH direct children to
+    reach their ChildProcess `close`, then drops this run's socket directory,
+    and only then re-raises the signal — removing this driver's OWN handlers by
+    identity, because with a handler still installed `process.kill(self,
+    signal)` simply re-enters it and the process lives on. A child that has not
+    reached `close` within the bounded deadline is REPORTED and this run's
+    socket directory is KEPT: an exit hook must never delete a directory a
+    surviving child may still be using. The exit hooks are the last-resort
+    fallback for an exit path the driver does not own.
 
 ## Scripts
 

@@ -20,19 +20,25 @@
  *   5. the driver's `snapshot()` uses the SHARED index (chains keyed by the
  *      node OBJECT) and its `click` goes through the visibility oracle: a node
  *      whose own centre falls outside the fragment the client shows must NOT be
- *      clicked at its centre.
+ *      clicked at its centre;
+ *   6. the driver's TEARDOWN is ordered: a signal, a normal finish, a throwing
+ *      flow and a startup failure all wait for the daemon and the window to
+ *      reach ChildProcess `close` before the driver exits and before the private
+ *      socket directory is removed.
  *
  * The client itself is NOT required: the driver is exercised against a fake
  * Tern CLI, so the test is deterministic and needs no display.
  */
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { dirname, join as joinPath } from 'node:path'
+import { dirname, join, join as joinPath } from 'node:path'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import {
+  killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting, waitForPidRecords,
+} from '../support/pid-records.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = joinPath(here, '../..')
@@ -49,19 +55,40 @@ function writeFakeTern(dir) {
   const log = joinPath(dir, 'calls.log')
   const script = `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { spawn } from 'node:child_process'
 const args = process.argv.slice(2)
 appendFileSync(${JSON.stringify(log)}, args.join(' ') + '\\n')
 const reply = (value) => { process.stdout.write(JSON.stringify(value)); process.exit(0) }
+// A long-lived helper RECORDS its identity so teardown can be checked against
+// the process this run really started: a bare PID would confuse a zombie or a
+// reused PID with a survivor.
+const startTime = () => {
+  try {
+    const stat = readFileSync('/proc/self/stat', 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? '-'
+  } catch { return '-' }
+}
+const recordPid = (kind) => appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'pids.log'), kind + ' ' + process.pid + ' ' + startTime() + '\\n')
 if (args[0] === '--version') { process.stdout.write('tern 0.0.0-fake\\n'); process.exit(0) }
 // The private daemon: record its socket so a test can prove that two runs do
 // NOT share one, then stay alive like the real daemon does.
 if (args[0] === 'daemon') {
   const at = args.indexOf('--socket')
   if (at >= 0) appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'daemon-sockets.log'), args[at + 1] + '\\n')
-  // Record this process so a test can prove teardown reached it.
-  appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'pids.log'), 'daemon ' + process.pid + '\\n')
+  // FAKE_STDIO_HOLD=1 makes a GRANDCHILD inherit this daemon's stdout/stderr
+  // and keep them open until the test releases it. The driver's ChildProcess
+  // close event cannot arrive while that pipe is open, which is what proves the
+  // teardown waits for the child instead of only sending its signal. The
+  // grandchild's PID is recorded BEFORE the daemon's own record, so a test that
+  // sees the record can already reach the holder.
+  if (process.env.FAKE_STDIO_HOLD === '1') {
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30); process.on("SIGUSR1", () => process.exit(0))'], { stdio: 'inherit' })
+    writeFileSync(${JSON.stringify(join(log, '..'))} + '/holder.pid', String(holder.pid))
+  }
+  recordPid('daemon')
+  // FAKE_DAEMON_EXITS=1 models a daemon that died before the flow finished.
+  if (process.env.FAKE_DAEMON_EXITS === '1') process.exit(0)
   setInterval(() => {}, 1 << 30)
-  process.exit(0)
 }
 // The WINDOW invocation ("tern --control EP") must STAY ALIVE: the driver
 // spawns it and talks to the control socket it creates. It also RECORDS the
@@ -70,14 +97,19 @@ if (args[0] === 'daemon') {
 // would keep passing after the driver stopped passing --out at all.
 if (args[0] === '--control') {
   const socket = args[args.indexOf('--control') + 1]
-  appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'pids.log'), 'window ' + process.pid + '\\n')
+  recordPid('window')
+  // FAKE_WINDOW_EXITS=1 models a client that died before it opened its control
+  // socket, which is the driver's startup-failure path.
+  if (process.env.FAKE_WINDOW_EXITS === '1') process.exit(0)
   const outFlag = args.indexOf('--out')
   if (outFlag >= 0) writeFileSync(${JSON.stringify(join(log, '..'))} + '/window-out.txt', args[outFlag + 1])
   writeFileSync(socket, '')
   setInterval(() => {}, 1 << 30)
-  process.exit(0)
 }
 if (args[0] !== 'ctl') process.exit(0)
+// FAKE_CTL_FAIL=1 makes every control command unacknowledged: the driver can
+// never reach "ready" and must fail rather than wait forever.
+if (process.env.FAKE_CTL_FAIL === '1') process.exit(1)
 const rest = args.slice(2)
 // The driver's argv is "ctl --control <EP> <command> [args]": after dropping
 // "ctl" and "--control", the socket is rest[0], the command is rest[1].
@@ -152,41 +184,8 @@ exec ${process.execPath} "$(dirname "$0")/fake-tern.mjs" "$@"
 }
 
 /**
- * Wait for the fake's PID log to record `count` helper processes.
- *
- * The FILE EVENT is the signal; `deadlineMs` only bounds a fake that never
- * writes, so a broken helper fails with a real message instead of hanging.
+ * Run the driver against the fake CLI with a flow that does nothing.
  */
-function waitForPids(pidsFile, count, deadlineMs) {
-  return new Promise((resolve, reject) => {
-    const read = () => existsSync(pidsFile)
-      ? readFileSync(pidsFile, 'utf8').trim().split('\n').filter(Boolean)
-      : []
-    const initial = read()
-    if (initial.length >= count) { resolve(initial); return }
-    // `watcher` is assigned below; the deadline callback must not touch it before
-    // the assignment completes, so it reads a mutable holder instead.
-    let watcher
-    const timer = setTimeout(() => {
-      watcher?.close()
-      reject(new Error(`the fake wrote ${read().length} pid line(s) within ${deadlineMs}ms`))
-    }, deadlineMs)
-    // reason: a bounded deadline around an fs event, not a settle window.
-    // The file appears when the fake starts, so watch the DIRECTORY: watching a
-    // path that does not exist yet throws ENOENT.
-    watcher = watch(dirname(pidsFile), { persistent: false }, (_event, name) => {
-      if (name !== undefined && String(name) !== pidsFile.split('/').pop()) return
-      const lines = read()
-      if (lines.length >= count) {
-        clearTimeout(timer)
-        watcher?.close()
-        resolve(lines)
-      }
-    })
-  })
-}
-
-/** Run the driver against the fake CLI with a flow that does nothing. */
 function runDriver(fake, extraEnv = {}, dir) {
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, 'export default async function (h) { h.check("the flow ran", true) }\n')
@@ -436,59 +435,207 @@ test('a capture whose PNG the client never wrote FAILS instead of passing silent
   assert.equal(existsSync(joinPath(out, 'shots', '01-ghost-shot.png')), false)
 })
 
-test('a SIGTERM to the driver still tears down its daemon, window and socket directory', async (t) => {
+/** A flow that finishes immediately; the run's exit code then means what it says. */
+const CHECKED_FLOW = 'export default async function (h) { h.check("the flow ran", true) }\n'
+/** A flow that throws: a red run, not a missing one. */
+const THROWING_FLOW = 'export default async function () { throw new Error("the flow failed") }\n'
+
+/**
+ * Start the driver, wait until BOTH helpers recorded their identity, then
+ * deliver `signal` and assert the run's final state.
+ *
+ * The PID records are the launch signal and the driver's own `exit` event is
+ * the interruption signal; neither is a clock.
+ */
+async function assertSignalTearDown(t, prefix, signal) {
   const life = testLifecycle(t)
-  const dir = life.tempDir('tern-gui-sigterm-')
+  const dir = life.tempDir(prefix)
   const fake = writeFakeTern(dir)
   const flow = joinPath(dir, 'flow.mjs')
-  // The flow parks so the driver stays alive long enough to be signalled. This
-  // is a NEGATIVE observation with no authoritative signal to wait for: the test
-  // must interrupt a LIVE driver, so it parks on its own promise and the driver
-  // is killed by the test, not by the flow finishing.
-  // reason: the window this test needs is the driver's own lifetime, bounded by
-  // the deadline below.
-  writeFileSync(flow, `export default async function (h) {
-  await new Promise(() => {})
-}
-`)
+  // The flow parks so the driver stays alive long enough to be signalled: the
+  // test must interrupt a LIVE driver, so the flow never finishes on its own.
+  writeFileSync(flow, 'export default async function () { await new Promise(() => {}) }\n')
   const out = joinPath(dir, 'out')
+  const pidsFile = joinPath(dir, 'pids.log')
   const child = spawn(process.execPath, [driver, flow, '--out', out], {
     encoding: 'utf8',
     env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0' },
     stdio: 'ignore',
   })
+  // The test's OWN cleanup runs in `t.after`, i.e. only AFTER the assertions:
+  // it must never stop the helpers first and then claim the driver did.
   life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+  life.defer(() => { killStillExecuting(readPidRecords(pidsFile)) })
 
-  // The authoritative signal: the fake writes its PID line as it starts, so the
-  // test can wait for that FILE EVENT instead of polling a clock. A deadline
-  // still bounds the wait, because a missing file is a real failure to report.
-  const pidsFile = joinPath(dir, 'pids.log')
-  // deadline reason: the helpers write synchronously on spawn; this only bounds
-  // a broken fake, it is not a settle window.
-  const spawned = await waitForPids(pidsFile, 2, 30_000)
-  assert.equal(spawned.length >= 2, true, `the driver started its helpers: ${JSON.stringify(spawned)}`)
-  const sockets = existsSync(joinPath(dir, 'daemon-sockets.log'))
-    ? readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim().split('\n').filter(Boolean)
-    : []
+  // Deadline reason: the helpers record their identity synchronously at
+  // startup; this only bounds a broken fake, it is not a settle window.
+  const records = await waitForPidRecords(pidsFile, 2, 30_000)
+  assert.equal(records.length >= 2, true, `the driver started its helpers: ${JSON.stringify(records)}`)
+  const sockets = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim().split('\n').filter(Boolean)
   assert.equal(sockets.length, 1, 'the driver started one private daemon')
 
-  // The real interruption: no `exit` hook runs for a default SIGTERM.
-  const exited = new Promise((resolve) => child.on('exit', resolve))
-  child.kill('SIGTERM')
-  // The signal's own exit event is the authoritative signal: no clock involved.
-  await exited
+  const exited = new Promise((resolve) => child.on('exit', (code, exitSignal) => resolve({ code, signal: exitSignal })))
+  child.kill(signal)
+  const exit = await exited
+  // A cancelled run must keep its interruption status: a teardown must not
+  // turn it into a clean exit 0.
+  assert.equal(exit.signal, signal, `the driver exits BY the signal, got ${JSON.stringify(exit)}`)
 
-  // Neither helper may outlive the driver.
-  const alive = (pid) => {
-    try { process.kill(pid, 0); return true } catch { return false }
-  }
-  const survivors = spawned
-    .map((line) => ({ kind: line.split(' ')[0], pid: Number(line.split(' ')[1]) }))
-    .filter((entry) => Number.isFinite(entry.pid) && alive(entry.pid))
-  assert.deepEqual(survivors, [], `every helper was torn down: ${JSON.stringify(survivors)}`)
-  // And the socket directory is gone with it.
+  // Neither helper may outlive the driver — and a zombie or a reused PID is
+  // not the helper this run started.
+  const survivors = await waitForNoExecuting(records, 5_000)
+  assert.deepEqual(survivors, [], `every helper was torn down before the driver exited: ${JSON.stringify(survivors)}`)
+  // And the socket directory is gone with the daemon.
   assert.equal(existsSync(dirname(sockets[0])), false,
     `the daemon's socket directory was removed: ${sockets[0]}`)
+  // The caller's run directory is evidence, so a cancelled run keeps it.
+  assert.ok(existsSync(joinPath(out, 'run.log')), 'the cancelled run keeps its log')
+}
+
+/**
+ * Run one driver whose flow finishes on its own and assert the run left no
+ * helper executing and no private socket directory behind.
+ */
+async function assertFinishedRunTearsDown(t, prefix, { flow, env = {}, expectedStatus, expectedStderr }) {
+  const life = testLifecycle(t)
+  const dir = life.tempDir(prefix)
+  const fake = writeFakeTern(dir)
+  const flowPath = joinPath(dir, 'flow.mjs')
+  writeFileSync(flowPath, flow)
+  const out = joinPath(dir, 'out')
+  const result = spawnSync(process.execPath, [driver, flowPath, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', ...env },
+  })
+  assert.equal(result.status, expectedStatus, result.stdout + result.stderr)
+  if (expectedStderr !== undefined) assert.match(result.stderr, expectedStderr)
+
+  const records = readPidRecords(joinPath(dir, 'pids.log'))
+  assert.equal(records.length, 2, `the run started both helpers: ${JSON.stringify(records)}`)
+  const survivors = await waitForNoExecuting(records, 5_000)
+  assert.deepEqual(survivors, [], `neither helper outlives the driver: ${JSON.stringify(survivors)}`)
+  const sockets = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim().split('\n').filter(Boolean)
+  assert.equal(existsSync(dirname(sockets[0])), false,
+    `the daemon's socket directory was removed: ${sockets[0]}`)
+  return { out, result }
+}
+
+test('a SIGTERM to the driver tears down its daemon, window and socket directory', async (t) => {
+  await assertSignalTearDown(t, 'tern-gui-sigterm-', 'SIGTERM')
+})
+
+test('a SIGINT to the driver tears down its daemon, window and socket directory', async (t) => {
+  await assertSignalTearDown(t, 'tern-gui-sigint-', 'SIGINT')
+})
+
+test('the driver does not exit while its daemon still holds stdio open', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-stdio-')
+  const fake = writeFakeTern(dir)
+  const flow = joinPath(dir, 'flow.mjs')
+  writeFileSync(flow, 'export default async function () { await new Promise(() => {}) }\n')
+  const out = joinPath(dir, 'out')
+  const pidsFile = joinPath(dir, 'pids.log')
+  const child = spawn(process.execPath, [driver, flow, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', FAKE_STDIO_HOLD: '1' },
+    stdio: 'ignore',
+  })
+  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+  life.defer(() => { killStillExecuting(readPidRecords(pidsFile)) })
+
+  const records = await waitForPidRecords(pidsFile, 2, 30_000)
+  const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8'))
+  life.defer(() => { killStillExecuting([{ kind: 'holder', pid: holderPid, startTime: startTimeOf(holderPid) }]) })
+
+  let exitedEarly = false
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => {
+    exitedEarly = true
+    resolve({ code, signal })
+  }))
+  child.kill('SIGTERM')
+  // reason: a bounded observation of a NEGATIVE fact — the teardown must not finish while the child holds stdio.
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.equal(exitedEarly, false, 'the driver exited before its child reached close')
+
+  // Release the pipe: only NOW can the daemon's `close` arrive.
+  process.kill(holderPid, 'SIGUSR1')
+  const exit = await exited
+  assert.equal(exit.signal, 'SIGTERM', `the driver exits BY the signal, got ${JSON.stringify(exit)}`)
+
+  const survivors = await waitForNoExecuting(records, 5_000)
+  assert.deepEqual(survivors, [], `every helper was torn down: ${JSON.stringify(survivors)}`)
+  const sockets = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim().split('\n').filter(Boolean)
+  assert.equal(existsSync(dirname(sockets[0])), false,
+    `the daemon's socket directory was removed: ${sockets[0]}`)
+})
+
+test('a helper that never reaches close is reported and its socket directory is kept', { timeout: 30_000 }, async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-timeout-')
+  const fake = writeFakeTern(dir)
+  const flow = joinPath(dir, 'flow.mjs')
+  writeFileSync(flow, CHECKED_FLOW)
+  const out = joinPath(dir, 'out')
+  // FAKE_STDIO_HOLD keeps the daemon's stdio open from a grandchild the driver
+  // does NOT own: the daemon never reaches `close`, which is the deadline path.
+  const result = spawnSync(process.execPath, [driver, flow, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', FAKE_STDIO_HOLD: '1' },
+  })
+  const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8'))
+  life.defer(() => killStillExecuting([{ kind: 'holder', pid: holderPid, startTime: startTimeOf(holderPid) }]))
+  const socket = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim()
+  const daemonDir = dirname(socket)
+  life.defer(() => rmSync(daemonDir, { recursive: true, force: true }))
+
+  // The run is a RED run, not a clean one: the teardown could not be proved.
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  const ledger = JSON.parse(readFileSync(joinPath(out, 'assertions.json'), 'utf8'))
+  assert.equal(ledger.failed, 1)
+  const failure = ledger.results.find((entry) => !entry.ok)
+  assert.match(failure.label, /settled before the driver exited/u)
+  assert.match(failure.detail, /daemon pid=\d+/u)
+  // And the directory a possibly-live daemon still uses was NOT deleted.
+  assert.equal(existsSync(daemonDir), true, 'an unproven teardown keeps the socket directory')
+})
+
+test('a normal run tears down its helpers and the private socket directory before it exits', async (t) => {
+  await assertFinishedRunTearsDown(t, 'tern-gui-normal-', { flow: CHECKED_FLOW, expectedStatus: 0 })
+})
+
+test('a flow that throws still tears down its helpers before the driver exits', async (t) => {
+  const { out } = await assertFinishedRunTearsDown(t, 'tern-gui-throws-', {
+    flow: THROWING_FLOW,
+    expectedStatus: 1,
+  })
+  const ledger = JSON.parse(readFileSync(joinPath(out, 'assertions.json'), 'utf8'))
+  assert.equal(ledger.failed, 1, 'the throwing flow is a red run, not a missing one')
+})
+
+test('a daemon that exits before the flow finishes does not block or leak the teardown', async (t) => {
+  await assertFinishedRunTearsDown(t, 'tern-gui-daemon-gone-', {
+    flow: CHECKED_FLOW,
+    expectedStatus: 0,
+    env: { FAKE_DAEMON_EXITS: '1' },
+  })
+})
+
+test('a window that exits before the flow finishes does not block or leak the teardown', async (t) => {
+  await assertFinishedRunTearsDown(t, 'tern-gui-window-gone-', {
+    flow: CHECKED_FLOW,
+    expectedStatus: 0,
+    env: { FAKE_WINDOW_EXITS: '1' },
+  })
+})
+
+test('a window that dies before the control socket answers fails the startup after teardown', async (t) => {
+  await assertFinishedRunTearsDown(t, 'tern-gui-startup-', {
+    flow: CHECKED_FLOW,
+    env: { FAKE_WINDOW_EXITS: '1', FAKE_CTL_FAIL: '1' },
+    expectedStatus: 2,
+    expectedStderr: /exited before it answered the control socket/,
+  })
 })
 
 test('the GUI driver hovers the VISIBLE fragment, and refuses a fully clipped node', (t) => {

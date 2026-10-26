@@ -1,21 +1,27 @@
 /**
  * Regression tests for the disposable temp-root runner: exit-code and
  * signal passthrough, TMPDIR containment, glob expansion (the child is
- * spawned without a shell), keep-mode, and root removal.
+ * spawned without a shell), keep-mode, root removal, and the POSIX signal
+ * teardown that must reach a TERM-ignoring descendant before it deletes the
+ * root that descendant is using.
  * @module @xmoon76/dsh-pi-tui/run-with-temp-root.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { isExecuting, killStillExecuting, startTimeOf, waitForNoExecuting } from '../support/pid-records.ts'
+import { waitForFileLine } from '../support/wait-for-file.ts'
 import { buildSpawnPlan } from '../../scripts/run-with-temp-root.mjs'
 
 const RUNNER = fileURLToPath(new URL('../../scripts/run-with-temp-root.mjs', import.meta.url))
+const HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/holder.mjs', import.meta.url))
+const LINGERING_HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/lingering-holder.mjs', import.meta.url))
+const POSIX_ONLY = process.platform === 'win32' ? 'signal forwarding to a process group is POSIX-only' : false
 
 function run(args, options = {}) {
   return spawnSync(process.execPath, [RUNNER, ...args], { encoding: 'utf8', ...options })
@@ -23,17 +29,114 @@ function run(args, options = {}) {
 
 test('the runner passes the child exit code through and removes its root', async (t) => {
   const life = testLifecycle(t)
-  const before = countRunnerRoots()
-  const ok = run(['node', '-e', 'process.exit(0)'])
+  // The runner's TMPDIR is isolated for THIS case. A global count of
+  // `dsh-pi-tui-test-run-*` roots would race with every other runner a
+  // PARALLEL test file starts (the lane runner uses the same prefix), and the
+  // assertion must name this run's own evidence, not shared global state.
+  const isolatedTmp = life.tempDir('dsh-runner-exit-')
+  const env = { ...process.env, TMPDIR: isolatedTmp, TMP: isolatedTmp, TEMP: isolatedTmp }
+  const ok = run(['node', '-e', 'process.exit(0)'], { env })
   assert.equal(ok.status, 0)
-  const failed = run(['node', '-e', 'process.exit(5)'])
+  const failed = run(['node', '-e', 'process.exit(5)'], { env })
   assert.equal(failed.status, 5)
-  assert.equal(countRunnerRoots(), before, 'a normal run must not leave a runner root behind')
+  assert.deepEqual(readdirSync(isolatedTmp), [], 'a normal run must not leave a runner root behind')
 })
 
 test('a child killed by a signal maps to 128+signo', () => {
   const result = run(['node', '-e', "process.kill(process.pid, 'SIGTERM')"])
   assert.equal(result.status, 143)
+})
+
+// Both interruption signals run the same contract: the wrapper forwards the
+// signal it RECEIVED to the tree, and the root outlives the tree.
+async function assertSignalReachesDescendant(t, signal) {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-runner-descendants-')
+  const marker = join(dir, 'evidence.log')
+  // The runner's DIRECT child is a holder that starts a descendant which
+  // IGNORES the forwarded signals: only a whole-group SIGKILL can end it.
+  const child = spawn(process.execPath, [RUNNER, process.execPath, HOLDER], {
+    // The case proves the DELETE path; a developer's keep-mode toggle must not
+    // turn its root-removal assertion into a different contract.
+    env: { ...process.env, PROBE_MARKER: marker, DSH_TEST_KEEP_TMP: undefined },
+    stdio: 'ignore',
+  })
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
+  // The test's OWN cleanup runs in `t.after`, i.e. only AFTER its assertions:
+  // it must never stop the tree first and then claim the runner did.
+  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+
+  const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
+  const [, rawPid, , tmpdirField] = ready.split(' ')
+  const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
+  const tmpRoot = tmpdirField.slice('tmpdir='.length)
+  life.defer(() => { killStillExecuting([descendant]) })
+
+  child.kill(signal)
+  const result = await exited
+  // The leader died BY the forwarded signal, and the runner reports it.
+  const expectedExit = { SIGTERM: 143, SIGINT: 130 }[signal]
+  assert.equal(result.code, expectedExit, `the runner reports the child's signal exit, got ${JSON.stringify(result)}`)
+
+  const log = readFileSync(marker, 'utf8')
+  // The signal reached the DESCENDANT, not only the leader ...
+  assert.match(log, new RegExp(`descendant ${descendant.pid} ignored ${signal}`, 'u'),
+    'the forwarded signal must reach the whole process group')
+  // ... and the root was still the child's while that descendant was alive.
+  assert.match(log, new RegExp(`descendant ${descendant.pid} tmpdir ok`, 'u'),
+    'the temp root must not be removed while a descendant still uses it')
+
+  const survivors = await waitForNoExecuting([descendant], 5_000)
+  assert.deepEqual(survivors, [], `the SIGKILL escalation ended the descendant: ${JSON.stringify(survivors)}`)
+  assert.equal(existsSync(tmpRoot), false, 'the temp root is removed once the group is provably gone')
+}
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  test(`a ${signal} reaches a TERM-ignoring descendant, and the root outlives it`, { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+    await assertSignalReachesDescendant(t, signal)
+  })
+}
+
+test('a direct child that exits normally leaves the root to a live descendant', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-runner-lingering-')
+  const marker = join(dir, 'evidence.log')
+  // The leader exits 0 ON ITS OWN while the descendant it started keeps
+  // running: the leader's close is NOT the group's end.
+  const child = spawn(process.execPath, [RUNNER, process.execPath, LINGERING_HOLDER], {
+    env: { ...process.env, PROBE_MARKER: marker, DSH_TEST_KEEP_TMP: undefined },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  let stderr = ''
+  child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
+  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+
+  const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
+  const [, rawPid, , tmpdirField] = ready.split(' ')
+  const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
+  const tmpRoot = tmpdirField.slice('tmpdir='.length)
+  life.defer(() => { killStillExecuting([descendant]) })
+  life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
+
+  const result = await exited
+  // The direct child's own status is preserved ...
+  assert.equal(result.code, 0, `the runner passes the normal exit through, got ${JSON.stringify(result)}`)
+  // ... and the root it left behind is NOT deleted while the descendant lives.
+  assert.match(stderr, /keeping .*process group \d+ still has live members after the direct child exited/u)
+  assert.equal(existsSync(tmpRoot), true, 'the root outlives a normally-exiting leader while a descendant uses it')
+  assert.equal(isExecuting(descendant), true, 'the descendant keeps running, untouched by the wrapper')
+})
+
+test('a command that does not exist reports the spawn failure and removes its root', async (t) => {
+  const life = testLifecycle(t)
+  const isolatedTmp = life.tempDir('dsh-runner-spawn-fail-')
+  const result = run(['definitely-not-a-command-xyz'], {
+    env: { ...process.env, TMPDIR: isolatedTmp, TMP: isolatedTmp, TEMP: isolatedTmp },
+  })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /failed to spawn definitely-not-a-command-xyz/u)
+  assert.deepEqual(readdirSync(isolatedTmp), [], 'a failed spawn must not leave its root behind')
 })
 
 test('the child sees TMPDIR/TMP/TEMP pointed at the disposable root', () => {
@@ -78,11 +181,6 @@ test('DSH_TEST_KEEP_TMP=1 keeps and prints the run root', async (t) => {
   rmSync(kept, { recursive: true, force: true })
 })
 
-function countRunnerRoots() {
-  // Inspect the ACTUAL temp root (os.tmpdir honors TMPDIR, so this works
-  // under the outer runner's containment and on Windows) with Node fs APIs.
-  return readdirSync(tmpdir()).filter(name => name.startsWith('dsh-pi-tui-test-run-')).length
-}
 
 // ── Windows spawn-plan resolution (unit-tested from any host) ──────────────
 

@@ -38,6 +38,7 @@ import { basename } from 'node:path'
 import { dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { index, visiblePoint } from './tern-pane-geometry.mjs'
+import { OWNED_CHILD_CLOSE_DEADLINE_MS, ownChild, stopOwnedChildren } from './lib/owned-child-shutdown.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '..')
@@ -76,6 +77,8 @@ async function createHarness({ ternBin, root, display }) {
   const configDir = join(root, 'config')
   mkdirSync(configDir, { recursive: true })
   mkdirSync(join(root, 'shots'), { recursive: true })
+  const log = (line) => appendFileSync(join(root, 'run.log'), `${line}\n`)
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   // The run's OWN session daemon. MEASURED: a window does not start one — it
   // attaches to the daemon already running for this user, so without this every
   // `tern split` lands on the OPERATOR'S window (`@focused` is the pane they
@@ -89,10 +92,10 @@ async function createHarness({ ternBin, root, display }) {
   // other's daemon.
   const daemonDir = mkdtempSync(join(tmpdir(), 'tern-gui-daemon-'))
   chmodSync(daemonDir, 0o700)
-  // The directory exists NOW, so its removal is registered NOW: a signal that
-  // arrives before the daemon handlers below would otherwise leave it behind.
+  // This directory is removed only after the daemon's `close` (see `shutdown`
+  // below); the `exit` hook is the last-resort fallback for an exit path that
+  // cannot await.
   const removeDaemonDir = () => rmSync(daemonDir, { recursive: true, force: true })
-  process.on('exit', removeDaemonDir)
   const daemonSocket = join(daemonDir, 'daemon.sock')
   // The window's env: the run's own config AND daemon, so nothing it does can
   // reach another session's panes.
@@ -107,13 +110,12 @@ async function createHarness({ ternBin, root, display }) {
     cwd: root,
     env: { ...process.env, DISPLAY: display, TERN_CONFIG_DIR: configDir },
   })
+  // The daemon's terminal state is observed the moment it exists: `stop()` only
+  // REQUESTS a signal, and the socket directory above must not be removed while
+  // the daemon may still be using it.
+  const daemonChild = ownChild(daemon, { kind: 'daemon' })
   daemon.stdout.on('data', (d) => log(`daemon.out ${String(d).trim()}`))
   daemon.stderr.on('data', (d) => log(`daemon.err ${String(d).trim()}`))
-  const stopDaemon = () => {
-    daemon.kill('SIGKILL')
-    removeDaemonDir()
-  }
-  process.on('exit', stopDaemon)
   // The window itself: spawned HERE, after its private daemon exists, so it
   // attaches to THIS run's daemon instead of the operator's.
   // The client writes its own PNGs into a directory of ITS choice and reuses the
@@ -127,34 +129,75 @@ async function createHarness({ ternBin, root, display }) {
     cwd: root,
     env: windowEnv,
   })
-  const stopWindow = () => window.kill('SIGKILL')
-  process.on('exit', stopWindow)
+  // Observed before any await, so a window that dies immediately is still a
+  // settled child instead of an event this driver never saw.
+  const windowChild = ownChild(window, { kind: 'window' })
+  window.stdout.on('data', (d) => log(`window.out ${String(d).trim()}`))
+  window.stderr.on('data', (d) => log(`window.err ${String(d).trim()}`))
   // MEASURED: a process that receives SIGTERM without a handler dies immediately
   // and NEVER runs its `exit` hooks, so the private daemon, the window and the
   // socket directory would outlive a cancelled run. Both signals get ONE
-  // idempotent teardown that then re-raises the signal, so the exit status still
-  // reflects the interruption instead of being masked by a clean exit.
-  let stopped = false
-  const stopAll = (signal) => {
-    if (stopped) return
-    stopped = true
-    try { stopWindow() } catch { /* the window is already gone */ }
-    try { stopDaemon() } catch { /* the daemon is already gone */ }
-    // Re-raise only AFTER the handlers are gone: with a handler still installed,
-    // `process.kill(self, signal)` just re-enters it and the process lives on.
-    process.removeAllListeners(signal)
-    process.kill(process.pid, signal)
+  // idempotent teardown that WAITS for both direct children to reach `close`,
+  // then drops this run's socket directory, and only then re-raises the signal,
+  // so the exit status still reflects the interruption instead of being masked
+  // by a clean exit.
+  let shutdownPromise
+  // Set when the teardown could not prove its children closed: this run's
+  // socket directory may still be in use, so NO exit path may delete it.
+  let daemonDirRetained = false
+  const shutdown = () => {
+    shutdownPromise ??= (async () => {
+      const outcome = await stopOwnedChildren([windowChild, daemonChild])
+      if (outcome.timedOut) {
+        // A deadline is NOT a teardown: name the child that did not settle and
+        // keep the socket directory instead of deleting a resource a survivor
+        // may still be using.
+        daemonDirRetained = true
+        check('the GUI helpers settled before the driver exited', false,
+          `no close within ${OWNED_CHILD_CLOSE_DEADLINE_MS}ms: `
+          + `${outcome.survivors.map((handle) => `${handle.kind} pid=${handle.pid ?? 'not-spawned'}`).join(', ')}`
+          + ` (kept socket dir ${daemonDir})`)
+        return outcome
+      }
+      removeDaemonDir()
+      return outcome
+    })()
+    return shutdownPromise
   }
-  process.on('SIGINT', () => stopAll('SIGINT'))
-  process.on('SIGTERM', () => stopAll('SIGTERM'))
-  window.stdout.on('data', (d) => log(`window.out ${String(d).trim()}`))
-  window.stderr.on('data', (d) => log(`window.err ${String(d).trim()}`))
+  // The synchronous LAST RESORT for an exit path this driver does not own. It
+  // can only request the signals — the ordered shutdown above already did, so
+  // this is a no-op there — and it never claims a child is gone. It also
+  // respects an UNPROVEN teardown: a directory a survivor may still be using
+  // is not deleted here either.
+  process.on('exit', () => {
+    windowChild.stop()
+    daemonChild.stop()
+    if (!daemonDirRetained) removeDaemonDir()
+  })
+  // One teardown per signal, then the ORIGINAL signal decides the exit status:
+  // a cancelled run must not look like a clean one.
+  let signalTeardown = false
+  const onSignal = (signal) => {
+    if (signalTeardown) return
+    signalTeardown = true
+    void shutdown().finally(() => {
+      // Re-raise only AFTER this driver's OWN handlers are gone: with a handler
+      // still installed, `process.kill(self, signal)` simply re-enters it and
+      // the process lives on. The handlers are removed BY IDENTITY, so a
+      // listener this driver does not own is never dropped.
+      process.off('SIGINT', onSigint)
+      process.off('SIGTERM', onSigterm)
+      process.kill(process.pid, signal)
+    })
+  }
+  const onSigint = () => onSignal('SIGINT')
+  const onSigterm = () => onSignal('SIGTERM')
+  process.on('SIGINT', onSigint)
+  process.on('SIGTERM', onSigterm)
   // Every control command talks to the window; the CLI commands a flow issues
   // (`tern split`) need the SAME daemon env, or they resolve `@focused` against
   // whichever daemon they happen to find.
   const cliEnv = { ...windowEnv, DISPLAY: display }
-  const log = (line) => appendFileSync(join(root, 'run.log'), `${line}\n`)
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
   /** One control command, delivered EXACTLY once (a click must not repeat). */
   function ctlOnce(...args) {
@@ -437,8 +480,11 @@ exec ${JSON.stringify(ternBin)} split @focused ${direction} -- ${keepOpen}
     key, resize, click, clickAt, hover, shot, capture, launch,
     splitPane, cliEnv,
     quit: () => { ctlOnce('quit') },
-    stopWindow,
-    stopDaemon,
+    shutdown,
+    // A window that has terminated can never answer the control socket: the
+    // startup wait uses this to fail instead of waiting out a deadline it has
+    // already missed.
+    windowClosed: () => windowChild.closed,
   }
 }
 
@@ -498,12 +544,18 @@ for (let i = 0; i < 60 && !ready; i += 1) {
       if (JSON.parse(reply.stdout).ok !== false) ready = true
     } catch { /* not a JSON reply yet */ }
   }
-  if (!ready) await new Promise((r) => setTimeout(r, 500))
+  if (!ready) {
+    // A window that has already terminated can never answer: waiting out the
+    // rest of the deadline would only delay the startup failure it already is.
+    if (harness.windowClosed()) break
+    await new Promise((r) => setTimeout(r, 500))
+  }
 }
 if (!ready) {
-  console.error(`the GUI window's control socket never answered (${root})`)
-  harness.stopWindow()
-  harness.stopDaemon()
+  console.error(harness.windowClosed()
+    ? `the GUI window exited before it answered the control socket (${root})`
+    : `the GUI window's control socket never answered (${root})`)
+  await harness.shutdown()
   process.exit(2)
 }
 harness.log('the GUI window answered the control socket')
@@ -512,6 +564,7 @@ try {
   const flow = await import(pathToFileURL(flowPath).href)
   if (typeof flow.default !== 'function') {
     console.error(`flow must default-export a function: ${flowPath}`)
+    await harness.shutdown()
     process.exit(2)
   }
   await flow.default(harness)
@@ -520,7 +573,6 @@ try {
   harness.check('the flow ran to completion', false, String(error?.message ?? error))
 } finally {
   harness.quit()
-  harness.stopWindow()
-  harness.stopDaemon()
+  await harness.shutdown()
 }
 process.exit(harness.finish({ tern: ternVersion, flow: flowPath, mode: 'GUI', display }))
