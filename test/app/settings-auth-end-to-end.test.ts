@@ -1177,8 +1177,12 @@ test('the Web page Configure deeplink completes a REAL masked set on the SAME re
   await openWebCredentialRow(h)
   assert.match(h.view(), /State: Not configured/u, 'the row starts from the official Not-configured fact')
   await key(h, '\r') // Configure in Models… (the only enabled action)
-  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && frame.includes('API Key Reference'),
-    () => h.vt.waitForRender(), 'the Models reference page')
+  // Wait for the ACTIONABLE reference page, not just its header: the page reads
+  // the reference after its first frame, and an Enter delivered while it is
+  // still reading is dropped (the CI-exposed race).
+  await waitForFrame(h.view, frame => frame.includes('Settings · Models')
+    && frame.includes('API Key Reference') && frame.includes('Configure API Key…'),
+    () => h.vt.waitForRender(), 'the Models reference page and its actions')
   assert.match(h.view(), /DEEPSEEK_API_KEY/u, 'Models owns the SAME official reference')
   // The masked editor: Enter opens the key prompt, the fake secret is typed,
   // Enter reviews and Enter submits to the official store.
