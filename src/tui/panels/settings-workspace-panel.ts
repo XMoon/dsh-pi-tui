@@ -199,11 +199,12 @@ export interface SettingsWorkspaceRow {
   /** Present ONLY on the writable pilot rows (B2-B). A row without it is never
    *  editable, whatever its action. */
   readonly edit?: SettingsWorkspaceEdit
-  /** C2-R3: the ONE row that opens an embedded SPECIALIST page inside this same
-   *  workspace body (the existing subagent allowlist picker). It is a
-   *  presentation seam only — no document field, no writer, no second lease.
-   *  A row without it never has a specialist page. */
-  readonly specialist?: 'subagent-allowlist'
+  /** C2-R3/C2-R4: the ONE row that opens an embedded SPECIALIST page inside
+   *  this same workspace body (the existing subagent allowlist picker, the Web
+   *  Search / Fetch settings page). It is a presentation seam only — no
+   *  document field, no writer, no second lease. A row without it never has a
+   *  specialist page. */
+  readonly specialist?: 'subagent-allowlist' | 'web-settings'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -353,6 +354,17 @@ export interface SettingsWorkspacePanelIntents {
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R4: the ONE Web Search / Fetch settings page factory. `done` returns to
+   * the Tools row that opened it; `navigateToModels` is the root's narrow
+   * page-switch intent the page's credential row uses (the root retires this
+   * page and mounts the EXISTING Models page with the typed initial view in the
+   * SAME lease — the page never runs `/login` or touches a secret).
+   */
+  readonly createWebSettingsPage?: (
+    done: () => void,
+    navigateToModels: (initial: ModelsInitialView) => void,
+  ) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -488,17 +500,31 @@ export interface SettingsAuthPage extends Component {
   dispose(): void
 }
 
-/** The ONE embedded specialist page surface (C2-R3). It is the EXISTING
- *  subagent allowlist picker: the workspace root owns the screen/lease and
- *  gives it the body grant, exactly like the Models/Account pages, but it has
- *  no exit verb of its own — its `Esc` is the picker's own close, which returns
- *  to the Agent rows through the factory's `done` callback. */
+/** The ONE embedded specialist page surface (C2-R3/C2-R4). It is an EXISTING
+ *  interactive component (the subagent allowlist picker, the Web Search / Fetch
+ *  settings page): the workspace root owns the screen/lease and gives it the
+ *  body grant, exactly like the Models/Account pages, but it has no exit verb
+ *  of its own — its `Esc` is the page's own close, which returns to the rows
+ *  through the factory's `done` callback. */
 export interface EmbeddedSpecialistPage extends Component {
   handleInput(data: string): void
-  /** The bounded row budget the body grant really gives it. */
+  /** The bounded row budget the body grant really gives it (the page's own
+   *  semantic hint is the LAST of those lines). */
   setMaxRows(rows: number): void
   focused: boolean
   dispose(): void
+  /** The sub-view's own name, painted in the pane header (and, with
+   *  {@link breadcrumbSuffix}, in the breadcrumb trail). */
+  readonly title: string
+  /** The breadcrumb segment this page adds after the owning row
+   *  (`Settings · <Category> · <Row> · <suffix>`). Absent = the page IS the row
+   *  identity, so the row label already names it. */
+  readonly breadcrumbSuffix?: string
+  /** The pane-header line the root paints inside the shared body grant. The
+   *  page supplies it because it owns its own column projection (the Web page
+   *  names BOTH columns); absent = the root paints the single active-pane label
+   *  from {@link title}. */
+  paneHeader?(width: number): string
 }
 
 /** One pane the current frame actually paints: its level and absolute geometry.
@@ -1270,6 +1296,49 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     this.selectCategory('account', 'content')
+  }
+
+  /**
+   * C2-R4: the ONE narrow page-switch intent the Web settings page's credential
+   * row uses. The Web page never runs `/login` and never touches a secret: it
+   * asks the ROOT to mount the EXISTING Models page on the typed initial view
+   * (the `DEEPSEEK_API_KEY` reference, or its exact clear target) in the SAME
+   * workspace lease.
+   *
+   * Order is load-bearing:
+   *  1. retire the Web page FIRST — its input/hit grants and its instance die
+   *     before any other page can exist;
+   *  2. commit the navigation state synchronously (category, content focus,
+   *     row/detail/choice/pointer);
+   *  3. mount the Models page with the CALLER'S initial view. Never call
+   *     `selectCategory('models', 'content')` first: on a wide frame that
+   *     mounts `{view:'list'}` and the real deeplink would then be ignored by
+   *     the already-mounted guard, opening the wrong page.
+   */
+  private navigateWebCredentialToModels(initial: ModelsInitialView): void {
+    if (this.disposed) return
+    // The intent belongs to the LIVE Web page: a callback captured by a retired
+    // page (an Esc, a category change, the teardown) can never switch the
+    // workspace after the fact.
+    if (this.specialistRow !== 'web-settings') return
+    if (!this.isSelectableCategory('models')) return
+    // Never drop a Host credential mutation another page still owns.
+    if (this.authPageHasPendingMutation()) return
+    if (this.categoryId === 'about') this.intents.onAboutLeave?.()
+    this.closeSpecialist()
+    this.categoryId = 'models'
+    this.focus = 'content'
+    this.rowId = undefined
+    this.rowOffset = 0
+    this.detailOffset = 0
+    this.resetChoice()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
+    if (this.authPageCategory !== undefined && this.authPageCategory !== 'models') this.closeAuthPage()
+    this.mountModelsPage(initial)
+    this.bumpRevision()
+    this.intents.requestRender()
   }
 
   private syncAuthPageBody(): void {
@@ -2116,10 +2185,12 @@ export class SettingsWorkspacePanel implements Component {
    *  owner or switch. */
   private renderHeader(plan: SettingsChromePlan): string[] {
     const row = this.selectedRow()
-    const breadcrumb = this.specialistPage !== undefined
-      // C2-R3: the embedded specialist page is a SUB-VIEW of the row that
-      // opened it, never a category and never a second screen owner.
-      ? `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'} · Allowed models`
+    const specialist = this.specialistPage
+    const breadcrumb = specialist !== undefined
+      // C2-R3/C2-R4: the embedded specialist page is a SUB-VIEW of the row that
+      // opened it, never a category and never a second screen owner. A page that
+      // IS the row identity adds no redundant tail segment.
+      ? `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}${specialist.breadcrumbSuffix === undefined ? '' : ` · ${specialist.breadcrumbSuffix}`}`
       : this.focus === 'categories'
         ? 'Categories'
         : this.focus === 'content'
@@ -2776,13 +2847,21 @@ export class SettingsWorkspacePanel implements Component {
         buttons.push({ verb: 'retry', text: 'Retry save', id: phase.attempted })
       }
     }
-    // C2-R3: the ONE explicit specialist entry (the subagent allowlist). It is
-    // an alias for the row's own Enter/Right, and it exists only while the row
-    // really carries the specialist page AND has not been refused availability.
-    if (row.specialist === 'subagent-allowlist'
-      && row.specialistAvailable !== false
-      && this.intents.createSubagentAllowlistPicker !== undefined) {
-      buttons.push({ verb: 'manage', text: 'Manage allowed models…', id: row.id })
+    // C2-R3/C2-R4: the ONE explicit specialist entry per row. It is an alias
+    // for the row's own Enter/Right, and it exists only while the row really
+    // carries the specialist page, the composition supplies its factory AND the
+    // row has not been refused availability.
+    if (row.specialist !== undefined && row.specialistAvailable !== false) {
+      const factoryAvailable = row.specialist === 'subagent-allowlist'
+        ? this.intents.createSubagentAllowlistPicker !== undefined
+        : this.intents.createWebSettingsPage !== undefined
+      if (factoryAvailable) {
+        buttons.push({
+          verb: 'manage',
+          text: row.specialist === 'subagent-allowlist' ? 'Manage allowed models…' : 'Configure Web…',
+          id: row.id,
+        })
+      }
     }
     if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…', id: row.id })
     return buttons
@@ -3158,23 +3237,30 @@ export class SettingsWorkspacePanel implements Component {
 
   /**
    * Mount the ONE embedded specialist page for a row that carries
-   * `specialist` (the existing subagent allowlist picker). The factory runs
-   * only on an explicit Manage/Enter; a category change, the picker's own
-   * `done` (Esc) or this workspace's teardown retires the instance exactly
-   * once. The panel never reads or writes the settings section itself.
+   * `specialist` (the existing subagent allowlist picker, the Web Search /
+   * Fetch settings page). The factory runs only on an explicit Manage/Enter; a
+   * category change, the page's own `done` (Esc) or this workspace's teardown
+   * retires the instance exactly once. The panel never reads or writes the
+   * settings section itself.
    */
   private openSpecialist(row: SettingsWorkspaceRow): void {
-    if (row.specialist !== 'subagent-allowlist') return
+    if (row.specialist === undefined) return
     // A row whose page is refused right now never starts Host or catalog IO.
     if (row.specialistAvailable === false) return
     if (this.specialistPage !== undefined) return
-    // A grant that cannot paint a candidate row never starts the picker: a
-    // toggle the user cannot see is not admissible.
-    if (this.bodyFloor() < 2) return
-    const page = this.intents.createSubagentAllowlistPicker?.(
-      () => { this.closeSpecialist() },
-      () => { this.refreshSpecialistSummary() },
-    )
+    // A grant that cannot paint the page's real content never starts it: the
+    // allowlist picker needs a candidate row, the Web page needs one real row
+    // (its list or its detail) above the single Action Bar.
+    if (this.bodyFloor() < (row.specialist === 'subagent-allowlist' ? 2 : 1)) return
+    const page = row.specialist === 'subagent-allowlist'
+      ? this.intents.createSubagentAllowlistPicker?.(
+          () => { this.closeSpecialist() },
+          () => { this.refreshSpecialistSummary() },
+        )
+      : this.intents.createWebSettingsPage?.(
+          () => { this.closeSpecialist() },
+          (initial) => { this.navigateWebCredentialToModels(initial) },
+        )
     if (page === undefined) return
     // The factory may run a synchronous callback that already changed the
     // workspace (a stale request): a page built for a superseded state must not
@@ -3237,13 +3323,20 @@ export class SettingsWorkspacePanel implements Component {
    */
   private renderSpecialistPage(plan: SettingsChromePlan): string[] {
     const lines: string[] = []
+    const page = this.specialistPage
     if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
     if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
     if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     const geometry = chromeGeometry(plan)
-    if (plan.paneHeaderRows === 1) lines.push(fit(this.paneHeader('Subagent allowed models', true), plan.width))
-    const page = this.specialistPage
+    if (plan.paneHeaderRows === 1) {
+      // The page owns its own column projection: the Web page names BOTH of its
+      // columns, the allowlist picker is a single list.
+      lines.push(fit(
+        page?.paneHeader?.(plan.width) ?? this.paneHeader(page?.title ?? '—', true),
+        plan.width,
+      ))
+    }
     const contentRows = geometry.contentRows
     // The picker is granted the body rows PLUS the one physical action row: its
     // own row-budgeted render already carries its semantic hint as the LAST

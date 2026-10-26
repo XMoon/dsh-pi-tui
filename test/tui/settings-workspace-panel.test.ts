@@ -23,6 +23,7 @@ import {
   type SettingsWorkspaceSnapshot,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
 import type { AboutStatusController } from '../../src/app/command/about-status.ts'
+import type { ModelsInitialView } from '../../src/tui/panels/models-workspace-page.ts'
 import type { AboutStatusView } from '../../src/domain/status/about.ts'
 import type {
   EmbeddedPluginPage,
@@ -422,12 +423,12 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       id: 'web-settings',
       category: 'tools',
       label: 'Web Search / Fetch',
-      summary: 'Host',
+      summary: 'Search: Messages · Fetch: HTTP',
       scope: 'Host Web provider settings',
       freshness: 'ready',
       description: 'Host-owned Web settings',
-      action: 'open-legacy',
-      legacyTargetId: 'web-search-provider',
+      action: 'inspect',
+      specialist: 'web-settings',
     },
   ],
 }
@@ -488,6 +489,8 @@ class FakePage implements SettingsAuthPage {
  * CURRENT page and only inside its own painted cells.
  */
 class FakeSpecialistPage implements EmbeddedSpecialistPage {
+  readonly title = 'Subagent allowed models'
+  readonly breadcrumbSuffix = 'Allowed models'
   inputs: string[] = []
   presses: { readonly type: string; readonly x: number; readonly y: number }[] = []
   grants: number[] = []
@@ -497,6 +500,45 @@ class FakeSpecialistPage implements EmbeddedSpecialistPage {
   lines: string[] = ['SPECIALIST HEADER', '> alpha', '  beta', 'specialist hint']
   render(width: number): string[] {
     return this.lines.map(line => line.slice(0, width))
+  }
+  handleInput(data: string): void {
+    this.inputs.push(data)
+  }
+  handleMouse(event: { readonly type: string; readonly x: number; readonly y: number }): undefined {
+    this.presses.push({ type: event.type, x: event.x, y: event.y })
+    return undefined
+  }
+  setMaxRows(rows: number): void {
+    this.grants.push(rows)
+  }
+  invalidate(): void {}
+  dispose(): void {
+    this.disposed = true
+  }
+}
+
+/**
+ * C2-R4: the embedded Web Search / Fetch page fake. It records the same
+ * surface the real page implements (title/pane header/budget/input/mouse) and
+ * exposes the ROOT's credential route so a case can drive the page's Models
+ * deeplink exactly like the real page does.
+ */
+class FakeWebSettingsPage implements EmbeddedSpecialistPage {
+  readonly title = 'Web Search / Fetch'
+  inputs: string[] = []
+  presses: { readonly type: string; readonly x: number; readonly y: number }[] = []
+  grants: number[] = []
+  focused = false
+  disposed = false
+  /** The root's narrow page-switch intent, captured by the factory. */
+  navigateToModels: ((initial: ModelsInitialView) => void) | undefined
+  lines: string[] = ['WEB PAGE LIST', '> Web Search Provider', '  Web Fetch Provider', 'web page hint']
+  render(width: number): string[] {
+    return this.lines.map(line => line.slice(0, width))
+  }
+  /** The two-column pane header the real page supplies. */
+  paneHeader(width: number): string {
+    return '[Web Search / Fetch]  Current / Detail'.slice(0, width)
   }
   handleInput(data: string): void {
     this.inputs.push(data)
@@ -597,6 +639,12 @@ interface Harness {
   readonly committed: readonly SettingsWorkspaceCommitRequest[]
   /** C2-R3: every embedded specialist page the factory really built. */
   readonly specialistPages: readonly FakeSpecialistPage[]
+  /** C2-R4: every embedded Web page the factory really built. */
+  readonly webPages: readonly FakeWebSettingsPage[]
+  /** How many times the Web page factory ran. */
+  readonly webBuilds: () => number
+  /** Every Models initial view the root mounted, in order. */
+  readonly modelsInitials: readonly ModelsInitialView[]
   /** How many times the factory ran (a second mount must never happen). */
   readonly specialistBuilds: () => number
   /** How many times the row-level authority re-read was requested. */
@@ -620,15 +668,20 @@ function setup(options: {
   readonly directory?: () => { readonly revision: number; readonly count: number }
   /** C2-R3: build the embedded subagent allowlist page for the Agent row. */
   readonly specialistPage?: boolean
+  /** C2-R4: build the embedded Web Search / Fetch page for the Tools row. */
+  readonly webPage?: boolean
   /** Runs while the specialist factory builds its page (the reentrancy seam). */
   readonly duringSpecialistBuild?: (harness: { readonly panel: SettingsWorkspacePanel }) => void
 } = {}): Harness {
   let columns = options.columns ?? 120
   let rows = options.rows ?? 40
   const built: FakePage[] = []
+  const modelsInitials: ModelsInitialView[] = []
   const pluginPages: FakePluginPage[] = []
   const settlements: ((outcome: SettingsWorkspaceCommitOutcome) => void)[] = []
   const specialistPages: FakeSpecialistPage[] = []
+  const webPages: FakeWebSettingsPage[] = []
+  let webBuilds = 0
   let specialistBuilds = 0
   let specialistRefreshes = 0
   let closes = 0
@@ -659,6 +712,7 @@ function setup(options: {
         }
       : undefined,
     createModelsPage: (initial, openAccount) => {
+      modelsInitials.push(initial)
       const page = new FakePage(`models:${initial.view}`)
       built.push(page)
       options.duringBuild?.({ panel: panel!, built })
@@ -672,6 +726,16 @@ function setup(options: {
       options.duringBuild?.({ panel: panel!, built })
       return page
     },
+    ...options.webPage === true ? {
+      createWebSettingsPage: (done: () => void, navigateToModels: (initial: ModelsInitialView) => void) => {
+        webBuilds += 1
+        const page = new FakeWebSettingsPage()
+        page.navigateToModels = navigateToModels
+        ;(page as unknown as { done: () => void }).done = done
+        webPages.push(page)
+        return page
+      },
+    } : {},
     ...options.specialistPage === true ? {
       createSubagentAllowlistPicker: (done: () => void, onAuthoritativeChange: () => void) => {
         specialistBuilds += 1
@@ -712,6 +776,9 @@ function setup(options: {
     committed,
     settlements,
     specialistPages,
+    webPages,
+    webBuilds: () => webBuilds,
+    modelsInitials,
     specialistBuilds: () => specialistBuilds,
     specialistRefreshes: () => specialistRefreshes,
   }
@@ -2834,4 +2901,148 @@ test('R3-C10 an unreadable official section withholds the delegation rows instea
   assert.match(emptyDetail, /No setting is available\.|None available\./u,
     `the empty Detail states the same absence in a fitting wording:\n${emptyDetail}`)
   assert.ok(reads > 0, 'the projection really read its authority')
+})
+
+// ── C2-R4: the embedded Web Search / Fetch page ────────────────────────────
+
+/** Walk the rail to Tools and its Rows level (the Web row is the second). */
+const openToolsRows = (h: Harness): void => {
+  walkTo(h, 'tools')
+  h.panel.handleInput('\r') // rail -> rows
+}
+
+test('R4-C1 the Web row mounts ONE embedded page in this workspace with its own pane header', () => {
+  const h = setup({ webPage: true })
+  openToolsRows(h)
+  assert.match(plain(h), /Web Search \/ Fetch/u, 'the Web row is painted')
+  assert.equal(h.webBuilds(), 0, 'focusing the row never builds the page')
+  h.panel.handleInput('\u001b[B') // Rows: Visual tools -> Web Search / Fetch
+  h.panel.handleInput('\r') // rows -> detail -> the page
+  assert.equal(h.webBuilds(), 1, 'the explicit activation built the page exactly once')
+  const page = h.webPages[0]!
+  assert.equal(page.disposed, false)
+  // The page owns the BODY and supplies its OWN two-column pane header.
+  const frame = plain(h)
+  assert.match(frame, /WEB PAGE LIST/u, `the page body is painted inside the workspace:\n${frame}`)
+  assert.match(frame, /\nweb page hint\s*$/u, 'the page hint becomes the ONE physical last row')
+  assert.match(frame, /Settings · Tools · Web Search \/ Fetch/u, 'the breadcrumb names the row sub-view')
+  assert.match(frame, /\[Web Search \/ Fetch\]  Current \/ Detail/u, 'the page supplies its pane header')
+  assert.equal(h.closes(), 0, 'opening the page never closes the workspace')
+  assert.equal(h.legacyOpens(), 0, 'the Web row never opens the legacy editor')
+  assert.deepEqual(h.legacyTargets(), [])
+  // The page owns the keyboard.
+  h.panel.handleInput('x')
+  assert.deepEqual(page.inputs, ['x'])
+  // Its Esc returns to the Tools row, never the conversation.
+  ;(page as unknown as { done: () => void }).done()
+  assert.equal(page.disposed, true)
+  assert.equal(h.closes(), 0, 'the page Esc never closes the workspace')
+  assert.match(plain(h), /Settings · Tools · Web Search \/ Fetch/u, 'the owning row owns the frame again')
+  assert.doesNotMatch(plain(h), /WEB PAGE LIST/u)
+})
+
+test('R4-C2 the credential route retires the Web page BEFORE mounting Models with the typed initial view', () => {
+  const h = setup({ webPage: true })
+  openToolsRows(h)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\r')
+  const page = h.webPages[0]!
+  page.navigateToModels?.({ view: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'DeepSeek API Key' })
+  assert.equal(page.disposed, true, 'the Web page is retired by the route')
+  assert.equal(h.closes(), 0, 'the route never closes the workspace')
+  // The rail walk itself mounted (and disposed) the Models/Account pages: the
+  // LAST mount is the one this route created.
+  assert.equal(h.built.at(-1)?.id, 'models:reference', 'the Models reference page is the destination')
+  assert.deepEqual(h.modelsInitials.at(-1), { view: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'DeepSeek API Key' },
+    'the CALLER initial view travels intact — never a list view mounted first')
+  assert.match(plain(h), /Settings · Models/u, 'one workspace, Models content')
+  assert.doesNotMatch(plain(h), /WEB PAGE LIST/u)
+  // The stale page callback is inert once the page is retired.
+  const mountsBeforeStaleRoute = h.built.length
+  page.navigateToModels?.({ view: 'logout', target: { kind: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'DeepSeek API Key' } })
+  assert.equal(h.built.length, mountsBeforeStaleRoute, 'a retired page can never switch the workspace again')
+})
+
+test('R4-C3 a category change and a teardown dispose the Web page; late callbacks never revive it', () => {
+  const change = setup({ webPage: true })
+  openToolsRows(change)
+  change.panel.handleInput('\u001b[B')
+  change.panel.handleInput('\r')
+  const page = change.webPages[0]!
+  ;(change.panel as unknown as { selectCategory: (id: string) => void }).selectCategory('appearance')
+  assert.equal(page.disposed, true, 'a real category change disposes the page')
+  assert.doesNotMatch(plain(change), /WEB PAGE LIST/u)
+  const mountsBeforeStaleRoute = change.built.length
+  page.navigateToModels?.({ view: 'reference', ref: 'DEEPSEEK_API_KEY' })
+  assert.equal(change.built.length, mountsBeforeStaleRoute, 'a disposed page never mounts Models')
+
+  const teardown = setup({ webPage: true })
+  openToolsRows(teardown)
+  teardown.panel.handleInput('\u001b[B')
+  teardown.panel.handleInput('\r')
+  const last = teardown.webPages[0]!
+  teardown.panel.dispose()
+  assert.equal(last.disposed, true, 'the workspace teardown disposes the page')
+  assert.equal(teardown.webBuilds(), 1, 'nothing re-mounts a page after teardown')
+})
+
+test('R4-C4 pointer gestures only resolve inside the page cells and never across a resize', () => {
+  const h = setup({ columns: 120, rows: 40, webPage: true })
+  openToolsRows(h)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\r')
+  const page = h.webPages[0]!
+  const frame = plain(h).split('\n')
+  const paneHeaderRow = frame.findIndex(line => line.includes('[Web Search / Fetch]'))
+  assert.ok(paneHeaderRow >= 0, `the page pane header is painted:\n${frame.join('\n')}`)
+  const bodyRow = paneHeaderRow + 1
+  h.panel.onCellPress(4, bodyRow)
+  h.panel.onCellClick(4, bodyRow)
+  assert.deepEqual(page.presses.map(entry => entry.type), ['press', 'click'])
+  assert.deepEqual(page.presses.map(entry => [entry.x, entry.y]), [[4, 0], [4, 0]],
+    'the page-local coordinates strip the root chrome')
+  // A gesture straddling a resize is refused.
+  page.presses.length = 0
+  h.panel.onCellPress(4, bodyRow)
+  h.resize(120, 30)
+  h.panel.onCellClick(4, bodyRow)
+  assert.deepEqual(page.presses.map(entry => entry.type), ['press'], 'the release after a resize is refused')
+  h.resize(120, 40)
+  plain(h)
+  // Chrome cells never reach the page.
+  page.presses.length = 0
+  plain(h)
+  h.panel.onCellPress(0, 1)
+  h.panel.onCellClick(0, 1)
+  assert.deepEqual(page.presses, [])
+})
+
+test('R4-C5 the page mounts from ONE real body row and is never built without a body', () => {
+  const h = setup({ columns: 120, rows: 3, webPage: true })
+  openToolsRows(h)
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\r')
+  assert.equal(h.webBuilds(), 1, 'one real body row is enough to paint the page list plus its bar')
+  const page = h.webPages[0]!
+  plain(h)
+  assert.ok(page.grants.length > 0 && page.grants.every(grant => grant >= 1),
+    'the page really received a positive line grant')
+
+  // At two terminal rows there is no body row at all: the root admits no
+  // navigation into the rows level, so the page is never built.
+  const floor = setup({ columns: 120, rows: 2, webPage: true })
+  floor.panel.handleInput('\u001b[B')
+  floor.panel.handleInput('\r')
+  assert.equal(floor.webBuilds(), 0, 'an invisible body never starts the page')
+})
+
+test('R4-C6 the Web row paints the ONE Configure Web… entry and never a legacy handoff', () => {
+  const h = setup({ webPage: true })
+  openToolsRows(h)
+  h.panel.handleInput('\u001b[B')
+  assert.match(plain(h), /Configure Web…/u, 'the Detail paints the page entry')
+  assert.match(plain(h), /Host Web provider settings|Host-owned Web settings/u)
+  h.panel.handleInput('\r')
+  assert.equal(h.legacyOpens(), 0, 'Enter never opens the legacy editor')
+  assert.equal(h.webBuilds(), 1, 'Enter opens the SAME-lease page')
 })

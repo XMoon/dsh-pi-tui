@@ -443,19 +443,18 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     closed instead of degrading to a local spawn.
 - Every other setting stays in the existing complete editor behind a
   per-category TRANSITION row (`Footer & status line…`,
-  `Input & terminal settings…`, `Configure extension settings…`, and the
-  relocated `Web Search / Fetch`): each row is `open-legacy` with its exact
-  legacy target, states the `Existing settings editor` scope, runs no write of
-  its own and starts the editor only on explicit activation — never on focus,
-  Tab, read, resize or a summary render. A launcher names only the fields that
-  are still unmigrated, so `Input & terminal settings…` targets
-  `Keyboard shortcuts` and advertises just that left row — never a row this
-  workspace already edits. A category with nothing left to migrate carries NO
-  launcher: a launcher for an empty remainder would be a false affordance.
+  `Input & terminal settings…`, `Configure extension settings…`): each row is
+  `open-legacy` with its exact legacy target, states the `Existing settings
+  editor` scope, runs no write of its own and starts the editor only on
+  explicit activation — never on focus, Tab, read, resize or a summary render.
+  A launcher names only the fields that are still unmigrated, so
+  `Input & terminal settings…` targets `Keyboard shortcuts` and advertises just
+  that left row — never a row this workspace already edits. A category with
+  nothing left to migrate carries NO launcher: a launcher for an empty
+  remainder would be a false affordance.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
-  `Web Search / Fetch` transition launcher whose existing-editor return path is
-  unchanged (Esc restores the workspace on that same row).
+  `Web Search / Fetch` page entry, in that frozen order.
   Its stated value is the effective Host form value; `[default]` marks a value
   the USER layer does not declare. Confirm writes that ONE field through the
   official revision-checked settings mutation and re-reads the Host. Off
@@ -467,6 +466,74 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
   backend `Verified` also requires the Host row's live registration fact to
   agree; Remote has no registry read and states the runtime half as
   unobservable instead of claiming success.
+- `Web Search / Fetch` is an EMBEDDED SPECIALIST PAGE inside this same
+  workspace lease: `Enter`/`Right` on the row (or its ONE painted
+  `Configure Web…` action) mounts the page in the same body under the same
+  header/metadata/notice/Action Bar. It is never the legacy `SettingsList`, never
+  a second alt-screen overlay and never a second settings manager, and its `Esc`
+  ladder is `Detail → Web list → the Tools row → the category rail`.
+
+  The page paints exactly SIX rows in this frozen order: `Web Search Provider`,
+  `Web Fetch Provider`, `Search API Result Count`, `Share Original Question`,
+  `Search / Fetch Endpoint`, `DeepSeek API Key`. At ≥100 columns the row list
+  (max 34 columns) sits beside the selected row's Detail; at 65–99 columns the
+  list is stacked above it; below 65 columns exactly ONE region is painted at a
+  time and `Enter`/`Esc` move between the list and its Detail. The frame keeps
+  ONE active cursor (the focused region's), ONE pane header and the ONE shared
+  last-row Action Bar; a cropped grant scrolls instead of hiding an activation,
+  and an Enter whose candidate is not inside the painted viewport does nothing.
+  A candidate, state word or `[current]` chip is never painted partially, and
+  terminal-untrusted Host text (custom provider ids, URLs, credential source)
+  is painted through the existing sanitizers and width helpers.
+
+  Authority is the Host `web` / `web-deepseek-api` sections through the
+  `WebProviderConfig` read and its FIVE setters. The provider choices are the
+  official identities `Messages`↔`deepseek-official` and
+  `HTTP`↔`http`, plus the opt-in, separately billed `DeepSeek Search API` /
+  `DeepSeek Fetch API`. A configured provider id outside those candidates is a
+  CUSTOM route: it is displayed verbatim, it is never replaced by a default and
+  the page offers NO confirmable candidate for it. The count row offers the
+  `5/10/20/50` presets while the official domain stays 1–50: a stored integer
+  outside the presets (for example `7`) is reported exactly and is never
+  rewritten by navigation or refresh. `Share Original Question` is `on` by
+  default and states the payload boundary (up to 128 characters of the
+  triggering human question as `ori_question`, never the full history or system
+  prompt). The endpoint row reuses the existing endpoint editor
+  (`WebEndpointPanel`): a full URL draft, an explicit Enter Confirm and the
+  trust warning that the credential and query are sent to that HTTPS target
+  (the URL shape is validated, not the host's trust); `http`, userinfo, query,
+  fragment and a trailing `/search`/`/fetch` are refused with no Host write.
+
+  Every write is ONE explicit Enter confirmation that enters the command
+  owner's single Web FIFO (the SAME queue the still-supported legacy editor rows
+  use until their retirement). At its turn the intent re-proves readiness and
+  section availability, takes the NEWEST committed read as its base, refuses a
+  custom-route/candidate violation with ZERO writes and dispatches the ONE
+  official setter. A fresh read-back then decides the settled word: `Verified`
+  only when the authority holds the requested identity, `Not saved` (with the
+  value the Host really keeps) when a readable authority differs, and `Outcome
+  unknown` when the result cannot be read back. A superseded read never decides
+  a verdict; a newer read is awaited first, and a page closed mid-write only
+  loses its own repaint — the dispatched Host operation still settles in the
+  command owner. Confirming a value the authority already holds performs NO
+  setter (the official auto-selection already applies the default candidate).
+  `Loading…` on page entry or `r` is a real pending state, never a last-known
+  value presented as current; every read that settles refreshes the Tools row
+  summary and the mounted page from the same facts.
+
+  `DeepSeek API Key` shows ONLY the official credential reference
+  (`DEEPSEEK_API_KEY`), its presence and its source layer — never the value.
+  Its two actions are `Configure in Models…` and `Clear in Models…` (the latter
+  only while the fresh official fact is configured), and both hand a typed
+  `ModelsInitialView` (the same reference, or its exact clear target) to the
+  workspace root: the root retires the Web page FIRST, then switches to the
+  existing Models page with that initial view in the SAME lease. The page never
+  runs `/login` text and never touches a secret; Models owns the masked input,
+  the clear confirmation and the credential-store mutation, and re-entering the
+  Web page performs a fresh presence read. A backend whose Web section is
+  unavailable (Remote or a half-mounted/malformed authority) still opens the
+  page as a read-only statement with its reason, paints `Unavailable` and offers
+  no Confirm or credential action at all.
 - An L2 choice is transient; only an explicit Confirm commits one field through
   its own authority path (the serialized TUI settings document, the Host
   `pi-tui-visual-tools` form section, or — for the two runtime-only disclosure

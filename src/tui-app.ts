@@ -1693,6 +1693,18 @@ export interface SettingsWorkspaceOpenOptions {
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R4: the ONE embedded Web Search / Fetch settings page factory. It is
+   * mounted in the SAME Settings lease/body when the user activates the Tools
+   * row that carries `specialist: 'web-settings'`; `done` returns to that row
+   * and `navigateToModels` is the root's narrow page-switch intent (the page's
+   * credential row opens the EXISTING Models page on the typed initial view in
+   * the same lease — never `/login` text and never a secret).
+   */
+  readonly createWebSettingsPage?: (
+    done: () => void,
+    navigateToModels: (initial: ModelsInitialView) => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
 /** The live row handle of an OPEN legacy settings list: a section whose facts
@@ -23191,6 +23203,9 @@ export class TuiApp {
       ...(options.createSubagentAllowlistPicker === undefined
         ? {}
         : { createSubagentAllowlistPicker: options.createSubagentAllowlistPicker }),
+      ...(options.createWebSettingsPage === undefined
+        ? {}
+        : { createWebSettingsPage: options.createWebSettingsPage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.

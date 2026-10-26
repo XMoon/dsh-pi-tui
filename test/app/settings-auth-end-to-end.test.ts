@@ -162,7 +162,16 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
-      web: { available: () => false },
+      // C2-R4: the Tools Web page is mountable for the credential deeplink case.
+      web: {
+        available: () => true,
+        read: async () => ({
+          searchProvider: 'deepseek-official',
+          fetchProvider: 'http',
+          api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+          credential: { configured: true, source: 'file' },
+        }),
+      },
       providers: {
         available: () => true,
         listCredentialOptions: () => {
@@ -1116,5 +1125,57 @@ test('a resize to 120x7 rejects a mouse press/release on the old sign-out row', 
     'the stale old-frame mouse gesture never signs out')
   assert.match(h.view(), /> Sign out/u, 'the confirmation is still open after the rejected gesture')
   await key(h, '\u001b')
+  h.close()
+})
+
+// ── C2-R4: the Web page's credential row is the SAME official reference ─────
+
+/** Open `/settings → Tools → Web Search / Fetch` and select the credential row
+ *  of the real Web page (Home + five Downs within the page list). */
+async function openWebCredentialRow(h: Harness): Promise<void> {
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
+  await waitForFrame(h.view, frame => frame.includes('Settings ·'), () => h.vt.waitForRender(), 'the Settings workspace')
+  for (let step = 0; step < 7; step += 1) await key(h, '\x1b[B') // About -> Tools
+  await key(h, '\r') // rows level
+  await key(h, '\x1b[B') // the Web row
+  await key(h, '\r') // the SAME-lease Web page
+  await waitForFrame(h.view, frame => frame.includes('Web Search Provider') && !frame.includes('Loading…'),
+    () => h.vt.waitForRender(), 'the Web Search / Fetch page')
+  await key(h, '\x1b[H')
+  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
+  await key(h, '\r') // the credential row Detail
+  await waitForFrame(h.view, frame => frame.includes('Reference: DEEPSEEK_API_KEY'),
+    () => h.vt.waitForRender(), 'the credential row Detail')
+}
+
+test('the Web page Configure deeplink opens the SAME Models reference in one lease', async () => {
+  const h = open(140, 40)
+  await h.vt.waitForRender()
+  await openWebCredentialRow(h)
+  assert.match(h.view(), /State: Configured · source: file/u)
+  await key(h, '\r') // Configure in Models… (the active action)
+  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && frame.includes('API Key Reference'),
+    () => h.vt.waitForRender(), 'the Models reference page')
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the SAME lease switched to the Models content page')
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u, 'Models owns the SAME official reference')
+  assert.doesNotMatch(h.view(), /Web Search Provider/u, 'the Web page was retired by the route')
+  assert.deepEqual(h.calls.filter(call => call.startsWith('set:') || call.startsWith('unset:')), [],
+    'the deeplink itself writes nothing; the Models page owns the credential mutation')
+  h.close()
+})
+
+test('the Web page Clear deeplink opens the SAME reference clear confirmation and a cancel writes nothing', async () => {
+  const h = open(140, 40)
+  await h.vt.waitForRender()
+  await openWebCredentialRow(h)
+  await key(h, '\x1b[B') // Configure -> Clear in Models…
+  await key(h, '\r')
+  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && /Clear|Sign out|Confirm/u.test(frame),
+    () => h.vt.waitForRender(), 'the Models clear confirmation')
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u, 'the clear target is the SAME official reference')
+  // Cancel: Esc leaves the confirmation without any credential write.
+  await key(h, '\x1b')
+  assert.deepEqual(h.calls.filter(call => call.startsWith('unset:')), [],
+    'a cancelled clear performs ZERO credential writes')
   h.close()
 })
