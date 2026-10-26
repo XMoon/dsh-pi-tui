@@ -1110,6 +1110,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             catalog: runner.catalog.models,
             notify: (message, kind) => app.notify(message, kind),
             requestRender: () => app.requestRender(),
+            diag: runner.diag,
             done: () => { done() },
             // A settlement that lands after the user closed the picker still
             // refreshes the Agent row facts of the workspace they are now
@@ -3731,6 +3732,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                     catalog: runner.catalog.models,
                     notify: (message, kind) => app.notify(message, kind),
                     requestRender: () => app.requestRender(),
+                    diag: runner.diag,
                     done,
                     summarize: (value) => {
                       allowlistRow.currentValue = value

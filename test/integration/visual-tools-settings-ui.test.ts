@@ -57,6 +57,12 @@ import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { mountVisualToolsSettingsPlane } from '../support/visual-tools-plane.ts'
 import { mountPermissionDefaultPlane } from '../support/permission-default-fixture.ts'
+import { mountSubagentSectionPlane } from '../support/subagent-section-fixture.ts'
+import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
+import * as tool from '@deepseek-ai/dsh-tool-subagent'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 /** The PTC SDK rendering of the current Host registry (the same definitions a
@@ -98,6 +104,25 @@ class RecordingAdapter extends LlmAdapter {
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: 'ok' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+/** One provider with one model, for the UI-driven allowlist catalog. */
+class CatalogAdapterForUi extends LlmAdapter {
+  override providerInfo(provider: string): { id: string; name: string } {
+    return { id: provider, name: provider }
+  }
+
+  override listModels(provider: string): Promise<readonly { provider: string; id: string; name: string }[]> {
+    return Promise.resolve([{ provider, id: 'fast', name: 'Fast' }])
+  }
+
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  override async *stream(): AsyncIterable<StreamChunk> {
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
@@ -200,7 +225,10 @@ function mountSettingsUi(port: DirectConfigPort): UiHarness {
     extensions: undefined,
     createPluginManagerPage: () => undefined,
     config: port,
-    catalog: { models: { available: () => false } },
+    // The Agent category's delegation rows need the model catalog as well as the
+    // official section; the section's own directory read is what the picker uses,
+    // so this only has to REPORT availability.
+    catalog: { models: { available: () => true, loadDirectory: async () => ({ default: { provider: 'alpha', model: 'fast' }, routableProviders: ['alpha'], groups: [{ id: 'alpha', name: 'alpha', models: [{ id: 'fast', name: 'Fast' }] }], failures: [] }) } },
   }
   const runner = new Proxy(base, {
     get: (target, property) => property in target ? target[property as string] : () => undefined,
@@ -296,6 +324,106 @@ test('a real Settings Confirm of the permission default is what the NEXT Session
     'the NEW Session was pinned with the updated Host default')
   assert.equal(approval.overrideOf(session), 'never',
     'and the preset bundle it sampled carries the never-approval knob')
+})
+
+test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samples', async t => {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(SubagentRuntime)
+  await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
+  await ctx.plugin(Loader)
+  await mountPermissionPrerequisites(ctx)
+  // The official section is a CONFIGURABLE plugin row: it needs a real settings
+  // plane, exactly like the permission default case below.
+  await mountSubagentSectionPlane(ctx, life.tempDir('subagent-section-plane-'), {
+    enabled: true,
+    allowedModels: [{ provider: 'alpha', model: 'fast' }],
+  })
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+
+  // The catalog the picker reads: one provider with one model.
+  ctx.llm.registerAdapter(['alpha'], new CatalogAdapterForUi())
+
+  // A standing preset composition, exactly like the shipped base layer.
+  const preset = createScope(ctx, { preset: 'r3-agent-toggle' })
+  await preset.ctx.plugin(tool, { provider: 'spawn', modelSelectionSettings: true })
+
+  /** A NEW Session joined to the standing preset. */
+  const createSession = async (id: string): Promise<{ session: unknown; agent: unknown }> => {
+    const handle = await ctx.agents.create({
+      sessionId: SessionId(id) as never,
+      setup: (agentCtx) => {
+        bindScopeParent(scopeOf(agentCtx)!, scopeOf(preset.ctx)!)
+      },
+    })
+    return { session: (handle.agent as unknown as { session: unknown }).session, agent: handle.agent }
+  }
+  /** Whether the Session's subagent tool exposes the route fields. */
+  const samplesRoutes = (agent: unknown): boolean => {
+    const schema = ctx.tools.schemas(agent as never).find(candidate => candidate.name === 'subagent')
+    const properties = (schema?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties
+    return properties?.['provider'] !== undefined && properties?.['model'] !== undefined
+  }
+
+  // Baseline: the section is ENABLED, so a new Session already samples routes.
+  const before = await createSession('r3-toggle-before')
+  assert.equal(samplesRoutes(before.agent), true, 'the enabled section already produces route fields')
+
+  // The REAL UI: /settings -> Agent -> Subagent model selection -> Confirm off.
+  const ui = mountSettingsUi(port)
+  t.after(() => ui.dispose())
+  ui.invoke('settings')
+  await ui.vt.waitForRender()
+  await selectSettingsCategory(ui.vt, 'Agent')
+  ui.vt.sendInput('\r')
+  await ui.vt.waitForRender()
+  // Walk down to the toggle row (the allowlist row precedes it, and a live
+  // Session adds the approval row first). The cursor cell is the one that
+  // starts with `> ` inside the Rows pane.
+  const selectedLabel = (): string => {
+    for (const line of ui.vt.getViewport()) {
+      const marker = line.indexOf('> ')
+      if (marker < 0) continue
+      const after = line.slice(marker + 2)
+      if (/^(?:Approval policy|Default permission|Subagent|User shell)/u.test(after)) {
+        return after.replace(/\u001b\[[0-9;]*m/gu, '').trim()
+      }
+    }
+    return ''
+  }
+  for (let step = 0; step < 6 && !selectedLabel().startsWith('Subagent model selection'); step += 1) {
+    ui.vt.sendInput('\x1b[B')
+    await ui.vt.waitForRender()
+  }
+  assert.match(selectedLabel(), /^Subagent model selection/u,
+    `the toggle row is selected:\n${ui.vt.getViewport().join('\n')}`)
+  ui.vt.sendInput('\r') // open the inline choice
+  await ui.vt.waitForRender()
+  assert.match(ui.vt.getViewport().join('\n'), /Choose value/u, 'the inline choice is open')
+  // The candidate list is [off, on]; `on` is current, so UP selects `off`.
+  ui.vt.sendInput('\x1b[A')
+  await ui.vt.waitForRender()
+  ui.vt.sendInput('\r') // explicit Confirm
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Status\s+Verified/u.test(frame),
+    () => ui.vt.waitForRender(),
+    'the subagent toggle Confirm must settle as Verified',
+  )
+
+  // The UI decision reached the OFFICIAL section ...
+  assert.deepEqual(port.subagentModelSelection.get(), { enabled: false, allowedModels: [{ provider: 'alpha', model: 'fast' }] },
+    'disabling kept the saved route and flipped only enabled')
+
+  // ... and the NEXT Session no longer samples the route fields.
+  const after = await createSession('r3-toggle-after')
+  assert.equal(samplesRoutes(after.agent), false,
+    'a Session composed after the UI disable must not expose the route fields')
+  assert.equal(samplesRoutes(before.agent), true,
+    'and the already-composed Session is never hot-rewritten')
 })
 
 test('a real Settings Confirm drives the Host registry and the next model request', async t => {

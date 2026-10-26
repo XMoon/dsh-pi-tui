@@ -329,6 +329,72 @@ test('removing the LAST route while enabled is refused with the official rule', 
     /disable subagent model selection before removing the last route|requires at least one allowed model/u)
 })
 
+test('EXT-4: a REJECTED write that cannot re-read the section still clears the optimistic marker', async () => {
+  // The section accepted nothing, and the authoritative re-read is unavailable.
+  // Leaving the optimistic marker on screen would show a route as allowed that
+  // the Host never stored, and a later close could report it as the summary.
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+
+  // The section is WRITABLE when the user acts (so the optimistic marker really
+  // appears) and becomes unavailable while the write is in flight.
+  const config = harness.deps.selection as unknown as {
+    available(): boolean
+    get(): unknown
+    set(value: unknown): Promise<void>
+  }
+  const realAvailable = config.available.bind(config)
+  const realGet = config.get.bind(config)
+  const realSet = config.set.bind(config)
+  config.set = async () => {
+    // The backend goes away exactly while this write is being attempted, and the
+    // write itself is REFUSED.
+    config.available = () => false
+    config.get = () => { throw new Error('official section read failed') }
+    throw new Error('the official subagent settings are unavailable on this backend')
+  }
+
+  menu.handleInput(ENTER) // toggle m1 on -> the write is refused
+  for (let i = 0; i < 16; i += 1) await Promise.resolve()
+  config.available = realAvailable
+  config.get = realGet
+
+  // The marker is back to the committed (empty) list, not the optimistic one:
+  // the row for m1 no longer carries the per-row `allowed` badge.
+  const frame = menu.render(80).join('\n').replace(/\u001b\[[0-9;]*m/gu, '')
+  const modelRow = frame.split('\n').find(line => line.trimEnd().endsWith('m1')) ?? ''
+  assert.ok(modelRow !== '', `the m1 row is still painted:\n${frame}`)
+  assert.doesNotMatch(modelRow, /allowed/u,
+    `a rejected route is never painted as allowed:\n${frame}`)
+  assert.equal(harness.store.writes.length, 0, 'the refused write never reached the section')
+  assert.ok(harness.notices.some(notice => notice.kind === 'error'),
+    `the refusal is reported: ${JSON.stringify(harness.notices)}`)
+})
+
+test('EXT-5(diag): a write that fails AFTER close stays silent to the user but diagnosable to the owner', async () => {
+  // No late toast is a deliberate UX choice. It is not permission to swallow the
+  // failure: the owner's diagnostics must record that a dispatched write failed.
+  const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const withDiag = {
+    ...harness.deps,
+    diag: { warn: (message: string, fields?: Record<string, unknown>) => { warnings.push({ message, ...fields === undefined ? {} : { fields } }) } },
+  }
+  const menu = new SubagentModelAllowlistPicker(withDiag)
+  await settle(harness, 0)
+  harness.store.failNext?.()
+  menu.handleInput(ENTER) // dispatch a write that will FAIL
+  menu.handleInput('\x1b') // the picker closes BEFORE the write settles
+  for (let i = 0; i < 16; i += 1) await Promise.resolve()
+
+  assert.equal(harness.notices.length, 0, 'no late toast for a panel the user left')
+  assert.equal(warnings.length, 1, `the late failure is recorded once: ${JSON.stringify(warnings)}`)
+  assert.equal(warnings[0]!.message, 'subagent allowlist write settled after close')
+  assert.equal(warnings[0]!.fields?.outcome, 'failed')
+  assert.match(String(warnings[0]!.fields?.reason), /rejected|unavailable|failed/u)
+})
+
 test('a REJECTED official write rolls the optimistic marker back to the committed section', async () => {
   const harness = rig({ enabled: false, allowedModels: [] })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
