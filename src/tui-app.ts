@@ -12831,6 +12831,12 @@ export class TuiApp {
     | undefined {
     for (const hit of entry.visuals) {
       if (inMessage < hit.top || inMessage >= hit.top + hit.height) continue
+      if (this.viewerMode !== undefined) {
+        // A subagent viewer is a READ-ONLY reading surface for the parent: its
+        // figure cells are never copy/view targets (the same rule the Host
+        // actions follow) and they never fall through to a card fold either.
+        return { hitId: 'inert', kind: 'inert', span: { startCol: 0, endCol: Math.max(1, this.terminal.columns) } }
+      }
       const token = this.identityToken(hit.handle.message)
       const row = inMessage - hit.top
       for (const action of hit.actions) {
@@ -24289,6 +24295,7 @@ export class TuiApp {
 
   /** `app.visual.selectNext`: cycle the current window's published visuals. */
   private selectNextVisual(): boolean {
+    if (this.viewerMode !== undefined) return true
     const handles = this.mountedVisualHandles()
     if (handles.length === 0) {
       this.notify('No published visuals in the current transcript window', 'info')
@@ -24306,12 +24313,20 @@ export class TuiApp {
     return true
   }
 
+  /** The live select-key hint, with no dangling separator when the action has
+   *  been disabled (`false` or no effective key). */
+  private visualSelectHint(): string {
+    const hint = this.keybindings.keyHint('app.visual.selectNext')
+    return hint === '' ? 'Select a visual first' : `Select a visual first · ${hint}`
+  }
+
   /** `app.visual.copySelected`: copy the selected figure's exact payload. */
   private copySelectedVisual(): boolean {
+    if (this.viewerMode !== undefined) return true
     const handle = this.selectedVisualHandle()
     if (handle === undefined) {
       // The honest one-line route: never guess "the last visual".
-      this.notify(`Select a visual first · ${this.keybindings.keyHint('app.visual.selectNext')}`, 'info')
+      this.notify(this.visualSelectHint(), 'info')
       return true
     }
     this.copyVisualPayload(handle)
@@ -24322,9 +24337,10 @@ export class TuiApp {
    * A Chart has no viewer (its exact values live on the row) — the request is
    * answered truthfully instead of minting a second surface. */
   private openSelectedVisual(): boolean {
+    if (this.viewerMode !== undefined) return true
     const handle = this.selectedVisualHandle()
     if (handle === undefined) {
-      this.notify(`Select a visual first · ${this.keybindings.keyHint('app.visual.selectNext')}`, 'info')
+      this.notify(this.visualSelectHint(), 'info')
       return true
     }
     if (handle.publication.source.svgSource === undefined) {

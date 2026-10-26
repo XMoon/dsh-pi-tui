@@ -38,6 +38,7 @@ import { isolatedSvgRasterSupported } from '../../../client/media/svg/rasterize.
 import type { SvgRasterLoader, SvgRasterState } from '../../../client/media/svg/raster-loader.ts'
 import { SVG_VIEWER_CHORDS, SVG_VIEWER_SCROLL_LABEL } from '../../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { color } from '../../theme/runtime.ts'
 
@@ -291,11 +292,14 @@ export class SvgViewerPanel implements Component {
     const sourcePlain = previewActive ? 'Source' : '[Source]'
     const devicePlain = `${previewPlain} · ${sourcePlain}`
     const deviceWidth = visibleWidth(devicePlain)
+    // The title is MODEL-SUPPLIED: project it to ONE safe physical row BEFORE
+    // either width branch. `sanitizeDisplayText` alone keeps LF (a second
+    // painted row) and the narrow branch must never paint the raw bytes.
+    const titlePlain = `SVG · ${sanitizedPhysicalLine(this.input.source.title)}`
     if (width < deviceWidth) {
       // Below the device's own width there is no truthful page device to paint.
-      return { painted: truncateToWidth(color.textStrong(`SVG · ${this.input.source.title}`), width, '…'), hits: [] }
+      return { painted: truncateToWidth(color.textStrong(titlePlain), width, '…'), hits: [] }
     }
-    const titlePlain = `SVG · ${sanitizeDisplayText(this.input.source.title)}`
     const leftRoom = Math.max(0, width - deviceWidth - 1)
     const left = leftRoom === 0 ? '' : truncateToWidth(color.textStrong(titlePlain), leftRoom, '…')
     const pad = ' '.repeat(Math.max(0, width - visibleWidth(left) - deviceWidth))
@@ -318,6 +322,10 @@ export class SvgViewerPanel implements Component {
   private barRow(width: number): { readonly painted: string; readonly plain: string } {
     const chords = SVG_VIEWER_CHORDS
     const segments: ActionBarSegment[] = []
+    // design-language §7.2 order: navigation, secondary verb, browsing hint,
+    // then Esc last. The browsing hint is the FIRST whole segment dropped.
+    segments.push({ text: `${chords.switchPage.label} view`, short: chords.switchPage.label, priority: 4 })
+    segments.push({ text: `${chords.copy.label} copy source`, short: `${chords.copy.label} copy`, priority: 6 })
     if (this.page === 'source') {
       segments.push({
         text: `${SVG_VIEWER_SCROLL_LABEL} scroll`,
@@ -325,8 +333,6 @@ export class SvgViewerPanel implements Component {
         priority: 2,
       })
     }
-    segments.push({ text: `${chords.switchPage.label} view`, short: chords.switchPage.label, priority: 4 })
-    segments.push({ text: `${chords.copy.label} copy source`, short: `${chords.copy.label} copy`, priority: 6 })
     segments.push({ text: `${chords.close.label} close`, short: chords.close.label, priority: 8 })
     const plain = renderActionBarRow(segments, Math.max(1, width))
     return { painted: color.textDim(plain), plain }
@@ -450,7 +456,10 @@ export class SvgViewerPanel implements Component {
           {
             maxWidthCells: Math.max(1, width),
             maxHeightCells: Math.max(1, bodyRows),
-            filename: sanitizeDisplayText(this.input.source.title),
+            // The fork's text fallback interpolates this name into a painted
+            // row and does NOT strip terminal controls; project it to one safe
+            // physical row at this boundary like every other external label.
+            filename: sanitizedPhysicalLine(this.input.source.title),
           },
           { widthPx: state.widthPx, heightPx: state.heightPx },
         ),

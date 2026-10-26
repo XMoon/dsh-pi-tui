@@ -31,6 +31,7 @@ import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
 import { createSurfaceRuntime, type SurfaceEventRoutingSource, type SurfaceViewedChildPresentation } from '../../src/app/surface/runtime.ts'
 import { createVisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
 import { createPresentationBridge } from '../../src/app/bootstrap/presentation-bridge.ts'
+import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
@@ -500,6 +501,14 @@ test('the real published turn yields the display /copy payload through the Direc
     .join('')
   assert.ok(raw.includes('[dsh-visual-'), 'the durable official body keeps its machine marker')
   assert.equal(raw.includes('visual-v1:'), false, 'the answer text itself carries no machine fact')
+  // The raw readable export is a DIFFERENT sink with a DIFFERENT expectation:
+  // it keeps the marker line while the display copy dropped only that span.
+  const exported = renderTranscriptMarkdown({
+    header: { id: session.sessionId } as never,
+    snapshotEvents: () => events,
+  })
+  assert.ok(exported.includes('[dsh-visual-'), 'raw /transcript keeps the consumed marker line')
+  assert.ok(copy !== undefined && !exported.includes(copy), 'the display copy is not the raw export payload')
 })
 
 test('a chart generated without present_visual stays only in the tool card', async (t) => {

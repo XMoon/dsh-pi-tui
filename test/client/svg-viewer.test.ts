@@ -486,3 +486,36 @@ test('the admitted test sources are valid inputs for the preview path', () => {
   assert.equal(admitSvg(WIDE_SVG).ok, true)
   assert.equal(admitSvg(LONG_SVG).ok, true)
 })
+
+test('a hostile model-supplied SVG title is sanitized in EVERY width branch, including below the page device', () => {
+  capabilities(null)
+  try {
+    const hostileTitle = `Service\u001b]52;c;SGVsbG8=\u0007\u001b[31m\nInjected\ttext`
+    const panel = panelOf({ rows: 12, source: sourceOf({ title: hostileTitle }) })
+    panel.setMaxRows(12)
+    // The page device is 18 cells wide (`[Preview] · Source`). 8/12/17 are the
+    // branch that previously painted the raw title; 18/19 have no room for the
+    // title left of the device; 44/80 exercise the normal branch.
+    for (const width of [8, 12, 17, 18, 19, 44, 80]) {
+      const lines = panel.render(width)
+      assert.equal(lines.length, 12, `${width}: the title never adds a second chrome row`)
+      const frame = lines.join('\n')
+      // Only the app-owned SGR is legitimate chrome; after projecting it away
+      // NO terminal-active byte may remain (a truncated raw sequence included).
+      const projected = stripSgr(frame)
+      assert.equal(projected.includes('\x1b'), false, `${width}: no raw ESC byte reaches the terminal`)
+      assert.equal(projected.includes('\u0007'), false, `${width}: no raw BEL byte reaches the terminal`)
+      for (const injected of ['\x1b]52', '\x1b[31m']) {
+        assert.equal(frame.includes(injected), false, `${width}: the complete injected sequence is absent`)
+      }
+      if (width >= 44) assert.ok(stripSgr(lines[0]!).startsWith('SVG · '), `${width}: the identity row is preserved`)
+      assert.ok(stripSgr(lines.at(-1)!).includes('Esc'), `${width}: the bar stays pinned last`)
+    }
+    // The newline in the model title is folded into the ONE title row.
+    const wide = stripSgr(panel.render(80)[0]!)
+    assert.ok(wide.includes('Service') && wide.includes('Injected'), wide)
+    panel.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})

@@ -22,7 +22,11 @@ import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { assistantStepOf } from '../../domain/transcript/folder.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { visibleAssistantTextForCopy } from '../../domain/visual/display-copy.ts'
-import { asVisualSessionEvents, collectPublishedVisuals } from '../../domain/visual/publication.ts'
+import {
+  asVisualSessionEvents,
+  collectPublishedVisuals,
+  isModelOnlyReplacement,
+} from '../../domain/visual/publication.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import { computeStats, type SessionStats } from '../../domain/status/stats.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
@@ -212,6 +216,10 @@ export function createPresentationBridge(deps: PresentationBridgeDeps): Presenta
     for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
       const event = session.eventAt(seq)
       if (event?.type !== 'assistant/message') continue
+      // A compaction/model-only surface replacement is NOT the human-visible
+      // latest answer: the transcript fold and the raw export both keep the
+      // append-origin message, so the display copy must read the same one.
+      if (isModelOnlyReplacement(event)) continue
       const content = event.data.message.content
       latest = {
         seq: Number(event.seq),
