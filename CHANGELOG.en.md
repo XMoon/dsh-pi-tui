@@ -353,6 +353,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Releasing an old extension handle no longer removes a re-registered contribution or
+  its diagnostics.** Each of the six Stable registrations — themes, autocomplete,
+  keybindings, message/tool renderers and editors — is now released at most once: the
+  explicit handle `dispose()`, the plugin fiber unload and the failed-registration
+  rollback share one one-shot cleanup. Releasing an old handle again (after re-registering
+  the same id in one plugin, or a late release from a fiber that already reloaded under
+  HMR) used to remove the replacement's registry record and health record, and it could
+  notify the theme-unload hook twice for the old theme; the replacement and its failure
+  diagnostics now survive, and the theme hook fires once per real unload.
 - **Switching to the Models page no longer freezes the whole TUI.** The provider
   directory and the credential reads now run after the page has painted its
   first frame, and one read asks the Host for a single directory snapshot:

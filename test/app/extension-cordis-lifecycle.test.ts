@@ -22,6 +22,21 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
+import type {
+  AutocompleteProviderContribution,
+  ContributionHealth,
+  EditorContribution,
+  ExtensionView,
+  MessagePresentationSnapshot,
+  NormalizedKey,
+  ToolPresentationSnapshot,
+  TuiAutocompleteQuery,
+  TuiColorPalette,
+  TuiKeybindingContribution,
+  TuiMessageRendererContribution,
+  TuiThemeContribution,
+  TuiToolRendererContribution,
+} from '../../src/extension/public-types.ts'
 
 /** The extension-host provider under test (real entry, real apply). */
 import { apply as applyExtensionHost } from '../../src/extensions.ts'
@@ -1177,6 +1192,643 @@ test('an old overlay lease is INERT after its surface disposes; it never mounts 
     lease?.close()
     assert.equal(appB.ownedExtensionOverlayLeasesForTest(), 0)
     appB.stop()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+// ── Stable registration release IDEMPOTENCE (six slots) ────────────────────
+//
+// The health record is keyed (slot, owner, id) and the five external
+// registries key their records BY ID ONLY, so neither can tell two
+// registrations of one id apart. Every release of a registration must
+// therefore run EXACTLY ONCE: the explicit handle release, the fiber effect
+// cleanup and the failed-effect rollback share one cleanup. A repeated or
+// LATE release of an OLD registration must leave a same-fiber (or HMR
+// reloaded) replacement's record, its registry revision and its health
+// untouched.
+
+/** One live registration handle (the public handle shape). */
+interface SlotRegistration {
+  readonly id: string
+  dispose(): void
+}
+
+/** A health record as the diagnostics read it. */
+interface HealthRecord {
+  readonly id: string
+  readonly owner: string
+  readonly extensionPoint: string
+  readonly state: string
+  readonly lastError?: string
+}
+
+/** The scoped service surface the six slots are driven through. */
+interface LifecycleService {
+  registerTheme(contribution: TuiThemeContribution): SlotRegistration
+  registerAutocomplete(contribution: AutocompleteProviderContribution): SlotRegistration
+  registerKeybinding(contribution: TuiKeybindingContribution): SlotRegistration
+  registerMessageRenderer(contribution: TuiMessageRendererContribution): SlotRegistration
+  registerToolRenderer(contribution: TuiToolRendererContribution): SlotRegistration
+  registerEditor(contribution: EditorContribution): SlotRegistration
+  setThemeUnloadedHook(hook: (unloaded: { selectableValue: string; name: string }) => void): () => void
+  readonly themes: {
+    snapshot(): { themes: readonly { id: string; name: string; owner: string }[]; revision: number }
+    selectableValues(): string[]
+    displayNameForSelectable(value: string): string | undefined
+    hasSelectable(value: string): boolean
+  }
+  readonly autocomplete: {
+    snapshot(): { providers: readonly { id: string; description?: string; owner: string }[]; revision: number }
+    suggestOwned(
+      query: TuiAutocompleteQuery,
+      onError?: (id: string, owner: string, error: unknown) => void,
+      onSuccess?: (id: string, owner: string) => void,
+    ): Promise<{ items: readonly { value: string; label: string }[]; prefix: string } | null>
+  }
+  readonly keybindings: {
+    snapshot(): { bindings: readonly { id: string; action: string; owner: string }[]; revision: number }
+    actionFor(key: NormalizedKey): string | undefined
+    subscribe(listener: () => void): () => void
+  }
+  readonly renderers: {
+    snapshot(): {
+      messageRenderers: readonly { id: string; description?: string; owner: string }[]
+      toolRenderers: readonly { id: string; toolName: string; description?: string; owner: string }[]
+      revision: number
+    }
+    renderMessageOwned(
+      snapshot: MessagePresentationSnapshot,
+      onError?: (id: string, owner: string, error: unknown) => void,
+    ): { view: ExtensionView; rendererId: string; owner: string } | undefined
+    renderToolOwned(
+      snapshot: ToolPresentationSnapshot,
+      onError?: (id: string, owner: string, error: unknown) => void,
+    ): { view: ExtensionView; rendererId: string; owner: string } | undefined
+  }
+  readonly editors: {
+    snapshot(): { editors: readonly { id: string; priority: number; owner: string }[]; revision: number }
+    winner(): { id: string; priority: number; owner: string } | undefined
+  }
+  _ledger(): {
+    healthSnapshot(): readonly HealthRecord[]
+    recordExternalError(slot: string, id: string, owner: string, message: string): void
+    clearExternalError(slot: string, id: string, owner: string): void
+  }
+}
+
+type Variant = 'A' | 'B'
+
+/** The mutable failure switch of one registration (a natural failure path). */
+interface FailureGate {
+  fail: boolean
+}
+
+/** One slot's registration/release/observation adapter (file-local table). */
+interface SlotProbe {
+  /** Short stable id for this slot (test ids are built from it). */
+  readonly key: string
+  /** The health `extensionPoint` of the slot. */
+  readonly slot: string
+  readonly recordMarker: (variant: Variant) => string
+  readonly invokeMarker: (variant: Variant) => string
+  /** A natural callback failure (B's provider/render throws), when one exists. */
+  readonly failureMessage?: (variant: Variant) => string
+  readonly register: (service: LifecycleService, id: string, variant: Variant, gate: FailureGate) => SlotRegistration
+  /** The live registry record for `id`, as (owner, visible label). */
+  readonly live: (service: LifecycleService, id: string) => { owner: string; label: string } | undefined
+  /** The registry revision (a no-op release must not bump it). */
+  readonly revision: (service: LifecycleService) => number
+  /** Drive the slot through its real consumer path. */
+  readonly invoke: (
+    service: LifecycleService,
+    id: string,
+    onError: (owner: string, error: unknown) => void,
+  ) => string | undefined | Promise<string | undefined>
+}
+
+const KEY_CHORD: NormalizedKey = { key: 'k', ctrl: true, alt: true, shift: false, super: false }
+
+/** A partial palette sample: the registry stores the contribution verbatim. */
+const SAMPLE_PALETTE = { text: '#111111' } as unknown as TuiColorPalette
+
+function textView(text: string): ExtensionView {
+  return { kind: 'text', spans: [{ text }] }
+}
+
+function viewText(view: ExtensionView): string {
+  return view.kind === 'text' ? view.spans.map(span => span.text).join('') : `<${view.kind}>`
+}
+
+const SLOT_PROBES: readonly SlotProbe[] = [
+  {
+    key: 'theme',
+    slot: 'theme',
+    recordMarker: variant => `Shared ${variant} theme`,
+    invokeMarker: variant => `Shared ${variant} theme`,
+    register: (service, id, variant) => service.registerTheme({
+      id,
+      name: `Shared ${variant} theme`,
+      palette: SAMPLE_PALETTE,
+    }),
+    live: (service, id) => {
+      const record = service.themes.snapshot().themes.find(entry => entry.id === id)
+      return record === undefined ? undefined : { owner: record.owner, label: record.name }
+    },
+    revision: service => service.themes.snapshot().revision,
+    invoke: service => {
+      const values = service.themes.selectableValues()
+      if (values.length !== 1) return `<${values.length} live selectables>`
+      return service.themes.displayNameForSelectable(values[0]!)
+    },
+  },
+  {
+    key: 'autocomplete',
+    slot: 'autocomplete',
+    recordMarker: variant => `Shared ${variant} provider`,
+    invokeMarker: variant => `${variant}-suggestion`,
+    failureMessage: variant => `${variant} provider boom`,
+    register: (service, id, variant, gate) => service.registerAutocomplete({
+      id,
+      description: `Shared ${variant} provider`,
+      provider: {
+        getSuggestions: async () => {
+          if (gate.fail) throw new Error(`${variant} provider boom`)
+          return { items: [{ value: `${variant}-suggestion`, label: `${variant} suggestion` }], prefix: '' }
+        },
+      },
+    }),
+    live: (service, id) => {
+      const record = service.autocomplete.snapshot().providers.find(entry => entry.id === id)
+      return record === undefined ? undefined : { owner: record.owner, label: record.description ?? '' }
+    },
+    revision: service => service.autocomplete.snapshot().revision,
+    invoke: async (service, id, onError) => {
+      const result = await service.autocomplete.suggestOwned(
+        { lines: [], cursorLine: 0, cursorCol: 0, signal: new AbortController().signal },
+        (failedId, failureOwner, error) => {
+          if (failedId === id) onError(failureOwner, error)
+        },
+      )
+      return result?.items[0]?.value
+    },
+  },
+  {
+    key: 'keybinding',
+    slot: 'keybinding',
+    recordMarker: variant => variant === 'A' ? 'open-search' : 'toggle-fullscreen',
+    invokeMarker: variant => variant === 'A' ? 'open-search' : 'toggle-fullscreen',
+    register: (service, id, variant) => service.registerKeybinding({
+      id,
+      key: KEY_CHORD,
+      action: variant === 'A' ? 'open-search' : 'toggle-fullscreen',
+      description: `Shared ${variant} binding`,
+    }),
+    live: (service, id) => {
+      const record = service.keybindings.snapshot().bindings.find(entry => entry.id === id)
+      return record === undefined ? undefined : { owner: record.owner, label: record.action }
+    },
+    revision: service => service.keybindings.snapshot().revision,
+    invoke: service => service.keybindings.actionFor(KEY_CHORD),
+  },
+  {
+    key: 'message',
+    slot: 'transcript.message.renderer',
+    recordMarker: variant => `Shared ${variant} message renderer`,
+    invokeMarker: variant => `${variant} message view`,
+    failureMessage: variant => `${variant} message renderer boom`,
+    register: (service, id, variant, gate) => service.registerMessageRenderer({
+      id,
+      description: `Shared ${variant} message renderer`,
+      render: () => {
+        if (gate.fail) throw new Error(`${variant} message renderer boom`)
+        return textView(`${variant} message view`)
+      },
+    }),
+    live: (service, id) => {
+      const record = service.renderers.snapshot().messageRenderers.find(entry => entry.id === id)
+      return record === undefined ? undefined : { owner: record.owner, label: record.description ?? '' }
+    },
+    revision: service => service.renderers.snapshot().revision,
+    invoke: (service, id, onError) => {
+      const rendered = service.renderers.renderMessageOwned(
+        { kind: 'assistant', turn: 0, text: 'body' },
+        (failedId, failureOwner, error) => {
+          if (failedId === id) onError(failureOwner, error)
+        },
+      )
+      return rendered === undefined ? undefined : viewText(rendered.view)
+    },
+  },
+  {
+    key: 'tool',
+    slot: 'transcript.tool.renderer',
+    recordMarker: variant => `Shared ${variant} tool renderer`,
+    invokeMarker: variant => `${variant} tool view`,
+    failureMessage: variant => `${variant} tool renderer boom`,
+    register: (service, id, variant, gate) => service.registerToolRenderer({
+      id,
+      toolName: 'bash',
+      description: `Shared ${variant} tool renderer`,
+      render: () => {
+        if (gate.fail) throw new Error(`${variant} tool renderer boom`)
+        return textView(`${variant} tool view`)
+      },
+    }),
+    live: (service, id) => {
+      const record = service.renderers.snapshot().toolRenderers.find(entry => entry.id === id)
+      return record === undefined ? undefined : { owner: record.owner, label: record.description ?? '' }
+    },
+    revision: service => service.renderers.snapshot().revision,
+    invoke: (service, id, onError) => {
+      const rendered = service.renderers.renderToolOwned(
+        { callId: 'call-1', toolName: 'bash', status: 'ok', expanded: false },
+        (failedId, failureOwner, error) => {
+          if (failedId === id) onError(failureOwner, error)
+        },
+      )
+      return rendered === undefined ? undefined : viewText(rendered.view)
+    },
+  },
+  {
+    key: 'editor',
+    slot: 'editor',
+    recordMarker: variant => variant === 'A' ? '5' : '7',
+    invokeMarker: variant => variant === 'A' ? '5' : '7',
+    register: (service, id, variant) => service.registerEditor({
+      id,
+      priority: variant === 'A' ? 5 : 7,
+      create: () => ({
+        component: textView(`${variant} editor`),
+        getText: () => '',
+        setText: () => {},
+        dispose: () => {},
+      }),
+    }),
+    live: (service, id) => {
+      const record = service.editors.snapshot().editors.find(entry => entry.id === id)
+      return record === undefined ? undefined : { owner: record.owner, label: String(record.priority) }
+    },
+    revision: service => service.editors.snapshot().revision,
+    invoke: service => String(service.editors.winner()?.priority),
+  },
+]
+
+/** Boot the real Cordis loader + the real extension host. */
+async function mountLifecycleHost(ctx: Context): Promise<void> {
+  await ctx.plugin(Loader)
+  await mount(ctx, startupPlugin)
+  await mount(ctx, applyExtensionHost)
+}
+
+/**
+ * Mount one REAL plugin fiber and return the scoped service it captured
+ * (`c.get(PI_TUI_EXTENSIONS_SERVICE)` — every registration in these tests
+ * enters through that scoped handle, never the bare registries).
+ */
+async function mountServiceOwner(
+  ctx: Context,
+  name?: string,
+): Promise<{ service: LifecycleService; unload: () => Promise<void> }> {
+  let captured: LifecycleService | undefined
+  const apply = (c: Context): void => {
+    captured = c.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as LifecycleService
+  }
+  const fiber = name === undefined ? ctx.plugin(apply) : ctx.plugin({ name, apply })
+  await fiber
+  assert.ok(captured !== undefined, 'the plugin fiber must resolve the extension service')
+  return { service: captured, unload: () => fiber.dispose() }
+}
+
+/** Every health record for one slot + id (all owners). */
+function slotHealth(service: LifecycleService, slot: string, id: string): readonly HealthRecord[] {
+  return service._ledger().healthSnapshot().filter(record => record.extensionPoint === slot && record.id === id)
+}
+
+/**
+ * One slot's full A → release → B → late-A-release sequence. Every
+ * registration enters through the plugin fiber's SCOPED service handle; the
+ * consumer paths are the real registry reads (suggestOwned /
+ * renderMessageOwned / renderToolOwned / actionFor / selectableValues /
+ * winner).
+ */
+async function runReplacementScenario(ctx: Context, probe: SlotProbe): Promise<void> {
+  await mountLifecycleHost(ctx)
+  const owner = await mountServiceOwner(ctx, `release-owner-${probe.key}`)
+  const service = owner.service
+  const gate: FailureGate = { fail: false }
+  try {
+    const first = probe.register(service, 'shared', 'A', gate)
+    const liveA = probe.live(service, 'shared')
+    assert.equal(liveA?.label, probe.recordMarker('A'), `${probe.slot}: A is the live registry record`)
+    assert.ok(liveA !== undefined)
+    const ownerA = liveA.owner
+    const healthA = slotHealth(service, probe.slot, 'shared')
+    assert.equal(healthA.length, 1, `${probe.slot}: A owns exactly ONE health record`)
+    assert.equal(healthA[0]?.owner, ownerA, `${probe.slot}: A's health is the caller's owner`)
+    assert.equal(healthA[0]?.state, 'active')
+
+    first.dispose()
+    assert.equal(probe.live(service, 'shared'), undefined, `${probe.slot}: A's release removes its record`)
+    assert.equal(slotHealth(service, probe.slot, 'shared').length, 0, `${probe.slot}: A's release drops its health`)
+
+    // The SAME fiber registers the same id again (the replacement).
+    const second = probe.register(service, 'shared', 'B', gate)
+    const liveB = probe.live(service, 'shared')
+    assert.equal(liveB?.label, probe.recordMarker('B'), `${probe.slot}: B is the live registry record`)
+    assert.equal(liveB?.owner, ownerA, `${probe.slot}: B is registered by the same owner`)
+    const revisionB = probe.revision(service)
+    const healthB = slotHealth(service, probe.slot, 'shared')
+    assert.equal(healthB.length, 1, `${probe.slot}: B owns exactly ONE health record`)
+    assert.equal(healthB[0]?.state, 'active')
+    const onError = (failureOwner: string, error: unknown): void => {
+      service._ledger().recordExternalError(probe.slot, 'shared', failureOwner, String(error))
+    }
+    assert.equal(await probe.invoke(service, 'shared', onError), probe.invokeMarker('B'),
+      `${probe.slot}: B serves through its real consumer path`)
+
+    // The OLD handle is released again — twice.
+    first.dispose()
+    first.dispose()
+    assert.equal(probe.live(service, 'shared')?.label, probe.recordMarker('B'),
+      `${probe.slot}: the late old release keeps B's live record identity`)
+    assert.equal(probe.revision(service), revisionB,
+      `${probe.slot}: the late old release does not mutate the registry revision`)
+    const healthAfterLate = slotHealth(service, probe.slot, 'shared')
+    assert.equal(healthAfterLate.length, 1, `${probe.slot}: B keeps exactly ONE health record`)
+    assert.equal(healthAfterLate[0]?.owner, ownerA, `${probe.slot}: B's health is still B's own record`)
+    assert.equal(healthAfterLate[0]?.state, 'active')
+    assert.equal(await probe.invoke(service, 'shared', onError), probe.invokeMarker('B'),
+      `${probe.slot}: B still serves after the late old release`)
+
+    // B's FAILURE must land on B's surviving health record.
+    if (probe.failureMessage !== undefined) {
+      gate.fail = true
+      assert.equal(await probe.invoke(service, 'shared', onError), undefined,
+        `${probe.slot}: the failing B abdicates`)
+      const failed = slotHealth(service, probe.slot, 'shared')
+      assert.equal(failed.length, 1, `${probe.slot}: the failure lands on B's health record`)
+      assert.equal(failed[0]?.owner, ownerA)
+      assert.equal(failed[0]?.state, 'failed')
+      assert.match(failed[0]?.lastError ?? '', new RegExp(`${probe.failureMessage('B')}$`),
+        `${probe.slot}: B's own error message is recorded`)
+      gate.fail = false
+    } else {
+      // No natural failure callback for this slot: the health bridge reports
+      // against the CURRENT owner (B), and the record it reaches is B's.
+      service._ledger().recordExternalError(probe.slot, 'shared', ownerA, 'bridge refused')
+      const failed = slotHealth(service, probe.slot, 'shared')
+      assert.equal(failed.length, 1)
+      assert.equal(failed[0]?.state, 'failed')
+      assert.equal(failed[0]?.lastError, 'bridge refused')
+      service._ledger().clearExternalError(probe.slot, 'shared', ownerA)
+      assert.equal(slotHealth(service, probe.slot, 'shared')[0]?.state, 'active')
+    }
+
+    second.dispose()
+    second.dispose()
+    assert.equal(probe.live(service, 'shared'), undefined, `${probe.slot}: B's own release removes its record`)
+    assert.equal(slotHealth(service, probe.slot, 'shared').length, 0, `${probe.slot}: B's own release drops its health`)
+  } finally {
+    await owner.unload()
+  }
+  assert.equal(probe.live(service, 'shared'), undefined,
+    `${probe.slot}: the owner unload leaves no record`)
+  assert.equal(slotHealth(service, probe.slot, 'shared').length, 0,
+    `${probe.slot}: the owner unload leaves no health`)
+}
+
+for (const probe of SLOT_PROBES) {
+  test(`a released ${probe.slot} handle keeps a same-id replacement and its health`, async () => {
+    const ctx = new Context()
+    try {
+      await runReplacementScenario(ctx, probe)
+    } finally {
+      for (const runtime of [...ctx.registry.values()]) {
+        for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+      }
+    }
+  })
+}
+
+test('a listener registering a same-id replacement during the release keeps its health (synchronous reentrancy)', async () => {
+  const ctx = new Context()
+  try {
+    await mountLifecycleHost(ctx)
+    const owner = await mountServiceOwner(ctx)
+    const service = owner.service
+    const first = service.registerKeybinding({ id: 'reentrant', key: KEY_CHORD, action: 'open-search' })
+    assert.equal(service.keybindings.actionFor(KEY_CHORD), 'open-search')
+    const oldOwner = service.keybindings.snapshot().bindings.find(entry => entry.id === 'reentrant')?.owner
+    assert.ok(oldOwner !== undefined)
+
+    // The registry's dispose notifies SYNCHRONOUSLY, with the record already
+    // removed: a listener may register the replacement right there. The
+    // replacement's health must survive the remainder of the OLD release.
+    let replacement: SlotRegistration | undefined
+    let reentered = false
+    const unsubscribe = service.keybindings.subscribe(() => {
+      if (reentered) return
+      if (service.keybindings.actionFor(KEY_CHORD) !== undefined) return
+      reentered = true
+      replacement = service.registerKeybinding({ id: 'reentrant', key: KEY_CHORD, action: 'toggle-fullscreen' })
+    })
+
+    // ONE release of A, which re-enters and installs B.
+    first.dispose()
+    assert.equal(service.keybindings.actionFor(KEY_CHORD), 'toggle-fullscreen',
+      'the listener-installed replacement is live')
+    const live = service.keybindings.snapshot().bindings.find(entry => entry.id === 'reentrant')
+    assert.equal(live?.owner, oldOwner, 'the replacement belongs to the same owner')
+    const health = slotHealth(service, 'keybinding', 'reentrant')
+    assert.equal(health.length, 1, 'the replacement owns exactly ONE health record')
+    assert.equal(health[0]?.state, 'active', 'the tail of the OLD release never untracks the replacement health')
+
+    // A repeated release of the OLD handle cannot undo the replacement.
+    first.dispose()
+    assert.equal(service.keybindings.actionFor(KEY_CHORD), 'toggle-fullscreen')
+    assert.equal(slotHealth(service, 'keybinding', 'reentrant').length, 1)
+
+    replacement?.dispose()
+    unsubscribe()
+    assert.equal(service.keybindings.actionFor(KEY_CHORD), undefined)
+    assert.equal(slotHealth(service, 'keybinding', 'reentrant').length, 0)
+    await owner.unload()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('the theme unload hook fires exactly once per theme registration', async () => {
+  const ctx = new Context()
+  try {
+    await mountLifecycleHost(ctx)
+    const owner = await mountServiceOwner(ctx)
+    const service = owner.service
+
+    // A RELEASED hook is never called: disposing a theme with no selection and
+    // no hook consumer stays safe.
+    const releaseAbsent = service.setThemeUnloadedHook(() => {
+      throw new Error('a released theme unload hook must never run')
+    })
+    releaseAbsent()
+    service.registerTheme({ id: 'hook-absent', name: 'Hook absent', palette: SAMPLE_PALETTE }).dispose()
+
+    const unloaded: { selectableValue: string; name: string }[] = []
+    const releaseHook = service.setThemeUnloadedHook(entry => {
+      unloaded.push(entry)
+    })
+    const first = service.registerTheme({ id: 'hook-theme', name: 'Hook A', palette: SAMPLE_PALETTE })
+    first.dispose()
+    assert.deepEqual(unloaded, [{ selectableValue: 'plugin:root/hook-theme', name: 'Hook A' }],
+      'the first release notifies exactly once, with the source-qualified value')
+
+    const second = service.registerTheme({ id: 'hook-theme', name: 'Hook B', palette: SAMPLE_PALETTE })
+    first.dispose()
+    first.dispose()
+    assert.equal(unloaded.length, 1, 'a repeated old release never re-notifies')
+    assert.equal(service.themes.displayNameForSelectable('plugin:root/hook-theme'), 'Hook B',
+      'the replacement keeps the same selectable identity')
+    const healthB = slotHealth(service, 'theme', 'hook-theme')
+    assert.equal(healthB.length, 1)
+    assert.equal(healthB[0]?.state, 'active')
+
+    second.dispose()
+    assert.equal(unloaded.length, 2, 'the replacement release notifies exactly once')
+    assert.deepEqual(unloaded[1], { selectableValue: 'plugin:root/hook-theme', name: 'Hook B' })
+
+    // A theme left LIVE is notified exactly once by the fiber cleanup.
+    service.registerTheme({ id: 'hook-live', name: 'Hook live', palette: SAMPLE_PALETTE })
+    await owner.unload()
+    assert.equal(unloaded.length, 3, 'the fiber cleanup notifies the still-live theme exactly once')
+    assert.deepEqual(unloaded[2], { selectableValue: 'plugin:root/hook-live', name: 'Hook live' })
+    releaseHook()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('an owner unload and a stale-fiber rollback leave no record or health ghost (six Stable slots)', async () => {
+  const ctx = new Context()
+  try {
+    await mountLifecycleHost(ctx)
+
+    // (a) Register only, never release, then unload the owner fiber: every
+    // slot disappears with its health; the theme hook notified once.
+    const unloadedThemes: { selectableValue: string; name: string }[] = []
+    const releaseHook = (ctx.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as LifecycleService)
+      .setThemeUnloadedHook(entry => unloadedThemes.push(entry))
+    const live = await mountServiceOwner(ctx)
+    for (const probe of SLOT_PROBES) {
+      probe.register(live.service, `unload-${probe.key}`, 'A', { fail: false })
+    }
+    for (const probe of SLOT_PROBES) {
+      assert.equal(probe.live(live.service, `unload-${probe.key}`)?.label, probe.recordMarker('A'),
+        `${probe.slot}: the registration is live before the unload`)
+      assert.equal(slotHealth(live.service, probe.slot, `unload-${probe.key}`).length, 1)
+    }
+    await live.unload()
+    for (const probe of SLOT_PROBES) {
+      assert.equal(probe.live(live.service, `unload-${probe.key}`), undefined,
+        `${probe.slot}: the owner unload removes the record`)
+      assert.equal(slotHealth(live.service, probe.slot, `unload-${probe.key}`).length, 0,
+        `${probe.slot}: the owner unload removes the health`)
+    }
+    assert.equal(unloadedThemes.length, 1, 'the unloaded theme notifies the hook exactly once')
+    releaseHook()
+
+    // (b) A STALE scoped service (its owner fiber is gone) must fail loudly and
+    // roll the half-registration back, leaving the id free for a new fiber.
+    const staleOwner = await mountServiceOwner(ctx)
+    await staleOwner.unload()
+    for (const probe of SLOT_PROBES) {
+      const id = `stale-${probe.key}`
+      assert.throws(
+        () => probe.register(staleOwner.service, id, 'A', { fail: false }),
+        /inactive context|INACTIVE_EFFECT|already disposed/i,
+        `${probe.slot}: a stale scoped service must fail loudly`,
+      )
+      assert.equal(probe.live(staleOwner.service, id), undefined,
+        `${probe.slot}: the failed stale registration leaves no registry ghost`)
+      assert.equal(slotHealth(staleOwner.service, probe.slot, id).length, 0,
+        `${probe.slot}: the failed stale registration leaves no health ghost`)
+    }
+
+    const fresh = await mountServiceOwner(ctx)
+    for (const probe of SLOT_PROBES) {
+      const registration = probe.register(fresh.service, `stale-${probe.key}`, 'B', { fail: false })
+      assert.equal(probe.live(fresh.service, `stale-${probe.key}`)?.label, probe.recordMarker('B'),
+        `${probe.slot}: a new live fiber registers the same id successfully`)
+      assert.equal(slotHealth(fresh.service, probe.slot, `stale-${probe.key}`).length, 1)
+      registration.dispose()
+    }
+    await fresh.unload()
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
+test('a late release from an unloaded fiber never removes a new fiber’s replacement (HMR)', async () => {
+  const ctx = new Context()
+  try {
+    await mountLifecycleHost(ctx)
+    const unloaded: { selectableValue: string; name: string }[] = []
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as LifecycleService
+    const releaseHook = service.setThemeUnloadedHook(entry => unloaded.push(entry))
+
+    // The plugin's FIRST generation registers a theme and a keybinding.
+    const previous = await mountServiceOwner(ctx, 'hmr-plugin')
+    const themeA = previous.service.registerTheme({ id: 'hmr-theme', name: 'HMR A', palette: SAMPLE_PALETTE })
+    const bindingA = previous.service.registerKeybinding({
+      id: 'hmr-binding',
+      key: KEY_CHORD,
+      action: 'open-search',
+    })
+    assert.equal(service.themes.selectableValues().includes('plugin:hmr-plugin/hmr-theme'), true)
+    await previous.unload()
+    assert.deepEqual(unloaded, [{ selectableValue: 'plugin:hmr-plugin/hmr-theme', name: 'HMR A' }],
+      'the first generation’s unload notifies the hook exactly once')
+
+    // The reloaded generation (SAME plugin name, NEW fiber/owner) registers the
+    // same ids: the source-qualified selectable value is stable across HMR.
+    const reloaded = await mountServiceOwner(ctx, 'hmr-plugin')
+    const themeB = reloaded.service.registerTheme({ id: 'hmr-theme', name: 'HMR B', palette: SAMPLE_PALETTE })
+    reloaded.service.registerKeybinding({ id: 'hmr-binding', key: KEY_CHORD, action: 'toggle-fullscreen' })
+    const ownerB = service.themes.snapshot().themes.find(entry => entry.id === 'hmr-theme')?.owner
+    assert.ok(ownerB !== undefined)
+    assert.equal(service.themes.displayNameForSelectable('plugin:hmr-plugin/hmr-theme'), 'HMR B')
+    assert.equal(service.keybindings.actionFor(KEY_CHORD), 'toggle-fullscreen')
+
+    // The LATE releases of the OLD generation's handles.
+    themeA.dispose()
+    bindingA.dispose()
+    assert.equal(service.themes.displayNameForSelectable('plugin:hmr-plugin/hmr-theme'), 'HMR B',
+      'the late old theme release never removes the reloaded theme')
+    assert.equal(service.keybindings.actionFor(KEY_CHORD), 'toggle-fullscreen',
+      'the late old keybinding release never removes the reloaded binding')
+    assert.equal(unloaded.length, 1, 'the late old release never re-notifies the theme hook')
+    for (const [slot, id] of [['theme', 'hmr-theme'], ['keybinding', 'hmr-binding']] as const) {
+      const health = slotHealth(service, slot, id)
+      assert.equal(health.length, 1, `${slot}: the reloaded registration keeps exactly ONE health record`)
+      assert.equal(health[0]?.owner, ownerB, `${slot}: the health belongs to the reloaded owner`)
+      assert.equal(health[0]?.state, 'active')
+    }
+
+    themeB.dispose()
+    await reloaded.unload()
+    assert.equal(unloaded.length, 2, 'the reloaded theme notifies the hook exactly once on release')
+    assert.equal(service.themes.hasSelectable('plugin:hmr-plugin/hmr-theme'), false)
+    assert.equal(slotHealth(service, 'theme', 'hmr-theme').length, 0)
+    assert.equal(slotHealth(service, 'keybinding', 'hmr-binding').length, 0)
+    releaseHook()
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
