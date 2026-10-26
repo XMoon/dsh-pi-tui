@@ -40,6 +40,8 @@ const QUESTION = 'what changed in the last release of the harness?'
 const MESSAGES_ENDPOINT = 'https://api.deepseek.com/anthropic/v1/messages'
 const SEARCH_ENDPOINT = 'https://api.deepseek.com/v1/tools/search'
 const FETCH_ENDPOINT = 'https://api.deepseek.com/v1/tools/fetch'
+/** The base the NEW test confirms through the UI endpoint editor. */
+const CONSUMER_BASE = 'https://gateway.example.test/r4/v1/tools'
 
 interface RecordedRequest {
   readonly url: string
@@ -77,6 +79,10 @@ function installTransport(): Transport {
         return { status: 200, json: { results: [{ url: 'https://example.test/api', title: 'API result', snippet: 'api snippet', date: null }] } }
       }
       if (url === FETCH_ENDPOINT) return { status: 200, json: { content: '# fetched page' } }
+      if (url === `${CONSUMER_BASE}/search`) {
+        return { status: 200, json: { results: [{ url: 'https://example.test/r4-consumer', title: 'R4 consumer result', snippet: 'r4', date: null }] } }
+      }
+      if (url === `${CONSUMER_BASE}/fetch`) return { status: 200, json: { content: '# r4 fetched page' } }
       return { status: 404, json: { error: { message: `unexpected endpoint ${url}` } } }
     },
     restore() { globalThis.fetch = original },
@@ -342,13 +348,29 @@ function toolResultOf(agent: Agent, callId: string): string | undefined {
   return undefined
 }
 
-const KEY = { down: '\x1b[B', home: '\x1b[H', enter: '\r', esc: '\x1b' } as const
+const KEY = { down: '\x1b[B', home: '\x1b[H', enter: '\r', esc: '\x1b', clearLine: '\x15' } as const
+
+/** The optional extra fields the real UI flow confirms (all DEFAULT off, so the
+ *  original tool test keeps its own settings). */
+interface WebTuiWrites {
+  /** Confirm Share Original Question `off` (the request must omit ori_question). */
+  readonly oriOff?: boolean
+  /** Confirm the DeepSeek Fetch API provider. */
+  readonly fetchDeepSeekApi?: boolean
+  /** Replace the endpoint draft with this base and confirm it. */
+  readonly endpoint?: string
+}
 
 /** Drive the REAL `/settings → Tools → Web Search / Fetch` page (C2-R4):
- *  confirm the DeepSeek Search API provider and the 20-result count, then leave
- *  the workspace. The real ConfigPort + Host settings mutate/readback performs
- *  every write; no Direct config object is used here. */
-async function writeWebSettingsThroughTui(app: S4D3Application, config: DirectWebProviderConfig): Promise<void> {
+ *  confirm the DeepSeek Search API provider and the 20-result count (plus the
+ *  optional writes), then leave the workspace. The real ConfigPort + Host
+ *  settings mutate/readback performs every write; no Direct config object is
+ *  used here. */
+async function writeWebSettingsThroughTui(
+  app: S4D3Application,
+  config: DirectWebProviderConfig,
+  writes: WebTuiWrites = {},
+): Promise<void> {
   for (const character of '/settings') app.vt.sendInput(character)
   await app.settle()
   app.vt.sendInput(KEY.enter)
@@ -381,11 +403,92 @@ async function writeWebSettingsThroughTui(app: S4D3Application, config: DirectWe
   }
   await app.waitFor(() => app.view().includes('Current: 20') && app.view().includes('Verified'),
     'the verified count write')
-  app.vt.sendInput(KEY.esc) // Detail -> list
+
+  /** Back to the page list, first row. */
+  const listTop = async (): Promise<void> => {
+    for (const key of [KEY.esc, KEY.home]) {
+      app.vt.sendInput(key)
+      await app.settle()
+    }
+  }
+  /** Home + Down*index + Enter: open one frozen row's Detail. */
+  const openRow = async (index: number): Promise<void> => {
+    for (let step = 0; step < index; step += 1) app.vt.sendInput(KEY.down)
+    app.vt.sendInput(KEY.enter)
+    await app.settle()
+  }
+
+  if (writes.oriOff === true) {
+    await listTop()
+    await openRow(3) // Share Original Question
+    app.vt.sendInput(KEY.down) // on -> off
+    app.vt.sendInput(KEY.enter)
+    await app.settle()
+    await app.waitFor(() => app.view().includes('Current: off') && app.view().includes('Verified'),
+      'the verified Share Original Question off write')
+  }
+  if (writes.fetchDeepSeekApi === true) {
+    await listTop()
+    await openRow(1) // Web Fetch Provider
+    app.vt.sendInput(KEY.down) // HTTP -> DeepSeek Fetch API
+    app.vt.sendInput(KEY.enter)
+    await app.settle()
+    await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Verified'),
+      'the verified fetch provider write')
+  }
+  if (writes.endpoint !== undefined) {
+    await listTop()
+    await openRow(4) // the endpoint row opens its editor on Enter
+    await app.settle()
+    app.vt.sendInput(KEY.clearLine) // replace the seeded draft
+    for (const character of writes.endpoint) app.vt.sendInput(character)
+    await app.settle()
+    app.vt.sendInput(KEY.enter)
+    await app.settle()
+    await app.waitFor(() => app.view().includes(`Current: ${writes.endpoint}`) && app.view().includes('Verified'),
+      'the verified endpoint write')
+  }
+  app.vt.sendInput(KEY.esc) // Detail/editor -> list
   await app.settle()
   // A pending authoritative reload may swallow a close gesture; Esc is
   // idempotent, so close until the workspace really leaves the frame.
   for (let attempt = 0; attempt < 6 && app.view().includes('Settings ·'); attempt += 1) {
+    app.vt.sendInput(KEY.esc)
+    await app.settle()
+  }
+  await app.waitFor(() => !app.view().includes('Settings ·'), 'the Settings workspace closes')
+}
+
+/** Open `/settings → Tools → Web Search / Fetch` and select the credential row
+ *  (Home + five Downs inside the page list). */
+async function openWebCredentialRowInApp(app: S4D3Application): Promise<void> {
+  for (const character of '/settings') app.vt.sendInput(character)
+  await app.settle()
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  if (app.view().includes('❯ /settings')) {
+    app.vt.sendInput(KEY.enter)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
+  await selectSettingsCategory(app.vt, 'Tools')
+  for (const key of [KEY.enter, KEY.down, KEY.enter]) {
+    app.vt.sendInput(key)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
+    'the Web Search / Fetch page')
+  for (const key of [KEY.home, KEY.down, KEY.down, KEY.down, KEY.down, KEY.down, KEY.enter]) {
+    app.vt.sendInput(key)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Reference: DEEPSEEK_API_KEY'),
+    'the Web credential row Detail')
+}
+
+/** Leave the Settings surface with the real Esc ladder. */
+async function closeSettingsInApp(app: S4D3Application): Promise<void> {
+  for (let attempt = 0; attempt < 8 && app.view().includes('Settings ·'); attempt += 1) {
     app.vt.sendInput(KEY.esc)
     await app.settle()
   }
@@ -440,6 +543,163 @@ test('a TUI Web settings write reaches the NEXT real tool call and the mounted t
   assert.equal(written?.api.count, 20, 'the configured count is still the authoritative settings value')
   // The original Tool result is the TUI-visible sink; no local provider truth.
   assert.match(app.view(), /https:\/\/example\.test\/api/u)
+})
+
+test('a TUI Web settings write reaches the real search and fetch consumers with the confirmed payload', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new WebL6Adapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 140,
+    rows: 40,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+    prepareHost: async host => {
+      host.ctx.llm.registerAdapter(['scripted'], adapter)
+      await (host.ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+        .set(credentialRef('DEEPSEEK_API_KEY'), 'd3-r4-key')
+    },
+  })
+  const transport = installTransport()
+  t.after(transport.restore)
+  const config = new DirectWebProviderConfig(app.host.ctx as never)
+  // EVERY write below is an explicit confirm in the real Web page: search
+  // provider, count, Share Original Question off, DeepSeek Fetch API and a new
+  // endpoint base.
+  await writeWebSettingsThroughTui(app, config, {
+    oriOff: true,
+    fetchDeepSeekApi: true,
+    endpoint: CONSUMER_BASE,
+  })
+  // The settings recompose re-read the persisted profile: re-pin the scripted
+  // transport before the next turn (the official default-model write path).
+  await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
+    .saveSelection({ provider: 'scripted', model: 'review-model' })
+  const written = await config.read()
+  assert.equal(written?.searchProvider, 'deepseek-search-api', 'the UI write is the authoritative search provider')
+  assert.equal(written?.fetchProvider, 'deepseek-fetch-api', 'the UI write is the authoritative fetch provider')
+  assert.equal(written?.api.count, 20, 'the UI count write is the authoritative settings value')
+  assert.equal(written?.api.sendOriginalQuestion, false, 'the UI off write is the authoritative question-sharing value')
+  assert.equal(written?.api.baseURL, CONSUMER_BASE, 'the UI endpoint write is the authoritative base')
+
+  // ONE real Session/Agent anchors the initiator boundary the official Web
+  // service reads for ori_question.
+  adapter.push({ kind: 'text', text: 'ready' })
+  const agent = await app.submitFirstPrompt('R4 consumer question')
+  await agent.whenIdle()
+  const web = app.host.ctx.get('web') as {
+    search(request: { query: string }): Promise<{ sources: readonly { url: string }[] }>
+    fetch(request: { url: string }): Promise<{ readonly url: string; readonly statusCode: number; readonly body: unknown }>
+  }
+  const agents = app.host.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
+
+  // The REAL search consumer: count 20 is the actual request value (no tool
+  // per-request clamp masks it), the custom endpoint is the HTTP target, and
+  // Share Original Question off omits ori_question entirely.
+  const search = await agents.withInitiator(agent, () => web.search({ query: 'r4 query' }))
+  assert.deepEqual(search.sources.map(source => source.url), ['https://example.test/r4-consumer'])
+  const searchRequest = transport.requests.at(-1)
+  assert.equal(searchRequest?.url, `${CONSUMER_BASE}/search`, 'the UI-confirmed endpoint is the real search target')
+  assert.deepEqual(searchRequest?.body, {
+    query: 'r4 query',
+    count: 20,
+    need_content: false,
+  }, 'the UI-confirmed count and off value reach the official request')
+  assert.equal(searchRequest?.authorization, 'Bearer d3-r4-key')
+
+  // The REAL fetch consumer: the UI-confirmed DeepSeek Fetch API provider and
+  // the same endpoint base are what the next fetch uses.
+  const fetched = await web.fetch({ url: 'https://example.test/r4-page' })
+  const fetchRequest = transport.requests.at(-1)
+  assert.equal(fetchRequest?.url, `${CONSUMER_BASE}/fetch`, 'the UI-confirmed fetch provider/base is the real fetch target')
+  assert.deepEqual(fetchRequest?.body, { url: 'https://example.test/r4-page' })
+  assert.equal(fetchRequest?.authorization, 'Bearer d3-r4-key')
+  assert.equal(fetched.url, 'https://example.test/r4-page')
+  assert.equal(fetched.statusCode, 200)
+  assert.deepEqual(fetched.body, { kind: 'text', content: '# r4 fetched page' })
+})
+
+test('the Web credential deeplink completes a real store set and clear and the page re-reads the fresh presence', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new WebL6Adapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 140,
+    rows: 40,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+    prepareHost: host => { host.ctx.llm.registerAdapter(['scripted'], adapter) },
+  })
+  const transport = installTransport()
+  t.after(transport.restore)
+  const config = new DirectWebProviderConfig(app.host.ctx as never)
+  assert.equal((await config.read())?.credential.configured, false, 'the fixture starts without the key')
+
+  // 1) Web credential row → Configure in Models… → the masked input → the REAL
+  //    official credential store.
+  await openWebCredentialRowInApp(app)
+  app.vt.sendInput(KEY.enter) // Configure in Models…
+  await app.settle()
+  await app.waitFor(() => app.view().includes('Settings · Models') && app.view().includes('API Key Reference'),
+    'the Models reference page')
+  app.vt.sendInput(KEY.enter) // open the masked key prompt
+  await app.settle()
+  await app.waitFor(() => /Enter the API key/u.test(app.view()), 'the masked key prompt')
+  for (const character of 'r4-store-key') app.vt.sendInput(character)
+  await app.settle()
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  await app.waitFor(() => app.view().includes('Verified'), 'the verified credential set')
+  assert.doesNotMatch(app.view(), /r4-store-key/u, 'the secret is never rendered back')
+  const afterSet = await config.read()
+  assert.equal(afterSet?.credential.configured, true, 'the REAL credential store reports the reference configured')
+
+  // 2) Re-enter the Web page: the fresh official presence is Configured.
+  await closeSettingsInApp(app)
+  await openWebCredentialRowInApp(app)
+  assert.match(app.view(), /State: Configured/u, `the Web page reads the fresh presence:\n${app.view()}`)
+
+  // 3) A real search authenticates with the key the UI just stored. The search
+  //    PROVIDER is arranged through the port here (this case's subject is the
+  //    credential chain); the search path itself is the production consumer.
+  await closeSettingsInApp(app)
+  await config.setSearchProvider('deepseek-search-api')
+  await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
+    .saveSelection({ provider: 'scripted', model: 'review-model' })
+  adapter.push({ kind: 'text', text: 'ready' })
+  const agent = await app.submitFirstPrompt('R4 credential question')
+  await agent.whenIdle()
+  const web = app.host.ctx.get('web') as {
+    search(request: { query: string }): Promise<{ sources: readonly { url: string }[] }>
+  }
+  const agents = app.host.ctx.get('agents') as { withInitiator<T>(agent: Agent, operation: () => T): T }
+  await agents.withInitiator(agent, () => web.search({ query: 'credentialed query' }))
+  const credentialed = transport.requests.at(-1)
+  assert.equal(credentialed?.url, SEARCH_ENDPOINT)
+  assert.equal(credentialed?.authorization, 'Bearer r4-store-key', 'the stored key is the auth material')
+
+  // 4) Web credential row → Clear in Models… → the REAL unset; the page then
+  //    reads Not configured and the next real search fails closed (no fallback).
+  await openWebCredentialRowInApp(app)
+  assert.match(app.view(), /State: Configured/u)
+  app.vt.sendInput(KEY.down) // Configure -> the enabled Clear in Models…
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  await app.waitFor(() => app.view().includes('Settings · Models') && /Clear credential/u.test(app.view()),
+    'the Models clear confirmation')
+  app.vt.sendInput(KEY.enter) // the ONE explicit clear confirmation
+  await app.settle()
+  await app.waitFor(() => /cleared/u.test(app.view()), 'the confirmed clear result')
+  const afterClear = await config.read()
+  assert.equal(afterClear?.credential.configured, false, 'the REAL credential store reports the reference cleared')
+  await closeSettingsInApp(app)
+  await openWebCredentialRowInApp(app)
+  assert.match(app.view(), /State: Not configured/u, `the Web page reads the fresh absence:\n${app.view()}`)
+
+  const requestsBefore = transport.requests.length
+  await assert.rejects(agents.withInitiator(agent, () => web.search({ query: 'no credential' })), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
+    return true
+  })
+  assert.equal(transport.requests.length, requestsBefore, 'no silent fallback and no dispatched request')
 })
 
 test('the missing-credential error reaches the TUI and the selected provider is never bypassed', { skip: skippedInstallationReason([]) }, async t => {

@@ -70,6 +70,10 @@ interface Harness {
   readonly setRecordRows: (rows: readonly { key: string; label: string; kind: 'grant' }[]) => void
   readonly view: () => string
   readonly rows: () => string[]
+  /** The exact secrets the UI handed to the official store (fixture-only). */
+  readonly writtenSecrets: readonly { ref: string; secret: string }[]
+  /** Seed the fake official store's configured state for one reference. */
+  readonly setConfigured: (ref: string, configured: boolean) => void
   readonly close: () => void
 }
 
@@ -97,6 +101,10 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
   const accountState: { view: AccountView } = { view: SIGNED_OUT }
   const calls: string[] = []
+  /** The references the fake official store really reports as configured. */
+  const configuredRefs = new Set(['DEEPSEEK_API_KEY', 'ACME_API_KEY', 'ANTHROPIC_API_KEY'])
+  /** The exact secret the UI handed to setReference (fixture-only; never painted). */
+  const writtenSecrets: { ref: string; secret: string }[] = []
   let recordRows: { key: string; label: string; kind: 'grant' }[] = [
     { key: 'plugin/mykey', label: 'My Key', kind: 'grant' },
   ]
@@ -169,7 +177,9 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
           searchProvider: 'deepseek-official',
           fetchProvider: 'http',
           api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
-          credential: { configured: true, source: 'file' },
+          credential: configuredRefs.has('DEEPSEEK_API_KEY')
+            ? { configured: true, source: 'file' }
+            : { configured: false },
         }),
       },
       providers: {
@@ -197,18 +207,25 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       credentials: {
         available: () => true,
         recordsSupported: () => true,
-        setReference: async (ref: string) => {
+        setReference: async (ref: string, secret: string) => {
           calls.push(`set:${ref}`)
+          writtenSecrets.push({ ref, secret })
           const gate = setReferenceGate
           setReferenceGate = undefined
           await gate
+          configuredRefs.add(ref)
         },
-        unsetReference: async (ref: string) => { calls.push(`unset:${ref}`) },
+        unsetReference: async (ref: string) => {
+          calls.push(`unset:${ref}`)
+          configuredRefs.delete(ref)
+        },
         deleteRecord: async (key: string) => {
           calls.push(`delete:${key}`)
           recordRows = recordRows.filter(record => record.key !== key)
         },
-        describeReference: async () => ({ configured: true }),
+        describeReference: async (ref: string) => configuredRefs.has(ref)
+          ? { configured: true, source: 'file' }
+          : { configured: false },
         listRecords: async () => recordRows.map(record => ({ ...record })),
         onChanged: () => () => {},
       },
@@ -276,6 +293,11 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       return () => { releaseSetReference?.() }
     },
     rows,
+    writtenSecrets,
+    setConfigured: (ref: string, configured: boolean) => {
+      if (configured) configuredRefs.add(ref)
+      else configuredRefs.delete(ref)
+    },
     view: () => rows().join('\n'),
     close: () => {
       startedApps.delete(app)
@@ -1148,33 +1170,73 @@ async function openWebCredentialRow(h: Harness): Promise<void> {
     () => h.vt.waitForRender(), 'the credential row Detail')
 }
 
-test('the Web page Configure deeplink opens the SAME Models reference in one lease', async () => {
+test('the Web page Configure deeplink completes a REAL masked set on the SAME reference and the page reads the fresh presence', async () => {
   const h = open(140, 40)
   await h.vt.waitForRender()
+  h.setConfigured('DEEPSEEK_API_KEY', false)
   await openWebCredentialRow(h)
-  assert.match(h.view(), /State: Configured · source: file/u)
-  await key(h, '\r') // Configure in Models… (the active action)
+  assert.match(h.view(), /State: Not configured/u, 'the row starts from the official Not-configured fact')
+  await key(h, '\r') // Configure in Models… (the only enabled action)
   await waitForFrame(h.view, frame => frame.includes('Settings · Models') && frame.includes('API Key Reference'),
     () => h.vt.waitForRender(), 'the Models reference page')
-  assert.match(h.rows()[0]!, /Settings · Models/u, 'the SAME lease switched to the Models content page')
   assert.match(h.view(), /DEEPSEEK_API_KEY/u, 'Models owns the SAME official reference')
-  assert.doesNotMatch(h.view(), /Web Search Provider/u, 'the Web page was retired by the route')
-  assert.deepEqual(h.calls.filter(call => call.startsWith('set:') || call.startsWith('unset:')), [],
-    'the deeplink itself writes nothing; the Models page owns the credential mutation')
+  // The masked editor: Enter opens the key prompt, the fake secret is typed,
+  // Enter reviews and Enter submits to the official store.
+  await key(h, '\r')
+  await waitForFrame(h.view, frame => /Enter the API key/u.test(frame),
+    () => h.vt.waitForRender(), 'the masked key prompt')
+  for (const character of 'sk-r4-secret') await key(h, character)
+  await key(h, '\r')
+  await key(h, '\r')
+  await waitForFrame(h.view, frame => frame.includes('Verified'),
+    () => h.vt.waitForRender(), 'the verified credential set')
+  assert.deepEqual(h.calls.filter(call => call.startsWith('set:')), ['set:DEEPSEEK_API_KEY'],
+    'exactly the official reference was written through the store')
+  assert.deepEqual(h.writtenSecrets, [{ ref: 'DEEPSEEK_API_KEY', secret: 'sk-r4-secret' }],
+    'the masked input reached the store verbatim')
+  assert.doesNotMatch(h.view(), /sk-r4-secret/u, 'the secret is never rendered back')
+  // Leave the whole workspace and re-enter through Tools → Web: the page must
+  // read the FRESH official presence, not a cached pre-set snapshot.
+  for (let attempt = 0; attempt < 8 && h.view().includes('Settings ·'); attempt += 1) await key(h, '\x1b')
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the workspace really closed')
+  await openWebCredentialRow(h)
+  assert.match(h.view(), /State: Configured · source: file/u, `the fresh Web presence is Configured:\n${h.view()}`)
+  assert.doesNotMatch(h.view(), /sk-r4-secret/u)
   h.close()
 })
 
-test('the Web page Clear deeplink opens the SAME reference clear confirmation and a cancel writes nothing', async () => {
+test('the Web page Clear deeplink completes a REAL unset on the SAME reference and the page reads the fresh absence', async () => {
   const h = open(140, 40)
   await h.vt.waitForRender()
   await openWebCredentialRow(h)
-  await key(h, '\x1b[B') // Configure -> Clear in Models…
+  assert.match(h.view(), /State: Configured/u)
+  await key(h, '\x1b[B') // Configure -> the enabled Clear in Models…
   await key(h, '\r')
-  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && /Clear|Sign out|Confirm/u.test(frame),
+  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && /Clear credential|Clear stored credential/u.test(frame),
     () => h.vt.waitForRender(), 'the Models clear confirmation')
   assert.match(h.view(), /DEEPSEEK_API_KEY/u, 'the clear target is the SAME official reference')
-  // Cancel: Esc leaves the confirmation without any credential write.
-  await key(h, '\x1b')
+  await key(h, '\r') // the ONE explicit clear confirmation
+  await waitForFrame(h.view, frame => /API key DEEPSEEK_API_KEY cleared|cleared/u.test(frame),
+    () => h.vt.waitForRender(), 'the confirmed clear result')
+  assert.deepEqual(h.calls.filter(call => call.startsWith('unset:')), ['unset:DEEPSEEK_API_KEY'],
+    'exactly the official reference was unset through the store')
+  // Re-enter through Tools → Web: the fresh official absence is displayed.
+  for (let attempt = 0; attempt < 8 && h.view().includes('Settings ·'); attempt += 1) await key(h, '\x1b')
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the workspace really closed')
+  await openWebCredentialRow(h)
+  assert.match(h.view(), /State: Not configured/u, `the fresh Web presence is Not configured:\n${h.view()}`)
+  h.close()
+})
+
+test('the Web page Clear deeplink cancel writes nothing', async () => {
+  const h = open(140, 40)
+  await h.vt.waitForRender()
+  await openWebCredentialRow(h)
+  await key(h, '\x1b[B') // Clear in Models…
+  await key(h, '\r')
+  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && /Clear credential|Clear stored credential/u.test(frame),
+    () => h.vt.waitForRender(), 'the Models clear confirmation')
+  await key(h, '\x1b') // cancel
   assert.deepEqual(h.calls.filter(call => call.startsWith('unset:')), [],
     'a cancelled clear performs ZERO credential writes')
   h.close()

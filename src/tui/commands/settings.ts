@@ -452,6 +452,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   const webSettingsAvailable = (): boolean => runner.config.web.available()
 
+  /** Why the Web page may not commit right now. The page keeps painting the
+   *  LAST read facts (they are readable), but it offers no confirmable
+   *  candidate, no endpoint draft and no credential action while the backend is
+   *  not current — the commit entry would refuse every one of them at its turn,
+   *  so offering them would be a false affordance. */
+  const webWritableRefusal = (): string | undefined => {
+    if (!webSettingsAvailable()) return 'the Host Web provider settings are not available on this backend'
+    const readiness = runner.config.configReadiness()
+    if (readiness === 'ready') return undefined
+    return readiness === 'stale'
+      ? 'the configuration is not current (reconnecting): Web settings are read-only until it reconnects'
+      : 'the configuration backend is unavailable: Web settings are read-only'
+  }
+
   /** The LATEST authority facts the Web page renders. A pending read is
    *  `pending` (never a last-known value presented as current); an unavailable
    *  backend, a failed read and a resolved-but-unreadable read each state their
@@ -1247,6 +1261,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           startWebSettingsRead()
           const page = new WebSettingsPage({
             readFacts: webSettingsFacts,
+            writableRefusal: webWritableRefusal,
             credentialAvailable: () => runner.config.credentials.available(),
             commit: (id, requested) => commitWebIntent(id, requested),
             refresh: () => { startWebSettingsRead() },

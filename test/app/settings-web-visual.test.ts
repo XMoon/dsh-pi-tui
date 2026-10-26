@@ -323,7 +323,7 @@ for (const [columns, rows] of SIZES) {
     // the list alone, where the selected row's own value IS the Host fact.
     assert.match(scrolled, /Current: |Reference: |Configured · source: file/u,
       `the selected row states a real Host fact:\n${scrolled}`)
-    const lastRowPainted = scrolled.includes('DeepSeek API Key') || scrolled.includes('Search / Fetch Endpoint')
+    const lastRowPainted = scrolled.includes('DeepSeek API Key') || scrolled.includes('Search / Fetch API Endpoint')
       || scrolled.includes('Search API Result Count') || scrolled.includes('Share Original Question')
     assert.ok(lastRowPainted, `the scroll really reveals later frozen rows:\n${scrolled}`)
     // Esc from the list returns to the Tools row (never a second overlay).

@@ -105,6 +105,8 @@ interface Harness {
   /** Hold EVERY authority read issued until the returned release is called
    *  (a page entry starts its own fresh read; a one-shot gate would miss it). */
   readonly holdAllReads: () => () => void
+  /** Move the LIVE backend readiness (the page must gate on it). */
+  readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
   readonly view: () => string
   readonly invoke: (name?: string) => unknown
   readonly dispose: () => void
@@ -115,6 +117,12 @@ function setup(options: {
   readonly rows?: number
   readonly available?: boolean
   readonly searchProvider?: string
+  /** The stored `web-deepseek-api.count` (a value outside the presets stays). */
+  readonly count?: number
+  /** Whether the official credential reference reads as configured. */
+  readonly configured?: boolean
+  /** Whether the official credential STORE is mounted (`credentials.available`). */
+  readonly credentialStore?: boolean
 }
 = {}): Harness {
   const columns = options.columns ?? 140
@@ -129,6 +137,7 @@ function setup(options: {
   let readHoldAll: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   let readsIssued = 0
   let readsSettled = 0
+  let readiness: 'ready' | 'stale' | 'unavailable' = 'ready'
   const store = {
     available: options.available ?? true,
     failNext: undefined as string | undefined,
@@ -140,8 +149,8 @@ function setup(options: {
     web: {
       searchProvider: options.searchProvider ?? 'deepseek-official',
       fetchProvider: 'http',
-      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
-      credential: { configured: true, source: 'file' },
+      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: options.count ?? 10, sendOriginalQuestion: true },
+      credential: options.configured === false ? { configured: false } : { configured: true, source: 'file' },
     } as WebProviderSettings,
   }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
@@ -227,12 +236,12 @@ function setup(options: {
         writeProfile: async () => {},
         writeKeylessProfile: async () => ({ kind: 'written' as const }),
       },
-      configReadiness: () => 'ready',
+      configReadiness: () => readiness,
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
       credentials: {
-        available: () => true,
+        available: () => options.credentialStore !== false,
         describeReference: async () => ({ configured: true, source: 'file' }),
       },
       web: {
@@ -309,6 +318,7 @@ function setup(options: {
       readGate = { promise, release }
       return release
     },
+    setReadiness: (next) => { readiness = next },
     holdAllReads: () => {
       let release = (): void => {}
       const promise = new Promise<void>(resolve => { release = () => resolve() })
@@ -531,7 +541,7 @@ test('the workspace row reports the configured providers and opens the Web page 
   // The six frozen rows, in order, on one frame (120x40 paints the whole list).
   let previous = -1
   for (const label of ['Web Search Provider', 'Web Fetch Provider', 'Search API Result Count',
-    'Share Original Question', 'Search / Fetch Endpoint', 'DeepSeek API Key']) {
+    'Share Original Question', 'Search / Fetch API Endpoint', 'DeepSeek API Key']) {
     const at = page.indexOf(label)
     assert.ok(at > previous, `the frozen row order holds (${label}):\n${page}`)
     previous = at
@@ -1237,6 +1247,145 @@ test('the page and the legacy Web row share ONE authority and one FIFO', async t
   await key(h, DOWN)
   assert.match(h.view(), /Current: 20/u, `the page reads the legacy write:\n${h.view()}`)
 })
+
+test('a stored count outside the presets stays readable and navigation never rewrites it', async t => {
+  const h = setup({ count: 7 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 2)
+  const frame = h.view()
+  assert.match(frame, /Current: 7/u, `the raw Host integer is reported exactly:\n${frame}`)
+  // The four presets are offered, but NONE claims to be current (the stored 7
+  // is not one of them).
+  for (const preset of ['5', '10', '20', '50']) assert.match(frame, new RegExp(`[› ] ${preset}`, 'u'))
+  const countLine = frame.split('\n').find(line => line.includes('› 5')) ?? ''
+  assert.doesNotMatch(countLine, /\[current\]/u, 'no preset claims the stored 7 as current')
+  await key(h, ENTER) // open the Detail
+  assert.match(h.view(), /Current: 7/u)
+  assert.deepEqual(h.writes, [], 'browsing a non-preset count writes nothing')
+})
+
+test('Clear in Models… is painted as a disabled fact and is never focusable', async t => {
+  const h = setup({ configured: false })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  const detail = h.view()
+  assert.match(detail, /State: Not configured/u)
+  assert.match(detail, /Clear in Models… \(unavailable\)/u, `the disabled action is named:\n${detail}`)
+  // The CURSOR only visits enabled actions (the disabled Clear is a fact, not a
+  // target): Down cannot move the highlight onto it and the bar still describes
+  // the ONE action Enter would really run (Configure).
+  assert.doesNotMatch(detail, /› Clear in Models…/u, 'the disabled Clear never owns the cursor')
+  await key(h, DOWN)
+  assert.match(h.view(), /› Configure in Models…/u, 'the cursor stays on the ONE enabled action')
+  assert.match(h.view(), /Enter open in Models/u, 'the bar describes the enabled action the cursor owns')
+  assert.doesNotMatch(h.view(), /› Clear in Models…\(unavailable\)/u)
+  assert.deepEqual(h.writes, [])
+})
+
+test('no credential action is offered when the store is unavailable, and the bar says so', async t => {
+  const h = setup({ credentialStore: false })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  const detail = h.view()
+  assert.match(detail, /The official credential store is unavailable/u)
+  assert.doesNotMatch(detail, /Enter open in Models/u, 'no false Enter affordance without an action')
+  assert.match(detail, /Esc back/u)
+  await key(h, ENTER)
+  assert.doesNotMatch(h.view(), /Settings · Models/u)
+  assert.deepEqual(h.writes, [])
+})
+
+test('a stale backend keeps the readable facts but offers no candidate and dispatches nothing', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  h.setReadiness('stale')
+  await key(h, 'r') // the read is still readable; the backend is not current
+  await settlePainted(h, 'the stale refusal', frame => frame.includes('reconnecting'))
+  await pageListSelect(h, 0)
+  await key(h, ENTER)
+  const detail = h.view()
+  assert.match(detail, /Current: Messages/u, 'the readable fact is still painted')
+  assert.match(detail, /read-only until it reconnects/u, `the refusal names the reason:\n${detail}`)
+  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists on a non-current backend')
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [], 'a stale backend dispatches nothing')
+  // Recovery: a ready backend + a fresh read restore the candidates.
+  h.setReadiness('ready')
+  await key(h, 'r')
+  await settlePainted(h, 'the recovered candidates', frame => frame.includes('Enter confirm'))
+  await chooseCandidate(h, 1) // Messages (the current value) -> DeepSeek Search API
+  await key(h, ENTER)
+  await settlePainted(h, 'the recovered verified write', frame => frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+})
+
+test('R4-09 a page turn holds the FIFO while a LEGACY editor intent is already queued', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.writeDelayMs = 120
+  await openWebPage(h)
+  // Dispatch the page write; HOLD EVERY authority read so its readback (and the
+  // reopen / legacy mount reads) stay pending: the page's FIFO turn is open.
+  const releaseReads = h.holdAllReads()
+  t.after(releaseReads)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  await settlePainted(h, 'the page write to dispatch', frame => frame.includes('Saving…'))
+  await closeWorkspace(h)
+  await openLegacyCountRow(h)
+  const pendingReads = h.readCount() - h.settledReadCount()
+  assert.ok(pendingReads >= 1, 'the held reads keep the page turn open')
+  // Enqueue the LEGACY intent while the page turn is still open.
+  await key(h, ENTER)
+  assert.ok(!h.log.some(entry => entry.startsWith('begin:count:')),
+    `the legacy intent must NOT start while the page turn is open:\n${h.log.join('\n')}`)
+  const mark = settledWritesMark(h)
+  releaseReads()
+  await awaitWriteSettlement(h, 'count:5', mark)
+  assert.deepEqual(h.log, [
+    'begin:search:deepseek-search-api',
+    'search:deepseek-search-api',
+    'begin:count:5',
+    'count:5',
+  ], 'the legacy intent starts only after the page turn settled')
+  assert.equal(h.maxConcurrentWrites(), 1, 'ONE queue: never two Web writes in flight')
+  assert.deepEqual(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.equal(h.store.web.api.count, 5)
+  // BOTH surfaces read the SAME authoritative winner: the legacy editor's
+  // provider row shows the page's committed search provider...
+  for (let step = 0; step < 2; step += 1) await key(h, UP)
+  await settlePainted(h, 'the legacy provider row to repaint the page write', frame =>
+    frame.includes('Current: DeepSeek Search API'))
+  assert.match(h.view(), /Current: DeepSeek Search API/u, `the legacy row reads the page write:\n${h.view()}`)
+  await key(h, ESC) // leave the legacy editor
+  // ...and the re-entered page shows BOTH committed values (the legacy count
+  // write included) from ONE fresh read.
+  await openWebPage(h)
+  assert.match(h.view(), /Current: DeepSeek Search API/u)
+  await pageListSelect(h, 2)
+  assert.match(h.view(), /Current: 5/u, `the page reads the legacy write:\n${h.view()}`)
+})
+
+/** Open the LEGACY editor through its transition row and walk to the Web count
+ *  row (Up*4 from the keyboard-shortcuts anchor). */
+async function openLegacyCountRow(h: Harness): Promise<void> {
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  await selectSettingsCategory(h.vt, 'Input & Terminal')
+  await key(h, ENTER)
+  for (let step = 0; step < 6; step += 1) await key(h, DOWN)
+  await key(h, ENTER)
+  await settlePainted(h, 'the legacy editor to mount', frame => frame.includes('Keyboard shortcuts'))
+  for (let step = 0; step < 4; step += 1) await key(h, UP)
+  assert.match(h.view(), /Search API Result Count/u, `the legacy Web rows are reachable:\n${h.view()}`)
+}
 
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
 
