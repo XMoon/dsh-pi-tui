@@ -1475,7 +1475,7 @@ test('an endpoint grant too short for the trust disclosure refuses the confirm',
   await openWebRow(h, 4) // the endpoint row opens its editor with a 1-line body
   const tiny = h.view()
   assert.doesNotMatch(tiny, /Enter confirm/u, `a cropped disclosure offers no Confirm:\n${tiny}`)
-  assert.match(tiny, /enlarge for the trust warning/u, 'the bar states how to reveal the disclosure')
+  assert.match(tiny, /enlarge for the warning/u, 'the bar states how to reveal the disclosure')
   await key(h, ENTER)
   assert.deepEqual(h.writes, [], 'a blind Confirm dispatches nothing')
   // Revealing the disclosure re-enables the explicit confirm path.
@@ -1489,6 +1489,41 @@ test('an endpoint grant too short for the trust disclosure refuses the confirm',
   await key(h, ENTER)
   await settleEndpointPanel(h)
   assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v4'])
+})
+
+test('a dispatched write keeps its live state visible on a grant too short for the disclosure', async t => {
+  const h = setup({ columns: 44, rows: 8 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // editor with the complete disclosure
+  h.store.failNext = 'mutate rejected'
+  const release = h.holdRead() // the refused write's reread stays pending => Saving…
+  t.after(release)
+  await editEndpointDraft(h, '/v5')
+  await key(h, ENTER) // dispatch the write
+  // Shrink below the disclosure: the live state must stay visible and the bar
+  // must not imply the dispatched mutation can be cancelled.
+  h.vt.resize(44, 3)
+  await h.vt.waitForRender()
+  const tinySaving = h.view()
+  assert.match(tinySaving, /Saving…/u, `the in-flight state survives the resize:\n${tinySaving}`)
+  assert.doesNotMatch(tinySaving, /Esc cancel/u,
+    `a dispatched write is never described as cancellable:\n${tinySaving}`)
+  release()
+  // The refusal settles while the grant is still tiny: its verdict stays visible.
+  const tinyRefused = await settlePainted(h, 'the refused verdict on the tiny grant', frame =>
+    frame.includes('Not saved'))
+  assert.match(tinyRefused, /Not saved/u)
+  assert.doesNotMatch(tinyRefused, /Esc cancel/u, 'a refused write is not a cancelled draft')
+  assert.deepEqual(h.writes, [], 'the failed setter dispatched no Host write')
+  // Enlarging reveals the full reason and restores the explicit confirm path;
+  // the draft survives, and a corrected confirm really writes.
+  h.vt.resize(44, 8)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Not saved · mutate rejected/u, `the full verdict is revealed:\n${h.view()}`)
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v5'])
 })
 
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
