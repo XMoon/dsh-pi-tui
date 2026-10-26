@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, MessageId, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
@@ -20,6 +20,8 @@ import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/c
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
+import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -644,4 +646,68 @@ test('the machine blocks stay hidden across the design-language size matrix', as
     app.stop()
     disposeStartedApps()
   }
+})
+
+
+test('the Work tool card survives unchanged when the final answer also renders the published figure', async () => {
+  const args = {
+    kind: 'bars' as const,
+    title: 'Request latency',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const fact = chartFactFromArgs(args)
+  const ref = `sv1_${'8'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as never,
+    ...chartRows(),
+    {
+      type: 'assistant/message',
+      seq: 3,
+      time: 3,
+      data: {
+        turn: 0,
+        step: 1,
+        message: {
+          id: MessageId('tool-card-inline'),
+          role: 'assistant',
+          content: [{ type: 'text', text: `Before.\n\n${marker}\n\nAfter.` }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as never,
+    { type: 'turn/end', seq: 4, time: 4, data: { turn: 0, reason: { kind: 'completed' } } } as never,
+  ])
+  const assistant = folder.messages().find(
+    (message): message is Extract<ReturnType<TranscriptFolder['messages']>[number], { kind: 'assistant' }> =>
+      message.kind === 'assistant',
+  )
+  assert.ok(assistant !== undefined)
+  const publication: PublishedVisual = {
+    ref, turn: 0, step: 1, stepStartSeq: 5, callSeq: 6, resultSeq: 7, callId: 'present-tool-card',
+    source: {
+      ref, type: 'chart', title: fact.title, turn: 0, step: 0, stepStartSeq: 1, callSeq: 2, resultSeq: 3, callId: 'call-1',
+      chart: fact, svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined,
+    },
+  }
+  setAssistantVisualPresentation(assistant, {
+    subjectKind: 'main', subjectId: 'tool-card', sourceIdentity: {}, session: {}, sessionId: 'tool-card', seq: 4,
+    turn: 0, step: 1, text: assistant.text, content: undefined, assistantRevision: 0,
+  }, [publication])
+
+  const { vt, app } = mountApp({ width: 100 })
+  await vt.waitForRender()
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // The Work card keeps its own title/values; the final answer adds ONE inline
+  // copy at the marker position instead of replacing or hiding the Work row.
+  assert.ok(view.includes('🛠️  Chart Request latency'), `the Work tool card is still painted:\n${view}`)
+  const after = view.indexOf('After.')
+  assert.ok(view.indexOf('Request latency', view.indexOf('Before.')) > view.indexOf('Before.'))
+  assert.ok(view.indexOf('Request latency', view.indexOf('Before.')) < after)
+  assert.ok(!view.includes('[dsh-visual-'))
+  app.stop()
 })

@@ -197,6 +197,10 @@ export interface VisualSource {
   readonly svg: SvgFact | undefined
   /** The admitted SVG source, present only for a `ready` authorization. */
   readonly svgSource: string | undefined
+  /** The already-admitted display target width (the user-coordinate width the
+   * SVG admission decided); present only with `svgSource`. A renderer reuses
+   * this value instead of re-running admission. */
+  readonly svgAdmissionWidth: number | undefined
 }
 
 /** The parsed and structurally validated publication receipt. */
@@ -434,7 +438,7 @@ function qualifySource(call: IndexedCall): VisualSource | undefined {
   }
   if (call.name === CHART_TOOL_NAME) {
     return fact.type === 'chart'
-      ? { ...base, type: 'chart', chart: fact, svg: undefined, svgSource: undefined }
+      ? { ...base, type: 'chart', chart: fact, svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined }
       : undefined
   }
   if (fact.type !== 'svg') return undefined
@@ -442,7 +446,14 @@ function qualifySource(call: IndexedCall): VisualSource | undefined {
   // admission gate against the FINAL content; no cached blob, PNG or meta is read.
   const authorization = authorizeSvg(call.arguments, result.content, 'ok')
   if (authorization.state !== 'ready') return undefined
-  return { ...base, type: 'svg', chart: undefined, svg: fact, svgSource: authorization.source }
+  return {
+    ...base,
+    type: 'svg',
+    chart: undefined,
+    svg: fact,
+    svgSource: authorization.source,
+    svgAdmissionWidth: authorization.admission.width,
+  }
 }
 
 /**

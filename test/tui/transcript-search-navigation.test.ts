@@ -13,6 +13,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -936,5 +938,96 @@ test('navigation: an explicit re-navigation re-opens a manually collapsed PTC su
   assert.equal(subCallExpanded.has('grand-1'), true, 'the current PTC child is promoted on dismiss')
   assert.ok(lines.some(line => line.includes('deepest-needle output')),
     `a non-suppressed search reveal stays open after dismiss:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+
+// ── a published visual Assistant keeps rendered search geometry ───────────
+
+function searchChartPublication(ref: string): PublishedVisual {
+  return {
+    ref, turn: 0, step: 1, stepStartSeq: 5, callSeq: 6, resultSeq: 7, callId: 'present-search',
+    source: {
+      ref, type: 'chart', title: 'Search latency', turn: 0, step: 0, stepStartSeq: 1, callSeq: 2, resultSeq: 3, callId: 'chart-search',
+      chart: { version: 1, type: 'chart', kind: 'bars', title: 'Search latency', unit: 'ms', series: [{ label: 'p50', value: 42 }] },
+      svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined,
+    },
+  }
+}
+
+function visualAnswerFolder(ref: string, text: string): {
+  folder: TranscriptFolder
+  assistant: Extract<TranscriptMessage, { kind: 'assistant' }>
+} {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as unknown as SessionEvent,
+    {
+      type: 'assistant/message',
+      seq: 1,
+      time: 2,
+      data: {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('search-visual'),
+          role: 'assistant',
+          content: [{ type: 'text', text }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: 2, time: 3, data: { turn: 0, reason: { kind: 'completed' } } } as unknown as SessionEvent,
+  ])
+  const assistant = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(assistant !== undefined)
+  setAssistantVisualPresentation(assistant, {
+    subjectKind: 'main', subjectId: 'search', sourceIdentity: {}, session: {}, sessionId: 'search', seq: 2,
+    turn: 0, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
+  }, [searchChartPublication(ref)])
+  return { folder, assistant }
+}
+
+test('search after an inline figure highlights the rendered answer row', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\nAfter needle.`)
+  const { vt, app } = startApp()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: assistant,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('After needle.'))
+  assert.ok(row >= 0, `the searched answer row is visible:\n${lines.join('\n')}`)
+  const col = lines[row]!.indexOf('needle')
+  assert.ok(vt.getCellUnderline(row, col), 'the rendered occurrence is weak-highlighted')
+  assert.equal(vt.getCellBgRgb(row, col), undefined, 'a message-source occurrence is never falsely exact')
+  app.stop()
+})
+
+test('a search that only matches a consumed marker line paints no false anchor', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\nAfter.`)
+  const { vt, app } = startApp()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: `dsh-visual-${ref}`,
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: assistant,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('Before figure.'))
+  assert.ok(row >= 0, `the answer remains visible:\n${lines.join('\n')}`)
+  const col = lines[row]!.indexOf('Before figure.')
+  assert.equal(vt.getCellBgRgb(row, col), undefined, 'no anchor wash for a hidden marker-only match')
+  assert.equal(vt.getCellUnderline(row, col), false, 'no false occurrence highlight')
   app.stop()
 })

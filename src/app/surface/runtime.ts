@@ -129,8 +129,16 @@ import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
 import type { StatusPatch } from '../../domain/status/types.ts'
 import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
-import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
-import type { TranscriptMessage } from '../../domain/transcript/types.ts'
+import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
+import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
+import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
+import { collectPublishedVisuals, type PublishedVisual } from '../../domain/visual/publication.ts'
+import {
+  clearAssistantVisualPresentation,
+  setAssistantVisualPresentation,
+  type VisualEventSnapshot,
+  type VisualPresentationKey,
+} from '../../domain/visual/presentation.ts'
 import type { TranscriptSearchMatch } from '../../domain/transcript/search.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import { streamingToolPreviewSnapshot, type StreamingToolPreview } from './streaming-tool-preparing.ts'
@@ -527,6 +535,21 @@ export interface SurfaceRuntimeOptions {
    * keeps its exact behaviour and no TSP code enters the product build graph.
    */
   readonly onTranscriptProjected?: (frame: TranscriptProjectionFrame) => void
+  /**
+   * The ONE read-only visual-event supply the transcript projection consults.
+   *
+   * The composition root implements it from the exact live Direct Session
+   * (`agentNow()` / the mounted viewed child's Agent): it returns the complete
+   * committed log plus the exact Session instance and its current `seq`, or
+   * `undefined` when no trustworthy same-Session read exists (Remote, no
+   * session, a stale subject). This surface neither creates a Host service nor
+   * keeps a second publication index: every changed identity re-runs PR1's
+   * `collectPublishedVisuals` over the official events.
+   */
+  readonly visualEventSnapshotFor?: (subject: {
+    readonly subjectKind: 'main' | 'viewed-child'
+    readonly subjectId: string | undefined
+  }) => VisualEventSnapshot | undefined
 }
 
 /**
@@ -1246,6 +1269,103 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     })
   }
 
+  /**
+   * The ONE derived-publication memo: a performance cache only. The authority
+   * is always the complete official log re-read through
+   * {@link collectPublishedVisuals}; the memo invalidates on the exact Session
+   * instance or its committed `seq`, so a resume, a cold rehydrate or a
+   * viewer switch can never reuse a previous subject's facts.
+   */
+  let visualSnapshotMemo: {
+    readonly session: object
+    readonly sessionId: string
+    readonly seq: number
+    readonly publications: readonly PublishedVisual[]
+  } | undefined
+  const publicationsOf = (snapshot: VisualEventSnapshot): readonly PublishedVisual[] => {
+    const memo = visualSnapshotMemo
+    if (memo !== undefined
+      && memo.session === snapshot.session
+      && memo.sessionId === snapshot.sessionId
+      && memo.seq === snapshot.seq) return memo.publications
+    const publications = collectPublishedVisuals(snapshot.sessionId, snapshot.events)
+    visualSnapshotMemo = {
+      session: snapshot.session,
+      sessionId: snapshot.sessionId,
+      seq: snapshot.seq,
+      publications,
+    }
+    return publications
+  }
+
+  /**
+   * PR2: attach the proven visual projection to the EXACT eligible final
+   * Assistant objects of the window being committed. The derivation uses the
+   * captured target's exact subject and source token, and it re-checks the
+   * target after the synchronous commit so a re-entrant session handover can
+   * never leave a stale attribution behind. Rows that are not the qualified
+   * final have their old sidecar cleared explicitly.
+   */
+  const applyVisualPresentations = (
+    target: ProjectionTarget,
+    messages: readonly TranscriptMessage[],
+    activities: ReadonlyMap<number, TurnActivity>,
+  ): void => {
+    const assistantRows = messages.filter(
+      (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+    )
+    const supply = options.visualEventSnapshotFor
+    if (supply === undefined) {
+      for (const message of assistantRows) clearAssistantVisualPresentation(message)
+      return
+    }
+    const snapshot = supply({ subjectKind: target.subjectKind, subjectId: target.subjectId })
+    if (snapshot === undefined
+      || (target.subjectId !== undefined && snapshot.sessionId !== target.subjectId)) {
+      for (const message of assistantRows) clearAssistantVisualPresentation(message)
+      return
+    }
+    const publications = publicationsOf(snapshot)
+    const sourceIdentity = projectionTokenFor(target.folder)
+    const selected = new Set<TranscriptMessage>()
+    for (const [turn, activity] of activities) {
+      const group = messages.filter(message => 'turn' in message && message.turn === turn)
+      const final = eligibleFinalAssistant(activity, group)
+      if (final === undefined) continue
+      const turnPublications = publications.filter(publication => publication.turn === turn)
+      if (turnPublications.length === 0) continue
+      const message = final.message
+      const key: VisualPresentationKey = {
+        subjectKind: target.subjectKind,
+        subjectId: target.subjectId,
+        sourceIdentity,
+        session: snapshot.session,
+        sessionId: snapshot.sessionId,
+        seq: snapshot.seq,
+        turn: message.turn,
+        step: assistantStepOf(message),
+        text: message.text,
+        content: message.content,
+        assistantRevision: assistantPresentationRevision(message),
+      }
+      setAssistantVisualPresentation(message, key, turnPublications)
+      selected.add(message)
+    }
+    for (const message of assistantRows) {
+      if (!selected.has(message)) clearAssistantVisualPresentation(message)
+    }
+    // The commit below can synchronously hand the session to another owner
+    // (plugin/modal callbacks). The captured target is no longer the live one
+    // then, so the derived sidecars are discarded instead of surviving into the
+    // next subject's projection; the successor's own repaint re-derives.
+    if (isCleanedUp()) return
+    const current = captureProjectionTarget(activeFolder(), activeWindow())
+    if (current.folder !== target.folder || current.controller !== target.controller
+      || current.subjectKind !== target.subjectKind || current.subjectId !== target.subjectId) {
+      for (const message of selected) clearAssistantVisualPresentation(message)
+    }
+  }
+
   // Coalesced repaint: streaming events fold into the folder immediately
   // (cheap) but the view rebuild flushes at most every REPAINT_FLUSH_MS, and
   // immediately on turn/end (`paintNow`).
@@ -1273,9 +1393,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     })
     onProjected?.()
     // Capture the subject identity and its source at ONE instant BEFORE the
-    // commit; the frame publishes only if all four are still live afterwards.
-    const target = projectionObserver === undefined ? undefined : captureProjectionTarget(folder, controller)
-    displaySeam().setTranscript(projection.messages, folder.turnActivities(), {
+    // commit; both the visual sidecars and the read-only observer are scoped to
+    // this exact selection.
+    const needsTarget = projectionObserver !== undefined || options.visualEventSnapshotFor !== undefined
+    const target = needsTarget ? captureProjectionTarget(folder, controller) : undefined
+    const activities = folder.turnActivities()
+    if (target !== undefined) applyVisualPresentations(target, projection.messages, activities)
+    displaySeam().setTranscript(projection.messages, activities, {
       ...controller.state(),
       firstTurn: projection.firstTurn,
       lastTurn: projection.lastTurn,

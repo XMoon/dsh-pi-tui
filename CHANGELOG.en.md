@@ -26,7 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason. Publication adds no session event, durable publication table or cache — cold replay
   derives the same facts from the same log — and the human-facing cards, search and `/transcript`
   export never show these machine lines while the raw session log keeps them intact. The existing
-  Tool Card still renders the visuals; inlining them into the final answer is a later stage.
+  Tool Card still renders the visuals, and published ones now also enter the final answer (below).
+- **Published charts/SVGs now appear inside the final answer, still as one Assistant row.** A
+  strict `[dsh-visual-sv1_…]: <#>` definition inserts its figure at that exact source position,
+  at most once per ref. Published figures with no marker are appended to the end of the answer in
+  first-publication order, before delivered files. Unpublished, forged, repeated or merely
+  code-block/indented/quote-shaped definitions draw nothing and never eat source text. Link
+  definitions keep their Markdown semantics: a reference before the figure and a definition after
+  it (or the reverse) resolve to the original destination; the definition context is display-only
+  and never reaches the session, model messages, search corpus or `/transcript` export. The final
+  answer remains one transcript row, one bullet, one component cache entry and one disclosure
+  owner; Full/Compact/Focus, expand/collapse, resizing and search navigation never duplicate the
+  figure or change its ownership. The existing Tool/Work cards and SVG description/source entries
+  stay unchanged. Direct main sessions and readable viewed children are covered; Remote and
+  native TSP mixing are not claimed here.
 - **`/settings → Agent` now edits permission, delegation and user-shell policy in place, and the
   `Agent settings…` transition row is retired.** The frozen order is `Approval policy (this
   session)` → `Default permission` → `Subagent allowed models` → `Subagent model selection` →

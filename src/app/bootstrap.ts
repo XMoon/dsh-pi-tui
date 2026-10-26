@@ -120,6 +120,7 @@ import { createSessionScopeAuthority, type LiveSessionScope } from '../app/sessi
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
+import { asVisualSessionEvents, type VisualSessionEvent } from '../domain/visual/publication.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
@@ -483,6 +484,55 @@ export function applyRunnerWithRuntime(
     // guarded writer stays hoisted with the runner scope so the terminal-total
     // fatal catch (outside the startup IIFE) can disable focus reporting too.
 
+    /**
+     * The exact live Session the visual sidecar may read: the main Direct
+     * attachment, or the mounted viewed child's Agent. Both are read through
+     * the EXISTING owners (agentNow / viewerRef); this is not a new Host
+     * service. Remote has no trustworthy complete-log read here, so it returns
+     * undefined and keeps only PR1's Tool/Work behavior.
+     */
+    /** Read-only memo of the last filtered visual-event view. The authority is
+     * always the exact Session log; this only avoids filtering the same
+     * committed log again on theme/resize/scroll repaints (the seq fence is
+     * the cache key, and a new Session instance always invalidates). */
+    let visualLogMemo: {
+      readonly session: object
+      readonly seq: number
+      readonly events: readonly VisualSessionEvent[]
+    } | undefined
+    const visualEventSnapshotFor = (subject: {
+      readonly subjectKind: 'main' | 'viewed-child'
+      readonly subjectId: string | undefined
+    }) => {
+      if (remoteSources !== undefined) return undefined
+      // A structural read only (the gate forbids new bootstrap declarations):
+      // the exact live Agent's Session object, never a second service.
+      const agent = (subject.subjectKind === 'main'
+        ? agentNow()
+        : viewerRef?.viewedChildAgent()) as {
+        readonly session: {
+          readonly id: string
+          readonly seq: number
+          snapshotEvents(): readonly { readonly type: string }[]
+        }
+      } | undefined
+      if (agent === undefined) return undefined
+      const session = agent.session
+      if (subject.subjectId !== undefined && session.id !== subject.subjectId) return undefined
+      const seq = session.seq
+      const memo = visualLogMemo
+      const events = memo !== undefined && memo.session === session && memo.seq === seq
+        ? memo.events
+        : asVisualSessionEvents(session.snapshotEvents())
+      visualLogMemo = { session, seq, events }
+      return {
+        session,
+        sessionId: session.id,
+        seq,
+        events,
+      }
+    }
+
     // A4: the mounted surface's ONE application owner. It owns the concrete
     // surface state (the opening journal + the unified status projection store,
     // the footer's single input) and the notification/focus presentation from
@@ -510,6 +560,9 @@ export function applyRunnerWithRuntime(
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.
       createPluginManagerPanel: createPluginManagerWorkspacePanel,
+      // The PR2 read-only visual snapshot supply: Direct main attachment or the
+      // mounted viewed child's exact Session, undefined on Remote.
+      visualEventSnapshotFor,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
