@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never fabricating a drawing. The surrounding Markdown keeps its link definitions, code, lists and
   footnotes. Each figure carries a real Copy button: a chart copies the final ChartFact as pretty
   JSON, an SVG copies the raw source; `Alt+V` cycles the selected figure of the current window in
-  paint order and marks it with `Selected · i/n`, `Alt+C` copies the current selection, and an
+  paint order, marks it with `Selected · i/n`, and keeps the current figure and its position
+  visible in the dock (`Selected i/n · <title>`); `Alt+C` copies the current selection, and an
   unselected chord shows a hint. Whether the selected figure is already inside the current viewport
   remains the Tern client's own transcript scroll position; the program adds no page, Reader or
   second scroll owner. Copy reuses the existing ClientActions clipboard policy; an old frame, an old

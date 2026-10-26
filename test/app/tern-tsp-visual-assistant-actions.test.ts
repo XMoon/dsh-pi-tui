@@ -31,6 +31,12 @@ import { svgDigest, svgHumanText, type SvgFact } from '../../src/domain/visual/s
 import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import { mountTspRenderer, type TspInputHandlers, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import {
+  TSP_VISUAL_CHORDS,
+  TSP_VISUAL_COPY_LABEL,
+  TSP_VISUAL_SELECT_LABEL,
+  formatKeyId,
+} from '../../src/tui/keybindings/hints.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -92,10 +98,15 @@ class ScriptedTern {
   readonly input = new FakeInput()
   readonly output = new FakeOutput()
   readonly events: WireEvent[] = []
+  /** Every surface OPEN message (`o`), in order: the Reader is a second one. */
+  readonly opens: { readonly id: string; readonly mode?: string; readonly title?: string }[] = []
 
   constructor(hello: typeof HELLO = HELLO, options: { readonly failBlobWrite?: boolean } = {}) {
     this.output.onWrite = bytes => {
       const text = DECODER.decode(bytes)
+      for (const match of text.matchAll(/\u001b_tsp;o;([\s\S]*?)\u001b\\/g)) {
+        this.opens.push(JSON.parse(match[1] as string) as { id: string; mode?: string; title?: string })
+      }
       if (options.failBlobWrite === true && text.includes('\u001b_tsp;b;')) {
         throw new Error('the tty owner is gone')
       }
@@ -491,8 +502,18 @@ test('Alt+V selects the first figure, reveals it, then cycles and wraps', async 
 
     harness.tern.input.type('\u001bv')
     await until('the first selection badge', () => badgeTexts(harness.tern).includes('Selected · 1/2'))
-    const firstReveal = harness.tern.frames().flatMap(frame => frame.ops).find(op => op[0] === 'reveal')
+    const frames = harness.tern.frames()
+    const revealFrameIndex = frames.findIndex(frame => frame.ops.some(op => op[0] === 'reveal'))
+    const selectedFrameIndex = frames.findIndex(frame => frame.ops.some(op => op[0] === 'add'
+      && (op[4] as { c?: readonly { p?: Record<string, unknown> }[] }).c?.some(child => child.p?.['key'] === 'visual-selected')))
+    const firstReveal = frames.flatMap(frame => frame.ops).find(op => op[0] === 'reveal')
+    // The target is the REAL committed figure node id, and the reveal op is
+    // queued AFTER the frame that paints the selection: this is the exact
+    // application-side sequence the client's scroll owner receives.
     assert.deepEqual(firstReveal, ['reveal', figures[0], 'nearest'])
+    assert.equal(figures[0], figureIds(harness.tern)[0], 'the reveal target is still in the current frame')
+    assert.equal(revealFrameIndex > selectedFrameIndex, true,
+      `the reveal follows the selected frame (selected=${selectedFrameIndex}, reveal=${revealFrameIndex})`)
 
     harness.tern.input.type('\u001bv')
     await until('the second selection badge', () => badgeTexts(harness.tern).includes('Selected · 2/2'))
@@ -522,6 +543,7 @@ test('Alt+C copies the selected figure and leaves the composer draft untouched',
     harness.renderer.composer.setDraft('unfinished draft')
     harness.tern.input.type('\u001bv')
     await until('the first selection badge', () => badgeTexts(harness.tern).includes('Selected · 1/2'))
+    await until('the dock selection summary', () => textNodes(harness.tern).includes('Selected 1/2 · Request latency (ms)'))
     harness.tern.input.type('\u001bc')
     await until('the clipboard write', () => harness.copies.length === 1)
     assert.equal(harness.copies[0]?.text, JSON.stringify(CHART, null, 2))
@@ -542,6 +564,8 @@ test('a second Alt+C copies the newer selection, never the earlier figure', asyn
     await until('the chart copy', () => harness.copies.length === 1)
     harness.tern.input.type('\u001bv')
     await until('the second selection badge', () => badgeTexts(harness.tern).includes('Selected · 2/2'))
+    await until('the dock selection summary follows the selection',
+      () => textNodes(harness.tern).includes('Selected 2/2 · Dependencies'))
     harness.tern.input.type('\u001bc')
     await until('the SVG copy', () => harness.copies.length === 2)
     assert.equal(harness.copies[1]?.text, SVG_SOURCE)
@@ -760,6 +784,8 @@ test('switching A -> B -> A clears the old selection and every old Copy id', asy
     assert.equal(harness.copies.length, 0)
     harness.tern.input.type('\u001bc')
     await until('the selection prompt', () => textNodes(harness.tern).includes('Alt+V to select a visual'))
+    assert.equal(textNodes(harness.tern).some(text => text.startsWith('Selected ')), false,
+      'the dock keeps no selected-figure summary once the selection is gone')
   } finally {
     await harness.dispose()
   }
@@ -842,6 +868,111 @@ test('a Tool SVG and the Assistant image of the same source share ONE sent blob,
     await until('the expanded Tool SVG image', () => nodesWhere(harness.tern, node => node.kind === 'image').length === 2)
     assert.equal(harness.tern.blobs().length, 1,
       'expanding the Tool card reuses the content-addressed blob id instead of re-sending bytes')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── Shared chord authority and owner preemption ────────────────────────────
+
+/** The raw terminal bytes of one fixed alt chord (`alt+v` -> ESC v). */
+function chordSequence(chord: string): string {
+  const base = chord.split('+')[1]
+  assert.ok(base !== undefined, `a base key exists in ${chord}`)
+  return `\u001b${base}`
+}
+
+test('the visual chords and their dock labels come from the ONE chord table', async () => {
+  const harness = await mountHarness()
+  try {
+    assert.equal(TSP_VISUAL_SELECT_LABEL, formatKeyId(TSP_VISUAL_CHORDS.select))
+    assert.equal(TSP_VISUAL_COPY_LABEL, formatKeyId(TSP_VISUAL_CHORDS.copy))
+    harness.commit(bothFiguresAnswer().messages, {})
+    await until('the chord hint from the same table',
+      () => textNodes(harness.tern).includes(`${TSP_VISUAL_SELECT_LABEL} select visual · ${TSP_VISUAL_COPY_LABEL} copy`))
+
+    harness.tern.input.type(chordSequence(TSP_VISUAL_CHORDS.select))
+    await until('the table-defined select chord', () => badgeTexts(harness.tern).includes('Selected · 1/2'))
+    assert.equal(textNodes(harness.tern).includes('Selected 1/2 · Request latency (ms)'), true)
+
+    // An unrelated alt chord is not a visual chord: no copy and no re-selection.
+    harness.tern.input.type('\u001bx')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(harness.copies.length, 0)
+    assert.deepEqual(badgeTexts(harness.tern).filter(text => text.startsWith('Selected ·')), ['Selected · 1/2'])
+
+    harness.tern.input.type(chordSequence(TSP_VISUAL_CHORDS.copy))
+    await until('the table-defined copy chord', () => harness.copies.length === 1)
+    assert.deepEqual(harness.copies, [{ text: JSON.stringify(CHART, null, 2) }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('an open modal seat preempts the pointer action and both visual chords', async () => {
+  const harness = await mountHarness()
+  try {
+    harness.commit(bothFiguresAnswer().messages, {})
+    const button = copyButtonIds(harness.tern)[0] as string
+    const modal = harness.renderer.interaction.showApprovalPrompt({ toolName: 'bash', reason: 'modal negative' }, false)
+    const settled = modal.then(() => undefined, () => undefined)
+    await until('the modal overlay', () => nodesWhere(harness.tern, node => node.kind === 'overlay').length > 0)
+
+    harness.tern.event({ ev: 'action', sf: surfaceId(harness.tern), id: button, act: 'dsh-visual-copy' })
+    harness.tern.input.type(chordSequence(TSP_VISUAL_CHORDS.select))
+    harness.tern.input.type(chordSequence(TSP_VISUAL_CHORDS.copy))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(harness.copies.length, 0)
+    assert.deepEqual(badgeTexts(harness.tern).filter(text => text.startsWith('Selected ·')), [])
+    assert.equal(textNodes(harness.tern).some(text => text.startsWith('Selected ')), false)
+
+    harness.renderer.interaction.withdrawPending()
+    await settled
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the Work Details Reader preempts the pointer action and both visual chords', async () => {
+  const withReader = { ...HELLO, features: [...HELLO.features, 'scroll'] }
+  const harness = await mountHarness({ hello: withReader })
+  try {
+    harness.commit(bothFiguresAnswer().messages, {})
+    const button = copyButtonIds(harness.tern)[0] as string
+    const handle = harness.renderer.taskPresentation.openBrowser([
+      { value: 'job:1', label: 'Job one', status: 'running', source: 'job' },
+    ], () => 'keep-open', () => {}, {
+      header: 'Work',
+      mode: 'full',
+      openedFrom: 'command',
+      scope: 'all',
+      enableSearch: true,
+      expandedIds: [],
+      collapsedIds: [],
+      maxVisible: 8,
+      loading: false,
+      groupLabels: true,
+      onRefresh: () => {},
+      onStop: () => {},
+      onViewportExpose: () => {},
+      onRetired: () => {},
+    })
+    await until('the Hub picker', () => nodesWhere(harness.tern, node => node.kind === 'picker').length > 0)
+    const picker = nodesWhere(harness.tern, node => node.kind === 'picker')[0]
+    assert.ok(picker !== undefined)
+    const actions = picker.props['actions'] as readonly { readonly id: string }[] | undefined
+    const details = actions?.find(action => String(action.id).startsWith('details#'))
+    assert.ok(details !== undefined, 'the Hub painted its Reader action')
+    harness.tern.event({ ev: 'action', sf: surfaceId(harness.tern), id: picker.id, act: String(details.id) })
+    await until('the second Reader surface', () => harness.tern.opens.some(open => open.mode === 'screen'))
+
+    harness.tern.event({ ev: 'action', sf: surfaceId(harness.tern), id: button, act: 'dsh-visual-copy' })
+    harness.tern.input.type(chordSequence(TSP_VISUAL_CHORDS.select))
+    harness.tern.input.type(chordSequence(TSP_VISUAL_CHORDS.copy))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(harness.copies.length, 0)
+    assert.deepEqual(badgeTexts(harness.tern).filter(text => text.startsWith('Selected ·')), [])
+    handle.close()
   } finally {
     await harness.dispose()
   }

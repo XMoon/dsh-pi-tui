@@ -129,8 +129,10 @@ function figureKindLabel(source: VisualSource): 'Chart' | 'SVG' {
   return source.chart !== undefined ? 'Chart' : 'SVG'
 }
 
-/** The committed display title of one published source. */
-function figureTitle(source: VisualSource): string {
+/** The committed display title of one published source (the same text the
+ *  figure head and the dock's selection summary use). */
+export function publishedVisualTitle(publication: PublishedVisual): string {
+  const source = publication.source
   if (source.chart !== undefined) return sanitizedPhysicalLine(chartDisplayTitle(source.chart))
   if (source.svg !== undefined) return sanitizedPhysicalLine(source.svg.title)
   return 'Visual'
@@ -193,7 +195,7 @@ function figureNode(piece: FigurePiece, options: AssistantVisualProjectionOption
   const head: Node[] = [
     ui.text({
       key: 'visual-title',
-      text: sanitizeDisplayText(`${figureKindLabel(source)} · ${figureTitle(source)}`),
+      text: sanitizeDisplayText(`${figureKindLabel(source)} · ${publishedVisualTitle(piece.publication)}`),
       wrap: 'word',
     }),
   ]
