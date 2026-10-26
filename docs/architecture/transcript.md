@@ -933,13 +933,19 @@ independent occurrences with independent fold state.
   20 MiB of source and 4 MiB of derived PNG, decoded with a 25,000,000-pixel
   ceiling. The derivative is a read-only projection cached inside the SAME
   `ImageLoader` presentation scope that authorized the source read: 16 READY
-  entries / 32 MiB of retained base64 per scope, at most two conversions per
-  loader, a 32-item waiting queue (a 33rd request degrades to a bounded busy
-  message), and the same per-id/global invalidation epochs retire the cache,
-  failures and queued/running jobs. Conversion never runs synchronously in
-  `render()`. The info row and the viewer target always keep the ORIGINAL ref
-  (name, dimensions, media type, bytes); only the painted body consumes the
-  derived PNG and its derived dimensions. Idle/loading/failed preview states
+  entries / 32 MiB of accounted base64 per scope, at most two conversions per
+  loader, a waiting queue capped at 32 items (an over-capacity request
+  degrades to a bounded busy message), and the same per-id/global
+  invalidation epochs retire the cache, failures and queued/running jobs.
+  The 32 MiB figure accounts the cache, not process RSS: a currently painted
+  occurrence holds the SAME base64 string in its own `Image`, and it drops
+  that local reference as soon as the occurrence repaints without pixels
+  (collapse, narrow/unsupported surface, capability loss, pending/error) or
+  is disposed; an evicted entry is re-derived on a later visible render.
+  Conversion never runs synchronously in `render()`. The info row and the
+  viewer target always keep the ORIGINAL ref (name, dimensions, media type,
+  bytes); only the painted body consumes the derived PNG and its derived
+  dimensions. Idle/loading/failed preview states
   paint informational rows only (a bounded `Preview unavailable`), a collapsed
   occurrence starts no conversion, and a body hit exists only when that frame
   actually emitted the Kitty placement. PNG, iTerm2 (original OSC 1337) and GIF
