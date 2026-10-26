@@ -218,7 +218,7 @@ test('main screen: stop retires only never-painted uploads and preserves painted
   screen.renderNow()
   const paintedId = root.imageA.imageId!
   const unplaced = core.register({ pngBase64: PNG, widthPx: 8, heightPx: 8 })!
-  facade.write(core.transmissionFor(unplaced.imageId))
+  facade.write(core.transmissionFor(unplaced.imageId, 'main'))
 
   terminal.writes.length = 0
   screen.stop()
@@ -245,15 +245,14 @@ test('alt screen: foreign and managed deletes stay isolated in both directions',
   facade.write(`\x1b_Ga=d,d=I,i=${foreignId},q=2\x1b\\`)
   assert.equal(terminal.text, `\x1b_Ga=d,d=I,i=${foreignId},q=2\x1b\\`)
 
-  // 2) The Core retires its own image: only its own id is touched.
+  // 2) The alternate screen's own exit releases ONLY what it placed; the
+  //    foreign owner and every other buffer are never mentioned.
   terminal.writes.length = 0
-  root.imageA.dispose()
-  screen.renderNow()
+  screen.stop()
   const text = terminal.text
-  assert.ok(text.includes(`a=d,d=I,i=${managedId}`), 'the managed id is released')
+  assert.ok(text.includes(`a=d,d=I,i=${managedId}`), 'the alt-owned id is released')
   assert.ok(!text.includes(`i=${foreignId}`), 'the foreign id is never mentioned')
   assert.ok(!text.includes('d=A') && !text.includes('d=a'), 'no global delete reaches the terminal')
-  screen.stop()
 })
 
 test('alt screen: the global release at stop becomes scoped own-id deletes', () => {

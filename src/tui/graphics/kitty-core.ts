@@ -24,6 +24,13 @@ import {
   encodeKittyTransmit,
 } from './kitty-native.ts'
 
+/**
+ * The physical screen buffer an occurrence was placed in. Kitty keeps the main
+ * and the alternate screen's images in separate stores, so a destructive event
+ * (or a global delete) only ever concerns the buffer it happened in.
+ */
+export type KittyScreenBuffer = 'main' | 'alt'
+
 /** The already-prepared display PNG one managed occurrence paints. */
 export interface KittyImageSource {
   /** Base64 PNG payload (already transcoded by the existing image owners). */
@@ -38,7 +45,6 @@ export interface KittyImage {
   readonly placementId: number
   /** Monotonic per-Core generation: a retired id is never re-used. */
   readonly generation: number
-  readonly source: KittyImageSource
 }
 
 /** Diagnostic events (the Stage-0 harness and the owner tests read these). */
@@ -51,6 +57,7 @@ export interface KittyGraphicsEvent {
     | 'data-invalidated'
     | 'retire-queued'
     | 'retire-emitted'
+    | 'retained'
     | 'writer-delete-translated'
     | 'global-delete-translated'
     | 'shutdown-unplaced'
@@ -74,11 +81,17 @@ export const MAX_RESIDENT_DECODED_BYTES = 256 * 1024 * 1024
 
 interface OwnedRecord {
   readonly image: KittyImage
-  /** Bytes were offered to the sink for the CURRENT screen buffer and no
-   *  destructive event has invalidated them since. */
-  resident: boolean
-  /** Whether the payload was ever offered to the sink for a placement. */
+  /** Screen buffers whose store currently holds this image's data: Kitty keeps
+   *  the main and the alternate screen's images apart, so the SAME id needs one
+   *  transmission per buffer it is placed in. */
+  readonly residentIn: Set<KittyScreenBuffer>
+  /** The already-prepared payload, or undefined once the occurrence was
+   *  retained (the terminal keeps the pixels; this Core releases its copy). */
+  source: KittyImageSource | undefined
+  /** Whether the payload was ever offered to the sink. */
   transmitted: boolean
+  /** The buffer the LAST placement was written into. */
+  buffer: KittyScreenBuffer | undefined
   /** Placements written since the last residency invalidation. */
   placements: number
   /** Whether this occurrence ever reached a placement in its lifetime. */
@@ -112,9 +125,11 @@ export class KittyGraphicsCore {
     this.onEvent = options.onEvent
   }
 
-  /** How many images the ledger currently holds (diagnostics + budget tests). */
+  /** How many images currently hold a payload (diagnostics + budget tests). */
   get residentImageCount(): number {
-    return this.records.size
+    let count = 0
+    for (const record of this.records.values()) if (record.source !== undefined) count += 1
+    return count
   }
 
   /** The retained base64 payload total (diagnostics + budget tests). */
@@ -136,7 +151,7 @@ export class KittyGraphicsCore {
    */
   register(source: KittyImageSource): KittyImage | undefined {
     if (this.disposed) return undefined
-    if (this.records.size + 1 > MAX_RESIDENT_IMAGES
+    if (this.residentImageCount + 1 > MAX_RESIDENT_IMAGES
       || this.payloadBytes + source.pngBase64.length > MAX_RESIDENT_PAYLOAD_BYTES
       || this.decodedByteTotal + decodedBytes(source) > MAX_RESIDENT_DECODED_BYTES) {
       this.emit({ type: 'budget-fallback' })
@@ -147,12 +162,13 @@ export class KittyGraphicsCore {
       imageId,
       placementId: this.nextPlacementId++,
       generation: ++this.generationCounter,
-      source,
     }
     this.records.set(imageId, {
       image,
-      resident: false,
+      source,
+      residentIn: new Set(),
       transmitted: false,
+      buffer: undefined,
       placements: 0,
       everPlaced: false,
       retireQueued: false,
@@ -185,33 +201,50 @@ export class KittyGraphicsCore {
    * here — the caller may only skip this call when it will not write the
    * placement.
    */
-  transmissionFor(imageId: number): string {
+  transmissionFor(imageId: number, buffer: KittyScreenBuffer): string {
     const record = this.records.get(imageId)
-    if (record === undefined) return ''
-    if (record.resident) return ''
-    this.emit({ type: 'transmit-offered', imageId })
-    record.resident = true
+    if (record === undefined || record.source === undefined) return ''
+    if (record.residentIn.has(buffer)) return ''
+    this.emit({ type: 'transmit-offered', imageId, detail: buffer })
+    record.residentIn.add(buffer)
     record.transmitted = true
-    return encodeKittyTransmit(record.image.source.pngBase64, imageId).join('')
+    return encodeKittyTransmit(record.source.pngBase64, imageId).join('')
   }
 
-  /** The facade wrote a placement anchor for this owned image. */
-  notePlacement(imageId: number): void {
+  /** The facade wrote a placement anchor for this owned image in `buffer`. */
+  notePlacement(imageId: number, buffer: KittyScreenBuffer): void {
     const record = this.records.get(imageId)
     if (record === undefined) return
+    record.buffer = buffer
     record.placements += 1
     record.everPlaced = true
-    this.emit({ type: 'placement-written', imageId })
+    this.emit({ type: 'placement-written', imageId, detail: buffer })
   }
 
   /**
-   * Queue the retirement of one owned occurrence. The hard `d=I` is emitted by
-   * the next {@link drain} — never from inside a render pass — so every write
-   * still travels through the facade's ordered stream.
+   * End one owned occurrence.
+   *
+   * A NEVER-painted occurrence is a pure pending byte set: it is queued for its
+   * own hard `d=I`, flushed by the next {@link drain} (never from inside a
+   * render pass, so every write still travels through the facade's ordered
+   * stream) because no screen or scrollback can reference it.
+   *
+   * A PAINTED occurrence is terminal-retained instead: its pixels may still be
+   * visible in the viewport or in the scrollback, and nothing but the screen's
+   * own layout may take them away. The Core drops its payload copy (bounding
+   * its own memory) and keeps the id known — never re-used, and never
+   * hard-deleted by this Core.
    */
   retire(image: KittyImage): void {
     const record = this.records.get(image.imageId)
-    if (record === undefined || record.retireQueued) return
+    if (record === undefined || record.retireQueued || record.source === undefined) return
+    if (record.everPlaced) {
+      this.payloadBytes -= record.source.pngBase64.length
+      this.decodedByteTotal -= decodedBytes(record.source)
+      record.source = undefined
+      this.emit({ type: 'retained', imageId: image.imageId })
+      return
+    }
     record.retireQueued = true
     this.emit({ type: 'retire-queued', imageId: image.imageId })
   }
@@ -232,17 +265,19 @@ export class KittyGraphicsCore {
   }
 
   /**
-   * A legacy global placement delete (`d=a`) — translate it into scoped
-   * placement removals for the Core's own images only. A foreign owner's
-   * placements are never touched.
+   * A legacy global placement delete (`d=a`) in `buffer` — translate it into
+   * scoped placement removals for the Core images THIS buffer placed. A foreign
+   * owner's placements, and the other buffer's images, are never touched: the
+   * main screen's scrollback outlives a leased alternate screen.
    */
-  translateGlobalPlacementDelete(): string {
+  translateGlobalPlacementDelete(buffer: KittyScreenBuffer): string {
     let wire = ''
     for (const record of this.records.values()) {
+      if (record.buffer !== buffer) continue
       record.placements = 0
       wire += encodeKittyDeletePlacement(record.image.imageId)
     }
-    if (wire !== '') this.emit({ type: 'global-delete-translated', detail: 'placements' })
+    if (wire !== '') this.emit({ type: 'global-delete-translated', detail: `placements:${buffer}` })
     return wire
   }
 
@@ -251,35 +286,35 @@ export class KittyGraphicsCore {
    * retirements of the Core's own images. The records survive (their
    * components still hold them) and the next placement re-transmits.
    */
-  translateGlobalImageDelete(): string {
+  translateGlobalImageDelete(buffer: KittyScreenBuffer): string {
     let wire = ''
     for (const record of this.records.values()) {
-      record.resident = false
+      // Only the data THIS buffer holds can be released: a record that was
+      // never transmitted here has nothing to delete, and the other buffer's
+      // copy (the main screen's scrollback) must survive.
+      if (!record.residentIn.delete(buffer)) continue
       record.placements = 0
-      // A record whose bytes never left this process has nothing to release:
-      // emitting its id would only put a command on the wire that cannot
-      // affect any pixel.
-      if (!record.everPlaced && !record.transmitted) continue
       wire += encodeKittyDeleteImage(record.image.imageId)
     }
-    if (wire !== '') this.emit({ type: 'global-delete-translated', detail: 'images' })
+    if (wire !== '') this.emit({ type: 'global-delete-translated', detail: `images:${buffer}` })
     return wire
   }
 
   /**
-   * A destructive screen event (a real clear, or a screen-buffer switch)
-   * invalidated the uploaded data of every owned image. Nothing is written
-   * here: the next placement re-transmits first.
+   * A destructive event in `buffer` (a real clear, or that buffer being
+   * discarded) invalidated the uploaded data of the images it placed. Nothing
+   * is written here: the next placement re-transmits first. Images placed in
+   * the OTHER buffer are untouched — a leased alternate screen never costs the
+   * main screen its data.
    */
-  invalidateResidency(reason: string): void {
+  invalidateResidency(buffer: KittyScreenBuffer, reason: string): void {
     let invalidated = 0
     for (const record of this.records.values()) {
+      if (!record.residentIn.delete(buffer)) continue
       record.placements = 0
-      if (!record.resident) continue
-      record.resident = false
       invalidated += 1
     }
-    if (invalidated > 0) this.emit({ type: 'data-invalidated', detail: reason })
+    if (invalidated > 0) this.emit({ type: 'data-invalidated', detail: `${reason}:${buffer}` })
   }
 
   /** Emit (and clear) every queued own-ID deletion, in queue order. */
@@ -290,8 +325,10 @@ export class KittyGraphicsCore {
         wire += encodeKittyDeleteImage(imageId)
         this.records.delete(imageId)
         this.retiredImageIds.add(imageId)
-        this.payloadBytes -= record.image.source.pngBase64.length
-        this.decodedByteTotal -= decodedBytes(record.image.source)
+        if (record.source !== undefined) {
+          this.payloadBytes -= record.source.pngBase64.length
+          this.decodedByteTotal -= decodedBytes(record.source)
+        }
         this.emit({ type: 'retire-emitted', imageId })
         continue
       }
@@ -310,12 +347,12 @@ export class KittyGraphicsCore {
   shutdownUnplaced(): string {
     let wire = ''
     for (const [imageId, record] of this.records) {
-      if (record.everPlaced || record.retireQueued) continue
+      if (record.everPlaced || record.retireQueued || record.source === undefined) continue
       wire += encodeKittyDeleteImage(imageId)
       this.records.delete(imageId)
       this.retiredImageIds.add(imageId)
-      this.payloadBytes -= record.image.source.pngBase64.length
-      this.decodedByteTotal -= decodedBytes(record.image.source)
+      this.payloadBytes -= record.source.pngBase64.length
+      this.decodedByteTotal -= decodedBytes(record.source)
       this.emit({ type: 'shutdown-unplaced', imageId })
     }
     return wire
