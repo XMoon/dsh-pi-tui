@@ -834,7 +834,6 @@ requires a separately planned explicit capability, not an implicit visual-body
 change.
 
 ## Long user messages
-## Long user messages
 
 A text-only durable user message over 10 rendered visual rows collapses to head
 4 + one marker + tail 3, decided at the CURRENT width and re-decided on resize.
