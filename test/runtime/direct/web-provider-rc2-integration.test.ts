@@ -753,6 +753,7 @@ test('the Web credential deeplink completes a real store set and clear and the p
   await openWebCredentialRowInApp(app)
   assert.match(app.view(), /State: Configured/u)
   app.vt.sendInput(KEY.down) // Configure -> the enabled Clear in Models…
+  await renderFrames(app) // the moved cursor must be PAINTED before Enter may act on it
   app.vt.sendInput(KEY.enter)
   await renderFrames(app)
   await app.waitFor(() => app.view().includes('Settings · Models') && /Clear credential/u.test(app.view()),
