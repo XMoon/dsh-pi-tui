@@ -697,7 +697,11 @@ its own:
 **Tail layout.** One file is one row: the BASENAME first, extended with the
 shortest trailing directory suffix that makes it unique inside that delivery
 (case-sensitive Host-path comparison), then an inline description that never
-wraps. Collapsed shows at most four files; the marker row names the command. An
+wraps. Disambiguation runs on the SAFE-DISPLAY projection of the path (the same
+one that paints it), so two declarations that differ only in bytes the
+projection removes cannot collapse into one visible label; when even that
+projection is identical, a visible ordinal suffix (`name (2)`) keeps the rows
+distinguishable. The RAW declared path stays the Copy and search authority. Collapsed shows at most four files; the marker row names the command. An
 expanded tail (an explicit master expansion or a granted search reveal) renders
 the complete declaration list. `Browse all` / per-file `Details` are painted
 ONLY where a real pointer owner exists (fullscreen Full); the regular surface's

@@ -20,6 +20,7 @@ import { deliveredFolder, deliveredSurfaceRouting, mountDeliveredSurface } from 
 import type { DeliveredFilesCapability, DeliveredFilesSnapshot } from '../../src/domain/deliverables/catalog.ts'
 import type { TranscriptMessage } from '../../src/transcript.ts'
 import { createArtifactsCommands } from '../../src/tui/commands/artifacts.ts'
+import type { SubmissionControllerDeps } from '../../src/app/submission/controller.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -576,4 +577,206 @@ test('a newer lease survives when the OLD mount itself fails after re-entry', as
   const after = await viewport(vt)
   assert.equal(after.split('\n').filter(line => line.includes('Delivered files · Turn 4')).length, 1,
     `exactly one live panel:\n${after}`)
+})
+
+test('a typed /deliverables reaches the panel through the REAL submission controller', async () => {
+  // RFL-003: the previous test proved the Client plane in isolation. THIS test
+  // drives the production user entry — TuiApp Enter → `onSubmit` →
+  // `createSubmissionController.submit` → `runLocalCommand` (live claim +
+  // registered handler) — and asserts the consequence (the panel is painted, no
+  // Session is created, nothing reaches the model sink) plus a POSITIVE control
+  // that the model sink really is reachable from this fixture.
+  const { parseCommand } = await import('@deepseek-ai/dsh-commands')
+  const { createClientCommandRegistry } = await import('../../src/app/command/client-command-registry.ts')
+  const { createSubmissionController } = await import('../../src/app/submission/controller.ts')
+  const { bindSubmissionRuntime } = await import('../../src/app/submission/runtime.ts')
+  const { createSessionOwnershipCore } = await import('../../src/app/session/ownership-core.ts')
+  const { createSessionScopeAuthority } = await import('../../src/app/session/scope.ts')
+  const { DraftImageStore } = await import('../../src/client/media/image/draft-store.ts')
+  const { DraftFileStore } = await import('../../src/client/media/attachment/file-draft.ts')
+  const { mergeDraft } = await import('../../src/app/submission/steer.ts')
+
+  const vt = new VirtualTerminal(100, 30)
+  const snap = snapshot([{ turn: 6, files: ['/ws/controller-report.md'] }])
+  const modelPrompts: string[] = []
+  const sessionsCreated: string[] = []
+  const notices: string[] = []
+  const draftImages = new DraftImageStore()
+  const draftFiles = new DraftFileStore()
+  let app!: TuiApp
+  const composer = {
+    getDraft: () => app.getDraft(),
+    setDraft: (text: string) => { app.setDraft(text) },
+    setEditorText: (text: string) => { app.setEditorText(text) },
+    insertIntoEditor: (text: string) => { app.insertIntoEditor(text) },
+    notify: (message: string) => { notices.push(message) },
+    setSubmitPending: () => {},
+    clearSettledLocalMessages: () => {},
+  }
+  const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  core.setCurrentOwner({} as never, 'session-live')
+  const scopeAuthority = createSessionScopeAuthority({
+    current: () => {
+      const subject = core.subject()
+      if (subject === undefined) throw new Error('fixture: the owner is not published')
+      return { sessionId: 'session-live', generation: core.generation(), subject }
+    },
+    isSubjectCurrent: (subject) => core.isSubjectCurrent(subject),
+  })
+  const clientCommands = createClientCommandRegistry(parseCommand)
+  const command = {
+    wasAdvertisedClaim: () => false,
+    hostClaimOf: () => undefined,
+    hostOriginClaimOf: () => undefined,
+    hostCatalogResolves: () => false,
+    clientClaimsLine: (parsed: { name: string; rawInput?: string } | undefined) => clientCommands.claimsLine(parsed),
+    isSkillWrapperName: () => false,
+    isSkillInvocation: () => false,
+    withCommandDelivery: <T>(_delivery: unknown, run: () => T): T => run(),
+    takeCommandDraftDisposition: () => undefined,
+    clientCommands,
+  }
+  const runtimeSurface = {
+    withWriter: async <T>(_scope: unknown, task: () => Promise<T> | T) => task(),
+    withPromptAdmission: async <T>(_line: string, task: () => Promise<T> | T) => task(),
+    isDisposed: () => false,
+    isScopeCurrent: () => true,
+    mergeDraftIntoEditor: (text: string) => { app.setEditorText(mergeDraft(app.getDraft(), text)); return true },
+    restoreStaleDraftIntoEditor: () => 'merged-verbatim' as const,
+    consumeDraftAttachments: () => {},
+    markDispatch: () => {},
+    beginLocalSubmission: () => {},
+    settleLocalSubmission: () => {},
+    settleSubmitAck: () => {},
+    notify: (message: string) => { notices.push(message) },
+    refuseByTransitionFence: () => {},
+    prepareMessage: async () => ({ message: {}, attachments: [] }),
+    prompt: async (_sessionId: string, message: unknown) => {
+      modelPrompts.push(JSON.stringify(message))
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
+  const submissionRuntime = bindSubmissionRuntime({ surface: runtimeSurface as never })
+  interface AgentLike {
+    readonly status: string
+    readonly session: { readonly id: string }
+    readonly options: Record<string, unknown>
+    readonly inbox: Record<string, unknown>
+  }
+  const deps: SubmissionControllerDeps<AgentLike> = {
+    app: () => composer,
+    diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+    signal: new AbortController().signal,
+    isCleanedUp: () => false,
+    logError: () => {},
+    liveAgent: () => undefined,
+    ownership: {
+      generation: () => core.generation(),
+      captureSubject: () => core.subject(),
+      transitionPending: () => false,
+    },
+    scope: {
+      captureLive: () => scopeAuthority.captureLive(),
+      isCurrent: (scope) => scopeAuthority.isCurrent(scope),
+      requireLive: () => {
+        const live = scopeAuthority.captureLive()
+        if (live === undefined) throw new Error('fixture: the owner is not live')
+        return live
+      },
+    },
+    session: {
+      // The sessionless contract: `/deliverables` must never create a Session.
+      ensureSession: async () => { sessionsCreated.push('created') },
+      beginCommandSettlement: () => {},
+      abortCommandSettlement: () => {},
+      settleCommandSettlement: () => {},
+      trackSettlementWork: () => {},
+    },
+    submissionRuntime,
+    command: command as never,
+    commandPlane: { available: () => false, execute: async () => undefined, findHandler: () => undefined },
+    backendKind: 'direct',
+    backend: {
+      hostFile: { canonicalizeMentions: async (_scope: unknown, text: string) => text } as never,
+      pendingInputReader: { snapshot: () => undefined },
+      sessionWriter: { prompt: async () => ({ kind: 'committed', value: undefined }) } as never,
+      hostCommand: { execute: async () => ({ kind: 'committed', matched: false }) } as never,
+    },
+    drafts: { images: draftImages, files: draftFiles },
+    status: { sessionCwd: () => '/ws' },
+    surface: { refreshPendingInput: () => {} },
+    history: { persist: () => {}, persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) } },
+    viewer: { isViewing: () => false },
+    extensions: {
+      findContribution: () => undefined,
+      handlerFor: () => undefined,
+      commandIdFor: () => undefined,
+      recordHealthRef: () => undefined,
+      recordError: () => {},
+      clearError: () => {},
+    },
+    artifacts: { start: () => {} },
+    shell: { run: (text: string) => { modelPrompts.push(`shell:${text}`) }, interrupt: () => {} },
+    supportsLocalShellCards: true,
+    supportsTuiBuiltinUi: true,
+    retainsStaleDraftRestore: true,
+    model: { selected: { get current() { return undefined } } },
+    image: { attachments: () => undefined as never, llm: () => undefined as never },
+    tuiSettings: undefined,
+    captureMatches: (subject) => core.isSubjectCurrent(subject as never),
+    ownerWasReplaced: () => false,
+    direct: { withPromptAdmission: async (_agent, _hasImages, task) => task() },
+    requestExit: () => {},
+    isPlanActive: () => false,
+  }
+  const controller = createSubmissionController<AgentLike>(deps)
+
+  app = new TuiApp(vt, {
+    onSubmit: (text, request, scopeToken) => { controller.submit(text, request, scopeToken) },
+    onExit: () => {},
+  }, {
+    deliveredFiles: {
+      snapshot: () => snap,
+      isCurrent: () => true,
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  // The REAL registrar registers `/deliverables` into the registry the
+  // controller consults (its LIVE claim source).
+  const classifier = createArtifactsCommands({
+    runner: { app, deliveredFilesSnapshot: () => snap } as never,
+    app,
+    composer: () => app,
+    registerOne: (definition) => { clientCommands.register(definition); return () => {} },
+    registerTuiCommand: (spec) => {
+      clientCommands.register({
+        name: spec.name,
+        description: spec.description,
+        ...(spec.input === undefined ? {} : { input: spec.input }),
+        handler: spec.handler,
+      })
+    },
+    detach: () => {},
+    notifyOutcome: () => {},
+  })
+  classifier.registerDeliverables()
+
+  // Type the line through the REAL editor + submit gesture.
+  vt.sendInput('/deliverables')
+  vt.sendInput('\r')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Delivered files · Turn 6'), `the controller route mounted the panel:\n${view}`)
+  assert.deepEqual(sessionsCreated, [], 'a sessionless local command never creates a Session')
+  assert.deepEqual(modelPrompts, [], 'the line never reaches the model sink')
+  assert.equal(notices.length, 0, 'the local route reported no refusal')
+  // POSITIVE CONTROL: this fixture's model path IS reachable, so the empty
+  // `modelPrompts` above is a real negative, not a dead sink.
+  vt.sendInput('\x1b')
+  await viewport(vt)
+  vt.sendInput('a plain prompt')
+  vt.sendInput('\r')
+  await viewport(vt)
+  assert.ok(sessionsCreated.length > 0 || modelPrompts.length > 0,
+    'the same fixture does deliver an ordinary prompt through the session path')
 })
