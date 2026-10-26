@@ -246,38 +246,6 @@ function callKey(turn: number, step: number, callId: string): string {
 }
 
 /**
- * The tool-call ids ONE step's model response requested, with how often each id
- * appears.
- *
- * `assistant/message` is appended before any of that step's `tool/call` events,
- * so this count is complete even when a concurrency-safe publisher is already
- * running while the loop is still appending its siblings. A count above one
- * means the model repeated an id in a single response — a state the live gate
- * must refuse up front, because the replay of the finished log will necessarily
- * see the duplicate and treat the identity as ambiguous.
- * @param events - the authority events, in log order.
- * @returns per-step `(turn, step) -> callId -> count`.
- */
-function stepCallIds(events: readonly VisualSessionEvent[]): Map<string, Map<string, number>> {
-  const steps = new Map<string, Map<string, number>>()
-  for (const event of events) {
-    if (event.type !== 'assistant/message') continue
-    if (isModelOnlyReplacement(event)) continue
-    const key = `${event.data.turn}:${event.data.step}`
-    let ids = steps.get(key)
-    if (ids === undefined) {
-      ids = new Map<string, number>()
-      steps.set(key, ids)
-    }
-    for (const block of event.data.message.content) {
-      if (block.type !== 'tool-call' || typeof block.id !== 'string') continue
-      ids.set(block.id, (ids.get(block.id) ?? 0) + 1)
-    }
-  }
-  return steps
-}
-
-/**
  * The call index of one committed log, scanning the events once.
  * @param sessionId - the observed session identity.
  * @param events - the authority events.
