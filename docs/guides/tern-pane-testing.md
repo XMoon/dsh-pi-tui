@@ -11,7 +11,7 @@ rendering and input routing) and must cover every feature change.
 |---|---|
 | Layout, wrapping and clipping | Tern lays the native nodes out and clips them at an overflow edge; headless asserts our bytes, not the client's boxes |
 | Real event shapes | The SDK's `action` / `select` / `strip` shapes are produced by the client, not by our presenter |
-| Visual appearance | Whether a panel is readable at a given width/font is a property of the rendered PNG |
+| Visual appearance | Whether a panel is readable at a given width/font — and which client appearance (light or dark) painted it — is a property of the rendered PNG |
 
 It is a **complement, not a replacement**: when a real-pane run surfaces a
 problem, add the regression to the headless suite.
@@ -126,10 +126,64 @@ The subject owns its own artifacts (in the smoke, its event record).
 | `capture(name, note)` | Node-tree dump + PNG + layout under one id |
 | `shot(id)` | Raw `shot` reply |
 | `ctl(...)` | A read or an idempotent set (`tree`, `stats`, `pick`, bare `a11y`, `perf since`, `shot`, `resize`, `css`); anything else is refused here — send it with `send` |
-| `send(...)` | Any command, delivered exactly ONCE and never retried: `click`, `key`, `run`, `a11y <action>`, `perf on\|off\|reset\|mark` |
+| `send(...)` | Any command, delivered exactly ONCE and never retried: `click`, `key`, `run`, `a11y <action>`, `perf on\|off\|reset\|mark`, `appearance`, `theme` |
 | `check(label, ok, detail)` / `measure(label, detail)` | Record an assertion / a measurement |
 | `finish(extra)` | Write `assertions.json`, print the summary, return the exit code |
 | `log` / `sleep` / `root` / `repo` | Run log, delay, run directory, repo root |
+
+## Appearance and theme
+
+Two independent facts decide a dark surface, and a check needs both:
+
+| Command | What it changes | Read it back with |
+|---|---|---|
+| `appearance light\|dark` | The **headless resolved appearance** — the client's simulated system appearance. Headless changes reach every document. A live window accepts the command but keeps its saved Appearance setting (see the GUI guide). | `state.theme` |
+| `theme [dark\|light] "<name>"` | A **named theme for an appearance**. Without the leading appearance the only argument is a name — even `dark` or `light`. Unknown names fail. | `state.theme_dark` / `state.theme_light` |
+
+`theme dark "<name>"` changes the dark SLOT only. On a client whose resolved
+appearance is still light it does not switch the paint, and an `{ok:true}` reply
+is not evidence that anything switched. The appearance switch is separate.
+
+### The headless switch (this harness)
+
+`appearance dark` resolves the dark appearance and repaints the headless
+client; to paint a specific named dark theme, send `theme dark "<name>"` first,
+using the name the client reports in `state.theme_dark`.
+
+```js
+h.send('appearance', 'dark')
+h.check('the client resolved the dark appearance', h.ctl('state').theme === 'dark')
+h.capture('dark', 'the surface in the dark appearance')
+h.send('appearance', 'light')               // return to light
+```
+
+The capture is the evidence for the pixels, and `shots/serve/<id>.layout.json`
+carries the resolved `theme`; assert it too when the PNG is the claim. `ctl
+dump` reports the same value in its `header.theme`.
+
+`appearance`/`theme` are idempotent sets in the client, but they are not in the
+driver's `ctl` repeatable list: send them once with `send`, and prove the
+result with `state` (a lost reply fails the run instead of silently applying
+nothing).
+
+The official scenario runner has the same switch as a per-run option:
+`tern shot ... --theme light|dark|both`. This harness drives `tern serve`
+instead, so the switch is the `appearance` command.
+
+### The live window is different
+
+A live GUI window does not use `appearance`: the client accepts it and returns
+`{ok:true}`, but its resolved theme stays the saved Appearance setting and no
+visible element's computed style changes. The live switch is the
+`appearance:dark` key action — send `plugins run appearance:dark` (or
+`appearance:light`) to the window, or use Preferences › Appearance ›
+Appearance: Dark/Light. It saves the setting; prove it with `state.theme` and
+`dump.header.theme`, not the reply. See
+[`tern-gui-testing.md`](./tern-gui-testing.md).
+
+`appearance` simulates the session's appearance. It changes no global OS setting
+and no saved Tern preference, and it says nothing about the physical OS
+dark-mode window chrome or the desktop font stack — that is the GUI lane.
 
 ## Artifacts
 
@@ -140,7 +194,7 @@ The subject owns its own artifacts (in the smoke, its event record).
 | `flow.<ext>` / `subject.<ext>` | Copies of the flow and of the subject this run used |
 | `<id>.tree.json` | The node tree at capture time |
 | `shots/serve/<id>.png` | The rendered pane — the human check |
-| `shots/serve/<id>.layout.json` | Element paths, boxes and computed geometry for that frame |
+| `shots/serve/<id>.layout.json` | Element paths, boxes and computed geometry for that frame, plus the resolved `theme` (`light`/`dark`) |
 | `launch.sh` / `subject.err` | How the subject was started, and its stderr |
 
 ## Rules that keep the evidence honest
@@ -199,7 +253,8 @@ The subject owns its own artifacts (in the smoke, its event record).
   produces an 800x1200 PNG (scale 2); compare geometry from `layout.json` or the
   tree, not from pixel offsets in the PNG.
 - **Say which state a lane ran against.** A run is evidence for the tree it ran
-  on; an edit after it invalidates it.
+  on and for the appearance it captured: a light capture says nothing about
+  dark, and an edit after it invalidates it.
 
 ## Limits
 
@@ -215,15 +270,20 @@ The subject owns its own artifacts (in the smoke, its event record).
   accumulates them under `temp/`; deleting them is the operator's decision.
 - The run directory keeps a copy of the flow and of the subject it launched, so a
   run can be audited later; any other module they import is not copied.
-- Client-side behaviour that no node exposes (physical IME, window chrome,
-  theme resolution) is out of scope; see
+- Client-side behaviour outside the client's own control channel (physical IME,
+  the OS window chrome, the desktop font stack and the OS accessibility bridge)
+  is out of scope. The client's own theme is not: in a headless session
+  `appearance` and `theme` are accepted at the control endpoint, and
+  `state.theme` plus the capture's layout `theme` report the result. A live
+  window uses the GUI guide's `plugins run appearance:dark`. See
   [`tmux-testing.md`](./tmux-testing.md) for the terminal-side complement.
 
 ## Related
 
 - [`tmux-testing.md`](./tmux-testing.md) — the terminal/TTY complement.
 - [`tern-gui-testing.md`](./tern-gui-testing.md) — the real GUI-window lane:
-  hover, the client's own theme, the native window and the accessibility tree.
+  the native window, its OS chrome/font stack, the live-window Appearance
+  switch, a real pointer and the OS accessibility bridge.
 - [`focus-replay-harness.md`](./tmux-testing.md) — the same shape for
   fullscreen frame replay: a probe script plus a pure oracle, documented here.
 - [`tsp/overview.md`](../tsp/overview.md) — the TSP integration and product boundary.
@@ -231,7 +291,7 @@ The subject owns its own artifacts (in the smoke, its event record).
 
 ## Lane fidelity and evidence rules
 
-- A real-pane claim comes from `tern serve --control` + `tern ctl run|type|key|click|resize|tree|dump|shot|quit` with the production presenter. `ctl key` takes Playwright names; `ctl css` swaps a sheet.
+- A real-pane claim comes from `tern serve --control` + `tern ctl run|type|key|click|resize|appearance|theme|tree|dump|shot|quit` with the production presenter. `ctl key` takes Playwright names; `ctl css` swaps a sheet.
 - Irreversible input is delivered exactly ONCE and never retried. A failed `ctl` call fails closed.
 - Containment goes through the geometry oracle (ancestor clipping + PNG); a node's own rect is not a visibility proof.
 - The lane must reproduce production mount-time side effects; a hand-rolled surface that skipped the stylesheet install produced wrong evidence.

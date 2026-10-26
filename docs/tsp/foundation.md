@@ -434,11 +434,13 @@ key. The existing hydration fence, modal seat and pre-bind held-key replay apply
 unchanged, so a paste during those windows reaches nothing.
 
 The headless lane mounts the production projections over one official inline
-surface and asks the client's own layout; the GUI lane adds the real window, the
-client's own theme, the accessibility tree and a real pointer into the client's
-own image viewer. Which script drives which lane, and every observation a run
-produced, belong to the PR/CI record and to
-[the real-pane harness guide](../guides/tern-pane-testing.md) — not here.
+surface and asks the client's own layout; the GUI lane adds the real window and
+its OS chrome/font stack, the OS accessibility bridge and a real pointer into
+the client's own image viewer. The client's `a11y` tree, its computed-style
+hover and its light/dark appearance are reachable headlessly too; see
+[the real-pane harness guide](../guides/tern-pane-testing.md) § Appearance and
+theme. Which script drives which lane, and every observation a run produced,
+belong to the PR/CI record — not here.
 
 Two obligations follow from the client owning the picture. Sibling navigation
 between two images of ONE message is NOT specified by the SDK, so the run

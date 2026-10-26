@@ -178,8 +178,10 @@ enough. `PROJECTION_ONLY` is not navigable state.
 - TSP is experimental and opt-in; PiTui remains the product renderer.
 - TSP transcript folding/disclosure is partial; it is not PiTui's complete
   Compact/Focus/Full model.
-- Physical GUI, IME, fonts, wheel/trackpad, theme modes and Remote TSP
-  qualification are outside the automated contract; only a specific real-pane
-  run may claim them.
+- Physical GUI, IME, the desktop font stack, wheel/trackpad, the real OS
+  window theme/chrome and Remote TSP qualification are outside the automated
+  contract; only a specific real-pane run may claim them. The client's own
+  light/dark appearance is headless-controllable (`appearance`) and is covered
+  by the real-pane harness, not by this list.
 - No Remote TSP renderer is claimed; a Remote TSP projection observer over the
   real wire remains a follow-up (see the repository handoff issue).
