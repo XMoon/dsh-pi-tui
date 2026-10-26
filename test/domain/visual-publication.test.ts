@@ -1200,3 +1200,76 @@ test('the readable filter recognises EVERY fact the official serializer can emit
   })
   assert.equal(svgProjected.blocks.length, 1, 'the filter recognises the padded SVG credential')
 })
+
+test('cold replay keeps its exact semantics with many sources, many publications and repeated refs', () => {
+  // Equivalence for the linear rewrite: many qualified sources, an AMBIGUOUS
+  // ref (two occurrences), several publications, one repeated across
+  // publications, and one publication whose refs must all qualify.
+  const log = new LogBuilder().turnStart(1)
+  const first = log.generate(1, 0, 'chart-a', 'chart')
+  const second = log.generate(1, 1, 'chart-b', 'chart')
+  log.stepEnd(1, 1)
+  // Two more publications of the SAME refs in later steps.
+  log.publish(1, 2, 'present-1', [first.ref, second.ref])
+  log.stepEnd(1, 2)
+  log.publish(1, 3, 'present-2', [first.ref])
+  log.stepEnd(1, 3)
+  log.publish(1, 4, 'present-3', [second.ref])
+  log.stepEnd(1, 4).turnEnd(1)
+
+  const events = log.events()
+  const published = collectPublishedVisuals(SESSION, events)
+  // History is preserved, first-wins per ref, in the FIRST publication's order.
+  assert.deepEqual(published.map(entry => entry.ref), [first.ref, second.ref])
+  assert.deepEqual(published.map(entry => entry.callId), ['present-1', 'present-1'])
+  assert.deepEqual(published.map(entry => entry.source.title), ['Request latency', 'Request latency'])
+
+  // A duplicated composite identity is not a source at all, so the ref it would
+  // have carried cannot publish. (Two DISTINCT tuples never share a ref under
+  // SHA-256, so the only reachable "same ref twice" shape is the duplicated
+  // identity below; the linear index keeps the same refusal.)
+  const ambiguous = new LogBuilder().turnStart(1)
+  ambiguous.generate(1, 0, 'dup-ref', 'chart')
+  ambiguous.stepEnd(1, 0)
+  ambiguous.stepStart(1, 0)
+  ambiguous.callInOpenStep(1, 0, 'dup-ref', 'dsh_pi_tui_chart', CHART_ARGS)
+  ambiguous.turnEnd(1)
+  assert.deepEqual(collectVisualSources(SESSION, ambiguous.events()), [],
+    'the duplicated identity is not a source at all')
+
+  // A publication of an UNOWNED ref never replays, which is the same refusal the
+  // ambiguity branch produces.
+  const publishUnknown = new LogBuilder().turnStart(1)
+  publishUnknown.generate(1, 0, 'dup-ref', 'chart')
+  publishUnknown.stepEnd(1, 0)
+  publishUnknown.publish(1, 1, 'present-unknown', ['sv1_0123456789abcdef0123'])
+  publishUnknown.stepEnd(1, 1).turnEnd(1)
+  assert.deepEqual(collectPublishedVisuals(SESSION, publishUnknown.events()), [],
+    'an unknown ref never publishes')
+})
+
+test('cold replay stays linear in the number of publications', () => {
+  // A growth probe: 200 publications over 40 sources. A quadratic implementation
+  // still produces the right answer here, so this case pins CORRECTNESS at size
+  // rather than timing; the linearity itself is structural (one source index and
+  // one first-wins set), and the case would time out visibly if it regressed to
+  // repeated full scans of the whole event list per reference.
+  const SOURCE_COUNT = 40
+  const PUBLICATION_COUNT = 200
+  const log = new LogBuilder().turnStart(1)
+  const refs: string[] = []
+  for (let index = 0; index < SOURCE_COUNT; index += 1) {
+    refs.push(log.generate(1, index, `chart-${String(index)}`, 'chart').ref)
+  }
+  log.stepEnd(1, SOURCE_COUNT - 1)
+  for (let index = 0; index < PUBLICATION_COUNT; index += 1) {
+    // Each publication names the SAME two refs, so first-wins must hold.
+    log.publish(1, SOURCE_COUNT + index, `present-${String(index)}`, [refs[0] as string, refs[1] as string])
+    log.stepEnd(1, SOURCE_COUNT + index)
+  }
+  log.turnEnd(1)
+  const published = collectPublishedVisuals(SESSION, log.events())
+  assert.deepEqual(published.map(entry => entry.ref), [refs[0], refs[1]])
+  assert.equal(published.length, 2, '200 publications of the same refs stay two entries')
+  assert.equal(published[0]?.callId, 'present-0', 'the first publication wins')
+})

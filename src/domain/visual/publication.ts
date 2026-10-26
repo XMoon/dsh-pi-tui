@@ -627,8 +627,22 @@ function isPublishableBy(
  * @returns the published visuals in durable order, first-wins.
  */
 export function collectPublishedVisuals(sessionId: string, events: readonly VisualSessionEvent[]): PublishedVisual[] {
-  const sources = collectVisualSources(sessionId, events)
+  // ONE index of the qualified sources per reference, built in a single pass
+  // (plan §2.3: O(N + K), never a per-reference rescan of the log). A reference
+  // is ambiguous — and therefore unpublishable — exactly when more than one
+  // occurrence owns it, so the map keeps a null marker instead of rescanning.
+  // Two DISTINCT identity tuples cannot share an `sv1_` ref under SHA-256, so
+  // this marker is an unreachable-in-practice fail-closed guard rather than a
+  // behaviour any test can legitimately exercise; the duplicated-identity shape
+  // it protects against is covered (a repeated `(turn, step, callId)` is not a
+  // source at all).
+  const sourcesByRef = new Map<string, VisualSource | null>()
+  for (const source of collectVisualSources(sessionId, events)) {
+    sourcesByRef.set(source.ref, sourcesByRef.has(source.ref) ? null : source)
+  }
   const published: PublishedVisual[] = []
+  // First-wins across publications, in O(1) per accepted reference.
+  const alreadyPublished = new Set<string>()
   for (const call of indexCalls(sessionId, events)) {
     if (call.ambiguous || call.name !== PRESENT_VISUAL_TOOL_NAME) continue
     const result = call.result
@@ -643,8 +657,10 @@ export function collectPublishedVisuals(sessionId: string, events: readonly Visu
     const accepted: PublishedVisual[] = []
     let qualified = true
     for (const ref of requested) {
-      const matched = sources.filter(source => source.ref === ref)
-      if (matched.length !== 1 || !isPublishableBy(matched[0] as VisualSource, call)) {
+      const source = sourcesByRef.get(ref)
+      // `undefined` = no committed source owns the ref; `null` = more than one
+      // does. Both refuse the whole publication, exactly as before.
+      if (source === undefined || source === null || !isPublishableBy(source, call)) {
         qualified = false
         break
       }
@@ -656,12 +672,13 @@ export function collectPublishedVisuals(sessionId: string, events: readonly Visu
         callSeq: call.callSeq,
         resultSeq: result.seq,
         callId: call.callId,
-        source: matched[0] as VisualSource,
+        source,
       })
     }
     if (!qualified) continue
     for (const entry of accepted) {
-      if (published.some(existing => existing.ref === entry.ref)) continue
+      if (alreadyPublished.has(entry.ref)) continue
+      alreadyPublished.add(entry.ref)
       published.push(entry)
     }
   }
