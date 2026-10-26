@@ -32,8 +32,9 @@ import {
 } from '../../src/domain/communication/git-attribution.ts'
 import { installGitAttributionPrompt, type SystemPromptLike } from '../../src/app/direct/system-prompt.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { confirmSettingsChoice, openSettingsRows, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -62,7 +63,19 @@ function fakeSettings(doc: Record<string, unknown>) {
 function setupSettings(options: { gitAttribution?: string; failWrite?: boolean } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The REAL owned-task entry a Settings write runs through.
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  })
   app.start()
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
@@ -191,111 +204,83 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: legacyEditorExtensions() as never,
+    // The minimal REAL extension registries: these cases exercise the static
+    // Git attribution row, not extension contributions.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
-  const run = async (): Promise<void> => {
-    await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: 'x' as never,
-      agent: undefined as never,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    await vt.flush()
-    await navigateToLegacySettings(vt)
-  }
+  const invoke = (): unknown => (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+    commandId: 'x' as never,
+    agent: undefined as never,
+    rawInput: '',
+    signal: new AbortController().signal,
+  })
   const view = async (): Promise<string> => {
     await vt.waitForRender()
     return stripTerminalSequences(vt.getViewport().join('\n'))
   }
-  return { app, vt, settings, run, view, gitAttributionState, attributionPrompt }
+  return { app, vt, settings, invoke, view, gitAttributionState, attributionPrompt }
 }
 
-test('the row renders the persisted mode; invalid values fall back to off', async () => {
-  // The row sits at the list tail; search-navigate to it (the search box is
-  // the focused element, exactly like the other settings-row tests).
-  const viewWithRow = async (t: ReturnType<typeof setupSettings>): Promise<string> => {
-    t.vt.sendInput('Git attribution')
-    const text = await t.view()
-    if (!text.includes('Git attribution')) throw new Error('Git attribution row never rendered')
-    return text
+test('the Conversation Git attribution row separates the live mode from an invalid persisted value', async () => {
+  const t = setupSettings({ gitAttribution: 'garbage' })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Conversation')
+    await selectSettingsRow(t.vt, 'Git attribution')
+    const rows = await t.view()
+    const row = paintedSelectedRowCell(t.vt) ?? ''
+    assert.ok(row.includes('off'), `an invalid persisted value normalizes the live mode to off:\n${rows}`)
+    assert.ok(!row.includes('garbage'), `the row never paints the invalid raw value:\n${rows}`)
+    t.vt.sendInput('\t') // the ROOT Tab enters the Detail (no choice)
+    const detail = await t.view()
+    assert.match(detail, /Value\s+off/u, `the primary fact is the live mode:\n${detail}`)
+    assert.match(detail, /Persisted\s+garbage/u, `the persisted raw value is its own fact:\n${detail}`)
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
   }
-  const t = setupSettings({ gitAttribution: 'product-model' })
-  await t.run()
-  const view = await viewWithRow(t)
-  assert.ok(view.split('\n').some(line => line.includes('Git attribution') && line.includes('product-model')),
-    `persisted mode must render:\n${view}`)
-  t.app.dispose()
-
-  const t2 = setupSettings({ gitAttribution: 'garbage' })
-  await t2.run()
-  const view2 = await viewWithRow(t2)
-  assert.ok(view2.split('\n').some(line => line.includes('Git attribution') && line.includes('off')),
-    `invalid mode must fall back to off:\n${view2}`)
-  assert.ok(!view2.includes('garbage'), 'the raw invalid value never renders')
-  t2.app.dispose()
 })
 
-test('cycling the row updates the live holder, the prompt text, and persists the whole document', async () => {
-  const t = setupSettings()
-  await t.run()
-  await t.view()
-  assert.equal(t.gitAttributionState.mode, 'off')
-  assert.equal(t.attributionPrompt(), '')
-
-  // Search-navigate to the row and cycle: off -> product.
-  t.vt.sendInput('Git attribution')
-  t.vt.sendInput('\r')
-  assert.equal(t.gitAttributionState.mode, 'product', 'the live holder switches synchronously')
-  assert.ok(t.attributionPrompt().includes('Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>'),
-    'the next prompt assembly carries the trailer guidance')
-
-  await t.view()
-  assert.equal(t.settings.writes.length, 1, 'exactly one whole-document write')
-  const write = t.settings.writes[0]!
-  assert.equal(write.gitAttribution, 'product')
-  assert.equal(write.progressUpdates, 'milestones', 'unrelated fields are preserved')
-  assert.equal(write.responseStyle, 'default')
-  assert.deepEqual(write.keybindings, { 'app.transcript.toggle': ['ctrl+o'] })
-  assert.deepEqual(write.customExtension, { enabled: true })
-  assert.equal(write.displayPreset, undefined, 'displayPreset is never pinned by an unrelated write')
-  t.app.dispose()
+test('explicit Confirms walk every Git attribution candidate through state, prompt and document', async () => {
+  const t = setupSettings({ gitAttribution: 'off' })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Conversation')
+    await selectSettingsRow(t.vt, 'Git attribution')
+    for (const candidate of ['product', 'product-model'] as const) {
+      await confirmSettingsChoice(t.vt, candidate, () => t.settings.writes.some(write => write.gitAttribution === candidate))
+      assert.equal(t.gitAttributionState.mode, candidate, `the LIVE prompt state moved to ${candidate}`)
+      assert.match(t.attributionPrompt(), /Co-Authored-By: @xmoon76\/dsh-pi-tui/u,
+        `the registered prompt section reads the same state (${candidate})`)
+      assert.equal(t.settings.writes.at(-1)?.gitAttribution, candidate, 'the document stores the raw candidate')
+      if (candidate === 'product-model') {
+        assert.match(t.attributionPrompt(), /Assisted-By: \{\{provider\}\}\/\{\{model\}\}/u)
+        assert.equal(t.settings.writes.at(-1)?.theme, 'auto', 'the whole-document replace preserves other fields')
+        assert.deepEqual(t.settings.writes.at(-1)?.customExtension, { enabled: true }, 'unknown fields ride verbatim')
+      }
+      await t.view()
+      t.vt.sendInput('\u001b') // settled Detail -> the SAME lease's Rows
+      await t.view()
+    }
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
-test('cycling twice reaches product-model and back toward off; persistence follows each step', async () => {
-  const t = setupSettings({ gitAttribution: 'product' })
-  await t.run()
-  await t.view()
-  t.vt.sendInput('Git attribution')
-  t.vt.sendInput('\r') // product -> product-model
-  assert.equal(t.gitAttributionState.mode, 'product-model')
-  assert.ok(t.attributionPrompt().includes('Assisted-By: {{provider}}/{{model}}'))
-  await t.view()
-  t.vt.sendInput('\r') // product-model -> off (wraps)
-  assert.equal(t.gitAttributionState.mode, 'off')
-  assert.equal(t.attributionPrompt(), '')
-  await t.view()
-  assert.equal(t.settings.writes.length, 2)
-  assert.equal(t.settings.writes[0]!.gitAttribution, 'product-model')
-  assert.equal(t.settings.writes[1]!.gitAttribution, 'off')
-  t.app.dispose()
-})
-
-test('a failed persistence write keeps the runtime change and notifies', async () => {
-  const t = setupSettings({ failWrite: true })
-  const notifications: string[] = []
-  t.app.notify = message => { notifications.push(message) }
-  await t.run()
-  await t.view()
-  t.vt.sendInput('Git attribution')
-  t.vt.sendInput('\r')
-  assert.equal(t.gitAttributionState.mode, 'product', 'the runtime change survives the failed write')
-  assert.ok(t.attributionPrompt().includes('Co-Authored-By'))
-  await t.view()
-  assert.ok(notifications.some(message => message.includes('settings unavailable')),
-    `the write failure surfaces:\n${notifications.join('; ')}`)
-  t.app.dispose()
+test('a failed persistence write keeps the live Git attribution change and never claims Verified', async () => {
+  const t = setupSettings({ gitAttribution: 'off', failWrite: true })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Conversation')
+    await selectSettingsRow(t.vt, 'Git attribution')
+    await confirmSettingsChoice(t.vt, 'product', async () => (await t.view()).includes('Not saved'))
+    assert.equal(t.gitAttributionState.mode, 'product', 'the runtime change survives the refused write')
+    assert.match(t.attributionPrompt(), /Co-Authored-By: @xmoon76\/dsh-pi-tui/u,
+      'the registered prompt section keeps the applied mode')
+    const detail = await t.view()
+    assert.match(detail, /Not saved/u, `the refusal is reported:\n${detail}`)
+    assert.doesNotMatch(detail, /Status\s+Verified/u, 'a refused write is never Verified')
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })

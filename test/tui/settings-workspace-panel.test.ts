@@ -833,6 +833,11 @@ const plain = (harness: Harness, width = harness.columns()): string =>
 
 const header = (harness: Harness): string => plain(harness).split('\n')[0] ?? ''
 
+/** The painted DETAIL column of the 120-column projection (pane x = 68):
+ *  a fact wrapped inside it must be read there, not across the row panes. */
+const detailColumn = (harness: Harness): string =>
+  plain(harness, 120).split('\n').map(line => line.slice(68)).join('\n')
+
 /** The painted category order of the default fixture (no extension rows). */
 const CATEGORY_ORDER = [
   'about', 'models', 'account', 'agent', 'appearance',
@@ -2006,29 +2011,72 @@ test('below the body floor the content focus forwards only Esc, never a hidden p
 
 // ── C2-R0: the nine fixed categories + the conditional Extensions ─────────
 
-/** One live extension-settings launcher, as the command layer builds it. */
-const extensionRow = (target: string): SettingsWorkspaceSnapshot['rows'][number] => ({
-  id: 'extension-settings-legacy',
-  category: 'extensions',
-  label: 'Configure extension settings…',
-  summary: '1 setting · 1 contributor',
-  scope: 'Existing settings editor',
-  freshness: 'ready',
-  description: 'extension registrations are edited by the existing settings editor',
-  action: 'open-legacy',
-  legacyTargetId: target,
-})
+/** One LIVE extension setting row, exactly as the command layer projects a
+ *  registry record: the registry id, its owning fiber identity, its immutable
+ *  registration token and — only when the registration has selectable values —
+ *  the native choice channel. A readonly registration carries no `edit`. */
+const extensionSettingRow = (options: {
+  readonly id: string
+  readonly owner: string
+  readonly token: number
+  readonly label?: string
+  readonly currentValue?: string
+  readonly values?: readonly string[]
+}): SettingsWorkspaceSnapshot['rows'][number] => {
+  const id = `ext-setting:${options.id}` as const
+  const currentValue = options.currentValue ?? 'on'
+  const values = options.values ?? []
+  return {
+    id,
+    category: 'extensions',
+    label: options.label ?? `${options.id} setting`,
+    summary: currentValue,
+    value: currentValue,
+    scope: `Extension runtime · ${options.owner}`,
+    freshness: 'runtime',
+    description: `registered at runtime by ${options.owner}`,
+    action: 'inspect',
+    extensionOwner: options.owner,
+    extensionRegistrationToken: options.token,
+    ...values.length === 0 ? {} : {
+      edit: {
+        field: id,
+        primary: 'runtime',
+        options: values.map(value => ({
+          value,
+          label: value,
+          available: true,
+          current: value === currentValue,
+        })),
+        runtime: currentValue,
+        persisted: 'Not applicable · extension runtime',
+      },
+    },
+  }
+}
+
+/** The ONE default live registration (one group, one writable row). */
+const defaultExtensionRows = (): SettingsWorkspaceSnapshot['rows'] => [
+  extensionSettingRow({
+    id: 'demo',
+    owner: '1:demo-extension',
+    token: 1,
+    label: 'Demo level',
+    currentValue: 'on',
+    values: ['off', 'on'],
+  }),
+]
 
 /** The fixture at one registry directory state. */
 const snapshotWithExtensions = (
   count: number,
   revision: number,
-  target = 'ext-setting:demo',
+  rows: readonly SettingsWorkspaceSnapshot['rows'][number][] = defaultExtensionRows(),
 ): SettingsWorkspaceSnapshot => ({
   ...SNAPSHOT,
   extensionRevision: revision,
   extensionCount: count,
-  rows: count > 0 ? [...SNAPSHOT.rows, extensionRow(target)] : SNAPSHOT.rows,
+  rows: count > 0 ? [...SNAPSHOT.rows, ...rows] : SNAPSHOT.rows,
 })
 
 /** The labels the painted category RAIL really shows, in row order. */
@@ -2074,12 +2122,13 @@ test('T01 the directory is the nine fixed categories with no Other settings and 
   assert.equal(h.legacyOpens(), 0, 'reaching the rail end opens nothing')
 })
 
-test('T02 a live extension appends Extensions; browsing it never opens the editor or writes', () => {
+test('T02 a live extension appends Extensions; its rows are the live registration and browsing writes', () => {
   let count = 0
   let revision = 0
+  let rows: SettingsWorkspaceSnapshot['rows'] = []
   const h = setup({
     directory: () => ({ revision, count }),
-    snapshot: () => snapshotWithExtensions(count, revision),
+    snapshot: () => snapshotWithExtensions(count, revision, rows),
   })
   plain(h)
   assert.match(plain(h), /Categories \(9\)/u, 'the empty directory paints nine categories')
@@ -2087,6 +2136,7 @@ test('T02 a live extension appends Extensions; browsing it never opens the edito
   // the selection, and the tenth category is reachable only after that paint.
   revision = 1
   count = 1
+  rows = defaultExtensionRows()
   const appended = plain(h)
   assert.match(appended, /Categories \(10\)/u, 'the frame that paints the registration states ten')
   assert.deepEqual(railLabels(h).at(-1), 'Extensions', 'Extensions is the appended last category')
@@ -2094,20 +2144,25 @@ test('T02 a live extension appends Extensions; browsing it never opens the edito
   h.panel.handleInput('\u001b[F')
   assert.match(plain(h), /> Extensions/u, 'End reaches the appended category')
   h.panel.handleInput('\r')
-  const rows = plain(h)
-  assert.match(header(h), /Settings · Extensions · Rows/u)
-  assert.match(rows, /Configure extension settings…/u, 'the R0 transition row is painted')
-  assert.match(rows, /Existing settings editor/u, 'the row states its transition scope')
+  const rowsFrame = plain(h)
+  assert.match(header(h), /Settings · Extensions \[1\/1\] · demo-extension · Rows/u,
+    'the header names the ONE live plugin group and its position')
+  assert.match(rowsFrame, /Rows \(1\) · demo-extension/u, 'the Rows pane header names the group')
+  assert.match(rowsFrame, /Demo level/u, 'the real registration is painted')
+  assert.match(rowsFrame, /Extension runtime · 1:demo-extension/u, 'the row scope states the raw owner')
   assert.equal(h.legacyOpens(), 0, 'reaching the row opens nothing')
   assert.equal(h.commits(), 0, 'reaching the row writes nothing')
+  // A single group keeps the ROOT Tab semantics: Rows -> Details.
   h.panel.handleInput('\t')
-  plain(h)
+  assert.match(header(h), /Settings · Extensions · Demo level/u, 'one group keeps the region Tab')
   assert.equal(h.legacyOpens(), 0, 'a Tab focus change never opens the legacy editor')
   h.panel.handleInput('\u001b') // Detail -> Rows
-  // Only the explicit activation of the painted row opens it, on the live first id.
+  // Only explicit activation opens the native choice, which writes nothing until
+  // its Confirm and never hands off to the legacy editor.
   h.panel.handleInput('\r')
-  assert.deepEqual(h.legacyTargets(), ['ext-setting:demo'], 'the launcher targets the registry first row')
-  assert.equal(h.commits(), 0, 'the transition launcher is a navigation, never a write')
+  assert.match(plain(h), /Choose value/u, 'the extension row opens the native choice')
+  assert.equal(h.commits(), 0, 'opening the choice writes nothing')
+  assert.equal(h.legacyOpens(), 0, 'the extension rows never hand off to the legacy editor')
 })
 
 test('T03 display rows live in Conversation while Theme/Icon stay in Appearance', () => {
@@ -2214,7 +2269,7 @@ test('T06 losing the Extensions directory falls back to Plugins and refuses ever
   h.panel.handleInput('\u001b[F') // End -> Extensions
   assert.match(plain(h), /> Extensions/u)
   h.panel.handleInput('\r') // rows of Extensions
-  assert.match(header(h), /Settings · Extensions · Rows/u)
+  assert.match(header(h), /Settings · Extensions \[1\/1\] · demo-extension · Rows/u)
   plain(h)
   // The registry empties AFTER the frame painted the launcher.
   revision = 2
@@ -2247,40 +2302,46 @@ test('T06 losing the Extensions directory falls back to Plugins and refuses ever
 })
 
 test('T07 a same-count revision change refuses the old press until the new frame paints', () => {
-  let target = 'ext-setting:first'
   let revision = 1
+  let rows: SettingsWorkspaceSnapshot['rows'] = [
+    extensionSettingRow({ id: 'first', owner: '1:demo', token: 1, label: 'First row' }),
+    extensionSettingRow({ id: 'second', owner: '1:demo', token: 2, label: 'Second row' }),
+  ]
   const h = setup({
     columns: 120,
     rows: 40,
-    directory: () => ({ revision, count: 1 }),
-    snapshot: () => snapshotWithExtensions(1, revision, target),
+    directory: () => ({ revision, count: rows.length }),
+    snapshot: () => snapshotWithExtensions(rows.length, revision, rows),
   })
   plain(h)
   h.panel.handleInput('\u001b[F') // Extensions
   h.panel.handleInput('\r') // rows
   const frame = plain(h)
-  const y = frame.split('\n').findIndex(line => line.includes('Configure extension settings…'))
-  assert.ok(y >= 0, `the launcher row must be painted:\n${frame}`)
-  const x = frame.split('\n')[y]!.indexOf('Configure extension settings…')
+  const y = frame.split('\n').findIndex(line => line.includes('Second row'))
+  assert.ok(y >= 0, `the second row must be painted:\n${frame}`)
+  const x = frame.split('\n')[y]!.indexOf('Second row')
   // A press is recorded against the row the frame painted.
   h.panel.onCellPress(x + 1, y)
-  // The owner is replaced by a DIFFERENT one under the same id: the count stays
-  // 1 and only the registry revision moves.
+  // The SAME ids are re-registered (HMR): the count stays 2 and only the
+  // registry revision/tokens move.
   revision = 2
-  target = 'ext-setting:second'
+  rows = [
+    extensionSettingRow({ id: 'first', owner: '1:demo', token: 3, label: 'First row' }),
+    extensionSettingRow({ id: 'second', owner: '1:demo', token: 4, label: 'Second row' }),
+  ]
   // The release arrives before any repaint: same coordinates, same painted row,
   // but a registry generation that no longer exists.
   h.panel.onCellClick(x + 1, y)
-  assert.equal(h.legacyOpens(), 0, 'the straddling release is refused')
-  // The next frame publishes the NEW registry row, and a fresh gesture opens it.
-  plain(h)
-  const repainted = plain(h)
-  const newY = repainted.split('\n').findIndex(line => line.includes('Configure extension settings…'))
+  const recovered = plain(h)
+  assert.match(recovered, /> First row/u, 'the straddling release did not move the selection')
+  assert.equal(h.commits(), 0, 'the straddling release dispatched no write')
+  // The repainted frame admits a FRESH activation of the same row.
+  const newY = recovered.split('\n').findIndex(line => line.includes('Second row'))
   assert.ok(newY >= 0)
-  const newX = repainted.split('\n')[newY]!.indexOf('Configure extension settings…')
+  const newX = recovered.split('\n')[newY]!.indexOf('Second row')
   h.panel.onCellPress(newX + 1, newY)
   h.panel.onCellClick(newX + 1, newY)
-  assert.deepEqual(h.legacyTargets(), ['ext-setting:second'], 'the repainted launcher opens the CURRENT row')
+  assert.match(plain(h), /> Second row/u, 'the repainted row accepts the fresh gesture')
 })
 
 test('T08 a 44x8 frame scrolls and reveals the rail and never activates an off-screen row', () => {
@@ -2510,7 +2571,7 @@ test('T06b an app-driven fact reread that discovers an empty directory recovers 
   plain(h)
   h.panel.handleInput('\u001b[F') // Extensions
   h.panel.handleInput('\r') // its rows
-  assert.match(header(h), /Settings · Extensions · Rows/u)
+  assert.match(header(h), /Settings · Extensions \[1\/1\] · demo-extension · Rows/u)
   plain(h)
   // The registry empties and an unrelated app-driven reread (a write settle)
   // observes the new snapshot BEFORE any user key arrives.
@@ -2567,7 +2628,7 @@ test('an unrelated registry change keeps an open candidate choice and its scroll
   // An UNRELATED registry change: a plugin registers a settings row.
   revision = 2
   count = 1
-  extraRows = [extensionRow('ext-setting:other')]
+  extraRows = [extensionSettingRow({ id: 'other', owner: '2:other', token: 1 })]
   const afterRegister = plain(h)
   // The frame is re-proved against the new directory, but the user's business
   // state is intact: same level, same candidate, same scroll.
@@ -2605,7 +2666,7 @@ test('a registry change that drops the chosen candidate identity drops the choic
           options,
         },
       },
-      extensionRow('ext-setting:other'),
+      extensionSettingRow({ id: 'other', owner: '2:other', token: 1 }),
     ],
   })
   let snapshot = snapshotOf()
@@ -2639,7 +2700,7 @@ test('losing the Extensions category still repairs the selection and its offsets
   let count = 1
   let snapshot: SettingsWorkspaceSnapshot = {
     ...withDirectory(revision, count),
-    rows: [...SNAPSHOT.rows, extensionRow('ext-setting:demo')],
+    rows: [...SNAPSHOT.rows, ...defaultExtensionRows()],
   }
   const h = setup({
     columns: 120,
@@ -2651,7 +2712,7 @@ test('losing the Extensions category still repairs the selection and its offsets
   plain(h)
   h.panel.handleInput('\u001b[F') // Extensions
   h.panel.handleInput('\r') // its Rows level
-  assert.match(header(h), /Settings · Extensions · Rows/u)
+  assert.match(header(h), /Settings · Extensions \[1\/1\] · demo-extension · Rows/u)
   plain(h)
   revision = 2
   count = 0
@@ -2666,6 +2727,422 @@ test('losing the Extensions category still repairs the selection and its offsets
   h.panel.handleInput('\u001b[A')
   assert.match(plain(h), /^> Tools/mu, 'the rail owns the keyboard after the repair')
   assert.equal(h.legacyOpens(), 0)
+})
+
+// ── C2-R6: the per-owner GROUP PAGES of the Extensions Rows level ──────────
+
+/** End -> Extensions, then its Rows level (the directory has live rows). */
+const openExtensionsRows = (h: Harness): void => {
+  plain(h)
+  h.panel.handleInput('\u001b[F') // End -> the appended last category
+  h.panel.handleInput('\r') // rail -> its Rows level
+}
+
+/** The interleaved A1,B1,A2,C1 registration stream: three owner groups whose
+ *  first-appearance order is alpha, beta, gamma, while the A page keeps its own
+ *  registry order (alpha level, alpha timeout). */
+const GROUPED_ROWS = (): SettingsWorkspaceSnapshot['rows'] => [
+  extensionSettingRow({ id: 'a1', owner: '11:alpha', token: 1, label: 'Alpha level', currentValue: 'on', values: ['off', 'on'] }),
+  extensionSettingRow({ id: 'b1', owner: '22:beta', token: 2, label: 'Beta level', currentValue: 'x', values: ['x', 'y'] }),
+  extensionSettingRow({ id: 'a2', owner: '11:alpha', token: 3, label: 'Alpha timeout', currentValue: '5s', values: ['5s', '10s'] }),
+  extensionSettingRow({ id: 'c1', owner: '33:gamma', token: 4, label: 'Gamma level', currentValue: '1' }),
+]
+
+const groupedHarness = (columns = 120, rows = 40): Harness => setup({
+  columns,
+  rows,
+  directory: () => ({ revision: 1, count: GROUPED_ROWS().length }),
+  snapshot: () => snapshotWithExtensions(GROUPED_ROWS().length, 1, GROUPED_ROWS()),
+})
+
+test('the Extensions page projects one owner group at a time in first-appearance order', () => {
+  const h = groupedHarness()
+  openExtensionsRows(h)
+  let frame = plain(h)
+  assert.match(header(h), /Settings · Extensions \[1\/3\] · alpha · Rows/u,
+    'the header states the group position before its name')
+  assert.match(frame, /Rows \(2\) · alpha/u, 'the pane header counts only the visible group')
+  assert.match(frame, /Alpha level/u)
+  assert.match(frame, /Alpha timeout/u, 'the group keeps the registry order, not a label sort')
+  assert.doesNotMatch(frame, /Beta level|Gamma level/u, 'other owners are not painted on this page')
+  // Up/Down and Home/End move inside the group only (two rows).
+  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B')
+  assert.match(plain(h), /> Alpha timeout/u, 'Down clamps on the group last row')
+  h.panel.handleInput('\u001b[H')
+  assert.match(plain(h), /> Alpha level/u, 'Home is the group first row')
+  h.panel.handleInput('\u001b[F')
+  assert.match(plain(h), /> Alpha timeout/u, 'End is the group last row')
+  // Tab cycles forward (wrapping) and lands on the target group first row.
+  h.panel.handleInput('\t')
+  frame = plain(h)
+  assert.match(header(h), /Settings · Extensions \[2\/3\] · beta · Rows/u)
+  assert.match(frame, /> Beta level/u, 'the target group first row is selected')
+  assert.match(frame, /Rows \(1\) · beta/u)
+  h.panel.handleInput('\t')
+  assert.match(header(h), /\[3\/3\] · gamma/u)
+  h.panel.handleInput('\t')
+  assert.match(header(h), /\[1\/3\] · alpha/u, 'forward wraps to the first group')
+  assert.match(plain(h), /> Alpha level/u, 'the wrap resets to the group first row')
+  // Shift+Tab reverses and wraps the other way.
+  h.panel.handleInput('\u001b[Z')
+  assert.match(header(h), /\[3\/3\] · gamma/u, 'backward wraps to the last group')
+  assert.equal(h.commits(), 0, 'group switching never writes')
+  assert.equal(h.legacyOpens(), 0, 'group switching never opens the legacy editor')
+})
+
+test('two owners with the same fiber name stay two groups and the header distinguishes them by uid', () => {
+  const rows = [
+    extensionSettingRow({ id: 'l1', owner: '101:logger', token: 1, label: 'First log level' }),
+    extensionSettingRow({ id: 'l2', owner: '202:logger', token: 2, label: 'Second log level' }),
+  ]
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision: 1, count: 2 }),
+    snapshot: () => snapshotWithExtensions(2, 1, rows),
+  })
+  openExtensionsRows(h)
+  assert.match(header(h), /Settings · Extensions \[1\/2\] · logger · 101 · Rows/u)
+  const first = plain(h)
+  assert.match(first, /Rows \(1\) · logger · 101/u)
+  assert.doesNotMatch(first, /Second log level/u, 'the same NAME never merges two identity groups')
+  h.panel.handleInput('\t')
+  assert.match(header(h), /Settings · Extensions \[2\/2\] · logger · 202 · Rows/u)
+  assert.match(plain(h), /Second log level/u)
+  // The Detail keeps the RAW owner identity and the RAW registry id.
+  h.panel.handleInput('\r')
+  const detail = plain(h)
+  assert.match(detail, /Owner\s+202:logger/u, 'the raw owner is a Detail fact')
+  assert.match(detail, /ID\s+l2/u, 'the raw registry id is a Detail fact')
+})
+
+test('a same-id re-registration discards the previous choice and its settled controls', () => {
+  let revision = 1
+  let rows = [extensionSettingRow({
+    id: 'same', owner: '1:demo', token: 1, label: 'Same setting', currentValue: 'on', values: ['off', 'on'],
+  })]
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision, count: 1 }),
+    snapshot: () => snapshotWithExtensions(1, revision, rows),
+  })
+  openExtensionsRows(h)
+  h.panel.handleInput('\r') // Detail + the native choice
+  assert.match(plain(h), /Choose value/u)
+  h.panel.handleInput('\u001b[A') // highlight `off`
+  assert.match(plain(h), /> off/u)
+  // A NEW registration reuses the SAME id (HMR): only the token moves.
+  revision = 2
+  rows = [extensionSettingRow({
+    id: 'same', owner: '1:demo', token: 2, label: 'Same setting', currentValue: 'off', values: ['on', 'off'],
+  })]
+  const replaced = plain(h)
+  assert.doesNotMatch(replaced, /Choose value/u, 'the old choice is discarded')
+  assert.match(header(h), /Settings · Extensions · Same setting/u)
+  assert.match(replaced, /Value\s+off/u, 'the new registration current value is painted')
+  assert.equal(h.commits(), 0, 'the discarded choice dispatched nothing')
+  // Enter starts a FRESH choice for the NEW registration; no old state returns.
+  h.panel.handleInput('\r')
+  assert.match(plain(h), /Choose value/u)
+  h.panel.handleInput('\u001b[B')
+  assert.match(plain(h), /> off\s+\[current\]/u, 'the new record own current candidate is offered')
+  assert.equal(h.commits(), 0)
+})
+
+test('an unloaded selected group lands on the first live group and its first row', () => {
+  let revision = 1
+  let rows = GROUPED_ROWS()
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    pluginPage: true,
+    directory: () => ({ revision, count: rows.length }),
+    snapshot: () => snapshotWithExtensions(rows.length, revision, rows),
+  })
+  openExtensionsRows(h)
+  h.panel.handleInput('\t') // alpha -> beta
+  assert.match(header(h), /\[2\/3\] · beta/u)
+  // The beta fiber unloads: its whole group disappears, alpha/gamma stay.
+  revision = 2
+  rows = GROUPED_ROWS().filter(row => row.extensionOwner !== '22:beta')
+  const after = plain(h)
+  assert.match(header(h), /\[1\/2\] · alpha · Rows/u, 'the first live group takes the page')
+  assert.match(after, /> Alpha level/u, 'its first row is selected')
+  assert.match(after, /Rows \(2\) · alpha/u)
+  // N -> 0: the conditional category disappears and Plugins keeps the rail.
+  revision = 3
+  rows = []
+  const emptied = plain(h)
+  assert.match(emptied, /Categories \(9\)/u)
+  assert.match(emptied, /> Plugins/u, 'the stable fallback category is selected')
+  assert.doesNotMatch(emptied, /Extensions/u, 'no empty Extensions page holds the frame')
+})
+
+test('a removed selected row keeps its owner group and selects that group first row', () => {
+  let revision = 1
+  let rows = GROUPED_ROWS()
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision, count: rows.length }),
+    snapshot: () => snapshotWithExtensions(rows.length, revision, rows),
+  })
+  openExtensionsRows(h)
+  h.panel.handleInput('\u001b[B') // Alpha timeout (the A group second row)
+  assert.match(plain(h), /> Alpha timeout/u)
+  revision = 2
+  rows = GROUPED_ROWS().filter(row => row.id !== 'ext-setting:a2')
+  const after = plain(h)
+  assert.match(header(h), /\[1\/3\] · alpha · Rows/u, 'the SAME owner group keeps the page')
+  assert.match(after, /> Alpha level/u, 'the group first surviving row is selected')
+  assert.doesNotMatch(after, /Alpha timeout/u)
+})
+
+test('one group keeps the root Tab semantics; two groups switch the visible Rows even when narrow', () => {
+  const single = setup({
+    columns: 44,
+    rows: 20,
+    directory: () => ({ revision: 1, count: 1 }),
+    snapshot: () => snapshotWithExtensions(1, 1),
+  })
+  plain(single)
+  single.panel.handleInput('\u001b') // the narrow About content -> the rail
+  single.panel.handleInput('\u001b[F')
+  single.panel.handleInput('\r')
+  assert.match(header(single), /Settings · Extensions \[1\/1\]/u,
+    'the 44-column header keeps the group position before the truncated name')
+  assert.doesNotMatch(header(single), /demo-extension · Rows/u, 'the long name is what yields')
+  const beforeTab = header(single)
+  single.panel.handleInput('\t')
+  assert.equal(header(single), beforeTab, 'a single group keeps the narrow Tab no-op')
+  assert.equal(single.commits(), 0)
+
+  const multi = groupedHarness(44, 20)
+  plain(multi)
+  multi.panel.handleInput('\u001b')
+  multi.panel.handleInput('\u001b[F')
+  multi.panel.handleInput('\r')
+  assert.match(header(multi), /Settings · Extensions \[1\/3\] · alpha · Rows/u)
+  multi.panel.handleInput('\t')
+  assert.match(header(multi), /Settings · Extensions \[2\/3\] · beta · Rows/u,
+    'the group switch changes the VISIBLE Rows level, not a hidden focus')
+  assert.match(plain(multi), /> Beta level/u)
+  const bar = plain(multi).split('\n').at(-1)!
+  assert.match(bar, /Tab group/u, 'the 44-column bar compacts the group hint')
+  assert.doesNotMatch(bar, /Tab panes/u, 'the region hint would be a false hint here')
+})
+
+test('the group-switch hints appear only on a multi-group Extensions Rows level', () => {
+  const single = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision: 1, count: 1 }),
+    snapshot: () => snapshotWithExtensions(1, 1),
+  })
+  openExtensionsRows(single)
+  let bar = plain(single).split('\n').at(-1)!
+  assert.match(bar, /Tab panes/u, 'one group keeps the root region hint')
+  assert.match(bar, /Shift\+Tab back/u)
+  assert.doesNotMatch(bar, /Tab next group|Shift\+Tab previous|Tab group/u,
+    'a single group advertises no group switch')
+
+  const multi = groupedHarness()
+  openExtensionsRows(multi)
+  bar = plain(multi).split('\n').at(-1)!
+  assert.match(bar, /Tab next group/u)
+  assert.match(bar, /Shift\+Tab previous/u)
+  assert.doesNotMatch(bar, /Tab panes/u, 'the region hint is replaced, never duplicated')
+})
+
+test('a pointer press recorded before a Tab group switch cannot complete on the new group', () => {
+  const rows = [
+    extensionSettingRow({ id: 'a1', owner: '11:alpha', token: 1, label: 'Alpha one' }),
+    extensionSettingRow({ id: 'a2', owner: '11:alpha', token: 2, label: 'Alpha two' }),
+    extensionSettingRow({ id: 'b1', owner: '22:beta', token: 3, label: 'Beta one' }),
+    extensionSettingRow({ id: 'b2', owner: '22:beta', token: 4, label: 'Beta two' }),
+  ]
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision: 1, count: rows.length }),
+    snapshot: () => snapshotWithExtensions(rows.length, 1, rows),
+  })
+  openExtensionsRows(h)
+  const frame = plain(h)
+  const y = frame.split('\n').findIndex(line => line.includes('Alpha two'))
+  assert.ok(y >= 0, `the second alpha row must be painted:\n${frame}`)
+  const x = frame.split('\n')[y]!.indexOf('Alpha two')
+  // A press is recorded against the A group's SECOND row.
+  h.panel.onCellPress(x + 1, y)
+  h.panel.handleInput('\t') // the Rows group switches to beta
+  assert.match(plain(h), /> Beta one/u)
+  // The release arrives at the SAME cells, which now paint beta's SECOND row:
+  // it belongs to a gesture of the previous group and must not move the cursor.
+  h.panel.onCellClick(x + 1, y)
+  assert.match(plain(h), /> Beta one/u, 'the stale release selected nothing')
+  assert.equal(h.commits(), 0, 'the stale release dispatched no write')
+})
+
+test('Tab stays the root region key while a choice or a pending write owns the keys', () => {
+  const multi = groupedHarness()
+  openExtensionsRows(multi)
+  multi.panel.handleInput('\r') // the selected alpha row opens its choice
+  assert.match(header(multi), /Settings · Extensions · Alpha level/u)
+  assert.match(plain(multi), /Choose value/u)
+  multi.panel.handleInput('\t')
+  assert.match(header(multi), /Settings · Extensions · Alpha level/u, 'a choice never switches groups')
+  assert.match(plain(multi), /Choose value/u)
+  // Confirm is the ONLY dispatch; the phase then owns Tab until it settles.
+  multi.panel.handleInput('\r')
+  assert.match(plain(multi), /Saving…/u)
+  multi.panel.handleInput('\t')
+  assert.match(header(multi), /Settings · Extensions · Alpha level/u, 'a pending write never switches groups')
+  assert.match(plain(multi), /Saving…/u)
+  multi.settlements.at(-1)!({ outcome: 'verified' })
+  plain(multi)
+  multi.panel.handleInput('\t')
+  assert.match(header(multi), /Settings · Categories/u, 'Detail Tab is the ROOT region key again')
+})
+
+test('an HMR replacement mid-write discards the old pending presentation and its late settlement', () => {
+  let revision = 1
+  let rows = [extensionSettingRow({
+    id: 'same', owner: '1:demo', token: 1, label: 'Same setting', currentValue: 'on', values: ['off', 'on'],
+  })]
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision, count: 1 }),
+    snapshot: () => snapshotWithExtensions(1, revision, rows),
+  })
+  openExtensionsRows(h)
+  h.panel.handleInput('\r') // Detail + choice
+  plain(h) // the candidate + Confirm grant must be PAINTED before the confirm
+  h.panel.handleInput('\r') // Confirm -> the app-owned pending write
+  assert.match(plain(h), /Saving…/u)
+  assert.equal(h.commits(), 1)
+  // The registration is REPLACED while the write is in flight (new token).
+  revision = 2
+  rows = [extensionSettingRow({
+    id: 'same', owner: '1:demo', token: 2, label: 'Same setting', currentValue: 'off', values: ['on', 'off'],
+  })]
+  const replaced = plain(h)
+  assert.doesNotMatch(replaced, /Saving…/u, 'the replaced registration inherits no pending row')
+  assert.match(replaced, /Value\s+off/u, 'the new registration current value is painted')
+  // The OLD settlement arrives late: it must not attach to the new record.
+  h.settlements[0]!({ outcome: 'verified' })
+  const settled = plain(h)
+  assert.doesNotMatch(settled, /Verified|Saving…|Retry save/u,
+    'the late settlement never claims the replaced registration')
+  assert.match(settled, /Value\s+off/u, 'the registry value stays the new registration value')
+  assert.equal(h.commits(), 1, 'no second write was dispatched')
+})
+
+test('an untrusted owner, label and value cannot break the Extensions frame or its group position', () => {
+  const rows = [
+    extensionSettingRow({
+      id: 'evil',
+      owner: '9:bad\u001b[31mname',
+      token: 1,
+      label: 'Bad \u001b[2Jlabel 鲸',
+      currentValue: 'v\u0007alue',
+    }),
+    extensionSettingRow({ id: 'ok', owner: '10:ok', token: 2, label: 'OK level' }),
+  ]
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision: 1, count: 2 }),
+    snapshot: () => snapshotWithExtensions(2, 1, rows),
+  })
+  openExtensionsRows(h)
+  const raw = h.panel.render(120).join('\n')
+  assert.ok(!raw.includes('\u001b[2J'), 'a label cannot inject a clear-screen sequence')
+  assert.ok(!raw.includes('\u0007'), 'a current value cannot inject a raw BEL')
+  assert.ok(!raw.includes('\u001b[31m'), 'an owner cannot inject an SGR sequence')
+  assert.match(header(h), /^Settings · Extensions \[1\/2\] · badname/u,
+    'the group position and the sanitized owner label stay on the one header row')
+  const frame = plain(h)
+  assert.equal(frame.split('\n').length, 40, 'the injected bytes never change the physical frame')
+  assert.match(frame, /Bad label 鲸/u, 'the remaining text is painted as ordinary content')
+  assert.match(frame, /Rows \(1\) · badname/u)
+})
+
+test('a registration with ONE candidate still needs an explicit Confirm', () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision: 1, count: 1 }),
+    snapshot: () => snapshotWithExtensions(1, 1, [
+      extensionSettingRow({ id: 'single', owner: '3:notes', token: 1, label: 'Single value', currentValue: 'only', values: ['only'] }),
+    ]),
+  })
+  openExtensionsRows(h)
+  h.panel.handleInput('\r') // Detail + choice with the ONE candidate
+  assert.match(plain(h), /Choose value/u)
+  assert.equal(h.commits(), 0, 'opening the native choice never commits by itself')
+  h.panel.handleInput('\r') // the explicit Confirm
+  assert.equal(h.commits(), 1, 'only the explicit Confirm dispatches')
+  assert.deepEqual(h.committed[0], {
+    field: 'ext-setting:single',
+    value: 'only',
+    registrationToken: 1,
+  })
+})
+
+test('a 30-candidate registration scrolls and confirms only the selected painted candidate', () => {
+  const values = Array.from({ length: 30 }, (_unused, index) => `value-${index}`)
+  const h = setup({
+    columns: 120,
+    rows: 24,
+    directory: () => ({ revision: 1, count: 1 }),
+    snapshot: () => snapshotWithExtensions(1, 1, [
+      extensionSettingRow({ id: 'many', owner: '5:many', token: 1, label: 'Many values', currentValue: 'value-0', values }),
+    ]),
+  })
+  openExtensionsRows(h)
+  h.panel.handleInput('\r') // Detail + choice (the list is longer than its viewport)
+  plain(h)
+  h.panel.handleInput('\u001b[F') // End selects the LAST candidate and reveals it
+  const frame = plain(h)
+  assert.match(frame, /> value-29/u, 'the selected last candidate is inside the painted viewport')
+  assert.doesNotMatch(frame, /value-5\b/u, 'the first candidates scrolled out instead of shrinking the grant')
+  h.panel.handleInput('\r') // Confirm
+  assert.equal(h.commits(), 1)
+  assert.equal(h.committed[0]?.value, 'value-29', 'the RAW selected candidate is dispatched')
+  assert.equal(h.committed[0]?.registrationToken, 1)
+})
+
+test('the extension Detail states the raw facts and the readonly / choice-mismatch diagnoses', () => {
+  const rows = [
+    extensionSettingRow({ id: 'readonly', owner: '7:notes', token: 1, label: 'Readonly note', currentValue: 'hello' }),
+    extensionSettingRow({
+      id: 'mismatch', owner: '7:notes', token: 2, label: 'Mismatched value', currentValue: 'legacy', values: ['a', 'b'],
+    }),
+  ]
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    directory: () => ({ revision: 1, count: 2 }),
+    snapshot: () => snapshotWithExtensions(2, 1, rows),
+  })
+  openExtensionsRows(h)
+  h.panel.handleInput('\t') // ROOT region key: the readonly row's Detail, no choice
+  let detail = detailColumn(h)
+  assert.match(detail, /Owner\s+7:notes/u)
+  assert.match(detail, /ID\s+readonly/u)
+  assert.match(detail, /No selectable values registered/u, 'a value-less registration is read-only')
+  assert.match(detail, /Scope\s+Extension runtime/u)
+  assert.doesNotMatch(detail, /Change…/u, 'a readonly row offers no Change affordance')
+  h.panel.handleInput('\u001b[Z') // back to the Rows level
+  h.panel.handleInput('\u001b[B') // the second row
+  h.panel.handleInput('\t')
+  detail = detailColumn(h)
+  assert.match(detail.replace(/\s+/gu, ' '), /Current value is not in selectable choices/u,
+    'a current value outside the registered choices is diagnosed')
+  assert.match(detail, /Change…/u, 'a writable registration still offers its choice')
 })
 
 // ── C2-R3: the ONE embedded specialist page (subagent allowlist) ───────────

@@ -727,12 +727,14 @@ owns only the lease, focus and write-lifecycle mechanics.
   `abandonWorkspaceForBlockingOwner()`, which closes the Job AND Settings leases
   under one freeze window before committing their own state. A Settings open that
   finds a blocking owner already active is refused.
-- **The legacy bridge closes before it opens.** The `Other settings` row runs
-  `openLegacySettings()` only after the workspace's own `close()` has retired the
-  lease and restored the return surface, so the existing `SettingsList` mounts on
-  the real return surface instead of stacking under a second physical owner; a
-  failed legacy open reports the real error on the restored surface and never
-  resurrects the closed workspace.
+- **The legacy bridge closes before it opens.** A legacy hand-off from a Settings
+  workspace runs the existing settings editor only after the workspace's own
+  `close()` has retired the lease and restored the return surface, so the
+  `SettingsList` mounts on the real return surface instead of stacking under a
+  second physical owner; a failed legacy open reports the real error on the
+  restored surface and never resurrects the closed workspace. The current
+  Settings surface has no such hand-off; the bridge contract stays for the
+  retained compatibility path.
 - **Read projection, not a second store.** The panel holds no ConfigPort and no
   subscription: the `/settings` command assembles a detached snapshot at open and
   at the explicit `R` refresh, and the panel renders it. Its only write verb hands

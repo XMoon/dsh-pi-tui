@@ -9,6 +9,18 @@
 
 ### 新增
 
+- **Settings 的 `Extensions` 现在是按插件分组的真实动态设置页。**
+  每个 TUI 扩展通过 `registerSetting` 贡献的设置都会以真实条目出现在
+  `Settings → Extensions`，并按注册 owner 自动分组分页：一次只显示一个插件的设置，
+  `Tab` / `Shift+Tab` 在两组及以上时循环切组并落在目标组第一行，`↑↓`、Home/End、翻页与滚轮
+  只在当前组内移动；只有一组时 `Tab` 保留原有区域焦点行为。标题栏先显示 `[i/N]` 再显示组名，
+  窄屏优先保住位置；Rows 面栏显示 `Rows (m) · 组名`，宽度不足时依次退化为 `Rows (m) · i/N`
+  与 `Rows (m)`。条目进入原生 Detail/Choice：Owner 与 ID 显示原始值，未注册候选值的设置只读，
+  当前值不在候选里会明确说明；只有显式 Confirm 才写入运行中的扩展，回读一致才 `Verified`，
+  插件拒绝显示 `Not saved` 并只把健康错误记在发起调用的 owner 上，被更新版本取代或已卸载不会
+  伪装成拒绝。设置只作用于本次运行的插件，不写 TUI 设置文档或 Host profile；同一 id 的 HMR
+  重注册不会继承旧确认/重试/结算。原先的 `Extensions → Configure extension settings…`
+  过渡入口已移除，Settings 不再跳转旧设置编辑器。
 - **PiTUI 的最终回答现在为已发布的图表/SVG 提供真实操作行与全屏 SVG 阅读器。**
   图表保留精确数值并新增 `Copy Data`（复制最终 ChartFact 的格式化 JSON）；SVG 保留描述与
   已授权的缩略图，并新增 `View` / `Copy SVG`（复制未经修改的原始源码）。`Alt+V` 在当前窗口

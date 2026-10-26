@@ -346,7 +346,18 @@ Rows 列表（不经过中间的 Detail 面板），下一次返回键即到分�
 Settings 的一级分类是固定的 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal / Tools / Plugins`，
 并且只在扩展设置注册表确实有设置行时才在末尾追加 `Extensions`；`/settings`
 （以及 `/status`）默认落在 About。`Extensions` 的增删与同一 id 重新注册都会先作废旧帧的
-键盘与鼠标授权，重绘完成前只有 `Esc` 还能安全返回。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
+键盘与鼠标授权，重绘完成前只有 `Esc` 还能安全返回。
+
+`Extensions` 是真实配置分类而不是过渡入口：Rows 每次只显示**一个注册 owner** 的实时设置；
+组序按该 owner 在注册表全局 `order ASC, id ASC` 流中首次出现的顺序，组内保持注册表原顺序。
+至少两组时 `Tab` / `Shift+Tab` 循环切换组（落在目标组第一行），`↑↓`、Home/End、翻页与滚轮
+只移动组内设置；只有一组时保留原有区域焦点键。标题栏先显示 `[i/N]` 再显示组名，窄屏先截断
+组名而不是位置；Rows 面栏按宽度退化为 `Rows (m) · 组名` → `Rows (m) · i/N` → `Rows (m)`。
+每行进入原生 Detail/Choice：Owner 与 ID 显示原始值，未注册候选值的设置只读，当前值不在候选里
+会明确说明而不会自动选中；只有显式 Confirm 才经 `SettingsRegistry.applyDetailed` 写入运行中的
+扩展，`accepted` 后回读一致才 `Verified`，插件拒绝显示 `Not saved` 并把健康错误只记在发起调用
+的 owner 上，被更新版本取代或已卸载则如实报告而不伪装成插件拒绝。扩展设置只作用于运行中的
+插件，不写 TUI 设置文档或 Host profile；同一 id 的 HMR 重注册会作废旧确认/重试/结算。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
 不是连通性测试）与 DeepSeek Account 入口；可查看 provider 事实、在遮蔽输入中写入/清除 API key、
 完成 Add Provider 草稿向导，以及发起 provider-native 登录（页面内持续显示 URL、提示与取消）。
 `Account` 是独立的 DeepSeek Account 页：显示 Host 的登录状态、浏览器授权 URL 与 SSH 隧道提示、
@@ -417,8 +428,7 @@ Keyboard shortcuts…；最后一项打开的是与裸 `/keybindings` 相同的�
 `not set`，非法显示 `invalid stored value: <原值>`），`Runtime` 明确写出下一次忙时 Enter 的策略，
 默认值会标注为 `queue (default; no valid saved value)`，绝不冒充已保存值；确认后不影响正在进行的
 回合。`Fullscreen` 的偏好确认后工作区照常可操作，**正常退出 Settings 后才切换 transcript 屏幕**；
-从剩余的 `Extensions` 过渡行跳去旧编辑器、被 Question/Approval 抢占、被强制关闭或写入未确认都不会切屏，已保存的偏好
-会在下次 TUI 启动时生效。
+被 Question/Approval 抢占、被强制关闭或写入未确认都不会切屏，已保存的偏好会在下次 TUI 启动时生效。
 
 其余六项先改真实运行态再持久化（失败不回滚运行态，`Persisted` 单独显示文档原始值）：
 `Git attribution` 改的是同一个 `tui:git-attribution` 提示词状态，仍只是提示词引导（不生成 Git hook、
@@ -449,11 +459,12 @@ Host 公布的 preset 原始 id，只影响**以后新建**的会话，当前会
 只有写入完成且回读一致才 `Verified`；它是 Host 的用户 shell 执行策略，不是模型工具 sandbox 策略，
 也不是权限 preset，因此不放在 Input & Terminal。
 
-完整的旧设置编辑器现在只剩一个入口：`Extensions → Configure extension settings…` 过渡行
-（只在扩展设置注册表有行时出现）。激活它才会先关闭工作区、恢复原界面，再打开原有编辑器并定位到
-对应的一项；Theme、Plugin Manager、键位与扩展设置的写入路径全部不变。Footer 与 Keyboard
-shortcuts 已改为同一 Settings lease 内的专页；`Appearance` 与 `Input & Terminal` 不再有过渡行，
-`Agent` 也没有未迁移项，它们的旧入口都已退休。
+新的 Settings 工作区不再跳转旧设置编辑器：所有字段都在原生行里编辑，`Extensions` 也直接列出
+真实动态设置行（按 owner 分组分页）。Theme、Plugin Manager、键位与扩展设置的写入路径全部不变；
+Footer 与 Keyboard shortcuts 仍是同一 Settings lease 内的专页，`Appearance`、`Input & Terminal`、
+`Agent` 与 `Extensions` 都不再有过渡入口。旧 `SettingsList` 仍由 `/help`、`/skill`、
+`/preset`、`/keybindings conflicts` 这些独立消费方使用，它们各自提供自己的行；旧完整设置编辑器
+不再是 Settings 的入口。
 
 `/settings → Tools → Web Search / Fetch` 现在是**同一个 Settings 工作区里的专页**（不再先关工作区、
 再进旧编辑器）。页面固定六行：搜索 Provider（`Messages`，官方默认，或独立计费的

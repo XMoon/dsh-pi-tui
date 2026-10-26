@@ -27,8 +27,9 @@ import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, ty
 import { installProgressUpdatesPrompt, installResponseStylePrompt, installFocusPrompt, type SystemPromptLike } from '../../src/app/direct/system-prompt.ts'
 import type { DisplayState } from '../../src/domain/display/preset.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { confirmSettingsChoice, openSettingsRows, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
@@ -61,7 +62,19 @@ function fakeSettings(doc: Record<string, unknown>) {
 function setupSettings(options: { notificationMode?: string; notificationMethod?: string; progressUpdates?: string; responseStyle?: string; failWrite?: boolean } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The REAL owned-task entry a Settings write runs through.
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  })
   app.start()
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
@@ -108,6 +121,10 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
   }
   const appliedModes: string[] = []
   const appliedMethods: string[] = []
+  // The ONE completion controller's live facts: a setter really changes what
+  // the foreground read reports (the fixture never claims a call it did not get).
+  let liveMode = parseNotificationMode(settings.value.get().notificationMode)
+  let liveMethod = parseNotificationMethod(settings.value.get().notificationMethod)
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -187,12 +204,10 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     setDisplayPreset: preset => { displayState.preset = preset; return { kind: 'applied', preset } },
     focusEnabled: () => displayState.preset === 'focus',
     setFocusMode: () => {},
-    setNotificationMode: (mode) => { appliedModes.push(mode) },
-    // The Settings workspace reads the live controller facts; this fixture's
-    // cases drive the LEGACY editor, which never asks for them.
-    currentNotificationMode: () => 'unfocused',
-    currentNotificationMethod: () => 'auto',
-    setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method) },
+    setNotificationMode: (mode) => { appliedModes.push(mode); liveMode = parseNotificationMode(mode) },
+    currentNotificationMode: () => liveMode,
+    currentNotificationMethod: () => liveMethod,
+    setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method); liveMethod = parseNotificationMethod(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
@@ -203,181 +218,108 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: legacyEditorExtensions() as never,
+    // The minimal REAL extension registries: these cases exercise the static
+    // notification rows, not extension contributions.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
-  const run = async (): Promise<void> => {
-    await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: 'x' as never,
-      agent: undefined as never,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    await navigateToLegacySettings(vt)
-  }
+  const invoke = (): unknown => (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+    commandId: 'x' as never,
+    agent: undefined as never,
+    rawInput: '',
+    signal: new AbortController().signal,
+  })
   const view = async (): Promise<string> => {
     await vt.waitForRender()
-    return vt.getViewport().join('\n')
+    return stripTerminalSequences(vt.getViewport().join('\n'))
   }
-  return { vt, app, settings, runner, appliedModes, appliedMethods, run, view, prompt, sections }
+  return { vt, app, settings, runner, appliedModes, appliedMethods, invoke, view, prompt, sections }
 }
 
-test('the notification rows render with the defaults (Unfocused / Auto)', async () => {
-  const t = setupSettings({})
-  await t.run()
-  await t.view()
-  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B')
-  const view = stripTerminalSequences(await t.view())
-  const modeRow = view.split('\n').find(line => line.includes('Notifications'))
-  const methodRow = view.split('\n').find(line => line.includes('Notification method'))
-  // The panel shows the RAW persisted values (the codebase-wide settings
-  // convention — wheel rows show literal step numbers, sandbox rows show
-  // 'bypass'); the DESCRIPTION carries the user-facing explanation.
-  assert.ok(modeRow !== undefined && modeRow.includes('unfocused'),
-    `default mode row must show unfocused (row: ${modeRow}):\n${view}`)
-  assert.ok(methodRow !== undefined && methodRow.includes('auto'),
-    `default method row must show auto (row: ${methodRow}):\n${view}`)
-  t.app.stop()
+test('the two Input & Terminal notification rows keep live facts and the persisted raw value apart', async () => {
+  // Missing fields (old document): the live defaults are Unfocused / Auto and
+  // the persisted facts say `not set`.
+  for (const entry of [
+    { mode: undefined, method: undefined, persistedMode: 'not set', persistedMethod: 'not set' },
+    { mode: 'garbage', method: 'garbage', persistedMode: 'garbage', persistedMethod: 'garbage' },
+  ] as const) {
+    const t = setupSettings(entry.mode === undefined ? {} : { notificationMode: entry.mode, notificationMethod: entry.method })
+    try {
+      await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+      await selectSettingsRow(t.vt, 'Notifications')
+      t.vt.sendInput('\t')
+      let detail = await t.view()
+      assert.match(detail, /Value\s+unfocused/u, `the live mode is the default:\n${detail}`)
+      assert.match(detail, new RegExp(`Persisted\\s+${entry.persistedMode}`, 'u'),
+        `the persisted mode fact stays separate:\n${detail}`)
+      // The next row in the SAME Rows level.
+      t.vt.sendInput('\u001b[Z') // Detail -> Rows
+      t.vt.sendInput('\u001b[B') // Notification method
+      t.vt.sendInput('\t')
+      detail = await t.view()
+      assert.match(detail, /Value\s+auto/u, `the live method is the default:\n${detail}`)
+      assert.match(detail, new RegExp(`Persisted\\s+${entry.persistedMethod}`, 'u'),
+        `the persisted method fact stays separate:\n${detail}`)
+    } finally {
+      if (!t.app.isDisposed()) t.app.dispose()
+    }
+  }
 })
 
-test('persisted values render on the rows; invalid values fall back to the defaults', async () => {
-  // Persisted values render verbatim.
-  const t = setupSettings({ notificationMode: 'always', notificationMethod: 'osc777' })
-  await t.run()
-  await t.view()
-  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B')
-  const view = stripTerminalSequences(await t.view())
-  assert.ok(view.split('\n').some(line => line.includes('Notifications') && line.includes('always')),
-    `persisted mode must render:\n${view}`)
-  assert.ok(view.split('\n').some(line => line.includes('Notification method') && line.includes('osc777')),
-    `persisted method must render:\n${view}`)
-  t.app.dispose()
-  // Invalid persisted values fall back to the defaults (never render raw).
-  const t2 = setupSettings({ notificationMode: 'garbage', notificationMethod: 'beep' })
-  await t2.run()
-  await t2.view()
-  for (let i = 0; i < 12; i += 1) t2.vt.sendInput('\x1b[B')
-  const view2 = stripTerminalSequences(await t2.view())
-  assert.ok(view2.split('\n').some(line => line.includes('Notifications') && line.includes('unfocused')),
-    `invalid mode must fall back to unfocused:\n${view2}`)
-  assert.ok(view2.split('\n').some(line => line.includes('Notification method') && line.includes('auto')),
-    `invalid method must fall back to auto:\n${view2}`)
-  assert.ok(!view2.includes('garbage') && !view2.includes('beep'),
-    `the raw invalid values must never render:\n${view2}`)
-  t2.app.stop()
+test('explicit Confirms move both notification axes through the ONE controller and merge the document', async () => {
+  const t = setupSettings({ notificationMode: 'unfocused', notificationMethod: 'auto', progressUpdates: 'milestones' })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Notifications')
+    await confirmSettingsChoice(t.vt, 'always', () => t.settings.writes.length > 0)
+    assert.deepEqual(t.appliedModes, ['always'], 'the ONE completion controller received the mode exactly once')
+    assert.equal(t.settings.writes[0]?.notificationMode, 'always')
+    assert.equal(t.settings.writes[0]?.notificationMethod, 'auto', 'the mode write leaves the method axis unchanged')
+    assert.equal(t.settings.writes[0]?.progressUpdates, 'milestones', 'the narration cadence rides along untouched')
+    assert.deepEqual(t.settings.writes[0]?.customExtension, { enabled: true }, 'unknown document fields ride verbatim')
+    assert.equal(t.settings.writes[0]?.displayPreset, 'full', 'the Display preset is untouched')
+
+    t.vt.sendInput('\u001b') // settled Detail -> Rows
+    await t.view()
+    await selectSettingsRow(t.vt, 'Notification method')
+    await confirmSettingsChoice(t.vt, 'osc9', () => t.settings.writes.length > 1)
+    assert.deepEqual(t.appliedMethods, ['osc9'], 'the SAME controller received the method exactly once')
+    assert.equal(t.settings.writes.at(-1)?.notificationMethod, 'osc9')
+    assert.equal(t.settings.writes.at(-1)?.notificationMode, 'always', 'the method write keeps the mode')
+    assert.equal(t.settings.writes.at(-1)?.progressUpdates, 'milestones')
+
+    // Reopening the workspace reads the SAME live controller facts.
+    t.vt.sendInput('\u001b') // Detail -> Rows
+    t.vt.sendInput('\u001b') // Rows -> Categories
+    t.vt.sendInput('\u001b') // Categories -> close
+    await t.view()
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Notifications')
+    const rows = await t.view()
+    const modeRow = paintedSelectedRowCell(t.vt) ?? ''
+    assert.ok(modeRow.includes('always'), `the reopened row reads the live mode:\n${rows}`)
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
-test('cycling the mode row applies the runtime setter and persists the whole document', async () => {
-  const t = setupSettings({ notificationMode: 'unfocused' })
-  await t.run()
-  await t.view()
-  for (let i = 0; i < 11; i += 1) t.vt.sendInput('\x1b[B') // move to the mode row
-  await t.view()
-  t.vt.sendInput('\r') // cycle mode: unfocused -> always
-  await t.view()
-  assert.deepEqual(t.appliedModes, ['always'], 'the runtime setter must receive the chosen mode')
-  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.notificationMode, 'always', `wrote: ${JSON.stringify(last)}`)
-  // A replace is wholesale: every other field rides along untouched.
-  assert.equal(last?.theme, 'auto')
-  assert.equal(last?.footer, 'full')
-  assert.equal(last?.focusMode, 'off')
-  t.app.stop()
-})
-
-test('cycling the method row applies the runtime setter and persists', async () => {
-  const t = setupSettings({ notificationMode: 'unfocused', notificationMethod: 'auto' })
-  await t.run()
-  await t.view()
-  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B') // move to the method row
-  await t.view()
-  t.vt.sendInput('\r') // cycle method: auto -> osc9
-  await t.view()
-  assert.deepEqual(t.appliedMethods, ['osc9'], 'the runtime setter must receive the chosen method')
-  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.notificationMethod, 'osc9', `wrote: ${JSON.stringify(last)}`)
-  // The mode field rides along untouched.
-  assert.equal(last?.notificationMode, 'unfocused')
-  t.app.stop()
-})
-
-test('both communication rows cycle live, preserve Display and raw fields, and survive reopening', async () => {
-  const t = setupSettings({ progressUpdates: 'off', responseStyle: 'concise' })
-  await t.run()
-  await t.view()
-  for (let i = 0; i < 9; i += 1) t.vt.sendInput('\x1b[B')
-  const initial = stripTerminalSequences(await t.view())
-  assert.match(initial, /Progress updates\s+off/)
-  assert.match(initial, /Response style\s+concise/)
-  // Cycle the progress row: off -> milestones -> frequent.
-  t.vt.sendInput('\r')
-  await t.view()
-  assert.equal(t.runner.progressUpdatesState.mode, 'milestones')
-  assert.match(t.prompt(), /# Progress updates: Milestones/)
-  t.vt.sendInput('\r')
-  await t.view()
-  assert.equal(t.runner.progressUpdatesState.mode, 'frequent')
-  assert.equal(t.runner.responseStyleState.style, 'concise', 'progress changes never touch the response axis')
-  assert.equal(t.runner.displayPreset!(), 'full')
-  assert.equal(t.settings.value.get().progressUpdates, 'frequent')
-  assert.equal(t.settings.value.get().responseStyle, 'concise')
-  assert.equal(t.sections.size, 3, 'switching never re-registers prompt sections')
-  assert.match(t.prompt(), /# Progress updates: Frequent/)
-  assert.match(t.prompt('tui:response-style'), /# Response style: Concise/)
-  // Cycle the response row (one below): concise -> explanatory -> default.
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\r')
-  await t.view()
-  assert.equal(t.runner.responseStyleState.style, 'explanatory')
-  assert.equal(t.runner.progressUpdatesState.mode, 'frequent', 'response changes never touch the progress axis')
-  assert.match(t.prompt('tui:response-style'), /# Response style: Explanatory/)
-  t.vt.sendInput('\r')
-  await t.view()
-  assert.equal(t.runner.responseStyleState.style, 'default')
-  assert.equal(t.prompt('tui:response-style'), '')
-  const last = t.settings.writes.at(-1)!
-  assert.equal(last.progressUpdates, 'frequent')
-  assert.equal(last.responseStyle, 'default')
-  assert.equal(last.displayPreset, 'full')
-  assert.deepEqual(last.keybindings, { 'app.transcript.toggle': ['ctrl+o'] })
-  assert.deepEqual(last.customExtension, { enabled: true })
-  t.vt.sendInput('\x1b')
-  await t.view()
-  await t.run()
-  await t.view()
-  for (let i = 0; i < 9; i += 1) t.vt.sendInput('\x1b[B')
-  const reopened = stripTerminalSequences(await t.view())
-  assert.match(reopened, /Progress updates\s+frequent/)
-  assert.match(reopened, /Response style\s+default/)
-})
-
-test('communication changes apply before a failed persistence write and Display switches preserve them', async () => {
-  const t = setupSettings({ progressUpdates: 'milestones', failWrite: true })
-  const notifications: string[] = []
-  t.app.notify = message => { notifications.push(message) }
-  await t.run()
-  await t.view()
-  for (let i = 0; i < 9; i += 1) t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\r')
-  assert.equal(t.runner.progressUpdatesState.mode, 'frequent', 'runtime changes synchronously')
-  assert.match(t.prompt(), /# Progress updates: Frequent/)
-  await t.view()
-  assert.ok(notifications.some(message => message.includes('settings unavailable')))
-  assert.notEqual(t.settings.value.get().progressUpdates, 'frequent')
-  // Display is the preceding row: full -> compact -> focus.
-  t.vt.sendInput('\x1b[A')
-  t.vt.sendInput('\r')
-  t.vt.sendInput('\r')
-  await t.view()
-  assert.equal(t.runner.displayPreset!(), 'focus')
-  assert.equal(t.runner.progressUpdatesState.mode, 'frequent', 'entering Focus never mutates the saved cadence')
-  assert.equal(t.prompt(), '', 'Focus suppresses the effective progress section')
-  assert.match(t.prompt('tui:focus-mode'), /# Focus mode/)
+test('a failed notification persistence keeps the applied mode and never claims Verified', async () => {
+  const t = setupSettings({ notificationMode: 'unfocused', notificationMethod: 'auto', failWrite: true })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Notifications')
+    await confirmSettingsChoice(t.vt, 'always', async () => (await t.view()).includes('Not saved'))
+    assert.deepEqual(t.appliedModes, ['always'], 'the apply-first controller received the mode before persistence')
+    const detail = await t.view()
+    assert.match(detail, /Not saved/u, `the refused write is reported:\n${detail}`)
+    assert.doesNotMatch(detail, /Status\s+Verified/u, 'it is never Verified')
+    assert.equal(t.settings.writes.length, 0, 'the refused persistence wrote nothing')
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
 test('the parsers are the single authority (defaults unfocused/auto)', () => {

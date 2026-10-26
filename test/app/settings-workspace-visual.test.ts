@@ -37,7 +37,7 @@ import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from '@xmoon76/pi
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
-import { darkColors } from '../../src/domain/display/theme.ts'
+import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
@@ -3235,6 +3235,38 @@ test('B-04 Retry save re-dispatches the failed value once the write can succeed'
   h.dispose()
 })
 
+test('B-04b two long same-prefix theme identities stay distinguishable at 44 columns and Confirm the raw choice', async () => {
+  const themes = new ThemeRegistry()
+  themes.register({
+    id: 'sunrise-alpha', name: 'Sunrise very long theme name alpha',
+    palette: { ...lightColors, text: '#111111' } as never,
+  }, 'acme-owner-a', 'acme')
+  themes.register({
+    id: 'sunrise-beta', name: 'Sunrise very long theme name beta',
+    palette: { ...darkColors, text: '#222222' } as never,
+  }, 'acme-owner-b', 'acme')
+  const h = setup({ columns: 44, rows: 20, doc: { theme: 'dark' }, themes })
+  await h.open('Appearance')
+  await key(h, '\r') // rows
+  await key(h, '\r') // the native choice
+  const frame = h.view()
+  // The SOURCE-QUALIFIED identities are the candidates; a long shared display
+  // prefix must never collapse them into one row.
+  assert.match(frame, /plugin:acme\/sunrise-alpha/u, `the first raw identity is painted:\n${frame}`)
+  assert.match(frame, /plugin:acme\/sunrise-beta/u, `the second raw identity is painted:\n${frame}`)
+  // The narrow projection paints the inline choice with NO pane header, so the
+  // candidate is revealed by its own painted cursor instead.
+  for (let step = 0; step < 8 && !/> plugin:acme\/sunrise-beta/u.test(h.view()); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  assert.match(h.view(), /> plugin:acme\/sunrise-beta/u, `the second identity owns the cursor:\n${h.view()}`)
+  await key(h, '\r') // explicit Confirm
+  await settle(h)
+  assert.equal(h.doc.theme, 'plugin:acme/sunrise-beta', 'the RAW selected identity is persisted')
+  assert.equal(h.replacements(), 1, 'exactly one document write')
+  h.dispose()
+})
+
 test('B-05 the Display preset applies through the shared runtime owner, persists exactly once and verifies', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { displayPreset: 'compact', theme: 'dark' }, displayPreset: 'full' })
   await openSelectedRow(h, 'display-preset')
@@ -6135,12 +6167,13 @@ test('a resize that keeps the child grant still fails closed until the new termi
 // reaches the surface's render path, and the production `/settings` handler
 // reads the live directory on every frame.
 
-test('C2-R0 a live registration appends Extensions and its launcher reaches the existing editor row', async () => {
+test('a live registration appends Extensions and its row commits through the registry', async () => {
   let invalidations = 0
   let requestRender: () => void = () => {}
   const registry = new SettingsRegistry(() => { invalidations += 1; requestRender() })
   const h = setup({ columns: 120, rows: 40, settingsRegistry: registry, pluginPage: true })
   requestRender = () => h.app.requestRender()
+  const calls: string[] = []
   const handle = registry.register({
     id: 'acme.demo-threshold',
     label: 'Demo threshold',
@@ -6148,7 +6181,7 @@ test('C2-R0 a live registration appends Extensions and its launcher reaches the 
     currentValue: '3',
     values: ['1', '3', '5'],
     order: 10,
-    onChange: () => true,
+    onChange: (value) => { calls.push(value); return true },
   }, 'acme-owner')
   assert.equal(invalidations, 1, 'the registry invalidation reached the surface render path')
   await h.vt.waitForRender()
@@ -6157,38 +6190,42 @@ test('C2-R0 a live registration appends Extensions and its launcher reaches the 
   await key(h, '\u001b[F')
   assert.match(h.view(), /^> Extensions/mu, `End reaches the live category:\n${h.view()}`)
   await key(h, '\r')
-  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u)
-  assert.match(h.view(), /Configure extension settings…/u, 'the transition launcher is painted')
-  assert.match(h.view(), /1 setting · 1 contributor/u, 'the summary counts the live rows and owners')
-  assert.match(h.view(), /Existing settings editor/u, 'the transition scope is stated')
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/1\] · acme-owner · Rows/u,
+    'the header names the live plugin group')
+  assert.match(h.view(), /Rows \(1\) · acme-owner/u, 'the pane header counts only the visible group')
+  assert.match(h.view(), /Demo threshold/u, 'the live registration IS the row')
+  assert.ok(!h.view().includes('Type to search'), 'the workspace never hands off to the legacy editor')
+  // Enter opens the NATIVE Detail + choice with the raw registration facts.
   await key(h, '\r')
-  const legacy = h.view()
-  assert.match(legacy, /Type to search/u, `the existing editor is the physical owner:\n${legacy}`)
-  assert.ok(!legacy.includes('Settings · '), 'the workspace is retired, not stacked underneath')
-  assert.match(legacy, /Demo threshold/u, 'the editor opens on the registered row')
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Demo threshold/u)
+  assert.match(h.view(), /Owner\s+acme-owner/u, 'the raw owner is stated')
+  // Confirm `1`: the LIVE registry invokes ITS registered callback with the raw
+  // candidate exactly once, and the Detail reports the registry readback.
+  await highlightCandidate(h, '1')
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(calls, ['1'], 'the registered callback ran once with the raw candidate')
+  assert.equal(registry.rows()[0]?.currentValue, '1', 'the LIVE registry value really changed')
+  assert.match(h.view(), /Verified/u, 'the Detail reports the registry readback')
+  // The settled browse Detail keeps the FULL registration identity.
+  assert.match(h.view(), /ID\s+acme.demo-threshold/u, 'the raw registry id is stated')
+  assert.ok(!h.view().includes('Type to search'), 'the legacy editor still never mounts')
 
   // The live unregistration is the same chain in reverse: the category and its
-  // launcher disappear, and Esc still has a legal return.
-  await key(h, '\u001b') // legacy -> conversation
-  await h.openHome()
-  assert.match(h.view(), /Categories \(10\)/u)
-  await key(h, '\u001b[F')
-  await key(h, '\r') // Extensions rows
+  // row disappear together and Esc still has a legal return.
+  const invalidationsBeforeDispose = invalidations
   handle.dispose()
-  assert.equal(invalidations, 2, 'the unregistration invalidated the surface too')
-  // The gesture that discovers the empty directory never opens the old editor.
-  await key(h, '\r')
+  assert.equal(invalidations, invalidationsBeforeDispose + 1, 'the unregistration invalidated the surface too')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Type to search'), 'no stale launcher opens the editor')
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the rail owns the keyboard again')
-  assert.match(h.view(), /^> Plugins/mu, 'the selected Extensions category fell back to Plugins')
+  assert.match(h.view(), /^> Plugins/mu, 'the emptied Extensions category fell back to Plugins')
   assert.match(h.view(), /Categories \(9\)/u, 'the empty directory paints the nine fixed categories')
   await key(h, '\u001b')
   assert.ok(h.view().includes('❯'), 'Esc still closes the workspace legally')
   h.dispose()
 })
 
-test('C2-R0 a stale keyboard Enter cannot open a replaced contributor before the repaint', async () => {
+test('a stale keyboard Enter cannot enter a replaced registration before the repaint', async () => {
   let requestRender: () => void = () => {}
   const registry = new SettingsRegistry(() => requestRender())
   const h = setup({ columns: 120, rows: 40, settingsRegistry: registry })
@@ -6208,8 +6245,7 @@ test('C2-R0 a stale keyboard Enter cannot open a replaced contributor before the
   await h.openHome()
   await key(h, '\u001b[F') // End -> Extensions
   await key(h, '\r') // its Rows level
-  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u)
-  assert.match(h.view(), /Configure extension settings…/u)
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/1\] · acme-owner-old · Rows/u)
   // The same id is unregistered and re-registered under a different owner and
   // callback BEFORE any repaint; the count stays 1 and only the revision moves.
   oldOwner.dispose()
@@ -6222,40 +6258,37 @@ test('C2-R0 a stale keyboard Enter cannot open a replaced contributor before the
     order: 5,
     onChange: (value) => { newCalls.push(value); return true },
   }, 'acme-owner-new')
-  // A keyboard Enter arrives before the repaint. It must neither open the
-  // existing editor nor advance the level with the spent frame.
+  // A keyboard Enter arrives before the repaint: the directory fence refuses it,
+  // so it neither enters the replaced row's Detail nor runs any callback.
   h.vt.sendInput('\r')
-  assert.ok(!h.view().includes('Type to search'), 'the stale Enter did not mount the legacy editor')
+  assert.ok(!h.view().includes('Choose value'), 'the stale Enter entered no Detail choice')
   assert.deepEqual(oldCalls, [], 'the replaced owner callback never runs')
   assert.deepEqual(newCalls, [], 'the current owner callback does not run from a stale key either')
-  // The frame composed against the CURRENT registry keeps the level where the
-  // user was: neither the editor (no Settings chrome) nor the Detail level may
-  // have been entered by the refused key.
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u, 'the refused key left the level untouched')
-  assert.ok(!h.view().includes('Change…'), 'the refused key entered no Detail action')
-  // The repainted launcher is actionable again and targets the CURRENT row.
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/1\] · acme-owner-new · Rows/u,
+    'the refused key left the level untouched')
+  assert.match(h.view(), /Replaced setting v2/u, 'the replacement is the painted row')
+  assert.ok(!h.view().includes('Replaced setting v1'), 'the replaced label is gone')
+  // The repainted row admits a fresh activation, and its confirmation reaches
+  // ONLY the current registration's callback.
   await key(h, '\r')
-  const legacy = h.view()
-  assert.match(legacy, /Type to search/u, `the existing editor is the physical owner:\n${legacy}`)
-  assert.match(legacy, /Replaced setting v2/u, 'the editor opened on the CURRENT registration')
-  assert.ok(!legacy.includes('Replaced setting v1'), 'the replaced label is gone')
-  // Activating the row runs the CURRENT callback through the registry's own
-  // apply path; the replaced generation is never invoked.
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Replaced setting v2/u)
+  await highlightCandidate(h, '5')
   await key(h, '\r')
   await settle(h)
-  assert.equal(oldCalls.length, 0, 'the replaced owner callback still never ran')
-  assert.equal(newCalls.length, 1, 'the current owner callback ran exactly once')
+  assert.deepEqual(oldCalls, [], 'the replaced owner callback still never ran')
+  assert.deepEqual(newCalls, ['5'], 'the current owner callback ran exactly once')
+  assert.equal(registry.rows()[0]?.currentValue, '5', 'the live registry holds the confirmed value')
   h.dispose()
 })
 
-test('C2-R0 a cross-generation pointer release cannot open a replaced contributor', async () => {
+test('a cross-generation pointer gesture cannot select a replaced registration', async () => {
   let requestRender: () => void = () => {}
   const registry = new SettingsRegistry(() => requestRender())
   const h = setup({ columns: 120, rows: 40, settingsRegistry: registry })
   requestRender = () => h.app.requestRender()
   const calls: string[] = []
-  const oldOwner = registry.register({
+  registry.register({
     id: 'acme.pointer-replaced',
     label: 'Pointer setting v1',
     description: 'The pressed owner generation',
@@ -6264,17 +6297,26 @@ test('C2-R0 a cross-generation pointer release cannot open a replaced contributo
     order: 5,
     onChange: (value) => { calls.push(`old:${value}`); return true },
   }, 'acme-pointer-old')
+  registry.register({
+    id: 'acme.pointer-other',
+    label: 'Pointer other v1',
+    description: 'The pressed owner second row',
+    currentValue: '3',
+    values: ['3', '5'],
+    order: 6,
+    onChange: (value) => { calls.push(`old:${value}`); return true },
+  }, 'acme-pointer-old')
   await h.vt.waitForRender()
   await h.openHome()
   await key(h, '\u001b[F')
   await key(h, '\r')
   const frame = h.rowsPlain()
-  const row = frame.findIndex(line => line.includes('Configure extension settings…'))
-  assert.ok(row >= 0, `the launcher must be painted:\n${h.view()}`)
-  const col = cellIndexOf(h, row, 'Configure extension settings…') + 1
-  // The press is recorded against the frame that painted owner A.
+  const row = frame.findIndex(line => line.includes('Pointer other v1'))
+  assert.ok(row >= 0, `the second row must be painted:\n${h.view()}`)
+  const col = cellIndexOf(h, row, 'Pointer other v1') + 1
+  // The press is recorded against the frame that painted the OLD generation.
   press(h, row, col)
-  oldOwner.dispose()
+  registry.disposeOwner('acme-pointer-old')
   registry.register({
     id: 'acme.pointer-replaced',
     label: 'Pointer setting v2',
@@ -6284,17 +6326,31 @@ test('C2-R0 a cross-generation pointer release cannot open a replaced contributo
     order: 5,
     onChange: (value) => { calls.push(`new:${value}`); return true },
   }, 'acme-pointer-new')
-  // The release of the recorded press arrives before the repaint: it must not
-  // complete the gesture recorded against the replaced generation.
+  registry.register({
+    id: 'acme.pointer-other',
+    label: 'Pointer other v2',
+    description: 'The replacement owner second row',
+    currentValue: '5',
+    values: ['3', '5'],
+    order: 6,
+    onChange: (value) => { calls.push(`new:${value}`); return true },
+  }, 'acme-pointer-new')
+  // The release arrives before the repaint: it must not select the row of the
+  // replaced generation.
   release(h, row, col)
-  assert.ok(!h.view().includes('Type to search'), 'the straddling release did not mount the legacy editor')
   assert.deepEqual(calls, [], 'no owner callback ran from the stale pointer gesture')
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u, 'the refused release left the level untouched')
-  // The repainted frame admits a FRESH activation of the current row.
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/1\] · acme-pointer-new · Rows/u)
+  assert.match(h.view(), /> Pointer setting v2/u, 'the stale release selected nothing')
+  // The pointer path is alive again on the repainted frame: a FRESH activation
+  // opens the current row's native Detail. (A second press at the SAME cell
+  // inside the fork's double-click window withholds its click by design, so
+  // this fresh activation uses the keyboard; the panel-level case covers a
+  // fresh pointer gesture on a different cell.)
   await key(h, '\r')
-  assert.match(h.view(), /Type to search/u, 'a fresh activation after the repaint opens the editor')
-  assert.match(h.view(), /Pointer setting v2/u, 'the editor opened on the replacement owner row')
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Pointer setting v2/u)
+  assert.match(h.view(), /Owner\s+acme-pointer-new/u, 'the repainted row belongs to the new owner')
+  assert.deepEqual(calls, [], 'opening the Detail runs no plugin callback')
   h.dispose()
 })
 
@@ -6377,9 +6433,10 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
     assert.match(h.view(), /Categories \(10\)/u, 'the live registration appended Extensions with no user input')
     await key(h, '\u001b[F')
     await key(h, '\r')
-    assert.match(h.rowsPlain()[0]!, /Settings · Extensions · Rows/u)
-    assert.match(h.view(), /Configure extension settings…/u)
-    assert.match(h.view(), /1 setting · 1 contributor/u, 'the summary counts the fiber-owned live rows')
+    assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/1\] · [^ ]+ · Rows/u,
+      'the header names the real fiber owner group')
+    assert.match(h.view(), /Rows \(1\) · /u, 'the pane header counts the fiber-owned live rows')
+    assert.match(h.view(), /Demo limit/u, 'the fiber registration IS the row')
 
     // The fiber dispose is the HMR unload: the directory retracts through the
     // same service → batcher → surface chain.
@@ -6401,6 +6458,130 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
       for (const disposedFiber of runtime.fibers) await Promise.resolve(disposedFiber.dispose())
     }
   }
+})
+
+// ── C2-R6: the per-owner GROUP PAGES of the Extensions Rows level ──────────
+//
+// A real in-process `SettingsRegistry` supplies interleaved A1, B1, A2 rows:
+// the workspace pages them by their owner identity, Tab/Shift+Tab cycle the
+// pages, and the painted frame keeps ONE header, ONE pane-header row and ONE
+// physical Action Bar at every frozen size.
+
+/** Open the conditional Extensions category and its Rows level. */
+async function openExtensionsRows(h: Harness): Promise<void> {
+  await h.openHome()
+  if (!railVisible(h.vt)) await key(h, '\u001b')
+  await key(h, '\u001b[F') // End -> the appended last category
+  await key(h, '\r') // rail -> its Rows level
+}
+
+/** A live registry with two owner groups whose global order interleaves. */
+function groupedExtensionRegistry(): { registry: SettingsRegistry; writes: string[] } {
+  const writes: string[] = []
+  const registry = new SettingsRegistry()
+  registry.register({
+    id: 'acme.alpha-level', label: 'Alpha level', currentValue: 'on', values: ['off', 'on'], order: 0,
+    onChange: (value) => { writes.push(`alpha:${value}`); return true },
+  }, '11:alpha')
+  registry.register({
+    id: 'acme.beta-level', label: 'Beta level', currentValue: 'x', values: ['x', 'y'], order: 1,
+    onChange: (value) => { writes.push(`beta:${value}`); return true },
+  }, '22:beta')
+  registry.register({
+    id: 'acme.alpha-timeout', label: 'Alpha timeout', currentValue: '5s', values: ['5s', '10s'], order: 2,
+    onChange: (value) => { writes.push(`alpha:${value}`); return true },
+  }, '11:alpha')
+  return { registry, writes }
+}
+
+test('the grouped Extensions page keeps its group position and ONE action bar at every frozen size', async () => {
+  for (const [columns, rows] of [[200, 60], [120, 40], [80, 24], [44, 20], [44, 8]] as const) {
+    let requestRender: () => void = () => {}
+    const { registry } = groupedExtensionRegistry()
+    const h = setup({ columns, rows, settingsRegistry: registry })
+    requestRender = () => h.app.requestRender()
+    await h.vt.waitForRender()
+    await openExtensionsRows(h)
+    const first = h.rowsPlain()
+    assert.match(first[0]!, /Settings · Extensions \[1\/2\]/u,
+      `the ${columns}x${rows} header states the group position:\n${h.view()}`)
+    assert.equal(first.length, rows, `the ${columns}x${rows} frame keeps its physical budget`)
+    assert.equal(
+      first.filter(line => /Esc (?:back|close)/u.test(line)).length,
+      1,
+      `exactly ONE physical Action Bar at ${columns}x${rows}:\n${h.view()}`,
+    )
+    assert.doesNotMatch(h.view(), /Tab panes/u,
+      `the group page never advertises the region Tab it replaced at ${columns}x${rows}`)
+    assert.match(h.view(), /Alpha level/u)
+    assert.doesNotMatch(h.view(), /Beta level/u, 'the other owner group is not painted')
+    // The pane header states the group only where the planner grants one.
+    if (columns >= 76) {
+      assert.match(h.view(), /\[Rows \(2\) · alpha\]/u,
+        `the ${columns}x${rows} pane header names the visible group and its row count`)
+    } else {
+      assert.doesNotMatch(h.view(), /Rows \(2\)/u, 'the narrow projection spends no row on the pane header')
+    }
+    // Tab switches the group in place, at every size.
+    await key(h, '\t')
+    assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[2\/2\]/u,
+      `the ${columns}x${rows} group switch keeps its position`)
+    assert.match(h.view(), /> Beta level/u, 'the target group first row is selected')
+    assert.doesNotMatch(h.view(), /Alpha level/u, 'the previous group rows are not painted')
+    // Shift+Tab returns to the first group (wrap-around backwards).
+    await key(h, '\u001b[Z')
+    assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/2\]/u)
+    assert.match(h.view(), /> Alpha level/u)
+    if (columns === 44) {
+      const bar = h.rowsPlain().at(-1)!
+      assert.match(bar, /Tab group/u, 'the 44-column bar compacts the group hint')
+      assert.match(bar, /Esc back/u, 'the highest-priority hint is still painted')
+    }
+    assertRowWidths(h, columns)
+    h.dispose()
+  }
+})
+
+test('a group switch resets the visible range and the row cursor to the target group first row', async () => {
+  let requestRender: () => void = () => {}
+  const { registry } = groupedExtensionRegistry()
+  const h = setup({ columns: 120, rows: 24, settingsRegistry: registry })
+  requestRender = () => h.app.requestRender()
+  await h.vt.waitForRender()
+  await openExtensionsRows(h)
+  // Move to the A group's SECOND row, then switch: B starts at its FIRST row.
+  await key(h, '\u001b[B')
+  assert.match(h.view(), /> Alpha timeout/u)
+  await key(h, '\t')
+  assert.match(h.view(), /> Beta level/u, 'the target group starts on its first row')
+  await key(h, '\u001b[Z')
+  assert.match(h.view(), /> Alpha level/u, 'returning to a group starts on its first row again')
+  // The Rows count follows the group, never the whole directory.
+  assert.match(h.view(), /\[Rows \(2\) · alpha\]/u)
+  await key(h, '\t')
+  assert.match(h.view(), /\[Rows \(1\) · beta\]/u)
+  h.dispose()
+})
+
+test('a Tab group switch refuses the pointer gesture recorded against the previous group', async () => {
+  let requestRender: () => void = () => {}
+  const { registry } = groupedExtensionRegistry()
+  const h = setup({ columns: 120, rows: 24, settingsRegistry: registry })
+  requestRender = () => h.app.requestRender()
+  await h.vt.waitForRender()
+  await openExtensionsRows(h)
+  const row = rowOf(h, 'Alpha timeout')
+  const col = cellIndexOf(h, row, 'Alpha timeout') + 1
+  press(h, row, col)
+  // The group switches while the press is still held: the release must not
+  // complete against the target of the previous group's frame.
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  release(h, row, col)
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[2\/2\]/u)
+  assert.match(h.view(), /> Beta level/u, 'the stale release neither moved nor re-selected a row')
+  h.dispose()
 })
 
 // ── C2-R1: the five migrated Appearance / Conversation writers ─────────────
@@ -7347,27 +7528,19 @@ test('a real Registry revision change keeps an open new-field choice and revokes
   h.dispose()
 })
 
-// Regression: C2-R1 acceptance R1-13.
-test('a held Settings commit and a queued LEGACY write share the ONE production writer', async () => {
-  // The production system admits ONE Settings workspace lease and ONE pending
-  // write per workspace, so two overlapping Settings commits are not reachable.
-  // What IS reachable is a Settings commit overlapping another settings-document
-  // writer — and every such writer goes through the SAME
-  // `serializeTuiSettingsMutation` + `withUserFooterCustomItems` pair. This case
-  // holds the DELIVERED Settings commit inside its queued task and submits the
-  // pre-existing complete editor's own `Submit while busy` write behind it.
+// Regression: C2-R1 acceptance R1-13 (re-based on a REACHABLE overlap after
+// C2-R6 removed the Extensions → legacy-editor transition: the second writer is
+// now the next Settings open over the SAME document queue).
+test('a Settings commit held across a close and reopen queues the next write behind the ONE production writer', async () => {
   const userItems = [{ schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }]
   const trust = { schemaVersion: 1, command: 'echo hi', timeoutMs: 300 }
   const keybindings = { schemaVersion: 1, bindings: { ctrlx: 'app.exit' } }
-  const legacyRegistry = new SettingsRegistry()
-  legacyRegistry.register({ id: 'legacy-probe', label: 'Legacy settings probe', currentValue: '' }, 'test')
   const h = setup({
     columns: 140,
     rows: 40,
-    doc: { theme: 'dark', iconStyle: 'emoji', busyEnter: 'queue' },
+    doc: { theme: 'dark', iconStyle: 'emoji', responseStyle: 'default', busyEnter: 'queue' },
     footerCustomItemsRaw: userItems,
     holdFirstReplace: true,
-    settingsRegistry: legacyRegistry,
   })
   Object.assign(h.doc, { footerCommand: trust, keybindings })
 
@@ -7383,46 +7556,36 @@ test('a held Settings commit and a queued LEGACY write share the ONE production 
   await h.firstWriteStarted()
   assert.equal(h.replacements(), 1, 'the Settings write started and is held inside the queue')
 
-  // 2. While it is held, the real handoff opens the existing complete editor on
-  //    the remaining Keyboard shortcuts row, and THAT editor's own write is
-  //    queued behind it.
+  // 2. While it is held the user closes Settings normally (the write is
+  //    app-owned and keeps settling) and opens a NEW workspace lease: the next
+  //    commit must queue behind the held one and re-read the document INSIDE
+  //    the queue, never the open-time snapshot.
   await key(h, '\x1b') // Detail -> Rows
   await key(h, '\x1b') // Rows -> Categories
+  await key(h, '\x1b') // Categories -> close
   await h.vt.waitForRender()
-  // Walk the rail DOWN to the conditional last category; the rail is the only
-  // selection owner. Extensions is the ONE remaining legacy launcher.
-  for (let step = 0; step < CATEGORY_ORDER.length + 1; step += 1) {
-    if (h.rowsPlain().some(line => line.startsWith('> Extensions'))) break
-    await key(h, '\x1b[B')
-  }
-  assert.ok(h.rowsPlain().some(line => line.startsWith('> Extensions')),
-    `the rail reached Extensions:\n${h.view()}`)
-  await key(h, '\r') // L0 -> L1 (the single transition row)
-  await key(h, '\r') // the handoff
+  assert.ok(h.view().includes('❯'), 'the editor seat is restored after the close')
+  await h.open('Conversation')
+  await key(h, '\r')
+  for (let step = 0; step < 4; step += 1) await key(h, '\x1b[B') // Response style
+  await key(h, '\r') // Detail -> the choice
   await h.vt.waitForRender()
-  assert.match(h.view(), /Type to search/u, `the legacy editor owns the screen:\n${h.view()}`)
-  // The legacy complete editor still owns its own `Submit while busy` writer:
-  // walk its painted rows to that field and activate it (a cycle row) — its
-  // document write is queued behind the held Settings write.
-  for (let step = 0; step < 40; step += 1) {
-    if (h.view().includes('> Submit while busy')) break
-    await key(h, '\x1b[B')
-  }
-  await settle(h, 8)
-  assert.ok(h.view().includes('> Submit while busy'), `the busy-enter row is selected:\n${h.view()}`)
-  await key(h, '\r') // cycle the row: the legacy writer runs
-  await settle(h, 8)
-  assert.ok(h.replacements() >= 1, 'the legacy write is QUEUED behind the held Settings write')
+  await highlightCandidate(h, 'concise')
+  await key(h, '\r') // Confirm: queued behind the held write
+  await settle(h, 4)
+  assert.equal(h.replacements(), 1, 'the second write waits in the SAME queue')
+  assert.match(h.view(), /Saving…/u, 'the second workspace states its pending write')
 
   // 3. Release the first write: both land, and the queued one carries the FIRST
   //    write's result plus the production USER-layer footer projection.
   h.releaseFirstReplace()
-  await settle(h, 12)
+  await settle(h, 14)
   assert.equal(h.replacements(), 2, 'both delivered writes reached the document writer')
   const document = h.doc as unknown as Record<string, unknown>
-  assert.equal(document.iconStyle, 'symbols', 'the Settings field landed')
-  assert.equal(document.busyEnter, 'steer', 'the queued legacy field landed too')
+  assert.equal(document.iconStyle, 'symbols', 'the first Settings field landed')
+  assert.equal(document.responseStyle, 'concise', 'the queued second field landed too')
   assert.equal(document.theme, 'dark', 'no unrelated field was rewritten')
+  assert.equal(document.busyEnter, 'queue', 'no unrelated preference was rewritten')
   assert.deepEqual(document.footerCustomItems, userItems,
     'the production writer projected the detached USER footer definitions')
   assert.deepEqual(document.footerCommand, trust, 'the trusted footer command survived verbatim')
@@ -7430,7 +7593,7 @@ test('a held Settings commit and a queued LEGACY write share the ONE production 
   const queued = h.replaced()[1]!
   assert.equal(queued.iconStyle, 'symbols',
     'the QUEUED write read the document AFTER the first write — never the open-time snapshot')
-  assert.equal(queued.busyEnter, 'steer')
+  assert.equal(queued.responseStyle, 'concise')
   h.dispose()
 })
 

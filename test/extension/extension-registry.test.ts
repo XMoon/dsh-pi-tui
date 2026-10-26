@@ -417,6 +417,60 @@ test('SettingsRegistry: owner unload removes rows; setValue is idempotent', () =
   assert.equal(registry.rows().length, 0)
 })
 
+test('SettingsRegistry: a late handle never writes or disposes a same-id replacement', () => {
+  const registry = new SettingsRegistry()
+  const first = registry.register({ id: 'same', label: 'First', currentValue: 'one' }, 'owner-a')
+  first.dispose()
+  const second = registry.register({ id: 'same', label: 'Second', currentValue: 'two' }, 'owner-a')
+  // The OLD fiber's late cleanup (an HMR disposer that outlived its record):
+  // both calls are inert for the NEW registration.
+  first.setValue('stale')
+  first.dispose()
+  assert.equal(registry.rows().length, 1, 'the replacement stays registered')
+  assert.equal(registry.rows()[0]?.label, 'Second', 'the replacement record is untouched')
+  assert.equal(registry.rows()[0]?.currentValue, 'two', 'the replacement value is untouched')
+  second.setValue('three')
+  assert.equal(registry.rows()[0]?.currentValue, 'three', 'the live handle still writes its own record')
+})
+
+test('SettingsRegistry: a registration token refuses a same-id replacement before its callback', async () => {
+  const registry = new SettingsRegistry()
+  const calls: string[] = []
+  const first = registry.register({
+    id: 'same', label: 'First', currentValue: 'one', values: ['one', 'two'],
+    onChange: (value) => { calls.push(`first:${value}`); return true },
+  }, 'owner-a')
+  const firstToken = registry.rows()[0]!.registrationToken
+  first.dispose()
+  registry.register({
+    id: 'same', label: 'Second', currentValue: 'one', values: ['one', 'two'],
+    onChange: (value) => { calls.push(`second:${value}`); return true },
+  }, 'owner-a')
+  const secondToken = registry.rows()[0]!.registrationToken
+  assert.notEqual(firstToken, secondToken, 'a re-registration allocates a NEW token')
+  // The old confirmation names the OLD registration: `gone`, and the NEW
+  // callback never runs (the token is checked BEFORE the callback is invoked).
+  assert.equal(await registry.applyDetailed('same', 'two', firstToken), 'gone')
+  assert.deepEqual(calls, [], 'the replacement callback never received the stale confirmation')
+  assert.equal(registry.rows()[0]?.currentValue, 'one', 'the replacement value is untouched')
+  // The matching token applies normally.
+  assert.equal(await registry.applyDetailed('same', 'two', secondToken), 'accepted')
+  assert.deepEqual(calls, ['second:two'], 'the live registration accepted it exactly once')
+  assert.equal(registry.rows()[0]?.currentValue, 'two')
+})
+
+test('SettingsRegistry: snapshot() never exposes the internal registration token', () => {
+  const registry = new SettingsRegistry()
+  registry.register({ id: 's', label: 'S', currentValue: 'v' }, 'o')
+  const snapshot = registry.snapshot()
+  assert.deepEqual(
+    Object.keys(snapshot.rows[0]!).sort(),
+    ['currentValue', 'description', 'id', 'label', 'order', 'owner', 'values'],
+    'the Stable snapshot shape is exactly its seven row facts',
+  )
+  assert.equal('registrationToken' in snapshot.rows[0]!, false)
+})
+
 // ── AutocompleteRegistry ───────────────────────────────────────────────────
 
 test('AutocompleteRegistry: provider recovery callback follows successful results', async () => {

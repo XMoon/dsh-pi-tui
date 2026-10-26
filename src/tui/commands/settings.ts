@@ -80,6 +80,7 @@ import type {
   SettingsWorkspaceRow,
   SettingsWorkspaceRowId,
   SettingsWorkspaceSnapshot,
+  SettingsWorkspaceWritableField,
 } from '../panels/settings-workspace-panel.ts'
 import { SETTINGS_SPECIALIST_ROUTE_ROW } from '../panels/settings-workspace-panel.ts'
 import { displaySessionId } from './sessions.ts'
@@ -2165,7 +2166,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
     const outcome = await ((): Promise<SettingsWorkspaceCommitOutcome> => {
-      switch (request.field) {
+      // C2-R6: a dynamic extension row has its OWN runtime authority (the
+      // in-process extension settings registry) — never the TUI document, a
+      // Host profile section or the shared document serialization queue. The
+      // prefix check runs FIRST so the exhaustive static switch below stays a
+      // closed literal union.
+      if (request.field.startsWith('ext-setting:')) return commitExtensionSetting(request)
+      const field = request.field as Exclude<SettingsWorkspaceWritableField, `ext-setting:${string}`>
+      switch (field) {
         case 'visual-tools': return commitVisualTools(request.value, request.revision)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)
@@ -2190,7 +2198,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         default: {
           // Exhaustiveness fence: a new writable field must name its writer
           // here instead of falling into another field's branch.
-          const unreachable: never = request.field
+          const unreachable: never = field
           throw new Error(`unmapped settings workspace field ${String(unreachable)}`)
         }
       }
@@ -2209,6 +2217,75 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       })
     }
     return outcome
+  }
+
+  /**
+   * C2-R6: commit ONE dynamic extension setting through the extension settings
+   * registry. This writer is deliberately separate from every static one: it
+   * never touches the TUI settings document, a Host profile section, the
+   * document serialization queue or an optimistic UI value.
+   *
+   * The REGISTRATION identity is the fence. The request carries the immutable
+   * token it was confirmed for, and the registry compares it BEFORE running the
+   * plugin's callback, so a same-id HMR replacement can never receive an old
+   * confirmation. The health REF is captured at invocation start from the same
+   * preflighted record (`{slot:'setting', id, owner}`), so a rejection lands
+   * only on the INVOKING owner and an unload/replacement is `gone` without any
+   * health report. An accepted apply is re-read from the registry: only an
+   * equal LIVE value is `Verified` — this is a runtime readback, never the TUI
+   * document's persisted verification.
+   */
+  const commitExtensionSetting = async (
+    request: SettingsWorkspaceCommitRequest,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const id = request.field.slice('ext-setting:'.length)
+    const token = request.registrationToken
+    if (token === undefined || !Number.isInteger(token)) {
+      return { outcome: 'not-saved', reason: 'the extension setting registration identity is missing' }
+    }
+    const registry = runner.extensions?.settings
+    if (registry === undefined) {
+      return { outcome: 'not-saved', reason: 'the extension settings registry is not available' }
+    }
+    const record = registry.rows().find(candidate => candidate.id === id)
+    if (record === undefined || record.registrationToken !== token) {
+      return { outcome: 'not-saved', reason: 'The extension setting was unloaded or replaced' }
+    }
+    if (!record.values.includes(request.value)) {
+      return { outcome: 'not-saved', reason: 'the requested value is not one of the extension setting\'s registered values' }
+    }
+    // The REF protocol: this apply speaks for the preflighted record's owner.
+    // A replaced registration was already refused by the token check above, so
+    // the ref can never name another owner's contribution.
+    const healthRef = { slot: 'setting', id, owner: record.owner }
+    const outcome = await registry.applyDetailed(id, request.value, token)
+    if (outcome === 'rejected') {
+      recordExtensionError?.(healthRef, new Error('setting rejected'))
+      return { outcome: 'not-saved', reason: 'The extension rejected the change' }
+    }
+    if (outcome === 'stale') {
+      // A newer apply superseded this one: the plugin never refused it, so no
+      // health record, no revert and no failure notification may be minted.
+      return { outcome: 'not-saved', reason: 'Superseded by a newer extension setting change' }
+    }
+    if (outcome === 'gone') {
+      return { outcome: 'not-saved', reason: 'The extension setting was unloaded or replaced' }
+    }
+    // `accepted`: the LIVE registry is the authority. Re-read the SAME
+    // registration; a different current value means a newer change won, which
+    // this request cannot claim as verified.
+    const applied = registry.rows().find(candidate => candidate.id === id && candidate.registrationToken === token)
+    if (applied === undefined) {
+      return { outcome: 'not-saved', reason: 'The extension setting was unloaded or replaced' }
+    }
+    if (applied.currentValue !== request.value) {
+      return {
+        outcome: 'indeterminate',
+        reason: `the extension settings registry now reads ${applied.currentValue === '' ? 'an empty value' : applied.currentValue}`,
+      }
+    }
+    clearExtensionError?.(healthRef)
+    return { outcome: 'verified' }
   }
 
   /**
@@ -3141,12 +3218,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined,
   ): SettingsWorkspaceSnapshot => {
     const configReadiness = runner.config.configReadiness()
-    // ONE registry read per snapshot: the conditional `Extensions` category and
-    // its transition launcher are derived from the SAME live directory, so a
-    // registration between two reads can never produce a category without the
-    // row that makes it reachable.
-    const extensionRegistry = runner.extensions?.settings.snapshot()
-    const extensionRows = extensionRegistry?.rows ?? []
+    // ONE synchronous registry read group per snapshot: the concrete live
+    // registrations (each carries its immutable per-registration token) plus
+    // the revision that describes the SAME directory. No plugin callback runs
+    // between the two reads and no second registry/cache is created; the
+    // conditional `Extensions` category and every dynamic row come from THIS
+    // projection, so a registration between two reads can never produce a
+    // category without the row that makes it reachable.
+    const extensionSettings = runner.extensions?.settings
+    const extensionRecords = extensionSettings?.rows() ?? []
+    const extensionRevision = extensionSettings?.snapshot().revision ?? 0
     const settings = runner.tuiSettings
     let doc: TuiSettingsDoc | undefined
     let readIssue: string | undefined
@@ -3251,7 +3332,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // the shipped default.
     const visualTools = runner.config.visualTools.read()
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
-    const extensionContributors = new Set(extensionRows.map(row => row.owner)).size
     // ── C2-R3: the five Agent rows' read facts ────────────────────────────────
     // PERMISSIONS. The approval row exists only for a LIVE, still-current
     // captured scope on a backend that really reads and writes the override:
@@ -3410,8 +3490,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       configReadiness,
       capturedAt: Date.now(),
       ...(readIssue === undefined ? {} : { readIssue }),
-      extensionRevision: extensionRegistry?.revision ?? 0,
-      extensionCount: extensionRows.length,
+      extensionRevision,
+      extensionCount: extensionRecords.length,
       rows: [
         {
           id: 'theme',
@@ -3848,26 +3928,53 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           action: 'inspect',
           specialist: 'web-settings',
         },
-        // The registry's live directory, newest snapshot only. Without a live
-        // row there is no Extensions category at all (the panel derives the
-        // category from `extensionCount`), so no empty page can be painted.
-        ...extensionRows.length === 0 ? [] : [{
-          // R0 is the transition ENTRY only: the row opens the existing editor
-          // on the registry's first (order ASC, id ASC) row. R6 replaces it
-          // with the per-owner extension settings list.
-          id: 'extension-settings-legacy' as const,
-          category: 'extensions' as const,
-          label: 'Configure extension settings…',
-          summary: `${extensionRows.length} ${extensionRows.length === 1 ? 'setting' : 'settings'} · ${extensionContributors} ${extensionContributors === 1 ? 'contributor' : 'contributors'}`,
-          scope: 'Existing settings editor',
-          freshness: 'ready' as const,
-          description: 'Extension registrations are edited by the existing settings editor. This row only opens that editor on the first registered setting; the per-owner list arrives with the extension settings migration.',
-          action: 'open-legacy' as const,
-          // The deeplink target is read from the LIVE registry on every open:
-          // it is never a stored id that could outlive the registration it
-          // names.
-          legacyTargetId: `ext-setting:${extensionRows[0]!.id}`,
-        }],
+        // C2-R6: the registry's live directory IS the row list. Every record is
+        // projected in the Registry's own global order (order ASC, id ASC); the
+        // command layer never groups or re-sorts, because the plugin GROUPS are
+        // a display projection the workspace derives from `extensionOwner`.
+        // Without a live row there is no Extensions category at all (the panel
+        // derives it from `extensionCount`), so no empty page can be painted.
+        ...extensionRecords.map(record => {
+          const id = `ext-setting:${record.id}` as const
+          const choices = record.values
+          return {
+            id,
+            category: 'extensions' as const,
+            label: record.label,
+            summary: record.currentValue,
+            value: record.currentValue,
+            scope: `Extension runtime · ${record.owner}`,
+            // Read from this process's registry, so it never inherits the TUI
+            // document's readiness: the registration is either live or absent.
+            freshness: 'runtime' as const,
+            description: `Registered at runtime by ${record.owner} (id ${record.id}). `
+              + (choices.length === 0
+                ? 'This setting registered no selectable values, so Settings shows it read-only. '
+                : 'Choosing a value applies it to the running extension. ')
+              + 'The value is read live from the in-process extension settings registry; it is not stored in the TUI settings document.',
+            action: 'inspect' as const,
+            extensionOwner: record.owner,
+            extensionRegistrationToken: record.registrationToken,
+            // A registration with NO selectable values is READ-ONLY: the Stable
+            // contribution has no freeform text field, and `onChange` existing
+            // never authorizes inventing one. The token above rides the ROW only
+            // (never the edit), so there is ONE registration snapshot field.
+            ...choices.length === 0 ? {} : {
+              edit: {
+                field: id,
+                primary: 'runtime' as const,
+                options: choices.map(choice => ({
+                  value: choice,
+                  label: choice,
+                  available: true,
+                  current: choice === record.currentValue,
+                })),
+                runtime: record.currentValue,
+                persisted: 'Not applicable · extension runtime',
+              },
+            },
+          }
+        }),
       ],
     }
   }

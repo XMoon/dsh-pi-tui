@@ -33,7 +33,8 @@ import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -283,9 +284,9 @@ function setup(options: {
       },
     }),
     catalog: { models: { available: () => false } },
-    // Explicitly ABSENT: the Proxy fallback would otherwise hand the legacy
-    // editor a truthy function for a missing optional owner.
-    extensions: legacyEditorExtensions() as never,
+    // The minimal REAL extension registries: this suite drives the same-lease
+    // Web Settings page, never the retired legacy editor.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     createPluginManagerPage: () => undefined,
     progressUpdatesState: { mode: 'milestones' },
     responseStyleState: { style: 'default' },
@@ -1257,54 +1258,6 @@ supersededEndpointCase(
   },
 )
 
-test('the page and the legacy Web row share ONE authority and one FIFO', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  // A PAGE write commits first (deliberately slow, so a second overlapping
-  // write would be observable).
-  h.store.writeDelayMs = 100
-  await openWebPage(h)
-  await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
-  const markPage = settledWritesMark(h)
-  await key(h, ENTER)
-  await awaitWriteSettlement(h, 'search:deepseek-search-api', markPage)
-  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
-  await closeWorkspace(h)
-
-  // The still-supported LEGACY editor is reachable through the ONE remaining
-  // `Extensions` transition row. Its Web rows read the SAME authority and write
-  // through the SAME FIFO.
-  await openLegacyWebRow(h, 'Search API Result Count')
-  assert.match(h.view(), /Search API Result Count/u, `the legacy editor still owns the Web rows:\n${h.view()}`)
-  const markLegacy = settledWritesMark(h)
-  await key(h, ENTER) // cycle 10 -> 20 through the legacy row
-  await awaitWriteSettlement(h, 'count:20', markLegacy)
-  assert.equal(h.maxConcurrentWrites(), 1, 'ONE FIFO: never two Web writes in flight')
-  assert.equal(h.store.web.api.count, 20)
-
-  // The provider row reports the PAGE's committed value, so both surfaces read
-  // the same authority (never a private copy). Re-enter the legacy editor (the
-  // list Esc closes it; a filter is not a persistent navigation mode).
-  await key(h, ESC)
-  await key(h, ESC)
-  await h.vt.waitForRender()
-  await openLegacyWebRow(h, 'Web Search Provider')
-  const providerRow = h.view()
-  assert.match(providerRow, /Web Search Provider/u)
-  assert.match(providerRow, /Current: DeepSeek Search API/u,
-    `the legacy row reads the value the page committed:\n${providerRow}`)
-  await key(h, ESC) // clear the query
-  await key(h, ESC) // leave the legacy editor (no Web-return path any more)
-
-  // Re-entering the page shows BOTH committed values from one fresh read.
-  await openWebPage(h)
-  assert.match(h.view(), /Current: DeepSeek Search API/u)
-  await key(h, DOWN)
-  await key(h, DOWN)
-  assert.match(h.view(), /Current: 20/u, `the page reads the legacy write:\n${h.view()}`)
-})
-
 test('a stored count outside the presets stays readable and navigation never rewrites it', async t => {
   const h = setup({ count: 7 })
   t.after(h.dispose)
@@ -1381,78 +1334,6 @@ test('a stale backend keeps the readable facts but offers no candidate and dispa
   await settlePainted(h, 'the recovered verified write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
 })
-
-test('R4-09 a page turn holds the FIFO while a LEGACY editor intent is already queued', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  h.store.writeDelayMs = 120
-  await openWebPage(h)
-  // Dispatch the page write; HOLD EVERY authority read so its readback (and the
-  // reopen / legacy mount reads) stay pending: the page's FIFO turn is open.
-  const releaseReads = h.holdAllReads()
-  t.after(releaseReads)
-  await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
-  await key(h, ENTER)
-  await settlePainted(h, 'the page write to dispatch', frame => frame.includes('Saving…'))
-  await closeWorkspace(h)
-  await openLegacyWebRow(h, 'Search API Result Count')
-  const pendingReads = h.readCount() - h.settledReadCount()
-  assert.ok(pendingReads >= 1, 'the held reads keep the page turn open')
-  // Enqueue the LEGACY intent while the page turn is still open.
-  await key(h, ENTER)
-  assert.ok(!h.log.some(entry => entry.startsWith('begin:count:')),
-    `the legacy intent must NOT start while the page turn is open:\n${h.log.join('\n')}`)
-  const mark = settledWritesMark(h)
-  releaseReads()
-  await awaitWriteSettlement(h, 'count:5', mark)
-  assert.deepEqual(h.log, [
-    'begin:search:deepseek-search-api',
-    'search:deepseek-search-api',
-    'begin:count:5',
-    'count:5',
-  ], 'the legacy intent starts only after the page turn settled')
-  assert.equal(h.maxConcurrentWrites(), 1, 'ONE queue: never two Web writes in flight')
-  assert.deepEqual(h.store.web.searchProvider, 'deepseek-search-api')
-  assert.equal(h.store.web.api.count, 5)
-  // BOTH surfaces read the SAME authoritative winner: re-enter the legacy
-  // editor on its provider row and prove it shows the page's committed value.
-  await key(h, ESC)
-  await key(h, ESC)
-  await h.vt.waitForRender()
-  await openLegacyWebRow(h, 'Web Search Provider')
-  await settlePainted(h, 'the legacy provider row to repaint the page write', frame =>
-    frame.includes('Current: DeepSeek Search API'))
-  assert.match(h.view(), /Current: DeepSeek Search API/u, `the legacy row reads the page write:\n${h.view()}`)
-  await key(h, ESC) // clear the query
-  await key(h, ESC) // leave the legacy editor
-  // ...and the re-entered page shows BOTH committed values (the legacy count
-  // write included) from ONE fresh read.
-  await openWebPage(h)
-  assert.match(h.view(), /Current: DeepSeek Search API/u)
-  await pageListSelect(h, 2)
-  assert.match(h.view(), /Current: 5/u, `the page reads the legacy write:\n${h.view()}`)
-})
-
-/** Type a legacy-editor filter query one character at a time (the shared
- *  SettingsList Input consumes real key events). */
-async function typeLegacyQuery(h: Harness, text: string): Promise<void> {
-  for (const character of text) await key(h, character)
-  await h.vt.waitForRender()
-}
-
-/** Open the LEGACY editor through the ONE remaining `Extensions` launcher and
- *  filter to one Web row. */
-async function openLegacyWebRow(h: Harness, label: string): Promise<void> {
-  h.invoke('settings')
-  await h.vt.waitForRender()
-  await selectSettingsCategory(h.vt, 'Extensions')
-  await key(h, ENTER) // Extensions rows
-  await key(h, ENTER) // the transition launcher
-  await settlePainted(h, 'the legacy editor to mount', frame => frame.includes('Type to search'))
-  await typeLegacyQuery(h, label)
-  assert.match(h.view(), new RegExp(`>\\s*${label}`, 'u'), `the legacy ${label} row is selected:\n${h.view()}`)
-}
 
 test('an external clear while the cursor sits on Clear clamps it to the still-enabled action', async t => {
   const h = setup()

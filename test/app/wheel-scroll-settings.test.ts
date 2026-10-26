@@ -31,8 +31,9 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../../src/domain/display/wheel-scroll.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { confirmSettingsChoice, openSettingsRows, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -90,7 +91,19 @@ function fakeSettings(doc: Record<string, unknown>) {
 function setupSettings(options: { wheelScrollLines?: string } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The REAL owned-task entry a Settings write runs through.
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  })
   app.start()
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
@@ -204,84 +217,74 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: legacyEditorExtensions() as never,
+    // The minimal REAL extension registries: these cases exercise the static
+    // Mouse wheel lines row, not extension contributions.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)
+  // The production surface runtime applies the persisted NEXT-mount step at
+  // startup (`settings-runtime.ts`), so the live fact is not a blank default.
+  app.setWheelScrollLines(wheelScrollLinesOf(options.wheelScrollLines))
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
-  const run = async (): Promise<void> => {
-    await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: CommandId('cmd-wheel-test'),
-      agent: undefined as never,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    await navigateToLegacySettings(vt)
-  }
+  const invoke = (): unknown => (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+    commandId: CommandId('cmd-wheel-test'),
+    agent: undefined as never,
+    rawInput: '',
+    signal: new AbortController().signal,
+  })
   const view = async (): Promise<string> => {
     await vt.waitForRender()
-    return vt.getViewport().join('\n')
+    return stripTerminalSequences(vt.getViewport().join('\n'))
   }
-  return { vt, app, settings, run, view }
+  return { vt, app, settings, invoke, view }
 }
 
-test('/settings lists the Mouse wheel lines row; missing and invalid persisted values fall back to 1', async () => {
-  // Missing field (old settings file): the row reads 1.
-  const t = setupSettings({})
-  await t.run()
-  await t.view()
-  t.vt.sendInput('Mouse wheel lines')
-  const view = await t.view()
-  assert.ok(view.includes('Mouse wheel lines'), `row missing:\n${view}`)
-  // The detail's TITLE row paints the same `> Mouse wheel lines` shape earlier in the
-  // frame; the list row is the one carrying its value column.
-  const content = (line: string): string => line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
-  const row = stripTerminalSequences(view).split('\n')
-    .find(line => line.includes('│') && /^> Mouse wheel lines {2,}\S/.test(content(line)))
-  assert.ok(row !== undefined && row.includes('1'),
-    `missing persisted value must fall back to 1 (row: ${row}):\n${view}`)
-  t.app.dispose()
-
-  // An invalid persisted value never renders outside the values list.
-  const t2 = setupSettings({ wheelScrollLines: 'garbage' })
-  await t2.run()
-  await t2.view()
-  t2.vt.sendInput('Mouse wheel lines')
-  const view2 = await t2.view()
-  assert.ok(stripTerminalSequences(view2).split('\n').some(line => line.includes('Mouse wheel lines') && line.includes('1')),
-    `invalid persisted value must fall back to 1:\n${view2}`)
-  assert.ok(!view2.includes('garbage'), `the raw invalid value must never render:\n${view2}`)
-  t2.app.dispose()
-
-  // A persisted 8 renders as 8.
-  const t3 = setupSettings({ wheelScrollLines: '8' })
-  await t3.run()
-  await t3.view()
-  t3.vt.sendInput('Mouse wheel lines')
-  const view3 = await t3.view()
-  assert.ok(stripTerminalSequences(view3).split('\n').some(line => line.includes('Mouse wheel lines') && line.includes('8')),
-    `persisted 8 must render on the row:\n${view3}`)
-  t3.app.stop()
+test('the Input & Terminal Mouse wheel row separates the NEXT-mount step from the persisted raw value', async () => {
+  for (const entry of [
+    { stored: undefined, runtime: '1', persisted: 'not set', note: 'missing' },
+    { stored: 'garbage', runtime: '1', persisted: 'garbage', note: 'invalid' },
+    { stored: '8', runtime: '8', persisted: '8', note: 'persisted 8' },
+  ] as const) {
+    const t = setupSettings(entry.stored === undefined ? {} : { wheelScrollLines: entry.stored })
+    try {
+      await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+      await selectSettingsRow(t.vt, 'Mouse wheel lines')
+      const rows = await t.view()
+      const row = paintedSelectedRowCell(t.vt) ?? ''
+      assert.ok(row.includes(`${entry.runtime} (next fullscreen`),
+        `the ${entry.note} row states the NEXT-mount step:\n${rows}`)
+      assert.ok(!row.includes('garbage'), `the row never paints an invalid raw value:\n${rows}`)
+      t.vt.sendInput('\t')
+      const detail = await t.view()
+      assert.match(detail, new RegExp(`Value\\s+${entry.runtime} \\(next fullscreen entry\\)`, 'u'),
+        `the live fact is the next-mount step (${entry.note}):\n${detail}`)
+      assert.match(detail, new RegExp(`Persisted\\s+${entry.persisted}`, 'u'),
+        `the persisted raw fact stays separate (${entry.note}):\n${detail}`)
+    } finally {
+      if (!t.app.isDisposed()) t.app.dispose()
+    }
+  }
 })
 
-test('the Mouse wheel lines row toggle persists without dropping other fields', async () => {
+test('an explicit Mouse wheel Confirm updates the NEXT mount and merges the document', async () => {
   const t = setupSettings({ wheelScrollLines: '1' })
-  await t.run()
-  await t.view()
-  t.vt.sendInput('Mouse wheel lines') // move to the wheel row
-  await t.view()
-  t.vt.sendInput('\r') // toggle 1 -> 2
-  await t.view()
-  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.wheelScrollLines, '2', `wrote: ${JSON.stringify(last)}`)
-  // A replace is wholesale: every other field rides along untouched.
-  assert.equal(last?.theme, 'auto')
-  assert.equal(last?.footer, 'full')
-  assert.equal(last?.fullscreen, 'on')
-  assert.equal(last?.focusMode, 'off')
-  t.app.stop()
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Mouse wheel lines')
+    await confirmSettingsChoice(t.vt, '2', () => t.settings.writes.length > 0)
+    assert.equal(t.app.currentWheelScrollLines(), 2, 'the NEXT fullscreen mount step changed')
+    assert.equal(t.settings.writes.length, 1, 'one explicit Confirm dispatches exactly one write')
+    const written = t.settings.writes[0]!
+    assert.equal(written.wheelScrollLines, '2')
+    assert.equal(written.theme, 'auto', 'the whole-document replace preserves the other fields')
+    assert.equal(written.footer, 'full')
+    assert.equal(written.fullscreen, 'on')
+    assert.equal(written.focusMode, 'off')
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
 // ── the TuiApp wiring (the preference reaches the alt screen) ────────────
