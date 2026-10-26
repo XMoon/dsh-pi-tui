@@ -36,7 +36,7 @@ import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../../src/runtime/job-observation-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { createSurfaceRuntime, type SurfaceRendererMount } from '../../src/app/surface/runtime.ts'
+import { createSurfaceRuntime, type SurfaceMountDeps, type SurfaceRendererMount } from '../../src/app/surface/runtime.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
@@ -1763,7 +1763,7 @@ function spyOnImageLoaderClear(): { clears: () => number; restore: () => void } 
   }
 }
 
-function minimalSurfaceDeps(renderer?: SurfaceRendererMount): object {
+function minimalSurfaceDeps(renderer?: SurfaceRendererMount): SurfaceMountDeps {
   return {
     events: { onSubmit: () => {}, onExit: () => {} },
     workspaceRoot: '/tmp',
@@ -1794,7 +1794,7 @@ function mountImageLifecycleSurface(renderer?: SurfaceRendererMount) {
     mainProgressAuthority: 'local-events',
     createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
-  surface.start(minimalSurfaceDeps(renderer) as never)
+  surface.start(minimalSurfaceDeps(renderer))
   return surface
 }
 
