@@ -17,6 +17,7 @@
  */
 
 import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 
 /**
@@ -225,7 +226,9 @@ export class WebEndpointPanel implements Component {
   private statusLine(width: number): string {
     if (this.state.kind === 'saving') return color.textDim('Saving…')
     if (this.state.kind === 'error') {
-      return `${verdictWord(this.state.verdict)}${color.textDim(` · ${this.state.message}`)}`
+      // The reason is HOST-origin: sanitize it at this display boundary so a
+      // hostile error can never emit terminal-control instructions.
+      return `${verdictWord(this.state.verdict)}${color.textDim(` · ${sanitizedPhysicalLine(this.state.message)}`)}`
     }
     // The idle hint drops WHOLE: a narrow grant keeps the actionable half
     // instead of painting a truncated sentence.

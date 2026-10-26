@@ -834,6 +834,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         return { kind: 'not-saved', reason: `the configuration is ${readiness}; the Web setting was not changed` }
       }
       await awaitWebSettled()
+      // (3) the queue head takes a FRESH official snapshot. A completed read —
+      // even the newest one — can predate an EXTERNAL Host settings writer, so
+      // the custom-provider / already-current / legality decisions below must
+      // never be based on a cached snapshot: that stale base could pass the
+      // custom-route guard and overwrite a provider id another writer just set.
+      await settleWebReadAfterWrite()
       const base = webSettings
       if (base === undefined) {
         return { kind: 'not-saved', reason: 'the current Web settings could not be read' }
