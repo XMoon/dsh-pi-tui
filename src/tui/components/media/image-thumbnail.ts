@@ -25,6 +25,15 @@
  * asks the loader to fire the async read on first render; the loader's
  * subscriber notification invalidates the component, which repaints with
  * the resolved bytes (plan §16.1 + the fork's dynamic-load contract).
+ *
+ * KITTY JPEG/WEBP PREVIEW (Image-6A): Kitty only places PNG, so a readable
+ * JPEG/WebP source is projected through the loader's bounded asynchronous PNG
+ * derivative. The INFO BAR still reports the ORIGINAL ref (name, original
+ * dimensions, original byte count) and `viewerSource` still returns the
+ * ORIGINAL attachment; only the painted body consumes the derived PNG and its
+ * derived dimensions. Idle/loading/error preview states paint informational
+ * rows only — never a fake pixel body — and a collapsed occurrence never
+ * starts a conversion. PNG, iTerm2 and GIF keep their existing paths.
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-thumbnail
  */
 
@@ -33,6 +42,7 @@ import type { Component } from '@xmoon76/pi-tui'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
+import { MAX_KITTY_THUMBNAIL_SOURCE_BYTES } from '../../../client/media/image/kitty-thumbnail.ts'
 import { color } from '../../theme/runtime.ts'
 
 /**
@@ -311,8 +321,17 @@ export class ImageThumbnail implements Component {
     // Inline graphics only when the terminal reports them; tmux and other
     // unsupported terminals keep the text fallback AND never trigger a
     // pointless read of the full bytes (§17.3, round-2 finding 4).
-    if (getCapabilities().images === null) {
+    const protocol = getCapabilities().images ?? null
+    if (protocol === null) {
       return [this.infoRow(width, this.infoLine())]
+    }
+    const previewCandidate = protocol === 'kitty'
+      && (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp')
+    // Cheap source-byte preflight BEFORE the attachment read (Image-6A §5.3):
+    // an over-budget JPEG/WebP can never produce a preview, so no full read is
+    // spent on it. The loader re-checks the REAL byte length before decoding.
+    if (previewCandidate && this.ref.bytes > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
+      return [this.infoRow(width, `${this.infoLine()} · Preview unavailable`)]
     }
     const state = this.loader.get(this.ref, this.scope)
     if (state.state === 'idle') {
@@ -329,10 +348,12 @@ export class ImageThumbnail implements Component {
     // Ready: the info line stays constant — only the image rows collapse
     // (the fullscreen click toggle). A collapsed image needs no placement;
     // the fork's differential renderer deletes the vanished kitty tile of
-    // the previous frame automatically.
+    // the previous frame automatically. A collapsed occurrence never starts
+    // the Image-6A conversion either.
     if (this.collapsed()) {
       return [this.infoRow(width, this.infoLine())]
     }
+    if (previewCandidate) return this.renderKittyPreview(width)
     if (this.instance === undefined) {
       this.instance = new Image(
         state.base64,
@@ -350,8 +371,7 @@ export class ImageThumbnail implements Component {
     // Whether those rows are REAL PIXELS is a property of the surface: a raster
     // format this protocol cannot display renders the fork's text fallback,
     // which keeps its informational row but must not become a clickable body.
-    const protocol = getCapabilities().images ?? null
-    if (protocol !== null && imagePixelsSupported(protocol, this.ref.mediaType)) {
+    if (imagePixelsSupported(protocol, this.ref.mediaType)) {
       // The hit must cover exactly the cells the image OCCUPIES, which is the
       // protocol's own placement width — NOT the `maxWidthCells` ceiling this
       // component asked for. The fork shrinks a square or portrait image well
@@ -364,6 +384,51 @@ export class ImageThumbnail implements Component {
     } else {
       this.paintedBody = undefined
     }
+    return [this.infoRow(width, this.infoLine()), ...body]
+  }
+
+  /**
+   * The Kitty JPEG/WebP body (Image-6A): the loader's derived PNG is the only
+   * pixel source. The derived dimensions drive placement; the info row and the
+   * viewer target stay the ORIGINAL ref. Idle/loading/error preview states are
+   * informational only and register no pixel body, so a not-ready occurrence
+   * can never open the Viewer from a text row.
+   */
+  private renderKittyPreview(width: number): string[] {
+    const preview = this.loader.getKittyThumbnail(this.ref, this.scope)
+    if (preview.state === 'idle') {
+      this.loader.loadKittyThumbnail(this.ref, this.scope)
+      return [this.infoRow(width, `${this.infoLine()} …`)]
+    }
+    if (preview.state === 'loading') {
+      return [this.infoRow(width, `${this.infoLine()} …`)]
+    }
+    if (preview.state === 'error') {
+      // Bounded, sanitized reason only: the captured native Error stays inside
+      // the loader and never reaches the terminal.
+      const reason = preview.reason === 'busy' ? 'Preview unavailable (busy)' : 'Preview unavailable'
+      return [this.infoRow(width, `${this.infoLine()} · ${reason}`)]
+    }
+    if (this.instance === undefined) {
+      this.instance = new Image(
+        preview.base64,
+        'image/png',
+        { fallbackColor: this.theme.fallbackColor },
+        {
+          maxHeightCells: MAX_IMAGE_ROWS,
+          maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+          filename: this.label(),
+        },
+        { widthPx: preview.width, heightPx: preview.height },
+      )
+    }
+    const body = this.instance.render(width)
+    // The derived body is a REAL Kitty placement only when this render emitted
+    // an anchored APC; a missing `c=` registers no hit.
+    const columns = paintedImageColumns(body, 'kitty')
+    this.paintedBody = columns === undefined
+      ? undefined
+      : { width, rows: body.length, endCol: columns }
     return [this.infoRow(width, this.infoLine()), ...body]
   }
 }

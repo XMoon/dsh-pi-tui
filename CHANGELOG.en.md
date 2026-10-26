@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Transcript thumbnails on a native Kitty terminal now support JPEG/WebP.**
+  Previously only PNG could paint pixels, so JPEG/WebP fell back to a text row. These formats
+  are now converted to a bounded PNG thumbnail in the background before painting: WebP only
+  contributes its first frame, EXIF orientation is applied, and the longest edge is capped at
+  768 pixels. The info row always keeps the original name, pixel dimensions and byte count; a
+  collapsed occurrence never starts a conversion; while converting or after a failure only
+  text is shown (a failure reads `Preview unavailable`); and only a body that really painted
+  pixels is clickable. PNG, the existing iTerm2 image path, GIF, and narrow or
+  graphics-unsupported terminals are unchanged; the fullscreen viewer opened from a thumbnail
+  still renders PNG originals only, so JPEG/WebP keep showing `Preview unavailable` there.
+
 - **The model can now declare that specific visuals are meant for the user.** A new
   `present_visual` tool joins the existing `dsh_pi_tui_chart` and `dsh_pi_tui_svg` under the SAME
   Visual tools switch (On by default): one switch adds or removes all three, and the settled group

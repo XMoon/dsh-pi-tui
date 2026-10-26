@@ -9,6 +9,14 @@
 
 ### 新增
 
+- **原生 Kitty 终端的 Transcript 缩略图现在也支持 JPEG/WebP。**
+  之前只有 PNG 能画出像素，JPEG/WebP 只能退化成文字行。现在这两种格式会在后台生成一份
+  受限的 PNG 缩略图再绘制：WebP 只取第一帧、按 EXIF 方向摆正、最长边不超过 768 像素；
+  信息行始终使用原始名称、像素尺寸与字节数，折叠状态不会触发转换，转换中或失败时只显示
+  文字（失败为 `Preview unavailable`），只有真正画出像素的正文才能点击。PNG、iTerm2 原有
+  图片路径、GIF，以及窄屏/不支持图形的终端行为不变；从缩略图打开的全屏查看页仍只显示
+  PNG 原图，JPEG/WebP 在那里继续显示 `Preview unavailable`。
+
 - **模型现在可以显式声明“这些图是要给用户看的”。** 新增 `present_visual` 工具，与既有的
   `dsh_pi_tui_chart`、`dsh_pi_tui_svg` 共享同一个 Visual tools 开关（默认 On，一处开关三个
   工具在同一处开关下一起出现/消失，且收敛后的一致性有保证：成功的开启最终持有三个、
