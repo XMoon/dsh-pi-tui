@@ -211,15 +211,17 @@ test('collapsed mode keeps the info bar and drops only the image rows', async ()
 // Image-6A: Kitty JPEG/WebP preview body (derived PNG) and its pixel hit
 // ---------------------------------------------------------------------------
 
-const FIXTURES = new URL('../fixtures/images/', import.meta.url)
-function fixture(name: string): Buffer {
-  return readFileSync(new URL(name, FIXTURES))
-}
+const SAMPLE_JPEG = readFileSync(new URL('../fixtures/images/transcript-sample.jpg', import.meta.url))
+const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
+const SAMPLE_PNG = readFileSync(new URL('../fixtures/images/transcript-sample.png', import.meta.url))
+const SAMPLE_GIF = readFileSync(new URL('../fixtures/images/transcript-sample.gif', import.meta.url))
+const ORIENTED_JPEG = readFileSync(new URL('../fixtures/images/transcript-oriented.jpg', import.meta.url))
+const CORRUPT_JPEG = readFileSync(new URL('../fixtures/images/transcript-corrupt.jpg', import.meta.url))
 
 const JPEG_REF: ImageAttachmentRefLike = {
   attachmentId: 'att-jpeg',
   mediaType: 'image/jpeg',
-  bytes: fixture('transcript-sample.jpg').byteLength,
+  bytes: SAMPLE_JPEG.byteLength,
   width: 120,
   height: 80,
   name: 'photo.jpg',
@@ -228,7 +230,7 @@ const JPEG_REF: ImageAttachmentRefLike = {
 const WEBP_REF: ImageAttachmentRefLike = {
   attachmentId: 'att-webp',
   mediaType: 'image/webp',
-  bytes: fixture('transcript-sample.webp').byteLength,
+  bytes: SAMPLE_WEBP.byteLength,
   width: 48,
   height: 32,
   name: 'graphic.webp',
@@ -268,7 +270,7 @@ test('a JPEG on Kitty stays informational until the derived PNG is READY, then p
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   let conversions = 0
-  const loader = imageLoaderWith(fixture('transcript-sample.jpg'), async (input, mediaType) => {
+  const loader = imageLoaderWith(SAMPLE_JPEG, async (input, mediaType) => {
     conversions += 1
     return convertKittyThumbnail(input, mediaType)
   })
@@ -307,12 +309,12 @@ test('EXIF orientation: original info dimensions stay, the derived body uses the
   const ref: ImageAttachmentRefLike = {
     attachmentId: 'att-oriented',
     mediaType: 'image/jpeg',
-    bytes: fixture('transcript-oriented.jpg').byteLength,
+    bytes: ORIENTED_JPEG.byteLength,
     width: 60,
     height: 30,
     name: 'turned.jpg',
   }
-  const loader = imageLoaderWith(fixture('transcript-oriented.jpg'))
+  const loader = imageLoaderWith(ORIENTED_JPEG)
   loader.load(ref)
   await until(() => loader.get(ref).state === 'ready', 'the raw oriented JPEG')
   const component = new ImageThumbnail(ref, loader, THEME, () => {})
@@ -328,7 +330,7 @@ test('EXIF orientation: original info dimensions stay, the derived body uses the
 test('a WebP preview renders its derived PNG, and the info bar keeps image/webp identity', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  const loader = imageLoaderWith(fixture('transcript-sample.webp'))
+  const loader = imageLoaderWith(SAMPLE_WEBP)
   loader.load(WEBP_REF)
   await until(() => loader.get(WEBP_REF).state === 'ready', 'the raw WebP read')
   const component = new ImageThumbnail(WEBP_REF, loader, THEME, () => {})
@@ -344,7 +346,7 @@ test('a WebP preview renders its derived PNG, and the info bar keeps image/webp 
 test('a failed conversion is a sanitized informational row with NO pixel body', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  const loader = imageLoaderWith(fixture('transcript-corrupt.jpg'), async () => {
+  const loader = imageLoaderWith(CORRUPT_JPEG, async () => {
     throw new Error('native decoder exploded at /private/path/photo.jpg')
   })
   const ref = { ...JPEG_REF, attachmentId: 'att-fail', name: 'broken.jpg' }
@@ -383,7 +385,7 @@ test('a collapsed JPEG never starts a conversion and paints no body', async () =
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   let conversions = 0
-  const loader = imageLoaderWith(fixture('transcript-sample.jpg'), async (input, mediaType) => {
+  const loader = imageLoaderWith(SAMPLE_JPEG, async (input, mediaType) => {
     conversions += 1
     return convertKittyThumbnail(input, mediaType)
   })
@@ -404,7 +406,7 @@ test('an over-budget ref is refused BEFORE the attachment read', async () => {
   let reads = 0
   let conversions = 0
   const loader = new ImageLoader(
-    async () => { reads += 1; return { ref: {}, data: fixture('transcript-sample.jpg') } },
+    async () => { reads += 1; return { ref: {}, data: SAMPLE_JPEG } },
     new ImageCache(),
     async (input, mediaType) => { conversions += 1; return convertKittyThumbnail(input, mediaType) },
   )
@@ -436,7 +438,7 @@ test('PNG still uses the original raw payload and never calls the converter', as
     mediaType: 'image/png',
     name: 'native.png',
   }
-  const loader = imageLoaderWith(fixture('transcript-sample.png'), async (input, mediaType) => {
+  const loader = imageLoaderWith(SAMPLE_PNG, async (input, mediaType) => {
     conversions += 1
     return convertKittyThumbnail(input, mediaType)
   })
@@ -453,7 +455,7 @@ test('iTerm2 JPEG keeps the original OSC 1337 path and never converts', async ()
   resetCapabilitiesCache()
   setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
   let conversions = 0
-  const loader = imageLoaderWith(fixture('transcript-sample.jpg'), async (input, mediaType) => {
+  const loader = imageLoaderWith(SAMPLE_JPEG, async (input, mediaType) => {
     conversions += 1
     return convertKittyThumbnail(input, mediaType)
   })
@@ -476,7 +478,7 @@ test('GIF on Kitty keeps the fork text fallback and never converts', async () =>
     mediaType: 'image/gif',
     name: 'motion.gif',
   }
-  const loader = imageLoaderWith(fixture('transcript-sample.gif'), async (input, mediaType) => {
+  const loader = imageLoaderWith(SAMPLE_GIF, async (input, mediaType) => {
     conversions += 1
     return convertKittyThumbnail(input, mediaType)
   })
@@ -493,7 +495,7 @@ test('two occurrences of one JPEG share ONE conversion but paint independent Kit
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   let conversions = 0
-  const loader = imageLoaderWith(fixture('transcript-sample.jpg'), async (input, mediaType) => {
+  const loader = imageLoaderWith(SAMPLE_JPEG, async (input, mediaType) => {
     conversions += 1
     return convertKittyThumbnail(input, mediaType)
   })
@@ -527,7 +529,7 @@ test('dispose during a pending conversion releases the subscription: no settle r
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   let releaseDerived!: () => void
-  const loader = imageLoaderWith(fixture('transcript-sample.jpg'), () => new Promise(resolve => {
+  const loader = imageLoaderWith(SAMPLE_JPEG, () => new Promise(resolve => {
     releaseDerived = () => resolve({
       base64: '',
       width: 120,
