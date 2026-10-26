@@ -354,9 +354,6 @@ export class KittyTerminalFacade implements Terminal {
       // Only the Core may free the data, so the placement is what disappears.
       return this.core.translateWriterDelete(imageId)
     }
-    // A late delete for an id this Core already retired is a no-op: the data is
-    // gone and the ownership decision was made at the retirement boundary.
-    if (imageId !== undefined && this.core.wasOwned(imageId)) return ''
     if (imageId !== undefined) return apc // a foreign owner's image: untouched
     // Kitty's default deletion specifier is `a` ("without any other keys it
     // deletes all images visible on screen"), so a bare `a=d` is the same

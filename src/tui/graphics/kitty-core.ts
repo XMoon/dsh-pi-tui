@@ -72,13 +72,28 @@ export interface KittyGraphicsCoreOptions {
 }
 
 /**
- * The frozen PR1 budget (plan §4.2). Beyond it a NEW occurrence must fall back
- * to text and no old image is force-deleted: an already-painted image may
- * still be referenced by the screen or the scrollback.
+ * The frozen ACTIVE-SET budget (plan §4.2, amended by the Owner 2026-10-27).
+ *
+ * These bound the working set the Core itself manages — pending uploads and the
+ * re-transmittable PNG cache — NOT how many images a session ever displayed.
+ * A meaningfully sized image whose decoded footprint alone exceeds the decoded
+ * budget is refused, and a new occurrence falls back to text when the active
+ * set is full; a previously PAINTED image is never force-deleted on its
+ * account. There is deliberately no cumulative image-id count: the main screen
+ * keeps its scrollback, so session-long id growth is terminal-retained and
+ * bounded by the terminal, not by a Core quota.
  */
-export const MAX_RESIDENT_IMAGES = 32
 export const MAX_RESIDENT_PAYLOAD_BYTES = 64 * 1024 * 1024
 export const MAX_RESIDENT_DECODED_BYTES = 256 * 1024 * 1024
+
+/**
+ * How many recently retained ids stay recognizable after their occurrence went
+ * away. A legacy writer's delete for one of them must stay a scoped placement
+ * removal (never a hard delete), and that delete only arrives for a frame that
+ * was on screen one or two paints ago. The ring is FIXED size so app-side state
+ * never grows with the number of images a session displayed.
+ */
+const RETAINED_ID_MEMORY = 256
 
 interface OwnedRecord {
   readonly image: KittyImage
@@ -111,12 +126,11 @@ function decodedBytes(source: KittyImageSource): number {
  * process-global singleton.
  */
 export class KittyGraphicsCore {
+  /** The ACTIVE set: occurrences that still hold a payload (the budgeted set). */
   private readonly records = new Map<number, OwnedRecord>()
-  /** Every id this Core ever handed out: never reused, and a legacy writer's
-   *  late delete for one of them must not be mistaken for a foreign owner. */
-  private readonly usedImageIds = new Set<number>()
-  /** Ids whose data this Core already freed. */
-  private readonly retiredImageIds = new Set<number>()
+  /** Bounded memory of ids whose painted pixels the terminal now retains. */
+  private readonly retainedIds = new Set<number>()
+  private readonly retainedOrder: number[] = []
   private readonly onEvent: ((event: KittyGraphicsEvent) => void) | undefined
   private nextPlacementId = 1
   private generationCounter = 0
@@ -128,14 +142,14 @@ export class KittyGraphicsCore {
     this.onEvent = options.onEvent
   }
 
-  /**
-   * How many image ids this terminal's ledger holds: live payload holders AND
-   * painted occurrences the terminal retains. This is the number the frozen
-   * ID budget bounds — a retained id still occupies both the terminal's image
-   * store and a ledger slot, so it may not be silently grandfathered forever.
-   */
+  /** How many occurrences currently hold a payload (the budgeted active set). */
   get residentImageCount(): number {
     return this.records.size
+  }
+
+  /** How many recently retained ids the Core still recognizes (bounded). */
+  get retainedImageCount(): number {
+    return this.retainedIds.size
   }
 
   /** The retained base64 payload total (diagnostics + budget tests). */
@@ -157,8 +171,7 @@ export class KittyGraphicsCore {
    */
   register(source: KittyImageSource): KittyImage | undefined {
     if (this.disposed) return undefined
-    if (this.records.size + 1 > MAX_RESIDENT_IMAGES
-      || this.payloadBytes + source.pngBase64.length > MAX_RESIDENT_PAYLOAD_BYTES
+    if (this.payloadBytes + source.pngBase64.length > MAX_RESIDENT_PAYLOAD_BYTES
       || this.decodedByteTotal + decodedBytes(source) > MAX_RESIDENT_DECODED_BYTES) {
       this.emit({ type: 'budget-fallback' })
       return undefined
@@ -186,19 +199,16 @@ export class KittyGraphicsCore {
     return image
   }
 
-  /** Whether `imageId` belongs to this Core (never a foreign owner's id). */
+  /**
+   * Whether `imageId` belongs to this Core: a live occurrence, or a painted one
+   * whose pixels the terminal now retains (still recognized so a late legacy
+   * delete stays a scoped placement removal instead of freeing those pixels).
+   */
   owns(imageId: number): boolean {
-    return this.records.has(imageId)
+    return this.records.has(imageId) || this.retainedIds.has(imageId)
   }
 
-  /**
-   * Whether `imageId` was ONE OF THIS CORE'S ids and its data is already gone.
-   * A late legacy delete for such an id is a no-op, not a foreign command: the
-   * Core already retired at the only moment that was allowed to.
-   */
-  wasOwned(imageId: number): boolean {
-    return this.retiredImageIds.has(imageId)
-  }
+
 
   /**
    * The wire the facade must emit immediately BEFORE a placement of
@@ -248,7 +258,15 @@ export class KittyGraphicsCore {
     if (record.everPlaced) {
       this.payloadBytes -= record.source.pngBase64.length
       this.decodedByteTotal -= decodedBytes(record.source)
-      record.source = undefined
+      // The pixels are the terminal's now; the Core keeps no payload and only
+      // a BOUNDED id memory so a late writer delete stays a placement removal.
+      this.records.delete(image.imageId)
+      this.retainedIds.add(image.imageId)
+      this.retainedOrder.push(image.imageId)
+      if (this.retainedOrder.length > RETAINED_ID_MEMORY) {
+        const forgotten = this.retainedOrder.shift()!
+        this.retainedIds.delete(forgotten)
+      }
       this.emit({ type: 'retained', imageId: image.imageId })
       return
     }
@@ -265,9 +283,15 @@ export class KittyGraphicsCore {
    */
   translateWriterDelete(imageId: number): string {
     const record = this.records.get(imageId)
-    if (record === undefined) return ''
-    record.placements = 0
-    this.emit({ type: 'writer-delete-translated', imageId })
+    if (record !== undefined) {
+      record.placements = 0
+      this.emit({ type: 'writer-delete-translated', imageId })
+      return encodeKittyDeletePlacement(imageId)
+    }
+    if (!this.retainedIds.has(imageId)) return ''
+    // The occurrence is gone but its pixels are terminal-retained: the layout
+    // intent is still "remove the placement", never "free the data".
+    this.emit({ type: 'writer-delete-translated', imageId, detail: 'retained' })
     return encodeKittyDeletePlacement(imageId)
   }
 
@@ -302,13 +326,7 @@ export class KittyGraphicsCore {
       if (!record.residentIn.delete(buffer)) continue
       record.placements = 0
       wire += encodeKittyDeleteImage(record.image.imageId)
-      // A painted occurrence the terminal retained is now provably gone: the
-      // buffer that held the only copy has just released it, so its id can be
-      // retired from the ledger and its slot reused.
-      if (record.source === undefined && record.residentIn.size === 0) {
-        this.records.delete(imageId)
-        this.retiredImageIds.add(imageId)
-      }
+
     }
     if (wire !== '') this.emit({ type: 'global-delete-translated', detail: `images:${buffer}` })
     return wire
@@ -355,7 +373,6 @@ export class KittyGraphicsCore {
       const record = this.records.get(imageId)
       if (record === undefined) continue
       this.records.delete(imageId)
-      this.retiredImageIds.add(imageId)
       if (record.source !== undefined) {
         this.payloadBytes -= record.source.pngBase64.length
         this.decodedByteTotal -= decodedBytes(record.source)
@@ -406,7 +423,6 @@ export class KittyGraphicsCore {
       if (record.everPlaced || record.retireQueued || record.source === undefined) continue
       wire += encodeKittyDeleteImage(imageId)
       this.records.delete(imageId)
-      this.retiredImageIds.add(imageId)
       this.payloadBytes -= record.source.pngBase64.length
       this.decodedByteTotal -= decodedBytes(record.source)
       this.emit({ type: 'shutdown-unplaced', imageId })
@@ -418,18 +434,22 @@ export class KittyGraphicsCore {
   dispose(): void {
     this.disposed = true
     this.records.clear()
+    this.retainedIds.clear()
+    this.retainedOrder.length = 0
     this.payloadBytes = 0
     this.decodedByteTotal = 0
   }
 
   private allocateImageId(): number {
-    // Node CSPRNG in [1, 0x100000000]; a retired id is never handed out again
-    // inside this Core's lifetime, so an old scrollback image can never be
-    // adopted by a new occurrence.
+    // Node CSPRNG in [1, 0x100000000]: random ids keep this Core clear of a
+    // foreign owner's ids in the same terminal. The draw is rejected against
+    // everything the Core still tracks — the live active set and the bounded
+    // retained-id memory — so a new occurrence can never adopt an id whose
+    // pixels may still be on screen. The check is deliberately bounded: this is
+    // exactly the state the Core keeps, not a session-long id ledger.
     for (;;) {
       const candidate = randomInt(1, 0x100000000)
-      if (this.usedImageIds.has(candidate)) continue
-      this.usedImageIds.add(candidate)
+      if (this.records.has(candidate) || this.retainedIds.has(candidate)) continue
       return candidate
     }
   }

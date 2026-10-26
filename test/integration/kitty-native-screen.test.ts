@@ -385,3 +385,49 @@ test('TuiApp routes the real main screen through the managed facade', async () =
     }
   }
 })
+
+
+/**
+ * The Owner's amended budget (2026-10-27): a new image may never be refused
+ * because of how many images the session already DISPLAYED. The main screen
+ * keeps its scrollback, so id growth is terminal-retained and the Core only
+ * bounds its own active working set.
+ */
+test('a real screen paints the 33rd, 64th and 100th thumbnail without a fallback', () => {
+  const { terminal, core, facade } = setup()
+  class Swapping implements Component {
+    current: NativeKittyImage | undefined
+    renders = 0
+    render(width: number): string[] {
+      this.renders += 1
+      return ['head', '', ...(this.current?.render(width) ?? []), 'tail']
+    }
+    invalidate(): void {
+      this.current?.invalidate()
+    }
+  }
+  const root = new Swapping()
+  const screen = new TuiMainScreen(facade)
+  screen.addChild(root)
+  screen.start()
+  const painted: number[] = []
+  for (let index = 0; index < 100; index++) {
+    root.current?.dispose()
+    root.current = new NativeKittyImage(core, { pngBase64: PNG, widthPx: 32, heightPx: 32 }, {
+      maxWidthCells: 20,
+      maxHeightCells: 6,
+      fallback: '[FALLBACK]',
+    })
+    terminal.writes.length = 0
+    screen.renderNow()
+    const wire = terminal.text
+    assert.ok(!wire.includes('[FALLBACK]'), `occurrence ${index + 1} painted pixels, not the fallback`)
+    const placement = wire.lastIndexOf('a=p,')
+    assert.ok(placement !== -1, `occurrence ${index + 1} was placed`)
+    painted.push(root.current.imageId!)
+  }
+  assert.equal(new Set(painted).size, 100, 'every occurrence got its own id')
+  const ids = apcs(terminal.text)
+  assert.equal(ids.filter((entry) => entry.a === 'p').length, 1, 'one placement in the final frame')
+  screen.stop()
+})

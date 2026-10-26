@@ -181,6 +181,11 @@ retirement and the resident budget.
   never reached a placement is auto-released. The main screen's `stop()` never
   sends `d=I` in either `preserveScreen` mode; the alternate screen releases
   the ids it placed, and only those.
+- **The budget bounds the working set, not the session.** The Core limits the
+  payload and decoded footprint it currently manages; it has no cumulative
+  image-id quota, because the main screen's scrollback legitimately grows with
+  the session and a displayed image may never be refused (nor force-deleted)
+  because of how many images came before it.
 - **Managed commands are quiet and typed.** Transmission is
   `a=t,f=100,i=<id>,q=2` in at most 4096-character chunks and EVERY chunk
   carries `q=2`; a placement anchor is `a=p,i=...,p=...,c=...,r=...,C=1,q=2;`
