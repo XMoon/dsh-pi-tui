@@ -326,6 +326,148 @@ test('a real Settings Confirm of the permission default is what the NEXT Session
     'and the preset bundle it sampled carries the never-approval knob')
 })
 
+/**
+ * A transport whose first turn asks tool `r3_approval_probe` (so the ask happens
+ * INSIDE an open turn, which the official approval audit requires), then closes
+ * the turn with text. The tool body itself calls the official approval seat and
+ * records the outcome the policy produced.
+ */
+class ApprovalProbeAdapter extends LlmAdapter {
+  outcome: string | undefined
+  private turns = 0
+  /** The Session whose approval seat the tool consults. */
+  session: unknown
+
+  override providerInfo(provider: string): { id: string; name: string } {
+    return { id: provider, name: provider }
+  }
+
+  override listModels(provider: string): Promise<readonly { provider: string; id: string; name: string }[]> {
+    return Promise.resolve([{ provider, id: 'm', name: 'M' }])
+  }
+
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  override async *stream(): AsyncIterable<StreamChunk> {
+    this.turns += 1
+    if (this.turns === 1) {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield {
+        type: 'tool-call-delta',
+        index: 0,
+        id: 'r3-approval-call' as never,
+        name: 'r3_approval_probe',
+        argumentsDelta: '{}',
+      }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id: 'r3-approval-call' as never, name: 'r3_approval_probe', arguments: '{}' },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'turn complete' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'turn complete' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+test('a real Default permission Confirm is what the NEXT Session\'s approval request resolves under', async t => {
+  // R3-02's missing leg: the settings write must not only change a stored value —
+  // the NEXT Session's REAL approval request must consume it and produce the
+  // outcome the policy dictates (`never` => rejected, with the durable
+  // approval/asked + approval/decided pair).
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx)
+  await mountAgentLoopTestHarness(ctx)
+  await ctx.plugin(Loader)
+  await mountPermissionPrerequisites(ctx)
+  await mountPermissionDefaultPlane(ctx, life.tempDir('permission-consume-plane-'))
+  const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  const presets = ctx.get('permissionPresets') as unknown as {
+    readonly names: readonly string[]
+    readonly defaultPreset: string
+  }
+
+  // A tool whose body IS the requested action, so "rejected" is observable as
+  // "the body never ran": it asks the official seat first and only then acts.
+  let bodyRuns = 0
+  let requestOutcome: string | undefined
+  const probeAdapter = new ApprovalProbeAdapter()
+  ctx.tools.register({
+    name: 'r3_approval_probe',
+    description: 'asks the official approval seat before acting',
+    parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args: unknown, value: string) => [{ type: 'text', text: value }] },
+    isConcurrencySafe: () => false,
+    execute: async (_args: unknown, toolCtx: { agent?: unknown }) => {
+      const approval = ctx.get('approval') as unknown as { request(request: unknown): Promise<string> }
+      requestOutcome = await approval.request({
+        agent: toolCtx.agent,
+        toolName: 'r3_approval_probe',
+        reason: 'the R3-02 approval consumer probe',
+      })
+      if (requestOutcome === 'allowed-once') { bodyRuns += 1; return 'ran' }
+      return 'refused'
+    },
+  } as never)
+
+  const ui = mountSettingsUi(port)
+  t.after(() => ui.dispose())
+  ui.invoke('settings')
+  await ui.vt.waitForRender()
+  await selectSettingsCategory(ui.vt, 'Agent')
+  ui.vt.sendInput('\r')
+  await ui.vt.waitForRender()
+  assert.match(ui.vt.getViewport().join('\n'), /> Default permission/u)
+  ui.vt.sendInput('\r')
+  await ui.vt.waitForRender()
+  ui.vt.sendInput('\x1b[B') // workspace-write -> danger-full-access (the never preset)
+  await ui.vt.waitForRender()
+  ui.vt.sendInput('\r')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Status\s+Verified/u.test(frame),
+    () => ui.vt.waitForRender(),
+    'the Default permission Confirm must settle as Verified',
+  )
+  assert.equal(presets.defaultPreset, 'danger-full-access', 'the UI really changed the Host permission default')
+
+  // SOURCE -> SINK: a Session composed AFTER the Confirm asks the official
+  // approval seat, and the sampled `never` policy decides it.
+  const asked: string[] = []
+  ctx.on('approval/request' as never, (() => { asked.push('asked') }) as never)
+
+  ctx.llm.registerAdapter(['approval-probe'], probeAdapter)
+  const handle = await ctx.agents.create({
+    sessionId: SessionId('r3-approval-consumer') as never,
+    agentOptions: { provider: 'approval-probe', model: 'm' },
+  })
+  const agent = handle.agent as unknown as {
+    followup(message: unknown): void
+    whenIdle(): Promise<void>
+    session: unknown
+  }
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+  await agent.whenIdle()
+
+  assert.equal(requestOutcome, 'rejected',
+    'the next Session\'s REAL approval request resolved under the never policy sampled from the UI Confirm')
+  assert.equal(bodyRuns, 0, 'a rejected approval never runs the requested body')
+  assert.equal(asked.length, 0, 'the never policy answers without consulting any interactive answerer')
+  const events = (agent.session as unknown as {
+    snapshotEvents(): readonly { readonly type: string }[]
+  }).snapshotEvents()
+  assert.ok(events.some(event => event.type === 'approval/asked'), 'the durable asked audit exists')
+  assert.ok(events.some(event => event.type === 'approval/decided'), 'the durable decided audit exists')
+})
+
 test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samples', async t => {
   const life = testLifecycle(t)
   const ctx = new Context()
