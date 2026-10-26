@@ -100,6 +100,10 @@ export interface SubagentAllowlistPickerDeps {
   /** @param summary the committed allowlist summary (display only — the outer
    *  surface re-reads its own authority; it never trusts this string as fact). */
   summarize(summary: string): void
+  /** The owner's diagnostics channel. A write that fails AFTER the picker
+   *  closed keeps its no-late-toast UX, but the failure must stay diagnosable
+   *  (the repository's failure model: never swallow an error). */
+  diag?: { warn(message: string, fields?: Record<string, unknown>): void }
   /** The owned-task entry (runOwned shape): async loads route through it
    *  instead of a bare `void promise` (AGENTS.md hard rule). */
   runOwned<T>(
@@ -246,6 +250,9 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
   private readonly deps: SubagentAllowlistPickerDeps
   /** Whether this picker has ever read a REAL section (see the constructor). */
   private sectionReadable = false
+  /** The last list a REAL section read produced. A rejected write that cannot
+   *  re-read the authority rolls back to THIS, never to the optimistic marker. */
+  private committedAllowed: readonly SubagentAllowedModelRoute[] = []
   private readonly enabled: boolean
   private allowed: readonly SubagentAllowedModelRoute[]
   /** The catalog authority state: `loading` until the one official read
@@ -303,6 +310,7 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
      *  section could otherwise be reported as a summary the Host never stored. */
     this.sectionReadable = current !== undefined
     this.allowed = current === undefined ? [] : current.allowedModels.map(route => ({ ...route }))
+    this.committedAllowed = this.allowed.map(route => ({ ...route }))
     this.enabled = current?.enabled === true
     this.picker = new SearchablePicker([], 8, selectListTheme, {}, {
       enableSearch: true,
@@ -463,13 +471,21 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
       .then(
         () => { this.syncFromSection() },
         (error: unknown) => {
-          this.syncFromSection()
-          // A failure settling AFTER the picker closed is silent: the outer
-          // row already converged to the committed summary, and a late toast
-          // would only describe a panel the user left.
-          if (!this.disposed) {
-            this.deps.notify(`allowlist write failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+          if (!this.syncFromSection()) this.rollbackToCommitted()
+          const reason = error instanceof Error ? error.message : String(error)
+          // A failure settling AFTER the picker closed is silent to the USER (a
+          // late toast would only describe a panel they left) — but it is NOT
+          // silent to the OWNER: the dispatched write failed and that must stay
+          // diagnosable.
+          if (this.disposed) {
+            this.deps.diag?.warn('subagent allowlist write settled after close', {
+              operation: 'subagent-allowlist-write',
+              outcome: 'failed',
+              reason,
+            })
+            return
           }
+          this.deps.notify(`allowlist write failed: ${reason}`, 'error')
         },
       )
   }
@@ -507,22 +523,37 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
    * and no summary is invented, so the display never claims a state the
    * authority could not confirm.
    */
-  private syncFromSection(): void {
+  private syncFromSection(): boolean {
     let committed: readonly SubagentAllowedModelRoute[]
     try {
       // An UNAVAILABLE section answers with the shipped default; that is not a
       // committed value, so it may not overwrite the working copy.
-      if (!this.deps.selection.available()) return
+      if (!this.deps.selection.available()) return false
       committed = this.deps.selection.get().allowedModels
     } catch {
-      return
+      return false
     }
     this.sectionReadable = true
     this.allowed = committed.map(existing => ({ ...existing }))
+    this.committedAllowed = this.allowed.map(route => ({ ...route }))
     if (this.disposed) {
       this.deps.summarize(allowlistSummary(this.allowed))
-      return
+      return true
     }
+    this.rebuild()
+    this.deps.requestRender()
+    return true
+  }
+
+  /**
+   * A rejected write that could not re-read the authority must not leave the
+   * optimistic marker on screen: the section never accepted it, so the picker
+   * rolls back to the last list a REAL read produced (and reports no summary if
+   * it never read one).
+   */
+  private rollbackToCommitted(): void {
+    if (this.disposed) return
+    this.allowed = this.committedAllowed.map(route => ({ ...route }))
     this.rebuild()
     this.deps.requestRender()
   }

@@ -1848,6 +1848,15 @@ test('R3-07 the user shell sandbox policy Confirm stores the raw document value 
   assert.match(h.view(), /Next ! \/ !! uses sandbox/u, 'the consumer effect is stated separately')
   assert.deepEqual(h.permissionWrites(), [], 'the shell policy never touches the Host permission default')
   assert.deepEqual(h.subagentWrites(), [], 'the shell policy never touches the subagent section')
+  // The REVERSE trip through the SAME UI (sandbox -> bypass), not a direct
+  // document edit: the consumer effect must flip back for the next `!`/`!!`.
+  await key(h, '\r') // reopen the settled row's choice
+  await key(h, '\x1b[A') // sandbox -> bypass
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.localShellSandbox, 'bypass', 'the reverse Confirm really stored bypass again')
+  assert.equal(h.replacements(), 2, 'exactly one whole-document write per Confirm')
+  assert.match(h.view(), /Next ! \/ !! uses bypass/u, 'the consumer effect flipped back through the UI')
   h.dispose()
 })
 
