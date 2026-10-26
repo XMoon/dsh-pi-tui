@@ -473,22 +473,29 @@ test('the real published turn yields the display /copy payload through the Direc
   assert.equal(publications.length, 1, 'the real publication was accepted')
   const folder = new TranscriptFolder()
   folder.apply(events)
-  // The bridge reads the EXACT live Session object through its official
-  // `eventAt`/`snapshotEvents` surface and the SAME Folder the surface folds.
+  // TEST STAND-IN for the official `Session.eventAt`: ONE stable read adapter
+  // slices the SAME committed snapshot; production reads the Session's own
+  // accessor. The bridge's visual-snapshot seam must identify the SAME object
+  // as `directSessionFor`, exactly as the live attachment does.
+  const sessionReads = {
+    seq: session.session.seq,
+    snapshotEvents: () => session.session.snapshotEvents(),
+    eventAt: (seq: number) => session.session.snapshotEvents()[seq],
+  }
   const bridge = createPresentationBridge({
     remoteSources: undefined,
     currentSessionId: () => session.sessionId,
     currentDirectAgent: () => session.agent as { session: { id: string; snapshotEvents(): readonly unknown[] } },
     assistantStreamBaselineFor: () => [],
-    // TEST STAND-IN for the official `Session.eventAt`: it slices the SAME
-    // committed snapshot; production reads the Session's own accessor.
-    directSessionFor: () => ({
-      seq: session.session.seq,
-      snapshotEvents: () => session.session.snapshotEvents(),
-      eventAt: (seq: number) => session.session.snapshotEvents()[seq],
-    }),
+    directSessionFor: () => sessionReads,
     mainFolder: () => folder,
     currentGeneration: () => 1,
+    mainVisualSnapshot: () => ({
+      session: sessionReads,
+      sessionId: session.sessionId,
+      seq: session.session.seq,
+      events: asVisualSessionEvents(events),
+    }),
   })
   const copy = bridge.directLastAssistantText(session.sessionId)
   assert.equal(copy, 'BEFORE-COPY\n\n\n\nAFTER-COPY',
