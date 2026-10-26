@@ -174,6 +174,17 @@ test('global deletes are translated into scoped own-id operations only', () => {
   for (const id of ids) assert.ok(terminal.text.includes(encodeKittyDeleteImage(id)), `scoped retire for ${id}`)
 })
 
+test('a bare a=d (the protocol default) is also a global delete', () => {
+  const { terminal, facade, core } = harness()
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(component.render(80).join('\r\n'))
+  const imageId = component.imageId!
+  terminal.writes.length = 0
+  facade.write('\x1b_Ga=d\x1b\\')
+  assert.ok(!terminal.text.includes('a=d\x1b'), 'the bare global form never reaches the terminal')
+  assert.ok(terminal.text.includes(encodeKittyDeletePlacement(imageId)), 'it becomes a scoped placement removal')
+})
+
 test('the gate joins a graphics command split across writes', () => {
   const { terminal, facade, core } = harness()
   const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
