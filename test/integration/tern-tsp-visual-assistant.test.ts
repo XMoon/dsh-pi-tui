@@ -31,7 +31,7 @@ import { EventEmitter } from 'node:events'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SessionSeq, buildForkSeed, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import { connect as sdkConnect } from '@stencil-hq/tern'
 import type { Op, TermInput, TermOutput } from '@stencil-hq/tern'
@@ -41,6 +41,9 @@ import {
   type SurfaceEventRoutingSource,
   type SurfaceRendererMount,
 } from '../../src/app/surface/runtime.ts'
+import { ownVisualOriginSpans, type VerifiedVisualOriginSpan } from '../../src/domain/visual/origin.ts'
+import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
+import { proveVisualLineage, type VisualLineageQuery } from '../../src/app/bootstrap/visual-lineage.ts'
 import { asVisualSessionEvents, collectPublishedVisuals } from '../../src/domain/visual/publication.ts'
 import type { VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
@@ -303,12 +306,50 @@ function marker(ref: string): string {
 interface RealSession {
   readonly sessionId: string
   readonly adapter: ScriptedAdapter
+  readonly provider: string
+  readonly ctx: Context
   readonly session: {
     readonly id: string
     readonly seq: number
+    readonly header: { readonly isSeeded?: boolean; readonly parentSession?: unknown }
+    readonly inheritedEventCount: number
     snapshotEvents(): readonly SessionEvent[]
   }
   run(steps: readonly StepPlan[]): Promise<void>
+}
+
+/** Create one official fork child of a live Session in the SAME Host context. */
+async function forkTspSession(ctx: Context, source: RealSession, label: string): Promise<RealSession> {
+  const events = source.session.snapshotEvents()
+  const boundary = events.length - 1
+  assert.ok(boundary >= 0, 'the fork source has a committed event')
+  const sessionId = `${label}-${Math.random().toString(36).slice(2, 10)}`
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(sessionId) as never,
+    seed: buildForkSeed(events, SessionSeq(boundary)),
+    inheritedEventCount: SessionLogOffset(boundary + 1),
+    meta: { parentSession: SessionId(source.sessionId), isSeeded: true },
+    agentOptions: { provider: source.provider, model: 'm' },
+    setup: () => {},
+  })
+  const agent = handle.agent as unknown as {
+    followup(message: unknown): void
+    whenIdle(): Promise<void>
+    session: RealSession['session']
+  }
+  return {
+    sessionId,
+    adapter: source.adapter,
+    provider: source.provider,
+    ctx,
+    session: agent.session,
+    async run(steps: readonly StepPlan[]): Promise<void> {
+      source.adapter.plans = [...steps]
+      source.adapter.prompts.length = 0
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+    },
+  }
 }
 
 async function bootRealSession(life: TestLifecycle, label: string): Promise<RealSession> {
@@ -320,10 +361,11 @@ async function bootRealSession(life: TestLifecycle, label: string): Promise<Real
   applyVisualTools(ctx, { enabled: { get: () => true } } as never)
   const sessionId = `${label}-${Math.random().toString(36).slice(2, 10)}`
   const adapter = new ScriptedAdapter()
-  ctx.llm.registerAdapter([`visual-assistant-${label}`], adapter)
+  const provider = `visual-assistant-${label}`
+  ctx.llm.registerAdapter([provider], adapter)
   const handle = await ctx.agents.create({
     sessionId: SessionId(sessionId) as never,
-    agentOptions: { provider: `visual-assistant-${label}`, model: 'm' },
+    agentOptions: { provider, model: 'm' },
     setup: () => {},
   })
   const agent = handle.agent as unknown as {
@@ -334,6 +376,8 @@ async function bootRealSession(life: TestLifecycle, label: string): Promise<Real
   return {
     sessionId,
     adapter,
+    provider,
+    ctx,
     session: agent.session,
     async run(steps: readonly StepPlan[]): Promise<void> {
       adapter.plans = [...steps]
@@ -356,7 +400,11 @@ interface TspSurfaceHarness {
   dispose(): Promise<void>
 }
 
-async function mountTspSurface(session: RealSession, folder: TranscriptFolder): Promise<TspSurfaceHarness> {
+async function mountTspSurface(
+  session: RealSession,
+  folder: TranscriptFolder,
+  snapshotFor?: () => VisualEventSnapshot | undefined,
+): Promise<TspSurfaceHarness> {
   const tern = new ScriptedTern()
   const copies: string[] = []
   const fatalErrors: unknown[] = []
@@ -454,12 +502,14 @@ async function mountTspSurface(session: RealSession, folder: TranscriptFolder): 
     terminalProgress: undefined,
     mainProgressAuthority: 'local-events',
     createPluginManagerPanel: createPluginManagerWorkspacePanel,
-    visualEventSnapshotFor: (): VisualEventSnapshot => ({
+    visualEventSnapshotFor: snapshotFor ?? ((): VisualEventSnapshot => ({
       session: session.session,
       sessionId: session.sessionId,
       seq: session.session.seq,
       events: asVisualSessionEvents(session.session.snapshotEvents()),
-    }),
+      verifiedOriginSpans: ownVisualOriginSpans(session.sessionId, 0, session.session.seq),
+      originRevision: 0,
+    })),
   })
   surface.attachEventRouting(source)
   surface.start({
@@ -690,6 +740,87 @@ test('the published refs are the SAME ones the real PR1 authority derives from t
     const figureKey = nodesWhere(harness.tern, node => node.kind === 'col' && node.props['role'] === 'dsh.visual.figure')[0]?.props['key']
     assert.equal(figureKey, `body-visual-${published[0]?.ref}`,
       'the painted figure carries the exact authority ref')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a REAL official fork child replays the inherited Chart and SVG into the mounted TSP surface', async (t) => {
+  const life = testLifecycle(t)
+  const source = await bootRealSession(life, 'tsp-fork')
+  await source.run([
+    {
+      calls: [
+        { callId: 'call-chart', name: CHART_TOOL_NAME, args: CHART },
+        { callId: 'call-svg', name: SVG_TOOL_NAME, args: SVG },
+      ],
+    },
+    {
+      calls: prompt => [{
+        callId: 'call-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: refsInPrompt(prompt).map(ref => ({ ref })) },
+      }],
+    },
+    { text: markerAnswer('Latency:\n\n', '\n\nDone.') },
+  ])
+  const child = await forkTspSession(source.ctx, source, 'tsp-fork-child')
+  // The child id over the inherited prefix is exactly the pre-fix revocation.
+  assert.deepEqual(
+    collectPublishedVisuals(child.sessionId, asVisualSessionEvents(child.session.snapshotEvents())),
+    [],
+  )
+
+  const folder = new TranscriptFolder()
+  folder.apply(child.session.snapshotEvents())
+  let latest: VisualEventSnapshot | undefined
+  let surfaceRef: TspSurfaceHarness | undefined
+  const tasks: Promise<void>[] = []
+  const query = source.ctx.get('sessionQuery') as VisualLineageQuery
+  const provider: VisualEventSnapshotProvider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => ({ session: child.session }),
+    viewedChildAgent: () => undefined,
+    lineage: {
+      prove: sessionId => proveVisualLineage(sessionId, query),
+      run: (_label, task) => { tasks.push(task()) },
+      isCurrentSubject: (_subject, called) => called === child.session,
+      requestRepaint: () => { surfaceRef?.repaint() },
+    },
+  })
+  const snapshotFor = (): VisualEventSnapshot | undefined => {
+    latest = provider({ subjectKind: 'main', subjectId: child.sessionId })
+    return latest
+  }
+  const harness = await mountTspSurface(child, folder, snapshotFor)
+  surfaceRef = harness
+  try {
+    replayEvents(harness, folder, child.session.snapshotEvents())
+    assert.ok(tasks.length >= 1, 'the mounted surface started the official lineage read')
+    await tasks[0]
+    await until('the two inherited figures', () => figureIds(harness.tern).length === 2)
+    assert.equal(figureDescendantKinds(harness.tern, 'chart').length, 1,
+      'the inherited chart paints one native chart')
+    assert.equal(figureDescendantKinds(harness.tern, 'image').length, 1,
+      'the inherited SVG paints one native image')
+    assert.equal(harness.tern.blobs.length, 1, 'the one content-addressed SVG blob is sent')
+    assert.deepEqual(latest?.verifiedOriginSpans, [
+      { startSeq: 0, endSeqExclusive: source.session.seq, sessionId: source.sessionId },
+      { startSeq: source.session.seq, endSeqExclusive: child.session.seq, sessionId: child.sessionId },
+    ], 'TSP consumes the SAME proven origin ranges as the PiTUI sidecar')
+
+    // The SAME Alt+V/Alt+C path copies the inherited chart fact and SVG bytes.
+    harness.tern.key('\u001bv')
+    await until('the chart selection', () => badgeTexts(harness.tern).includes('Selected · 1/2'))
+    harness.tern.key('\u001bc')
+    await until('the inherited chart copy', () => harness.copies.length === 1)
+    assert.deepEqual(JSON.parse(harness.copies[0] as string), { version: 1, type: 'chart', ...CHART })
+    harness.tern.key('\u001bv')
+    await until('the SVG selection', () => badgeTexts(harness.tern).includes('Selected · 2/2'))
+    harness.tern.key('\u001bc')
+    await until('the inherited SVG copy', () => harness.copies.length === 2)
+    assert.equal(harness.copies[1], SVG_SOURCE, 'the inherited SVG source bytes are unchanged')
+    assert.equal(harness.fatalErrors.length, 0)
   } finally {
     await harness.dispose()
   }

@@ -22,6 +22,7 @@ import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { assistantStepOf } from '../../domain/transcript/folder.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { visibleAssistantTextForCopy } from '../../domain/visual/display-copy.ts'
+import { originSessionIdAt } from '../../domain/visual/origin.ts'
 import type { VisualEventSnapshot } from '../../domain/visual/presentation.ts'
 import {
   collectPublishedVisuals,
@@ -207,6 +208,7 @@ export function createPresentationBridge(deps: PresentationBridgeDeps): Presenta
    * ```text
    * official latest event -> same-Session main Folder -> the exact settlement
    * seq of (turn, step) -> eligibleFinalAssistant() on that turn's rows
+   * -> the SAME verified origin ranges the display used
    * -> collectPublishedVisuals(same Session snapshot) -> shared planner
    * -> text spans only -> existing post-await scope fence -> clipboard
    * ```
@@ -217,6 +219,12 @@ export function createPresentationBridge(deps: PresentationBridgeDeps): Presenta
    * folder never settled that exact seq, the eligible final row is another
    * step/text, or the ownership changed), the read fails closed instead of
    * guessing which span to drop.
+   *
+   * A fork-inherited answer whose origin is not yet proven is the one extra
+   * refusal: its markers may already be consumed by the inherited publication,
+   * so the clipboard write must not start (and must not fall through to the
+   * "no publication" branch that would copy the marker literally). Once the
+   * lineage settles, this same path returns the visible copy.
    */
   const directLastAssistantText = (sessionId: string): string | undefined => {
     const session = directSessionFor(sessionId)
@@ -263,7 +271,13 @@ export function createPresentationBridge(deps: PresentationBridgeDeps): Presenta
     if (snapshot === undefined || snapshot.session !== session || snapshot.sessionId !== sessionId) {
       throw new SupersededReadError('the session changed while reading the last assistant text')
     }
-    const publications = collectPublishedVisuals(sessionId, snapshot.events)
+    // An inherited answer with an unproven origin may carry markers the
+    // ancestor's publication already consumed; never copy those bytes either
+    // literally or after a guessed deletion.
+    if (originSessionIdAt(snapshot.verifiedOriginSpans, latest.seq) === undefined) {
+      throw new SupersededReadError('the inherited visual provenance of the last assistant text is not verified yet')
+    }
+    const publications = collectPublishedVisuals(sessionId, snapshot.events, snapshot.verifiedOriginSpans)
     const turnPublications = publications.filter(publication => publication.turn === latest.turn)
     // No PR1-authorized publication for this turn: the marker-shaped bytes are
     // ordinary prose, never a consumed display span.

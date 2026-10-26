@@ -25,11 +25,12 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SessionSeq, buildForkSeed, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
 import { createSurfaceRuntime, type SurfaceEventRoutingSource, type SurfaceViewedChildPresentation } from '../../src/app/surface/runtime.ts'
-import { createVisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
+import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
+import { proveVisualLineage, type VisualLineageQuery } from '../../src/app/bootstrap/visual-lineage.ts'
 import { createPresentationBridge } from '../../src/app/bootstrap/presentation-bridge.ts'
 import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
@@ -38,6 +39,7 @@ import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.t
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { asVisualSessionEvents, collectPublishedVisuals } from '../../src/domain/visual/publication.ts'
+import { ownVisualOriginSpans } from '../../src/domain/visual/origin.ts'
 import { assistantVisualPresentation, type VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerChildView, type ViewerRuntimeDeps } from '../../src/app/surface/viewer-runtime.ts'
 import type { SessionPresentationEvent } from '../../src/app/surface/session-presentation.ts'
@@ -65,6 +67,12 @@ const CHART_B = {
   series: [{ label: 'p50', value: 11 }],
 }
 const SVG = { title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }
+const SVG_CHILD = {
+  title: 'Child topology',
+  description: 'Child -> Cache',
+  svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+    + '<rect width="64" height="32" fill="#f97316"/><text x="4" y="20" font-size="12">Child</text></svg>',
+}
 
 interface ScriptedCall {
   readonly callId: string
@@ -129,6 +137,8 @@ interface RealSession {
   readonly session: {
     readonly id: string
     readonly seq: number
+    readonly header: { readonly isSeeded?: boolean; readonly parentSession?: unknown }
+    readonly inheritedEventCount: number
     snapshotEvents(): readonly SessionEvent[]
   }
   readonly adapter: ScriptedAdapter
@@ -137,7 +147,16 @@ interface RealSession {
   setEnabled(next: boolean): void
 }
 
-async function bootRealSession(life: TestLifecycle, label: string): Promise<RealSession> {
+/** One production-equivalent Host composition shared by every Session of a test. */
+interface RealContext {
+  readonly ctx: Context
+  readonly provider: string
+  create(label: string): Promise<RealSession>
+  /** Create the official fork child of one live Session in THIS context. */
+  fork(source: RealSession, label: string): Promise<RealSession>
+}
+
+async function bootRealContext(life: TestLifecycle, label: string): Promise<RealContext> {
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
   await mountAgentLoopTestDependencies(ctx, {})
@@ -145,35 +164,69 @@ async function bootRealSession(life: TestLifecycle, label: string): Promise<Real
   await ctx.plugin(SessionQuerySqlite, { path: ':memory:', openAt: 'never' })
   let enabled = true
   applyVisualTools(ctx, { enabled: { get: () => enabled } } as never)
-  const sessionId = `${label}-${Math.random().toString(36).slice(2, 10)}`
+  const provider = `visual-assistant-${label}`
   const adapter = new ScriptedAdapter()
-  ctx.llm.registerAdapter([`visual-assistant-${label}`], adapter)
-  const handle = await ctx.agents.create({
-    sessionId: SessionId(sessionId) as never,
-    agentOptions: { provider: `visual-assistant-${label}`, model: 'm' },
-    setup: () => {},
-  })
-  const agent = handle.agent as unknown as {
-    followup(message: unknown): void
-    whenIdle(): Promise<void>
-    session: RealSession['session']
+  ctx.llm.registerAdapter([provider], adapter)
+  const wrap = (sessionId: string, handle: { agent: unknown }): RealSession => {
+    const agent = handle.agent as {
+      followup(message: unknown): void
+      whenIdle(): Promise<void>
+      session: RealSession['session']
+    }
+    return {
+      sessionId,
+      agent: agent as object,
+      session: agent.session,
+      adapter,
+      async run(steps: readonly StepPlan[]): Promise<void> {
+        adapter.plans = [...steps]
+        adapter.prompts.length = 0
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+        await agent.whenIdle()
+      },
+      setEnabled(next: boolean): void {
+        enabled = next
+        ctx.emit('loader/volatile-update', [['enabled']])
+      },
+    }
   }
+  const randomSuffix = (): string => Math.random().toString(36).slice(2, 10)
   return {
-    sessionId,
-    agent: agent as object,
-    session: agent.session,
-    adapter,
-    async run(steps: readonly StepPlan[]): Promise<void> {
-      adapter.plans = [...steps]
-      adapter.prompts.length = 0
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-      await agent.whenIdle()
+    ctx,
+    provider,
+    async create(idLabel: string): Promise<RealSession> {
+      const sessionId = `${idLabel}-${randomSuffix()}`
+      const handle = await ctx.agents.create({
+        sessionId: SessionId(sessionId) as never,
+        agentOptions: { provider, model: 'm' },
+        setup: () => {},
+      })
+      return wrap(sessionId, handle)
     },
-    setEnabled(next: boolean): void {
-      enabled = next
-      ctx.emit('loader/volatile-update', [['enabled']])
+    async fork(source: RealSession, idLabel: string): Promise<RealSession> {
+      // The OFFICIAL seed: the exact inclusive prefix, the child-owned
+      // `session/end-seed` marker, and the child metadata the Direct lifecycle
+      // commits. No hand-built fork shape.
+      const sourceEvents = source.session.snapshotEvents()
+      const boundary = sourceEvents.length - 1
+      assert.ok(boundary >= 0, 'the fork source has a committed event')
+      const sessionId = `${idLabel}-${randomSuffix()}`
+      const handle = await ctx.agents.create({
+        sessionId: SessionId(sessionId) as never,
+        seed: buildForkSeed(sourceEvents, SessionSeq(boundary)),
+        inheritedEventCount: SessionLogOffset(boundary + 1),
+        meta: { parentSession: SessionId(source.sessionId), isSeeded: true },
+        agentOptions: { provider, model: 'm' },
+        setup: () => {},
+      })
+      return wrap(sessionId, handle)
     },
   }
+}
+
+async function bootRealSession(life: TestLifecycle, label: string): Promise<RealSession> {
+  const boot = await bootRealContext(life, label)
+  return boot.create(label)
 }
 
 interface SnapshotSource {
@@ -314,6 +367,8 @@ function mountSurface(
         sessionId: snapshot.sessionId,
         seq: snapshot.seq,
         events: asVisualSessionEvents(snapshot.events),
+        verifiedOriginSpans: ownVisualOriginSpans(snapshot.sessionId, 0, snapshot.seq),
+        originRevision: 0,
       }
     },
   })
@@ -495,6 +550,8 @@ test('the real published turn yields the display /copy payload through the Direc
       sessionId: session.sessionId,
       seq: session.session.seq,
       events: asVisualSessionEvents(events),
+      verifiedOriginSpans: ownVisualOriginSpans(session.sessionId, 0, session.session.seq),
+      originRevision: 0,
     }),
   })
   const copy = bridge.directLastAssistantText(session.sessionId)
@@ -1100,4 +1157,211 @@ test('the bootstrap visual snapshot provider is wired to the production selector
   assert.match(helper, /if \(options\.isRemote\(\)\) return undefined/)
   assert.match(helper, /subject\.subjectId !== undefined && session\.id !== subject\.subjectId/)
   assert.match(helper, /asVisualSessionEvents\(session\.snapshotEvents\(\)\)/)
+})
+
+// ── official fork inheritance through the real production chain ───────────
+
+/** The REAL official observation, held behind a test-owned gate. */
+function gatedLineageQuery(ctx: Context): {
+  readonly query: VisualLineageQuery
+  release(): void
+} {
+  const real = ctx.get('sessionQuery') as VisualLineageQuery
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  return {
+    release: () => release(),
+    query: {
+      async observeSession(sessionId, options) {
+        await gate
+        return real.observeSession(sessionId, options)
+      },
+    },
+  }
+}
+
+/**
+ * Mount ONE fork subject with the production provider wired to the REAL
+ * official `sessionQuery`: the ancestry proof runs for real, the settled
+ * result repaints through the mounted surface, and no fixture injects an
+ * already-proven decision downstream.
+ */
+function mountForkSubject(
+  query: VisualLineageQuery,
+  session: RealSession,
+  folder: TranscriptFolder,
+): {
+  readonly harness: SurfaceHarness
+  readonly tasks: Promise<void>[]
+  readonly snapshot: () => VisualEventSnapshot | undefined
+} {
+  let mainAgent: { session: RealSession['session'] } | undefined = { session: session.session }
+  let surfaceRef: { repaint(): void } | undefined
+  let latest: VisualEventSnapshot | undefined
+  const tasks: Promise<void>[] = []
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => mainAgent,
+    viewedChildAgent: () => undefined,
+    lineage: {
+      prove: sessionId => proveVisualLineage(sessionId, query),
+      run: (_label, task) => { tasks.push(task()) },
+      isCurrentSubject: (_subject, calledSession) => mainAgent?.session === calledSession,
+      requestRepaint: () => { surfaceRef?.repaint() },
+    },
+  })
+  const snapshotFor: VisualEventSnapshotProvider = subject => {
+    const snapshot = provider(subject)
+    latest = snapshot
+    return snapshot
+  }
+  const harness = mountSurface(new Map(), session.sessionId, folder, { visualEventSnapshot: snapshotFor })
+  surfaceRef = harness.surface
+  return { harness, tasks, snapshot: () => latest }
+}
+
+/** Run one turn publishing ONE chart and ONE SVG, with both markers inline. */
+async function runTwoFigureAnswer(
+  session: RealSession,
+  chart: unknown,
+  svg: unknown,
+): Promise<void> {
+  await session.run([
+    {
+      calls: [
+        { callId: 'call-chart', name: CHART_TOOL_NAME, args: chart },
+        { callId: 'call-svg', name: SVG_TOOL_NAME, args: svg },
+      ],
+    },
+    {
+      calls: prompt => [{
+        callId: 'call-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: refsInPrompt(prompt).map(ref => ({ ref })) },
+      }],
+    },
+    {
+      text: prompt => {
+        const refs = refsInPrompt(prompt)
+        assert.equal(refs.length, 2)
+        return `Before.\n\n${marker(refs[0] as string)}\n\nBetween.\n\n${marker(refs[1] as string)}\n\nAfter.`
+      },
+    },
+  ])
+}
+
+test('a real official fork replays its inherited Chart and SVG once the lineage proof settles', async (t) => {
+  const life = testLifecycle(t)
+  const boot = await bootRealContext(life, 'fork-inherit')
+  const source = await boot.create('source')
+  await runTwoFigureAnswer(source, CHART, SVG)
+  const sourceEvents = source.session.snapshotEvents()
+  assert.equal(collectPublishedVisuals(source.sessionId, asVisualSessionEvents(sourceEvents)).length, 2,
+    'the source publication is committed under the source identity')
+
+  const child = await boot.fork(source, 'child')
+  assert.equal(child.session.header.isSeeded, true)
+  assert.equal(String(child.session.header.parentSession), source.sessionId)
+  // The exact bug this hotfix targets: replaying the child log with the CHILD
+  // id revokes both inherited publications.
+  assert.deepEqual(collectPublishedVisuals(child.sessionId, asVisualSessionEvents(child.session.snapshotEvents())), [])
+
+  const folder = new TranscriptFolder()
+  folder.apply(child.session.snapshotEvents())
+  const gated = gatedLineageQuery(boot.ctx)
+  const subject = mountForkSubject(gated.query, child, folder)
+  try {
+    await subject.harness.repaint()
+    const pendingView = subject.harness.vt.getViewport().join('\n')
+    assert.ok(pendingView.includes('Before.') && pendingView.includes('After.'))
+    assert.equal(pendingView.indexOf('Request latency', pendingView.indexOf('Before.')), -1,
+      `while the official ancestry read is pending the inherited figure stays in its Tool card:\n${pendingView}`)
+    assert.equal(subject.tasks.length, 1, 'ONE ancestry read for the selected Session identity')
+
+    gated.release()
+    await subject.tasks[0]
+    await subject.harness.vt.waitForRender()
+    const view = subject.harness.vt.getViewport().join('\n')
+    const before = view.indexOf('Before.')
+    const chart = view.indexOf('Request latency', before)
+    const between = view.indexOf('Between.')
+    const svg = view.indexOf('Service topology', between)
+    const after = view.indexOf('After.')
+    assert.ok(before >= 0 && chart > before && between > chart && svg > between && after > svg,
+      `both inherited figures replay inline at their own markers:\n${view}`)
+    assert.equal(bulletRows(view).length, 1)
+
+    const snapshot = subject.snapshot()
+    assert.ok(snapshot !== undefined)
+    assert.deepEqual(snapshot.verifiedOriginSpans, [
+      { startSeq: 0, endSeqExclusive: source.session.seq, sessionId: source.sessionId },
+      { startSeq: source.session.seq, endSeqExclusive: child.session.seq, sessionId: child.sessionId },
+    ], 'the settled provenance attributes the inherited prefix to the official source Session')
+  } finally {
+    subject.harness.dispose()
+  }
+})
+
+test('A -> B -> C keeps the grandparent, parent and child figures exactly once each', async (t) => {
+  const life = testLifecycle(t)
+  const boot = await bootRealContext(life, 'fork-chain')
+  const a = await boot.create('a')
+  await runTwoFigureAnswer(a, CHART, SVG)
+  const b = await boot.fork(a, 'b')
+  // B publishes its OWN new SVG in a real turn.
+  await b.run([
+    { calls: [{ callId: 'b-svg', name: SVG_TOOL_NAME, args: SVG_CHILD }] },
+    {
+      calls: prompt => [{
+        callId: 'b-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        // The inherited refs are already in the model context; the NEW one is
+        // the last reference the generating result projected.
+        args: { visuals: [{ ref: refsInPrompt(prompt).at(-1) }] },
+      }],
+    },
+    {
+      text: prompt => {
+        const ref = refsInPrompt(prompt).at(-1)
+        assert.ok(ref !== undefined, 'B received its own visual reference')
+        return `Child before.\n\n${marker(ref)}\n\nChild after.`
+      },
+    },
+  ])
+  const c = await boot.fork(b, 'c')
+
+  const folder = new TranscriptFolder()
+  folder.apply(c.session.snapshotEvents())
+  const subject = mountForkSubject(boot.ctx.get('sessionQuery') as VisualLineageQuery, c, folder)
+  try {
+    await subject.harness.repaint()
+    await subject.tasks[0]
+    await subject.harness.vt.waitForRender()
+    const view = subject.harness.vt.getViewport().join('\n')
+    // A's inherited answer keeps both of ITS figures inline.
+    const aBefore = view.indexOf('Before.')
+    const aBetween = view.indexOf('Between.')
+    const aAfter = view.indexOf('After.')
+    const chartInline = view.indexOf('Request latency', aBefore)
+    const svgInline = view.indexOf('Service topology', aBetween)
+    assert.ok(chartInline > aBefore && chartInline < aBetween, `the grandparent chart is inline:\n${view}`)
+    assert.ok(svgInline > aBetween && svgInline < aAfter, `the grandparent SVG is inline:\n${view}`)
+    // B's own answer keeps ITS figure inline.
+    const bBefore = view.indexOf('Child before.')
+    const bAfter = view.indexOf('Child after.')
+    const childInline = view.indexOf('Child topology', bBefore)
+    assert.ok(childInline > bBefore && childInline < bAfter, `the parent own new SVG is inline:\n${view}`)
+    assert.equal(view.indexOf('Request latency', bBefore), -1,
+      `A grandparent figure never leaks into B the parent answer:\n${view}`)
+
+    const snapshot = subject.snapshot()
+    assert.ok(snapshot !== undefined)
+    assert.deepEqual(snapshot.verifiedOriginSpans.map(span => span.sessionId), [
+      a.sessionId,
+      b.sessionId,
+      c.sessionId,
+    ], 'three origins, each proven at its own level')
+  } finally {
+    subject.harness.dispose()
+  }
 })
