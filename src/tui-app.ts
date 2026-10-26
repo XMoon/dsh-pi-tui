@@ -230,6 +230,10 @@ import { CompactTextPreview } from './tui/components/transcript/compact-text-pre
 import { ChartBody } from './tui/components/transcript/chart-body.ts'
 import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/components/transcript/visual-assistant-body.ts'
 import type { VisualFigureOptions } from './tui/components/transcript/visual-figure.ts'
+import {
+  createNativeKittyGraphics,
+  type NativeKittyGraphics,
+} from './tui/graphics/native-image.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
 import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
@@ -2787,6 +2791,12 @@ interface ScopeSettlement {
 
 export class TuiApp {
   private readonly terminal: Terminal
+  /**
+   * The ONE managed Kitty graphics owner of this physical terminal
+   * (Image-7A). `undefined` on every terminal that never had native Kitty
+   * evidence: those consumers keep the legacy fork `Image`.
+   */
+  private readonly nativeGraphics: NativeKittyGraphics | undefined
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
   /** The unified status projection store (M0): the footer's single input.
@@ -4152,7 +4162,12 @@ export class TuiApp {
         return typeof value === 'function' ? value.bind(target) : value
       },
     })
-    this.terminal = resizeAware
+    // The managed graphics handle is created ONCE per physical terminal, from
+    // the real terminal the screens will write through, and both screens plus
+    // every first-party native consumer share the SAME facade/Core.
+    const nativeGraphics = createNativeKittyGraphics(resizeAware)
+    this.nativeGraphics = nativeGraphics
+    this.terminal = nativeGraphics?.terminal ?? resizeAware
     // Scroll profiler (diagnostic, DSH_TUI_SCROLL_PROFILE=1): time write
     // calls and count the per-frame rewrite volume on the SAME terminal
     // instance both screens write through. Disabled builds never wrap.
@@ -4375,7 +4390,7 @@ export class TuiApp {
       focusSeatOwner: () => this.focusSeatOwner(),
     })
 
-    this.tui = new TuiMainScreen(resizeAware)
+    this.tui = new TuiMainScreen(this.terminal)
     // The host default editor is the TuiEditor subclass: kimi parity for
     // `@dir/` mention completion (Tab-accepting a directory reopens the
     // dropdown at its children; Esc closes it without re-triggering). Its
@@ -4786,6 +4801,7 @@ export class TuiApp {
       // Image-6B: a settled JPEG/WebP derivation must repaint the mounted
       // surface; the component owns no screen and never paints by itself.
       requestRender: () => this.requestRender(),
+      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
     }, this.imageTheme ?? { fallbackColor: text => color.textDim(text) })
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
@@ -5626,6 +5642,10 @@ export class TuiApp {
       // not leave a ref'd interval firing into the disposed surface.
       () => this.overlayBroker.disposeAll(),
       () => this.stop(),
+      // Image-7A: the managed graphics Core dies with the physical terminal.
+      // The screens already emitted their own release/retire through the same
+      // facade, so this only drops the ledger (never a late terminal write).
+      () => this.nativeGraphics?.dispose(),
       () => { this.generation += 1 },
       () => this.clearNotify(),
       () => {
@@ -12064,6 +12084,7 @@ export class TuiApp {
       this.imageScope?.(),
       // The `[-]`/`[+]` control is a FULLSCREEN info-row affordance only.
       () => this.fullscreen !== undefined,
+      this.nativeGraphics,
     )
     const source = thumbnail.viewerSource
     const occurrence: TranscriptImageOccurrence = {
@@ -18092,6 +18113,7 @@ export class TuiApp {
             svgLoader: this.svgRasterLoader,
             svgTheme: this.imageTheme,
             svgAdmissionWidth: source.svgAdmissionWidth,
+            ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
           }
         : {}),
     }
@@ -19341,6 +19363,8 @@ export class TuiApp {
         this.svgRasterLoader,
         this.imageTheme,
         () => this.settleThumbnailRender(),
+        undefined,
+        this.nativeGraphics,
       ))
     }
     if (explicitlyExpanded) {
@@ -19402,6 +19426,7 @@ export class TuiApp {
             this.imageTheme,
             () => this.settleThumbnailRender(),
             MAX_IMAGE_ROWS + 1,
+            this.nativeGraphics,
           )
           thumbnailRows = thumbnail.render(width).length
         }
@@ -24162,6 +24187,7 @@ export class TuiApp {
       columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates,
       // Currentness at SELECTION time: a candidate that left the mounted
@@ -24204,6 +24230,7 @@ export class TuiApp {
       columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,
@@ -24407,6 +24434,7 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.svgRasterLoader === undefined ? {} : { svgLoader: this.svgRasterLoader }),
+      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,

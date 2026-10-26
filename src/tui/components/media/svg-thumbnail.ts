@@ -22,7 +22,8 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/svg-thumbnail
  */
 
-import { Image, getCapabilities, type Component } from '@xmoon76/pi-tui'
+import { Image, getCapabilities, imageFallback, type Component } from '@xmoon76/pi-tui'
+import { NativeKittyImage, type NativeKittyGraphics, type PixelBody } from '../../graphics/native-image.ts'
 import type { ImageThumbnailTheme } from './image-thumbnail.ts'
 import { MAX_IMAGE_ROWS, MAX_IMAGE_WIDTH, NARROW_WIDTH_THRESHOLD } from './image-thumbnail.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
@@ -64,7 +65,11 @@ export class SvgThumbnail implements Component {
   /** The last successfully decoded derivative for this variant. A loader-cache
    *  eviction must not erase an image the component already painted. */
   private lastReady: { readonly base64: string; readonly widthPx: number; readonly heightPx: number } | undefined
-  private instance: Image | undefined
+  private instance: PixelBody | undefined
+  /** Whether `instance` is a managed component (it owns a Core handle). */
+  private instanceNative = false
+  /** The ONE managed graphics owner of this physical terminal, when admitted. */
+  private readonly nativeGraphics: NativeKittyGraphics | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
   /** The real pixel rows and placement width the LAST render at `width`
@@ -81,6 +86,7 @@ export class SvgThumbnail implements Component {
     theme: SvgThumbnailTheme,
     requestRender: () => void,
     fixedRows?: number,
+    nativeGraphics?: NativeKittyGraphics,
   ) {
     this.digest = digest
     this.source = source
@@ -89,6 +95,7 @@ export class SvgThumbnail implements Component {
     this.theme = theme
     this.requestRender = requestRender
     this.fixedRows = fixedRows
+    this.nativeGraphics = nativeGraphics
     this.unsubscribe = loader.subscribe(digest, targetWidth, () => {
       this.invalidate()
       this.requestRender()
@@ -132,7 +139,9 @@ export class SvgThumbnail implements Component {
   }
 
   invalidate(): void {
+    this.instance?.dispose?.()
     this.instance = undefined
+    this.instanceNative = false
     this.cachedLines = undefined
     this.cachedKey = undefined
     this.paintedBody = undefined
@@ -177,21 +186,39 @@ export class SvgThumbnail implements Component {
       ? state
       : this.lastReady
     if (effective !== undefined) {
-      if (this.instance === undefined) {
-        this.instance = new Image(
-          effective.base64,
-          'image/png',
-          { fallbackColor: this.theme.fallbackColor },
-          {
-            maxHeightCells: MAX_IMAGE_ROWS,
-            maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
-            filename: 'svg',
-          },
-          { widthPx: effective.widthPx, heightPx: effective.heightPx },
-        )
+      const native = this.nativeGraphics !== undefined
+      if (this.instance === undefined || this.instanceNative !== native) {
+        this.instance?.dispose?.()
+        this.instance = native
+          ? this.nativeGraphics!.image(
+            { pngBase64: effective.base64, widthPx: effective.widthPx, heightPx: effective.heightPx },
+            {
+              maxHeightCells: MAX_IMAGE_ROWS,
+              maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+              fallback: this.theme.fallbackColor(imageFallback(
+                'image/png',
+                { widthPx: effective.widthPx, heightPx: effective.heightPx },
+                'svg',
+              )),
+            },
+          )
+          : new Image(
+            effective.base64,
+            'image/png',
+            { fallbackColor: this.theme.fallbackColor },
+            {
+              maxHeightCells: MAX_IMAGE_ROWS,
+              maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+              filename: 'svg',
+            },
+            { widthPx: effective.widthPx, heightPx: effective.heightPx },
+          )
+        this.instanceNative = native
       }
       const body = this.instance.render(width)
-      const columns = paintedImageColumns(body)
+      const columns = this.instance instanceof NativeKittyImage
+        ? this.instance.paintedBodyAt(width)?.columns
+        : paintedImageColumns(body)
       if (columns !== undefined) {
         this.paintedBody = { width, rows: body.length, endCol: columns }
         this.paintedPixel = { width, widthPx: effective.widthPx, heightPx: effective.heightPx }

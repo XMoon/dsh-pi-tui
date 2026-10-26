@@ -37,8 +37,10 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-thumbnail
  */
 
-import { Image, getCapabilities, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { Image, getCapabilities, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
+import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import { NativeKittyImage } from '../../graphics/native-image.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
@@ -128,7 +130,13 @@ export class ImageThumbnail implements Component {
    */
   private readonly fullscreenCollapseControl: (() => boolean) | undefined
   private unsubscribe: (() => void) | undefined
-  private instance: Image | undefined
+  /** The ONE native graphics owner of this physical terminal (Image-7A). When
+   *  present, Kitty pixels are painted through the managed Core instead of the
+   *  legacy fork `Image`; iTerm2 and every other terminal keep that path. */
+  private readonly nativeGraphics: NativeKittyGraphics | undefined
+  /** True when `instance` is a managed component (it owns a Core handle). */
+  private instanceNative = false
+  private instance: PixelBody | undefined
   /** Which source/protocol the local `Image` was built for. A terminal
    * capability flip (Kitty ↔ iTerm2) or a raw/derived source switch must
    * rebuild it; reusing an instance across those renders stale cached lines
@@ -161,6 +169,7 @@ export class ImageThumbnail implements Component {
     collapsedRef?: () => boolean,
     scope?: unknown,
     fullscreenCollapseControl?: () => boolean,
+    nativeGraphics?: NativeKittyGraphics,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
@@ -170,6 +179,7 @@ export class ImageThumbnail implements Component {
     this.collapsedRef = collapsedRef
     this.scope = scope
     this.fullscreenCollapseControl = fullscreenCollapseControl
+    this.nativeGraphics = nativeGraphics
     // Subscribe to THIS (scope, attachment)'s settles only: N thumbnails loading
     // in parallel never invalidate each other, and another presentation's settle
     // for the same content id never wakes this component (review finding 8 — no
@@ -288,9 +298,17 @@ export class ImageThumbnail implements Component {
     return { rows: painted.rows, endCol: painted.endCol }
   }
 
-  invalidate(): void {
+  /** Release the pixel body and, when it is a managed occurrence, its Core
+   *  handle: the Core's next write emits the owned hard delete. */
+  private releaseInstance(): void {
+    this.instance?.dispose?.()
     this.instance = undefined
+    this.instanceNative = false
     this.instanceKind = undefined
+  }
+
+  invalidate(): void {
+    this.releaseInstance()
     this.cachedLines = undefined
     this.cachedKey = undefined
     this.paintedControl = undefined
@@ -322,8 +340,7 @@ export class ImageThumbnail implements Component {
    * it, and the next pixel render rebuilds from the CURRENT loader state.
    */
   private infoOnly(width: number, text: string): string[] {
-    this.instance = undefined
-    this.instanceKind = undefined
+    this.releaseInstance()
     return [this.infoRow(width, text)]
   }
 
@@ -373,25 +390,46 @@ export class ImageThumbnail implements Component {
     }
     if (previewCandidate) return this.renderKittyPreview(width)
     const instanceKind = protocol === 'kitty' ? 'raw-kitty' : 'raw-iterm2'
-    if (this.instance === undefined || this.instanceKind !== instanceKind) {
-      this.instance = new Image(
-        state.base64,
-        this.ref.mediaType,
-        { fallbackColor: this.theme.fallbackColor },
-        {
-          maxHeightCells: MAX_IMAGE_ROWS,
-          maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
-          filename: this.label(),
-        },
-        { widthPx: this.ref.width, heightPx: this.ref.height },
-      )
+    const native = this.nativeGraphics !== undefined
+    if (this.instance === undefined || this.instanceKind !== instanceKind || this.instanceNative !== native) {
+      this.releaseInstance()
+      this.instance = native
+        ? this.nativeGraphics!.image(
+          { pngBase64: state.base64, widthPx: this.ref.width, heightPx: this.ref.height },
+          {
+            maxHeightCells: MAX_IMAGE_ROWS,
+            maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+            fallback: this.theme.fallbackColor(imageFallback(
+              this.ref.mediaType,
+              { widthPx: this.ref.width, heightPx: this.ref.height },
+              this.label(),
+            )),
+          },
+        )
+        : new Image(
+          state.base64,
+          this.ref.mediaType,
+          { fallbackColor: this.theme.fallbackColor },
+          {
+            maxHeightCells: MAX_IMAGE_ROWS,
+            maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+            filename: this.label(),
+          },
+          { widthPx: this.ref.width, heightPx: this.ref.height },
+        )
+      this.instanceNative = native
       this.instanceKind = instanceKind
     }
     const body = this.instance.render(width)
     // Whether those rows are REAL PIXELS is a property of the surface: a raster
-    // format this protocol cannot display renders the fork's text fallback,
-    // which keeps its informational row but must not become a clickable body.
-    if (imagePixelsSupported(protocol, this.ref.mediaType)) {
+    // format this protocol cannot display renders a text fallback, which keeps
+    // its informational row but must not become a clickable body.
+    if (imagePixelsSupported(protocol, this.ref.mediaType) && this.instance instanceof NativeKittyImage) {
+      // The managed component reports the exact placement it just built; the
+      // same answer covers the budget fallback (no pixels, no hit).
+      const painted = this.instance.paintedBodyAt(width)
+      this.paintedBody = painted === undefined ? undefined : { width, rows: painted.rows, endCol: painted.columns }
+    } else if (imagePixelsSupported(protocol, this.ref.mediaType)) {
       // The hit must cover exactly the cells the image OCCUPIES, which is the
       // protocol's own placement width — NOT the `maxWidthCells` ceiling this
       // component asked for. The fork shrinks a square or portrait image well
@@ -429,27 +467,48 @@ export class ImageThumbnail implements Component {
       const reason = preview.reason === 'busy' ? 'Preview unavailable (busy)' : 'Preview unavailable'
       return this.infoOnly(width, `${this.infoLine()} · ${reason}`)
     }
-    if (this.instance === undefined || this.instanceKind !== 'preview-kitty') {
-      this.instance = new Image(
-        preview.base64,
-        'image/png',
-        { fallbackColor: this.theme.fallbackColor },
-        {
-          maxHeightCells: MAX_IMAGE_ROWS,
-          maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
-          filename: this.label(),
-        },
-        { widthPx: preview.width, heightPx: preview.height },
-      )
+    const native = this.nativeGraphics !== undefined
+    if (this.instance === undefined || this.instanceKind !== 'preview-kitty' || this.instanceNative !== native) {
+      this.releaseInstance()
+      this.instance = native
+        ? this.nativeGraphics!.image(
+          { pngBase64: preview.base64, widthPx: preview.width, heightPx: preview.height },
+          {
+            maxHeightCells: MAX_IMAGE_ROWS,
+            maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+            fallback: this.theme.fallbackColor(imageFallback(
+              'image/png',
+              { widthPx: preview.width, heightPx: preview.height },
+              this.label(),
+            )),
+          },
+        )
+        : new Image(
+          preview.base64,
+          'image/png',
+          { fallbackColor: this.theme.fallbackColor },
+          {
+            maxHeightCells: MAX_IMAGE_ROWS,
+            maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
+            filename: this.label(),
+          },
+          { widthPx: preview.width, heightPx: preview.height },
+        )
+      this.instanceNative = native
       this.instanceKind = 'preview-kitty'
     }
     const body = this.instance.render(width)
-    // The derived body is a REAL Kitty placement only when this render emitted
-    // an anchored APC; a missing `c=` registers no hit.
-    const columns = paintedImageColumns(body, 'kitty')
-    this.paintedBody = columns === undefined
-      ? undefined
-      : { width, rows: body.length, endCol: columns }
+    if (this.instance instanceof NativeKittyImage) {
+      const painted = this.instance.paintedBodyAt(width)
+      this.paintedBody = painted === undefined ? undefined : { width, rows: painted.rows, endCol: painted.columns }
+    } else {
+      // The derived body is a REAL Kitty placement only when this render emitted
+      // an anchored APC; a missing `c=` registers no hit.
+      const columns = paintedImageColumns(body, 'kitty')
+      this.paintedBody = columns === undefined
+        ? undefined
+        : { width, rows: body.length, endCol: columns }
+    }
     return [this.infoRow(width, this.infoLine()), ...body]
   }
 }

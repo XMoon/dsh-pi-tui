@@ -152,6 +152,42 @@ sanitizer keeps its own vetted OSC 8 contract; that contract is unchanged).
 - **Never** add a terminal emulator, PTY, image passthrough or a
   color-preserving parser dependency to solve this.
 
+## Kitty graphics ownership
+
+Inline Kitty graphics are the ONE protocol family with a Client-local
+ownership layer in front of the terminal writer: `src/tui/graphics/**` (the
+per-physical-terminal `KittyGraphicsCore` plus the `KittyTerminalFacade` both
+screens write through). The vendored screens still own their text frames,
+scrollback and layout; the Core owns image ids, upload residency, placements,
+retirement and the resident budget.
+
+- **One authority for image data.** Only the Core emits a hard
+  `a=d,d=I,i=<own id>` retirement. A legacy writer's per-id delete of a managed
+  id is layout intent, not ownership: it becomes a scoped placement removal
+  (`a=d,d=i,i=<id>`) so the pixels disappear in that frame while the data stays
+  resident for a re-show. A late delete for an id the Core already retired is
+  dropped.
+- **Foreign owners are untouched.** A per-id delete for an id the Core does not
+  own passes through byte-for-byte. A global `a=d,d=A` / `a=d,d=a` never
+  reaches the terminal; it is translated into the same operations scoped to the
+  Core's own ids only.
+- **Managed commands are quiet and typed.** Transmission is
+  `a=t,f=100,i=<id>,q=2` in at most 4096-character chunks and EVERY chunk
+  carries `q=2`; a placement anchor is `a=p,i=...,p=...,c=...,r=...,C=1,q=2;`
+  (the trailing `;` is what makes the fork's main-screen image-line parser
+  track it). The payload is re-sent only after a clear that really invalidated
+  it. The facade observes `CSI 2J`, `CSI 3J` and a screen-buffer switch as
+  residency invalidations and never rewrites text, OSC 8/52, mouse or keyboard
+  modes, or a foreign APC.
+- **Admission is narrower than capability.** The managed path requires a real
+  Kitty terminal directly attached (no multiplexer); Kitty-compatible
+  terminals, iTerm2 and unknown terminals keep the legacy `Image`/text
+  fallback, and no environment override can force admission.
+
+Proof: `test/tui/kitty-native-protocol.test.ts`,
+`test/tui/kitty-graphics-owner.test.ts`,
+`test/integration/kitty-native-screen.test.ts`.
+
 ## Specialized contracts that stay as they are
 
 These own their own policy and are guarded by negative-control regression

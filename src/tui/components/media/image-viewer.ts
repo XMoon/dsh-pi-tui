@@ -27,8 +27,9 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-viewer
  */
 
-import { Image, getCapabilities, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { Image, getCapabilities, imageFallback, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
+import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import { MAX_KITTY_THUMBNAIL_SOURCE_BYTES } from '../../../client/media/image/kitty-thumbnail.ts'
@@ -64,6 +65,12 @@ export interface ImageViewerInput {
   /** What Esc actually does on this surface (design-language D13): `back`
    * returns to the image list, `close` leaves the Viewer. Default `close`. */
   readonly closeHint?: ImageViewerCloseHint
+  /**
+   * The ONE managed graphics owner of this physical terminal (Image-7A). The
+   * Viewer paints Kitty pixels through the Core when it is admitted; iTerm2 and
+   * every other surface keep the legacy `Image` path.
+   */
+  readonly nativeGraphics?: NativeKittyGraphics
 }
 
 /** One read-only rendered attachment, sized to the frame's content grant. */
@@ -82,7 +89,10 @@ export class ImageViewerPanel implements Component {
   /** The granted CONTENT row budget (overlay maxHeight minus border rows). */
   private maxRows = DEFAULT_MAX_ROWS
   /** The local placement instance; never a cache of loaded bytes. */
-  private instance: Image | undefined
+  private instance: PixelBody | undefined
+  /** Whether `instance` is a managed component (it owns a Core handle). */
+  private instanceNative = false
+  private readonly nativeGraphics: NativeKittyGraphics | undefined
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
   private instanceProtocol: 'kitty' | 'iterm2' | undefined
@@ -102,6 +112,7 @@ export class ImageViewerPanel implements Component {
     this.requestRender = input.requestRender
     this.onClose = input.onClose
     this.closeHint = input.closeHint === 'back' ? 'Esc back' : 'Esc close'
+    this.nativeGraphics = input.nativeGraphics
     // Subscribe ONCE to THIS (scope, attachment)'s settles only: another
     // presentation's settle for the same content id must not wake this panel.
     // The callback only invalidates the local paint and schedules one frame.
@@ -123,9 +134,13 @@ export class ImageViewerPanel implements Component {
     if (matchesKey(data, 'escape')) this.onClose()
   }
 
-  /** Drop the local placement so the next paint rebuilds from current state. */
+  /** Drop the local placement so the next paint rebuilds from current state.
+   *  A managed placement's Core handle is released with it (the Core then owns
+   *  the hard delete at its next write). */
   invalidate(): void {
+    this.instance?.dispose?.()
     this.instance = undefined
+    this.instanceNative = false
     this.instanceAttachmentId = undefined
     this.instanceProtocol = undefined
     this.instanceKind = undefined
@@ -327,31 +342,49 @@ export class ImageViewerPanel implements Component {
    * base64 string and the payload's pixel dimensions. Any change rebuilds
    * instead of rendering stale cached lines from the wrong protocol/source.
    */
-  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource): Image {
+  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource): PixelBody {
+    const native = this.nativeGraphics !== undefined
     if (this.instance === undefined
       || this.instanceAttachmentId !== this.ref.attachmentId
       || this.instanceProtocol !== 'kitty'
       || this.instanceKind !== pixel.kind
+      || this.instanceNative !== native
       || this.instanceWidth !== width
       || this.instanceBodyRows !== bodyRows
       || this.instanceBase64 !== pixel.base64
       || this.instanceWidthPx !== pixel.widthPx
       || this.instanceHeightPx !== pixel.heightPx) {
-      this.instance = new Image(
-        pixel.base64,
-        'image/png',
-        { fallbackColor: this.theme.fallbackColor },
-        {
-          maxWidthCells: Math.max(1, width),
-          maxHeightCells: Math.max(1, bodyRows),
-          // The fork's text fallback interpolates this name into a painted row
-          // (`[Image: <name> [mime] WxH]`) and does NOT strip terminal controls.
-          // Project it at this boundary like every other external label, so a
-          // hostile name can never reach the terminal through the fallback path.
-          filename: sanitizedPhysicalLine(this.ref.name ?? 'image'),
-        },
-        { widthPx: pixel.widthPx, heightPx: pixel.heightPx },
-      )
+      this.instance?.dispose?.()
+      // The fork's text fallback interpolates this name into a painted row
+      // (`[Image: <name> [mime] WxH]`) and does NOT strip terminal controls.
+      // Project it at this boundary like every other external label, so a
+      // hostile name can never reach the terminal through the fallback path.
+      const label = sanitizedPhysicalLine(this.ref.name ?? 'image')
+      this.instance = native
+        ? this.nativeGraphics!.image(
+          { pngBase64: pixel.base64, widthPx: pixel.widthPx, heightPx: pixel.heightPx },
+          {
+            maxWidthCells: Math.max(1, width),
+            maxHeightCells: Math.max(1, bodyRows),
+            fallback: this.theme.fallbackColor(imageFallback(
+              'image/png',
+              { widthPx: pixel.widthPx, heightPx: pixel.heightPx },
+              label,
+            )),
+          },
+        )
+        : new Image(
+          pixel.base64,
+          'image/png',
+          { fallbackColor: this.theme.fallbackColor },
+          {
+            maxWidthCells: Math.max(1, width),
+            maxHeightCells: Math.max(1, bodyRows),
+            filename: label,
+          },
+          { widthPx: pixel.widthPx, heightPx: pixel.heightPx },
+        )
+      this.instanceNative = native
       this.instanceAttachmentId = this.ref.attachmentId
       this.instanceProtocol = 'kitty'
       this.instanceKind = pixel.kind

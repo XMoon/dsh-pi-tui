@@ -22,6 +22,7 @@ import { svgDetailRows } from '../../../domain/visual/svg.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
 import { ChartBody } from './chart-body.ts'
 import { SvgThumbnail, type SvgThumbnailTheme } from '../media/svg-thumbnail.ts'
+import type { NativeKittyGraphics } from '../../graphics/native-image.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { color } from '../../theme/runtime.ts'
 
@@ -67,6 +68,8 @@ export interface VisualFigureOptions {
   readonly svgTheme?: SvgThumbnailTheme
   /** The already-admitted SVG display target width (reused, not re-derived). */
   readonly svgAdmissionWidth?: number
+  /** The ONE managed graphics owner of this physical terminal (Image-7A). */
+  readonly nativeGraphics?: NativeKittyGraphics
 }
 
 /** The selected device's textual label (colour is never the only signal). */
@@ -172,6 +175,8 @@ export class VisualFigureComponent implements Component {
             options.svgLoader,
             options.svgTheme,
             options.requestRender,
+            undefined,
+            options.nativeGraphics,
           )
         : undefined
       this.actions = [
