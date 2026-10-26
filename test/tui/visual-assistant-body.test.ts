@@ -191,6 +191,7 @@ function prefixedDefinitions(count: number): string {
 // ── SharedDefinitionsMarkdown ────────────────────────────────────────────
 
 test('a reference link before a figure resolves through the display-only definitions prefix', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
   const prefix = '[one]: https://example.com/one "One"\n\n'
   const segment = new SharedDefinitionsMarkdown({
     body: 'see [x][one]',
@@ -204,6 +205,7 @@ test('a reference link before a figure resolves through the display-only definit
 })
 
 test('a link reference in a later text piece resolves against the same full-run prefix', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
   const prefix = '[late]: https://example.com/late\n\n'
   const segment = new SharedDefinitionsMarkdown({
     body: 'later [y][late]',
@@ -265,6 +267,7 @@ test('a twenty-definition prefix over ten segments adds no rows at all', () => {
 })
 
 test('a resize re-renders both the prefix and the body at the new width', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
   const segment = new SharedDefinitionsMarkdown({
     body: 'a paragraph with [link][one]',
     definitions: '[one]: https://example.com/one\n\n',
@@ -279,6 +282,7 @@ test('a resize re-renders both the prefix and the body at the new width', () => 
 })
 
 test('a CJK label and title in a CRLF definition prefix keeps the real href', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
   const prefix = '[链接]: https://example.com/cjk "标题"\r\n\r\n'
   const segment = new SharedDefinitionsMarkdown({
     body: '参考 [x][链接]',
