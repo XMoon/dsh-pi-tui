@@ -979,7 +979,11 @@ test('the real ViewerRuntime folder/selection and production snapshot provider d
     {
       viewedChildId: () => viewer.isViewing() ? child.sessionId : undefined,
       viewedChildPresentation: () => viewer.presentation(),
-      viewedChildFolder: () => read.folder,
+      viewedChildFolder: () => {
+        const current = viewer.read()
+        assert.ok(current !== undefined, 'the routing source reads the CURRENT viewer folder')
+        return current.folder
+      },
       viewedChildAgent: () => viewer.viewedChildAgent(),
       visualEventSnapshot: subject => provider(subject),
     },
@@ -997,12 +1001,16 @@ test('the real ViewerRuntime folder/selection and production snapshot provider d
     const mainFrame = harness.vt.getViewport().join('\n')
     assert.equal(mainFrame.indexOf('Child viewer chart'), -1, `the child visual does not survive viewer exit:\n${mainFrame}`)
 
-    // Re-enter the SAME viewer: the real folder and the production provider
-    // re-derive the child's visual as the current subject.
+    // Re-enter the SAME viewer: enterView mints a NEW TranscriptFolder, so the
+    // routing source must follow viewer.read() dynamically; a stale folder
+    // reference would make this assertion pass against the old projection.
     await viewer.enterView(child.sessionId, 'child', 'one-shot', parent.sessionId, 'inactive')
+    const reenteredRead = viewer.read()
+    assert.ok(reenteredRead !== undefined)
+    assert.notEqual(reenteredRead.folder, read.folder, 're-entering a viewer owns a new folder instance')
     await harness.repaint()
     const reentered = harness.vt.getViewport().join('\n')
-    assert.ok(reentered.includes('Child viewer chart'), `re-entering re-derives the child visual:\n${reentered}`)
+    assert.ok(reentered.includes('Child viewer chart'), `re-entering re-derives the child visual from the new folder:\n${reentered}`)
   } finally {
     harness.dispose()
     viewer.dispose()
