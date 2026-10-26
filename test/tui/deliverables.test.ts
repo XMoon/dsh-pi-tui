@@ -535,3 +535,30 @@ test('declarations whose paths project to nothing stay distinguishable when pain
   assert.ok(!view.includes('\u001b[31m') && !view.includes('\u001b[32m'),
     'no control sequence from a declared path reaches the frame')
 })
+
+test('a generated ordinal never collides with a naturally painted label', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [
+      { path: '/a/report\u001b[31m' },
+      { path: '/a/report\u001b[32m' },
+      { path: '/b/report (2)' },
+    ],
+  }])
+  const view = await viewport(vt)
+  const rows = view.split('\n').filter(line => line.trim() !== '' && line.includes('report'))
+  assert.equal(rows.length, 3, `all three declared files are painted:\n${view}`)
+  const labels = rows.map(row => row.trim())
+  assert.equal(new Set(labels).size, 3, `three visibly distinct rows:\n${labels.join('\n')}`)
+  assert.ok(rows.some(row => row.trim() === 'report (2)'), `the natural label survives:\n${labels.join('\n')}`)
+  assert.ok(!view.includes('\u001b[31m') && !view.includes('\u001b[32m'),
+    'no control sequence from a declared path reaches the frame')
+})
