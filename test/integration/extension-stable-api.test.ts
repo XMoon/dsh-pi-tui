@@ -319,10 +319,10 @@ test('the theme-unload hook fires with the SOURCE-QUALIFIED selectable value, an
     assert.ok(unloaded.includes('plugin:theme-unload/t1'), `the hook must receive the selectable value on owner unload: ${unloaded}`)
     assert.ok(unloaded.includes('Foo Theme'), `the hook must receive the display name on owner unload: ${unloaded}`)
     // Explicit dispose (registered from the ROOT fiber — the stable name
-    // is 'root'): the hook fires too. (The same theme may notify again
-    // when its fiber's effect disposer runs at teardown — the host
-    // fallback is idempotent: only a value matching the LIVE selection
-    // triggers the restore, so repeats are no-ops.)
+    // is 'root'): the hook fires too. Each registration notifies ONCE: the
+    // explicit release and the fiber effect cleanup share one one-shot
+    // cleanup, so the later effect disposer at teardown cannot notify a
+    // second time.
     const handle = service.registerTheme({ id: 't2', name: 'Bar Theme', palette: {} })
     handle.dispose()
     assert.ok(unloaded.includes('plugin:root/t2'), `the hook must receive the selectable value on explicit dispose: ${unloaded}`)
