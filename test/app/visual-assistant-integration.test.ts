@@ -24,10 +24,11 @@ import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
 import { createSurfaceRuntime, type SurfaceEventRoutingSource } from '../../src/app/surface/runtime.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { TranscriptFolder } from '../../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { asVisualSessionEvents, collectPublishedVisuals } from '../../src/domain/visual/publication.ts'
+import { assistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -351,6 +352,26 @@ function markerAnswer(before: string, after: string): (prompt: string) => string
     assert.ok(ref !== undefined, 'the model received the visual reference')
     return `${before}\n\n${marker(ref)}\n\n${after}`
   }
+}
+
+/** Run one published-chart answer through the real loop and return its session. */
+async function runChartAnswer(
+  session: RealSession,
+  chart: unknown,
+  before: string,
+  after: string,
+): Promise<void> {
+  await session.run([
+    { calls: [{ callId: 'call-chart', name: CHART_TOOL_NAME, args: chart }] },
+    {
+      calls: prompt => [{
+        callId: 'call-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: [{ ref: refsInPrompt(prompt)[0] }] },
+      }],
+    },
+    { text: markerAnswer(before, after) },
+  ])
 }
 
 // ── the positive production chain ────────────────────────────────────────
@@ -782,6 +803,57 @@ test('a same-id Session replacement (resume-shaped new instance) re-derives the 
     const inline = view.indexOf('Request latency', view.indexOf('Resume before.'))
     assert.ok(inline > view.indexOf('Resume before.') && inline < view.indexOf('Resume after.'),
       `a new same-id Session instance re-derives the projection:\n${view}`)
+  } finally {
+    harness.dispose()
+  }
+})
+
+
+test('a synchronous subject switch inside setTranscript discards the old visual and commits the successor', async (t) => {
+  const life = testLifecycle(t)
+  const first = await bootRealSession(life, 'commit-switch-a')
+  const second = await bootRealSession(life, 'commit-switch-b')
+  await runChartAnswer(first, { ...CHART, title: 'Commit chart A' }, 'A before.', 'A after.')
+  await runChartAnswer(second, { ...CHART, title: 'Commit chart B' }, 'B before.', 'B after.')
+  const firstFolder = new TranscriptFolder()
+  const secondFolder = new TranscriptFolder()
+  firstFolder.apply(eventsOf(first))
+  secondFolder.apply(eventsOf(second))
+  const firstAssistant = firstFolder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(firstAssistant !== undefined)
+  const snapshots = new Map([
+    [first.sessionId, snapshotOf(first)],
+    [second.sessionId, snapshotOf(second)],
+  ])
+  const harness = mountSurface(snapshots, first.sessionId, firstFolder)
+  try {
+    await harness.repaint()
+    assert.ok(harness.vt.getViewport().join('\n').includes('Commit chart A'))
+    assert.ok(assistantVisualPresentation(firstAssistant) !== undefined, 'precondition: A has an inline visual sidecar')
+    // The display seam commits A, then SYNCHRONOUSLY hands the surface to B in
+    // the same call. The runtime must drop A's sidecar and commit B now.
+    const app = harness.surface.app
+    const prototype = Object.getPrototypeOf(app) as { setTranscript: typeof app.setTranscript }
+    const original = prototype.setTranscript
+    let switched = false
+    app.setTranscript = (...args: Parameters<typeof app.setTranscript>) => {
+      const result = original.call(app, ...args)
+      if (!switched) {
+        switched = true
+        harness.setMain(second.sessionId, secondFolder)
+      }
+      return result
+    }
+    await harness.repaint()
+    const view = harness.vt.getViewport().join('\n')
+    assert.ok(view.includes('B before.') && view.includes('B after.'), `the successor frame is committed:\n${view}`)
+    const inline = view.indexOf('Commit chart B', view.indexOf('B before.'))
+    assert.ok(inline > view.indexOf('B before.') && inline < view.indexOf('B after.'),
+      `the successor visual is inline:\n${view}`)
+    assert.equal(assistantVisualPresentation(firstAssistant), undefined,
+      'the pre-commit visual sidecar on the old row was discarded')
   } finally {
     harness.dispose()
   }

@@ -1245,6 +1245,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     }
   }
 
+  /** Whether two captured projection targets are the SAME live selection in
+   * all four identity parts (source instances + subject identity). */
+  const sameProjectionTarget = (left: ProjectionTarget, right: ProjectionTarget): boolean =>
+    left.folder === right.folder
+    && left.controller === right.controller
+    && left.subjectKind === right.subjectKind
+    && left.subjectId === right.subjectId
+
   /**
    * PR2: publish ONE already-computed projection to the optional read-only
    * observer. It never re-windows, re-folds or re-reads the log: it hands over
@@ -1282,6 +1290,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     readonly seq: number
     readonly publications: readonly PublishedVisual[]
   } | undefined
+  /** One-shot guard for the post-commit successor repaint. A re-entrant
+   * setTranscript handover is not allowed to recurse without bound; the next
+   * application repaint owns any further switch. */
+  let visualSuccessorRepaint = false
   const publicationsOf = (snapshot: VisualEventSnapshot): readonly PublishedVisual[] => {
     const memo = visualSnapshotMemo
     if (memo !== undefined
@@ -1301,33 +1313,33 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   /**
    * PR2: attach the proven visual projection to the EXACT eligible final
    * Assistant objects of the window being committed. The derivation uses the
-   * captured target's exact subject and source token, and it re-checks the
-   * target after the synchronous commit so a re-entrant session handover can
-   * never leave a stale attribution behind. Rows that are not the qualified
-   * final have their old sidecar cleared explicitly.
+   * captured target's exact subject and source token. Rows that are not the
+   * qualified final have their old sidecar cleared explicitly. The selected
+   * rows are returned so the caller can discard them if the synchronous
+   * `setTranscript` handover changed the live target.
    */
   const applyVisualPresentations = (
     target: ProjectionTarget,
     messages: readonly TranscriptMessage[],
     activities: ReadonlyMap<number, TurnActivity>,
-  ): void => {
+  ): readonly Extract<TranscriptMessage, { kind: 'assistant' }>[] => {
     const assistantRows = messages.filter(
       (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
     )
     const supply = options.visualEventSnapshotFor
     if (supply === undefined) {
       for (const message of assistantRows) clearAssistantVisualPresentation(message)
-      return
+      return []
     }
     const snapshot = supply({ subjectKind: target.subjectKind, subjectId: target.subjectId })
     if (snapshot === undefined
       || (target.subjectId !== undefined && snapshot.sessionId !== target.subjectId)) {
       for (const message of assistantRows) clearAssistantVisualPresentation(message)
-      return
+      return []
     }
     const publications = publicationsOf(snapshot)
     const sourceIdentity = projectionTokenFor(target.folder)
-    const selected = new Set<TranscriptMessage>()
+    const selected = new Set<Extract<TranscriptMessage, { kind: 'assistant' }>>()
     for (const [turn, activity] of activities) {
       const group = messages.filter(message => 'turn' in message && message.turn === turn)
       const final = eligibleFinalAssistant(activity, group)
@@ -1354,16 +1366,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     for (const message of assistantRows) {
       if (!selected.has(message)) clearAssistantVisualPresentation(message)
     }
-    // The commit below can synchronously hand the session to another owner
-    // (plugin/modal callbacks). The captured target is no longer the live one
-    // then, so the derived sidecars are discarded instead of surviving into the
-    // next subject's projection; the successor's own repaint re-derives.
-    if (isCleanedUp()) return
-    const current = captureProjectionTarget(activeFolder(), activeWindow())
-    if (current.folder !== target.folder || current.controller !== target.controller
-      || current.subjectKind !== target.subjectKind || current.subjectId !== target.subjectId) {
-      for (const message of selected) clearAssistantVisualPresentation(message)
-    }
+    return [...selected]
   }
 
   // Coalesced repaint: streaming events fold into the folder immediately
@@ -1398,14 +1401,38 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const needsTarget = projectionObserver !== undefined || options.visualEventSnapshotFor !== undefined
     const target = needsTarget ? captureProjectionTarget(folder, controller) : undefined
     const activities = folder.turnActivities()
-    if (target !== undefined) applyVisualPresentations(target, projection.messages, activities)
+    const visualRows = target === undefined
+      ? []
+      : applyVisualPresentations(target, projection.messages, activities)
     displaySeam().setTranscript(projection.messages, activities, {
       ...controller.state(),
       firstTurn: projection.firstTurn,
       lastTurn: projection.lastTurn,
       hasNewer: projection.hasNewer,
     }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder))
-    if (target !== undefined) publishProjected(target, projection.messages)
+    if (target === undefined) return
+    // setTranscript can SYNCHRONOUSLY run plugin/modal callbacks that hand the
+    // session to another owner. The pre-commit derivation is then stale: clear
+    // the exact rows it selected and commit the successor target NOW, so the
+    // old visual cannot remain painted until some later frame.
+    if (!isCleanedUp()) {
+      const current = captureProjectionTarget(activeFolder(), activeWindow())
+      if (!sameProjectionTarget(target, current)) {
+        for (const message of visualRows) clearAssistantVisualPresentation(message)
+        if (visualRows.length > 0 && !visualSuccessorRepaint) {
+          visualSuccessorRepaint = true
+          try {
+            repaintActive(searchPresentation, onProjected)
+          } finally {
+            visualSuccessorRepaint = false
+          }
+          return
+        }
+      }
+    } else {
+      for (const message of visualRows) clearAssistantVisualPresentation(message)
+    }
+    publishProjected(target, projection.messages)
   }
   /** Repaint the ACTIVE target (main or the mounted viewed child). */
   const repaintActive = (

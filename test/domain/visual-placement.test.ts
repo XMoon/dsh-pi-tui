@@ -248,7 +248,7 @@ test('an inline publication in the middle keeps the later unconsumed refs at the
 
 // ── grammar negatives: text is preserved, nothing is drawn ───────────────
 
-const NEGATIVE_DOCUMENTS: readonly { readonly title: string; readonly doc: string; readonly prefix?: string }[] = [
+const NEGATIVE_DOCUMENTS: readonly { readonly title: string; readonly doc: string }[] = [
   { title: 'a fenced code block marker', doc: `before\n\n\`\`\`\n${marker(REF_A)}\n\`\`\`\n\nafter` },
   { title: 'an inline code marker', doc: `before\n\n\`${marker(REF_A)}\`\n\nafter` },
   { title: 'a one-space indented marker', doc: `before\n\n ${marker(REF_A)}\n\nafter` },
@@ -262,7 +262,7 @@ const NEGATIVE_DOCUMENTS: readonly { readonly title: string; readonly doc: strin
   { title: 'a marker with an https destination', doc: `before\n\n[dsh-visual-${REF_A}]: <https://example.com>\n\nafter` },
   { title: 'a marker with a plain URL destination', doc: `before\n\n[dsh-visual-${REF_A}]: https://example.com\n\nafter` },
   { title: 'an uppercase-ref marker', doc: `before\n\n[dsh-visual-${REF_A.toUpperCase()}]: <#>\n\nafter` },
-  { title: 'a short-ref marker', doc: `before\n\n[dsh-visual-sv1_abc]: <#>\n\nafter`, prefix: '[dsh-visual-sv1_abc]: <#>\n\n' },
+  { title: 'a short-ref marker', doc: `before\n\n[dsh-visual-sv1_abc]: <#>\n\nafter` },
   { title: 'an escaped-label marker', doc: `before\n\n\\[dsh-visual-${REF_A}\\]: <#>\n\nafter` },
   { title: 'a marker missing the colon', doc: `before\n\n[dsh-visual-${REF_A}] <#>\n\nafter` },
   { title: 'a marker missing the angle brackets', doc: `before\n\n[dsh-visual-${REF_A}]: #\n\nafter` },
@@ -274,9 +274,29 @@ for (const negative of NEGATIVE_DOCUMENTS) {
     const plan = planVisualPlacement({ text: negative.doc, publications: [publication(REF_A)] })
     assert.deepEqual(visualPieces(plan.pieces).map(piece => piece.placement), ['tail'])
     assert.equal(textPieces(plan.pieces).map(piece => piece.source).join(''), negative.doc)
-    assert.equal(definitionPrefix(plan, 0), negative.prefix ?? '')
   })
 }
+
+test('a visual-label-shaped definition with a non-marker destination stays an ordinary prefix definition', () => {
+  for (const line of [
+    `[dsh-visual-${REF_A}]: <https://example.com>`,
+    `[dsh-visual-${REF_A}]: https://example.com`,
+    `[dsh-visual-${REF_A}]: #`,
+    `[dsh-visual-${REF_A}]: <#> "title"`,
+    `[dsh-visual-${REF_A}]: <#> `,
+  ]) {
+    const plan = planVisualPlacement({ text: `before\n\n${line}\n\nafter`, publications: [publication(REF_A)] })
+    assert.deepEqual(visualPieces(plan.pieces).map(piece => piece.placement), ['tail'], `not a marker: ${line}`)
+    assert.ok(definitionPrefix(plan, 0).includes(line.trimEnd()), `ordinary definition kept for links: ${line}`)
+  }
+})
+
+test('a valid visual marker label with an invalid ref spelling stays an ordinary definition', () => {
+  const line = '[dsh-visual-sv1_abc]: <#>'
+  const plan = planVisualPlacement({ text: `before\n\n${line}\n\nafter`, publications: [publication(REF_A)] })
+  assert.deepEqual(visualPieces(plan.pieces).map(piece => piece.placement), ['tail'])
+  assert.match(definitionPrefix(plan, 0), /\[dsh-visual-sv1_abc\]: <#>/u)
+})
 
 test('a marker whose definition is not top-level (blockquote) is not consumed', () => {
   const doc = `before\n\n> ${marker(REF_A)}\n> after`

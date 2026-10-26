@@ -30,8 +30,9 @@
   不写回会话、模型消息、搜索原文或 `/transcript` 导出。最终回答仍是一个 transcript 行、
   一个 bullet、一个组件缓存与同一个 disclosure owner，Full/Compact/Focus、展开/折叠、
   调整宽度与搜索跳转都不会复制图形或改变归属；原有 Tool/Work 卡片、SVG 描述与源码查看
-  入口保持不变。Direct 主会话与可读的 viewed child 已可用；Remote 与 TSP 原生混排不在本次
-  声明范围内。
+  入口保持不变。由 Extension Renderer 接管的 Assistant 卡片保持原插件视图，不叠加 Host
+  图形；回退到 Host 渲染时仍按原位/尾部规则显示。Direct 主会话与可读的 viewed child 已可用；
+  Remote 与 TSP 原生混排不在本次声明范围内。
 - **`/settings → Agent` 现在直接编辑权限、委派与用户 shell 策略五项，`Agent settings…` 过渡行退休。**
   顺序固定为 `Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
   `Subagent model selection` → `User shell sandbox policy`，每项只有一个权威：审批策略是**当前会话**
