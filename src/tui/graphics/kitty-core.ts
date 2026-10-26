@@ -57,6 +57,7 @@ export interface KittyGraphicsEvent {
     | 'data-invalidated'
     | 'retire-queued'
     | 'retire-emitted'
+    | 'write-failed'
     | 'retained'
     | 'writer-delete-translated'
     | 'global-delete-translated'
@@ -97,6 +98,8 @@ interface OwnedRecord {
   /** Whether this occurrence ever reached a placement in its lifetime. */
   everPlaced: boolean
   retireQueued: boolean
+  /** A retire has been offered to the sink but the write has not succeeded. */
+  retirePending: boolean
 }
 
 function decodedBytes(source: KittyImageSource): number {
@@ -172,6 +175,7 @@ export class KittyGraphicsCore {
       placements: 0,
       everPlaced: false,
       retireQueued: false,
+      retirePending: false,
     })
     this.payloadBytes += source.pngBase64.length
     this.decodedByteTotal += decodedBytes(source)
@@ -237,7 +241,7 @@ export class KittyGraphicsCore {
    */
   retire(image: KittyImage): void {
     const record = this.records.get(image.imageId)
-    if (record === undefined || record.retireQueued || record.source === undefined) return
+    if (record === undefined || record.retireQueued || record.retirePending || record.source === undefined) return
     if (record.everPlaced) {
       this.payloadBytes -= record.source.pngBase64.length
       this.decodedByteTotal -= decodedBytes(record.source)
@@ -317,23 +321,65 @@ export class KittyGraphicsCore {
     if (invalidated > 0) this.emit({ type: 'data-invalidated', detail: `${reason}:${buffer}` })
   }
 
-  /** Emit (and clear) every queued own-ID deletion, in queue order. */
-  drain(): string {
+  /**
+   * The queued own-ID deletions, offered to the sink but NOT yet committed: a
+   * failing write must be able to put them back, because `Terminal.write()` is
+   * only an offer — it never proves the terminal decoded the command.
+   */
+  takeRetirements(): { wire: string; ids: readonly number[] } {
+    const ids: number[] = []
     let wire = ''
     for (const [imageId, record] of this.records) {
-      if (record.retireQueued) {
-        wire += encodeKittyDeleteImage(imageId)
-        this.records.delete(imageId)
-        this.retiredImageIds.add(imageId)
-        if (record.source !== undefined) {
-          this.payloadBytes -= record.source.pngBase64.length
-          this.decodedByteTotal -= decodedBytes(record.source)
-        }
-        this.emit({ type: 'retire-emitted', imageId })
-        continue
-      }
+      if (!record.retireQueued) continue
+      record.retireQueued = false
+      record.retirePending = true
+      ids.push(imageId)
+      wire += encodeKittyDeleteImage(imageId)
     }
-    return wire
+    return { wire, ids }
+  }
+
+  /** The retire write succeeded: the ids are gone and their bytes are freed. */
+  commitRetirements(ids: readonly number[]): void {
+    for (const imageId of ids) {
+      const record = this.records.get(imageId)
+      if (record === undefined) continue
+      this.records.delete(imageId)
+      this.retiredImageIds.add(imageId)
+      if (record.source !== undefined) {
+        this.payloadBytes -= record.source.pngBase64.length
+        this.decodedByteTotal -= decodedBytes(record.source)
+      }
+      this.emit({ type: 'retire-emitted', imageId })
+    }
+  }
+
+  /** The retire write failed: keep the ids queued for the next attempt. */
+  rollbackRetirements(ids: readonly number[]): void {
+    for (const imageId of ids) {
+      const record = this.records.get(imageId)
+      if (record === undefined) continue
+      record.retirePending = false
+      record.retireQueued = true
+    }
+  }
+
+  /**
+   * A frame write threw. The bytes may have partially reached the sink, so the
+   * residency of every image this write touched in `buffer` is now UNKNOWN:
+   * the next placement must re-send the payload, and nothing may claim the data
+   * arrived. Nothing is hard-deleted here — a partially painted image may still
+   * be referenced by the screen or the scrollback.
+   */
+  noteWriteFailure(ids: readonly number[], buffer: KittyScreenBuffer): void {
+    let touched = 0
+    for (const imageId of ids) {
+      const record = this.records.get(imageId)
+      if (record === undefined) continue
+      record.residentIn.delete(buffer)
+      touched += 1
+    }
+    this.emit({ type: 'write-failed', detail: `${buffer}:${touched}` })
   }
 
   /**

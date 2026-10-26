@@ -30,6 +30,8 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
 
 class RecordingTerminal implements Terminal {
   readonly writes: string[] = []
+  /** When set, the matching write throws after the bytes were recorded. */
+  failWhen: ((data: string) => boolean) | undefined
   columns = 80
   rows = 24
   kittyProtocolActive = true
@@ -42,6 +44,10 @@ class RecordingTerminal implements Terminal {
   stop(): void {}
   async drainInput(): Promise<void> {}
   write(data: string): void {
+    if (this.failWhen?.(data) === true) {
+      this.failWhen = undefined
+      throw new Error('terminal write failed')
+    }
     this.writes.push(data)
   }
   moveBy(): void {}
@@ -260,6 +266,36 @@ test('a managed placement split inside the introducer still gets its transmissio
   assert.ok(terminal.text.indexOf('a=t,f=100') < terminal.text.indexOf('a=p,'), 'and before the placement')
 })
 
+test('a failed frame write is never assumed to have landed', () => {
+  const { terminal, facade, core } = harness()
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  const anchor = component.render(80)[0]!
+  // The very first write (payload + placement) fails.
+  terminal.failWhen = () => true
+  assert.throws(() => facade.write(anchor), /terminal write failed/)
+
+  // The error was not swallowed, and the Core did not claim the bytes arrived:
+  // the next placement re-sends the payload instead of silently omitting it.
+  terminal.writes.length = 0
+  facade.write(anchor)
+  assert.equal(count(terminal.text, 'a=t,f=100'), 1, 'the payload is sent again')
+  assert.ok(terminal.text.indexOf('a=t,f=100') < terminal.text.indexOf('a=p,'))
+})
+
+test('a failed retire write keeps the id queued instead of claiming release', () => {
+  const { terminal, facade, core } = harness()
+  const image = core.register(source())!
+  // Uploaded, never placed: its retire is the safe case.
+  core.retire(image)
+  terminal.failWhen = (data) => data.includes('a=d')
+  assert.throws(() => facade.write('frame'), /terminal write failed/)
+  assert.equal(count(terminal.text, 'a=d'), 0, 'nothing claimed to be released')
+
+  // The next write retries the SAME retire and commits it only on success.
+  facade.write('frame')
+  assert.equal(count(terminal.text, `a=d,d=I,i=${image.imageId}`), 1, 'the retire is retried exactly once')
+})
+
 test('clearScreen invalidates the Core even though it bypasses write()', () => {
   const { terminal, facade, core } = harness()
   const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
@@ -350,7 +386,7 @@ test('the budget falls back instead of evicting a possibly visible image', () =>
   assert.equal(core.register(source(PNG, 4, 4)), undefined, 'the next occurrence falls back')
   // Dropping one occurrence makes room again; nothing was force-deleted.
   core.retire(images[0]!)
-  core.drain()
+  core.commitRetirements(core.takeRetirements().ids)
   assert.ok(core.register(source(PNG, 4, 4)), 'a released slot is reusable')
 })
 

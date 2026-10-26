@@ -127,10 +127,18 @@ export class KittyTerminalFacade implements Terminal {
     // terminal still accepts bytes; images that were really placed stay under
     // the screen's own preserve/release policy (the alternate screen emits its
     // global release through this facade; the main screen preserves its
-    // scrollback).
-    const cleanup = this.core.drain() + this.core.shutdownUnplaced()
-    if (cleanup !== '') this.inner.write(cleanup)
+    // scrollback). A failing cleanup is reported AFTER the terminal is restored,
+    // never swallowed and never left to skip `inner.stop()`.
+    let failure: unknown
+    try {
+      this.flushRetirements()
+      const cleanup = this.core.shutdownUnplaced()
+      if (cleanup !== '') this.inner.write(cleanup)
+    } catch (error) {
+      failure = error
+    }
     this.inner.stop()
+    if (failure !== undefined) throw failure
   }
 
   drainInput(maxMs?: number, idleMs?: number): Promise<void> {
@@ -191,15 +199,17 @@ export class KittyTerminalFacade implements Terminal {
   // --- Terminal.write: the graphics gate -----------------------------------
 
   write(data: string): void {
-    let wire = this.core.drain()
+    // Queued own-ID retirements go out FIRST, and they are only committed once
+    // the sink accepted them: a failed write must be able to put them back.
+    this.flushRetirements()
+    let wire = ''
+    /** The managed ids this frame really offered to the sink. */
+    const touched: number[] = []
     let input = data
     // Join the two bounded hold-backs with this write. They are at most one
     // incomplete APC plus one escape-sequence prefix, so no full-frame text or
     // image payload is ever retained here.
-    if (input === '' && this.partialApc === '' && this.pendingText === '') {
-      if (wire !== '') this.inner.write(wire)
-      return
-    }
+    if (input === '' && this.partialApc === '' && this.pendingText === '') return
     if (this.partialApc !== '') {
       input = this.partialApc + input
       this.partialApc = ''
@@ -231,11 +241,35 @@ export class KittyTerminalFacade implements Terminal {
         }
         break
       }
-      wire += this.handleApc(input.slice(start, end + KITTY_APC_TERMINATOR.length))
+      wire += this.handleApc(input.slice(start, end + KITTY_APC_TERMINATOR.length), touched)
       cursor = end + KITTY_APC_TERMINATOR.length
       textStart = cursor
     }
-    if (wire !== '') this.inner.write(wire)
+    if (wire === '') return
+    try {
+      this.inner.write(wire)
+    } catch (error) {
+      // `Terminal.write()` is an offer, never a terminal ACK: bytes may have
+      // partially reached the sink. The touched images are now UNKNOWN, so the
+      // next placement re-sends them; nothing is hard-deleted (a partially
+      // painted image may still be referenced) and the failure is rethrown
+      // instead of being swallowed.
+      this.core.noteWriteFailure(touched, this.buffer)
+      throw error
+    }
+  }
+
+  /** Offer the queued own-ID retirements; commit or roll back on the result. */
+  private flushRetirements(): void {
+    const { wire, ids } = this.core.takeRetirements()
+    if (wire === '') return
+    try {
+      this.inner.write(wire)
+    } catch (error) {
+      this.core.rollbackRetirements(ids)
+      throw error
+    }
+    this.core.commitRetirements(ids)
   }
 
   /**
@@ -296,7 +330,7 @@ export class KittyTerminalFacade implements Terminal {
    * the exact bytes to write in its place (possibly an injected transmission
    * plus the command, possibly a translation, possibly nothing).
    */
-  private handleApc(apc: string): string {
+  private handleApc(apc: string, touched: number[]): string {
     const command = parseKittyApc(apc)
     if (command === undefined) return apc
     const action = command.controls.a
@@ -309,6 +343,7 @@ export class KittyTerminalFacade implements Terminal {
     // (a clear between the two writes would invalidate it again).
     const transmission = this.core.transmissionFor(imageId, this.buffer)
     this.core.notePlacement(imageId, this.buffer)
+    touched.push(imageId)
     return transmission + apc
   }
 
