@@ -742,6 +742,7 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
       'src/app/bootstrap/session-startup.ts',
       'src/app/bootstrap/task-source.ts',
       'src/app/bootstrap/terminal-output.ts',
+      'src/app/bootstrap/visual-snapshot.ts',
     ],
   )
 })

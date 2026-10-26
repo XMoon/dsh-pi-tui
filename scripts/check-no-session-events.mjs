@@ -79,7 +79,9 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // the read-only PR1 authority (collectPublishedVisuals). This is a render-time
   // projection, not a second writer or fold; the Remote composition returns no
   // snapshot at all (no complete-log seam exists there), so it fails closed.
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: ': asVisualSessionEvents(session.snapshotEvents())', why: 'published-visual final-answer projection reads the EXACT current Direct Session log; Remote returns undefined (no complete-log seam)' },
+  // The wiring-only selector lives in the bootstrap helper so it is executable
+  // in tests; the debt moved WITH the one call site.
+  { file: 'src/app/bootstrap/visual-snapshot.ts', call: 'snapshotEvents', site: ': asVisualSessionEvents(session.snapshotEvents())', why: 'published-visual final-answer projection reads the EXACT current Direct Session log; Remote returns undefined (no complete-log seam)' },
   // M3-4 PR4 relocated the rewind picker authority OUT of the application
   // event owner (it reads SessionReader.turnOutline + loadThrough): the old
   // application-events.ts allowance was removed, not transferred.

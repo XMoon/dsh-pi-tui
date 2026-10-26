@@ -21,14 +21,15 @@ import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type S
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
-import { createSurfaceRuntime, type SurfaceEventRoutingSource } from '../../src/app/surface/runtime.ts'
+import { createSurfaceRuntime, type SurfaceEventRoutingSource, type SurfaceViewedChildPresentation } from '../../src/app/surface/runtime.ts'
+import { createVisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { asVisualSessionEvents, collectPublishedVisuals } from '../../src/domain/visual/publication.ts'
-import { assistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import { assistantVisualPresentation, type VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerChildView, type ViewerRuntimeDeps } from '../../src/app/surface/viewer-runtime.ts'
 import type { SessionPresentationEvent } from '../../src/app/surface/session-presentation.ts'
 import type { SurfaceRuntime } from '../../src/app/surface/runtime.ts'
@@ -201,7 +202,14 @@ function mountSurface(
       readonly subjectKind: 'main' | 'viewed-child'
       readonly subjectId: string | undefined
     }) => SnapshotSource | undefined
+    readonly visualEventSnapshot?: (subject: {
+      readonly subjectKind: 'main' | 'viewed-child'
+      readonly subjectId: string | undefined
+    }) => VisualEventSnapshot | undefined
     readonly viewedChildAgent?: () => object | undefined
+    readonly viewedChildId?: () => string | undefined
+    readonly viewedChildPresentation?: () => SurfaceViewedChildPresentation<SessionEvent>
+    readonly viewedChildFolder?: () => TranscriptFolder
   } = {},
 ): SurfaceHarness {
   const vt = new VirtualTerminal(120, 100)
@@ -240,10 +248,10 @@ function mountSurface(
     observeMainEvent: () => ({ refreshAgents: false }),
     appendOpeningViewerEvent: () => false,
     main: () => mainPresentation,
-    viewedChildId: () => viewed?.id,
-    viewedChild: () => childPresentation(),
+    viewedChildId: options.viewedChildId ?? (() => viewed?.id),
+    viewedChild: options.viewedChildPresentation ?? (() => childPresentation()),
     mainFolder: () => mainFolder,
-    viewedChildFolder: () => viewed!.folder,
+    viewedChildFolder: options.viewedChildFolder ?? (() => viewed!.folder),
     pendingSubjectId: () => undefined,
     pendingSnapshot: () => undefined,
     submissionEchoes: () => undefined,
@@ -287,6 +295,7 @@ function mountSurface(
     mainProgressAuthority: 'local-events',
     createPluginManagerPanel: createPluginManagerWorkspacePanel,
     visualEventSnapshotFor: subject => {
+      if (options.visualEventSnapshot !== undefined) return options.visualEventSnapshot(subject)
       const snapshot = options.visualEventSnapshotFor === undefined
         ? (subject.subjectId === undefined ? undefined : snapshots.get(subject.subjectId))
         : options.visualEventSnapshotFor(subject)
@@ -877,14 +886,12 @@ test('a synchronous subject switch inside setTranscript discards the old visual 
   }
 })
 
-test('the real ViewerRuntime child Agent feeds the visual snapshot provider', async (t) => {
+test('the real ViewerRuntime folder/selection and production snapshot provider drive the visual surface', async (t) => {
   const life = testLifecycle(t)
   const parent = await bootRealSession(life, 'viewer-parent')
   const child = await bootRealSession(life, 'viewer-child')
   await runChartAnswer(child, { ...CHART, title: 'Child viewer chart' }, 'Child before.', 'Child after.')
   const parentFolder = new TranscriptFolder()
-  const childFolder = new TranscriptFolder()
-  childFolder.apply(eventsOf(child))
   const childEvents = eventsOf(child)
   const childView: ViewerChildView<SessionPresentationEvent> = {
     childSessionId: child.sessionId,
@@ -914,7 +921,16 @@ test('the real ViewerRuntime child Agent feeds the visual snapshot provider', as
     display: displaySeamStub(),
     app: {
       enterFocusViewerScope: () => {},
+      exitFocusViewerScope: () => {},
+      discardFocusViewerScope: () => {},
       setViewerMode: () => {},
+      clearLocalMessages: () => {},
+      clearNotify: () => {},
+      getViewerGeneration: () => 0,
+      notify: () => {},
+      getDraft: () => '',
+      setEditorText: () => {},
+      restoreSubagentDraft: () => {},
     },
   } as unknown as SurfaceRuntime<SessionPresentationEvent>
   const viewer = createViewerRuntime<SessionPresentationEvent>({
@@ -930,6 +946,28 @@ test('the real ViewerRuntime child Agent feeds the visual snapshot provider', as
   } satisfies ViewerRuntimeDeps<SessionPresentationEvent>)
   await viewer.enterView(child.sessionId, 'child', 'one-shot', parent.sessionId, 'inactive')
   assert.ok(viewer.viewedChildAgent() !== undefined, 'the real viewer owns the exact child Agent identity')
+  const read = viewer.read()
+  assert.ok(read !== undefined, 'the real viewer owns the child folder/selection')
+
+  // The PRODUCTION selector closure is executed, not re-implemented here.
+  const provider = createVisualEventSnapshotProvider({
+    isRemote: () => false,
+    mainAgent: () => parent.agent,
+    viewedChildAgent: () => viewer.viewedChildAgent(),
+  })
+  const mainSnapshot = provider({ subjectKind: 'main', subjectId: parent.sessionId })
+  assert.equal(mainSnapshot?.sessionId, parent.sessionId, 'main selection returns the main Session')
+  const childSnapshot = provider({ subjectKind: 'viewed-child', subjectId: child.sessionId })
+  assert.equal(childSnapshot?.sessionId, child.sessionId, 'viewed-child selection returns the child Session')
+  assert.equal(provider({ subjectKind: 'viewed-child', subjectId: 'wrong-subject' }), undefined,
+    'a mismatched subject id is refused')
+  const remoteProvider = createVisualEventSnapshotProvider({
+    isRemote: () => true,
+    mainAgent: () => parent.agent,
+    viewedChildAgent: () => viewer.viewedChildAgent(),
+  })
+  assert.equal(remoteProvider({ subjectKind: 'main', subjectId: parent.sessionId }), undefined,
+    'Remote fails closed instead of inventing a log')
 
   const harness = mountSurface(
     new Map([
@@ -939,34 +977,46 @@ test('the real ViewerRuntime child Agent feeds the visual snapshot provider', as
     parent.sessionId,
     parentFolder,
     {
+      viewedChildId: () => viewer.isViewing() ? child.sessionId : undefined,
+      viewedChildPresentation: () => viewer.presentation(),
+      viewedChildFolder: () => read.folder,
       viewedChildAgent: () => viewer.viewedChildAgent(),
-      visualEventSnapshotFor: subject => {
-        const agent = subject.subjectKind === 'main' ? parent.agent : viewer.viewedChildAgent()
-        if (agent === undefined) return undefined
-        const session = (agent as { session: RealSession['session'] }).session
-        if (subject.subjectId !== undefined && session.id !== subject.subjectId) return undefined
-        return { session, sessionId: session.id, seq: session.seq, events: session.snapshotEvents() }
-      },
+      visualEventSnapshot: subject => provider(subject),
     },
   )
   try {
-    harness.setViewedChild(child.sessionId, childFolder)
     await harness.repaint()
-    const view = harness.vt.getViewport().join('\n')
-    const inline = view.indexOf('Child viewer chart', view.indexOf('Child before.'))
-    assert.ok(inline > view.indexOf('Child before.') && inline < view.indexOf('Child after.'),
-      `the real viewer child's visual is inline:\n${view}`)
+    const childFrame = harness.vt.getViewport().join('\n')
+    const inline = childFrame.indexOf('Child viewer chart', childFrame.indexOf('Child before.'))
+    assert.ok(inline > childFrame.indexOf('Child before.') && inline < childFrame.indexOf('Child after.'),
+      `the viewer-owned folder paints the child's inline visual:\n${childFrame}`)
+
+    // Exit the viewer: the main surface must not retain the child visual.
+    assert.equal(viewer.exitView(), true)
+    await harness.repaint()
+    const mainFrame = harness.vt.getViewport().join('\n')
+    assert.equal(mainFrame.indexOf('Child viewer chart'), -1, `the child visual does not survive viewer exit:\n${mainFrame}`)
+
+    // Re-enter the SAME viewer: the real folder and the production provider
+    // re-derive the child's visual as the current subject.
+    await viewer.enterView(child.sessionId, 'child', 'one-shot', parent.sessionId, 'inactive')
+    await harness.repaint()
+    const reentered = harness.vt.getViewport().join('\n')
+    assert.ok(reentered.includes('Child viewer chart'), `re-entering re-derives the child visual:\n${reentered}`)
   } finally {
     harness.dispose()
     viewer.dispose()
   }
 })
 
-test('the bootstrap visual snapshot provider is wired to the exact main/viewed-child Agent', () => {
-  const source = readFileSync(new URL('../../src/app/bootstrap.ts', import.meta.url), 'utf8')
-  assert.match(source, /visualEventSnapshotFor/)
-  assert.match(source, /subject\.subjectKind === 'main'/)
-  assert.match(source, /viewerRef\?\.viewedChildAgent\(\)/)
-  assert.match(source, /remoteSources !== undefined/)
-  assert.match(source, /asVisualSessionEvents\(session\.snapshotEvents\(\)\)/)
+test('the bootstrap visual snapshot provider is wired to the production selector', () => {
+  const bootstrap = readFileSync(new URL('../../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  assert.match(bootstrap, /createVisualEventSnapshotProvider\(/)
+  assert.match(bootstrap, /isRemote: \(\) => remoteSources !== undefined/)
+  assert.match(bootstrap, /mainAgent: \(\) => agentNow\(\)/)
+  assert.match(bootstrap, /viewedChildAgent: \(\) => viewerRef\?\.viewedChildAgent\(\)/)
+  const helper = readFileSync(new URL('../../src/app/bootstrap/visual-snapshot.ts', import.meta.url), 'utf8')
+  assert.match(helper, /if \(options\.isRemote\(\)\) return undefined/)
+  assert.match(helper, /subject\.subjectId !== undefined && session\.id !== subject\.subjectId/)
+  assert.match(helper, /asVisualSessionEvents\(session\.snapshotEvents\(\)\)/)
 })
