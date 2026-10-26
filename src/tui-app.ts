@@ -233,7 +233,7 @@ import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
 import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
 import { humanFacingVisualResult, type PublishedVisual } from './domain/visual/publication.ts'
 import { assistantVisualPresentation, assistantVisualPresentationRevision } from './domain/visual/presentation.ts'
-import { planVisualPlacement, type TextPiece } from './domain/visual/placement.ts'
+import { planVisualPlacement } from './domain/visual/placement.ts'
 import { isVisualToolName, PRESENT_VISUAL_TOOL_NAME } from './domain/visual/tools.ts'
 import { chartDisplayTitle, chartTextRows } from './domain/visual/chart.ts'
 import { authorizeSvg, svgDetailRows } from './domain/visual/svg.ts'
@@ -11070,12 +11070,37 @@ export class TuiApp {
       ...(message.content === undefined ? {} : { content: message.content }),
       publications: presentation.publications,
     })
-    const visible = plan.pieces
-      .filter((piece): piece is TextPiece => piece.kind === 'text')
-      .map(piece => piece.source)
-      .join('\n')
-      .toLowerCase()
-    return !visible.includes(query.trim().toLowerCase())
+    // Reconstruct the SAME raw search-corpus text the folder indexes: all text
+    // ContentBlocks concatenated WITHOUT a separator (a query may legitimately
+    // cross an image/file block), minus only the consumed marker spans. Also
+    // include the delivered-file chunks, whose cross-chunk hits keep the
+    // message as their first-chunk owner. Suppression then means "this query
+    // exists ONLY inside hidden marker text", not merely "not in one planner
+    // piece".
+    const blocks = message.content ?? [{ type: 'text' as const, text: message.text }]
+    const markersByBlock = new Map<number, { start: number; end: number }[]>()
+    for (const piece of plan.pieces) {
+      if (piece.kind !== 'visual' || piece.blockIndex === null
+        || piece.markerStart === undefined || piece.markerEnd === undefined) continue
+      const markers = markersByBlock.get(piece.blockIndex) ?? []
+      markers.push({ start: piece.markerStart, end: piece.markerEnd })
+      markersByBlock.set(piece.blockIndex, markers)
+    }
+    let residual = ''
+    for (const [blockIndex, block] of blocks.entries()) {
+      if (block.type !== 'text') continue
+      let cursor = 0
+      for (const marker of (markersByBlock.get(blockIndex) ?? []).sort((left, right) => left.start - right.start)) {
+        residual += block.text.slice(cursor, marker.start)
+        cursor = marker.end
+      }
+      residual += block.text.slice(cursor)
+    }
+    if (message.deliverables !== undefined) {
+      for (const file of message.deliverables) residual += ` ${file.path} ${file.description ?? ''}`
+    }
+    const normalize = (value: string): string => value.replace(/\s+/gu, ' ').trim().toLowerCase()
+    return !normalize(residual).includes(normalize(query))
   }
 
   /** The rendered search presentation of ONE block while a search is active.
