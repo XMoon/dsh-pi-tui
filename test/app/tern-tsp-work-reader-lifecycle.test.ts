@@ -139,7 +139,7 @@ async function mount(
       }
     },
   }
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit() {},
     onFatal: (error) => { fatals.push(error) },
   })

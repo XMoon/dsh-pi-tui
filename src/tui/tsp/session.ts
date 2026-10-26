@@ -39,7 +39,7 @@
  */
 
 import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
-import type { Key, Node, ScrollTo, Session, SessionInput, Surface, TspEvent } from '@stencil-hq/tern'
+import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type {
@@ -87,6 +87,16 @@ import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.t
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
 import { SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
+import type { PublishedVisual } from '../../domain/visual/publication.ts'
+import { assistantVisualPresentation } from '../../domain/visual/presentation.ts'
+import {
+  VISUAL_COPY_ACTION,
+  VISUAL_COPY_KEY,
+  VISUAL_COPY_ROLE,
+  VISUAL_FIGURE_KEY_PREFIX,
+  VISUAL_FIGURE_ROLE,
+  type SelectedVisualState,
+} from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
 
 /**
@@ -105,6 +115,36 @@ interface DockState {
   statusLine: string
   notices: readonly DisplayDockNotice[]
   welcome: readonly DisplayWelcomeFacts[]
+}
+
+/** One eligible final Assistant row: the ONLY row kind that owns visuals. */
+type AssistantTranscriptRow = Extract<TranscriptMessage, { kind: 'assistant' }>
+
+/**
+ * PR3: the currentness facts of one figure's Copy target. It is an EVENT
+ * INDEX rebuilt from the committed frame — never a durable fact: it remembers
+ * the exact row, publication, projection source and scope the button was
+ * painted under, so a late action can be refused by identity, not by parsing
+ * a node id.
+ */
+interface VisualCopyTarget {
+  readonly message: AssistantTranscriptRow
+  readonly publication: PublishedVisual
+  /** The projection source token at index time (`===` comparison only). */
+  readonly source: object
+  /** The presentation-key scope at index time. */
+  readonly scopePrefix: string
+}
+
+/** PR3: the figures of ONE committed main frame, in committed paint order. */
+interface VisualFrameIndex {
+  readonly order: readonly string[]
+  /** Figure wrapper node ids, by published ref. */
+  readonly nodeIds: ReadonlyMap<string, string>
+  /** Copy targets by published ref (the keyboard path). */
+  readonly targets: ReadonlyMap<string, VisualCopyTarget>
+  /** Copy targets by the actual Copy button node id (the pointer path). */
+  readonly copyButtons: ReadonlyMap<string, VisualCopyTarget>
 }
 
 /** How many transient notices the dock keeps (oldest evicted). */
@@ -223,6 +263,14 @@ export interface TspRendererOptions {
    * `text` — the behaviour before PR-B1.
    */
   readonly toolPresenter?: ToolPresenter
+  /**
+   * PR3: the ONE Client-local clipboard callback for a published visual's
+   * authoritative payload. The composition root injects the EXISTING
+   * `ClientActions.copySelection`; the renderer owns no clipboard policy and
+   * never writes the payload to a log. `true` = copied, `false` = the write
+   * failed.
+   */
+  readonly copyVisual: (text: string) => Promise<boolean>
   /** The connect seam (tests); default is the shipped SDK `connect`. */
   readonly connect?: typeof sdkConnect
   /** Diagnostics sink for the renderer's own lifecycle facts. */
@@ -370,6 +418,33 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     surface.stylesheet(DRAFT_PREVIEW_SHEET, `
       @media (max-height: 640px) {
         [data-role="${DRAFT_PREVIEW_ROLE}"] { display: none; }
+      }
+    `)
+  }
+  /**
+   * PR3: the ONE scope-local sheet of the Assistant figure Copy control. It is
+   * installed once, only when the pane negotiated `styles`; without the
+   * feature the client's own `html.button` presentation is used unchanged (a
+   * measured visual requirement, not a silent link fallback). The rules use
+   * the client's theme variables so the control follows light/dark, and they
+   * are scoped under the figure role so nothing else is restyled.
+   */
+  if (session.caps.features.includes('styles')) {
+    surface.stylesheet('dsh-visual-copy', `
+      [data-role="${VISUAL_FIGURE_ROLE}"] [data-role="${VISUAL_COPY_ROLE}"] {
+        border: 1px solid var(--accent);
+        background: var(--card);
+        color: var(--t1);
+        padding: 1px 8px;
+        border-radius: 4px;
+        font-family: var(--sans);
+      }
+      [data-role="${VISUAL_FIGURE_ROLE}"] [data-role="${VISUAL_COPY_ROLE}"]:hover {
+        background: var(--raise);
+      }
+      [data-role="${VISUAL_FIGURE_ROLE}"] [data-role="${VISUAL_COPY_ROLE}"]:focus-visible {
+        outline: 1px solid var(--accent);
+        outline-offset: 1px;
       }
     `)
   }
@@ -728,6 +803,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  unambiguous. A toggle whose id does not end with a current path is
    *  stale/foreign and is ignored. */
   const toolDisclosureByPath = new Map<string, string>()
+  /**
+   * PR3: the CURRENT committed frame's Assistant figures — the published refs
+   * in paint order, each figure's wrapper node id, and the two Copy-target
+   * indexes (keyboard by ref, pointer by the actual button node id). They are
+   * short-lived event indexes rebuilt by `rebuildLastMain()`; nothing here is a
+   * durable fact, and the maps are REPLACED (never consulted across a rebuild).
+   */
+  let visualOrder: readonly string[] = []
+  let figureNodeIds: ReadonlyMap<string, string> = new Map()
+  let visualTargets: ReadonlyMap<string, VisualCopyTarget> = new Map()
+  let visualCopyButtons: ReadonlyMap<string, VisualCopyTarget> = new Map()
+  /**
+   * PR3: the selected figure of the CURRENT subject. It stores the ref plus
+   * the 1-based position/count painted in the last committed frame; the next
+   * rebuild reconciles it against the new frame's real order (a target that
+   * left the window clears the selection, never a same-named ref elsewhere).
+   */
+  let selectedVisual: SelectedVisualState | undefined
 
   /** The hardware caret this renderer last asked for (the ONE focus truth it
    *  keeps: it re-issues the op only when the DESIRED seat changes, including
@@ -1502,10 +1595,123 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // live tool-card demand, not the session lifetime.
     const live = new Set<string>()
     for (const state of states.values()) if (state.state === 'ready') live.add(state.fact.digest)
+    // PR3: an Assistant-published SVG in the current window is live demand too.
+    // The mapper requests its blob only while it projects the figure, but the
+    // content-addressed id must not be pruned between that frame and the next.
+    for (const message of lastMessages) {
+      if (message.kind !== 'assistant' || message.displayBlocks !== undefined) continue
+      const presentation = assistantVisualPresentation(message)
+      if (presentation === undefined) continue
+      for (const publication of presentation.publications) {
+        const svg = publication.source.svg
+        if (svg !== undefined && publication.source.svgSource !== undefined) live.add(svg.digest)
+      }
+    }
     for (const digest of [...svgBlobIds.keys()]) {
       if (!live.has(digest)) svgBlobIds.delete(digest)
     }
     return states
+  }
+
+  /**
+   * PR3: the eligible figure sources of the current window, keyed by the
+   * figure wrapper key the mapper writes. The gates are the mapper's own: an
+   * open-`displayBlocks` row is not the settled body, and only a sidecar with
+   * publications draws figures.
+   */
+  const visualFigureSources = (): ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }> => {
+    const sources = new Map<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>()
+    for (const message of lastMessages) {
+      if (message.kind !== 'assistant' || message.displayBlocks !== undefined) continue
+      const presentation = assistantVisualPresentation(message)
+      if (presentation === undefined || presentation.publications.length === 0) continue
+      for (const publication of presentation.publications) {
+        sources.set(`${VISUAL_FIGURE_KEY_PREFIX}${publication.ref}`, { message, publication })
+      }
+    }
+    return sources
+  }
+
+  /**
+   * PR3: index the COMMITTED main tree. The node ids come from the SDK's own
+   * `View.from` derivation over the exact tree this renderer paints, so a
+   * pointer action can be matched by the real button id of the current frame —
+   * never by a ref substring, a bare call id or a guessed path.
+   */
+  const indexVisualFrame = (
+    root: Node,
+    sources: ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>,
+  ): VisualFrameIndex => {
+    const order: string[] = []
+    const nodeIds = new Map<string, string>()
+    const targets = new Map<string, VisualCopyTarget>()
+    const copyButtons = new Map<string, VisualCopyTarget>()
+    const source = projectionScope
+    if (source === undefined) return { order, nodeIds, targets, copyButtons }
+    const visit = (tree: Tree, figure: VisualCopyTarget | undefined): void => {
+      const key = (tree.props as { readonly key?: unknown }).key
+      const entry = typeof key === 'string' ? sources.get(key) : undefined
+      let current = figure
+      if (entry !== undefined) {
+        current = {
+          message: entry.message,
+          publication: entry.publication,
+          source,
+          scopePrefix,
+        }
+        order.push(entry.publication.ref)
+        nodeIds.set(entry.publication.ref, tree.id)
+        targets.set(entry.publication.ref, current)
+      }
+      if (current !== undefined && key === VISUAL_COPY_KEY) copyButtons.set(tree.id, current)
+      for (const child of tree.children) visit(child, current)
+    }
+    for (const region of View.from({ main: root }).regions) {
+      if (region !== undefined) visit(region, undefined)
+    }
+    return { order, nodeIds, targets, copyButtons }
+  }
+
+  /** Reconcile the previous selection with a frame's REAL figure order: a
+   *  target that left the window clears the selection. */
+  const reconcileVisualSelection = (
+    previous: SelectedVisualState | undefined,
+    frame: VisualFrameIndex,
+  ): SelectedVisualState | undefined => {
+    if (previous === undefined) return undefined
+    const index = frame.order.indexOf(previous.ref)
+    return index < 0 ? undefined : { ref: previous.ref, index: index + 1, count: frame.order.length }
+  }
+
+  /** Whether two selection facts paint the same badge. */
+  const sameSelectedVisual = (
+    left: SelectedVisualState | undefined,
+    right: SelectedVisualState | undefined,
+  ): boolean => left === right || (left !== undefined && right !== undefined
+    && left.ref === right.ref && left.index === right.index && left.count === right.count)
+
+  /** Drop the committed frame's visual index and the selection it belonged to.
+   *  Used when the subject/source changes or hydration retires the rows. */
+  const clearVisualFrameState = (): void => {
+    visualOrder = []
+    figureNodeIds = new Map()
+    visualTargets = new Map()
+    visualCopyButtons = new Map()
+    selectedVisual = undefined
+  }
+
+  /**
+   * PR3: the display-demand sender for one admitted Assistant-published SVG.
+   * It calls the ONLY SVG blob sender and nothing else. A pane without
+   * `image`+`blobs` never reaches it (the mapper draws no image node, and this
+   * guard keeps the sender unreachable even if it did).
+   */
+  const requestPublishedSvgBlob = (publication: PublishedVisual): string | undefined => {
+    if (!nativeImagesSupported()) return undefined
+    const source = publication.source.svgSource
+    const svg = publication.source.svg
+    if (source === undefined || svg === undefined) return undefined
+    return sendSvgBlob(source, svg.digest)
   }
 
   /** Rebuild the canonical transcript from the last projection (same scope and
@@ -1528,17 +1734,43 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const svgStates = prepareSvgStates()
     // PR-D: the same fatal fence for the native SVG blob sender.
     if (visualProjectionAborted) return false
-    lastMain = transcriptView(projectTranscriptStructure(lastMessages), scopeKeys, {
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-      scopePrefix,
-      ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
-      ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
-      preparingPreviews: lastStreamingToolPreviews,
-      chartKindsSupported: session.caps.kinds.includes('chart'),
-      ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
-      expandedToolKeys,
-      imageStates,
-    })
+    const figureSources = visualFigureSources()
+    const build = (selection: SelectedVisualState | undefined): Node => transcriptView(
+      projectTranscriptStructure(lastMessages),
+      scopeKeys,
+      {
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        scopePrefix,
+        ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
+        ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
+        preparingPreviews: lastStreamingToolPreviews,
+        chartKindsSupported: session.caps.kinds.includes('chart'),
+        ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
+        expandedToolKeys,
+        imageStates,
+        nativeImagesSupported: nativeImagesSupported(),
+        requestPublishedSvgBlob,
+        ...(selection === undefined ? {} : { selectedVisual: selection }),
+      },
+    )
+    // The painted selection follows the frame's REAL order: a transcript
+    // change can add, remove or reorder figures while a selection exists. The
+    // first build is the normal path; only a changed selection fact triggers
+    // ONE bounded rebuild (the badge text is the only difference).
+    let selection = selectedVisual
+    lastMain = build(selection)
+    let frame = indexVisualFrame(lastMain, figureSources)
+    const reconciled = reconcileVisualSelection(selection, frame)
+    if (!sameSelectedVisual(selection, reconciled)) {
+      selection = reconciled
+      lastMain = build(selection)
+      frame = indexVisualFrame(lastMain, figureSources)
+    }
+    selectedVisual = reconciled
+    visualOrder = frame.order
+    figureNodeIds = frame.nodeIds
+    visualTargets = frame.targets
+    visualCopyButtons = frame.copyButtons
     // Record the CURRENT projection's actual tool-node id → disclosure path.
     // The walk uses the real parent/child key chain, so a dotted subCallId is
     // never split and an absent ToggleEvent.key never needs a fallback.
@@ -1646,6 +1878,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (seat.attentionCount() > 0) {
       lines.push(ui.text({ key: 'question-attention', text: `Continued questions: ${seat.attentionCount()} · ${TSP_CONTINUED_INSPECTION_LABEL}` }))
     }
+    // PR3: the visual chords are advertised ONLY while the current frame really
+    // carries a figure. They are renderer-local product chords, not public
+    // keymap entries, so the dock names them directly.
+    if (visualOrder.length > 0) {
+      lines.push(ui.text({ key: 'visual-actions', text: 'Alt+V select visual · Alt+C copy' }))
+    }
     for (const notice of dock.notices) {
       const noticeText = sanitizeDisplayText(notice.text)
       lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${noticeText}` : noticeText }))
@@ -1705,6 +1943,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       releaseImageSubscriptions()
       svgBlobIds.clear()
       expandedToolKeys.clear()
+      // PR3: the old frame's figure ids, Copy targets and selection belong to
+      // the retired scope; the new subject starts with no selected figure.
+      clearVisualFrameState()
       activeImageScope = imageBinding?.imageScope()
     }
     // PR3-B B3 (§3.9): remember the projection so a settled-answer lookup can
@@ -1787,6 +2028,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // PR-C: the retired subject's image subscriptions go with it - a late
       // settle of the outgoing subject must not repaint the incoming one.
       releaseImageSubscriptions()
+      // PR3: the outgoing subject's figure index and selection die with it;
+      // the Loading frame advertises no visual action.
+      clearVisualFrameState()
       // PR-B3: the retired subject's Preparing rows go with it — the new
       // subject's own snapshot replaces them when it commits.
       lastStreamingToolPreviews = []
@@ -1907,6 +2151,111 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     else options.requestExit()
   }
 
+  /**
+   * PR3: the ONE admission predicate of the visual chords and figure Copy
+   * actions. A modal seat, the temporary Reader, or any open native presenter
+   * owns the seat; the hydration window and an unbound/pre-dispose renderer
+   * refuse too, so a hidden base surface never acts behind another owner.
+   */
+  const visualActionsAdmitted = (): boolean => {
+    if (disposed || hydrating || !inputBound) return false
+    if (seat.hasModalSeat()) return false
+    if (detailsSlot !== undefined || openingDetails) return false
+    if (workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
+      || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true) return false
+    return true
+  }
+
+  /** The EXACT payload of one admitted publication: the final ChartFact as
+   *  pretty JSON, or the admitted SVG source verbatim (never trimmed). */
+  const visualCopyPayload = (publication: PublishedVisual): string | undefined => {
+    if (publication.source.chart !== undefined) return JSON.stringify(publication.source.chart, null, 2)
+    return publication.source.svgSource
+  }
+
+  /** The user-visible noun of one copy outcome. */
+  const visualCopyKind = (publication: PublishedVisual): string =>
+    publication.source.chart !== undefined ? 'chart data' : 'SVG source'
+
+  /**
+   * PR3: one admitted visual Copy. The payload is snapshotted at admission
+   * time, so the write can never pick up a later subject's figure. The
+   * synchronous admission is complete before the async clipboard write starts;
+   * the settlement notifies the dock ONLY while the exact subject, row and
+   * publication are still current — an in-flight copy for an older subject may
+   * finish in the OS, but it never writes a success notice onto the new one.
+   */
+  const issueVisualCopy = (target: VisualCopyTarget): void => {
+    if (!visualActionsAdmitted()) return
+    const payload = visualCopyPayload(target.publication)
+    if (payload === undefined) return
+    const kind = visualCopyKind(target.publication)
+    const isStillCurrent = (): boolean => {
+      if (disposed || hydrating) return false
+      if (target.source !== projectionScope || target.scopePrefix !== scopePrefix) return false
+      if (!lastMessages.includes(target.message)) return false
+      const current = assistantVisualPresentation(target.message)
+      return current !== undefined && current.publications.includes(target.publication)
+    }
+    let task: Promise<boolean>
+    try {
+      task = options.copyVisual(payload)
+    } catch (error) {
+      // A synchronous throw from the injected client callback is the same
+      // failed write as a rejection: the existing error owner sees it, and
+      // the payload never enters a log line.
+      options.logError?.('tsp renderer: visual copy failed', { kind, error: errorText(error) })
+      try { display.notify(`Failed to copy ${kind}`, 'error') } catch (failure) { routeFatal(failure) }
+      return
+    }
+    task.then(
+      copied => {
+        if (!isStillCurrent()) return
+        try { display.notify(copied ? `Copied ${kind}` : `Failed to copy ${kind}`, copied ? 'info' : 'error') } catch (error) { routeFatal(error) }
+      },
+      (error: unknown) => {
+        // Diagnostics are recorded even for a refused stale settlement; the
+        // DOCK notice is the part that must not reach a newer subject.
+        options.logError?.('tsp renderer: visual copy failed', { kind, error: errorText(error) })
+        if (!isStillCurrent()) return
+        try { display.notify(`Failed to copy ${kind}`, 'error') } catch (failure) { routeFatal(failure) }
+      },
+    )
+  }
+
+  /**
+   * PR3 Alt+V: select the next figure of the CURRENT committed frame (wrap to
+   * the first), repaint the selection badge, then reveal the figure through the
+   * existing main-surface scroll. No selection exists before the first press.
+   */
+  const selectNextVisual = (): void => {
+    if (!visualActionsAdmitted()) return
+    const order = visualOrder
+    if (order.length === 0) return
+    const current = selectedVisual
+    const position = current === undefined ? 0 : (order.indexOf(current.ref) + 1) % order.length
+    const ref = order[position]
+    if (ref === undefined) return
+    selectedVisual = { ref, index: position + 1, count: order.length }
+    if (!rebuildLastMain()) return
+    render()
+    const nodeId = figureNodeIds.get(ref)
+    if (nodeId !== undefined) surface.reveal(nodeId, 'nearest')
+  }
+
+  /** PR3 Alt+C: copy the CURRENT selection; never guess "the last figure". */
+  const copySelectedVisual = (): void => {
+    if (!visualActionsAdmitted()) return
+    const current = selectedVisual
+    const target = current === undefined ? undefined : visualTargets.get(current.ref)
+    if (target === undefined) {
+      selectedVisual = undefined
+      display.notify('Alt+V to select a visual', 'info')
+      return
+    }
+    issueVisualCopy(target)
+  }
+
   const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. B3-A2 §6.6: a temporary Screen that is still physically open or
@@ -1958,6 +2307,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (key.name === 'escape') {
       handlers.cancel()
       return false
+    }
+    // PR3: the two visual chords are inserted AFTER every existing owner
+    // (Reader/modal/Alt+Q/cancel/pickers/Esc) and BEFORE Ctrl+V and the
+    // composer, so an older owner always wins. They are consumed even when no
+    // figure exists (a no-op that leaves the composer draft untouched), and
+    // they never match another modifier combination.
+    if (key.alt === true && key.ctrl !== true && key.meta !== true && key.shift !== true) {
+      if (key.name === 'v') {
+        selectNextVisual()
+        return false
+      }
+      if (key.name === 'c') {
+        copySelectedVisual()
+        return false
+      }
     }
     // PR4: the paste-media gesture. The SDK decodes Ctrl+V as the formal
     // `Key` fields (`name === 'v'`, lowercase, `ctrl === true`) — a bracketed
@@ -2118,6 +2482,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if (sessionBrowser?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
+        // PR3: a figure Copy action is admitted ONLY through the exact Copy
+        // button node id of the CURRENT committed frame, re-checked against the
+        // live sidecar; an old-frame button, a ref substring or any other action
+        // value is dropped without a copy, a notice or a new modal.
+        if (input.event.ev === 'action' && input.event.act === VISUAL_COPY_ACTION) {
+          if (visualActionsAdmitted()) {
+            const target = visualCopyButtons.get(input.event.id)
+            if (target !== undefined) issueVisualCopy(target)
+          }
+          return false
+        }
         if ((workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
           || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
           && input.event.ev === 'focus') applyFocus(true)

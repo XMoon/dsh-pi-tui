@@ -122,7 +122,7 @@ async function mount(t: { after(fn: () => unknown): void }): Promise<ScrollHarne
       }
     },
   }
-  const renderer = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit: () => { harness.exits.push(1) },
     onFatal: (error) => { fatals.push(error) },
   })

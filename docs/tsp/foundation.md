@@ -557,6 +557,55 @@ the current switch value.
   missing `chart`/`image`/`blobs` capability changes only the presentation, not
   the tool catalogue or the result.
 
+#### Assistant in-place published visuals (TSP)
+
+An eligible final Assistant's published visuals are ONE ordered body inside its
+existing card; they are never a sibling top-level card, a second transcript row,
+a new page or a Viewer owned by this renderer.
+
+- **Authority.** `collectPublishedVisuals` (PR1) and the row's
+  `assistantVisualPresentation` sidecar (PR2) are the only sources. The TSP
+  mapper consumes the PR2 `planVisualPlacement()` result; it adds no marker
+  parser, publication map, Tool-card lookup, blob-id-to-publication inference or
+  renderer-side mark-as-published state. A message's settled `content` (or its
+  flat text when it carries none) is the sole placement coordinate; a row whose
+  `displayBlocks` are live keeps the pending body and draws no settled figure.
+- **Composition.** Continuous text blocks become `ui.md` runs; the display-only
+  shared-definition prefix rides each truly independent run so cross-segment
+  links keep their real destination, and it never enters the Session, search,
+  export or a Copy payload. Every other non-text block keeps the mapper's
+  existing block renderer at its original position; reasoning/tool-call blocks
+  have no body and never split a Markdown run.
+- **Native or readable.** A chart draws `ui.chart` only when the `chart` kind is
+  negotiated, and its exact final title/values stay readable in every case. An
+  SVG draws a native image only when `image` + `blobs` are negotiated AND the
+  publication's already-admitted source is present; its readable description is
+  always drawn. The image is sent through the ONE `session.blob()` sender as
+  `image/svg+xml` when the figure is projected, and the same content-addressed
+  cache/live-demand policy as the Tool SVG path applies. Missing capability
+  never fabricates a drawing and never removes the Copy control.
+- **Copy.** The pointer control is a real `html.button` with
+  `actions.click = 'dsh-visual-copy'` and NO SDK handler; the program admits the
+  event only when `ev === 'action'`, `act` equals that value, `sf` is this
+  surface and the event's node id is the exact Copy-button id of the CURRENT
+  committed frame. The index is rebuilt from the committed node tree; a bare ref
+  substring, a historical id and a bare call id are never identities. A Chart
+  copies `JSON.stringify(final ChartFact, null, 2)`; an SVG copies the admitted
+  `svgSource` verbatim. The clipboard owner is the existing ClientActions policy
+  (CLIENT_LOCAL), injected through the renderer's ONE `copyVisual` callback; the
+  SDK's own `actions.click:'copy'` text copy is not used.
+- **Keyboard.** `Alt+V` selects the next figure of the current window in its
+  committed paint order (wrap) and reveals it through the existing main-surface
+  scroll; `Alt+C` copies only the current selection and never guesses another
+  figure. The chords are renderer-local product bindings, admitted after every
+  existing owner: a modal seat, the temporary Reader, an open Picker/Work Hub and
+  the hydration window all outrank them. Selection is scoped to the current
+  `(projection source, scope, row, published ref)`; a source/scope change, a
+  disappeared target or a new subject clears it, and an asynchronously settling
+  clipboard write notifies the dock only while its own source/row/publication is
+  still current.
+
+
 ## 6. Evidence tiers and qualification
 
 | Tier | May prove | Must NOT be promoted to |
@@ -629,8 +678,10 @@ universal/version-independent claim; a tier qualifies a claim, not a repository.
   client tree, not the wire. A disabled
   entry is `off` opacity plus a tooltip/title reason; the client paints no
   in-place reason text, so the reason also rides a detail fact. A stylesheet
-  cannot paint border/background on an `el` button, and native button
-  activation is not assumed. The way back is a native `ui.row({onClick})` navigation row at the top
+  paints border/background/padding on an `el` button when the rule targets the
+  node's own `role`/`class` (measured on the pinned 0.9.5 client); a
+  descendant/global selector is not a substitute, and native button activation
+  is not assumed — the program admits the action itself. The way back is a native `ui.row({onClick})` navigation row at the top
   of the reading body, with an Esc twin; at the tail, Esc must stay bound to
   back. OSC52 emission into the Tern tty is not an OS-clipboard proof; the agent
   lane may not claim `CLIPBOARD_CHANGED`, and the OS half is Owner-attested.

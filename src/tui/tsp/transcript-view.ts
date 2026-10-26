@@ -42,8 +42,13 @@ import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { chartHumanText, chartProjection, chartValueRows, type ChartFact } from '../../domain/visual/chart.ts'
 import { svgDetailRows, type SvgFact } from '../../domain/visual/svg.ts'
 import { visualParts, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
-import { humanFacingVisualResult } from '../../domain/visual/publication.ts'
+import { humanFacingVisualResult, type PublishedVisual } from '../../domain/visual/publication.ts'
+import { assistantVisualPresentation } from '../../domain/visual/presentation.ts'
 import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
+import {
+  assistantPublishedVisualNodes,
+  type SelectedVisualState,
+} from './assistant-visual.ts'
 
 /**
  * One replay-local allocator of presentation keys, scoped to a single
@@ -150,6 +155,23 @@ export interface TranscriptViewOptions {
    * default for pure projections/tests.
    */
   readonly expandedToolKeys?: ReadonlySet<string>
+  /**
+   * PR3: whether the pane negotiated the `image` kind AND the `blobs` feature.
+   * An Assistant-published SVG draws its native image only when this is true;
+   * its readable description is drawn in every case.
+   */
+  readonly nativeImagesSupported?: boolean
+  /**
+   * PR3: the session owner's synchronous display-demand sender for one
+   * admitted Assistant-published SVG. The mapper calls it only while
+   * projecting the image node it belongs to; an absent sender draws no image.
+   */
+  readonly requestPublishedSvgBlob?: (publication: PublishedVisual) => string | undefined
+  /**
+   * PR3: the current window's selected figure (session-owned state). It is
+   * painted only on the matching published figure.
+   */
+  readonly selectedVisual?: SelectedVisualState
 }
 
 /** PR-D: one SVG row's prepared display state. */
@@ -999,6 +1021,37 @@ function messageNode(message: TranscriptMessage, key: string, options: Transcrip
       const display = message.displayBlocks
       if (display !== undefined) {
         return ui.card({ key, head: 'Assistant' }, ...assistantDisplayNodes(display, options))
+      }
+      // PR3: the published-visual sidecar is the ONLY source of an Assistant
+      // figure. `displayBlocks` outranks it above (an open opaque block is not
+      // a settled final body); a row without a sidecar publication keeps its
+      // previous image/flat body exactly.
+      const presentation = assistantVisualPresentation(message)
+      if (presentation !== undefined && presentation.publications.length > 0) {
+        return ui.card(
+          { key, head: 'Assistant' },
+          ...assistantPublishedVisualNodes(
+            {
+              text: message.text,
+              ...(message.content === undefined ? {} : { content: message.content }),
+            },
+            presentation.publications,
+            {
+              chartKindsSupported: options.chartKindsSupported === true,
+              nativeImagesSupported: options.nativeImagesSupported === true,
+              ...(options.selectedVisual === undefined ? {} : { selected: options.selectedVisual }),
+              ...(options.requestPublishedSvgBlob === undefined ? {} : { requestPublishedSvgBlob: options.requestPublishedSvgBlob }),
+              // A reasoning/tool-call block has no Assistant body and must not
+              // interrupt the Markdown run; every other non-text block keeps the
+              // mapper's existing block renderer (image/file/opaque fallback).
+              nonText: (block, blockIndex) => block.type === 'text'
+                || block.type === 'reasoning'
+                || block.type === 'tool-call'
+                ? undefined
+                : bodyBlockNodes(block, blockIndex, options),
+            },
+          ),
+        )
       }
       if (message.content !== undefined && bodyHasImage(message.content)) {
         return ui.card({ key, head: 'Assistant' }, ...bodyContentNodes(message.content, options))
