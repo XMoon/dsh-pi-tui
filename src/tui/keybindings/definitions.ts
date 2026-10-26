@@ -176,6 +176,30 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'global',
     configurable: true,
   },
+  'app.visual.selectNext': {
+    id: 'app.visual.selectNext',
+    defaultKeys: ['alt+v'],
+    description: 'Select the next published visual',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
+  'app.visual.copySelected': {
+    id: 'app.visual.copySelected',
+    defaultKeys: ['alt+c'],
+    description: 'Copy the selected published visual',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
+  'app.visual.openSelected': {
+    id: 'app.visual.openSelected',
+    defaultKeys: ['alt+o'],
+    description: 'Open the selected SVG visual in the viewer',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
 
   // ── Editor / Clipboard ───────────────────────────────────────────────
   'app.editor.external': {
@@ -541,6 +565,11 @@ export const VIEWER_BLOCKED_PARENT_ACTIONS: ReadonlySet<AppKeybindingId> = new S
   'app.input.dequeue',
   'app.permission.cycle',
   'app.transcript.search',
+  // PR2.5: the published-visual actions target the PARENT transcript; a
+  // subagent viewer must consume them instead of copying/opening the parent.
+  'app.visual.selectNext',
+  'app.visual.copySelected',
+  'app.visual.openSelected',
   'app.exit.request',
   'app.editor.external',
   'app.todo.toggle',

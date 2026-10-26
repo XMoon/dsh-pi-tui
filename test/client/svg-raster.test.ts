@@ -13,7 +13,7 @@ import test from 'node:test'
 import { spawn } from 'node:child_process'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
-import { createSvgRasterizer, rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
+import { createSvgRasterizer, rasterizeSvg, type SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
 import { admitSvg } from '../../src/domain/visual/svg-admission.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
 
@@ -30,16 +30,16 @@ test('the loader dedupes one digest, notifies on settle and keeps an unrequested
     rasterCalls += 1
     return await new Promise(resolve => { release = resolve })
   })
-  assert.deepEqual(loader.get('digest-a'), { state: 'idle' })
+  assert.deepEqual(loader.get('digest-a', 128), { state: 'idle' })
   let notifications = 0
-  const unsubscribe = loader.subscribe('digest-a', () => { notifications += 1 })
+  const unsubscribe = loader.subscribe('digest-a', 128, () => { notifications += 1 })
   loader.load('digest-a', 'source-a', 128)
   loader.load('digest-a', 'source-a', 128)
-  assert.equal(loader.get('digest-a').state, 'loading')
+  assert.equal(loader.get('digest-a', 128).state, 'loading')
   assert.equal(rasterCalls, 1, 'concurrent loads are deduped')
   release({ png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 })
   await new Promise(resolve => setImmediate(resolve))
-  const ready = loader.get('digest-a')
+  const ready = loader.get('digest-a', 128)
   assert.equal(ready.state, 'ready')
   assert.equal(ready.state === 'ready' ? ready.base64 : '', TINY_PNG_BASE64)
   assert.equal(notifications, 1)
@@ -57,10 +57,10 @@ test('clear() aborts an in-flight child and drops its late result', async () => 
   loader.load('digest-b', 'source-b', 128)
   loader.clear()
   assert.equal(observedAbort, true, 'the in-flight request sees the abort')
-  assert.deepEqual(loader.get('digest-b'), { state: 'idle' })
+  assert.deepEqual(loader.get('digest-b', 128), { state: 'idle' })
   release({ png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: 1, heightPx: 1 })
   await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(loader.get('digest-b'), { state: 'idle' }, 'a cleared epoch never stores a late result')
+  assert.deepEqual(loader.get('digest-b', 128), { state: 'idle' }, 'a cleared epoch never stores a late result')
   loader.dispose()
 })
 
@@ -107,17 +107,17 @@ test('the loader runs ONE global raster at a time and an evicted digest reaches 
   })
   // A LIVE demand is what turns an eviction into a terminal state; a digest
   // without subscribers is forgettable cache history (see the thumbnail tests).
-  loader.subscribe('digest-0', () => {})
+  loader.subscribe('digest-0', 128, () => {})
   for (let index = 0; index < 13; index += 1) loader.load(`digest-${index}`, `source-${index}`, 128)
   assert.equal(maxActive, 1, 'different digests must never spawn concurrent native rasterizations')
   // The 13th load evicts the ACTIVE oldest entry. It must not be resurrected
   // and must not stay 'idle' (which would invite an endless re-request).
   await new Promise(resolve => setImmediate(resolve))
-  const evicted = loader.get('digest-0')
+  const evicted = loader.get('digest-0', 128)
   assert.equal(evicted.state, 'error')
   assert.match(evicted.state === 'error' ? evicted.error.message : '', /evicted/u)
   loader.load('digest-0', 'source-0', 128)
-  assert.equal(loader.get('digest-0').state, 'error', 'the eviction is terminal for this epoch')
+  assert.equal(loader.get('digest-0', 128).state, 'error', 'the eviction is terminal for this epoch')
   assert.equal(calls.get('source-0'), 1, 'the evicted digest is never retried; the next queued digest proceeds')
   while (releases.length > 0) {
     releases.shift()?.()
@@ -162,7 +162,7 @@ test('a loading thumbnail evicted from the cache leaves the loading line and doe
       })
     })
     let notifications = 0
-    loader.subscribe('digest-0', () => { notifications += 1 })
+    loader.subscribe('digest-0', 128, () => { notifications += 1 })
     const thumbnails = Array.from({ length: 13 }, (_, index) => new SvgThumbnail(
       `digest-${index}`,
       `source-${index}`,
@@ -172,7 +172,7 @@ test('a loading thumbnail evicted from the cache leaves the loading line and doe
       () => {},
     ))
     for (const thumbnail of thumbnails) thumbnail.render(100)
-    assert.equal(loader.get('digest-0').state, 'error', 'the evicted active digest is terminal')
+    assert.equal(loader.get('digest-0', 128).state, 'error', 'the evicted active digest is terminal')
     assert.equal(notifications, 1, 'its live subscriber was notified exactly once')
     const firstPaint = thumbnails[0]!.render(100).join('\n')
     assert.ok(!firstPaint.includes('Rendering SVG image'), `the evicted image must not stay loading:\n${firstPaint}`)
@@ -183,7 +183,7 @@ test('a loading thumbnail evicted from the cache leaves the loading line and doe
       releases.shift()?.()
       await new Promise(resolve => setImmediate(resolve))
     }
-    assert.equal(loader.get('digest-12').state, 'ready')
+    assert.equal(loader.get('digest-12', 128).state, 'ready')
     for (const thumbnail of thumbnails) thumbnail.dispose()
     loader.dispose()
   } finally {
@@ -230,7 +230,7 @@ test('the live subscriber terminal state survives arbitrary cache-history churn'
       })
     })
     let firstNotifications = 0
-    loader.subscribe('digest-0', () => { firstNotifications += 1 })
+    loader.subscribe('digest-0', 128, () => { firstNotifications += 1 })
     // 12 cache entries + 64 more + one: the old bounded-history design forgot
     // the first live terminal after 64 evictions and restarted it.
     const thumbnails = Array.from({ length: 77 }, (_, index) => new SvgThumbnail(
@@ -249,7 +249,7 @@ test('the live subscriber terminal state survives arbitrary cache-history churn'
     }
     assert.equal(firstNotifications, 1)
     assert.equal(calls.get('source-0'), 1, 'the live terminal state is not a retry loop')
-    assert.equal(loader.get('digest-0').state, 'error')
+    assert.equal(loader.get('digest-0', 128).state, 'error')
     for (const thumbnail of thumbnails) thumbnail.dispose()
     loader.dispose()
   } finally {
@@ -336,4 +336,146 @@ test('the missing-side viewBox intrinsic is used before the native child spawns'
   const small = await rasterize(WIDTH_ONLY_VIEWBOX_SVG, { targetWidth: 128, signal: new AbortController().signal })
   assert.equal(small.widthPx, 128)
   assert.ok(small.heightPx === 262 || small.heightPx === 263, `safe target height ${small.heightPx}`)
+})
+
+// ── width variants: the viewer derivative is NOT the thumbnail PNG ────────
+
+/** A rasterizer that records every request and returns the requested width. */
+function widthRecordingRasterizer(): {
+  rasterize: SvgRasterize
+  calls: Array<{ readonly source: string; readonly width: number }>
+  releaseNext: () => void
+  pending: number
+} {
+  const calls: Array<{ readonly source: string; readonly width: number }> = []
+  const releases: Array<() => void> = []
+  let pending = 0
+  const rasterize: SvgRasterize = async (source, options) => {
+    calls.push({ source, width: options.targetWidth })
+    pending += 1
+    return await new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (fn: () => void): void => {
+        if (settled) return
+        settled = true
+        pending -= 1
+        fn()
+      }
+      releases.push(() => finish(() => resolve({
+        png: new Uint8Array(),
+        base64: TINY_PNG_BASE64,
+        widthPx: options.targetWidth,
+        heightPx: Math.max(1, Math.round(options.targetWidth / 2)),
+      })))
+      options.signal.addEventListener('abort', () => finish(() => reject(new Error('cancelled'))), { once: true })
+    })
+  }
+  return {
+    rasterize,
+    calls,
+    releaseNext: () => { releases.shift()?.() },
+    get pending() { return pending },
+  }
+}
+
+test('one digest at two widths keeps two cache variants and rasters each exact width once', async () => {
+  const recorder = widthRecordingRasterizer()
+  const loader = new SvgRasterLoader(recorder.rasterize)
+  loader.load('same-digest', 'same-source', 320)
+  loader.load('same-digest', 'same-source', 320)
+  loader.load('same-digest', 'same-source', 1280)
+  // The single lane runs the first variant; the second is queued exactly once.
+  assert.deepEqual(recorder.calls.map(call => call.width), [320])
+  recorder.releaseNext()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(recorder.calls.map(call => call.width), [320, 1280], 'a different width is a different request')
+  recorder.releaseNext()
+  await new Promise(resolve => setImmediate(resolve))
+  const small = loader.get('same-digest', 320)
+  const large = loader.get('same-digest', 1280)
+  assert.equal(small.state === 'ready' ? small.widthPx : 0, 320)
+  assert.equal(large.state === 'ready' ? large.widthPx : 0, 1280,
+    'the ready derivative reports the width that produced it, never a shared thumbnail PNG')
+  loader.dispose()
+})
+
+test('releaseUnused cancels only the exact unsubscribed variant while a thumbnail still watches its own width', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const recorder = widthRecordingRasterizer()
+    const loader = new SvgRasterLoader(recorder.rasterize)
+    const thumbnail = new SvgThumbnail('shared-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {})
+    thumbnail.render(100)
+    assert.deepEqual(recorder.calls.map(call => call.width), [320], 'the thumbnail owns the 320 variant')
+    // No viewer subscription yet: releasing the viewer variant is a no-op for
+    // the live thumbnail variant.
+    loader.releaseUnused('shared-digest', 320)
+    assert.equal(loader.get('shared-digest', 320).state, 'loading', 'a live thumbnail demand is never cancelled by releaseUnused')
+    loader.releaseUnused('shared-digest', 1280)
+    assert.equal(recorder.calls.length, 1, 'an idle viewer variant starts nothing')
+    loader.dispose()
+    thumbnail.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a viewer variant cancelled before its child starts never spawns a second native process', async () => {
+  const recorder = widthRecordingRasterizer()
+  const loader = new SvgRasterLoader(recorder.rasterize)
+  loader.subscribe('viewer-digest', 1280, () => {})
+  loader.load('viewer-digest', 'viewer-source', 1280)
+  loader.load('viewer-digest', 'viewer-source', 320)
+  assert.deepEqual(recorder.calls.map(call => call.width), [1280], 'one lane owns 1280')
+  // The viewer leaves while 1280 is active: its queued 320 demand is dropped,
+  // and the active child keeps the lane until it really settles.
+  loader.releaseUnused('viewer-digest', 320)
+  assert.deepEqual(recorder.calls.map(call => call.width), [1280], 'the cancelled queued variant never spawns')
+  loader.releaseUnused('viewer-digest', 1280)
+  recorder.releaseNext()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(recorder.calls.map(call => call.width), [1280], 'no successor starts for a cancelled demand')
+  assert.equal(recorder.pending, 0)
+  loader.dispose()
+})
+
+test('the thumbnail reports the real painted pixel body only for an anchored Kitty placement', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const recorder = widthRecordingRasterizer()
+    const loader = new SvgRasterLoader(recorder.rasterize)
+    const thumbnail = new SvgThumbnail('geometry-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {})
+    const loading = thumbnail.render(100)
+    assert.ok(loading.join('\n').includes('Rendering SVG image'))
+    assert.equal(thumbnail.paintedImageBody(100), undefined, 'a loading render registers no pixel body')
+    assert.equal(thumbnail.paintedPixelSize(100), undefined)
+    recorder.releaseNext()
+    await new Promise(resolve => setImmediate(resolve))
+    const ready = thumbnail.render(100)
+    const body = thumbnail.paintedImageBody(100)
+    assert.ok(body !== undefined && body.rows > 0, `the ready render paints pixel rows:\n${ready.join('\n')}`)
+    assert.ok(body !== undefined && body.endCol > 0, 'the hit is bounded by the placement width, not the maxWidthCells ceiling')
+    assert.deepEqual(thumbnail.paintedPixelSize(100), { widthPx: 320, heightPx: 160 },
+      'the painted derivative reports the THUMBNAIL variant dimensions')
+    assert.equal(thumbnail.paintedImageBody(80), undefined, 'geometry is reported only for the width actually painted')
+    thumbnail.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('an iTerm2 or image-less surface paints no SVG pixel body and never starts a raster', () => {
+  for (const images of ['iterm2', null] as const) {
+    setCapabilities({ images, trueColor: true, hyperlinks: false })
+    const recorder = widthRecordingRasterizer()
+    const loader = new SvgRasterLoader(recorder.rasterize)
+    const thumbnail = new SvgThumbnail('caps-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {})
+    assert.deepEqual(thumbnail.render(100), [], `${String(images)}: no fake rows`)
+    assert.equal(thumbnail.paintedImageBody(100), undefined)
+    assert.equal(recorder.calls.length, 0, `${String(images)}: no native child`)
+    thumbnail.dispose()
+    loader.dispose()
+    resetCapabilitiesCache()
+  }
 })

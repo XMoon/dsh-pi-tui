@@ -252,3 +252,26 @@ test('a present Host projection renders its measured zero; a sample-less scope s
 // group is PRESENT. It is therefore NOT a bounded-window ABSENT proof — that
 // absence is encoded by the presentation-layer availability bit (Batch 1B,
 // `recent-performance-availability.test.ts`), not here.
+
+test('lastAssistantText: Remote keeps the official marker bytes (no Direct display-copy rewrite)', async () => {
+  const ref = `sv1_${'a'.repeat(20)}`
+  const body = `Before.\n\n[dsh-visual-${ref}]: <#>\n\nAfter.`
+  const window: PresentationReadSnapshot = {
+    sessionId: 's',
+    durableEvents: [
+      // The Remote window may carry the durable publication evidence, but this
+      // PR deliberately declares no Remote Chart/SVG publication qualification:
+      // the Remote composer has no Direct Folder/publication seam, so the
+      // official window text must stay byte-exact.
+      { type: 'tool/call', seq: 0, time: 1, data: { turn: 1, step: 1, callId: 'p', name: 'present_visual', arguments: '{"visuals":[]}' } },
+      assistantMessage(1, body),
+    ] as never,
+    liveInputs: [], revision: 1, coverage: 'bounded', hasMore: false, loadingOlder: false, openState: 'open',
+  }
+  const text = await composeRemoteLastAssistantText({
+    sessionId: 's',
+    reader: { read: async () => window, loadOlder: async () => window },
+    fence: { isCurrent: () => true },
+  })
+  assert.equal(text, body, 'the Remote last-assistant read is not the Direct display projection')
+})

@@ -685,9 +685,9 @@ test('a replaced SVG Assistant component releases its loader subscription even b
   let subscribed = 0
   let unsubscribed = 0
   const originalSubscribe = loader.subscribe.bind(loader)
-  loader.subscribe = (digest, listener) => {
+  loader.subscribe = (digest, targetWidth, listener) => {
     subscribed += 1
-    const unsubscribe = originalSubscribe(digest, listener)
+    const unsubscribe = originalSubscribe(digest, targetWidth, listener)
     return () => {
       unsubscribed += 1
       unsubscribe()

@@ -15,11 +15,10 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/transcript/visual-assistant-body
  */
 
-import {
-  Text,
-  type Component,
-  type MarkdownOptions,
-  type MarkdownTheme,
+import type {
+  Component,
+  MarkdownOptions,
+  MarkdownTheme,
 } from '@xmoon76/pi-tui'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type {
@@ -27,12 +26,12 @@ import type {
   SharedDefinitionsContext,
   VisualPiece,
 } from '../../../domain/visual/placement.ts'
-import { svgDetailRows } from '../../../domain/visual/svg.ts'
-import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
-import { ChartBody } from './chart-body.ts'
-import { SvgThumbnail, type SvgThumbnailTheme } from '../media/svg-thumbnail.ts'
+import {
+  VisualFigureComponent,
+  type VisualFigureActionHit,
+  type VisualFigureOptions,
+} from './visual-figure.ts'
 import { SharedDefinitionsMarkdown } from './shared-definitions-markdown.ts'
-import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 
 /** Rendering dependencies supplied by the host renderer. */
 export interface VisualAssistantBodyOptions {
@@ -43,11 +42,14 @@ export interface VisualAssistantBodyOptions {
   readonly markdownOptions: MarkdownOptions
   /** Paint function for chart/SVG body text (the existing tool-card convention). */
   readonly paint: (text: string) => string
-  /** Existing Client-local raster path; absent means the explicit text fallback. */
-  readonly svgLoader?: SvgRasterLoader
-  readonly svgTheme?: SvgThumbnailTheme
   /** Repaint when an SVG raster settles. */
   readonly requestRender: () => void
+  /**
+   * Build the per-piece figure inputs: the exact authorized publication, the
+   * live selection predicate and the Copy/View intent callbacks. The body owns
+   * the ordered composition; the host owns every business effect.
+   */
+  readonly figure: (piece: VisualPiece) => VisualFigureOptions
   /**
    * Materialize one non-text ContentBlock at its original position through the
    * host's EXISTING renderer (image/file/fallback and occurrence bookkeeping).
@@ -57,9 +59,20 @@ export interface VisualAssistantBodyOptions {
   readonly nonText: (block: ContentBlock, blockIndex: number) => Component | undefined
 }
 
+/** One figure's painted hit geometry, in Assistant-body row coordinates. */
+export interface VisualAssistantPaintedHits {
+  readonly ref: string
+  readonly top: number
+  readonly height: number
+  readonly actions: readonly VisualFigureActionHit[]
+  readonly thumbnailBody?: { readonly startRow: number; readonly endRow: number; readonly endCol: number }
+}
+
 /** The ordered Assistant body: no bullet, no row identity of its own. */
 export class VisualAssistantBody implements Component {
   private readonly children: Component[] = []
+  /** The hit geometry of the LAST render (width-fenced like every painted hit). */
+  private paintedHits: { readonly width: number; readonly hits: readonly VisualAssistantPaintedHits[] } | undefined
 
   constructor(options: VisualAssistantBodyOptions) {
     const prefixByBlock = new Map<number, string>()
@@ -129,27 +142,19 @@ export class VisualAssistantBody implements Component {
   }
 
   private visualComponents(piece: VisualPiece, options: VisualAssistantBodyOptions): Component[] {
-    const source = piece.publication.source
-    if (source.chart !== undefined) return [new ChartBody(source.chart, options.paint)]
-    if (source.svg !== undefined && source.svgSource !== undefined) {
-      // The tool card's SVG convention: the readable description is ALWAYS
-      // visible; the raster is an enhancement on top of it.
-      const components: Component[] = [
-        new Text(options.paint(sanitizeDisplayText(svgDetailRows(source.svg).join('\n'))), 0, 0),
-      ]
-      if (options.svgLoader !== undefined && options.svgTheme !== undefined && source.svgAdmissionWidth !== undefined) {
-        components.push(new SvgThumbnail(
-          source.svg.digest,
-          source.svgSource,
-          source.svgAdmissionWidth,
-          options.svgLoader,
-          options.svgTheme,
-          options.requestRender,
-        ))
-      }
-      return components
-    }
-    return [new Text(options.paint(sanitizeDisplayText('Drawing unavailable — the visual fact is missing')), 0, 0)]
+    return [new VisualFigureComponent(options.figure(piece))]
+  }
+
+  /**
+   * The figure hit geometry of the LAST paint at `width` (Assistant-body row
+   * coordinates), or an empty list when the body has not rendered at that
+   * width. The row map and the release click both read this one projection.
+   * @param width - the content width the body was last rendered at.
+   * @returns the painted figure cells.
+   */
+  paintedVisualHits(width: number): readonly VisualAssistantPaintedHits[] {
+    if (this.paintedHits === undefined || this.paintedHits.width !== width) return []
+    return this.paintedHits.hits
   }
 
   invalidate(): void {
@@ -162,7 +167,26 @@ export class VisualAssistantBody implements Component {
 
   render(width: number): string[] {
     const lines: string[] = []
-    for (const child of this.children) lines.push(...child.render(width))
+    const hits: VisualAssistantPaintedHits[] = []
+    for (const child of this.children) {
+      if (child instanceof VisualFigureComponent) {
+        const childLines = child.render(width)
+        const painted = child.paintedHitMap(width)
+        if (painted !== undefined) {
+          hits.push({
+            ref: child.ref,
+            top: lines.length,
+            height: painted.height,
+            actions: painted.actions,
+            ...(painted.thumbnailBody === undefined ? {} : { thumbnailBody: painted.thumbnailBody }),
+          })
+        }
+        lines.push(...childLines)
+        continue
+      }
+      lines.push(...child.render(width))
+    }
+    this.paintedHits = { width, hits }
     return lines
   }
 }

@@ -1,14 +1,24 @@
 /**
  * The PiTui SVG thumbnail: one admitted, Client-local raster inside the
- * EXISTING tool card. It reuses the PR-C `Image` component and image budget;
- * it never writes a durable attachment or a second protocol stack.
+ * EXISTING tool card or published Visual figure. It reuses the PR-C `Image`
+ * component and image budget; it never writes a durable attachment or a second
+ * protocol stack.
+ *
+ * The raster cache is keyed by `(digest, targetWidth)`, so this component owns
+ * exactly ONE display variant — its admitted target width. A viewer's
+ * high-resolution variant is a different cache entry and never replaces it.
  *
  * The component never awaits: it consults the raster loader synchronously and
  * asks it to fire the isolated conversion on first render; the loader's settle
- * notification invalidates the component, which repaints with the PNG. When
- * the terminal has no inline-image protocol (or the card is narrower than the
- * existing threshold) it emits NO rows — the card body's description and source
- * availability remain the whole presentation.
+ * notification invalidates the component, which repaints with the PNG. Inline
+ * pixels are shown for the Kitty protocol only (the PR2.5 visual contract:
+ * SVG preview pixels are not extended to iTerm2/macOS/Windows); otherwise it
+ * emits NO rows — the figure's description and source availability remain the
+ * whole presentation.
+ *
+ * `paintedImageBody()` reports the REAL pixel rows the last render painted, so
+ * a click can only open the viewer from pixels the user actually saw: a
+ * loading, failed or text-fallback render registers no body.
  * @module @xmoon76/dsh-pi-tui/tui/components/media/svg-thumbnail
  */
 
@@ -19,6 +29,26 @@ import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts
 
 /** The image theme surface reused from the PR-C thumbnail. */
 export type SvgThumbnailTheme = ImageThumbnailTheme
+
+/** The painted pixel rows of the last render at one width. */
+export interface SvgThumbnailBody {
+  readonly rows: number
+  readonly endCol: number
+}
+
+/**
+ * The columns one Kitty placement sequence actually occupies, read from the
+ * sequence the fork just rendered (`c=` in the APC). The anchor at the START of
+ * the row is required — the fork's text fallback is never a pixel body.
+ * @param body - the fork `Image` output rows.
+ * @returns the placement width, or undefined when no anchored sequence exists.
+ */
+function paintedImageColumns(body: readonly string[]): number | undefined {
+  const anchored = /^\x1b_G([^;\x1b]*)[;\x1b]/.exec(body[0] ?? '')
+  if (anchored === null) return undefined
+  const columns = /(?:^|,)c=(\d+)/.exec(anchored[1]!)
+  return columns === null ? undefined : Number(columns[1])
+}
 
 /** Render one admitted SVG source through the asynchronous raster cache. */
 export class SvgThumbnail implements Component {
@@ -31,12 +61,17 @@ export class SvgThumbnail implements Component {
   /** When set, the component always occupies exactly this many rows. */
   private readonly fixedRows: number | undefined
   private unsubscribe: (() => void) | undefined
-  /** The last successfully decoded derivative for this digest. A loader-cache
+  /** The last successfully decoded derivative for this variant. A loader-cache
    *  eviction must not erase an image the component already painted. */
   private lastReady: { readonly base64: string; readonly widthPx: number; readonly heightPx: number } | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
+  /** The real pixel rows and placement width the LAST render at `width`
+   * painted. `undefined` whenever that render carried no pixels. */
+  private paintedBody: (SvgThumbnailBody & { readonly width: number }) | undefined
+  /** The actual raster dimensions of the derivative painted at `width`. */
+  private paintedPixel: { readonly width: number; readonly widthPx: number; readonly heightPx: number } | undefined
 
   constructor(
     digest: string,
@@ -54,7 +89,7 @@ export class SvgThumbnail implements Component {
     this.theme = theme
     this.requestRender = requestRender
     this.fixedRows = fixedRows
-    this.unsubscribe = loader.subscribe(digest, () => {
+    this.unsubscribe = loader.subscribe(digest, targetWidth, () => {
       this.invalidate()
       this.requestRender()
     })
@@ -68,10 +103,40 @@ export class SvgThumbnail implements Component {
     this.invalidate()
   }
 
+  /**
+   * The REAL pixel body rows the LAST render at `width` painted, or undefined
+   * when that render carried no pixels (not ready, failed, narrow, no inline
+   * graphics protocol, or a non-Kitty surface). This is the authoritative
+   * "may a click on these rows open the Viewer?" answer — deliberately not
+   * "the component emits rows".
+   * @param width - the transcript content width being hit-tested.
+   * @returns the painted body row count and its widest occupied column.
+   */
+  paintedImageBody(width: number): SvgThumbnailBody | undefined {
+    const painted = this.paintedBody
+    if (painted === undefined || painted.width !== width) return undefined
+    return { rows: painted.rows, endCol: painted.endCol }
+  }
+
+  /**
+   * The actual raster dimensions of the derivative the LAST render at `width`
+   * painted (never the admitted target width, never the source's declared
+   * width). `undefined` when that render painted no pixels.
+   * @param width - the transcript content width being inspected.
+   * @returns the painted PNG's width/height in pixels.
+   */
+  paintedPixelSize(width: number): { readonly widthPx: number; readonly heightPx: number } | undefined {
+    const painted = this.paintedPixel
+    if (painted === undefined || painted.width !== width) return undefined
+    return { widthPx: painted.widthPx, heightPx: painted.heightPx }
+  }
+
   invalidate(): void {
     this.instance = undefined
     this.cachedLines = undefined
     this.cachedKey = undefined
+    this.paintedBody = undefined
+    this.paintedPixel = undefined
   }
 
   render(width: number): string[] {
@@ -92,9 +157,17 @@ export class SvgThumbnail implements Component {
   }
 
   private renderLines(width: number): string[] {
+    // Every non-pixel branch below clears the recorded body first: a previous
+    // render's geometry must never survive a state change at the same width.
+    this.paintedBody = undefined
+    this.paintedPixel = undefined
     if (width < NARROW_WIDTH_THRESHOLD) return []
-    if (getCapabilities().images === null) return []
-    const state = this.loader.get(this.digest)
+    // SVG preview pixels are a Kitty-only capability in this contract. iTerm2's
+    // inline framing is not understood by the fork's ANSI width layer, and the
+    // other platforms have no verified native raster bound: the figure keeps
+    // its description and source actions instead of faking a pixel body.
+    if (getCapabilities().images !== 'kitty') return []
+    const state = this.loader.get(this.digest, this.targetWidth)
     if (state.state === 'ready') this.lastReady = state
     // The loader cache is bounded; an eviction (or a clear) must not turn an
     // already painted component back into a retrying placeholder. Use the
@@ -117,7 +190,13 @@ export class SvgThumbnail implements Component {
           { widthPx: effective.widthPx, heightPx: effective.heightPx },
         )
       }
-      return ['', ...this.instance.render(width)]
+      const body = this.instance.render(width)
+      const columns = paintedImageColumns(body)
+      if (columns !== undefined) {
+        this.paintedBody = { width, rows: body.length, endCol: columns }
+        this.paintedPixel = { width, widthPx: effective.widthPx, heightPx: effective.heightPx }
+      }
+      return ['', ...body]
     }
     if (state.state === 'idle') {
       this.loader.load(this.digest, this.source, this.targetWidth)
@@ -125,8 +204,8 @@ export class SvgThumbnail implements Component {
     }
     if (state.state === 'loading') return [this.theme.fallbackColor('  Rendering SVG image…')]
     // A terminal loader state (a real failure or an evicted never-painted
-    // digest): never re-request from this component; the card body keeps the
-    // description and the admitted source path.
+    // digest): never re-request from this component; the figure keeps the
+    // description and the source actions.
     return [this.theme.fallbackColor('  SVG image unavailable')]
   }
 }

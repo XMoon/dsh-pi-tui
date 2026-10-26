@@ -833,6 +833,74 @@ published visuals normally. Future extension support for published visuals
 requires a separately planned explicit capability, not an implicit visual-body
 change.
 
+### Visual figure actions and the SVG viewer
+
+A published figure paints its own real action row inside the SAME Assistant
+row: a chart keeps the exact `ChartBody` values and appends `Copy Data`
+(the final ChartFact as formatted JSON); an SVG keeps its description and
+admitted thumbnail and appends `View` / `Copy SVG` (the raw admitted source).
+`src/tui/components/transcript/visual-figure.ts` owns that row and reports the
+cells it ACTUALLY painted; it holds no Session, no keymap and no clipboard. The
+figure's action cells and the thumbnail's real Kitty pixel body are the only
+operable cells on those rows — the title, description and a loading/error row
+are inert, and a click inside the figure never folds the Assistant card. The
+fullscreen `onCellPress`/`onCellClick` owner records the painted owner, row,
+semantic action and column span at press time and re-proves them on release, so
+a repaint or resize cannot transfer a click onto whatever moved there. The
+figures are not operable behind a Question/Approval/overlay/workspace owner.
+
+Selection is transient display state, never a second figure fact:
+`app.visual.selectNext` (`Alt+V` default) cycles the CURRENT mounted window's
+publications in durable order and paints a textual `[Selected]` device on the
+figure; `app.visual.copySelected` (`Alt+C`) copies the selected payload;
+`app.visual.openSelected` (`Alt+O`) opens a selected SVG and answers
+`Chart has no viewer` for a chart. All three are ordinary configurable Host
+actions (`scope: global`) whose hints come from the live keymap; an unselected
+action names the select key instead of guessing a figure. A subject change
+(window, Session, rehydrate or replacement) invalidates the selection, the
+painted hit identity, an in-flight copy receipt and the open viewer.
+
+The SVG Viewer is the EXISTING leased image-workspace screen with an
+`svg-viewer` variant, not a second overlay or alt-screen owner:
+`ImageWorkspacePanel` keeps the physical lease, the `preserveScreen` return
+stack, focus and the close path, while `SvgViewerPanel` owns only the local
+Preview/Source state, a bounded Source read position and its painted cells.
+Preview is the open default and the Source page is a read-only,
+`sanitizeDisplayText`-projected view of the original XML with line/page/Home/End
+scrolling; `Tab` is the only page switch, `C` and the bar's copy cell send the
+ORIGINAL `PublishedVisual.source.svgSource` bytes unchanged, and `Esc` restores
+the transcript it was opened from. Those screen-local fixed chords and their
+labels live in ONE table (`SVG_VIEWER_CHORDS`), never in the Host keymap. Chart
+has no viewer.
+
+The Viewer's Preview is its OWN raster variant. `SvgRasterLoader` is keyed by
+`(digest, exact targetWidth)`, still runs ONE isolated child at a time with the
+same bounded 12-variant cache, and a Viewer close aborts only its exact
+unsubscribed variant (`releaseUnused`) — a thumbnail variant other rows still
+watch is never dropped. The target width is derived from the real content grant
+(columns, rows and the admitted viewBox ratio inside the existing 2048px /
+4M-pixel budget), never from a fixed size and never by upscaling the thumbnail.
+Preview pixels stay Kitty-only; without that protocol the page says
+`Preview unavailable` while Source and Copy remain fully usable.
+
+### Display `/copy` for consumed visual markers
+
+The durable Assistant body keeps its `[dsh-visual-…]: <#>` definition and the
+raw `/transcript` export keeps every byte. `/copy` is a DISPLAY sink, so it
+projects the same text the user reads: the latest official
+`assistant/message` is proven to be the committed final row of the SAME Session
+(the Folder's `assistantSettlementSeq(turn, step)` equals the event's `seq`,
+and `eligibleFinalAssistant()` returns the same turn/step/body), then the
+existing `collectPublishedVisuals` authority supplies the publications and the
+shared `planVisualPlacement()` yields the text spans. Only consumed marker
+spans are removed; line terminators, whitespace, CJK, emoji, tabs, ordinary
+definitions and code samples survive exactly, and the display-only definitions
+prefix never enters the payload. A marker-shaped body without a publication for
+its turn is ordinary prose and is copied unchanged. A published marker whose
+final-row identity cannot be proven (torn fold, replaced body, ownership change)
+fails closed instead of guessing which bytes to drop. Remote's bounded-window
+last-assistant read is a different contract and stays byte-exact.
+
 ## Long user messages
 
 A text-only durable user message over 10 rendered visual rows collapses to head

@@ -18,6 +18,12 @@
 import { DirectPresentationReader } from '../../runtime/direct/presentation-read-direct.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
+import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
+import { assistantStepOf } from '../../domain/transcript/folder.ts'
+import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
+import { visibleAssistantTextForCopy } from '../../domain/visual/display-copy.ts'
+import { asVisualSessionEvents, collectPublishedVisuals } from '../../domain/visual/publication.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
 import { computeStats, type SessionStats } from '../../domain/status/stats.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
 
@@ -55,6 +61,11 @@ export interface DirectSessionReads {
   eventAt(seq: number): Parameters<typeof computeStats>[0][number] | undefined
 }
 
+/** The ContentBlock shape the display-copy projection consumes, taken from the
+ * domain module so this composition seam needs no Host package import (the
+ * Client-boundary gate counts even a TYPE-ONLY one). */
+type CopyContentBlocks = NonNullable<Parameters<typeof visibleAssistantTextForCopy>[0]['content']>
+
 /** The narrow values the presentation bridge composes; one cohesive lifetime. */
 export interface PresentationBridgeDeps {
   /** The Remote-branch presentation sources (undefined on Direct). */
@@ -67,6 +78,14 @@ export interface PresentationBridgeDeps {
   readonly assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[]
   /** The exact attached Direct session for one fenced session id. */
   readonly directSessionFor: (sessionId: string) => DirectSessionReads
+  /**
+   * The EXISTING main transcript fold of the current owner, if any. Used only
+   * to prove the final-Assistant identity of a display `/copy`; never a second
+   * Folder and never a Host read.
+   */
+  readonly mainFolder: () => TranscriptFolder | undefined
+  /** The ownership generation (bumped by every owner/binding commit). */
+  readonly currentGeneration: () => number
 }
 
 /** The composition-facing presentation reads the root consumes. */
@@ -81,7 +100,13 @@ export interface PresentationBridge {
   remoteRunningOf(sessionId: string): boolean | undefined
   /** The Direct whole-log stats fold for one exact attachment. */
   directSessionStats(sessionId: string): SessionStats
-  /** The Direct last-assistant-message read (single-event lookup, never a full fold). */
+  /**
+   * The Direct last-assistant-message read (single-event lookup, never a full
+   * fold): the ORIGINAL official bytes, minus the marker spans the display
+   * renderer consumed. Throws {@link SupersededReadError} when the latest
+   * official message carries published-visual markers whose final-row identity
+   * cannot be proven (a torn read must never be silently copied).
+   */
   directLastAssistantText(sessionId: string): string | undefined
   /** The official whole-log `sessionStats` projection value (Remote; unknown-shaped). */
   sessionStatsProjectionOf(sessionId: string): unknown
@@ -152,19 +177,89 @@ export function createPresentationBridge(deps: PresentationBridgeDeps): Presenta
   const directSessionStats = (sessionId: string): SessionStats =>
     computeStats(directSessionFor(sessionId).snapshotEvents())
 
+  /**
+   * The Direct display `/copy` payload.
+   *
+   * Fast path: the latest official `assistant/message` text blocks joined
+   * exactly as before (single-event backwards lookup; no full fold). Only a
+   * text that CONTAINS the marker candidate prefix pays the qualification cost:
+   *
+   * ```text
+   * official latest event -> same-Session main Folder -> the exact settlement
+   * seq of (turn, step) -> eligibleFinalAssistant() on that turn's rows
+   * -> collectPublishedVisuals(same Session snapshot) -> shared planner
+   * -> text spans only -> existing post-await scope fence -> clipboard
+   * ```
+   *
+   * The candidate string never DECIDES a removal: if the Session has no
+   * published visual for that turn the original bytes are returned even when
+   * they look like a marker. If it HAS one and any identity link is torn (the
+   * folder never settled that exact seq, the eligible final row is another
+   * step/text, or the ownership changed), the read fails closed instead of
+   * guessing which span to drop.
+   */
   const directLastAssistantText = (sessionId: string): string | undefined => {
     const session = directSessionFor(sessionId)
+    let latest: {
+      readonly seq: number
+      readonly turn: number
+      readonly step: number
+      readonly text: string
+      readonly content: CopyContentBlocks
+    } | undefined
     // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
     // materialize the whole log for one message.
     for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
       const event = session.eventAt(seq)
       if (event?.type !== 'assistant/message') continue
-      return event.data.message.content
-        .filter(block => block.type === 'text')
-        .map(block => (block as { text: string }).text)
-        .join('')
+      const content = event.data.message.content
+      latest = {
+        seq: Number(event.seq),
+        turn: event.data.turn,
+        step: event.data.step,
+        text: content
+          .filter(block => block.type === 'text')
+          .map(block => (block as { text: string }).text)
+          .join(''),
+        content,
+      }
+      break
     }
-    return undefined
+    if (latest === undefined) return undefined
+    // A candidate only BUYS the proof; it never authorizes a deletion.
+    if (!latest.text.includes('[dsh-visual-')) return latest.text
+    const generation = deps.currentGeneration()
+    if (currentSessionId() !== sessionId) {
+      throw new SupersededReadError('the session changed while reading the last assistant text')
+    }
+    const publications = collectPublishedVisuals(sessionId, asVisualSessionEvents(session.snapshotEvents()))
+    const turnPublications = publications.filter(publication => publication.turn === latest.turn)
+    // No PR1-authorized publication for this turn: the marker-shaped bytes are
+    // ordinary prose, never a consumed display span.
+    if (turnPublications.length === 0) return latest.text
+    const folder = deps.mainFolder()
+    if (folder === undefined) {
+      throw new SupersededReadError('the published visual source cannot be qualified in the current transcript')
+    }
+    const settlementSeq = folder.assistantSettlementSeq(latest.turn, latest.step)
+    if (settlementSeq !== latest.seq) {
+      throw new SupersededReadError('the latest assistant message is not the committed final step of this transcript')
+    }
+    const group = folder.messages().filter(message => 'turn' in message && message.turn === latest.turn)
+    const final = eligibleFinalAssistant(folder.turnActivity(latest.turn), group)
+    if (final === undefined
+      || assistantStepOf(final.message) !== latest.step
+      || final.message.text !== latest.text) {
+      throw new SupersededReadError('the published visual source does not match the eligible final assistant row')
+    }
+    if (deps.currentGeneration() !== generation || currentSessionId() !== sessionId) {
+      throw new SupersededReadError('the session changed while deriving the last assistant text')
+    }
+    return visibleAssistantTextForCopy({
+      text: latest.text,
+      content: latest.content,
+      publications: turnPublications,
+    })
   }
 
   /** The official whole-log `sessionStats` projection value off the
