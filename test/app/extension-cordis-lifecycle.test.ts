@@ -1216,15 +1216,6 @@ interface SlotRegistration {
   dispose(): void
 }
 
-/** A health record as the diagnostics read it. */
-interface HealthRecord {
-  readonly id: string
-  readonly owner: string
-  readonly extensionPoint: string
-  readonly state: string
-  readonly lastError?: string
-}
-
 /** The scoped service surface the six slots are driven through. */
 interface LifecycleService {
   registerTheme(contribution: TuiThemeContribution): SlotRegistration
@@ -1273,7 +1264,7 @@ interface LifecycleService {
     winner(): { id: string; priority: number; owner: string } | undefined
   }
   _ledger(): {
-    healthSnapshot(): readonly HealthRecord[]
+    healthSnapshot(): readonly ContributionHealth[]
     recordExternalError(slot: string, id: string, owner: string, message: string): void
     clearExternalError(slot: string, id: string, owner: string): void
   }
@@ -1503,7 +1494,7 @@ async function mountServiceOwner(
 }
 
 /** Every health record for one slot + id (all owners). */
-function slotHealth(service: LifecycleService, slot: string, id: string): readonly HealthRecord[] {
+function slotHealth(service: LifecycleService, slot: string, id: string): readonly ContributionHealth[] {
   return service._ledger().healthSnapshot().filter(record => record.extensionPoint === slot && record.id === id)
 }
 
