@@ -33,6 +33,12 @@
  * of deleting a directory that process still uses. On Windows there is no
  * group id to address, so the signal is forwarded to the direct child only.
  *
+ * EXIT STATUS: a clean run passes the child's status through, but an
+ * INTERRUPTED run reports the first received SIGINT/SIGTERM/SIGHUP
+ * (128+signo), even when the child handles the signal and exits 0. A cleanup
+ * that cannot be proven is NON-ZERO as well: a command's success does not
+ * excuse a temp root (or a process group) left behind.
+ *
  * Set DSH_TEST_KEEP_TMP=1 to keep (and print) the run root for debugging.
  */
 import { spawn } from 'node:child_process'
@@ -145,6 +151,23 @@ function main() {
    * spawn failure and signal teardown reaches it first, the temp root is
    * removed at most once and the exit code is set at most once.
    */
+  const SIGNAL_EXIT = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15 }
+  // The first interruption signal this runner received, if any. It owns the
+  // runner's exit status: a child that "handles" SIGTERM and exits 0 must not
+  // turn an interrupted run into a success.
+  let receivedSignal
+  /** The runner's OWN status; the child's result is diagnostic. */
+  const exitCodeOf = () => {
+    if (receivedSignal !== undefined) return 128 + (SIGNAL_EXIT[receivedSignal] ?? 0)
+    if (childResult === undefined) return 1
+    if (childResult.code !== null) return childResult.code
+    // Mirror death-by-signal with the conventional 128+signo exit code.
+    const signo = SIGNAL_EXIT[childResult.signal] ?? 0
+    return signo > 0 ? 128 + signo : 1
+  }
+  const describeChild = () => (childResult === undefined
+    ? 'the direct child did not finish'
+    : childResult.code !== null ? `the direct child exited ${childResult.code}` : `the direct child was terminated by ${childResult.signal}`)
   function finish(settled, detail) {
     if (finished) return
     finished = true
@@ -155,19 +178,12 @@ function main() {
       // runs would delete the very directory that process is using, so an
       // unproven group keeps the root and says so instead of claiming a
       // cleanup it cannot prove.
-      process.stderr.write(`[run-with-temp-root] keeping ${root}: ${detail}\n`)
+      process.stderr.write(`[run-with-temp-root] cleanup unproven: keeping ${root}: ${detail} (${describeChild()})\n`)
     }
-    if (childResult === undefined) {
-      process.exitCode = 1
-      return
-    }
-    if (childResult.code !== null) {
-      process.exitCode = childResult.code
-      return
-    }
-    // Mirror death-by-signal with the conventional 128+signo exit code.
-    const signo = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15 }[childResult.signal] ?? 0
-    process.exitCode = signo > 0 ? 128 + signo : 1
+    // A cleanup that cannot be proven is NOT a pass: the run gets a non-zero
+    // status and the child's own result stays diagnostic. The interruption
+    // signal already makes the status non-zero on its own path.
+    process.exitCode = settled || receivedSignal !== undefined ? exitCodeOf() : 1
   }
 
   child.on('error', (error) => {
@@ -197,6 +213,7 @@ function main() {
   const onSignal = (signal) => {
     if (teardownStarted || finished) return
     teardownStarted = true
+    receivedSignal = signal
     void (async () => {
       let settled = true
       if (ownsGroup) {

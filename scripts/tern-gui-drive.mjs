@@ -142,9 +142,6 @@ async function createHarness({ ternBin, root, display }) {
   // so the exit status still reflects the interruption instead of being masked
   // by a clean exit.
   let shutdownPromise
-  // Set when the teardown could not prove its children closed: this run's
-  // socket directory may still be in use, so NO exit path may delete it.
-  let daemonDirRetained = false
   const shutdown = () => {
     shutdownPromise ??= (async () => {
       const outcome = await stopOwnedChildren([windowChild, daemonChild])
@@ -152,7 +149,6 @@ async function createHarness({ ternBin, root, display }) {
         // A deadline is NOT a teardown: name the child that did not settle and
         // keep the socket directory instead of deleting a resource a survivor
         // may still be using.
-        daemonDirRetained = true
         check('the GUI helpers settled before the driver exited', false,
           `no close within ${OWNED_CHILD_CLOSE_DEADLINE_MS}ms: `
           + `${outcome.survivors.map((handle) => `${handle.kind} pid=${handle.pid ?? 'not-spawned'}`).join(', ')}`
@@ -164,15 +160,26 @@ async function createHarness({ ternBin, root, display }) {
     })()
     return shutdownPromise
   }
-  // The synchronous LAST RESORT for an exit path this driver does not own. It
-  // can only request the signals — the ordered shutdown above already did, so
-  // this is a no-op there — and it never claims a child is gone. It also
-  // respects an UNPROVEN teardown: a directory a survivor may still be using
-  // is not deleted here either.
+  // The synchronous LAST RESORT for an exit path this driver does not own (a
+  // flow calling process.exit, an uncaught exception). It can only request the
+  // signals — the ordered shutdown above already did, so this is a no-op there
+  // — and it never claims a child is gone. Deleting this run's socket directory
+  // is safe only once BOTH children are provably closed; a survivor keeps it
+  // and the unproven state is recorded in the run.
   process.on('exit', () => {
     windowChild.stop()
     daemonChild.stop()
-    if (!daemonDirRetained) removeDaemonDir()
+    if (windowChild.closed && daemonChild.closed) {
+      removeDaemonDir()
+      return
+    }
+    try {
+      log(`TEARDOWN-UNPROVEN keeping socket dir ${daemonDir} `
+        + `(window closed=${windowChild.closed}, daemon closed=${daemonChild.closed})`)
+    } catch {
+      // The diagnostic must never replace the exit status this path is exiting
+      // with; the directory is still kept either way.
+    }
   })
   // One teardown per signal, then the ORIGINAL signal decides the exit status:
   // a cancelled run must not look like a clean one.

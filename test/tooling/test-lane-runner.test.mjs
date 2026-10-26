@@ -308,8 +308,10 @@ test('holds a signal-ignoring descendant', async () => {
 
   child.kill(signal)
   const result = await exited
-  // An interrupted lane must not look like a clean run.
-  assert.notEqual(result.code, 0, `the runner exits non-zero after an interruption, got ${JSON.stringify(result)}`)
+  // An interrupted lane must not report the child's own status: the wrapper
+  // reports the signal it received.
+  assert.equal(result.code, { SIGTERM: 143, SIGINT: 130 }[signal],
+    `the received signal owns the runner's status, got ${JSON.stringify(result)}`)
 
   const log = readFileSync(marker, 'utf8')
   // The signal reached the DESCENDANT of the worker, not only the leader ...
@@ -331,6 +333,67 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     await assertSignalReachesWorkerTree(t, signal)
   })
 }
+
+test('a lane whose leader handles SIGTERM and exits 0 still yields the interruption status', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+  const life = testLifecycle(t)
+  const fixture = life.tempDir('dsh-lane-handled-')
+  const marker = join(fixture, 'evidence.log')
+  const scripts = join(fixture, 'scripts')
+  mkdirSync(join(scripts, 'lib'), { recursive: true })
+  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
+    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
+  }
+  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'the wrapper handled-signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}
+`)
+  const probeDir = join(fixture, 'test', 'probe')
+  mkdirSync(probeDir, { recursive: true })
+  writeFileSync(join(probeDir, 'alive.test.mjs'), `import { appendFileSync } from 'node:fs'
+import test from 'node:test'
+
+test('stays alive until the interruption', async () => {
+  appendFileSync(process.env.PROBE_MARKER, 'worker ' + process.pid + ' ready tmpdir=' + process.env.TMPDIR + '\\n')
+  await new Promise(() => {})
+})
+`)
+  // NODE_OPTIONS loads this hook in EVERY Node process the lane starts. Only
+  // the `node --test` LEADER is the runner's direct child (it carries `--test`
+  // in execArgv); this makes THAT process handle the interruption and exit 0.
+  writeFileSync(join(fixture, 'signal-hook.cjs'), 'if (process.execArgv.includes("--test")) {\n'
+    + '  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => process.exit(0))\n'
+    + '}\n')
+  const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    env: {
+      ...process.env,
+      PROBE_MARKER: marker,
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${join(fixture, 'signal-hook.cjs')}`.trim(),
+      DSH_TEST_JSONL: undefined,
+      DSH_TEST_EFFECTIVE_JSON: undefined,
+      DSH_TEST_KEEP_TMP: undefined,
+      NODE_TEST_CONTEXT: undefined,
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  let stderr = ''
+  child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
+  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+
+  const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
+  const [, , tmpdirField] = ready.split(' ')
+  const tmpRoot = tmpdirField.slice('tmpdir='.length)
+  life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
+
+  child.kill('SIGTERM')
+  const result = await exited
+  // The leader exited 0, but the wrapper was interrupted: the signal owns the
+  // status, and the settled group releases its root.
+  assert.equal(result.code, 143, `the received signal owns the runner's status, got ${JSON.stringify(result)}`)
+  assert.doesNotMatch(stderr, /cleanup unproven/u)
+  assert.equal(existsSync(tmpRoot), false, 'a settled group releases its root')
+})
 
 test('a lane whose worker leaves a running descendant keeps its temp root', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   const life = testLifecycle(t)
@@ -388,8 +451,10 @@ test('starts a descendant that outlives the worker', () => {
   life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
 
   const result = await exited
-  assert.equal(result.code, 0, `the normal lane result is preserved, got ${JSON.stringify(result)}`)
-  assert.match(stderr, /keeping .*process group \d+ still has live members after the direct child exited/u)
+  // The lane's tests passed, but its owned group is still alive: an unproven
+  // cleanup is a non-zero run, not a pass. The child's status stays diagnostic.
+  assert.equal(result.code, 1, `an unproven cleanup is a non-zero run, got ${JSON.stringify(result)}`)
+  assert.match(stderr, /cleanup unproven: keeping .*still has live members after the direct child exited \(the direct child exited 0\)/u)
   assert.equal(existsSync(tmpRoot), true, 'the lane root outlives a worker descendant')
   assert.equal(isExecuting(descendant), true, 'the descendant keeps running, untouched by the runner')
 })

@@ -600,6 +600,31 @@ test('a helper that never reaches close is reported and its socket directory is 
   assert.equal(existsSync(daemonDir), true, 'an unproven teardown keeps the socket directory')
 })
 
+test('an exit path the driver does not own keeps a socket directory it cannot prove closed', { timeout: 30_000 }, (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-exit-')
+  const fake = writeFakeTern(dir)
+  const flow = joinPath(dir, 'flow.mjs')
+  // A flow calling process.exit() skips the driver's `finally`: the synchronous
+  // exit hook runs with the helpers still alive, so it may only REQUEST their
+  // signals — it must not delete the socket directory it cannot prove closed.
+  writeFileSync(flow, 'export default async function () { process.exit(7) }\n')
+  const out = joinPath(dir, 'out')
+  const result = spawnSync(process.execPath, [driver, flow, '--out', out], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0' },
+  })
+  assert.equal(result.status, 7, result.stdout + result.stderr)
+  const records = readPidRecords(joinPath(dir, 'pids.log'))
+  life.defer(() => { killStillExecuting(records) })
+
+  const socket = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim()
+  const daemonDir = dirname(socket)
+  life.defer(() => rmSync(daemonDir, { recursive: true, force: true }))
+  assert.equal(existsSync(daemonDir), true, 'an unproven teardown keeps the socket directory')
+  assert.match(readFileSync(joinPath(out, 'run.log'), 'utf8'), /TEARDOWN-UNPROVEN keeping socket dir/u)
+})
+
 test('a normal run tears down its helpers and the private socket directory before it exits', async (t) => {
   await assertFinishedRunTearsDown(t, 'tern-gui-normal-', { flow: CHECKED_FLOW, expectedStatus: 0 })
 })
