@@ -464,3 +464,48 @@ test('a middle-only discriminator stays visible in the list and the Details titl
   assert.ok(body.includes('report-aaaaaaaa'), `the path head is visible:\n${body}`)
   assert.ok(body.includes('bbbbbbbb.md'), `the path tail is visible:\n${body}`)
 })
+
+test('a wrapped Host path preserves every projected character', () => {
+  const path = '/ws/archive/a very long report name.md'
+  const h = harness(snapshotOf([{ turn: 1, files: [path] }]))
+  h.setSize(44, 20)
+  h.type('enter')
+  const rows = h.rows()
+  const hostStart = rows.findIndex(row => row.startsWith('Host: '))
+  assert.ok(hostStart >= 0, rows.join('\n'))
+  const chunks: string[] = []
+  for (let index = hostStart; index < rows.length; index += 1) {
+    const row = rows[index]!
+    if (index === hostStart) {
+      chunks.push(row.slice('Host: '.length).trimEnd())
+      continue
+    }
+    if (!row.startsWith('      ')) break
+    chunks.push(row.slice(6).trimEnd())
+  }
+  assert.ok(chunks.length > 1, `the path really wraps at this width:\n${rows.join('\n')}`)
+  assert.equal(chunks.join(''), path, `no character (including a space) may be lost:\n${rows.join('\n')}`)
+})
+
+test('the list, the side pane and the Details title paint the same fitted label', () => {
+  const long = `report-${'x'.repeat(40)}-${'y'.repeat(20)}.md`
+  const h = harness(snapshotOf([{ turn: 1, files: [{ path: `/ws/docs/${long}`, description: 'long one' }, '/ws/docs/other.md'] }]))
+  h.setSize(140, 40)
+  const rows = h.rows()
+  const listRow = rows.find(row => row.startsWith('> report-'))
+  assert.ok(listRow !== undefined, rows.join('\n'))
+  // Two-column mode puts the side pane on the SAME row: the list cell ends at
+  // its own `Details` verb.
+  const listLabel = listRow.slice(2, listRow.lastIndexOf(' Details')).trimEnd()
+  assert.ok(listLabel.includes('…'), `precondition: the list cell clamps the label: ${listLabel}`)
+
+  // The wide side pane (right column) starts with the same label.
+  const listWidth = Math.max(24, Math.floor(((140 - 4) - 3) * 0.58))
+  const rightJoined = rows.map(row => row.slice(listWidth + 3)).join('')
+  assert.ok(rightJoined.includes(listLabel), `the side pane must paint the same label:\n${rightJoined}`)
+
+  // The Details title too.
+  h.type('enter')
+  const title = h.rows()[0]!.replace(/ · Details$/, '')
+  assert.equal(title, listLabel, 'the Details title must reuse the list label')
+})

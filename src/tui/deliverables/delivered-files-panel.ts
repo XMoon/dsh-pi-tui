@@ -110,6 +110,32 @@ function wrapPlainText(text: string, width: number): string[] {
   return lines
 }
 
+/**
+ * Break one PROJECTED PATH into cells, preserving EVERY character.
+ *
+ * {@link wrapPlainText} serves prose and drops the space at a wrap boundary;
+ * a declared path is IDENTITY, so its safe projection must re-assemble exactly.
+ * The break therefore happens between characters and nothing is removed.
+ */
+function wrapPathText(text: string, width: number): string[] {
+  const limit = Math.max(1, Math.floor(width))
+  const lines: string[] = []
+  let current = ''
+  let currentWidth = 0
+  for (const char of Array.from(text)) {
+    const charWidth = visibleWidth(char)
+    if (currentWidth > 0 && currentWidth + charWidth > limit) {
+      lines.push(current)
+      current = ''
+      currentWidth = 0
+    }
+    current += char
+    currentWidth += charWidth
+  }
+  lines.push(current)
+  return lines
+}
+
 /** The keyboard hints of one page, most important last (Esc is always last). */
 interface HintSegments {
   readonly select?: string
@@ -230,13 +256,21 @@ export class DeliveredFilesPanel implements Component {
   }
 
   /**
-   * The delivery's labels fitted to ONE room, shared by the list rows, the
-   * wide side pane and the Details title, so every surface of this page shows
-   * the SAME text for the same file (and no two rows can paint the same text
-   * after the clamp).
+   * The delivery's labels fitted ONCE for this panel width, keyed by raw path.
+   *
+   * The room is the NARROWEST consumer (the two-column list cell, capped again
+   * by the Details title's room), so the list rows, the wide side pane and the
+   * Details title all paint the SAME text for the same file and no clamp can
+   * collapse two rows.
    */
-  private fittedLabels(room: number): readonly string[] {
-    return fitDeliveredLabels(this.projectedLabels(), Math.max(1, room))
+  private fittedLabelsFor(width: number): ReadonlyMap<string, string> {
+    const files = this.currentFiles()
+    const actions = width >= ACTION_COLUMN_MIN_WIDTH
+    const listWidth = this.twoColumn(width) ? Math.max(24, Math.floor((width - 3) * 0.58)) : width
+    const listRoom = Math.max(1, listWidth - (actions ? visibleWidth(DETAILS_VERB) + 2 : 0) - 2)
+    const titleRoom = Math.max(8, width - ' · Details'.length)
+    const fitted = fitDeliveredLabels(this.projectedLabels(), Math.min(listRoom, titleRoom))
+    return new Map(files.map((file, index) => [file.path, fitted[index]!]))
   }
 
   private selectedFile(): PresentedFilePresentation | undefined {
@@ -516,7 +550,7 @@ export class DeliveredFilesPanel implements Component {
     // The COMPLETE projected path is wrapped, never clipped: it is the identity
     // the (necessarily clamped) title cannot always show.
     const hostPrefix = 'Host: '
-    const hostChunks = wrapPlainText(sanitizeDisplayText(file.path), Math.max(8, contentWidth - hostPrefix.length))
+    const hostChunks = wrapPathText(sanitizeDisplayText(file.path), Math.max(8, contentWidth - hostPrefix.length))
     hostChunks.forEach((chunk, index) => {
       lines.push(`${index === 0 ? color.textDim(hostPrefix) : ' '.repeat(hostPrefix.length)}${chunk}`)
     })
@@ -537,16 +571,15 @@ export class DeliveredFilesPanel implements Component {
     const rows: string[] = []
     const actionRows = new Map<number, { index: number; startCol: number; endCol: number }>()
     const listRows = new Map<number, number>()
+    // ONE fitted label set for this width, shared by every surface of the page.
+    const fittedByPath = this.fittedLabelsFor(safeWidth)
 
     if (this.page === 'details') {
       const file = this.selectedFile()
       const titleSuffix = ' · Details'
-      const titleRoom = Math.max(8, safeWidth - titleSuffix.length)
-      const fitted = this.fittedLabels(titleRoom)
-      const titleIndex = file === undefined ? -1 : this.currentFiles().indexOf(file)
-      const titleLabel = titleIndex >= 0 && file !== undefined
-        ? fitted[titleIndex] ?? sanitizeDisplaySegment(deliveredFileBasename(file.path))
-        : ''
+      const titleLabel = file === undefined
+        ? ''
+        : fittedByPath.get(file.path) ?? sanitizeDisplaySegment(deliveredFileBasename(file.path))
       const title = file === undefined ? 'Details' : `${titleLabel}${titleSuffix}`
       rows.push(truncateToWidth(color.textDim(title), safeWidth, '…'))
       const bodyRows = Math.max(1, this.maxRows - 2)
@@ -607,14 +640,6 @@ export class DeliveredFilesPanel implements Component {
     const selectedIndex = this.selectedIndex()
     const actions = safeWidth >= ACTION_COLUMN_MIN_WIDTH
     const actionColumn = visibleWidth(DETAILS_VERB) + 2
-    // ONE fitting room for every surface of this page (the Details title is the
-    // narrowest consumer), so the list, the side pane and the Details title
-    // agree on each file's text and no clamp can collapse two rows.
-    const fitted = this.fittedLabels(Math.min(
-      Math.max(1, listWidth - (actions ? actionColumn : 0) - 2),
-      Math.max(8, safeWidth - ' · Details'.length),
-    ))
-    const fittedByPath = new Map(this.currentFiles().map((file, index) => [file.path, fitted[index]!]))
 
     for (const [offset, file] of visible.entries()) {
       const index = listTop + offset
@@ -644,7 +669,9 @@ export class DeliveredFilesPanel implements Component {
     while (rows.length < this.maxRows - 1) rows.push('')
 
     if (twoColumn) {
-      const side = this.sidePane(sideWidth, area)
+      const side = this.sidePane(sideWidth, area, this.selectedFile() === undefined
+        ? undefined
+        : fittedByPath.get(this.selectedFile()!.path))
       for (let index = 0; index < area; index += 1) {
         const rowIndex = this.headerRows() + (this.filterRowShown() ? 1 : 0) + index
         const left = rows[rowIndex] ?? ''
@@ -658,12 +685,14 @@ export class DeliveredFilesPanel implements Component {
   }
 
   /** The wide Files right pane: the selected file's DECLARED metadata only. */
-  private sidePane(width: number, rows: number): string[] {
+  private sidePane(width: number, rows: number, fittedLabel: string | undefined): string[] {
     const file = this.selectedFile()
     const lines: string[] = []
     if (file === undefined) return lines
-    lines.push(...wrapPlainText(sanitizeDisplayText(this.labelOf(file)), width))
-    const fullPath = wrapPlainText(sanitizeDisplayText(file.path), width)
+    // The SAME fitted label the list and the Details title paint; a path wraps
+    // without losing characters.
+    lines.push(...wrapPathText(fittedLabel ?? sanitizeDisplaySegment(this.labelOf(file)), width))
+    const fullPath = wrapPathText(sanitizeDisplayText(file.path), width)
     lines.push(...fullPath.map(line => color.textDim(line)))
     if (file.description !== undefined && file.description !== '') {
       lines.push(...wrapPlainText(sanitizeDisplayText(file.description), width).map(line => color.textDim(line)))
