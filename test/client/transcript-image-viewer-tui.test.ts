@@ -12,6 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -19,7 +20,10 @@ import { getKeybindings, resetCapabilitiesCache, setCapabilities, visibleWidth }
 import { ImageWorkspacePanel } from '../../src/tui/components/media/image-workspace.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { ImageCache } from '../../src/client/media/image/cache.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import { convertKittyThumbnail } from '../../src/client/media/image/kitty-thumbnail.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -534,9 +538,10 @@ test('a click RIGHT of the painted image body is inert: no Viewer, no fold, no c
 })
 
 test('a protocol-unsupported raster paints a text fallback that is NOT a clickable image body', async () => {
-  // Kitty accepts PNG only and this bundle installs no transcoder, so a JPEG
-  // renders the fork's `imageFallback` TEXT row. That row is information: it
-  // must not become a Viewer target (it would open a screen from plain text).
+  // Kitty accepts PNG payloads only. JPEG/WebP now take the Image-6A derived
+  // preview path, but GIF remains on the fork's `imageFallback` TEXT row. That
+  // row is information: it must not become a Viewer target (it would open a
+  // screen from plain text).
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const { vt, app } = startApp()
@@ -545,24 +550,24 @@ test('a protocol-unsupported raster paints a text fallback that is NOT a clickab
   folder.apply([
     userMessage([
       { type: 'text', text: 'fallback' },
-      { type: 'image', attachment: { ...IMAGE_REF, attachmentId: 'att-jpeg', mediaType: 'image/jpeg', name: 'photo.jpg' } },
+      { type: 'image', attachment: { ...IMAGE_REF, attachmentId: 'att-gif', mediaType: 'image/gif', name: 'motion.gif' } },
     ], 1),
     userMessage([{ type: 'text', text: 'NEXT' }], 2),
   ])
   app.setTranscript(folder.messages())
   const view = await viewport(vt)
-  const infoRow = rowOfNth(view, '🖼️ photo.jpg · 800×100', 0)
+  const infoRow = rowOfNth(view, '🖼️ motion.gif · 800×100', 0)
   assert.ok(infoRow > 0, `the fallback info row is painted:\n${view}`)
   const nextBefore = rowOfNth(view, 'NEXT', 0)
   // The fallback TEXT row sits directly under the info row. Clicking it must do
   // nothing — previously it was registered as the image's pixel body.
   const fallbackRow = infoRow + 1
   const fallbackLine = view.split('\n')[fallbackRow - 1] ?? ''
-  assert.ok(fallbackLine.includes('Image:') || fallbackLine.includes('[image/jpeg]'),
+  assert.ok(fallbackLine.includes('Image:') || fallbackLine.includes('[image/gif]'),
     `the text fallback really is painted on that row:\n${fallbackLine}`)
   await clickCell(vt, 10, fallbackRow)
   const after = await viewport(vt)
-  assert.ok(!after.includes('Image · photo.jpg'), `a text fallback opens no Viewer:\n${after}`)
+  assert.ok(!after.includes('Image · motion.gif'), `a text fallback opens no Viewer:\n${after}`)
   assert.equal(rowOfNth(after, 'NEXT', 0), nextBefore, `the layout is unchanged:\n${after}`)
   app.setFullscreen(false)
   app.stop()
@@ -920,6 +925,272 @@ test('a hostile attachment name cannot emit terminal controls through the /view-
   assert.ok(!/\u001b\]0;/.test(emitted), 'no OSC-0 title sequence reaches the terminal')
   // ...while the benign remainder of the name is still identifiable.
   assert.ok(view.includes('evilphoto.png'), `the safe part of the name is still shown:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+// ---------------------------------------------------------------------------
+// Image-6A: real TuiApp + VirtualTerminal / AltScreen JPEG & WebP previews
+// ---------------------------------------------------------------------------
+
+const IMAGE_FIXTURES = new URL('../fixtures/images/', import.meta.url)
+function fixture(name: string): Buffer {
+  return readFileSync(new URL(name, IMAGE_FIXTURES))
+}
+
+function jpegRef(): ImageAttachmentRefLike {
+  return {
+    attachmentId: 'att-jpeg',
+    mediaType: 'image/jpeg',
+    bytes: fixture('transcript-sample.jpg').byteLength,
+    width: 120,
+    height: 80,
+    name: 'photo.jpg',
+  }
+}
+
+function webpRef(): ImageAttachmentRefLike {
+  return {
+    attachmentId: 'att-webp',
+    mediaType: 'image/webp',
+    bytes: fixture('transcript-sample.webp').byteLength,
+    width: 48,
+    height: 32,
+    name: 'graphic.webp',
+  }
+}
+
+/** Wait for an authoritative loader state, not a wall-clock window. */
+async function until(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.fail(`timed out waiting for ${label}`)
+}
+
+/** A taller real terminal: two image bodies (12 rows each) plus chrome fit. */
+async function startTallApp(loader?: ImageLoader): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
+  const started = startApp(loader)
+  started.vt.resize(100, 60)
+  await started.vt.waitForRender()
+  return started
+}
+
+/** Every Kitty image ID the TUI actually wrote with f=100 (PNG transmission). */
+function writtenKittyImageIds(vt: VirtualTerminal): string[] {
+  const ids = new Set<string>()
+  for (const chunk of vt.writes) {
+    for (const match of chunk.matchAll(/\x1b_G([^;\x1b]*);[^\x1b]*\x1b\\/g)) {
+      const header = match[1]!
+      if (!header.includes('f=100')) continue
+      const id = /(?:^|,)i=(\d+)/.exec(header)
+      if (id !== null) ids.add(id[1]!)
+    }
+  }
+  return [...ids]
+}
+
+test('JPEG and WebP paint real Kitty pixels after their derived PNGs, and body clicks open the ORIGINAL ref', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const jpeg = jpegRef()
+  const webp = webpRef()
+  const refs = new Map([[jpeg.attachmentId, jpeg], [webp.attachmentId, webp]])
+  const loader = new ImageLoader(async (ref) => ({
+    ref: {},
+    data: ref.attachmentId === jpeg.attachmentId ? fixture('transcript-sample.jpg') : fixture('transcript-sample.webp'),
+  }))
+  const { vt, app } = await startTallApp(loader)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([
+    { type: 'text', text: 'two formats' },
+    { type: 'image', attachment: jpeg },
+    { type: 'text', text: 'and' },
+    { type: 'image', attachment: webp },
+  ], 1)])
+  app.setTranscript(folder.messages())
+  await until(() => refs.size > 0
+    && loader.getKittyThumbnail(jpeg).state === 'ready'
+    && loader.getKittyThumbnail(webp).state === 'ready', 'both derived PNGs')
+  await vt.waitForRender()
+  const ids = writtenKittyImageIds(vt)
+  assert.equal(ids.length, 2, `both occurrences wrote a real PNG placement: ${JSON.stringify(ids)}`)
+  const view = await viewport(vt)
+  assert.ok(view.includes('🖼️ photo.jpg · 120×80'), `JPEG info row:\n${view}`)
+  assert.ok(view.includes('🖼️ graphic.webp · 48×32'), `WebP info row:\n${view}`)
+
+  // Click the JPEG body: the Viewer opens the ORIGINAL attachment ref.
+  const jpegRow = rowOfNth(view, '🖼️ photo.jpg · 120×80', 0)
+  await clickCell(vt, 4, jpegRow + 1)
+  const jpegViewer = await viewport(vt)
+  assert.ok(jpegViewer.includes('Image · photo.jpg'), `JPEG body click opens the Viewer:\n${jpegViewer}`)
+  assert.ok(jpegViewer.includes('120×80 · image/jpeg'), `Viewer keeps the ORIGINAL ref metadata:\n${jpegViewer}`)
+  // 6A deliberately leaves the Viewer PNG-only; this is the expected 6B boundary.
+  assert.ok(jpegViewer.includes('Preview unavailable'), `6B boundary stays explicit:\n${jpegViewer}`)
+  vt.sendInput('\x1b')
+  await settleClick(vt)
+
+  // Click the WebP body: same behavior, the original WebP ref.
+  const back = await viewport(vt)
+  const webpRow = rowOfNth(back, '🖼️ graphic.webp · 48×32', 0)
+  await clickCell(vt, 4, webpRow + 1)
+  const webpViewer = await viewport(vt)
+  assert.ok(webpViewer.includes('Image · graphic.webp'), `WebP body click opens the Viewer:\n${webpViewer}`)
+  assert.ok(webpViewer.includes('48×32 · image/webp'), `Viewer keeps the ORIGINAL WebP ref:\n${webpViewer}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a pending JPEG preview has NO pixel body and cannot open the Viewer; READY enables the same row', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const jpeg = jpegRef()
+  let releaseDerived!: () => void
+  let conversions = 0
+  const derived = await convertKittyThumbnail(fixture('transcript-sample.jpg'), 'image/jpeg')
+  const loader = new ImageLoader(
+    async () => ({ ref: {}, data: fixture('transcript-sample.jpg') }),
+    new ImageCache(),
+    () => {
+      conversions += 1
+      return new Promise(resolve => { releaseDerived = () => resolve(derived) })
+    },
+  )
+  const { vt, app } = await startTallApp(loader)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: jpeg }], 1)])
+  app.setTranscript(folder.messages())
+  await until(() => loader.get(jpeg).state === 'ready' && conversions === 1, 'the pending conversion')
+  const pending = await viewport(vt)
+  const pendingRow = rowOfNth(pending, '🖼️ photo.jpg · 120×80', 0)
+  assert.ok(pendingRow > 0, `pending info row painted:\n${pending}`)
+  assert.ok(pending.includes('…'), 'the pending marker is painted')
+  await clickCell(vt, 4, pendingRow + 1)
+  const afterPendingClick = await viewport(vt)
+  assert.ok(!afterPendingClick.includes('Image · photo.jpg'), `a pending row must not open the Viewer:\n${afterPendingClick}`)
+
+  releaseDerived()
+  await until(() => loader.getKittyThumbnail(jpeg).state === 'ready', 'the released derivative')
+  await vt.waitForRender()
+  const ready = await viewport(vt)
+  const readyRow = rowOfNth(ready, '🖼️ photo.jpg · 120×80', 0)
+  await clickCell(vt, 4, readyRow + 1)
+  const opened = await viewport(vt)
+  assert.ok(opened.includes('Image · photo.jpg'), `READY pixels are clickable:\n${opened}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a corrupt JPEG degrades to safe text with no pixel body and no Viewer', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const ref: ImageAttachmentRefLike = {
+    attachmentId: 'att-corrupt',
+    mediaType: 'image/jpeg',
+    bytes: fixture('transcript-corrupt.jpg').byteLength,
+    width: 120,
+    height: 80,
+    name: 'broken.jpg',
+  }
+  const loader = new ImageLoader(async () => ({ ref: {}, data: fixture('transcript-corrupt.jpg') }))
+  const { vt, app } = await startTallApp(loader)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
+  app.setTranscript(folder.messages())
+  await until(() => loader.getKittyThumbnail(ref).state === 'error', 'the sanitized preview failure')
+  await vt.waitForRender()
+  const view = await viewport(vt)
+  const row = rowOfNth(view, '🖼️ broken.jpg · 120×80', 0)
+  assert.ok(row > 0, `identity row stays:\n${view}`)
+  assert.ok(view.includes('Preview unavailable'), `safe failure text:\n${view}`)
+  assert.equal(writtenKittyImageIds(vt).length, 0, 'a corrupt source paints no PNG placement')
+  await clickCell(vt, 4, row + 1)
+  const afterClick = await viewport(vt)
+  assert.ok(!afterClick.includes('Image · broken.jpg'), `no fake Viewer hit:\n${afterClick}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('two occurrences of one JPEG share one read and one conversion, with two distinct Kitty placements', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const jpeg = jpegRef()
+  let reads = 0
+  let conversions = 0
+  const loader = new ImageLoader(
+    async () => { reads += 1; return { ref: {}, data: fixture('transcript-sample.jpg') } },
+    new ImageCache(),
+    async (input, mediaType) => {
+      conversions += 1
+      return convertKittyThumbnail(input, mediaType)
+    },
+  )
+  const { vt, app } = await startTallApp(loader)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([
+    { type: 'image', attachment: jpeg },
+    { type: 'text', text: 'duplicate' },
+    { type: 'image', attachment: jpeg },
+  ], 1)])
+  app.setTranscript(folder.messages())
+  await until(() => loader.getKittyThumbnail(jpeg).state === 'ready', 'the shared derivative')
+  await vt.waitForRender()
+  assert.equal(reads, 1, 'the same (scope, id) reads once')
+  assert.equal(conversions, 1, 'the same (scope, id) converts once')
+  assert.equal(writtenKittyImageIds(vt).length, 2, 'each occurrence owns its own Kitty image id')
+  const view = await viewport(vt)
+  assert.equal(rowOfNth(view, '🖼️ photo.jpg · 120×80', 0) > 0, true)
+  assert.equal(rowOfNth(view, '🖼️ photo.jpg · 120×80', 1) > 0, true)
+  const firstRow = rowOfNth(view, '🖼️ photo.jpg · 120×80', 0)
+  const secondRow = rowOfNth(view, '🖼️ photo.jpg · 120×80', 1)
+  await clickCell(vt, 4, firstRow + 1)
+  const firstViewer = await viewport(vt)
+  assert.ok(firstViewer.includes('Image · photo.jpg'), `first occurrence opens:\n${firstViewer}`)
+  vt.sendInput('\x1b')
+  await settleClick(vt)
+  await clickCell(vt, 4, secondRow + 1)
+  const secondViewer = await viewport(vt)
+  assert.ok(secondViewer.includes('Image · photo.jpg'), `second occurrence opens:\n${secondViewer}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('invalidating a running JPEG conversion never paints its late derivative', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const jpeg = jpegRef()
+  let releaseDerived!: () => void
+  let conversions = 0
+  const derived = await convertKittyThumbnail(fixture('transcript-sample.jpg'), 'image/jpeg')
+  const loader = new ImageLoader(
+    async () => ({ ref: {}, data: fixture('transcript-sample.jpg') }),
+    new ImageCache(),
+    () => {
+      conversions += 1
+      return new Promise(resolve => { releaseDerived = () => resolve(derived) })
+    },
+  )
+  const { vt, app } = await startTallApp(loader)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: jpeg }], 1)])
+  app.setTranscript(folder.messages())
+  await until(() => loader.get(jpeg).state === 'ready' && conversions === 1, 'the running conversion')
+  await viewport(vt)
+  const writesBefore = writtenKittyImageIds(vt).length
+  loader.invalidate(jpeg.attachmentId)
+  releaseDerived()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  await vt.waitForRender()
+  assert.equal(loader.getKittyThumbnail(jpeg).state, 'idle', 'the stale derivative is discarded')
+  assert.equal(writtenKittyImageIds(vt).length, writesBefore, 'the stale settle paints no new placement')
+  const view = await viewport(vt)
+  assert.ok(view.includes('🖼️ photo.jpg · 120×80'), 'the identity row survives')
   app.setFullscreen(false)
   app.stop()
 })

@@ -926,6 +926,26 @@ independent occurrences with independent fold state.
   empty payload, an unsupported MIME, or a protocol this surface does not
   support), each with the real name/dimensions/media type/bytes. The viewer is
   read-only: no zoom, pan, export, edit, OCR, transcoding or second byte cache.
+- **Kitty JPEG/WebP thumbnails derive a bounded PNG.** Kitty places PNG
+  payloads only, so a READY JPEG/WebP source (never a GIF) is projected through
+  ONE Client-local asynchronous PNG derivative: first page only, EXIF
+  orientation applied, fitted inside 768×768 without enlargement, at most
+  20 MiB of source and 4 MiB of derived PNG, decoded with a 25,000,000-pixel
+  ceiling. The derivative is a read-only projection cached inside the SAME
+  `ImageLoader` presentation scope that authorized the source read: 16 READY
+  entries / 32 MiB of retained base64 per scope, at most two conversions per
+  loader, a 32-item waiting queue (a 33rd request degrades to a bounded busy
+  message), and the same per-id/global invalidation epochs retire the cache,
+  failures and queued/running jobs. Conversion never runs synchronously in
+  `render()`. The info row and the viewer target always keep the ORIGINAL ref
+  (name, dimensions, media type, bytes); only the painted body consumes the
+  derived PNG and its derived dimensions. Idle/loading/failed preview states
+  paint informational rows only (a bounded `Preview unavailable`), a collapsed
+  occurrence starts no conversion, and a body hit exists only when that frame
+  actually emitted the Kitty placement. PNG, iTerm2 (original OSC 1337) and GIF
+  (text fallback) keep their existing paths. The Viewer does NOT gain non-PNG
+  pixels: a JPEG/WebP body click opens the same attachment and still shows
+  `Preview unavailable`.
 - **Pickers are a mounted-window snapshot.** `/view-image` candidates come from
   the SAME mounted transcript batch (message order then render order) and only
   from occurrences the Host actually rendered. `/view-image` is a PiTui-local,
@@ -939,11 +959,15 @@ independent occurrences with independent fold state.
   capability and its cursor-up framing is outside the fork's ANSI width layer,
   so the iTerm2 workspace shows the metadata plus `Preview unavailable`; native
   iTerm2 workspace pixels are deferred to separate renderer/protocol work.
-  Transcript thumbnails keep their existing per-surface capability behavior.
+  Transcript thumbnails keep their per-surface capability behavior; on Kitty
+  their JPEG/WebP bodies use the bounded derivative above, while the Viewer
+  stays PNG-only.
 
 Authority: `TuiApp` (occurrence projection, last-painted hit classifier, leased
 image workspace), `ImageThumbnail` (info/control/body geometry),
-`ImageViewerPanel` (read-only fitted render), `ImageLoader` (scoped reads),
+`ImageViewerPanel` (read-only fitted render), `ImageLoader` (scoped reads and
+bounded preview derivatives), `src/client/media/image/kitty-thumbnail.ts` (the
+only native JPEG/WebP → PNG decoder),
 `src/tui/commands/artifacts.ts` + `src/domain/command/policy.ts` (`/view-image`).
 
 Must-not: derive occurrences from message text, filenames or attachment ids
@@ -953,6 +977,10 @@ rebuild or scroll the transcript to open the viewer; paint the viewer as a
 horizontal overlay over image base lines; add hover/zoom/export affordances.
 
 Proof: `test/client/image-collapse.test.ts`,
+`test/client/kitty-thumbnail.test.ts`,
+`test/client/image-loader.test.ts`,
+`test/client/image-thumbnail.test.ts`,
+`test/client/image-transcript.test.ts`,
 `test/client/transcript-image-viewer.test.ts`,
 `test/client/transcript-image-viewer-tui.test.ts`,
 `test/app/view-image-command.test.ts`,

@@ -260,3 +260,53 @@ test('a rebuild (resize) keeps the thumbnail loader subscription alive (non-owni
   assert.ok(view.includes('🖼️ shot.png · 800×600'), 'the resolved thumbnail row must still render after the settle')
   app.stop()
 })
+// ---------------------------------------------------------------------------
+// Image-6A: the source message stays the authority (refs, MIME, order, bytes)
+// ---------------------------------------------------------------------------
+
+test('a JPEG/WebP message keeps its ORIGINAL refs, block order and model-facing content', () => {
+  // The preview derivation is a DISPLAY projection: the folded message must
+  // keep the original MIME types, attachment ids, byte counts and dimensions,
+  // and the flat marker order must still name both source images.
+  const jpeg: ImageAttachmentRefLike = {
+    attachmentId: 'att-jpeg',
+    mediaType: 'image/jpeg',
+    bytes: 968,
+    width: 120,
+    height: 80,
+    name: 'photo.jpg',
+  }
+  const webp: ImageAttachmentRefLike = {
+    attachmentId: 'att-webp',
+    mediaType: 'image/webp',
+    bytes: 138,
+    width: 48,
+    height: 32,
+    name: 'graphic.webp',
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([
+    { type: 'text', text: 'compare' },
+    { type: 'image', attachment: jpeg },
+    { type: 'text', text: 'with' },
+    { type: 'image', attachment: webp },
+  ])])
+  const message = folder.messages()[0]!
+  assert.equal(message.kind, 'user')
+  if (message.kind !== 'user') return
+  assert.deepEqual(message.content?.map(block => block.type), ['text', 'image', 'text', 'image'])
+  const images = message.content?.filter(block => block.type === 'image') ?? []
+  assert.equal(images[0]?.type === 'image' && images[0].attachment.mediaType, 'image/jpeg')
+  assert.equal(images[0]?.type === 'image' && images[0].attachment.attachmentId, 'att-jpeg')
+  assert.equal(images[0]?.type === 'image' && images[0].attachment.bytes, 968)
+  assert.equal(images[0]?.type === 'image' && images[0].attachment.width, 120)
+  assert.equal(images[0]?.type === 'image' && images[0].attachment.height, 80)
+  assert.equal(images[0]?.type === 'image' && images[0].attachment.name, 'photo.jpg')
+  assert.equal(images[1]?.type === 'image' && images[1].attachment.mediaType, 'image/webp')
+  assert.equal(images[1]?.type === 'image' && images[1].attachment.attachmentId, 'att-webp')
+  assert.equal(images[1]?.type === 'image' && images[1].attachment.bytes, 138)
+  assert.equal(images[1]?.type === 'image' && images[1].attachment.width, 48)
+  assert.equal(images[1]?.type === 'image' && images[1].attachment.height, 32)
+  assert.equal(images[1]?.type === 'image' && images[1].attachment.name, 'graphic.webp')
+  assert.equal(message.text, 'compare 🖼️ photo.jpg with 🖼️ graphic.webp')
+})

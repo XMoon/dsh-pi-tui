@@ -8,10 +8,41 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ImageCache } from '../../src/client/media/image/cache.ts'
 import { bytesToBase64, ImageLoader } from '../../src/client/media/image/loader.ts'
+import {
+  MAX_KITTY_THUMBNAIL_SOURCE_BYTES,
+  KittyThumbnailOutputTooLargeError,
+  type KittyThumbnailConverter,
+  type KittyThumbnailPng,
+} from '../../src/client/media/image/kitty-thumbnail.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 
 function refOf(id: string, bytes = 3): ImageAttachmentRefLike {
   return { attachmentId: id, mediaType: 'image/png', bytes, width: 1, height: 1, name: `${id}.png` }
+}
+
+/** A JPEG/WebP ref (the only media types the preview scheduler accepts). */
+function previewRefOf(
+  id: string,
+  mediaType: 'image/jpeg' | 'image/webp' = 'image/jpeg',
+  bytes = 3,
+): ImageAttachmentRefLike {
+  return { attachmentId: id, mediaType, bytes, width: 40, height: 30, name: `${id}.jpg` }
+}
+
+function derived(width = 40, height = 30): KittyThumbnailPng {
+  return { base64: 'iVBORw0KGgo=', width, height, byteLength: 8 }
+}
+
+/** Flush the loader's microtask/timer-adjacent settles deterministically. */
+function flush(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
+}
+
+function previewLoader(
+  convert: KittyThumbnailConverter,
+  cache = new ImageCache(64, 64 * 1024 * 1024),
+): ImageLoader {
+  return new ImageLoader(async () => ({ ref: {}, data: new Uint8Array([1, 2, 3]) }), cache, convert)
 }
 
 test('the cache stores ready entries and reports size/bytes', () => {
@@ -525,4 +556,263 @@ test('object-scope: two scopes never share bytes, failures or subscribers (both 
   assert.equal(wakesB, 1, "B's own settle wakes B")
   offA()
   offB()
+})
+
+// ---------------------------------------------------------------------------
+// Image-6A: per-scope preview derivatives (Kitty JPEG/WebP → PNG)
+// ---------------------------------------------------------------------------
+
+test('preview scheduling waits for a READY same-scope source and dedupes requests', async () => {
+  let calls = 0
+  let release!: () => void
+  const convert: KittyThumbnailConverter = () => {
+    calls += 1
+    return new Promise<KittyThumbnailPng>(resolve => { release = () => resolve(derived()) })
+  }
+  const loader = previewLoader(convert)
+  const ref = previewRefOf('preview-dedupe')
+  // No raw source yet: the preview must not start (and must not re-read).
+  loader.loadKittyThumbnail(ref)
+  assert.equal(loader.getKittyThumbnail(ref).state, 'idle')
+  assert.equal(calls, 0)
+  let notifies = 0
+  loader.subscribe(ref.attachmentId, () => { notifies += 1 })
+  loader.load(ref)
+  await flush()
+  // Two occurrence renders request the same (scope, id): ONE conversion.
+  loader.loadKittyThumbnail(ref)
+  loader.loadKittyThumbnail(ref)
+  assert.equal(loader.getKittyThumbnail(ref).state, 'loading')
+  assert.equal(calls, 1)
+  release()
+  await flush()
+  const state = loader.getKittyThumbnail(ref)
+  assert.equal(state.state, 'ready')
+  if (state.state === 'ready') {
+    assert.equal(state.width, 40)
+    assert.equal(state.base64, derived().base64)
+  }
+  assert.equal(calls, 1, 'a READY (and loading) preview never converts again')
+  assert.equal(notifies, 2, 'raw settle then preview settle, one wake each')
+})
+
+test('a converter failure records a bounded decode-failed state and keeps the native error', async () => {
+  const native = new Error('libvips exploded while decoding')
+  const loader = previewLoader(async () => { throw native })
+  const ref = previewRefOf('preview-fail')
+  loader.load(ref)
+  await flush()
+  loader.loadKittyThumbnail(ref)
+  await flush()
+  const state = loader.getKittyThumbnail(ref)
+  assert.equal(state.state, 'error')
+  if (state.state === 'error') {
+    assert.equal(state.reason, 'decode-failed')
+    assert.equal(state.error, native, 'the real error stays diagnosable inside the loader state')
+  }
+  assert.equal(loader.isReady(ref), true, 'the source attachment read is unaffected by a preview failure')
+})
+
+test('an over-budget derived PNG is classified output-too-large in both forms', async () => {
+  // 1) the real decoder's typed failure
+  const typed = previewLoader(async () => { throw new KittyThumbnailOutputTooLargeError(5 * 1024 * 1024) })
+  const a = previewRefOf('preview-output-typed')
+  typed.load(a)
+  await flush()
+  typed.loadKittyThumbnail(a)
+  await flush()
+  const typedState = typed.getKittyThumbnail(a)
+  assert.equal(typedState.state, 'error')
+  if (typedState.state === 'error') assert.equal(typedState.reason, 'output-too-large')
+
+  // 2) an injected converter that RETURNS an oversized PNG (cache-admission seam)
+  const injected = previewLoader(async () => ({
+    base64: 'AAAA',
+    width: 40,
+    height: 30,
+    byteLength: 4 * 1024 * 1024 + 1,
+  }))
+  const b = previewRefOf('preview-output-returned')
+  injected.load(b)
+  await flush()
+  injected.loadKittyThumbnail(b)
+  await flush()
+  const injectedState = injected.getKittyThumbnail(b)
+  assert.equal(injectedState.state, 'error')
+  if (injectedState.state === 'error') assert.equal(injectedState.reason, 'output-too-large')
+  assert.equal(injected.kittyThumbnailCacheSize(), 0, 'an over-budget derivative is never cached READY')
+})
+
+test('the REAL source byte length is checked after READY (not only the ref metadata)', async () => {
+  let calls = 0
+  const bytes = new Uint8Array(MAX_KITTY_THUMBNAIL_SOURCE_BYTES + 1)
+  const loader = new ImageLoader(
+    async () => ({ ref: {}, data: bytes }),
+    new ImageCache(),
+    async () => { calls += 1; return derived() },
+  )
+  const ref = previewRefOf('preview-real-bytes', 'image/jpeg', 1) // ref.bytes lies low on purpose
+  loader.load(ref)
+  await flush()
+  loader.loadKittyThumbnail(ref)
+  await flush()
+  const state = loader.getKittyThumbnail(ref)
+  assert.equal(state.state, 'error')
+  if (state.state === 'error') assert.equal(state.reason, 'input-too-large')
+  assert.equal(calls, 0, 'an over-budget source never reaches the decoder')
+})
+
+test('at most two conversions run and the 33rd queued request reports busy', async () => {
+  const pending: Array<() => void> = []
+  let active = 0
+  let maxActive = 0
+  const convert: KittyThumbnailConverter = () => new Promise<KittyThumbnailPng>(resolve => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    pending.push(() => { active -= 1; resolve(derived()) })
+  })
+  const loader = previewLoader(convert)
+  const refs = Array.from({ length: 35 }, (_value, index) => previewRefOf(`preview-queue-${index}`))
+  for (const ref of refs) loader.load(ref)
+  await flush()
+  assert.equal(loader.cacheSize(), 35, 'all sources are READY before any preview is requested')
+  for (const ref of refs) loader.loadKittyThumbnail(ref)
+  assert.equal(maxActive, 2, 'no more than two sharp jobs run at once')
+  // 2 running + 32 queued were admitted; the 35th request is over capacity.
+  const busy = loader.getKittyThumbnail(refs[34]!)
+  assert.equal(busy.state, 'error')
+  if (busy.state === 'error') assert.equal(busy.reason, 'busy')
+  assert.equal(loader.getKittyThumbnail(refs[33]!).state, 'loading',
+    'the last admitted queue slot still waits instead of failing')
+
+  while (pending.length > 0) {
+    pending.shift()!()
+    await flush()
+  }
+  await flush()
+  // The admitted burst all converted, but the READY cache keeps its own 16-item
+  // LRU bound; the rest were evicted (they still converted exactly once).
+  assert.equal(loader.kittyThumbnailCacheSize(), 16, 'the burst settles within the READY cache bound')
+  assert.equal(maxActive, 2, 'the whole burst never exceeded the concurrency cap')
+})
+
+test('same attachmentId in different presentation scopes derives independently', async () => {
+  const inputs: string[] = []
+  const convert: KittyThumbnailConverter = async (input) => {
+    inputs.push(String(input[0]))
+    return derived()
+  }
+  const loader = new ImageLoader(
+    async (_ref, scope) => ({ ref: {}, data: new Uint8Array([(scope as { key: string }).key === 'A' ? 7 : 9]) }),
+    new ImageCache(),
+    convert,
+  )
+  const ref = previewRefOf('preview-scopes')
+  const scopeA = { key: 'A' }
+  const scopeB = { key: 'B' }
+  loader.load(ref, scopeA)
+  loader.load(ref, scopeB)
+  await flush()
+  loader.loadKittyThumbnail(ref, scopeA)
+  loader.loadKittyThumbnail(ref, scopeB)
+  await flush()
+  assert.equal(inputs.length, 2, 'each scope projects its OWN authorized bytes')
+  assert.deepEqual(inputs, ['7', '9'])
+  assert.equal(loader.getKittyThumbnail(ref, scopeA).state, 'ready')
+  assert.equal(loader.getKittyThumbnail(ref, scopeB).state, 'ready')
+})
+
+test('invalidate(id) retires a running conversion but allows a fresh one', async () => {
+  const releases: Array<() => void> = []
+  let calls = 0
+  const convert: KittyThumbnailConverter = () => {
+    calls += 1
+    return new Promise<KittyThumbnailPng>(resolve => { releases.push(() => resolve(derived(10, 10))) })
+  }
+  const loader = previewLoader(convert)
+  const ref = previewRefOf('preview-invalidate')
+  loader.load(ref)
+  await flush()
+  let notifies = 0
+  loader.subscribe(ref.attachmentId, () => { notifies += 1 })
+  loader.loadKittyThumbnail(ref)
+  await flush()
+  assert.equal(loader.getKittyThumbnail(ref).state, 'loading')
+  loader.invalidate(ref.attachmentId)
+  assert.equal(loader.getKittyThumbnail(ref).state, 'idle', 'invalidate drops the pending preview slot')
+  releases.shift()!()
+  await flush()
+  assert.equal(loader.getKittyThumbnail(ref).state, 'idle', 'the stale settle never publishes')
+  assert.equal(notifies, 0, 'invalidate is not a broadcast and the stale settle never wakes')
+  // The same attachment may be read and converted again in the same scope.
+  loader.load(ref)
+  await flush()
+  loader.loadKittyThumbnail(ref)
+  await flush()
+  assert.equal(loader.getKittyThumbnail(ref).state, 'loading')
+  releases.shift()!()
+  await flush()
+  assert.equal(loader.getKittyThumbnail(ref).state, 'ready')
+  assert.equal(calls, 2)
+  assert.equal(notifies, 2, 'the fresh raw settle then the fresh preview settle wake exactly once each')
+})
+
+test('clear() drops queued/running preview state and its settle never wakes a component', async () => {
+  let release!: () => void
+  const loader = previewLoader(() => new Promise<KittyThumbnailPng>(resolve => {
+    release = () => resolve(derived())
+  }))
+  const ref = previewRefOf('preview-clear')
+  loader.load(ref)
+  await flush()
+  loader.loadKittyThumbnail(ref)
+  await flush()
+  assert.equal(loader.getKittyThumbnail(ref).state, 'loading')
+  let notifies = 0
+  loader.subscribe(ref.attachmentId, () => { notifies += 1 })
+  loader.clear()
+  assert.equal(notifies, 1, 'clear broadcasts the existing global invalidation')
+  assert.equal(loader.getKittyThumbnail(ref).state, 'idle')
+  release()
+  await flush()
+  assert.equal(loader.getKittyThumbnail(ref).state, 'idle', 'a pre-clear conversion can never publish')
+  assert.equal(notifies, 1, 'the stale settle adds no wake')
+  loader.load(ref)
+  await flush()
+  loader.loadKittyThumbnail(ref)
+  await flush()
+  release()
+  await flush()
+  assert.equal(loader.getKittyThumbnail(ref).state, 'ready', 'a post-clear request derives normally')
+})
+
+test('the preview LRU keeps at most 16 READY entries and a revisit re-derives', async () => {
+  let calls = 0
+  const loader = previewLoader(async () => { calls += 1; return derived() })
+  const refs = Array.from({ length: 17 }, (_value, index) => previewRefOf(`preview-lru-${index}`))
+  for (const ref of refs) loader.load(ref)
+  await flush()
+  for (const ref of refs) loader.loadKittyThumbnail(ref)
+  await flush()
+  assert.equal(calls, 17)
+  assert.equal(loader.kittyThumbnailCacheSize(), 16, 'the 17th READY entry evicts the oldest')
+  assert.equal(loader.getKittyThumbnail(refs[0]!).state, 'idle', 'the oldest derivative was evicted')
+  loader.loadKittyThumbnail(refs[0]!)
+  await flush()
+  assert.equal(calls, 18, 'a revisit re-derives once')
+  assert.equal(loader.getKittyThumbnail(refs[0]!).state, 'ready')
+})
+
+test('the preview cache enforces its 32 MiB base64 byte budget', async () => {
+  const chunk = 'A'.repeat(3 * 1024 * 1024)
+  const loader = previewLoader(async () => ({ base64: chunk, width: 10, height: 10, byteLength: 10 }))
+  const refs = Array.from({ length: 11 }, (_value, index) => previewRefOf(`preview-bytes-${index}`))
+  for (const ref of refs) loader.load(ref)
+  await flush()
+  for (const ref of refs) loader.loadKittyThumbnail(ref)
+  await flush()
+  assert.equal(loader.kittyThumbnailCacheSize(), 10, '33 MiB of base64 evicts down to the 32 MiB budget')
+  assert.ok(loader.kittyThumbnailCacheBytes() <= 32 * 1024 * 1024)
+  assert.equal(loader.getKittyThumbnail(refs[0]!).state, 'idle')
+  assert.equal(loader.getKittyThumbnail(refs[10]!).state, 'ready')
 })
