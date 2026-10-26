@@ -129,6 +129,11 @@ export class ImageThumbnail implements Component {
   private readonly fullscreenCollapseControl: (() => boolean) | undefined
   private unsubscribe: (() => void) | undefined
   private instance: Image | undefined
+  /** Which source/protocol the local `Image` was built for. A terminal
+   * capability flip (Kitty ↔ iTerm2) or a raw/derived source switch must
+   * rebuild it; reusing an instance across those renders stale cached lines
+   * from the WRONG protocol (the fork caches by width, not by capability). */
+  private instanceKind: 'raw-kitty' | 'raw-iterm2' | 'preview-kitty' | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
   /** The control span the LAST painted info row actually carried, keyed by
@@ -285,6 +290,7 @@ export class ImageThumbnail implements Component {
 
   invalidate(): void {
     this.instance = undefined
+    this.instanceKind = undefined
     this.cachedLines = undefined
     this.cachedKey = undefined
     this.paintedControl = undefined
@@ -309,6 +315,18 @@ export class ImageThumbnail implements Component {
     return lines
   }
 
+  /**
+   * One informational row with NO pixel body. It also drops the local
+   * `Image`: a collapsed / narrow / capability-lost / not-ready occurrence
+   * must not keep a derived-PNG payload alive after the loader's LRU dropped
+   * it, and the next pixel render rebuilds from the CURRENT loader state.
+   */
+  private infoOnly(width: number, text: string): string[] {
+    this.instance = undefined
+    this.instanceKind = undefined
+    return [this.infoRow(width, text)]
+  }
+
   private renderLines(width: number): string[] {
     // Every non-pixel branch below returns an info-only row; clearing here
     // keeps a previous render's body from surviving a state change that reuses
@@ -316,14 +334,14 @@ export class ImageThumbnail implements Component {
     this.paintedBody = undefined
     // Narrow terminals fall back BEFORE any load (round-2 finding 4).
     if (width < NARROW_WIDTH_THRESHOLD) {
-      return [this.infoRow(width, this.infoLine())]
+      return this.infoOnly(width, this.infoLine())
     }
     // Inline graphics only when the terminal reports them; tmux and other
     // unsupported terminals keep the text fallback AND never trigger a
     // pointless read of the full bytes (§17.3, round-2 finding 4).
     const protocol = getCapabilities().images ?? null
     if (protocol === null) {
-      return [this.infoRow(width, this.infoLine())]
+      return this.infoOnly(width, this.infoLine())
     }
     const previewCandidate = protocol === 'kitty'
       && (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp')
@@ -331,19 +349,19 @@ export class ImageThumbnail implements Component {
     // an over-budget JPEG/WebP can never produce a preview, so no full read is
     // spent on it. The loader re-checks the REAL byte length before decoding.
     if (previewCandidate && this.ref.bytes > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
-      return [this.infoRow(width, `${this.infoLine()} · Preview unavailable`)]
+      return this.infoOnly(width, `${this.infoLine()} · Preview unavailable`)
     }
     const state = this.loader.get(this.ref, this.scope)
     if (state.state === 'idle') {
       // Fire the read; the settle notification invalidates this component.
       this.loader.load(this.ref, this.scope)
-      return [this.infoRow(width, this.infoLine())]
+      return this.infoOnly(width, this.infoLine())
     }
     if (state.state === 'loading') {
-      return [this.infoRow(width, `${this.infoLine()} …`)]
+      return this.infoOnly(width, `${this.infoLine()} …`)
     }
     if (state.state === 'error') {
-      return [this.infoRow(width, `${this.infoLine()} — ${state.error.message}`)]
+      return this.infoOnly(width, `${this.infoLine()} — ${state.error.message}`)
     }
     // Ready: the info line stays constant — only the image rows collapse
     // (the fullscreen click toggle). A collapsed image needs no placement;
@@ -351,10 +369,11 @@ export class ImageThumbnail implements Component {
     // the previous frame automatically. A collapsed occurrence never starts
     // the Image-6A conversion either.
     if (this.collapsed()) {
-      return [this.infoRow(width, this.infoLine())]
+      return this.infoOnly(width, this.infoLine())
     }
     if (previewCandidate) return this.renderKittyPreview(width)
-    if (this.instance === undefined) {
+    const instanceKind = protocol === 'kitty' ? 'raw-kitty' : 'raw-iterm2'
+    if (this.instance === undefined || this.instanceKind !== instanceKind) {
       this.instance = new Image(
         state.base64,
         this.ref.mediaType,
@@ -366,6 +385,7 @@ export class ImageThumbnail implements Component {
         },
         { widthPx: this.ref.width, heightPx: this.ref.height },
       )
+      this.instanceKind = instanceKind
     }
     const body = this.instance.render(width)
     // Whether those rows are REAL PIXELS is a property of the surface: a raster
@@ -398,18 +418,18 @@ export class ImageThumbnail implements Component {
     const preview = this.loader.getKittyThumbnail(this.ref, this.scope)
     if (preview.state === 'idle') {
       this.loader.loadKittyThumbnail(this.ref, this.scope)
-      return [this.infoRow(width, `${this.infoLine()} …`)]
+      return this.infoOnly(width, `${this.infoLine()} …`)
     }
     if (preview.state === 'loading') {
-      return [this.infoRow(width, `${this.infoLine()} …`)]
+      return this.infoOnly(width, `${this.infoLine()} …`)
     }
     if (preview.state === 'error') {
       // Bounded, sanitized reason only: the captured native Error stays inside
       // the loader and never reaches the terminal.
       const reason = preview.reason === 'busy' ? 'Preview unavailable (busy)' : 'Preview unavailable'
-      return [this.infoRow(width, `${this.infoLine()} · ${reason}`)]
+      return this.infoOnly(width, `${this.infoLine()} · ${reason}`)
     }
-    if (this.instance === undefined) {
+    if (this.instance === undefined || this.instanceKind !== 'preview-kitty') {
       this.instance = new Image(
         preview.base64,
         'image/png',
@@ -421,6 +441,7 @@ export class ImageThumbnail implements Component {
         },
         { widthPx: preview.width, heightPx: preview.height },
       )
+      this.instanceKind = 'preview-kitty'
     }
     const body = this.instance.render(width)
     // The derived body is a REAL Kitty placement only when this render emitted

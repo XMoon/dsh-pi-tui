@@ -569,3 +569,127 @@ test('a failed RAW read on a JPEG keeps the read error and never starts a decode
   assert.equal(loader.getKittyThumbnail(ref).state, 'idle', 'no preview state is fabricated for a failed read')
   assert.equal(component.paintedImageBody(80), undefined)
 })
+
+test('a capability flip rebuilds the body for the NEW protocol (derived PNG vs original MIME)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = imageLoaderWith(SAMPLE_JPEG)
+  loader.load(JPEG_REF)
+  await until(() => loader.get(JPEG_REF).state === 'ready', 'the raw JPEG')
+  const component = new ImageThumbnail(JPEG_REF, loader, THEME, () => {})
+  component.render(80)
+  await until(() => loader.getKittyThumbnail(JPEG_REF).state === 'ready', 'the derived PNG')
+  const kitty = component.render(80)
+  assert.ok(kitty.join('\n').includes('\x1b_G'), 'Kitty paints the derived PNG')
+  assert.ok(!kitty.join('\n').includes('\x1b]1337;File='), 'no iTerm2 sequence while Kitty')
+  // Flip to iTerm2: the SAME component must render the ORIGINAL MIME image,
+  // not the cached derived-PNG placement.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  const iterm2 = component.render(80)
+  assert.ok(iterm2.join('\n').includes('\x1b]1337;File='), 'iTerm2 paints the original image')
+  assert.ok(!iterm2.join('\n').includes('\x1b_G'), 'the derived Kitty placement is gone')
+  assert.ok(component.paintedImageBody(80) !== undefined, 'iTerm2 registers its real OSC footprint')
+  // And back: Kitty must repaint the DERIVED PNG, not the fork JPEG fallback.
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const again = component.render(80)
+  const body = kittyBody(again)
+  assert.ok(body !== undefined, 'Kitty repaints a real APC')
+  assert.ok(body.header.includes('f=100'), 'the repaint is the derived PNG payload')
+  assert.deepEqual(pngDimensions(body.png), { width: 120, height: 80 })
+  assert.ok(component.paintedImageBody(80) !== undefined)
+})
+
+test('a collapsed preview releases its local payload: re-expanding after eviction re-derives', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const first = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
+  const second = await convertKittyThumbnail(ORIENTED_JPEG, 'image/jpeg')
+  let conversions = 0
+  const loader = imageLoaderWith(SAMPLE_JPEG, async () => {
+    conversions += 1
+    return conversions === 1 ? first : second
+  })
+  const ref = { ...JPEG_REF, attachmentId: 'att-release', name: 'release.jpg' }
+  loader.load(ref)
+  await until(() => loader.get(ref).state === 'ready', 'the raw JPEG')
+  let collapsed = false
+  const component = new ImageThumbnail(ref, loader, THEME, () => {}, () => collapsed)
+  component.render(80)
+  await until(() => loader.getKittyThumbnail(ref).state === 'ready', 'the first derivative')
+  const expanded = component.render(80)
+  const firstBody = kittyBody(expanded)
+  assert.ok(firstBody !== undefined)
+  assert.deepEqual(pngDimensions(firstBody.png), { width: 120, height: 80 })
+  // Collapsing returns an info-only frame: the local Image (and its base64
+  // reference) is dropped, not just hidden.
+  collapsed = true
+  const folded = component.render(80)
+  assert.equal(folded.length, 1)
+  assert.ok(!folded.join('\n').includes('\x1b_G'))
+  assert.equal(component.paintedImageBody(80), undefined)
+  // A trim/invalidation drops the raw and derived cache entries. If the
+  // collapsed occurrence had retained its Image, re-expanding would paint the
+  // OLD payload; the new derivative deliberately has different dimensions.
+  loader.invalidate(ref.attachmentId)
+  collapsed = false
+  component.render(80)
+  await until(() => loader.get(ref).state === 'ready', 'the fresh raw read')
+  component.render(80)
+  await until(() => loader.getKittyThumbnail(ref).state === 'ready', 'the second derivative')
+  const again = component.render(80)
+  const secondBody = kittyBody(again)
+  assert.ok(secondBody !== undefined)
+  assert.deepEqual(pngDimensions(secondBody.png), { width: 30, height: 60 },
+    'the rebuilt body comes from the NEW derivative, not a retained payload')
+  assert.equal(conversions, 2)
+})
+
+test('narrow Kitty and unknown/tmux never READ or CONVERT a real JPEG/WebP', async () => {
+  for (const images of ['kitty', null] as const) {
+    resetCapabilitiesCache()
+    setCapabilities({ images, trueColor: true, hyperlinks: false })
+    let reads = 0
+    let conversions = 0
+    const loader = new ImageLoader(
+      async () => { reads += 1; return { ref: {}, data: SAMPLE_JPEG } },
+      new ImageCache(),
+      async () => { conversions += 1; return { base64: '', width: 1, height: 1, byteLength: 0 } },
+    )
+    const width = images === 'kitty' ? NARROW_WIDTH_THRESHOLD - 1 : 80
+    for (const ref of [JPEG_REF, WEBP_REF]) {
+      const component = new ImageThumbnail(ref, loader, THEME, () => {})
+      const lines = component.render(width)
+      assert.equal(lines.length, 1)
+      assert.ok(lines[0]!.includes('🖼️ '), `info-only row for ${ref.mediaType} at ${String(images)}: ${lines[0]}`)
+      assert.ok(!lines.join('\n').includes('\x1b_G'))
+      assert.equal(component.paintedImageBody(width), undefined)
+    }
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(reads, 0, `no attachment read for ${refsLabel(images)}`)
+    assert.equal(conversions, 0, `no conversion for ${refsLabel(images)}`)
+  }
+})
+
+function refsLabel(images: 'kitty' | null): string {
+  return images === 'kitty' ? 'narrow Kitty' : 'unknown/tmux'
+}
+
+test('iTerm2 WebP keeps the original OSC 1337 payload and never converts', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  let conversions = 0
+  const loader = imageLoaderWith(SAMPLE_WEBP, async (input, mediaType) => {
+    conversions += 1
+    return convertKittyThumbnail(input, mediaType)
+  })
+  loader.load(WEBP_REF)
+  await until(() => loader.get(WEBP_REF).state === 'ready', 'the raw WebP read')
+  const component = new ImageThumbnail(WEBP_REF, loader, THEME, () => {})
+  const lines = component.render(80)
+  assert.ok(lines.join('\n').includes('\x1b]1337;File='), 'iTerm2 carries the ORIGINAL WebP MIME image')
+  assert.ok(!lines.join('\n').includes('\x1b_G'), 'no Kitty conversion payload')
+  assert.equal(conversions, 0, 'iTerm2 WebP never schedules a Kitty conversion')
+  assert.ok(component.paintedImageBody(80) !== undefined, 'the OSC footprint is a real pixel body')
+})

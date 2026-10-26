@@ -818,3 +818,27 @@ test('the preview cache enforces its 32 MiB base64 byte budget', async () => {
   assert.equal(loader.getKittyThumbnail(refs[0]!).state, 'idle')
   assert.equal(loader.getKittyThumbnail(refs[10]!).state, 'ready')
 })
+
+test('clear() drops QUEUED conversions: a disposed surface starts no new decoder work', async () => {
+  const pending: Array<() => void> = []
+  let started = 0
+  const loader = previewLoader(() => new Promise<KittyThumbnailPng>(resolve => {
+    started += 1
+    pending.push(() => resolve(derived()))
+  }))
+  const refs = Array.from({ length: 3 }, (_value, index) => previewRefOf(`preview-dispose-${index}`))
+  for (const ref of refs) loader.load(ref)
+  await flush()
+  for (const ref of refs) loader.loadKittyThumbnail(ref)
+  await flush()
+  assert.equal(started, 2, 'two conversions are running')
+  assert.equal(loader.getKittyThumbnail(refs[2]!).state, 'loading', 'the third waits in the queue')
+  loader.clear()
+  pending.shift()!()
+  await flush()
+  pending.shift()!()
+  await flush()
+  assert.equal(started, 2, 'the queued conversion never starts after clear()')
+  assert.equal(loader.getKittyThumbnail(refs[2]!).state, 'idle')
+  assert.equal(loader.kittyThumbnailCacheSize(), 0)
+})
