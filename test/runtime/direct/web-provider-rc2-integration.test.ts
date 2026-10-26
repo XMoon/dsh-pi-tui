@@ -470,6 +470,26 @@ async function writeWebSettingsThroughTui(
   await app.waitFor(() => !app.view().includes('Settings ·'), 'the Settings workspace closes')
 }
 
+/** Open `/settings → Tools → Web Search / Fetch` and wait for its settled facts. */
+async function openWebPageInApp(app: S4D3Application): Promise<void> {
+  for (const character of '/settings') app.vt.sendInput(character)
+  await app.settle()
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  if (app.view().includes('❯ /settings')) {
+    app.vt.sendInput(KEY.enter)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
+  await selectSettingsCategory(app.vt, 'Tools')
+  for (const key of [KEY.enter, KEY.down, KEY.enter]) {
+    app.vt.sendInput(key)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
+    'the Web Search / Fetch page')
+}
+
 /** Open `/settings → Tools → Web Search / Fetch` and select the credential row
  *  (Home + five Downs inside the page list). */
 async function openWebCredentialRowInApp(app: S4D3Application): Promise<void> {
@@ -505,6 +525,46 @@ async function closeSettingsInApp(app: S4D3Application): Promise<void> {
   }
   await app.waitFor(() => !app.view().includes('Settings ·'), 'the Settings workspace closes')
 }
+
+test('an EXTERNAL custom provider installed after the page read is never overwritten', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new WebL6Adapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 140,
+    rows: 40,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+    prepareHost: async host => {
+      host.ctx.llm.registerAdapter(['scripted'], adapter)
+      await (host.ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+        .set(credentialRef('DEEPSEEK_API_KEY'), 'd3-r4-key')
+    },
+  })
+  const transport = installTransport()
+  t.after(transport.restore)
+  const config = new DirectWebProviderConfig(app.host.ctx as never)
+  await openWebPageInApp(app)
+  app.vt.sendInput(KEY.enter) // the search-provider row Detail
+  await app.settle()
+  assert.match(app.view(), /Current: Messages/u, 'the page snapshot is the official default')
+
+  // Another HOST settings writer installs a CUSTOM provider id while the page
+  // still holds its older snapshot.
+  await (app.host.ctx.get('settings') as {
+    mutate(ns: string, ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[]): Promise<unknown>
+  }).mutate('web', [{ op: 'set', path: ['searchProvider'], value: 'acme-search' }])
+  assert.equal((await config.read())?.searchProvider, 'acme-search', 'the external writer really landed')
+
+  // Confirm the stale candidate: the queue head re-reads the Host, sees the
+  // custom route and refuses with ZERO writes instead of overwriting it.
+  app.vt.sendInput(KEY.down) // Messages -> DeepSeek Search API
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  await app.waitFor(() => app.view().includes('Not saved') && app.view().includes('custom route'),
+    'the external custom route refusal')
+  assert.equal((await config.read())?.searchProvider, 'acme-search', 'the external custom provider is preserved')
+  assert.match(app.view(), /Current: acme-search/u, 'the fresh authority facts replace the stale snapshot')
+  assert.equal(transport.requests.length, 0, 'no HTTP request is made for a refused settings write')
+})
 
 test('a TUI Web settings write reaches the NEXT real tool call and the mounted transcript', { skip: skippedInstallationReason([]) }, async t => {
   const adapter = new WebL6Adapter()

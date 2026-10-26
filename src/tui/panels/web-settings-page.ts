@@ -899,6 +899,25 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return composeRow(left, right, width)
   }
 
+  /** A choice row's Action Bar: `Enter confirm` only while the highlighted
+   *  candidate is inside THIS render's Detail viewport (the same gate the
+   *  dispatch uses), so a resize can never advertise a Confirm it will drop. */
+  private choiceActionBar(width: number, bodyRows: number): string {
+    const requested = this.choiceValues()[this.choiceIndex]
+    if (requested === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    const viewport = this.detailViewport(width, bodyRows)
+    const projection = this.detailProjection(width, viewport)
+    const entry = projection.optionLines.find(line => line.value === requested)
+    const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
+    const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
+    if (!visible) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    return wholeWording(
+      '↑/↓ choose · Enter confirm · Esc back',
+      width,
+      ['Enter confirm · Esc back', 'Enter · Esc', 'Esc back'],
+    )
+  }
+
   /** The credential row's Action Bar. It advertises the Models deeplink ONLY
    *  while the reconciled cursor owns a selectable action that is really inside
    *  the CURRENT render's Detail viewport — an off-screen or disabled target is
@@ -945,14 +964,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
             : wholeWording('r refresh · Esc back', width, ['Esc back'])
           // No confirmable candidate (a pending/unreadable authority or a custom
           // provider route) means NO Confirm affordance: the bar advertises only
-          // what the frame really offers.
-          : this.choiceValues().length === 0
-            ? wholeWording('r refresh · Esc back', width, ['Esc back'])
-            : wholeWording(
-                '↑/↓ choose · Enter confirm · Esc back',
-                width,
-                ['Enter confirm · Esc back', 'Enter · Esc', 'Esc back'],
-              )
+          // what the frame really offers, and a candidate cropped out of THIS
+          // frame's Detail viewport is not confirmable either (Enter is refused
+          // by the same painted-visibility gate).
+          : this.choiceActionBar(width, bodyRows)
     return hint === '' ? '' : color.textMuted(hint)
   }
 
@@ -1067,7 +1082,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (facts.kind === 'unavailable') {
       return [
         { text: `${color.textMuted('Current: ')}${color.text(sanitizedPhysicalLine(value))}` },
-        ...wrapTextWithAnsi(facts.reason, Math.max(1, width)).map(text => ({ text: color.textDim(text) })),
+        // `facts.reason` is HOST-origin text: sanitize at the display boundary
+        // (no raw ANSI/VT/CR/LF can ever reach the terminal) before wrapping.
+        ...wrapTextWithAnsi(sanitizedPhysicalLine(facts.reason), Math.max(1, width)).map(text => ({ text: color.textDim(text) })),
       ]
     }
     const refusal = this.intents.writableRefusal()
@@ -1317,11 +1334,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return undefined
   }
 
+  /** The wheel over the list scrolls the list by moving the SELECTION: the
+   *  render-time rebase then reveals it, so the wheel's effect can never be
+   *  undone by the cursor-visibility fence (and the active cursor stays
+   *  visible, never a ghost action on a scrolled-out row). */
   private scrollList(delta: number): void {
-    const max = Math.max(0, WEB_SETTINGS_ROW_IDS.length - this.listViewport(this.liveWidth(), this.liveBodyRows()))
-    const next = Math.min(Math.max(0, this.listOffset + delta), max)
-    if (next === this.listOffset) return
-    this.commitPresentation(() => { this.listOffset = next })
+    const next = Math.min(Math.max(0, this.cursor + delta), WEB_SETTINGS_ROW_IDS.length - 1)
+    if (next === this.cursor) return
+    this.commitPresentation(() => { this.cursor = next })
   }
 
   private activateTarget(target: PageTarget): void {

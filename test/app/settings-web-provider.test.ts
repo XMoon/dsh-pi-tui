@@ -73,6 +73,8 @@ interface Harness {
     available: boolean
     failNext: string | undefined
     readThrows: boolean
+    /** The message a throwing read reports (may carry hostile control text). */
+    readErrorMessage: string
     /** A mounted section whose facts do not validate (read() answers undefined). */
     readUndefined: boolean
     /** Artificial delay for one Host write (the FIFO order proof). */
@@ -143,6 +145,8 @@ function setup(options: {
     failNext: undefined as string | undefined,
     readThrows: false,
     readUndefined: false,
+    /** The message a throwing read reports (may carry hostile control text). */
+    readErrorMessage: 'settings descriptor unreadable',
     writeDelayMs: 0,
     endpointStoredValue: undefined as string | undefined,
     keptProviderValue: undefined as string | undefined,
@@ -259,7 +263,7 @@ function setup(options: {
           try {
             if (gate !== undefined) await gate.promise
             if (held !== undefined) await held.promise
-            if (throws) throw new Error('settings descriptor unreadable')
+            if (throws) throw new Error(store.readErrorMessage)
             if (unreadable) return undefined
             return captured
           } finally {
@@ -437,6 +441,34 @@ async function awaitWriteSettlement(h: Harness, label: string, mark: number): Pr
 async function pageListSelect(h: Harness, index: number): Promise<void> {
   await key(h, HOME)
   for (let step = 0; step < index; step += 1) await key(h, DOWN)
+}
+
+/**
+ * Dispatch ONE write whose queue-head PRE-read stays READABLE while the write's
+ * own verification readback R1 is UNREADABLE and held.
+ *
+ * The pre-read is issued first and captured as readable; the Host flips to
+ * unreadable before R1 is issued, then R1 is held by a fresh gate. The caller
+ * releases the returned R1 when its superseded/unreadable settlement is what
+ * the case is about.
+ */
+async function dispatchWithHeldUnreadableReadback(
+  h: Harness,
+  dispatch: () => Promise<void>,
+): Promise<() => void> {
+  const releasePre = h.holdRead()
+  const readsBefore = h.readCount()
+  await dispatch()
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+    () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
+  h.store.readUndefined = true
+  const releaseR1 = h.holdRead()
+  releasePre()
+  // R1 must be ISSUED (and held) before the caller arms any broader gate: a
+  // later all-reads hold must not be the thing that keeps R1 pending.
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+    () => h.vt.waitForRender(), 'the write readback R1 to be issued')
+  return releaseR1
 }
 
 /** Open the Web page's row Detail for `index` from the LIST. */
@@ -989,15 +1021,14 @@ test('a SUPERSEDED write readback never decides the verdict', async t => {
   t.after(h.dispose)
   await openWebPage(h)
 
-  // The write's readback R1 observes an UNREADABLE Host and is held while a
-  // NEWER read R2 (the page's `r`) observes the post-write facts.
-  h.store.readUndefined = true
-  const releaseR1 = h.holdRead()
-  t.after(releaseR1)
+  // The queue-head pre-read stays readable; the write's readback R1 observes
+  // an UNREADABLE Host and is held while a NEWER read R2 (the page's `r`)
+  // observes the post-write facts.
   await openWebRow(h, 0)
   await chooseCandidate(h, 1)
   const markMutation = settledWritesMark(h)
-  await key(h, ENTER)
+  const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
+  t.after(releaseR1)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markMutation)
   assert.match(h.view(), /Saving…/u, 'the write really issued its verification read (R1 is pending)')
 
@@ -1023,13 +1054,11 @@ test('a superseded readback settling while the newer read is STILL pending never
   t.after(h.dispose)
   await openWebPage(h)
 
-  h.store.readUndefined = true
-  const releaseR1 = h.holdRead()
-  t.after(releaseR1)
   await openWebRow(h, 0)
   await chooseCandidate(h, 1)
   const markR1Write = settledWritesMark(h)
-  await key(h, ENTER)
+  const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
+  t.after(releaseR1)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markR1Write)
   assert.match(h.view(), /Saving…/u, 'R1 is pending')
 
@@ -1090,10 +1119,18 @@ test('the endpoint editor reports Outcome unknown when the read-back is unreadab
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
-  h.store.readUndefined = true
   await openWebRow(h, 4)
   await editEndpointDraft(h, '/v2')
+  // The pre-read is readable; the write's verification readback is unreadable.
+  const releasePre = h.holdRead()
+  const readsBefore = h.readCount()
   await key(h, ENTER)
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+    () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
+  h.store.readUndefined = true
+  releasePre()
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+    () => h.vt.waitForRender(), 'the write readback R1 to be issued')
   await settleEndpointPanel(h)
   const frame = h.view()
   assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
@@ -1117,12 +1154,20 @@ function supersededEndpointCase(
       const h = setup({ columns, rows })
       t.after(h.dispose)
       await openWebPage(h)
+      await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+      await editEndpointDraft(h, '/v2')
+      // Readable pre-read; the write's readback R1 is unreadable and held.
+      const releasePre = h.holdRead()
+      const readsBefore = h.readCount()
+      await key(h, ENTER) // dispatch the endpoint write
+      await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+        () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
       h.store.readUndefined = true
       const releaseR1 = h.holdRead()
       t.after(releaseR1)
-      await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-      await editEndpointDraft(h, '/v2')
-      await key(h, ENTER) // dispatch the endpoint write
+      releasePre()
+      await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+        () => h.vt.waitForRender(), 'the write readback R1 to be issued')
       await settlePainted(h, 'the endpoint editor to state Saving…', frame => frame.includes('Saving…'))
 
       h.store.readUndefined = false
@@ -1524,6 +1569,114 @@ test('a dispatched write keeps its live state visible on a grant too short for t
   await key(h, ENTER)
   await settleEndpointPanel(h)
   assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v5'])
+})
+
+test('an EXTERNAL provider change after the page read is never overwritten by a stale base', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  // The page's Detail was built from the official read...
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: Messages/u)
+  // ...another Host writer then installs a CUSTOM route while the page is open.
+  h.store.web.searchProvider = 'acme-search'
+  // Confirm without refreshing the page: the queue head must re-read the Host
+  // and refuse with ZERO writes instead of overwriting the external value.
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the external custom route refusal', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.deepEqual(h.writes, [], 'the stale base never dispatches a Host write')
+  assert.equal(h.store.web.searchProvider, 'acme-search', 'the external custom route is preserved')
+  assert.match(refused, /custom route \(acme-search\)/u, `the refusal names the external route:\n${refused}`)
+  assert.match(refused, /Current: acme-search/u, 'the fresh authority facts replace the stale snapshot')
+})
+
+test('a HOST error reason with ANSI/OSC/CR/LF is sanitized at the display boundary', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readThrows = true
+  h.store.readErrorMessage = 'bad \u001b[31mhost\u001b[0m \u001b]0;pwn\u0007 line\nbreak\rcr'
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  const frame = h.view()
+  assert.match(frame, /bad host/u, `the readable part of the reason survives:\n${frame}`)
+  assert.doesNotMatch(frame, /\u001b/u, `no escape byte reaches the frame:\n${JSON.stringify(frame)}`)
+  assert.doesNotMatch(frame, /pwn/u, 'an OSC payload is never painted')
+  assert.match(frame, /line break/u, 'CR/LF are collapsed instead of escaping the row budget')
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [])
+})
+
+test('a HOST failure reason with control text is sanitized inside the endpoint editor', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4)
+  h.store.failNext = 'rejected \u001b[31mred\u001b[0m \u001b]0;title\u0007'
+  await editEndpointDraft(h, '/v9')
+  await key(h, ENTER)
+  const frame = await settlePainted(h, 'the sanitized endpoint error', frame => frame.includes('Not saved'))
+  assert.match(frame, /rejected red/u, `the readable reason survives:\n${frame}`)
+  assert.doesNotMatch(frame, /\u001b/u, 'no escape byte reaches the editor frame')
+  assert.doesNotMatch(frame, /title/u, 'the OSC payload is never painted')
+})
+
+test('the wheel scrolls a cropped list by moving the visible selection (44 and 80 columns)', async t => {
+  // 44×8: a 4-row list viewport.
+  const narrow = setup({ columns: 44, rows: 8 })
+  try {
+    await openWebPage(narrow)
+    const contentTop = 3 // header + metadata + rule
+    narrow.vt.sendInput(`\x1b[<65;5;${contentTop + 1}M`)
+    await narrow.vt.waitForRender()
+    assert.match(narrow.view(), /> Web Fetch Provider/u, `the wheel moved the selection:\n${narrow.view()}`)
+    for (let step = 0; step < 3; step += 1) {
+      narrow.vt.sendInput(`\x1b[<65;5;${contentTop + 1}M`)
+      await narrow.vt.waitForRender()
+    }
+    const scrolled = narrow.view()
+    assert.match(scrolled, /> Search \/ Fetch API Endpoint/u, `the list really scrolled to the later row:\n${scrolled}`)
+    assert.match(scrolled, /Search \/ Fetch API Endpoint/u)
+  } finally {
+    narrow.dispose()
+  }
+  // 80×10: the stacked medium layout with a 2-row list viewport.
+  const stacked = setup({ columns: 80, rows: 10 })
+  try {
+    await openWebPage(stacked)
+    const contentTop = 4 // header + metadata + rule + pane header
+    for (let step = 0; step < 3; step += 1) {
+      stacked.vt.sendInput(`\x1b[<65;5;${contentTop + 1}M`)
+      await stacked.vt.waitForRender()
+    }
+    const scrolled = stacked.view()
+    assert.match(scrolled, /> Share Original Question/u, `the stacked list scrolled to row 3:\n${scrolled}`)
+    assert.match(scrolled, /Search API Result Count/u, 'the scrolled window really moved')
+  } finally {
+    stacked.dispose()
+  }
+})
+
+test('a resize that crops the highlighted candidate removes the Enter confirm affordance', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 2) // count Detail
+  await key(h, DOWN) // 10 -> 20
+  assert.match(h.view(), /Enter confirm/u)
+  h.vt.resize(120, 3)
+  await h.vt.waitForRender()
+  const cropped = h.view()
+  assert.doesNotMatch(cropped, /Enter confirm/u, `a cropped candidate offers no Confirm:\n${cropped}`)
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [], 'Enter on an invisible candidate dispatches nothing')
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Enter confirm · Esc back/u, 'the restored frame advertises the Confirm again')
+  await key(h, ENTER)
+  await settlePainted(h, 'the confirmed count write', frame => frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['count:20'])
 })
 
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
