@@ -475,7 +475,7 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
 
   The page paints exactly SIX rows in this frozen order: `Web Search Provider`,
   `Web Fetch Provider`, `Search API Result Count`, `Share Original Question`,
-  `Search / Fetch Endpoint`, `DeepSeek API Key`. At ≥100 columns the row list
+  `Search / Fetch API Endpoint`, `DeepSeek API Key`. At ≥100 columns the row list
   (max 34 columns) sits beside the selected row's Detail; at 65–99 columns the
   list is stacked above it; below 65 columns exactly ONE region is painted at a
   time and `Enter`/`Esc` move between the list and its Detail. The frame keeps

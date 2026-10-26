@@ -126,6 +126,11 @@ export interface WebRowPhase {
 export interface WebSettingsPageIntents {
   /** The LATEST authoritative read state, read synchronously at render time. */
   readonly readFacts: () => WebSettingsFacts
+  /** Why this page may not commit right now (backend non-current/unavailable).
+   *  The page still paints the last read facts, but offers NO confirmable
+   *  candidate, no endpoint draft and no credential action until it is writable
+   *  again — the command queue would refuse every one of them. */
+  readonly writableRefusal: () => string | undefined
   /** Whether the official credential store is mounted right now. */
   readonly credentialAvailable: () => boolean
   /** Queue ONE confirmed intent on the command owner's single Web FIFO. */
@@ -367,7 +372,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     if (this.selectedRowId() === 'web-credential') {
-      const actions = this.credentialActions()
+      const actions = this.selectableCredentialActions()
       if (actions.length === 0) return
       const next = Math.min(Math.max(0, this.actionIndex + delta), actions.length - 1)
       if (next === this.actionIndex) return
@@ -430,7 +435,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const rowId = this.selectedRowId()
     if (rowId === undefined) return
     const facts = this.intents.readFacts()
-    if (rowId === 'web-search-endpoint' && facts.kind === 'ready') {
+    if (rowId === 'web-search-endpoint' && facts.kind === 'ready'
+      && this.intents.writableRefusal() === undefined) {
       this.openEndpointEditor(facts.settings.api.baseURL)
       return
     }
@@ -531,6 +537,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (rowId === undefined || rowId === 'web-search-endpoint') return []
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
+    if (this.intents.writableRefusal() !== undefined) return []
     switch (rowId) {
       case 'web-search-provider':
         return this.providerSelectable(facts.settings.searchProvider, WEB_SEARCH_PROVIDER_CANDIDATES)
@@ -609,16 +616,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     }
   }
 
-  /** The row's value SLOT: a transient phase states itself (the frozen chip
-   *  vocabulary), otherwise the authority fact. */
-  private rowValue(rowId: WebSettingsRowId, facts: WebSettingsFacts): string {
-    const phase = rowId === 'web-credential' ? undefined : this.phases.get(rowId)
-    if (phase?.kind === 'saving') return 'Saving…'
-    if (phase?.kind === 'not-saved') return 'Not saved'
-    if (phase?.kind === 'outcome-unknown') return 'Outcome unknown'
-    return this.authorityValue(rowId, facts)
-  }
-
   /** The credential row's presence/source fact (never the value). */
   private credentialState(facts: WebSettingsFacts): { readonly value: string; readonly configured: boolean; readonly available: boolean } {
     if (facts.kind === 'pending') return { value: 'Loading…', configured: false, available: false }
@@ -643,6 +640,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private credentialActions(): readonly { readonly action: 'configure' | 'clear'; readonly label: string; readonly enabled: boolean }[] {
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
+    if (this.intents.writableRefusal() !== undefined) return []
     const state = this.credentialState(facts)
     if (!state.available) return []
     return [
@@ -651,11 +649,18 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     ]
   }
 
+  /** The actions the cursor may really activate right now. A DISABLED action
+   *  is painted as a fact (with its reason) but is never focusable: the bar can
+   *  therefore never advertise an Enter that would silently do nothing. */
+  private selectableCredentialActions(): readonly { readonly action: 'configure' | 'clear'; readonly label: string; readonly enabled: boolean }[] {
+    return this.credentialActions().filter(action => action.enabled)
+  }
+
   /** Hand the typed page-switch intent to the ROOT: Models (never `/login`
    *  text) owns the actual credential mutation. */
   private activateCredentialAction(): void {
-    const action = this.credentialActions()[this.actionIndex]
-    if (action === undefined || !action.enabled) return
+    const action = this.selectableCredentialActions()[this.actionIndex]
+    if (action === undefined) return
     if (!this.paintedActionVisible(action.action)) return
     const initial: ModelsInitialView = action.action === 'configure'
       ? { view: 'reference', ref: WEB_CREDENTIAL_REF, label: 'DeepSeek API Key' }
@@ -718,7 +723,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
     const projection = this.detailProjection(width, viewport)
-    const action = this.credentialActions()[actionIndex]?.action
+    const action = this.selectableCredentialActions()[actionIndex]?.action
     if (action === undefined) return
     const entry = projection.actionLines.find(line => line.value === action)
     if (entry === undefined) return
@@ -840,7 +845,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           ['↑/↓ · Enter open · r refresh · Esc', '↑/↓ · Enter · Esc', 'Esc'],
         )
       : rowId === 'web-credential'
-        ? this.credentialActions().length === 0
+        ? this.selectableCredentialActions().length === 0
           ? wholeWording('r refresh · Esc back', width, ['Esc back'])
           : wholeWording(
               '↑/↓ choose · Enter open in Models · Esc back',
@@ -892,20 +897,35 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   /** ONE list row: the cursor, the frozen label and the CURRENT value. The
    *  label keeps its head cells (truncated with `…`), the value takes what is
-   *  left. A phase word replaces the value while the row is writing. */
+   *  left. A transient STATE word replaces the value while the row is writing
+   *  and is NEVER truncated: the label yields instead (design language §4.5),
+   *  because a cut state word is a different claim. */
   private listRow(rowId: WebSettingsRowId, facts: WebSettingsFacts, width: number): string {
     const selected = rowId === this.selectedRowId()
     const cursor = selected ? (this.region === 'list' ? color.primary('> ') : color.textMuted('> ')) : '  '
+    const phase = rowId === 'web-credential' ? undefined : this.phases.get(rowId)
+    const phaseWordText = phase === undefined || phase.kind === 'verified'
+      ? undefined
+      : phase.kind === 'saving' ? 'Saving…' : phase.kind === 'not-saved' ? 'Not saved' : 'Outcome unknown'
+    const labelOf = (room: number): string => {
+      const label = truncateToWidth(this.rowLabel(rowId), Math.max(1, room), '…', false)
+      return selected ? color.textStrong(label) : color.text(label)
+    }
+    if (phaseWordText !== undefined) {
+      const wordCells = visibleWidth(phaseWordText)
+      const label = labelOf(width - 2 - wordCells - 1)
+      const lead = `${cursor}${label}`
+      const gap = Math.max(1, width - visibleWidth(lead) - wordCells)
+      const ink = phase?.kind === 'not-saved' ? color.error(phaseWordText)
+        : phase?.kind === 'outcome-unknown' ? color.warning(phaseWordText) : color.textDim(phaseWordText)
+      return fit(`${lead}${' '.repeat(gap)}${ink}`, width)
+    }
     const label = this.rowLabel(rowId)
     const lead = truncateToWidth(`${cursor}${selected ? color.textStrong(label) : color.text(label)}`, width, '…', false)
     const leadWidth = visibleWidth(lead)
     const valueRoom = Math.max(0, width - leadWidth - 1)
     if (valueRoom < 1) return fit(lead, width)
-    const phase = rowId === 'web-credential' ? undefined : this.phases.get(rowId)
-    const value = phase === undefined || phase.kind === 'verified'
-      ? this.rowValue(rowId, facts)
-      : phase.kind === 'saving' ? 'Saving…' : phase.kind === 'not-saved' ? 'Not saved' : 'Outcome unknown'
-    const paintedValue = truncateToWidth(sanitizedPhysicalLine(value), valueRoom, '…', false)
+    const paintedValue = truncateToWidth(sanitizedPhysicalLine(this.authorityValue(rowId, facts)), valueRoom, '…', false)
     const gap = Math.max(1, width - leadWidth - visibleWidth(paintedValue))
     return fit(`${lead}${' '.repeat(gap)}${color.textMuted(paintedValue)}`, width)
   }
@@ -916,7 +936,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       case 'web-fetch-provider': return 'Web Fetch Provider'
       case 'web-search-count': return 'Search API Result Count'
       case 'web-send-original-question': return 'Share Original Question'
-      case 'web-search-endpoint': return 'Search / Fetch Endpoint'
+      case 'web-search-endpoint': return 'Search / Fetch API Endpoint'
       case 'web-credential': return 'DeepSeek API Key'
     }
   }
@@ -965,6 +985,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       return [
         { text: `${color.textMuted('Current: ')}${color.text(sanitizedPhysicalLine(value))}` },
         ...wrapTextWithAnsi(facts.reason, Math.max(1, width)).map(text => ({ text: color.textDim(text) })),
+      ]
+    }
+    const refusal = this.intents.writableRefusal()
+    if (refusal !== undefined) {
+      return [
+        { text: `${color.textMuted('Current: ')}${color.text(sanitizedPhysicalLine(value))}` },
+        ...wrapTextWithAnsi(refusal, Math.max(1, width)).map(text => ({ text: color.warning(text) })),
       ]
     }
     if (rowId !== 'web-search-endpoint' || facts.kind !== 'ready') {
@@ -1088,16 +1115,28 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     ]
     const actions = this.credentialActions()
     if (actions.length === 0 && facts.kind === 'ready') {
-      lines.push({ text: color.textDim('The official credential store is unavailable; no credential action is offered here.') })
+      const refusal = this.intents.writableRefusal()
+      if (refusal !== undefined) {
+        lines.push(...wrapTextWithAnsi(refusal, Math.max(1, width)).map(text => ({ text: color.warning(text) })))
+      } else {
+        lines.push({ text: color.textDim('The official credential store is unavailable; no credential action is offered here.') })
+      }
     }
-    for (const [index, action] of actions.entries()) {
-      const active = index === this.actionIndex
-      const marker = active ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
-      const label = `${marker}${active && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
+    let selectable = -1
+    for (const action of actions) {
+      if (action.enabled) selectable += 1
+      // A disabled action is a painted FACT: no cursor, no hit target, and the
+      // bar never advertises it (only `selectableCredentialActions()` drive the
+      // cursor and the Enter affordance).
       if (!action.enabled) {
-        lines.push({ text: `${color.textMuted(truncateToWidth(label, Math.max(1, width), '…', false))}${color.textDim(' (unavailable)')}` })
+        lines.push({
+          text: `${color.textMuted(truncateToWidth(`  ${action.label}`, Math.max(1, width), '…', false))}${color.textDim(' (unavailable)')}`,
+        })
         continue
       }
+      const active = selectable === this.actionIndex
+      const marker = active ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
+      const label = `${marker}${active && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
       lines.push({ text: truncateToWidth(label, Math.max(1, width), '…', false), action: action.action, enabled: true })
     }
     lines.push({ text: '' })
