@@ -690,3 +690,94 @@ test('a disposed component never requests a frame or publishes a late result', a
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(gates.length, 1, 'a post-dispose paint starts no decoder')
 })
+
+test('an invalidate before the conversion microtask releases the slot for the next target', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  let conversions = 0
+  const gates: Deferred<KittyThumbnailPng>[] = []
+  const converter: KittyThumbnailConverter = () => {
+    conversions += 1
+    const gate = deferred<KittyThumbnailPng>()
+    gates.push(gate)
+    return gate.promise
+  }
+  const store = new DraftImageStore()
+  const a = store.add({ bytes: SAMPLE_JPEG, mediaType: 'image/jpeg', width: 120, height: 80 })
+  const b = store.add({ bytes: SAMPLE_WEBP, mediaType: 'image/webp', width: 120, height: 80 })
+  const { component, setDraft, renders } = harness(store, { convertThumbnail: converter })
+  setDraft(a.placeholder)
+  component.render(100)
+  assert.notEqual(internals(component).activeDraftConversion, undefined, 'fixture: the slot is claimed before the microtask')
+  component.invalidate()
+  await until(() => internals(component).activeDraftConversion === undefined, 'the cancelled pre-start task to release the slot')
+  assert.equal(conversions, 0, 'the cancelled decoder never starts')
+  assert.equal(renders(), 0, 'a retired candidate requests no frame')
+
+  // The next visible target must still be allowed to derive (the old slot is
+  // really released, not stuck pending forever).
+  const pngB = await convertKittyThumbnail(SAMPLE_WEBP, 'image/webp')
+  setDraft(b.placeholder)
+  component.render(100)
+  await until(() => gates.length === 1, 'the next target conversion to start')
+  gates[0]!.resolve(pngB)
+  await until(() => internals(component).draftReady?.image === b, 'the next target derivative')
+  assert.ok(component.render(100).join('\n').includes('\x1b_G'), 'the next target paints real pixels')
+})
+
+test('a target switch before the conversion microtask frees the slot for the new target', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  let conversions = 0
+  const gates: Deferred<KittyThumbnailPng>[] = []
+  const converter: KittyThumbnailConverter = () => {
+    conversions += 1
+    const gate = deferred<KittyThumbnailPng>()
+    gates.push(gate)
+    return gate.promise
+  }
+  const store = new DraftImageStore()
+  const a = store.add({ bytes: SAMPLE_JPEG, mediaType: 'image/jpeg', width: 120, height: 80 })
+  const b = store.add({ bytes: SAMPLE_WEBP, mediaType: 'image/webp', width: 120, height: 80 })
+  const { component, setDraft, renders } = harness(store, { convertThumbnail: converter })
+  setDraft(a.placeholder)
+  component.render(100)
+  // Switch and paint B in the SAME task, before A's deferred decoder starts.
+  setDraft(b.placeholder)
+  const waiting = component.render(100)
+  assert.ok(stripAnsi(waiting[0]!).includes(`#${b.id}/1`), 'B is the visible target')
+  assert.ok(stripAnsi(waiting[0]!).endsWith('…'), 'B waits for the single slot')
+  assert.equal(conversions, 0, 'A never reached the decoder')
+  await until(() => internals(component).activeDraftConversion === undefined, 'the pre-start A task to release the slot')
+  assert.equal(conversions, 0, 'the decoder still never started')
+  assert.ok(renders() >= 1, 'the settled stale slot asks for a frame for the CURRENT target')
+
+  const pngB = await convertKittyThumbnail(SAMPLE_WEBP, 'image/webp')
+  component.render(100)
+  await until(() => gates.length === 1, 'the B conversion to start')
+  gates[0]!.resolve(pngB)
+  await until(() => internals(component).draftReady?.image === b, 'the B derivative')
+  const ready = component.render(100)
+  assert.ok(ready.join('\n').includes('\x1b_G'), 'B paints real pixels after the freed slot')
+  assert.equal(internals(component).draftCandidate, b)
+})
+
+test('dispose before the conversion microtask releases the slot without a frame request', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  let conversions = 0
+  const converter: KittyThumbnailConverter = () => {
+    conversions += 1
+    return new Promise<KittyThumbnailPng>(() => {})
+  }
+  const store = new DraftImageStore()
+  const a = store.add({ bytes: SAMPLE_JPEG, mediaType: 'image/jpeg', width: 120, height: 80 })
+  const { component, setDraft, renders } = harness(store, { convertThumbnail: converter })
+  setDraft(a.placeholder)
+  component.render(100)
+  assert.notEqual(internals(component).activeDraftConversion, undefined, 'fixture: the slot is claimed')
+  component.dispose()
+  await until(() => internals(component).activeDraftConversion === undefined, 'the disposed pre-start task to release the slot')
+  assert.equal(conversions, 0, 'a disposed component never starts the decoder')
+  assert.equal(renders(), 0, 'a disposed component requests no frame')
+})
