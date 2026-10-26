@@ -26,6 +26,7 @@ import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { RendererRegistry } from '../../src/extension/internal/renderer-registry.ts'
 import type { ExtensionView } from '../../src/extension/public-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { MessageId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -366,6 +367,57 @@ test('a trailing marker and a marker-only answer both keep the visual at the ans
     assert.ok(!view.includes('[dsh-visual-'))
     app.dispose()
   }
+})
+
+test('a half-streamed marker stays visible during the live turn and resolves only after terminal completion', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const folder = new TranscriptFolder()
+  folder.apply([{ type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as unknown as SessionEvent])
+  const partial: AssistantLiveInput = {
+    kind: 'chunk', sessionId: 'stream-marker', attemptId: 'attempt-1', turn: 0, step: 0, time: 2,
+    chunk: { type: 'text-delta', index: 0, text: 'Before.\n\n[dsh-visual-sv1_' },
+  }
+  folder.applyLiveInput(partial)
+  const { vt, app } = mountApp({ width: 100, height: 60 })
+  await vt.waitForRender()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const streaming = vt.getViewport().join('\n')
+  assert.ok(streaming.includes('[dsh-visual-sv1_'), `the incomplete marker is the accepted transient text:\n${streaming}`)
+  assert.equal(streaming.indexOf('Request latency'), -1, 'no figure is drawn before the complete terminal state')
+
+  const text = `Before.\n\n${marker(REF_A)}\n\nAfter.`
+  folder.apply([
+    {
+      type: 'assistant/message',
+      seq: 1,
+      time: 3,
+      data: {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('stream-marker-final'),
+          role: 'assistant',
+          content: [{ type: 'text', text }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: 2, time: 4, data: { turn: 0, reason: { kind: 'completed' } } } as unknown as SessionEvent,
+  ])
+  const assistant = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(assistant !== undefined)
+  setAssistantVisualPresentation(assistant, { ...key(), text: assistant.text }, [chartPublication(REF_A)])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const settled = vt.getViewport().join('\n')
+  const inline = settled.indexOf('Request latency', settled.indexOf('Before.'))
+  assert.ok(inline > settled.indexOf('Before.') && inline < settled.indexOf('After.'),
+    `the completed terminal state resolves the marker at its source position:\n${settled}`)
+  assert.ok(!settled.includes('[dsh-visual-sv1_'), 'the complete marker definition is hidden')
+  app.stop()
 })
 
 test('an SVG answer always paints the description and never a blank fake drawing', async () => {
