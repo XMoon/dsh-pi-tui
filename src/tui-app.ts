@@ -11096,7 +11096,13 @@ export class TuiApp {
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
     const matches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
     if (!current && matches.length === 0) return { current: false }
-    if (current && matches.length === 0 && this.searchTargetRendersNoOccurrence(block.message, target.query)) {
+    if (current
+      && matches.length === 0
+      // Only a message-corpus target can be a consumed marker. A deliverable
+      // path/description hit has no rendered occurrence when its folded tail is
+      // collapsed but is a fully legitimate anchor target; never suppress it.
+      && target.match.source.kind === 'message'
+      && this.searchTargetRendersNoOccurrence(block.message, target.query)) {
       return { current: false }
     }
     if (current) {

@@ -340,7 +340,13 @@ function sharedDefinitionsPrefix(definitions: readonly LocatedDefinition[]): str
   const lines: string[] = []
   for (const definition of definitions) {
     const tag = definition.token.tag
-    if (VISUAL_LABEL_PATTERN.test(tag)) continue
+    // Exclude ONLY an exact visual marker definition. A visual-label-shaped
+    // definition with a different destination or title is an ordinary link
+    // definition and must keep resolving across segments.
+    const exactMarker = VISUAL_LABEL_PATTERN.test(tag)
+      && definition.token.href === '#'
+      && definition.rawText === `[${tag}]: <#>`
+    if (exactMarker) continue
     lines.push(definition.rawText)
   }
   return lines.length === 0 ? '' : `${lines.join('\n')}\n\n`

@@ -49,8 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer remains one transcript row, one bullet, one component cache entry and one disclosure
   owner; Full/Compact/Focus, expand/collapse, resizing and search navigation never duplicate the
   figure or change its ownership. The existing Tool/Work cards and SVG description/source entries
-  stay unchanged. Direct main sessions and readable viewed children are covered; Remote and
-  native TSP mixing are not claimed here.
+  stay unchanged. An Assistant card owned by an extension renderer keeps its existing plugin view
+  and is not overlaid with the Host figure; when the Host renderer is selected, the inline/tail
+  rules apply. Direct main sessions and readable viewed children are covered; Remote and native
+  TSP mixing are not claimed here.
 - **`/settings → Agent` now edits permission, delegation and user-shell policy in place, and the
   `Agent settings…` transition row is retired.** The frozen order is `Approval policy (this
   session)` → `Default permission` → `Subagent allowed models` → `Subagent model selection` →

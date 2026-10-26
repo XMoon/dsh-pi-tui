@@ -820,7 +820,18 @@ visual-projection revision is part of the row's cache identity. Full, Compact,
 Focus and expanded Focus all render that same row. A marker's text is hidden
 from the display surface but remains readable raw source; search authority stays
 the raw message corpus, and a display-only suppression is allowed only for a
-match whose hidden marker paints no occurrence.
+message-corpus match whose hidden marker paints no occurrence (a
+delivered-file target keeps its anchor even when its folded preview is closed).
+
+Renderer ownership: an installed Assistant extension renderer keeps its
+existing whole-card ownership. The ordered Host visual body applies only when
+the Host renders the Assistant; an extension-owned card is never bypassed for a
+published visual, never overlaid with a second figure card, and never given a
+different renderer snapshot. The Stable Extension API is unchanged. When the
+extension chain abdicates or no renderer is selected, the Host path paints the
+published visuals normally. Future extension support for published visuals
+requires a separately planned explicit capability, not an implicit visual-body
+change.
 
 ## Long user messages
 ## Long user messages

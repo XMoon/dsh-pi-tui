@@ -23,6 +23,8 @@ import { setAssistantVisualPresentation, type VisualPresentationKey } from '../.
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import { svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
+import { RendererRegistry } from '../../src/extension/internal/renderer-registry.ts'
+import type { ExtensionView } from '../../src/extension/public-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { MessageId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 
@@ -567,6 +569,45 @@ test('a visual sidecar revision rebuilds the one Assistant component and no othe
   assert.equal(app.messageCacheEntryForTest(assistant)?.visualPresentationRevision, 1,
     'the cache identity records the sidecar revision')
   app.stop()
+})
+
+function extensionTextView(text: string): ExtensionView {
+  return { kind: 'text', spans: [{ text }] }
+}
+
+test('an installed assistant renderer owns the visual answer card; host fallback paints the ordered body', async () => {
+  const doc = `Before ext.\n\n${marker(REF_A)}\n\nAfter ext.`
+  const { folder, assistant } = answerFolder(doc)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A)])
+  const registry = new RendererRegistry()
+  const handle = registry.registerMessageRenderer({
+    id: 'visual-owner-test',
+    kind: 'assistant',
+    render: snapshot => extensionTextView(`EXTENSION ASSISTANT ${snapshot.turn}`),
+  }, 'test')
+  const vt = new VirtualTerminal(100, 60)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    renderers: registry,
+    imageTheme: { fallbackColor: text => text },
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const extensionView = vt.getViewport().join('\n')
+  assert.ok(extensionView.includes('EXTENSION ASSISTANT 0'))
+  assert.equal(extensionView.indexOf('Request latency'), -1,
+    'the Host visual body never overlays an extension-owned card')
+  handle.dispose()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const hostView = vt.getViewport().join('\n')
+  assert.ok(!hostView.includes('EXTENSION ASSISTANT'), 'the extension view retired with its renderer')
+  const inline = hostView.indexOf('Request latency', hostView.indexOf('Before ext.'))
+  assert.ok(inline > hostView.indexOf('Before ext.') && inline < hostView.indexOf('After ext.'),
+    `the Host fallback paints the published visual inline:\n${hostView}`)
+  app.dispose()
 })
 
 test('a replaced SVG Assistant component releases its loader subscription even behind delivered files', async () => {

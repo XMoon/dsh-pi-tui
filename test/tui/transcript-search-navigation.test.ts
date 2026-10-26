@@ -13,7 +13,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import { assistantVisualPresentation, setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -1029,5 +1029,96 @@ test('a search that only matches a consumed marker line paints no false anchor',
   const col = lines[row]!.indexOf('Before figure.')
   assert.equal(vt.getCellBgRgb(row, col), undefined, 'no anchor wash for a hidden marker-only match')
   assert.equal(vt.getCellUnderline(row, col), false, 'no false occurrence highlight')
+  app.stop()
+})
+
+
+test('a visual Assistant keeps the search anchor for a folded delivered-file target', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const files = Array.from({ length: 6 }, (_, index) => ({
+    path: `out/visible-${index}.md`,
+    description: `Visible report ${index}`,
+  }))
+  files[5] = { path: 'out/hidden-target.md', description: 'Hidden delivered target' }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } } as unknown as SessionEvent,
+    {
+      type: 'deliverables/presented',
+      seq: 1,
+      time: 2,
+      data: { turn: 1, callId: 'present-1', files },
+    } as unknown as SessionEvent,
+    {
+      type: 'assistant/message',
+      seq: 2,
+      time: 3,
+      data: {
+        turn: 1,
+        step: 0,
+        message: {
+          id: MessageId('visual-deliverable-search'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: 3, time: 4, data: { turn: 1, reason: { kind: 'completed' } } } as unknown as SessionEvent,
+  ])
+  const card = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(card !== undefined)
+  setAssistantVisualPresentation(card, {
+    subjectKind: 'main', subjectId: 'deliverable-search', sourceIdentity: {}, session: {}, sessionId: 'deliverable-search', seq: 3,
+    turn: 1, step: 0, text: card.text, content: undefined, assistantRevision: 0,
+  }, [searchChartPublication(ref)])
+  const match = folder.search('hidden-target').find(candidate => candidate.source.kind === 'assistant-deliverable')
+  assert.ok(match !== undefined, 'the hidden delivered path is in the raw search corpus')
+  assert.deepEqual(match.source, { kind: 'assistant-deliverable', index: 5, field: 'path' })
+
+  const { vt, app } = startApp(100, 24)
+  app.setFullscreen(true)
+  app.setTranscript([card], folder.turnActivities())
+  await vt.waitForRender()
+  assert.ok(assistantVisualPresentation(card) !== undefined, 'precondition: the Answer has a visual sidecar')
+  app.setTranscriptSearchTarget({ query: 'hidden-target', match, message: card })
+  app.scrollToSearchTarget()
+  const lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('hidden-target.md')), `the reveal opens the folded delivered file:\n${lines.join('\n')}`)
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { selectedIndex: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.ok(selection !== undefined,
+    'a delivered-file target keeps its anchor selection; only a consumed-marker message target is suppressed')
+  assert.equal(selection.exact, false, 'the deliverable target remains anchor-only')
+  app.stop()
+})
+
+test('a search target below an inline figure scrolls the viewport to the rendered answer row', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const filler = Array.from({ length: 30 }, (_, index) => `filler line ${index}`).join('\n')
+  const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\n${filler}\n\nAfter needle.`)
+  const { vt, app } = startApp(80, 12)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: assistant,
+  })
+  app.scrollToSearchTarget()
+  const lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('After needle.')),
+    `the destination row is visible after the figure:\n${lines.join('\n')}`)
+  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0,
+    'the source-local destination is below the card top')
   app.stop()
 })
