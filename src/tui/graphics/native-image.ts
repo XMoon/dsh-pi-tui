@@ -138,7 +138,6 @@ export class NativeKittyImage implements Component {
       maxHeight,
       cell,
     )
-    if (maxWidth < 1 || geometry.columns < 1 || geometry.rows < 1) return [this.options.fallback]
     this.paintedBody = { width, columns: geometry.columns, rows: geometry.rows }
     const lines = [encodeKittyPlacement(handle.imageId, handle.placementId, geometry)]
     for (let row = 1; row < geometry.rows; row++) lines.push('')
