@@ -14,12 +14,16 @@
  * the CONTRACT, not one platform's spelling: the length bound, the relative
  * form, and the working directory the tests depend on.
  *
+ * The last case owns the runner's SIGNAL contract on POSIX: the child leads
+ * its own process group, so the signal reaches the `node --test` worker tree
+ * and the disposable temp root survives until that whole tree is gone.
+ *
  * @module @xmoon76/dsh-pi-tui/test/tooling/test-lane-runner.test
  */
 
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
@@ -27,9 +31,14 @@ import test from 'node:test'
 import { parseConcurrency } from '../../scripts/run-test-lane.mjs'
 import { resolveLane } from '../../scripts/test-discovery.mjs'
 import { LANES } from '../../scripts/test-lanes.mjs'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { isExecuting, killStillExecuting, startTimeOf, waitForNoExecuting } from '../support/pid-records.ts'
+import { waitForFileLine } from '../support/wait-for-file.ts'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
 const TEST_ROOT = join(ROOT, 'test')
+const SIGNAL_TREE_DESCENDANT = join(ROOT, 'test', 'fixtures', 'signal-tree', 'descendant.mjs')
+const POSIX_ONLY = process.platform === 'win32' ? 'signal forwarding to a process group is POSIX-only' : false
 
 /**
  * The Windows command-line limit: `CreateProcessW` caps the command line at
@@ -223,4 +232,164 @@ test('the CONCURRENCY level changes how many files Node keeps in flight', () => 
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------
+// The SIGNAL contract.
+//
+// The regression this protects: the runner forwarded a signal to the `node
+// --test` LEADER only. A worker and its own descendants kept running, and the
+// disposable temp root — their TMPDIR — was removed at the leader's close.
+// ---------------------------------------------------------------------------
+
+async function assertSignalReachesWorkerTree(t, signal) {
+  const life = testLifecycle(t)
+  const fixture = life.tempDir('dsh-lane-group-')
+  const marker = join(fixture, 'evidence.log')
+  // The lane runner resolves its lanes and its test root from its OWN location,
+  // so a fixture REPOSITORY is the way to give it a lane that runs one known
+  // file. The runner and the discovery rule are the PRODUCTION files, read at
+  // run time — a change to their signal handling changes what this case
+  // exercises. The probe itself runs in a real `node --test` WORKER and starts
+  // a descendant that ignores every forwarded signal.
+  const scripts = join(fixture, 'scripts')
+  mkdirSync(join(scripts, 'lib'), { recursive: true })
+  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
+    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
+  }
+  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'the wrapper signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}
+`)
+  const probeDir = join(fixture, 'test', 'probe')
+  mkdirSync(probeDir, { recursive: true })
+  writeFileSync(join(probeDir, 'descendants.test.mjs'), `import { spawn } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
+import test from 'node:test'
+
+test('holds a signal-ignoring descendant', async () => {
+  const marker = process.env.PROBE_MARKER
+  appendFileSync(marker, \`worker \${process.pid}\\n\`)
+  const descendant = spawn(process.execPath, [process.env.PROBE_DESCENDANT], { stdio: 'ignore', env: process.env })
+  // The worker must be able to FINISH: an referenced child handle would keep
+  // its event loop alive until the descendant ends.
+  descendant.unref()
+  appendFileSync(marker, \`descendant \${descendant.pid}\\n\`)
+  await new Promise(() => {})
+})
+`)
+  const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    env: {
+      ...process.env,
+      PROBE_MARKER: marker,
+      PROBE_DESCENDANT: SIGNAL_TREE_DESCENDANT,
+      // The OUTER run's lane context must not leak into the fixture lane: the
+      // reporter/effective-json paths belong to the real repository, and an
+      // inherited test-run context would stop the probe's `node --test` from
+      // executing anything at all.
+      DSH_TEST_JSONL: undefined,
+      DSH_TEST_EFFECTIVE_JSON: undefined,
+      DSH_TEST_KEEP_TMP: undefined,
+      NODE_TEST_CONTEXT: undefined,
+    },
+    stdio: 'ignore',
+  })
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
+  // The test's OWN cleanup runs in `t.after`, i.e. only AFTER its assertions:
+  // it must never stop the tree first and then claim the runner did.
+  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+
+  const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
+  const [, rawPid, , tmpdirField] = ready.split(' ')
+  const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
+  const tmpRoot = tmpdirField.slice('tmpdir='.length)
+  life.defer(() => { killStillExecuting([descendant]) })
+
+  child.kill(signal)
+  const result = await exited
+  // An interrupted lane must not look like a clean run.
+  assert.notEqual(result.code, 0, `the runner exits non-zero after an interruption, got ${JSON.stringify(result)}`)
+
+  const log = readFileSync(marker, 'utf8')
+  // The signal reached the DESCENDANT of the worker, not only the leader ...
+  assert.match(log, new RegExp(`descendant ${descendant.pid} ignored ${signal}`, 'u'),
+    'the forwarded signal must reach the node --test worker tree, not only the leader')
+  // ... and the temp root was still the child's while that descendant lived.
+  assert.match(log, new RegExp(`descendant ${descendant.pid} tmpdir ok`, 'u'),
+    'the temp root must outlive the leader while a descendant still uses it')
+
+  const survivors = await waitForNoExecuting([descendant], 5_000)
+  assert.deepEqual(survivors, [], `the SIGKILL escalation ended the descendant: ${JSON.stringify(survivors)}`)
+  assert.equal(existsSync(tmpRoot), false, 'the temp root is removed once the group is provably gone')
+}
+
+// Both interruption signals run the same contract: the receiver forwards the
+// signal it got to the whole tree it owns.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  test(`a ${signal} to the lane runner reaches the worker tree, not only the leader`, { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+    await assertSignalReachesWorkerTree(t, signal)
+  })
+}
+
+test('a lane whose worker leaves a running descendant keeps its temp root', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+  const life = testLifecycle(t)
+  const fixture = life.tempDir('dsh-lane-lingering-')
+  const marker = join(fixture, 'evidence.log')
+  // A fixture repository whose probe test starts a descendant and RETURNS:
+  // `node --test` finishes normally while the descendant keeps the group alive.
+  const scripts = join(fixture, 'scripts')
+  mkdirSync(join(scripts, 'lib'), { recursive: true })
+  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
+    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
+  }
+  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'the wrapper lingering probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}
+`)
+  const probeDir = join(fixture, 'test', 'probe')
+  mkdirSync(probeDir, { recursive: true })
+  writeFileSync(join(probeDir, 'lingering.test.mjs'), `import { spawn } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
+import test from 'node:test'
+
+test('starts a descendant that outlives the worker', () => {
+  const marker = process.env.PROBE_MARKER
+  const descendant = spawn(process.execPath, [process.env.PROBE_DESCENDANT], { stdio: 'ignore', env: process.env })
+  // The worker must be able to FINISH: an referenced child handle would keep
+  // its event loop alive until the descendant ends.
+  descendant.unref()
+  appendFileSync(marker, \`descendant \${descendant.pid}\\n\`)
+})
+`)
+  const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    env: {
+      ...process.env,
+      PROBE_MARKER: marker,
+      PROBE_DESCENDANT: SIGNAL_TREE_DESCENDANT,
+      DSH_TEST_JSONL: undefined,
+      DSH_TEST_EFFECTIVE_JSON: undefined,
+      DSH_TEST_KEEP_TMP: undefined,
+      NODE_TEST_CONTEXT: undefined,
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  let stderr = ''
+  child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
+  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+
+  const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
+  const [, rawPid, , tmpdirField] = ready.split(' ')
+  const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
+  const tmpRoot = tmpdirField.slice('tmpdir='.length)
+  life.defer(() => { killStillExecuting([descendant]) })
+  life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
+
+  const result = await exited
+  assert.equal(result.code, 0, `the normal lane result is preserved, got ${JSON.stringify(result)}`)
+  assert.match(stderr, /keeping .*process group \d+ still has live members after the direct child exited/u)
+  assert.equal(existsSync(tmpRoot), true, 'the lane root outlives a worker descendant')
+  assert.equal(isExecuting(descendant), true, 'the descendant keeps running, untouched by the runner')
 })

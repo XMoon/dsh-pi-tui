@@ -18,7 +18,15 @@
  *   - an EMPTY lane fails closed — a lane that discovers nothing must never
  *     report green;
  *   - the file list is sorted, so the execution order does not depend on the
- *     filesystem.
+ *     filesystem;
+ *   - SIGNALS: on POSIX the child leads its OWN process group, so a forwarded
+ *     SIGINT/SIGTERM/SIGHUP reaches the workers and commands it started, and
+ *     the temp root is removed only once the whole group is provably gone — a
+ *     bounded grace, then ONE SIGKILL escalation. The direct child's `close`
+ *     alone is not the group's end, on a NORMAL exit either: a lane whose
+ *     workers left a process running keeps (and reports) its root instead of
+ *     deleting a directory that process still uses. On Windows there is no
+ *     group id to address, so the signal is forwarded to the direct child only.
  *
  * Usage: node scripts/run-test-lane.mjs <lane>
  * @module @xmoon76/dsh-pi-tui/scripts/run-test-lane
@@ -33,6 +41,7 @@ import { fileURLToPath } from 'node:url'
 
 import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
+import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const TEST_ROOT = join(ROOT, 'test')
@@ -194,24 +203,25 @@ function main() {
     }, null, 2)}\n`)
   }
 
+  // POSIX only: the child leads its own process group, which is what a
+  // forwarded signal can address as a TREE (the `node --test` workers and the
+  // commands they started). Windows has no group id, so it keeps the previous
+  // direct-child forwarding.
+  const ownsGroup = process.platform !== 'win32'
   const child = spawn(process.execPath, spawnArgs, {
     cwd: ROOT,
     stdio: 'inherit',
     shell: false,
+    detached: ownsGroup,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
   })
-  const forwardSignal = (signal) => {
-    if (!child.killed) {
-      try {
-        child.kill(signal)
-      } catch {
-        // The child may have settled between the check and the kill.
-      }
-    }
-  }
-  process.on('SIGINT', () => forwardSignal('SIGINT'))
-  process.on('SIGTERM', () => forwardSignal('SIGTERM'))
-  process.on('SIGHUP', () => forwardSignal('SIGHUP'))
+
+  let childResult
+  let resolveClosed
+  /** Resolves on the direct child's `close`, never on a group fact. */
+  const closed = new Promise((resolve) => { resolveClosed = resolve })
+  let finished = false
+  let teardownStarted = false
 
   const disposeRoot = () => {
     if (keep) {
@@ -221,20 +231,83 @@ function main() {
     rmSync(root, { recursive: true, force: true })
   }
 
-  child.on('error', (error) => {
-    disposeRoot()
-    console.error(`[run-test-lane] failed to spawn the test runner: ${error.message}`)
-    process.exit(1)
-  })
-  child.on('close', (code, signal) => {
-    disposeRoot()
-    if (code !== null) {
-      process.exitCode = code
+  /**
+   * The ONE place the lane finishes: whatever combination of child close,
+   * spawn failure and signal teardown reaches it first, the temp root is
+   * removed at most once and the exit code is set at most once.
+   */
+  const finish = (settled, detail) => {
+    if (finished) return
+    finished = true
+    if (settled) {
+      disposeRoot()
+    } else {
+      // The root IS the child's TMPDIR. Removing it while a descendant still
+      // runs would delete the very directory that process is using, so an
+      // unproven group keeps the root and says so instead of claiming a
+      // cleanup it cannot prove.
+      process.stderr.write(`[run-test-lane] keeping ${root}: ${detail}\n`)
+    }
+    if (childResult === undefined) {
+      process.exitCode = 1
       return
     }
-    const signo = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15 }[signal] ?? 0
+    if (childResult.code !== null) {
+      process.exitCode = childResult.code
+      return
+    }
+    const signo = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15 }[childResult.signal] ?? 0
     process.exitCode = signo > 0 ? 128 + signo : 1
+  }
+
+  child.on('error', (error) => {
+    // A child that never spawned has no group and no status: the spawn failure
+    // wins and is reported as such.
+    if (finished) return
+    finished = true
+    disposeRoot()
+    console.error(`[run-test-lane] failed to spawn the test runner: ${error.message}`)
+    process.exitCode = 1
   })
+  child.on('close', (code, signal) => {
+    childResult = { code, signal }
+    resolveClosed()
+    if (teardownStarted) return
+    // A normal close is only the DIRECT child's end. A worker or command it
+    // started can still be using the root, and the root must not be deleted
+    // underneath it — the same rule the signal path follows.
+    if (ownsGroup && groupStillAlive(child)) {
+      finish(false, `process group ${child.pid} still has live members after the direct child exited`)
+      return
+    }
+    finish(true)
+  })
+
+  const onSignal = (signal) => {
+    if (teardownStarted || finished) return
+    teardownStarted = true
+    void (async () => {
+      let settled = true
+      if (ownsGroup) {
+        settled = await stopOwnedGroup(child, signal)
+      } else {
+        try {
+          child.kill(signal)
+        } catch {
+          // The child may have settled between the check and the kill.
+        }
+      }
+      if (!settled) {
+        finish(false, `process group ${child.pid} still has live members after SIGKILL`)
+        return
+      }
+      await closed
+      finish(true)
+    })()
+  }
+  process.on('SIGINT', () => onSignal('SIGINT'))
+  process.on('SIGTERM', () => onSignal('SIGTERM'))
+  process.on('SIGHUP', () => onSignal('SIGHUP'))
 }
 
 // The runner runs only when it is EXECUTED. A test that imports the
