@@ -403,23 +403,28 @@ identical initial focus and entry-refresh behavior. `/statusline` remains the
     - a picker toggle owns exactly ONE `(provider, model)` pair, applied as an
       add or a remove — never a replacement of the whole list, so two surfaces
       (or two picker instances, one still writing) compose instead of erasing
-      each other's routes. Adding an existing pair is a no-op and removing an
-      absent one changes nothing.
+      each other's routes. An add never creates a DUPLICATE grant (an existing
+      pair is re-appended, so the stored order may differ from the click order)
+      and a remove of an absent pair changes nothing.
 
     The half an action does not own is re-read from the official section INSIDE
     the queue, immediately before the write. A slow earlier write therefore can
     never land after a newer intent, and a payload captured before an earlier
-    write settled can never erase it. Two intents that cannot be satisfied may
-    not resolve as success: an intent whose turn finds the backend non-current,
-    the section unavailable, the section unreadable, or the write refused
-    reports a typed refusal and performs ZERO writes (the last-route-while-
-    enabled rule is decided from the FRESH section, in FIFO order, never from a
-    picker's earlier view). The queue is a serialization + rebase barrier, not a
-    second settings authority: the official section stays the only stored value,
-    and a surface may only report facts it actually read back — an optimistic
-    marker is never summarised as saved, and a write that settles after its
-    surface closed still corrects that surface's displayed summary or leaves no
-    summary at all.
+    write settled can never erase it. An intent is REFUSED before any write when
+    its turn finds the backend non-current, the section unavailable/unreadable,
+    or the FRESH section in a state the intent cannot legally produce (the
+    last-route-while-enabled rule is decided there, in FIFO order, never from a
+    picker's earlier view): those refusals perform ZERO writes and report a typed
+    cause. A write that was dispatched and then rejected by the section is a
+    DIFFERENT failure — it surfaces as a failed write with its own reason, never
+    as a refusal. The queue is a serialization + rebase barrier, not a second
+    settings authority: the official section stays the only stored value, and a
+    surface may only report facts it actually read back. An optimistic marker is
+    therefore never summarised as saved: a close reports the last confirmed list,
+    a successful fresh readback updates it, a rejected write that cannot read
+    back rolls the surface back to that last confirmed list, and a write whose
+    readback is unreadable keeps the last confirmed value rather than inventing
+    one.
   - Every `Agent` row that owns a Host write refuses to offer a confirmable
     candidate while its authority cannot vouch for the value: a non-`ready`
     backend (or an unreadable document) keeps the row and its truthful
