@@ -273,7 +273,6 @@ test('staged JPEG/WebP → REAL submit sink → transcript → /view-image paint
   assert.equal(loader.kittyThumbnailCacheSize(), 2, 'the Viewer added no second derived cache entry')
 
   vt.sendInput('\x1b')
-  await new Promise(resolve => setTimeout(resolve, 600))
   await vt.waitForRender()
   assert.ok(vt.getViewport().join('\n').includes('Images · current transcript'), 'Esc back returns to the list')
   vt.sendInput('\x1b[B')
@@ -287,10 +286,8 @@ test('staged JPEG/WebP → REAL submit sink → transcript → /view-image paint
   assert.equal(conversions, conversionsAfterThumbnails, 'the WebP Viewer added no conversion either')
 
   vt.sendInput('\x1b')
-  await new Promise(resolve => setTimeout(resolve, 600))
   await vt.waitForRender()
   vt.sendInput('\x1b')
-  await new Promise(resolve => setTimeout(resolve, 600))
   await vt.waitForRender()
   const restored = vt.getViewport().join('\n')
   assert.ok(restored.includes('🖼️ photo.jpg · 120×80'), `the transcript is restored:\n${restored}`)
