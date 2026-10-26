@@ -295,3 +295,47 @@ test('an unobservable Session reports a bounded reason instead of throwing', asy
   assert.deepEqual(proof.spans, [])
   assert.match(proof.unproven ?? '', /missing: the Session could not be observed \(SESSION_QUERY_SESSION_NOT_FOUND\)/u)
 })
+
+test('a non-seeded level claiming inherited events proves nothing at all', async () => {
+  const { query } = queryOf(new Map([
+    ['child', { isSeeded: false, inheritedEventCount: 4, events: PARENT_EVENTS }],
+  ]))
+  const proof = await proveVisualLineage('child', query)
+  assert.deepEqual(proof.spans, [], 'the own range cannot be located from inconsistent metadata')
+  assert.match(proof.unproven ?? '', /reports an inherited event count without seed lineage/u)
+})
+
+test('an observation that does not report its seed flag proves nothing at all', async () => {
+  const proof = await proveVisualLineage('child', {
+    async observeSession() {
+      return {
+        header: { id: 'child' },
+        inheritedEventCount: 0,
+        events: PARENT_EVENTS,
+        [Symbol.dispose]: () => {},
+      } as VisualLineageObservation
+    },
+  })
+  assert.deepEqual(proof.spans, [])
+  assert.match(proof.unproven ?? '', /does not report its seed lineage/u)
+})
+
+test('a fork parent that does not report its seed flag is refused', async () => {
+  const child = seededLog('child', PARENT_EVENTS, 2, 'parent')
+  const base = queryOf(new Map([['child', child.facts]]))
+  const proof = await proveVisualLineage('child', {
+    async observeSession(sessionId: string) {
+      if (sessionId === 'parent') {
+        return {
+          header: { id: 'parent' },
+          inheritedEventCount: 0,
+          events: PARENT_EVENTS,
+          [Symbol.dispose]: () => {},
+        } as VisualLineageObservation
+      }
+      return base.query.observeSession(sessionId, { projectionMode: 'none' })
+    },
+  })
+  assert.deepEqual(proof.spans, [childOwnRange(child)])
+  assert.match(proof.unproven ?? '', /the fork parent does not report its seed lineage/u)
+})

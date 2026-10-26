@@ -67,6 +67,7 @@ const CHART_B = {
   series: [{ label: 'p50', value: 11 }],
 }
 const SVG = { title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }
+const CHART_GRANDCHILD = { ...CHART, title: 'Grandchild latency' }
 const SVG_CHILD = {
   title: 'Child topology',
   description: 'Child -> Cache',
@@ -1329,6 +1330,25 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
     },
   ])
   const c = await boot.fork(b, 'c')
+  // C publishes its OWN new chart in a real turn: the A -> B -> C chain must
+  // prove all three origins through source -> lineage -> projection -> sink.
+  await c.run([
+    { calls: [{ callId: 'c-chart', name: CHART_TOOL_NAME, args: CHART_GRANDCHILD }] },
+    {
+      calls: prompt => [{
+        callId: 'c-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: [{ ref: refsInPrompt(prompt).at(-1) }] },
+      }],
+    },
+    {
+      text: prompt => {
+        const ref = refsInPrompt(prompt).at(-1)
+        assert.ok(ref !== undefined, 'C received its own visual reference')
+        return `Grandchild before.\n\n${marker(ref)}\n\nGrandchild after.`
+      },
+    },
+  ])
 
   const folder = new TranscriptFolder()
   folder.apply(c.session.snapshotEvents())
@@ -1353,6 +1373,19 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
     assert.ok(childInline > bBefore && childInline < bAfter, `the parent own new SVG is inline:\n${view}`)
     assert.equal(view.indexOf('Request latency', bBefore), -1,
       `A grandparent figure never leaks into B the parent answer:\n${view}`)
+    // C's OWN answer keeps ITS own new chart inline, exactly once.
+    const cBefore = view.indexOf('Grandchild before.')
+    const cAfter = view.indexOf('Grandchild after.')
+    const grandchildInline = view.indexOf('Grandchild latency', cBefore)
+    assert.ok(cBefore >= 0 && grandchildInline > cBefore && grandchildInline < cAfter,
+      `the child own new chart is inline:\n${view}`)
+    assert.equal(
+      view.indexOf('Grandchild latency', grandchildInline + 'Grandchild latency'.length),
+      -1,
+      'the child own figure appears exactly once in the child answer',
+    )
+    assert.equal(view.indexOf('Child topology', cBefore), -1,
+      `the parent figure never leaks into C the child answer:\n${view}`)
 
     const snapshot = subject.snapshot()
     assert.ok(snapshot !== undefined)

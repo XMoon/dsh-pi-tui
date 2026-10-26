@@ -318,3 +318,26 @@ test('a subject whose id does not match the live Session is refused', () => {
   assert.equal(harness.provider({ subjectKind: 'main', subjectId: 'other' }), undefined)
   assert.equal(harness.proveCalls.length, 0)
 })
+
+test('inconsistent seed facts prove nothing and start no ancestry task', () => {
+  // A non-seeded header that still records inherited events (or a missing
+  // flag) cannot be split into own/inherited history: attributing the whole
+  // log to the current Session would grant it over an ancestor's events.
+  const inconsistent = sessionOf({
+    id: 'child', seeded: false, cut: 3,
+    events: [{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'session/end-seed' }],
+  })
+  const harness = harnessFor({ session: inconsistent })
+  const snapshot = harness.provider(MAIN)
+  assert.ok(snapshot !== undefined)
+  assert.deepEqual(snapshot.verifiedOriginSpans, [], 'no seq is attributed to any Session')
+  assert.equal(harness.proveCalls.length, 0, 'inconsistent metadata never triggers a parent read')
+
+  const missingFlag = sessionOf({ id: 'child', events: [{ type: 'turn/start' }] })
+  Object.defineProperty(missingFlag.header, 'isSeeded', { value: undefined, enumerable: true })
+  Object.defineProperty(missingFlag, 'inheritedEventCount', { value: 1, enumerable: true })
+  const absent = harnessFor({ session: missingFlag })
+  assert.deepEqual(absent.provider(MAIN)?.verifiedOriginSpans, [],
+    'an absent seed flag is not a licence to attribute the whole log')
+  assert.equal(absent.proveCalls.length, 0)
+})

@@ -101,6 +101,8 @@ interface OriginState {
   readonly session: VisualSnapshotSessionLike
   readonly subject: VisualSnapshotSubject
   readonly sessionId: string
+  /** Whether the official seed facts are consistent (see {@link visualSeedFacts}). */
+  readonly consistent: boolean
   /** The official inherited cut: own events start here. */
   readonly cut: number
   readonly parentSession: string | undefined
@@ -108,6 +110,32 @@ interface OriginState {
   inherited: readonly VerifiedVisualOriginSpan[]
   /** The monotonic origin revision served with every snapshot. */
   revision: number
+}
+
+/**
+ * The Session's official seed facts, or undefined when they are inconsistent.
+ *
+ * A log may only be split into "inherited" and "current Session" history when
+ * the official header flag and the inherited count AGREE: a boolean
+ * `header.isSeeded`, a non-negative safe-integer count, and a zero count for a
+ * non-seeded log. Anything else — an absent flag, a non-integer count, or a
+ * non-seeded header claiming inherited events — proves NOTHING: treating the
+ * whole log as the current Session's own would grant it over inherited events.
+ * @param session - the selected live Session face.
+ * @returns the own-range start, or undefined for inconsistent metadata.
+ */
+function visualSeedFacts(
+  session: VisualSnapshotSessionLike,
+): { readonly cut: number; readonly parentSession: string | undefined } | undefined {
+  const seeded = session.header.isSeeded
+  const inherited = Number(session.inheritedEventCount)
+  if (typeof seeded !== 'boolean' || !Number.isSafeInteger(inherited) || inherited < 0) return undefined
+  if (!seeded && inherited !== 0) return undefined
+  if (!seeded) return { cut: 0, parentSession: undefined }
+  return {
+    cut: inherited,
+    parentSession: session.header.parentSession === undefined ? undefined : String(session.header.parentSession),
+  }
 }
 
 /** Whether two proven range lists are the same conclusion. */
@@ -151,6 +179,9 @@ export function createVisualEventSnapshotProvider(
    * `seq` (new child events are own events by construction).
    */
   const provenSpans = (origin: OriginState, seq: number): readonly VerifiedVisualOriginSpan[] => {
+    // Inconsistent seed metadata has no proven history at all (fail closed):
+    // the own range cannot even be located without an agreed cut.
+    if (!origin.consistent) return []
     const own = ownVisualOriginSpans(origin.sessionId, origin.cut, seq)
     return mergeVisualOriginSpans([...origin.inherited, ...own]) ?? own
   }
@@ -199,20 +230,26 @@ export function createVisualEventSnapshotProvider(
       ? memo.events
       : asVisualSessionEvents(session.snapshotEvents())
     memo = { session, seq, events }
-    const seeded = session.header.isSeeded === true
-    const cut = seeded ? Number(session.inheritedEventCount) : 0
-    const parentSession = session.header.parentSession === undefined
-      ? undefined
-      : String(session.header.parentSession)
+    const seed = visualSeedFacts(session)
     const sameIdentity = state !== undefined
       && state.session === session
       && state.sessionId === session.id
-      && state.cut === cut
-      && state.parentSession === parentSession
+      && state.consistent === (seed !== undefined)
+      && state.cut === (seed?.cut ?? 0)
+      && state.parentSession === seed?.parentSession
     if (!sameIdentity) {
       revision += 1
-      state = { session, subject, sessionId: session.id, cut, parentSession, inherited: [], revision }
-      if (seeded && cut > 0) startLineage(state)
+      state = {
+        session,
+        subject,
+        sessionId: session.id,
+        consistent: seed !== undefined,
+        cut: seed?.cut ?? 0,
+        parentSession: seed?.parentSession,
+        inherited: [],
+        revision,
+      }
+      if (seed !== undefined && seed.cut > 0) startLineage(state)
     }
     const origin = state as OriginState
     return {

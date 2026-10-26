@@ -182,6 +182,13 @@ async function proveLevel(
 ): Promise<LevelProof> {
   const length = level.events.length
   if (!level.isSeeded) {
+    // A non-seeded Session owns its whole log ONLY when its recorded inherited
+    // count is zero. Inconsistent metadata proves nothing: inferring "own" from
+    // a missing flag would grant the current Session authority over inherited
+    // events that still belong to an ancestor.
+    if (level.inheritedEventCount !== 0) {
+      return { spans: [], unproven: problem(`${level.sessionId}: reports an inherited event count without seed lineage`) }
+    }
     return { spans: ownVisualOriginSpans(level.sessionId, 0, length), unproven: undefined }
   }
   const cut = level.inheritedEventCount
@@ -224,7 +231,11 @@ async function proveLevel(
     if (!sameStoredPrefix(level.events, observation.events, cut)) {
       return ownOnly(level, cut, `${level.sessionId}: the fork parent prefix differs from the inherited events`)
     }
-    const parentSeeded = parentHeader.isSeeded === true
+    const parentSeededFlag = parentHeader.isSeeded
+    if (typeof parentSeededFlag !== 'boolean') {
+      return ownOnly(level, cut, `${level.sessionId}: the fork parent does not report its seed lineage`)
+    }
+    const parentSeeded = parentSeededFlag
     const parentCut = observation.inheritedEventCount
     if (!parentSeeded && parentCut !== 0) {
       return ownOnly(level, cut, `${level.sessionId}: the fork parent reports an inherited cut without seed lineage`)
@@ -276,16 +287,21 @@ export async function proveVisualLineage(
     return { spans: [], unproven: problem(`${sessionId}: the Session could not be observed (${errorText(error)})`) }
   }
   try {
-    if (String(observation.header.id) !== sessionId) {
+    const header = observation.header
+    if (String(header.id) !== sessionId) {
       return { spans: [], unproven: problem(`${sessionId}: the observation identifies another Session`) }
+    }
+    const seeded = header.isSeeded
+    if (typeof seeded !== 'boolean') {
+      return { spans: [], unproven: problem(`${sessionId}: the observation does not report its seed lineage`) }
     }
     const level: VisualLineageLog = {
       sessionId,
-      isSeeded: observation.header.isSeeded === true,
+      isSeeded: seeded,
       inheritedEventCount: observation.inheritedEventCount,
-      parentSession: observation.header.parentSession === undefined
+      parentSession: header.parentSession === undefined
         ? undefined
-        : String(observation.header.parentSession),
+        : String(header.parentSession),
       events: observation.events,
     }
     return await proveLevel(level, new Set(), query)
