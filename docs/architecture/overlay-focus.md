@@ -378,10 +378,9 @@ that grant instead of the whole terminal height.
 - Documented exception: the independent key-recorder view (`KeyRecorder`,
   reached from the leader editor or a binding choice) is NOT a budgeted
   assembly — it renders its fixed view regardless of the panel grant, so on a
-  grant shorter than that view the compositor clamp applies. This PR keeps
-  that degradation (no second scrollport) and pins it in
-  `test/tui/keybinding-editor.test.ts`; "every render branch fits the grant"
-  holds for the panel's own assemblies, not for the recorder view.
+  grant shorter than that view the compositor clamp applies. It keeps that
+  degradation and adds no second scrollport; "every render branch fits the
+  grant" holds for the panel's own assemblies, not for the recorder view.
 - Legacy limits are retained deliberately for the independent `SettingsList`
   consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`): the list
   keeps `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its
