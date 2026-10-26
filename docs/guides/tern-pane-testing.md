@@ -38,7 +38,7 @@ and it takes minutes. Run it deliberately, for acceptance evidence.
 
 | Piece | Owns |
 |---|---|
-| `scripts/tern-pane-drive.mjs` | The driver: `tern serve` lifecycle, the control channel, real input, the node tree, captures, the run directory and the result ledger |
+| `scripts/tern-pane-drive.mjs` | The driver: `tern serve` lifecycle, the control channel, control-injected input, the node tree, captures, the run directory and the result ledger |
 | `scripts/tern-pane-geometry.mjs` | The visibility oracle: boxes, clipping ancestors, the visible click point. Pure, covered by `test/tooling/tern-pane-geometry.test.mjs` |
 | `scripts/tern-pane-instrument.mjs` | The two remaining rules: which commands may be repeated, and how a path is quoted into the generated launcher. Pure, covered by `test/tooling/tern-pane-instrument.test.mjs` |
 | `scripts/tern-pane-smoke.mjs` + `-smoke-subject.mts` | The committed smoke: the worked example, and the check that the driver still works end to end |
@@ -76,7 +76,7 @@ node scripts/tern-pane-drive.mjs scripts/tern-pane-smoke.mjs --out /tmp/not-ours
 
 `scripts/tern-pane-smoke.mjs` is the worked example and the end-to-end check of
 the instrument itself: it resizes, launches `scripts/tern-pane-smoke-subject.mts`
-in a real pane, sends a REAL pointer click and a REAL key, reads the subject's own
+in a real pane, sends a control-injected pointer click and a control-injected key, reads the subject's own
 record back, measures the viewport and captures a PNG. Run it before trusting your
 own flow:
 
@@ -97,7 +97,7 @@ export default async function (h) {
 
   const snap = h.snapshot()
   const button = snap.nodes.find((node) => node.tag === 'button' && h.descendantsText(node).includes('Pick'))
-  h.check('a REAL pointer click on the visible fragment runs the handler',
+  h.check('a control-injected pointer click on the visible fragment runs the handler',
     await h.click(snap.chains, button) && h.has(h.snapshot(), 'clicks=1'))
 
   await h.key('a', 700)
@@ -175,9 +175,10 @@ instead, so the switch is the `appearance` command.
 A live GUI window does not use `appearance`: the client accepts it and returns
 `{ok:true}`, but its resolved theme stays the saved Appearance setting and no
 visible element's computed style changes. The live switch is the
-`appearance:dark` key action — send `plugins run appearance:dark` (or
-`appearance:light`) to the window, or use Preferences › Appearance ›
-Appearance: Dark/Light. It saves the setting; prove it with `state.theme` and
+`appearance:dark` key action — in a GUI flow send `plugins run appearance:dark`
+(or `appearance:light`) once with `send`; `ctl` retries, so it must not carry an
+action. Alternatively use Preferences › Appearance › Appearance: Dark/Light.
+It saves the setting; prove it with `state.theme` and
 `dump.header.theme`, not the reply. See
 [`tern-gui-testing.md`](./tern-gui-testing.md).
 
@@ -234,8 +235,8 @@ dark-mode window chrome or the desktop font stack — that is the GUI lane.
   written" pass vacuously. A flow that throws is recorded as a failed
   `the flow ran to completion` and still writes the ledger, so a red run is as
   auditable as a green one.
-- **A real input is delivered exactly once.** `click`, `key` and the subject
-  launch are never retried — a repeat would be a SECOND real input while the run
+- **An input is delivered exactly once.** `click`, `key` and the subject
+  launch are never retried — a repeat would be a SECOND input while the run
   still claimed "exactly one", so an unacknowledged send aborts the run instead.
   Reads and idempotent sets may be retried, because a lost reply costs nothing.
   The split is on the WHOLE command shape, not the name: a bare `a11y` reads the
@@ -275,15 +276,17 @@ dark-mode window chrome or the desktop font stack — that is the GUI lane.
   is out of scope. The client's own theme is not: in a headless session
   `appearance` and `theme` are accepted at the control endpoint, and
   `state.theme` plus the capture's layout `theme` report the result. A live
-  window uses the GUI guide's `plugins run appearance:dark`. See
-  [`tmux-testing.md`](./tmux-testing.md) for the terminal-side complement.
+  window switches with the GUI guide's `plugins run appearance:dark`, sent once
+  with `send`. See [`tmux-testing.md`](./tmux-testing.md) for the terminal-side
+  complement.
 
 ## Related
 
 - [`tmux-testing.md`](./tmux-testing.md) — the terminal/TTY complement.
 - [`tern-gui-testing.md`](./tern-gui-testing.md) — the real GUI-window lane:
   the native window, its OS chrome/font stack, the live-window Appearance
-  switch, a real pointer and the OS accessibility bridge.
+  switch, control-injected pointer/key input and the client's `a11y` tree (not
+  OS input or an OS reader).
 - [`focus-replay-harness.md`](./tmux-testing.md) — the same shape for
   fullscreen frame replay: a probe script plus a pure oracle, documented here.
 - [`tsp/overview.md`](../tsp/overview.md) — the TSP integration and product boundary.

@@ -113,13 +113,13 @@ export default async function (h) {
   h.measure('the inline image accessible name (this client build)',
     JSON.stringify(inlineImages.map((element) => element.name ?? null)))
 
-  // A REAL pointer on the image: the client's own image viewer. `image` came
+  // A control-injected pointer on the image: the client's own image viewer. `image` came
   // from `snap`, so its chains must come from `snap` too: the oracle indexes by
   // node identity, and chains from another snapshot do not contain this node.
   const hovered = await h.hover(snap.chains, image)
   h.measure('the pointer over the image', JSON.stringify(hovered ?? null))
   const clicked = await h.click(snap.chains, image)
-  h.check('a REAL pointer click on the image is delivered', clicked === true, JSON.stringify({ clicked }))
+  h.check('a control-injected pointer click on the image is delivered', clicked === true, JSON.stringify({ clicked }))
   const viewer = viewerOf(h.ctl('a11y'))
   h.check('the client opens its OWN image viewer on that click', viewer !== undefined,
     'the accessibility tree must carry a Dialog')
