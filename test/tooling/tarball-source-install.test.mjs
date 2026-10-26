@@ -50,7 +50,13 @@ function candidateFiles() {
     // mirror the REAL published entry set (the tarball smoke imports every
     // public subpath), including the plugin name the row is loaded by.
     'dist/performance-host.mjs': "export const name = 'pi-tui-performance-host'\n",
-    'dist/visual-tools.mjs': "export const name = 'pi-tui-visual-tools'\n",
+    // The REAL published row surface, including the two tool names it has
+    // exported since it shipped (the tarball smoke asserts them).
+    'dist/visual-tools.mjs': "export const name = 'pi-tui-visual-tools'\n"
+      + "export const inject = ['tools']\n"
+      + "export const CHART_TOOL_NAME = 'dsh_pi_tui_chart'\n"
+      + "export const SVG_TOOL_NAME = 'dsh_pi_tui_svg'\n"
+      + "export const apply = () => {}\n",
     'dist/index.d.mts': 'export declare const SOURCE_PROBE: boolean\n',
     'dist/startup.d.mts': 'export declare const STARTUP_PROBE: boolean\n',
     'dist/extensions.d.mts': 'export declare const EXTENSIONS_PROBE: boolean\n',
@@ -58,7 +64,11 @@ function candidateFiles() {
     'dist/extension/advanced.d.mts': 'export declare const ADVANCED_API_LEVEL: 1\n',
     'dist/extension/unstable.d.mts': 'export declare const UNSTABLE_API_LEVEL: 1\n',
     'dist/performance-host.d.mts': 'export declare const name: string\n',
-    'dist/visual-tools.d.mts': 'export declare const name: string\n',
+    'dist/visual-tools.d.mts': 'export declare const name: string\n'
+      + 'export declare const inject: string[]\n'
+      + 'export declare const CHART_TOOL_NAME: string\n'
+      + 'export declare const SVG_TOOL_NAME: string\n'
+      + 'export declare const apply: () => void\n',
     'cordis.patch.yml': 'patch: []\n',
     'README.md': '# source probe\n',
     'README.en.md': '# source probe\n',
