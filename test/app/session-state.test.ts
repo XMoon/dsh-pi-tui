@@ -33,8 +33,17 @@ import { DirectModelSelectionOwner } from '../../src/runtime/direct/model-select
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import {
+  confirmSettingsChoice,
+  openSettingsChoice,
+  openSettingsRows,
+  paintedDetailsText,
+  paintedSelectedRowCell,
+  selectSettingsChoice,
+  selectSettingsRow,
+  settingsDetailsPaneStart,
+} from '../support/settings-workspace-navigation.ts'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -94,6 +103,58 @@ function fakeAgent(sessionId: string): Agent {
 
 /** A stub runner with a MUTABLE generation and live agent (the test plays
  * the session switch by mutating state). */
+/** The TuiApp the migrated Settings cases use: the REAL owned-task writer
+ *  entry plus the process-slot lifecycle guard. */
+function newSettingsApp(vt: VirtualTerminal): TuiApp {
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  return app
+}
+
+/** SGR primary-button press+release at a 0-based viewport cell (real mouse). */
+async function clickSettingsCell(vt: VirtualTerminal, x: number, y: number): Promise<void> {
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await vt.waitForRender()
+}
+
+const settingsPlain = (vt: VirtualTerminal): readonly string[] =>
+  vt.getViewport().map(stripTerminalSequences)
+
+/** The physical cell of one painted Details-pane text (0-based). */
+function settingsDetailsCell(vt: VirtualTerminal, needle: string): { x: number; y: number } {
+  const start = settingsDetailsPaneStart(vt)
+  const lines = settingsPlain(vt)
+  for (const [y, line] of lines.entries()) {
+    const at = line.slice(start).indexOf(needle)
+    if (at >= 0) return { x: start + at + 1, y }
+  }
+  throw new Error(`the Details pane must paint ${JSON.stringify(needle)}:\n${lines.join('\n')}`)
+}
+
+/** The physical cell of one painted Rows-pane text (0-based). */
+function settingsRowsCell(vt: VirtualTerminal, needle: string): { x: number; y: number } {
+  const lines = settingsPlain(vt)
+  const start = lines.find(line => line.includes('[Rows ('))?.indexOf('[Rows (') ?? 0
+  for (const [y, line] of lines.entries()) {
+    const at = line.slice(start).indexOf(needle)
+    if (at >= 0) return { x: start + at + 1, y }
+  }
+  throw new Error(`the Rows pane must paint ${JSON.stringify(needle)}:\n${lines.join('\n')}`)
+}
+
 function stubRunner(
   ctx: Context,
   app: TuiApp,
@@ -230,7 +291,7 @@ function stubRunner(
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: legacyEditorExtensions() as never,
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     exit: () => {},
   }
 }
@@ -279,45 +340,204 @@ function fakeServices() {
   }
 }
 
-test('/settings working-directory row follows the live session cwd', async () => {
+test('the live session cwd the retired Working-directory row showed still follows the session owner', async () => {
+  // Frozen R6 decision: the new Settings surface does NOT add a Working
+  // directory row (the old read-only row was a legacy-editor fact). The
+  // SEMANTIC capability is proven on the runner seam the surface reads: the
+  // surface cwd follows the live session owner's header, never a stale open.
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
+  const app = newSettingsApp(vt)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  const state = { agent: undefined, generation: 1 }
-  let liveCwd = '/ws/alpha'
+  const alpha = fakeAgent('session-a')
+  ;(alpha.session as unknown as { header: { cwd: string } }).header.cwd = '/ws/alpha'
+  const state: { agent: Agent | undefined; generation: number } = { agent: alpha, generation: 1 }
   const runner = stubRunner(ctx, app, state)
   const proxy = new Proxy(runner, {
     get(target, prop, receiver) {
-      if (prop === 'sessionCwd') return (): string => liveCwd
+      if (prop === 'sessionCwd') {
+        return (): string => state.agent === undefined
+          ? '/ws'
+          : (state.agent.session as unknown as { header: { cwd: string } }).header.cwd
+      }
       return Reflect.get(target, prop, receiver)
     },
   })
   registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
-  const settingsDef = services.defs.find(def => def.name === 'settings')
-  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
-  ;(settingsDef!.handler as () => unknown)()
-  await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  vt.sendInput('Working directory')
-  await vt.waitForRender()
-  let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('/ws/alpha'), `session cwd row missing:\n${view}`)
-  // A session switch to another workspace must reflect on the next open.
-  liveCwd = '/ws/beta'
-  vt.sendInput('\x1b') // close the settings overlay
-  await vt.waitForRender()
-  ;(settingsDef!.handler as () => unknown)()
-  await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  vt.sendInput('Working directory')
-  await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(view.includes('/ws/beta'), `updated session cwd missing:\n${view}`)
+  assert.equal(proxy.sessionCwd(), '/ws/alpha', 'the live session owner decides the surface cwd')
+  // A session switch to another workspace must move the fact on the next read.
+  const beta = fakeAgent('session-b')
+  ;(beta.session as unknown as { header: { cwd: string } }).header.cwd = '/ws/beta'
+  state.agent = beta
+  state.generation += 1
+  assert.equal(proxy.sessionCwd(), '/ws/beta', 'the fact follows the live session, never a snapshot')
   app.stop()
+})
+
+test('the Appearance Theme row reaches Rows → Detail → Choice with REAL mouse input and an explicit Confirm', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = newSettingsApp(vt)
+  try {
+    const services = fakeServices()
+    ctx.provide('commands', services.commands as never)
+    const userFooterCustomItems = [{ schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' }]
+    ctx.provide('settings', {
+      describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: userFooterCustomItems } }],
+    } as never)
+    const doc: Record<string, unknown> = {
+      theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
+    }
+    const persisted: unknown[] = []
+    const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+    Object.assign(runner, {
+      tuiSettings: {
+        get: () => doc as never,
+        replace: (next: Record<string, unknown>) => {
+          persisted.push(next.theme)
+          Object.assign(doc, next)
+          return next
+        },
+      },
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const settingsDef = services.defs.find(def => def.name === 'settings')
+    assert.ok(settingsDef?.handler !== undefined)
+    const invoke = (): unknown => (settingsDef!.handler as () => unknown)()
+    await openSettingsRows(vt, invoke, 'Appearance')
+    await selectSettingsRow(vt, 'Configured theme')
+    // REAL mouse press/release on the painted Rows cell selects the row.
+    const rowCell = settingsRowsCell(vt, 'Configured theme')
+    await clickSettingsCell(vt, rowCell.x, rowCell.y)
+    assert.match(paintedSelectedRowCell(vt) ?? '', /^Configured theme/u, 'the click selected its own painted row')
+    // Enter opens the native choice; a REAL mouse click picks the candidate
+    // (a preview, never a write), and the explicit Confirm dispatches it.
+    await openSettingsChoice(vt)
+    const lightCell = settingsDetailsCell(vt, 'light')
+    await clickSettingsCell(vt, lightCell.x, lightCell.y)
+    assert.equal(persisted.length, 0, 'selecting a candidate by mouse never writes')
+    vt.sendInput('\r') // the ONE explicit Confirm
+    await vt.waitForRender()
+    for (let round = 0; round < 12 && persisted.length === 0; round += 1) await vt.waitForRender()
+    assert.equal(persisted.length, 1, 'the explicit Confirm dispatched exactly one write')
+    assert.equal(persisted[0], 'light')
+    assert.equal(doc.theme, 'light', 'the document stores the builtin choice')
+    assert.deepEqual(doc.footerCustomItems, userFooterCustomItems,
+      'the USER custom-item storage rides the write verbatim')
+    assert.equal(app.currentTheme(), 'light', 'the runtime palette really changed')
+    assert.match(paintedDetailsText(vt), /Status\s+Verified/u)
+  } finally {
+    app.stop()
+  }
+})
+
+test('the Appearance Theme write refuses an unreadable USER custom-item layer without promoting project data', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = newSettingsApp(vt)
+  try {
+    const services = fakeServices()
+    ctx.provide('commands', services.commands as never)
+    // No `settings` service: the Direct adapter cannot read the USER layer, so
+    // a whole-document write must abort instead of promoting the project value.
+    const projectFooterCustomItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
+    const doc: Record<string, unknown> = {
+      theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
+      footerCustomItems: projectFooterCustomItems,
+    }
+    const persisted: Record<string, unknown>[] = []
+    const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+    Object.assign(runner, {
+      tuiSettings: {
+        get: () => doc as never,
+        replace: (next: Record<string, unknown>) => {
+          persisted.push(next)
+          Object.assign(doc, next)
+          return next
+        },
+      },
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const settingsDef = services.defs.find(def => def.name === 'settings')
+    assert.ok(settingsDef?.handler !== undefined)
+    await openSettingsRows(vt, () => (settingsDef!.handler as () => unknown)(), 'Appearance')
+    await selectSettingsRow(vt, 'Configured theme')
+    await confirmSettingsChoice(vt, 'light', async () => (await paintedDetailsText(vt)).includes('Not saved'))
+    assert.deepEqual(persisted, [], 'an unavailable USER projection aborts the unrelated settings write')
+    assert.equal(doc.theme, 'dark', 'the merged document stays untouched when the write is aborted')
+    assert.deepEqual(doc.footerCustomItems, projectFooterCustomItems, 'the project value is never promoted')
+    const detail = paintedDetailsText(vt)
+    assert.match(detail, /Not saved/u)
+    assert.doesNotMatch(detail, /Status\s+Verified/u, 'a refused write is never Verified')
+    assert.match(detail, /Value\s+dark/u, 'the stored fact still names the semantic value')
+  } finally {
+    app.stop()
+  }
+})
+
+test('a Theme candidate whose source unloaded before the Confirm is refused without persisting or rolling a false value', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = newSettingsApp(vt)
+  try {
+    const services = fakeServices()
+    ctx.provide('commands', services.commands as never)
+    ctx.provide('settings', {
+      describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: [] } }],
+    } as never)
+    const doc: Record<string, unknown> = {
+      theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
+    }
+    const persisted: unknown[] = []
+    const registry = new ThemeRegistry()
+    const handle = registry.register(
+      { id: 'solarized', name: 'Solarized', palette: { text: '#123456' } as never },
+      'owner-a-owner',
+      'owner-a',
+    )
+    const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+    Object.assign(runner, {
+      tuiSettings: {
+        get: () => doc as never,
+        replace: (next: Record<string, unknown>) => {
+          persisted.push(next.theme)
+          Object.assign(doc, next)
+          return next
+        },
+      },
+      extensions: { themes: registry, settings: new SettingsRegistry() } as never,
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const settingsDef = services.defs.find(def => def.name === 'settings')
+    assert.ok(settingsDef?.handler !== undefined)
+    await openSettingsRows(vt, () => (settingsDef!.handler as () => unknown)(), 'Appearance')
+    await selectSettingsRow(vt, 'Configured theme')
+    await openSettingsChoice(vt) // the frozen choice still paints the plugin row
+    // HMR: the contribution unloads between the open and the Confirm.
+    handle.dispose()
+    assert.equal(registry.paletteForSelectable('plugin:owner-a/solarized'), undefined,
+      'the source is really gone at confirm time')
+    await selectSettingsChoice(vt, 'plugin:owner-a/solarized')
+    vt.sendInput('\r') // Confirm the stale identity
+    await vt.waitForRender()
+    for (let round = 0; round < 12 && !(await paintedDetailsText(vt)).includes('Not saved'); round += 1) {
+      await vt.waitForRender()
+    }
+    const detail = paintedDetailsText(vt)
+    assert.deepEqual(persisted, [], 'a stale source never persists')
+    assert.equal(doc.theme, 'auto', 'the committed choice is unchanged')
+    assert.match(detail, /Not saved/u)
+    assert.match(detail, /no longer available/u, 'the real refusal reason is stated')
+    assert.doesNotMatch(detail, /Status\s+Verified/u)
+    assert.ok((paintedSelectedRowCell(vt) ?? '').includes('auto'),
+      'the row states the committed choice, never the stale identity')
+  } finally {
+    app.stop()
+  }
 })
 
 test('/tasks Enter opens the job detail through the shared openJobView', async () => {
@@ -1284,358 +1504,6 @@ test('/title and /rename degrade when the sessionTitle service is absent', async
 })
 
 
-test('/settings theme pick persists the BUILTIN choice too (review P1: the transactional commit must keep the settings write)', async () => {
-  // Regression for the review's P1: the transactional restructure moved the
-  // settings.replace call into the file/plugin branch, so picking a BUILTIN
-  // (auto/dark/light) applied but never persisted — the next start restored
-  // the old theme. The commit() seam persists EVERY successful branch.
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const userFooterCustomItems: unknown[] = [
-    { schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' },
-    { schemaVersion: 1, id: 'user:clock', kind: 'future-kind', command: 'date' },
-  ]
-  const projectFooterCustomItems: unknown[] = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
-  ctx.provide('settings', {
-    describe: () => [{
-      ns: 'tui-app',
-      value: { footerCustomItems: projectFooterCustomItems },
-      user: { footerCustomItems: userFooterCustomItems },
-    }],
-  } as never)
-  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
-  const doc: Record<string, unknown> = {
-    theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
-    footerCustomItems: projectFooterCustomItems,
-  }
-  const persisted: Array<{ theme: unknown; footerCustomItems: unknown }> = []
-  Object.assign(runner, {
-    tuiSettings: {
-      get: () => doc as never,
-      replace: (next: Record<string, unknown>) => {
-        persisted.push({ theme: next.theme, footerCustomItems: next.footerCustomItems })
-        Object.assign(doc, next)
-        return next
-      },
-    },
-  })
-  registerTuiCommandsWithDirectSeams(runner)
-  const settingsDef = services.defs.find(def => def.name === 'settings')
-  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
-  ;(settingsDef!.handler as () => unknown)()
-  await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  vt.sendInput('\x1b[B') // → Theme row (approval is first; the doc starts dark)
-  await vt.waitForRender()
-  vt.sendInput('\r') // open the Theme submenu
-  await vt.waitForRender()
-  vt.sendInput('\x1b[B') // dark
-  await vt.waitForRender()
-  vt.sendInput('\x1b[B') // light
-  await vt.waitForRender()
-  vt.sendInput('\r') // pick light
-  await vt.waitForRender()
-  assert.equal(persisted.length, 1)
-  assert.equal(persisted[0]?.theme, 'light',
-    'a BUILTIN pick must persist through the same transactional commit as a plugin pick')
-  assert.deepEqual(persisted[0]?.footerCustomItems, userFooterCustomItems,
-    'an unrelated theme change must preserve the exact USER custom-item storage value')
-  assert.deepEqual(doc.footerCustomItems, userFooterCustomItems,
-    'a project-layer custom-item value must never be promoted by the theme write')
-  assert.deepEqual(runner.config.footerCustomItems.get().items, [userFooterCustomItems[0]],
-    'runtime resolution must still expose only the supported USER definition')
-  // The committed choice marks the light row on a re-open.
-  vt.sendInput('\r') // reopen the submenu
-  await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  const lightMarked = view.split('\n').filter(line => line.includes('light') && line.includes('[current]'))
-  assert.equal(lightMarked.length, 1, `the light row carries the marker after the pick:\n${view}`)
-  app.stop()
-})
-
-test('/settings nested Theme submenu responds to fullscreen mouse clicks (mouse parity)', async () => {
-  // The full nested chain through the REAL /settings handler: click the
-  // outer Theme row (through the Frame), the ThemeSubmenu opens in place,
-  // click a theme row inside the submenu, and the transactional commit
-  // persists the clicked source-qualified value.
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  app.setFullscreen(true)
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const userFooterCustomItems: unknown[] = [
-    { schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' },
-  ]
-  const projectFooterCustomItems: unknown[] = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
-  ctx.provide('settings', {
-    describe: () => [{
-      ns: 'tui-app',
-      value: { footerCustomItems: projectFooterCustomItems },
-      user: { footerCustomItems: userFooterCustomItems },
-    }],
-  } as never)
-  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
-  const doc: Record<string, unknown> = {
-    theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
-    footerCustomItems: projectFooterCustomItems,
-  }
-  const persisted: string[] = []
-  Object.assign(runner, {
-    tuiSettings: {
-      get: () => doc as never,
-      replace: (next: Record<string, unknown>) => {
-        persisted.push(next.theme as string)
-        Object.assign(doc, next)
-        return next
-      },
-    },
-  })
-  registerTuiCommandsWithDirectSeams(runner)
-  const settingsDef = services.defs.find(def => def.name === 'settings')
-  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
-  ;(settingsDef!.handler as () => unknown)()
-  await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  // Click the outer Theme row (approval is first; the doc starts dark).
-  let viewport = vt.getViewport()
-  const themeRow = viewport.findIndex(line => line.includes('Theme'))
-  assert.ok(themeRow >= 0, `Theme row missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[themeRow]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'frame left border missing')
-  vt.sendInput(`\x1b[<0;${leftBorder + 3};${themeRow + 1}M`)
-  vt.sendInput(`\x1b[<0;${leftBorder + 3};${themeRow + 1}m`)
-  await vt.waitForRender()
-  // The ThemeSubmenu is open in place: click the "light" row.
-  viewport = vt.getViewport()
-  const lightRow = viewport.findIndex(line => line.includes('light'))
-  assert.ok(lightRow >= 0, `light row missing in the submenu:\n${viewport.join('\n')}`)
-  const subLeftBorder = viewport[lightRow]?.indexOf('│') ?? -1
-  assert.ok(subLeftBorder >= 0, 'submenu frame left border missing')
-  vt.sendInput(`\x1b[<0;${subLeftBorder + 3};${lightRow + 1}M`)
-  vt.sendInput(`\x1b[<0;${subLeftBorder + 3};${lightRow + 1}m`)
-  await vt.waitForRender()
-  for (let spin = 0; spin < 50; spin += 1) await new Promise(resolve => setImmediate(resolve))
-  assert.equal(persisted.length, 1, 'the submenu click must persist exactly one write')
-  assert.equal(persisted[0], 'light', 'the submenu click must apply the clicked theme')
-  app.stop()
-})
-
-test('/settings theme write aborts when USER custom storage is unavailable', async () => {
-  // A whole-document settings write must not proceed when the Direct adapter
-  // cannot read the USER layer. Otherwise this fallback would write the merged
-  // document with footerCustomItems: undefined and erase the user's data.
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
-  const projectFooterCustomItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
-  const doc: Record<string, unknown> = {
-    theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
-    footerCustomItems: projectFooterCustomItems,
-  }
-  const persisted: Record<string, unknown>[] = []
-  Object.assign(runner, {
-    tuiSettings: {
-      get: () => doc as never,
-      replace: (next: Record<string, unknown>) => {
-        persisted.push(next)
-        Object.assign(doc, next)
-        return next
-      },
-    },
-  })
-  registerTuiCommandsWithDirectSeams(runner)
-  const settingsDef = services.defs.find(def => def.name === 'settings')
-  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
-  ;(settingsDef!.handler as () => unknown)()
-  await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  vt.sendInput('\x1b[B') // → Theme row (approval is first; the doc starts dark)
-  await vt.waitForRender()
-  vt.sendInput('\r') // open the Theme submenu
-  await vt.waitForRender()
-  vt.sendInput('\x1b[B') // dark
-  await vt.waitForRender()
-  vt.sendInput('\x1b[B') // light
-  await vt.waitForRender()
-  vt.sendInput('\r') // attempt to pick light
-  await vt.waitForRender()
-  for (let spin = 0; spin < 50; spin += 1) await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(persisted, [], 'an unavailable USER projection must abort the unrelated settings write')
-  assert.equal(doc.theme, 'dark', 'the merged document must remain untouched when the write is aborted')
-  assert.deepEqual(doc.footerCustomItems, projectFooterCustomItems, 'the project value must not be promoted')
-  app.stop()
-})
-
-test('/settings theme STALE pick through the REAL handler rolls the row and the choice back (review P2: production-path failure)', async () => {
-  // The miniature in theme-picker.test.ts pins the fork contract; THIS test
-  // drives the REAL /settings handler (registerTuiCommands → app panel →
-  // ThemeSubmenu → the transactional commit/rollback in commands.ts): open
-  // the submenu while the plugin theme is live, unload it (the HMR window),
-  // confirm the STALE row → the handler must notify, roll the outer row
-  // back to the previous choice's display, and leave the committed choice
-  // untouched (a re-open marks `auto`, never the stale identity).
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
-  const doc: Record<string, unknown> = { theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off' }
-  const persisted: string[] = []
-  // A REAL registry with one plugin theme, plus an empty settings registry
-  // (the /settings panel reads extensions.settings.rows()).
-  const registry = new ThemeRegistry()
-  const handle = registry.register(
-    { id: 'solarized', name: 'Solarized', palette: { text: '#123456' } as never },
-    'owner-a-owner',
-    'owner-a',
-  )
-  Object.assign(runner, {
-    tuiSettings: {
-      get: () => doc as never,
-      replace: (next: Record<string, unknown>) => {
-        persisted.push(next.theme as string)
-        Object.assign(doc, next)
-        return next
-      },
-    },
-    extensions: legacyEditorExtensions(registry) as never,
-  })
-  registerTuiCommandsWithDirectSeams(runner)
-  const settingsDef = services.defs.find(def => def.name === 'settings')
-  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
-  ;(settingsDef!.handler as () => unknown)()
-  await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  vt.sendInput('\x1b[B') // → Theme row (starts at auto)
-  await vt.waitForRender()
-  vt.sendInput('\r') // open the Theme submenu — rows FROZEN here
-  await vt.waitForRender()
-  // HMR: the contribution unloads while the submenu is open.
-  handle.dispose()
-  assert.equal(registry.paletteForSelectable('plugin:owner-a/solarized'), undefined,
-    'the source is gone at confirm time (the stale window)')
-  vt.sendInput('\x1b[B') // dark
-  await vt.waitForRender()
-  vt.sendInput('\x1b[B') // light
-  await vt.waitForRender()
-  vt.sendInput('\x1b[B') // Solarized (the frozen plugin row)
-  await vt.waitForRender()
-  vt.sendInput('\r') // confirm the STALE row
-  await vt.waitForRender()
-  // The REAL handler rejected the frozen identity and notified.
-  assert.ok(vt.getViewport().join('\n').includes('not found'),
-    'the stale pick must notify "theme not found"')
-  // Nothing was persisted, and the outer row rolled back to the previous
-  // choice's friendly display — never the stale raw identity.
-  assert.deepEqual(persisted, [], 'a failed pick must not persist')
-  // The outer theme ROW rolled back to the previous choice's friendly
-  // display (the notify banner still NAMES the stale value — that is the
-  // error message, not the row).
-  const themeRow = vt.getViewport().find(line => line.includes('Theme') && line.includes('auto') === false && line.includes('plugin:'))
-  assert.equal(themeRow, undefined, `the theme row must not show the stale identity: ${themeRow ?? ''}`)
-  const rollbackRow = vt.getViewport().find(line => line.includes('Theme'))
-  assert.ok(rollbackRow !== undefined && rollbackRow.includes('auto'),
-    `the theme row rolled back to the previous choice's label: ${rollbackRow ?? ''}`)
-  // The committed choice is UNCHANGED: a re-open marks `auto` `[current]`.
-  vt.sendInput('\r') // reopen the submenu
-  await vt.waitForRender()
-  const reopened = vt.getViewport().join('\n')
-  const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('[current]'))
-  assert.equal(autoMarked.length, 1, `the auto row carries the marker after the rollback:\n${reopened}`)
-  app.stop()
-})
-
-/** Spin the event loop for a bounded number of TURNS (never a wall-clock
- * timeout) until the CURRENT palette equals `expected`, then fail with the
- * last palette. The autodetect reply applies through a detached task chain,
- * so the assertion waits on the OBSERVABLE outcome via loop turns — no
- * fixed sleep and no clock read (AGENTS.md — never a fixed setTimeout). */
-async function waitForPalette(expected: unknown, maxTurns = 1000): Promise<void> {
-  for (let turn = 0; turn < maxTurns && currentPalette !== expected; turn += 1) {
-    await new Promise(resolve => setImmediate(resolve))
-  }
-  assert.equal(currentPalette, expected, 'the palette never reached the expected value')
-}
-
-test('/settings theme autodetect applies only while auto stays the latest choice', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
-  const settingsDef = services.defs.find(def => def.name === 'settings')
-  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
-  ;(settingsDef!.handler as () => unknown)()
-  await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  vt.sendInput('\x1b[B') // → the Theme row (the panel opens at auto)
-  await vt.waitForRender()
-  // The theme row opens an in-place SUBMENU (the /model pattern — the row
-  // displays the friendly name, the picker's rows carry the SOURCE-
-  // QUALIFIED values; the first row is the current selection's row).
-  // Pick `auto` (the first row): the LATEST choice is auto, so a landing
-  // detection must apply. Inject a LIGHT reply (the palette before the
-  // first explicit pick of this test is the default dark, so only a real
-  // detection landing can turn it light — the assertion is never masked by
-  // an explicit-pick side effect).
-  vt.sendInput('\r') // open the Theme submenu
-  await vt.waitForRender()
-  vt.sendInput('\r') // the first row = auto (a detection query fires)
-  await vt.waitForRender()
-  vt.sendInput('\x1b]11;#eeeeee\x07') // light-background reply
-  await waitForPalette(lightColors)
-  // Pick auto again, then walk away while the query is in flight: the late
-  // landing must be REFUSED (the guard reads the latest choice).
-  vt.sendInput('\r') // open the Theme submenu
-  await vt.waitForRender()
-  vt.sendInput('\r') // the first row = auto (a NEW query fires)
-  await vt.waitForRender()
-  vt.sendInput('\r') // reopen the submenu and switch to dark (query in flight)
-  await vt.waitForRender()
-  vt.sendInput('\x1b[B') // → dark (the second row)
-  await vt.waitForRender()
-  vt.sendInput('\r')
-  await vt.waitForRender()
-  // The in-flight query gets a LIGHT reply — a landing would turn the
-  // palette light, so the refusal is OBSERVABLE (a dark reply would be
-  // indistinguishable from the explicit dark pick). The palette spins the
-  // event loop a bounded number of turns (no wall-clock sleep) before the
-  // refusal assertion.
-  vt.sendInput('\x1b]11;#eeeeee\x07')
-  for (let spin = 0; spin < 50; spin += 1) {
-    await new Promise(resolve => setImmediate(resolve))
-  }
-  assert.equal(currentPalette, darkColors,
-    'a detection landing after the user left auto must not apply (a light reply must be refused)')
-  app.stop()
-})
-
-// ── D2.3 model-selection settlement presentation ──────────────────────────
-
-/** A catalog whose ONLY Session model write is a scripted semantic outcome;
- * the presentation must follow the outcome, never the requested value. */
 function scriptedModelCatalog(
   outcome: () => Promise<{ kind: string; value?: { provider: string; model: string }; error?: { code: string; message: string }; reason?: string }>,
   current: { provider: string; model: string } = { provider: 'p', model: 'old-model' },

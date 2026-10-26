@@ -1,11 +1,13 @@
 /**
- * Headless tests for the busy-Enter preference surface (web busyEnter
- * parity): the /settings row reflects the persisted value and its Enter
- * toggle persists the other behavior, and the pure dispatch boundary
- * (resolveSubmitDelivery) applies the web ComposerSubmissionPolicy to
- * agent-facing input while LOCAL commands always execute. The steer-side
- * semantics (steerAll onlyDraft) live in steer.test.ts; the accelerated
- * chord lives in input-experience.test.ts.
+ * Headless tests for the busy-Enter preference surface (web busyEnter parity):
+ * the pure dispatch boundary (resolveSubmitDelivery) applies the web
+ * ComposerSubmissionPolicy to agent-facing input while LOCAL commands always
+ * execute. The `/settings → Conversation → Submit while busy` UI, its
+ * persisted/default/invalid facts and its explicit Confirm are covered by the
+ * real Settings workspace suite (`settings-workspace-visual.test.ts`); the
+ * retired `Extensions → Configure extension settings…` copies were removed in
+ * C2-R6. The steer-side semantics (steerAll onlyDraft) live in steer.test.ts;
+ * the accelerated chord lives in input-experience.test.ts.
  * @module @xmoon76/dsh-pi-tui/busy-enter.test
  */
 
@@ -28,8 +30,8 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -255,25 +257,13 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: (options.extensions ?? legacyEditorExtensions()) as never,
+    // The minimal REAL extension registries: these cases exercise the static
+    // settings rows, not extension contributions.
+    extensions: (options.extensions ?? { themes: new ThemeRegistry(), settings: new SettingsRegistry() }) as never,
     exit: () => {},
   }
   const installed = registerTuiCommandsWithDirectSeams(runner)
-  const def = commands.defs.find(entry => entry.name === 'settings')
-  assert.ok(def?.handler !== undefined, 'settings handler missing')
-  /** Run `/settings` and cross the B2-A workspace bridge into the legacy editor. */
-  const run = async (rawInput: string): Promise<unknown> => {
-    const result = (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: CommandId('cmd-test-1'),
-      agent: undefined as never,
-      rawInput,
-      signal: new AbortController().signal,
-    })
-    await navigateToLegacySettings(vt)
-    return result
-  }
-  // Run ANY registered command (defaults to /settings for the existing
-  // tests; /help uses the same surface).
+  // Run ANY registered command (`/help` and the host-claim cases use it).
   const runCommand = async (name: string, rawInput = ''): Promise<unknown> => {
     const found = commands.defs.find(entry => entry.name === name)
     assert.ok(found?.handler !== undefined, `${name} handler missing`)
@@ -288,7 +278,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, ctx, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
+  return { vt, app, ctx, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
 }
 
 test('only the winner stamped with THIS surface\'s mirror id is subtracted', () => {
@@ -356,90 +346,6 @@ test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
   t.app.stop()
 })
 
-test('/settings shows the busy-enter row with the persisted value', async () => {
-  const t = setup({ busyEnter: 'steer' })
-  await t.run('')
-  const view = await t.view()
-  // Key-neutral label (review round 37): the preference is the semantic
-  // SUBMIT action's busy behavior — never a physical Enter claim (the
-  // submit key may be remapped).
-  assert.ok(view.includes('Submit while busy'), `busy-enter row missing:\n${view}`)
-  assert.ok(view.includes('steer'), `persisted value missing:\n${view}`)
-  t.app.stop()
-})
-
-test('the busy-enter row Enter toggle persists the other behavior', async () => {
-  const t = setup({ busyEnter: 'steer' })
-  await t.run('')
-  await t.view()
-  // Rows without a session: theme, icon-style, expand, thinking, footer,
-  // busy-enter, fullscreen, separator, cwd — the busy-enter row is the
-  // 6th.
-  t.vt.sendInput('\x1b[B') // down × 5
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\r') // toggle the selected row's value
-  await t.view()
-  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.busyEnter, 'queue', `the toggle must flip steer -> queue, wrote: ${JSON.stringify(last)}`)
-  t.app.stop()
-})
-
-test('the busy-enter row defaults to queue', async () => {
-  const t = setup()
-  await t.run('')
-  const view = await t.view()
-  assert.ok(view.includes('queue'), `default value missing:\n${view}`)
-  t.app.stop()
-})
-
-test('/settings shows the local-shell-sandbox row with the persisted value', async () => {
-  const t = setup({ localShellSandbox: 'sandbox' })
-  await t.run('')
-  await t.view()
-  // The row sits below the initial fold (theme, icon-style, expand,
-  // thinking, footer, busy-enter, then sandbox).
-  for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
-  const view = await t.view()
-  assert.ok(view.includes('User shell sandbox policy'), `local-shell-sandbox row missing:\n${view}`)
-  assert.ok(view.includes('sandbox'), `persisted value missing:\n${view}`)
-  t.app.stop()
-})
-
-test('the local-shell-sandbox row defaults to bypass', async () => {
-  const t = setup()
-  await t.run('')
-  await t.view()
-  for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
-  const view = await t.view()
-  assert.ok(view.includes('bypass'), `default bypass value missing:\n${view}`)
-  t.app.stop()
-})
-
-test('the local-shell-sandbox row Enter toggle persists the other behavior', async () => {
-  const t = setup({ localShellSandbox: 'bypass' })
-  await t.run('')
-  await t.view()
-  // Rows without a session: theme, icon-style, expand, thinking, footer,
-  // busy-enter, local-shell-sandbox, fullscreen, separator, cwd — the
-  // sandbox row is the 7th.
-  t.vt.sendInput('\x1b[B') // down × 6
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\r') // toggle the selected row's value
-  await t.view()
-  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.localShellSandbox, 'sandbox', `the toggle must flip bypass -> sandbox, wrote: ${JSON.stringify(last)}`)
-  t.app.stop()
-})
-
 test('resolveSubmitDelivery: /skill <name> with args follows the policy; the bare picker does not (review finding)', () => {
   const withArgs = resolveSubmitDelivery({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' }, true, 'enter', 'steer')
   assert.equal(withArgs, 'steer', '/skill <name> [image ...] is agent input while running')
@@ -477,66 +383,6 @@ test('/help copy is key-neutral after a remap — no stale bare Esc/Enter claims
   assert.ok(view.includes('Cancel the active turn'), 'the selected cancel row must render its description')
   assert.ok(!view.includes('one Esc while'), `the cancel copy must not claim physical Esc:\n${view}`)
   assert.ok(view.includes('interrupt action twice'), 'the cancel prose is key-neutral (semantic action)')
-  t.app.stop()
-})
-
-test('/settings SettingsList row responds to a fullscreen mouse click (v0.85.1 mouse integration)', async () => {
-  const t = setup({ busyEnter: 'steer' })
-  t.app.setFullscreen(true)
-  await t.run('')
-  await t.view()
-  const viewport = t.vt.getViewport()
-  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
-  assert.ok(rowY >= 0, `busy-enter row missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'frame left border missing')
-  // SGR click on the row's content (1-based): the content starts two cells
-  // right of the left border (`│` + one padding cell).
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${rowY + 1}M`)
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${rowY + 1}m`)
-  await t.view()
-  assert.ok(t.settings.writes.length >= 1, 'the mouse click must toggle and persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.busyEnter, 'queue', `the click must flip steer -> queue, wrote: ${JSON.stringify(last)}`)
-  t.app.stop()
-})
-
-test('/settings frame borders do not activate SettingsList rows (v0.85.1 mouse integration)', async () => {
-  const t = setup({ busyEnter: 'steer' })
-  t.app.setFullscreen(true)
-  await t.run('')
-  await t.view()
-  const viewport = t.vt.getViewport()
-  const borderY = viewport.findIndex(line => line.includes('╰'))
-  assert.ok(borderY >= 0, `frame bottom border missing:\n${viewport.join('\n')}`)
-  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
-  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'frame left border missing')
-  // Click the bottom border (inside the frame, on the border row): it must
-  // NOT reach the child as a valid row.
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${borderY + 1}M`)
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${borderY + 1}m`)
-  await t.view()
-  assert.equal(t.settings.writes.length, 0, 'a bottom-border click must not toggle a row')
-  t.app.stop()
-})
-
-test('/settings frame left padding does not activate SettingsList rows (v0.85.1 mouse integration)', async () => {
-  const t = setup({ busyEnter: 'steer' })
-  t.app.setFullscreen(true)
-  await t.run('')
-  await t.view()
-  const viewport = t.vt.getViewport()
-  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
-  assert.ok(rowY >= 0, `busy-enter row missing:\n${viewport.join('\n')}`)
-  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'frame left border missing')
-  // Click the padding cell between the left border and the content
-  // (frame-local x=1): it must NOT reach the child as column 0.
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${rowY + 1}M`)
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${rowY + 1}m`)
-  await t.view()
-  assert.equal(t.settings.writes.length, 0, 'a left-padding click must not toggle a row')
   t.app.stop()
 })
 
@@ -614,20 +460,4 @@ test('the deprecated app.input.queue action keeps its own (fixed-queue) identity
   assert.equal(both.bindings['app.input.queue'], 'ctrl+y')
   assert.equal(both.bindings['app.input.submitAccelerated'], 'ctrl+k')
   assert.deepEqual(both.diagnostics, [], 'two distinct actions never collide')
-})
-
-test('/settings describes the user-shell sandbox policy as conditional on Host execution', async () => {
-  // The row keeps its persisted value and write path, but its discovery copy
-  // must not over-promise execution: a backend that provides no Host
-  // user-shell (Remote rc.2 fails closed) still shows the policy row.
-  const t = setup()
-  let captured: Parameters<TuiApp['openSettings']>[0] | undefined
-  t.app.openSettings = ((items: Parameters<TuiApp['openSettings']>[0]) => { captured = items }) as unknown as TuiApp['openSettings']
-  await t.runCommand('settings', '')
-  await navigateToLegacySettings(t.vt)
-  const row = captured?.find(candidate => candidate.id === 'local-shell-sandbox')
-  assert.ok(row !== undefined, 'the local-shell-sandbox row must exist')
-  assert.match(row.description ?? '', /when Host user-shell execution is available/i,
-    'the sandbox policy description must scope execution to an available Host user-shell')
-  t.app.stop()
 })

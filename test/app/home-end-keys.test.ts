@@ -16,7 +16,7 @@ import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from '@xmoon76/pi-tui'
+import { getKeybindings, KeybindingsManager, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS } from '@xmoon76/pi-tui'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../../src/tui/keybindings/home-end-mode.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -30,8 +30,9 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { confirmSettingsChoice, openSettingsRows, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -588,7 +589,19 @@ function fakeTuiSettings(homeEndKeys: string): { value: TuiSettingsLike; writes:
 function setupSettings(options: { homeEndKeys?: string } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The REAL owned-task entry a Settings write runs through.
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  })
   app.start()
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
@@ -603,6 +616,10 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
   } as never)
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const settings = fakeTuiSettings(options.homeEndKeys ?? 'input')
+  // The production bootstrap applies the persisted preset to the live keymap
+  // before the workspace opens; do the same here (an invalid raw value falls
+  // back to the `input` pair).
+  applyHomeEndKeyMode(homeEndKeysModeOf(options.homeEndKeys))
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -690,68 +707,62 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: legacyEditorExtensions() as never,
+    // The minimal REAL extension registries: these cases exercise the static
+    // Home/End keys row, not extension contributions.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
-  const run = async (): Promise<void> => {
-    await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: CommandId('cmd-test-1'),
-      agent: undefined as never,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    await navigateToLegacySettings(vt)
-  }
+  const invoke = (): unknown => (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+    commandId: CommandId('cmd-test-1'),
+    agent: undefined as never,
+    rawInput: '',
+    signal: new AbortController().signal,
+  })
   const view = async (): Promise<string> => {
     await vt.waitForRender()
-    return vt.getViewport().join('\n')
+    return stripTerminalSequences(vt.getViewport().join('\n'))
   }
-  return { vt, app, run, view, settings }
+  return { vt, app, invoke, view, settings }
 }
 
-test('/settings shows the Home/End keys row; an invalid persisted value falls back to input', async () => {
+test('the Input & Terminal Home/End row separates the live preset from an invalid persisted value', async () => {
   resetKeybindings()
   const t = setupSettings({ homeEndKeys: 'garbage' })
-  await t.run()
-  await t.view()
-  // Rows without a session: theme, icon-style, expand, thinking, footer,
-  // busy-enter, local-shell-sandbox, home-end-keys, fullscreen,
-  // separator, cwd — the home-end-keys row is the 8th, below the panel's
-  // visible fold.
-  for (let i = 0; i < 7; i += 1) t.vt.sendInput('\x1b[B')
-  const view = await t.view()
-  const row = view.split('\n').find(line => line.includes('Home/End keys')) ?? ''
-  assert.ok(row !== '', `row missing:\n${view}`)
-  // The row line carries only the label and the current value (the
-  // description is a separate line), so the value can be matched on the
-  // row itself.
-  assert.ok(row.includes('input'), `an invalid persisted value must fall back to input:\n${view}`)
-  assert.ok(!row.includes('viewport'), `an invalid persisted value must not fall back to viewport:\n${view}`)
-  assert.ok(!view.includes('garbage'), `the raw invalid value must never render:\n${view}`)
-  t.app.stop()
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Home/End keys')
+    const rows = await t.view()
+    const row = paintedSelectedRowCell(t.vt) ?? ''
+    assert.ok(row.includes('input'), `an invalid persisted value falls back to input:\n${rows}`)
+    assert.ok(!row.includes('garbage'), `the row never paints the invalid raw value:\n${rows}`)
+    // The ROOT Tab enters the Detail (no choice): both facts stay separate.
+    t.vt.sendInput('\t')
+    const detail = await t.view()
+    assert.match(detail, /Value\s+input/u, `the primary fact is the live preset:\n${detail}`)
+    assert.match(detail, /Persisted\s+garbage/u, `the persisted raw value is its own fact:\n${detail}`)
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
-test('the Home/End keys row toggle applies the preset immediately and persists', async () => {
+test('an explicit Home/End Confirm applies the preset to the live keymap and persists', async () => {
   resetKeybindings()
-  const t = setupSettings({ homeEndKeys: 'viewport' })
-  await t.run()
-  await t.view()
-  // Rows without a session: theme, icon-style, expand, thinking, footer,
-  // busy-enter, local-shell-sandbox, home-end-keys, fullscreen, separator,
-  // cwd — the home-end-keys row is the 8th.
-  for (let i = 0; i < 7; i += 1) t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\r') // toggle viewport -> input
-  await t.view()
-  const resolved = getKeybindings().getResolvedBindings()
-  assert.equal(resolved['tui.altScreen.top'], 'ctrl+home', 'the preset must apply immediately')
-  assert.equal(resolved['tui.altScreen.bottom'], 'ctrl+end')
-  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.homeEndKeys, 'input', `wrote: ${JSON.stringify(last)}`)
-  t.app.stop()
+  const t = setupSettings({ homeEndKeys: 'input' })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Home/End keys')
+    await confirmSettingsChoice(t.vt, 'viewport', () => t.settings.writes.length > 0)
+    const resolved = getKeybindings().getResolvedBindings()
+    assert.equal(resolved['tui.altScreen.top'], 'home', 'the preset applies to the LIVE keymap immediately')
+    assert.equal(resolved['tui.altScreen.bottom'], 'end')
+    assert.equal(t.settings.writes.length, 1, 'one explicit Confirm dispatches exactly one write')
+    assert.equal(t.settings.writes[0]?.homeEndKeys, 'viewport', `wrote: ${JSON.stringify(t.settings.writes[0])}`)
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
 // ── Fullscreen jump-to-latest indicator ─────────────────────────────────

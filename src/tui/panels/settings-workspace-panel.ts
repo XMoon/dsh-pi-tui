@@ -76,7 +76,10 @@ export type SettingsWorkspaceDirectCategoryId = 'about' | 'models' | 'account' |
 
 /** The stable identity of one readonly pilot row. The `*-settings-legacy` rows
  *  are the R0 TRANSITION launchers: each one names the exact existing-editor
- *  row it focuses and runs no write of its own. */
+ *  row it focuses and runs no write of its own. C2-R6 adds the dynamic
+ *  `ext-setting:<registry id>` identity of ONE live extension registration:
+ *  the prefix is the only dynamic shape the panel activates, and activation
+ *  additionally requires membership in the CURRENT snapshot. */
 export type SettingsWorkspaceRowId =
   | 'theme'
   | 'icon-style'
@@ -104,6 +107,13 @@ export type SettingsWorkspaceRowId =
   | 'footer-configurator'
   | 'keyboard-shortcuts'
   | 'extension-settings-legacy'
+  | `ext-setting:${string}`
+
+/** The prefix that separates a dynamic extension-setting row from the static
+ *  workspace ids. It mirrors the legacy editor's deeplink prefix; the two are
+ *  different surfaces (one paints rows, the other hands off) and share only
+ *  the spelling of the registry id. */
+const EXTENSION_SETTING_ROW_PREFIX = 'ext-setting:'
 
 /** How current one row's value is, as the reader proved it. */
 export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'unavailable' | 'read-error'
@@ -130,6 +140,10 @@ export type SettingsWorkspaceWritableField =
   | 'notification-mode' | 'notification-method' | 'terminal-progress'
   | 'approval' | 'default-permission' | 'subagent-model-selection' | 'local-shell-sandbox'
   | 'footer-mode'
+  // C2-R6: a live extension registration's own field identity. The command
+  // layer routes it to the extension settings registry; it never reaches a
+  // TUI-document or Host-section writer.
+  | `ext-setting:${string}`
 
 /** One selectable candidate of a writable row. `value` is the EXACT identity
  *  that gets applied and persisted (a source-qualified theme id, a display
@@ -212,6 +226,22 @@ export interface SettingsWorkspaceRow {
    *  its last-known facts but offers no Manage action, because the page could
    *  only refuse every write. */
   readonly specialistAvailable?: boolean
+  /**
+   * C2-R6: the raw owning-fiber identity of ONE live extension-setting
+   * registration (`<fiber uid>:<fiber name>`). Present on EVERY extension row,
+   * readonly ones included: it is the GROUP identity the Extensions page
+   * projects and the Owner fact the Detail states — never a display name, and
+   * never a lookup key for a write.
+   */
+  readonly extensionOwner?: string
+  /**
+   * C2-R6: the registration identity of that SAME contribution. It changes on
+   * every registration, including a same-id/same-owner HMR reload, and is the
+   * ONE fence that keeps an old confirmation/scroll/settlement from reaching a
+   * replacement. Stored once, on the row: `SettingsWorkspaceEdit` carries no
+   * second copy.
+   */
+  readonly extensionRegistrationToken?: number
 }
 
 /** The facts an authority OTHER than the settings document can change for one
@@ -229,6 +259,12 @@ export interface SettingsWorkspaceCommitRequest {
   /** The revision the confirmed candidate was read at (revision-checked rows
    *  only): the writer submits it as its expected revision. */
   readonly revision?: number
+  /** C2-R6: the extension registration the confirmed candidate belongs to.
+   *  Present ONLY for `ext-setting:` fields: the command layer forwards it to
+   *  `SettingsRegistry.applyDetailed`, which refuses a stale registration
+   *  BEFORE calling its callback. It is a runtime identity, never a stored
+   *  settings value. */
+  readonly registrationToken?: number
 }
 
 /**
@@ -418,11 +454,26 @@ export interface SettingsWorkspacePanelIntents {
 /**
  * The transient per-open editing phase. This is PRESENTATION state only: the
  * durable authority stays the ConfigPort, and no phase ever outlives the panel.
+ * C2-R6: a phase of an `ext-setting:` field carries the registration token it
+ * was opened for; every confirm/retry settlement is proven against it so an
+ * old phase can never speak for a same-id replacement.
  */
 type SettingsWorkspaceEditPhase =
   | { readonly kind: 'browsing' }
-  | { readonly kind: 'choosing'; readonly field: SettingsWorkspaceWritableField; readonly candidate: string; readonly index: number }
-  | { readonly kind: 'pending'; readonly field: SettingsWorkspaceWritableField; readonly requestId: number; readonly attempted: string }
+  | {
+      readonly kind: 'choosing'
+      readonly field: SettingsWorkspaceWritableField
+      readonly candidate: string
+      readonly index: number
+      readonly registrationToken?: number
+    }
+  | {
+      readonly kind: 'pending'
+      readonly field: SettingsWorkspaceWritableField
+      readonly requestId: number
+      readonly attempted: string
+      readonly registrationToken?: number
+    }
   | {
       readonly kind: 'settled'
       readonly field: SettingsWorkspaceWritableField
@@ -430,6 +481,7 @@ type SettingsWorkspaceEditPhase =
       readonly attempted: string
       readonly outcome: SettingsWorkspaceCommitOutcome['outcome']
       readonly reason?: string
+      readonly registrationToken?: number
     }
 
 type SettingsLayout = 'wide' | 'medium' | 'narrow'
@@ -669,7 +721,9 @@ function isWorkspacePage(id: string): id is SettingsWorkspacePage {
   return id === 'categories' || id === 'rows' || id === 'detail'
 }
 
-/** The typed guard for a painted row id (a hit target never casts). */
+/** The typed guard for a painted row id (a hit target never casts). The ONE
+ *  dynamic shape is the `ext-setting:` prefix; whether such a row is really
+ *  ACTIVATABLE is decided separately, against the current snapshot. */
 function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
   return id === 'theme'
     || id === 'icon-style'
@@ -697,6 +751,12 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'footer-configurator'
     || id === 'keyboard-shortcuts'
     || id === 'extension-settings-legacy'
+    || id.startsWith(EXTENSION_SETTING_ROW_PREFIX)
+}
+
+/** The registry id behind one dynamic extension row (`ext-setting:<id>`). */
+function extensionSettingIdOf(rowId: SettingsWorkspaceRowId): string {
+  return rowId.slice(EXTENSION_SETTING_ROW_PREFIX.length)
 }
 
 const WIDE_CATEGORY_WIDTH = 22
@@ -1222,12 +1282,17 @@ export class SettingsWorkspacePanel implements Component {
   private syncExtensionDirectory(): boolean {
     const live = this.liveDirectory()
     if (live.revision === this.directoryRevision && live.count === this.directoryCount) return false
+    // The repair basis is captured BEFORE the re-read: the selected row's
+    // owner/token are LOCAL values of this transition (never a stored group
+    // cursor), so `applyDirectory` can tell a surviving setting from a
+    // re-registered id and a surviving owner group from an unloaded one.
+    const previous = this.selectedRow()
     const next = this.source.readSnapshot()
     this.snapshot = next
     // The frame is planned from the SNAPSHOT (its rows and its directory are
     // one read): adopting the live count here would paint a directory whose
     // rows the re-read did not describe.
-    this.applyDirectory(next.extensionRevision ?? 0, next.extensionCount ?? 0)
+    this.applyDirectory(next.extensionRevision ?? 0, next.extensionCount ?? 0, previous)
     this.bumpRevision()
     this.intents.requestRender()
     return true
@@ -1241,7 +1306,11 @@ export class SettingsWorkspacePanel implements Component {
    *  and the transient edit are repaired only where they really stopped being
    *  valid. An unrelated `setValue()`/register/unload therefore keeps an open
    *  candidate choice and the user's scroll position. */
-  private applyDirectory(revision: number, count: number): void {
+  private applyDirectory(
+    revision: number,
+    count: number,
+    previous: SettingsWorkspaceRow | undefined,
+  ): void {
     this.directoryRevision = revision
     this.directoryCount = count
     this.effectiveCategoryOrder = count > 0
@@ -1268,14 +1337,38 @@ export class SettingsWorkspacePanel implements Component {
     }
     // The selected row must still exist in the CURRENT snapshot. A row that a
     // re-registered owner dropped is never kept by id alone.
-    if (!this.snapshot.rows.some(row => row.id === this.rowId && row.category === this.categoryId)) {
-      this.rowId = this.firstRowOf(this.categoryId)
+    const selected = this.snapshot.rows.find(row => row.id === this.rowId && row.category === this.categoryId)
+    if (selected === undefined) {
+      // The selected row vanished. When its OWNER still contributes rows, the
+      // SAME plugin group keeps the page and lands on its new first row; when
+      // the whole group is gone the first live group takes over (its own first
+      // row), and the page returns to that group's Rows level.
+      const previousOwner = this.categoryId === 'extensions' ? previous?.extensionOwner : undefined
+      const ownerRow = previousOwner === undefined
+        ? undefined
+        : this.snapshot.rows.find(row => row.category === 'extensions' && row.extensionOwner === previousOwner)
+      if (ownerRow !== undefined) {
+        this.rowId = ownerRow.id
+        if (this.focus === 'detail') this.focus = 'rows'
+      } else {
+        this.rowId = this.firstRowOf(this.categoryId)
+        if (this.categoryId === 'extensions' && this.rowId !== undefined) this.focus = 'rows'
+      }
       selectionInvalid = true
+    } else if (previous !== undefined
+      && selected.extensionRegistrationToken !== previous.extensionRegistrationToken) {
+      // The same row id was RE-REGISTERED (HMR). The id is not a setting
+      // identity: keep the row selected (it exists) but retire every transient
+      // presentation and UI acknowledgement that belonged to the old record.
+      this.rowId = selected.id
+      selectionInvalid = true
+      this.discardTransientEdit()
     }
     if (selectionInvalid) {
-      // The selection itself changed: the transient edit and both list offsets
-      // belonged to it. A pending/settled write is app-owned and is never
-      // touched here.
+      // The selection itself changed: the transient choice and both list
+      // offsets belonged to it. A pending/settled write is app-owned and is
+      // never cancelled here (except through the token replacement above,
+      // whose UI acknowledgement must not survive).
       this.resetChoice()
       this.rowOffset = 0
       this.detailOffset = 0
@@ -1285,6 +1378,16 @@ export class SettingsWorkspacePanel implements Component {
     // contribution list can grow or shrink under an open choice). Re-anchor the
     // choice on its VALUE and leave the scroll positions alone.
     this.reanchorChoice()
+  }
+
+  /** Retire the transient edit PRESENTATION of the current selection. A pending
+   *  write is NOT cancelled: its owner keeps settling it, it simply has no row
+   *  left to paint on, and its late settlement finds no matching request id. */
+  private discardTransientEdit(): void {
+    if (this.editPhase.kind === 'browsing') return
+    this.editPhase = { kind: 'browsing' }
+    this.choiceOffset = 0
+    this.editRequestId += 1
   }
 
   /** Keep the open candidate choice on the SAME candidate identity after a
@@ -1298,7 +1401,13 @@ export class SettingsWorkspacePanel implements Component {
     const index = options.findIndex(option => option.value === phase.candidate)
     if (index < 0) this.editPhase = { kind: 'browsing' }
     else if (index !== phase.index) {
-      this.editPhase = { kind: 'choosing', field: phase.field, candidate: phase.candidate, index }
+      this.editPhase = {
+        kind: 'choosing',
+        field: phase.field,
+        candidate: phase.candidate,
+        index,
+        ...phase.registrationToken === undefined ? {} : { registrationToken: phase.registrationToken },
+      }
     }
   }
 
@@ -1306,12 +1415,19 @@ export class SettingsWorkspacePanel implements Component {
    *  without a live directory keeps the constructor's directory (a historical
    *  composition has no registry to observe). */
   private adoptSnapshot(next: SettingsWorkspaceSnapshot): void {
-    this.snapshot = next
-    if (this.source.extensionDirectory === undefined) return
+    if (this.source.extensionDirectory === undefined) {
+      this.snapshot = next
+      return
+    }
     const revision = next.extensionRevision ?? this.directoryRevision
     const count = next.extensionCount ?? this.directoryCount
-    if (revision === this.directoryRevision && count === this.directoryCount) return
-    this.applyDirectory(revision, count)
+    if (revision === this.directoryRevision && count === this.directoryCount) {
+      this.snapshot = next
+      return
+    }
+    const previous = this.selectedRow()
+    this.snapshot = next
+    this.applyDirectory(revision, count, previous)
     this.bumpRevision()
   }
 
@@ -2234,6 +2350,24 @@ export class SettingsWorkspacePanel implements Component {
     ]
   }
 
+  /** C2-R6: the group-switch hints of the Extensions Rows level, ONLY when it
+   *  really has 2+ groups. Priority 6.5 places them ABOVE every browsing hint
+   *  (Up/Down 4, Enter 5, Right 6, refresh 2) and BELOW the back key (7): a
+   *  tight bar drops the browsing hints first, keeps `Left back`/`Esc`, and the
+   *  narrow projection compacts the pair into the one sanctioned `Tab group`
+   *  segment the 44-column bar can afford. */
+  private extensionGroupActionBarSegments(): ActionBarSegment[] {
+    if (this.categoryId !== 'extensions' || this.focus !== 'rows') return []
+    if (this.extensionOwnerGroups().length < 2) return []
+    if (layoutForWidth(this.intents.columns()) === 'narrow') {
+      return [{ text: `${SETTINGS_REGION_LABELS.forward} group`, priority: 6.5 }]
+    }
+    return [
+      { text: `${SETTINGS_REGION_LABELS.forward} next group`, priority: 6.5 },
+      { text: `${SETTINGS_REGION_LABELS.backward} previous`, priority: 6.5 },
+    ]
+  }
+
   /** The category rail's own hints. A direct category hands the keyboard to
    *  its content page; a legacy category steps one level deeper. */
   private navigationActionBarSegments(): ActionBarSegment[] {
@@ -2286,8 +2420,8 @@ export class SettingsWorkspacePanel implements Component {
               ? this.pluginBreadcrumb(this.pluginPage.currentView())
               : CATEGORY_LABELS[this.categoryId])
           : this.focus === 'rows'
-            ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
-            : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
+            ? this.rowsBreadcrumb()
+            : `${CATEGORY_LABELS[this.categoryId]} · ${sanitizedPhysicalLine(row?.label ?? '—')}`
     // Identity is BOLD textStrong and the trail is textDim (roles 1 + 2): the
     // brand word is not `primary`, because primary means active/actionable and
     // already paints the cursor, the focused label and every affordance.
@@ -2301,6 +2435,20 @@ export class SettingsWorkspacePanel implements Component {
       ? ''
       : `${editable} editable ${editable === 1 ? 'row' : 'rows'}`
     return [composeEdge(lead, right === '' ? '' : color.textMuted(right), plan.width)]
+  }
+
+  /** The Rows-level breadcrumb. The extension page puts the group POSITION
+   *  before its display label so a narrow frame truncates the name, never the
+   *  `[i/N]` identity. */
+  private rowsBreadcrumb(): string {
+    const category = CATEGORY_LABELS[this.categoryId]
+    if (this.categoryId !== 'extensions') return `${category} · Rows`
+    const groups = this.extensionOwnerGroups()
+    if (groups.length === 0) return `${category} · Rows`
+    const index = this.extensionGroupIndex(groups)
+    const owner = groups[index]
+    const label = owner === undefined ? undefined : this.extensionDisplayNames(groups).get(owner)
+    return `${category} [${index + 1}/${groups.length}]${label === undefined ? '' : ` · ${label}`} · Rows`
   }
 
   /** The diagnostic line (roles 11 + 12). Trailing facts drop WHOLE before any
@@ -2510,7 +2658,7 @@ export class SettingsWorkspacePanel implements Component {
         const title = pane.page === 'categories'
           ? `Categories (${categoryCount})`
           : pane.page === 'rows'
-            ? `Rows (${this.rowsPaneCount()})`
+            ? this.rowsPaneTitle(pane.width)
             : 'Details'
         return fit(this.paneHeader(title, this.focus === pane.page), pane.width)
       })
@@ -2982,8 +3130,12 @@ export class SettingsWorkspacePanel implements Component {
    *  The WORD and its tone are separate from the explanation so the pane can
    *  paint only the word with the semantic token (design language §3.2): a
    *  refused write must not look like a verified one. */
-  private editStatus(field: SettingsWorkspaceWritableField): SettingsCommitStatus | undefined {
+  private editStatus(row: SettingsWorkspaceRow, field: SettingsWorkspaceWritableField): SettingsCommitStatus | undefined {
     const phase = this.editPhase
+    // A phase describes ONE registration: a same-id replacement never inherits
+    // the previous record's pending/settled acknowledgement.
+    const sameRegistration = phase.kind === 'browsing' || phase.registrationToken === row.extensionRegistrationToken
+    if (!sameRegistration) return undefined
     if (phase.kind === 'pending' && phase.field === field) {
       return { word: 'Saving…', reason: 'the Host has not confirmed yet', tone: 'muted' }
     }
@@ -3065,13 +3217,24 @@ export class SettingsWorkspacePanel implements Component {
       field('Value', row.summary, color.text)
     }
     if (row.value !== undefined && row.value !== row.summary) field('Source', row.value)
+    if (row.extensionOwner !== undefined) {
+      // C2-R6: the registration's own facts. The Owner is the raw FULL owner
+      // identity and the ID the raw registry id — never a display-name guess.
+      // A registration with no selectable values is READ-ONLY and states it; a
+      // current value outside the registered choices is reported instead of
+      // being silently replaced or auto-selected.
+      field('Owner', row.extensionOwner)
+      field('ID', extensionSettingIdOf(row.id))
+      if (edit === undefined) field('Choices', 'No selectable values registered')
+      else if (!edit.options.some(option => option.current)) field('Choices', 'Current value is not in selectable choices')
+    }
     if (edit !== undefined) {
       if (!inlineChoice) {
         if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect)
         if (edit.primary === 'persisted') field('Runtime', edit.runtime)
         else field('Persisted', edit.persisted)
       }
-      const status = this.editStatus(edit.field)
+      const status = this.editStatus(row, edit.field)
       if (status !== undefined) {
         const paint = status.tone === 'success' ? color.success
           : status.tone === 'error' ? color.error
@@ -3137,13 +3300,20 @@ export class SettingsWorkspacePanel implements Component {
       segments = this.navigationActionBarSegments()
     } else if (this.focus === 'rows') {
       const rowAction = row?.action === 'open-legacy' ? 'open' : row?.edit === undefined || row.edit.options.length === 0 ? 'details' : 'choose'
+      // C2-R6: on the Extensions Rows level Tab/Shift+Tab cycle the PLUGIN
+      // GROUPS, so the bar advertises that instead of the root's `Tab panes`
+      // region hint (which would be a false hint there). One group keeps the
+      // root's own region hint: its Tab really is the focus key.
+      const groupHints = this.extensionGroupActionBarSegments()
       segments = [
         { text: 'Up/Down select', priority: 4 },
         { text: 'Left back', priority: 7 },
         { text: `Right ${rowAction}`, priority: 6 },
         { text: `Enter ${rowAction}`, priority: 5 },
         { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
-        ...(this.currentRows().length > 0 ? this.regionActionBarHints('panes', true) : []),
+        ...(groupHints.length > 0
+          ? groupHints
+          : this.currentRows().length > 0 ? this.regionActionBarHints('panes', true) : []),
         { text: back, priority: 8 },
       ]
     } else {
@@ -3173,7 +3343,82 @@ export class SettingsWorkspacePanel implements Component {
   // ── state helpers ────────────────────────────────────────────────────────
 
   private currentRows(): readonly SettingsWorkspaceRow[] {
-    return this.snapshot.rows.filter(row => row.category === this.categoryId)
+    if (this.categoryId !== 'extensions') {
+      return this.snapshot.rows.filter(row => row.category === this.categoryId)
+    }
+    // C2-R6: the Extensions Rows level pages ONE plugin group — the group of
+    // the CURRENTLY SELECTED row. There is no second cursor: every movement,
+    // count, scroll offset and hit map below reads THIS projection, and a row
+    // id that no longer resolves is repaired by the directory/refresh path
+    // (never by inventing a placeholder row or caching a group).
+    const owner = this.selectedRow()?.extensionOwner
+    if (owner === undefined) return []
+    return this.snapshot.rows.filter(row => row.category === 'extensions' && row.extensionOwner === owner)
+  }
+
+  /** The owner groups of the CURRENT snapshot, in their FIRST-APPEARANCE order.
+   *  This is a pure projection of the rows the snapshot already carries: no
+   *  sort, no registry read, no cache, no second group cursor. */
+  private extensionOwnerGroups(): readonly string[] {
+    const groups: string[] = []
+    const seen = new Set<string>()
+    for (const row of this.snapshot.rows) {
+      if (row.category !== 'extensions') continue
+      const owner = row.extensionOwner
+      if (owner === undefined || seen.has(owner)) continue
+      seen.add(owner)
+      groups.push(owner)
+    }
+    return groups
+  }
+
+  /** The index of the selected row's owner in `groups` (0 when the directory
+   *  repair has not landed yet — the selected row always belongs to a group
+   *  otherwise). */
+  private extensionGroupIndex(groups: readonly string[]): number {
+    const owner = this.selectedRow()?.extensionOwner
+    const index = owner === undefined ? -1 : groups.indexOf(owner)
+    return index < 0 ? 0 : index
+  }
+
+  /** Display-only labels for the owner groups. The FULL owner string stays the
+   *  grouping identity; this projection only takes the fiber name after the
+   *  first `:` and appends the owning fiber's uid when two groups would render
+   *  the same name (`logger · 123`). `(anonymous)` covers an empty name, and
+   *  every label crosses the existing terminal-safety projection. */
+  private extensionDisplayNames(groups: readonly string[]): ReadonlyMap<string, string> {
+    const parsed = groups.map(owner => {
+      const separator = owner.indexOf(':')
+      const uid = separator < 0 ? '' : owner.slice(0, separator)
+      const name = separator < 0 ? owner : owner.slice(separator + 1)
+      return { owner, uid, name: name === '' ? '(anonymous)' : name }
+    })
+    const counts = new Map<string, number>()
+    for (const entry of parsed) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1)
+    const labels = new Map<string, string>()
+    for (const entry of parsed) {
+      const duplicated = (counts.get(entry.name) ?? 0) > 1
+      const label = duplicated && entry.uid !== '' ? `${entry.name} · ${entry.uid}` : entry.name
+      labels.set(entry.owner, sanitizedPhysicalLine(label))
+    }
+    return labels
+  }
+
+  /** The Rows pane title of the current page. The Extensions page states its
+   *  plugin group here (`Rows (m) · <label>`, degrading to `Rows (m) · i/N`
+   *  and then `Rows (m)`), never on an extra physical row. */
+  private rowsPaneTitle(width: number): string {
+    const base = `Rows (${this.rowsPaneCount()})`
+    if (this.categoryId !== 'extensions') return base
+    const groups = this.extensionOwnerGroups()
+    if (groups.length === 0) return base
+    const position = `${this.extensionGroupIndex(groups) + 1}/${groups.length}`
+    const owner = groups[this.extensionGroupIndex(groups)]
+    const label = owner === undefined ? undefined : this.extensionDisplayNames(groups).get(owner)
+    // `paneHeader` adds the active-device brackets around the title.
+    const room = Math.max(1, width - 2)
+    const full = label === undefined ? `${base} · ${position}` : `${base} · ${label}`
+    return [full, `${base} · ${position}`, base].find(text => visibleWidth(text) <= room) ?? base
   }
 
   /** The count the Rows pane header states: the real snapshot rows of the
@@ -3888,6 +4133,20 @@ export class SettingsWorkspacePanel implements Component {
     const tabForward = matchesKey(data, 'tab')
     const tabBackward = matchesKey(data, 'shift+tab')
     if (tabForward || tabBackward) {
+      // C2-R6: at the Extensions Rows level with 2+ plugin groups the SAME keys
+      // cycle the groups (wrapping) and keep the Rows focus. Every other state
+      // keeps the root's region-focus semantics: one group, an open choice or
+      // an in-flight write (both own their keys), another category, or another
+      // focus — and a narrow terminal may switch groups too, because the group
+      // that changes is the Rows level already on screen (not a hidden pane).
+      if (this.categoryId === 'extensions'
+        && this.focus === 'rows'
+        && this.extensionOwnerGroups().length >= 2
+        && this.editPhase.kind !== 'choosing'
+        && this.editPhase.kind !== 'pending') {
+        this.switchExtensionGroup(tabForward ? 1 : -1)
+        return
+      }
       this.jumpRegion(tabForward)
       return
     }
@@ -3998,6 +4257,42 @@ export class SettingsWorkspacePanel implements Component {
     // new one). It never calls `enterDetail()`/`confirm()`: focusing the Detail
     // pane must not open a choice.
     this.leaveDetailTo(next)
+  }
+
+  /**
+   * C2-R6: cycle the ONE visible plugin group. The transaction commits the new
+   * row/focus/scroll state synchronously, revokes every grant of the previous
+   * frame and schedules ONE repaint — it never calls a plugin callback, a
+   * writer or the legacy editor. Wrap-around is modulo N, and the target is
+   * always the first setting of the target group (no per-group cursor).
+   */
+  private switchExtensionGroup(direction: 1 | -1): void {
+    const groups = this.extensionOwnerGroups()
+    if (groups.length < 2) return
+    const owner = groups[(this.extensionGroupIndex(groups) + direction + groups.length) % groups.length]
+    const target = owner === undefined
+      ? undefined
+      : this.snapshot.rows.find(row => row.category === 'extensions' && row.extensionOwner === owner)
+    if (target === undefined) return
+    this.cancelPointerOwners()
+    this.paintedTargets = []
+    this.rowId = target.id
+    this.focus = 'rows'
+    this.rowOffset = 0
+    this.detailOffset = 0
+    // A group is a NEW visible range: both row-viewport sentinels force the
+    // next paint to rebase it instead of revealing an offset of the old group.
+    this.lastRowIndex = -1
+    this.lastRowViewport = -1
+    // A settled outcome belongs to the row that was settled: it can never be
+    // repainted on another group's Detail.
+    if (this.editPhase.kind === 'settled') {
+      this.editPhase = { kind: 'browsing' }
+      this.choiceOffset = 0
+      this.editRequestId += 1
+    }
+    this.bumpRevision()
+    this.intents.requestRender()
   }
 
   /**
@@ -4418,7 +4713,13 @@ export class SettingsWorkspacePanel implements Component {
     const next = Math.min(Math.max(0, index), Math.max(0, edit.options.length - 1))
     const option = edit.options[next]
     if (option === undefined || next === phase.index) return
-    this.editPhase = { kind: 'choosing', field: phase.field, candidate: option.value, index: next }
+    this.editPhase = {
+      kind: 'choosing',
+      field: phase.field,
+      candidate: option.value,
+      index: next,
+      ...phase.registrationToken === undefined ? {} : { registrationToken: phase.registrationToken },
+    }
     // The candidate change is a state version: a press recorded against the
     // previous candidate (or its confirm button) is refused at release.
     this.bumpRevision()
@@ -4441,7 +4742,15 @@ export class SettingsWorkspacePanel implements Component {
     const current = options.findIndex(option => option.current)
     const index = current >= 0 ? current : 0
     this.resetChoice()
-    this.editPhase = { kind: 'choosing', field: fresh.edit.field, candidate: options[index]!.value, index }
+    this.editPhase = {
+      kind: 'choosing',
+      field: fresh.edit.field,
+      candidate: options[index]!.value,
+      index,
+      // The registration the choice was opened for: an HMR replacement keeps
+      // the same field string, so this token is its write identity.
+      ...fresh.extensionRegistrationToken === undefined ? {} : { registrationToken: fresh.extensionRegistrationToken },
+    }
     this.choiceOffset = 0
     // These are layout sentinels, not authority: a new choice must reveal its
     // selected candidate on the first painted option frame.
@@ -4457,8 +4766,13 @@ export class SettingsWorkspacePanel implements Component {
    *  A scrolled-away identity is revealed on the first keyboard press. */
   private confirmChoice(source: 'keyboard' | 'button'): void {
     const phase = this.editPhase
-    const edit = this.selectedRow()?.edit
-    if (phase.kind !== 'choosing' || edit === undefined || edit.field !== phase.field) return
+    const row = this.selectedRow()
+    const edit = row?.edit
+    if (phase.kind !== 'choosing' || row === undefined || edit === undefined || edit.field !== phase.field) return
+    // C2-R6: a confirmation speaks for ONE registration. A same-id replacement
+    // (or a row whose token moved under the painted frame) refuses it before
+    // any request is dispatched.
+    if (row.extensionRegistrationToken !== phase.registrationToken) return
     if (
       this.paintedRevision !== this.revision ||
       this.lastRenderWidth !== this.intents.columns() ||
@@ -4480,14 +4794,17 @@ export class SettingsWorkspacePanel implements Component {
       this.settle(phase.field, phase.candidate, {
         outcome: 'not-saved',
         reason: 'the selected source is no longer available',
-      })
+      }, phase.registrationToken)
       return
     }
     if (!option.available) {
-      this.settle(phase.field, phase.candidate, { outcome: 'not-saved', reason: 'the selected source is no longer available' })
+      this.settle(phase.field, phase.candidate, {
+        outcome: 'not-saved',
+        reason: 'the selected source is no longer available',
+      }, phase.registrationToken)
       return
     }
-    this.dispatch(phase.field, phase.candidate, edit.revision)
+    this.dispatch(phase.field, phase.candidate, edit.revision, phase.registrationToken)
   }
 
   /** `[Retry save]`: re-dispatch the FAILED attempt's value, re-proving that its
@@ -4495,34 +4812,63 @@ export class SettingsWorkspacePanel implements Component {
    *  settlement of the first attempt can never overwrite its result. */
   private retryCommit(value: string): void {
     const phase = this.editPhase
-    const edit = this.selectedRow()?.edit
-    if (phase.kind !== 'settled' || edit === undefined || edit.field !== phase.field) return
+    const row = this.selectedRow()
+    const edit = row?.edit
+    if (phase.kind !== 'settled' || row === undefined || edit === undefined || edit.field !== phase.field) return
+    // A retry is still the SAME registration's attempt: a replaced record must
+    // not receive it (the registry would answer `gone`, but the panel must not
+    // even dispatch it against the new owner's row).
+    if (row.extensionRegistrationToken !== phase.registrationToken) return
     const option = edit.options.find(candidate => candidate.value === value)
     if (option === undefined || !option.available) {
-      this.settle(phase.field, value, { outcome: 'not-saved', reason: 'the selected source is no longer available' })
+      this.settle(phase.field, value, {
+        outcome: 'not-saved',
+        reason: 'the selected source is no longer available',
+      }, phase.registrationToken)
       return
     }
-    this.dispatch(phase.field, value, edit.revision)
+    this.dispatch(phase.field, value, edit.revision, phase.registrationToken)
   }
 
   /** The ONE dispatch: commit the pending phase, then hand the request to the
    *  app-owned write channel with THIS open's request identity. `revision` is
    *  the revision-checked row's decision fence (absent for the TUI-document
-   *  writers, whose own serialization/diff path owns its concurrency rule). */
-  private dispatch(field: SettingsWorkspaceWritableField, value: string, revision?: number): void {
+   *  writers, whose own serialization/diff path owns its concurrency rule);
+   *  `registrationToken` is the extension registration fence (absent for every
+   *  static field). */
+  private dispatch(
+    field: SettingsWorkspaceWritableField,
+    value: string,
+    revision?: number,
+    registrationToken?: number,
+  ): void {
     const onCommit = this.intents.onCommit
     const requestId = this.editRequestId + 1
     this.editRequestId = requestId
     if (onCommit === undefined) {
-      this.settle(field, value, { outcome: 'not-saved', reason: 'the settings writer is unavailable' })
+      this.settle(field, value, {
+        outcome: 'not-saved',
+        reason: 'the settings writer is unavailable',
+      }, registrationToken)
       return
     }
-    this.editPhase = { kind: 'pending', field, requestId, attempted: value }
+    this.editPhase = {
+      kind: 'pending',
+      field,
+      requestId,
+      attempted: value,
+      ...registrationToken === undefined ? {} : { registrationToken },
+    }
     this.choiceOffset = 0
     this.bumpRevision()
     this.intents.requestRender()
     onCommit(
-      { field, value, ...revision === undefined ? {} : { revision } },
+      {
+        field,
+        value,
+        ...revision === undefined ? {} : { revision },
+        ...registrationToken === undefined ? {} : { registrationToken },
+      },
       outcome => this.settlePending(requestId, outcome),
     )
   }
@@ -4534,7 +4880,7 @@ export class SettingsWorkspacePanel implements Component {
     if (this.disposed) return
     const phase = this.editPhase
     if (phase.kind !== 'pending' || phase.requestId !== requestId) return
-    this.settle(phase.field, phase.attempted, outcome)
+    this.settle(phase.field, phase.attempted, outcome, phase.registrationToken)
     // C2-R3: the ONE typed follow-up a refusal may carry. It is applied only
     // after the settlement is committed above and only while this request is
     // still the live one, so a late or superseded result can never move the
@@ -4549,7 +4895,12 @@ export class SettingsWorkspacePanel implements Component {
 
   /** Record a settled outcome and re-read the authorities: the Detail then shows
    *  the values the write REALLY produced, never the attempted ones. */
-  private settle(field: SettingsWorkspaceWritableField, attempted: string, outcome: SettingsWorkspaceCommitOutcome): void {
+  private settle(
+    field: SettingsWorkspaceWritableField,
+    attempted: string,
+    outcome: SettingsWorkspaceCommitOutcome,
+    registrationToken?: number,
+  ): void {
     this.editPhase = {
       kind: 'settled',
       field,
@@ -4557,6 +4908,7 @@ export class SettingsWorkspacePanel implements Component {
       attempted,
       outcome: outcome.outcome,
       ...outcome.reason === undefined ? {} : { reason: outcome.reason },
+      ...registrationToken === undefined ? {} : { registrationToken },
     }
     this.editRequestId += 1
     this.choiceOffset = 0

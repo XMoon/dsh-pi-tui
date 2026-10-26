@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Settings → Extensions is now a real dynamic settings page grouped by extension.**
+  Every setting an extension contributes through `registerSetting` appears as a real entry in
+  `Settings → Extensions`, grouped and paged by its registering owner: one extension's settings
+  are visible at a time, `Tab` / `Shift+Tab` cycle the groups with two or more groups (landing on
+  the target group's first row), and `↑`/`↓`, Home/End, paging and the wheel move only inside the
+  current group; with a single group `Tab` keeps its existing region-focus behavior. The header
+  states `[i/N]` before the group label so a narrow frame preserves the position, and the Rows
+  pane header shows `Rows (m) · label`, degrading to `Rows (m) · i/N` and then `Rows (m)` by
+  width. Entries open the native Detail/Choice: Owner and ID are shown raw, a registration with no
+  selectable values is read-only, and a current value outside the registered choices is reported
+  explicitly. Only an explicit Confirm writes to the running extension; `Verified` requires a
+  matching live readback, a plugin refusal paints `Not saved` and records health only for the
+  INVOKING owner, and a superseded or unloaded registration is reported as such instead of being
+  faked into a refusal. These settings apply to the running extension only and never write the TUI
+  settings document or a Host profile; a same-id HMR re-registration inherits no old confirmation,
+  retry or settlement. The former `Extensions → Configure extension settings…` transition entry is
+  gone, and Settings no longer jumps to the legacy settings editor.
 - **PiTUI final answers now carry real actions for published charts/SVGs and a fullscreen SVG reader.**
   A chart keeps its exact values and gains `Copy Data` (the final ChartFact as pretty JSON);
   an SVG keeps its description and admitted thumbnail and gains `View` / `Copy SVG` (the raw

@@ -439,7 +439,23 @@ still keeps `←` as cursor movement. The Settings categories are the fixed `Abo
 Appearance / Conversation / Input & Terminal / Tools / Plugins`, and `Extensions` is appended only
 while the extension settings registry really has rows; `/settings` (and `/status`) land on About.
 Adding, removing or same-id re-registering an extension row revokes the previous frame's keyboard
-and pointer grants first, and only `Esc` can still return safely until that frame repaints. `Models` is an in-place page: it lists
+and pointer grants first, and only `Esc` can still return safely until that frame repaints.
+
+`Extensions` is a real configuration category rather than a transition entry: its Rows project the
+live settings of ONE registering owner at a time. Groups follow each owner's first appearance in
+the registry's global `order ASC, id ASC` stream, and each group keeps that registry order. With two
+or more groups `Tab` / `Shift+Tab` cycle the groups (landing on the target group's first row), while
+`↑`/`↓`, Home/End, paging and the wheel stay inside the group; a single group keeps the root region
+keys. The header states `[i/N]` before the group label, so a narrow frame truncates the name rather
+than the position, and the Rows pane header degrades `Rows (m) · label` → `Rows (m) · i/N` →
+`Rows (m)` by width. Each row opens the native Detail/Choice: Owner and ID are shown raw, a
+registration with no selectable values is read-only, and a current value outside the choices is
+reported instead of auto-selected. Only an explicit Confirm calls
+`SettingsRegistry.applyDetailed`; an accepted change is `Verified` only after the live readback
+agrees, a plugin refusal paints `Not saved` and records health only for the INVOKING owner, and a
+superseded or unloaded registration is reported as such instead of being faked into a plugin
+refusal. Extension settings are runtime-only: they never write the TUI settings document or a Host
+profile. A same-id HMR re-registration discards old confirmations, retries and settlements. `Models` is an in-place page: it lists
 the Host provider directory, whether an API key is configured (presence only, never a
 connection test) and the DeepSeek Account entry; it exposes provider facts, a masked API-key
 editor, the Add Provider draft wizard, and provider-native sign-in with a persistent notice,
@@ -531,9 +547,8 @@ value: <raw>` when illegal), and its `Runtime` says what the NEXT busy Enter rea
 default is named as `queue (default; no valid saved value)` instead of being presented as saved.
 Its confirmation never rewrites a turn that is already running. A `Fullscreen` preference keeps
 the workspace usable and switches the transcript screen only after you leave Settings
-normally; a Legacy hand-off from the remaining `Extensions` transition row, a Question/Approval
-takeover, a forced close or an unverified write switches nothing, and the stored preference still
-applies at the next TUI start.
+normally; a Question/Approval takeover, a forced close or an unverified write switches nothing,
+and the stored preference still applies at the next TUI start.
 
 The other six apply their real runtime owner first and then persist (a failed write never rolls
 the runtime back, and `Persisted` keeps reporting the raw stored value): `Git attribution`
@@ -574,13 +589,13 @@ bypass"), and only an agreed read-back is `Verified`. It is the Host user-shell 
 not the model's tool sandbox policy and not a permission preset, which is why it does not live in
 Input & Terminal.
 
-The complete legacy settings editor now has exactly ONE entry: the conditional
-`Extensions → Configure extension settings…` transition row (present only while the extension
-settings registry has rows). Activating it retires the workspace and restores the surface it paused
-before opening the original editor on that exact row, so Theme, the Plugin Manager, keybindings and
-extension settings keep every existing write path. Footer and Keyboard shortcuts are now same-lease
-pages; `Appearance` and `Input & Terminal` carry no transition row, and `Agent` has no unmigrated
-field left, so those legacy entries are retired.
+The new Settings workspace never jumps to the legacy settings editor: every field is edited in its
+native rows and `Extensions` lists the real live registrations directly (grouped and paged by
+owner). Theme, the Plugin Manager, keybindings and extension settings keep every existing write
+path; Footer and Keyboard shortcuts remain same-lease pages, and `Appearance`, `Input & Terminal`,
+`Agent` and `Extensions` carry no transition entry. The legacy `SettingsList` remains in
+use only by its independent consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`),
+which supply their own rows; the complete legacy settings editor is no longer a Settings entry.
 
 `/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
 Host's `pi-tui-visual-tools.enabled` configuration. That one switch governs THREE model tools:

@@ -31,8 +31,9 @@ import {
   type TerminalProgressMode,
 } from '../../src/domain/terminal-progress/settings.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { confirmSettingsChoice, openSettingsRows, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -63,7 +64,19 @@ function fakeSettings(doc: Record<string, unknown>) {
 function setupSettings(options: { terminalProgress?: string; failWrite?: boolean } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The REAL owned-task entry a Settings write runs through.
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  }, { terminalProgressMode: parseTerminalProgressMode(options.terminalProgress) })
   app.start()
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
@@ -173,7 +186,12 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     setFocusMode: () => {},
     setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
     setNotificationMethod: () => {},
-    setTerminalProgressMode: (mode) => { appliedModes.push(mode) },
+    setTerminalProgressMode: (mode) => {
+      appliedModes.push(mode)
+      // The production SurfaceRuntime seam really applies the parsed mode to
+      // the mounted surface.
+      app.setTerminalProgressMode(parseTerminalProgressMode(mode))
+    },
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
@@ -184,34 +202,25 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: legacyEditorExtensions() as never,
+    // The minimal REAL extension registries: these cases exercise the static
+    // Terminal progress row, not extension contributions.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
-  const run = async (): Promise<void> => {
-    await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: 'x' as never,
-      agent: undefined as never,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    await vt.flush()
-    await navigateToLegacySettings(vt)
-  }
+  const invoke = (): unknown => (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+    commandId: 'x' as never,
+    agent: undefined as never,
+    rawInput: '',
+    signal: new AbortController().signal,
+  })
   const view = async (): Promise<string> => {
     await vt.waitForRender()
     return stripTerminalSequences(vt.getViewport().join('\n'))
   }
-  /** Search-navigate to the row so the test does not depend on row index. */
-  const viewRow = async (): Promise<string> => {
-    vt.sendInput('Terminal progress')
-    const text = await view()
-    if (!text.includes('Terminal progress')) throw new Error('Terminal progress row never rendered')
-    return text
-  }
-  return { vt, app, settings, run, view, viewRow, appliedModes }
+  return { vt, app, settings, invoke, view, appliedModes }
 }
 
 test('the parser is the single authority and fails safe to the dual-protocol default', () => {
@@ -240,85 +249,81 @@ test('the two protocol predicates have a fixed truth table', () => {
   }
 })
 
-test('the row renders the dual-protocol default when the persisted value is absent', async () => {
-  const t = setupSettings()
-  await t.run()
-  const view = await t.viewRow()
-  const row = view.split('\n').find(line => /Terminal progress\s+9;4\+7501\b/.test(line))
-  assert.ok(row !== undefined, `absent value must render 9;4+7501:\n${view}`)
-  t.app.dispose()
-})
-
-test('the row renders the default for an invalid persisted value and never the raw string', async () => {
-  const t = setupSettings({ terminalProgress: 'garbage' })
-  await t.run()
-  const view = await t.viewRow()
-  const row = view.split('\n').find(line => /Terminal progress\s+9;4\+7501\b/.test(line))
-  assert.ok(row !== undefined, `invalid value must fall back to 9;4+7501:\n${view}`)
-  assert.ok(!view.includes('garbage'), 'the raw invalid value never renders')
-  t.app.dispose()
-})
-
-test('the row renders the dual-protocol default for the retired on value', async () => {
-  const t = setupSettings({ terminalProgress: 'on' })
-  await t.run()
-  const view = await t.viewRow()
-  const row = view.split('\n').find(line => /Terminal progress\s+9;4\+7501\b/.test(line))
-  assert.ok(row !== undefined, `the retired on value must render as the default:\n${view}`)
-  assert.ok(!/\bTerminal progress\s+on\b/.test(view), 'on is not a UI value any more')
-  t.app.dispose()
-})
-
-test('cycling the row walks the four modes in the fixed order and persists each one', async () => {
-  // The UI order is part of the contract: the DEFAULT first, then 9;4, 7501, off.
-  // Starting from the retired `on` (read as the default) proves the first press
-  // lands on the 9;4 compatibility mode.
-  const t = setupSettings({ terminalProgress: 'on' })
-  await t.run()
-  await t.viewRow()
-  const order: string[] = ['9;4', '7501', 'off', '9;4+7501']
-  for (const [index, expectedMode] of order.entries()) {
-    t.vt.sendInput('\r')
-    await t.view()
-    assert.equal(t.appliedModes[index], expectedMode,
-      `press ${index + 1} must select ${expectedMode}`)
-    assert.equal(t.settings.writes[index]?.terminalProgress, expectedMode,
-      `press ${index + 1} must persist ${expectedMode}`)
+test('the Input & Terminal Terminal progress row normalizes absent, invalid and retired persisted values', async () => {
+  // Absent / invalid / the RETIRED `on` value: the live fact is the
+  // dual-protocol default; only a legal raw value must survive as the
+  // persisted fact, and `on` is READ-COMPAT ONLY (never a candidate/written).
+  for (const entry of [
+    { stored: undefined, persisted: 'not set', note: 'absent' },
+    { stored: 'garbage', persisted: 'garbage', note: 'invalid' },
+    { stored: 'on', persisted: 'on', note: 'retired on' },
+  ] as const) {
+    const t = setupSettings(entry.stored === undefined ? {} : { terminalProgress: entry.stored })
+    try {
+      await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+      await selectSettingsRow(t.vt, 'Terminal progress')
+      const rows = await t.view()
+      const row = paintedSelectedRowCell(t.vt) ?? ''
+      assert.ok(row.includes('9;4+7501'), `the ${entry.note} value renders the dual-protocol default:\n${rows}`)
+      t.vt.sendInput('\t')
+      const detail = await t.view()
+      assert.match(detail, /Value\s+9;4\+7501/u, `the live fact is the normalized mode (${entry.note}):\n${detail}`)
+      assert.match(detail, new RegExp(`Persisted\\s+${entry.persisted.replace(/\+/gu, '\\+')}`, 'u'),
+        `the persisted raw fact stays separate (${entry.note}):\n${detail}`)
+      if (entry.stored === 'on') {
+        assert.doesNotMatch(detail, /> on\s+(?:\[current\]|unavailable)?/u,
+          'the retired `on` value is never offered as a candidate nor marked current')
+        assert.doesNotMatch(detail, /Current value is not in selectable choices/u,
+          'the normalized runtime still owns a registered candidate')
+      }
+    } finally {
+      if (!t.app.isDisposed()) t.app.dispose()
+    }
   }
-  assert.equal(t.settings.writes.length, 4, 'exactly one whole-document write per press')
-  const write = t.settings.writes[0]!
-  assert.equal(write.theme, 'auto', 'unrelated fields are preserved')
-  assert.equal(write.progressUpdates, 'milestones', 'the narration cadence is never conflated with this gate')
-  assert.deepEqual(write.keybindings, { 'app.transcript.toggle': ['ctrl+o'] })
-  assert.deepEqual(write.customExtension, { enabled: true })
-  t.app.dispose()
 })
 
-test('reopening /settings shows the persisted value', async () => {
-  const t = setupSettings({ terminalProgress: 'on' })
-  await t.run()
-  await t.viewRow()
-  t.vt.sendInput('\r') // 9;4+7501 -> 9;4
-  await t.view()
-  t.vt.sendInput('\x1b') // Esc closes without writing
-  await t.view()
-  await t.run()
-  const view = await t.viewRow()
-  const row = view.split('\n').find(line => /Terminal progress\s+9;4\b/.test(line))
-  assert.ok(row !== undefined, `reopened row must show the persisted 9;4:\n${view}`)
-  t.app.dispose()
+test('explicit Confirms walk the four Terminal progress modes and persist each one', async () => {
+  const t = setupSettings({ terminalProgress: '9;4+7501' })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Terminal progress')
+    for (const mode of ['9;4', '7501', 'off'] as const) {
+      await confirmSettingsChoice(t.vt, mode, () => t.settings.writes.some(write => write.terminalProgress === mode))
+      assert.deepEqual(t.appliedModes.at(-1), mode, `the mounted surface received ${mode}`)
+      assert.equal(t.app.currentTerminalProgressMode(), mode, `the app really applies ${mode}`)
+      assert.equal(t.settings.writes.at(-1)?.terminalProgress, mode)
+      assert.equal(t.settings.writes.at(-1)?.progressUpdates, 'milestones', 'the narration cadence is untouched')
+      await t.view()
+      t.vt.sendInput('\u001b') // settled Detail -> Rows
+      await t.view()
+    }
+    // Reopening the workspace reads the SAME mounted mode, never an old cache.
+    t.vt.sendInput('\u001b') // Rows -> Categories
+    t.vt.sendInput('\u001b') // Categories -> close
+    await t.view()
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Terminal progress')
+    const rows = await t.view()
+    const row = paintedSelectedRowCell(t.vt) ?? ''
+    assert.ok(row.includes('off'), `the reopened row reads the mounted mode:\n${rows}`)
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
-test('a failed persistence write keeps the runtime change and notifies', async () => {
-  const t = setupSettings({ failWrite: true })
-  const notifications: string[] = []
-  t.app.notify = message => { notifications.push(message) }
-  await t.run()
-  await t.viewRow()
-  t.vt.sendInput('\r')
-  assert.deepEqual(t.appliedModes, ['9;4'], 'the runtime change survives the failed write')
-  await t.view()
-  assert.ok(notifications.some(message => message.includes('settings unavailable')),
-    `the write failure surfaces:\n${notifications.join('; ')}`)
-  t.app.dispose()
+test('a failed Terminal progress persistence keeps the mounted mode and reports Not saved', async () => {
+  const t = setupSettings({ terminalProgress: '9;4+7501', failWrite: true })
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Input & Terminal')
+    await selectSettingsRow(t.vt, 'Terminal progress')
+    await confirmSettingsChoice(t.vt, 'off', async () => (await t.view()).includes('Not saved'))
+    assert.deepEqual(t.appliedModes, ['off'], 'the mounted surface received the mode before persistence')
+    assert.equal(t.app.currentTerminalProgressMode(), 'off', 'the runtime change survives the refused write')
+    const detail = await t.view()
+    assert.match(detail, /Not saved/u, `the real refusal is on screen:\n${detail}`)
+    assert.match(detail, /Value\s+off/u, 'the applied runtime fact is kept apart from persistence')
+    assert.doesNotMatch(detail, /Status\s+Verified/u, 'a refused write is never Verified')
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })

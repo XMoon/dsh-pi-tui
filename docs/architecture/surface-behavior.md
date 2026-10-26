@@ -180,6 +180,40 @@ specialist-page contract below).
   on `Plugins` with the rail focused and nothing is installed, enabled or
   removed; a stale internal `initialCategory: 'extensions'` request lands on
   `Plugins` too.
+- `Extensions` is a real configuration category, not a transition launcher: its
+  Rows level projects the LIVE registrations of ONE owning extension at a time.
+  The groups are the distinct `owner` identities of the current registry rows,
+  ordered by each owner's FIRST appearance in the registry's global
+  `order ASC, id ASC` stream; within a group that registry order is preserved.
+  The selected row's owner IS the current group — there is no group cursor,
+  cached page list or second selection state.
+  `Tab`/`Shift+Tab` cycle the groups (wrapping) only at this Rows level with two
+  or more groups and no open choice or pending write (both own their keys),
+  landing on the target group's FIRST row; `↑`/`↓`/Home/End/page/wheel and both
+  scroll offsets stay inside the group. Every other category, focus, choice and
+  pending state keeps the root region-key semantics, and a single group paints
+  its name and `[1/1]` but keeps the root Tab. The header states
+  `Extensions [i/N]` BEFORE the display label, so a narrow frame truncates the
+  name and never the position; the Rows pane header degrades
+  `Rows (m) · <label>` → `Rows (m) · i/N` → `Rows (m)` inside its own width.
+  When the selected row disappears the SAME owner group keeps the page and
+  selects its first surviving row; when the whole group unloads the first live
+  group becomes current (its first row, Rows focus); the emptied category falls
+  back to `Plugins` as above.
+- Each extension setting is a native Rows/Detail/Choice entry. The Detail states
+  the RAW owner identity and the RAW registry id; a registration that
+  contributed no selectable values is READ-ONLY (the Stable contribution has no
+  freeform text field, and no editor is invented), and a current value outside
+  the registered choices is reported instead of being auto-selected. Only an
+  explicit Confirm calls `SettingsRegistry.applyDetailed`; the confirmation
+  carries the registration's immutable internal token, so a same-id HMR
+  replacement (even with the same owner string) can never receive an old
+  confirmation, retry or settlement. `accepted`/`rejected`/`stale`/`gone` keep
+  their registry semantics: a rejection records health only for the INVOKING
+  owner and paints `Not saved`, while a superseded or unloaded registration is
+  reported without a fabricated plugin refusal or rollback. Extension settings
+  are runtime-only: nothing here is written to the TUI settings document or a
+  Host profile.
 
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single
@@ -443,14 +477,12 @@ specialist-page contract below).
     deliberately not part of `Input & Terminal`. When the Host provides no
     user-shell the preference still stores, and the existing executor fails
     closed instead of degrading to a local spawn.
-- The complete legacy editor remains reachable ONLY through the conditional
-  `Extensions → Configure extension settings…` transition row (R6 owns the
-  extension page/retirement): it is `open-legacy`, states the `Existing settings
-  editor` scope, runs no write of its own and starts the editor only on
-  explicit activation — never on focus, Tab, read, resize or a summary render.
-  `Appearance` and `Input & Terminal` carry NO legacy launcher, because every
-  field they own is migrated; a launcher for an empty remainder would be a false
-  affordance.
+- The Settings workspace has NO hand-off to the legacy settings editor: every
+  field it reaches is edited by its own native row, so no category carries a
+  transition launcher. The legacy `SettingsList` component remains reachable
+  only through its independent consumers (`/help`, `/skill`, `/preset`,
+  `/keybindings conflicts`), which supply their own row lists; the old complete
+  settings editor body is not part of the Settings surface.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
   `Web Search / Fetch` page entry, in that frozen order.
@@ -607,9 +639,10 @@ specialist-page contract below).
   rail with the page instance, its view/query/selection/scroll and the
   controller's install request id intact. Only a real category change or the
   Settings teardown disposes the page and releases its Host claim. The legacy
-  complete editor stays reachable through the ONE conditional `Extensions`
-  transition row, and `Extensions` is a DIRECTORY entry only: the per-owner
-  extension settings list is not part of this contract.
+  complete editor is not reachable from any Settings level: the workspace never
+  hands off to it. `Extensions` is a real configuration category whose Rows
+  project one owning extension's live settings at a time (see the Settings
+  Workspace contract above).
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 

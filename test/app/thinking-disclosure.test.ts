@@ -36,8 +36,9 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
-import { legacyEditorExtensions } from '../support/legacy-settings-extensions.ts'
+import { confirmSettingsChoice, openSettingsRows, paintedDetailsText, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -557,7 +558,19 @@ function fakeTuiSettings(): { value: TuiSettingsLike; writes: Array<Record<strin
 function setupSettings() {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The REAL owned-task entry a Settings write runs through.
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  })
   app.start()
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
@@ -658,64 +671,61 @@ function setupSettings() {
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: legacyEditorExtensions() as never,
+    // The minimal REAL extension registries: this harness exercises the static
+    // Thinking detail row, not extension contributions.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
     exit: () => {},
   }
   registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
-  const run = async (): Promise<void> => {
-    await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: CommandId('cmd-test-1'),
-      agent: undefined as never,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    await navigateToLegacySettings(vt)
-  }
+  const invoke = (): unknown => (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+    commandId: CommandId('cmd-test-1'),
+    agent: undefined as never,
+    rawInput: '',
+    signal: new AbortController().signal,
+  })
   const view = async (): Promise<string> => {
     await vt.waitForRender()
     return vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
   }
-  return { vt, app, run, view, settings }
+  return { vt, app, invoke, view, settings }
 }
 
-test('the /settings Thinking row is the SAME state as Alt+T (detail semantics)', async () => {
+test('the Conversation Thinking detail row owns the SAME bulk state as Alt+T', async () => {
   const t = setupSettings()
-  await t.run()
-  let view = await t.view()
-  // I1: the default current value is collapsed.
-  assert.ok(view.includes('Thinking detail'), `the row must render:\n${view}`)
-  assert.ok(view.includes('collapsed'), `the default value must be collapsed:\n${view}`)
-  // I2: the value list is exactly collapsed / expanded (cycle once).
-  // Select the row (rows without a session: theme, icon-style, expand,
-  // thinking).
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  t.vt.sendInput('\x1b[B')
-  view = await t.view()
-  assert.ok(view.includes('collapsed'), `still collapsed on the row:\n${view}`)
-  // I3: the description speaks DETAIL, never visibility.
-  assert.ok(view.includes('Default detail level for reasoning blocks; blocks stay visible'),
-    `the detail description missing:\n${view}`)
-  assert.ok(!view.includes('shown') && !view.includes('hidden') && !view.includes('render at all'),
-    `the old shown/hidden language must be gone:\n${view}`)
-  // I4: selecting expanded sets the app state DIRECTLY (declarative setter).
-  t.vt.sendInput('\r')
-  await t.view()
-  assert.equal(t.app.isThinkingExpanded(), true, 'the settings pick must set the app state')
-  view = await t.view()
-  assert.ok(view.includes('expanded'), `the row must reflect the new value:\n${view}`)
-  // I5: Alt+T after the settings write toggles from the SAME state.
-  t.app.toggleThinkingExpanded()
-  assert.equal(t.app.isThinkingExpanded(), false, 'Alt+T must toggle from the settings state')
-  // I6: a REOPENED settings panel reflects the Alt+T state (one source).
-  t.vt.sendInput('\x1b') // close the panel
-  await t.view()
-  await t.run()
-  view = await t.view()
-  assert.ok(view.includes('collapsed'), `the reopened row must reflect the Alt+T toggle:\n${view}`)
-  t.app.stop()
+  try {
+    await openSettingsRows(t.vt, () => t.invoke(), 'Conversation')
+    await selectSettingsRow(t.vt, 'Thinking detail')
+    let view = await t.view()
+    const row = paintedSelectedRowCell(t.vt) ?? ''
+    assert.ok(row.includes('collapsed'), `the default live value is collapsed:\n${view}`)
+    t.vt.sendInput('\t') // the ROOT Tab enters the Detail (no choice)
+    view = await t.view()
+    const details = paintedDetailsText(t.vt).replace(/\s+/gu, ' ')
+    assert.match(details, /reasoning blocks render expanded or collapsed/u,
+      `the description names the DETAIL level of the reasoning blocks:\n${view}`)
+    assert.match(details, /shared with Alt\+T; not a persisted Host value/u,
+      'the description states the SAME Alt+T owner and the runtime-only nature')
+    assert.doesNotMatch(details, /shown|hidden/u, 'the old shown/hidden language is gone')
+    // The explicit Confirm drives the SAME TuiApp owner Alt+T toggles.
+    await confirmSettingsChoice(t.vt, 'expanded')
+    assert.equal(t.app.isThinkingExpanded(), true, 'the Settings Confirm sets the bulk app state')
+    assert.equal(t.settings.writes.length, 0, 'the Thinking row is runtime-only: it writes no document')
+    // Alt+T toggles FROM the Settings state, and a reopened workspace reads it.
+    t.app.toggleThinkingExpanded()
+    assert.equal(t.app.isThinkingExpanded(), false, 'Alt+T toggles the same state')
+    t.vt.sendInput('\u001b') // settled Detail -> Rows
+    t.vt.sendInput('\u001b') // Rows -> Categories
+    t.vt.sendInput('\u001b') // Categories -> close
+    await t.view()
+    await openSettingsRows(t.vt, () => t.invoke(), 'Conversation')
+    await selectSettingsRow(t.vt, 'Thinking detail')
+    const reopened = paintedSelectedRowCell(t.vt) ?? ''
+    assert.ok(reopened.includes('collapsed'), `the reopened row reflects the Alt+T state:\n${await t.view()}`)
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
 })
 
 test('the /settings declarative setter clears per-card overrides like Alt+T (bulk statement)', async () => {
