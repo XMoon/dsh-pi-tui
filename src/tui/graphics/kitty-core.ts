@@ -149,8 +149,6 @@ export class KittyGraphicsCore {
   private readonly imageIdFloor = randomInt(1, ID_SPACE_START_LIMIT)
   /** One past the last id handed out: `[floor, next)` is exactly this Core's. */
   private nextImageId = this.imageIdFloor
-  /** Ids whose frame write failed after possibly reaching the sink. */
-  private readonly ambiguous = new Set<number>()
   private readonly onEvent: ((event: KittyGraphicsEvent) => void) | undefined
   private nextPlacementId = 1
   private generationCounter = 0
@@ -257,7 +255,6 @@ export class KittyGraphicsCore {
   notePlacement(imageId: number, buffer: KittyScreenBuffer): void {
     const record = this.records.get(imageId)
     if (record === undefined) return
-    this.ambiguous.delete(imageId)
     record.buffer = buffer
     record.placements += 1
     record.everPlaced = true
@@ -425,21 +422,11 @@ export class KittyGraphicsCore {
       const record = this.records.get(imageId)
       if (record === undefined) continue
       record.residentIn.delete(buffer)
-      if (record.everPlaced) this.ambiguous.add(imageId)
       touched += 1
     }
     this.emit({ type: 'write-failed', detail: `${buffer}:${touched}` })
   }
 
-  /**
-   * Whether a record's placement write failed after possibly reaching the
-   * screen. Its pixels may be visible, so the Owner's retention rule applies:
-   * it is never hard-deleted on ambiguity — the next placement re-sends it and
-   * a stop leaves it to the screen's own policy.
-   */
-  isAmbiguous(imageId: number): boolean {
-    return this.ambiguous.has(imageId)
-  }
 
   /**
    * Terminal stop: queue the retirement of every owned image whose data never
@@ -465,7 +452,6 @@ export class KittyGraphicsCore {
   dispose(): void {
     this.disposed = true
     this.records.clear()
-    this.ambiguous.clear()
     this.payloadBytes = 0
     this.decodedByteTotal = 0
   }
