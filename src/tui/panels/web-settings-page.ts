@@ -289,6 +289,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // The endpoint draft owns the keyboard: its Input + its own explicit Enter
     // Confirm + its own Esc cancel are the ONLY keys it understands.
     if (this.endpointPanel !== undefined) {
+      // Readiness is re-proved BEFORE the key is forwarded: a backend that
+      // turned stale while the draft was open must not accept a Confirm, and
+      // the key that discovered it is not applied to the read-only surface.
+      if (this.syncEndpointWritability()) {
+        this.commitPresentation(() => {})
+        return
+      }
       this.endpointPanel.panel.focused = this.focused
       this.endpointPanel.panel.handleInput(data)
       return
@@ -374,7 +381,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (this.selectedRowId() === 'web-credential') {
       const actions = this.selectableCredentialActions()
       if (actions.length === 0) return
-      const next = Math.min(Math.max(0, this.actionIndex + delta), actions.length - 1)
+      const index = this.reconcileCredentialCursor()
+      const next = Math.min(Math.max(0, index + delta), actions.length - 1)
       if (next === this.actionIndex) return
       this.commitPresentation(() => {
         this.actionIndex = next
@@ -460,6 +468,15 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     const facts = this.intents.readFacts()
+    // The endpoint row's ONE action is its explicit editor, reachable from the
+    // LIST (Enter opens the Detail) and from the read-only Detail (Enter opens
+    // the editor) — the bar never advertises a key that does nothing.
+    if (rowId === 'web-search-endpoint') {
+      if (facts.kind === 'ready' && this.intents.writableRefusal() === undefined) {
+        this.openEndpointEditor(facts.settings.api.baseURL)
+      }
+      return
+    }
     if (facts.kind !== 'ready') return
     const requested = this.choiceValues()[this.choiceIndex]
     if (requested === undefined) return
@@ -486,6 +503,28 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         } else this.phases.set(rowId, { kind: 'outcome-unknown', reason: result.reason })
       })
     })
+  }
+
+  /** Close the endpoint draft without a write (the backend stopped being
+   *  writable, or the page is being retired). The draft never outlives its
+   *  ability to be confirmed. */
+  private closeEndpointDraft(): void {
+    this.endpointPanel?.panel.dispose()
+    this.endpointPanel = undefined
+    this.region = 'detail'
+    this.detailOffset = 0
+    this.pressed = undefined
+  }
+
+  /** A draft whose Confirm can only be refused is a false affordance: when the
+   *  backend turned non-current (or the credential/section disappeared), the
+   *  draft closes with ZERO writes and the row's read-only Detail states why.
+   *  Returns true when this call really closed a mounted draft. */
+  private syncEndpointWritability(): boolean {
+    if (this.endpointPanel === undefined) return false
+    if (this.intents.writableRefusal() === undefined) return false
+    this.closeEndpointDraft()
+    return true
   }
 
   /** Mount the EXISTING endpoint editor for the row's current authority value. */
@@ -656,10 +695,29 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return this.credentialActions().filter(action => action.enabled)
   }
 
+  /**
+   * Reconcile the credential cursor with the CURRENT selectable set. A fresh
+   * read can shrink it under the user (an external clear removes Clear while
+   * the cursor sits on it): the cursor is clamped onto a still-selectable
+   * action and the Detail is re-revealed, so the painted cursor, the Action Bar
+   * and the Enter target can never disagree. Called from render and from every
+   * cursor/activation path.
+   */
+  private reconcileCredentialCursor(): number {
+    const count = this.selectableCredentialActions().length
+    if (count === 0) return 0
+    const clamped = Math.min(Math.max(0, this.actionIndex), count - 1)
+    if (clamped !== this.actionIndex) {
+      this.actionIndex = clamped
+      this.detailOffset = 0
+    }
+    return clamped
+  }
+
   /** Hand the typed page-switch intent to the ROOT: Models (never `/login`
    *  text) owns the actual credential mutation. */
   private activateCredentialAction(): void {
-    const action = this.selectableCredentialActions()[this.actionIndex]
+    const action = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
     if (action === undefined) return
     if (!this.paintedActionVisible(action.action)) return
     const initial: ModelsInitialView = action.action === 'configure'
@@ -760,6 +818,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   render(width: number): string[] {
     if (this.disposed) return [fit('', width)]
+    // A backend that turned non-current closes an open endpoint draft FIRST:
+    // the frame never paints a Confirm the writer must refuse.
+    this.syncEndpointWritability()
+    // A fresh read can invalidate the credential cursor before this frame: clamp
+    // it FIRST so the painted cursor, the bar and the Enter target agree.
+    if (this.endpointPanel === undefined && this.selectedRowId() === 'web-credential') {
+      this.reconcileCredentialCursor()
+    }
     const grant = this.rowGrant
     const bodyRows = this.bodyRows()
     const facts = this.intents.readFacts()
@@ -833,6 +899,26 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return composeRow(left, right, width)
   }
 
+  /** The credential row's Action Bar. It advertises the Models deeplink ONLY
+   *  while the reconciled cursor owns a selectable action that is really inside
+   *  the painted Detail viewport — an off-screen or disabled target is never
+   *  described as an available Enter. */
+  private credentialActionBar(width: number): string {
+    const active = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
+    if (active === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    const viewport = this.detailViewport(width, this.liveBodyRows())
+    const projection = this.detailProjection(width, viewport)
+    const entry = projection.actionLines.find(line => line.value === active.action)
+    const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
+    const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
+    if (!visible) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    return wholeWording(
+      '↑/↓ choose · Enter open in Models · Esc back',
+      width,
+      ['Enter open in Models · Esc back', 'Enter · Esc', 'Esc back'],
+    )
+  }
+
   /** The ONE physical Action Bar line. Whole segments only: a hint that does
    *  not fit is dropped, never cut into half a word. It is painted with the
    *  hint role (§3.2 role 12), so its first cell is always real ink. */
@@ -845,13 +931,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           ['↑/↓ · Enter open · r refresh · Esc', '↑/↓ · Enter · Esc', 'Esc'],
         )
       : rowId === 'web-credential'
-        ? this.selectableCredentialActions().length === 0
-          ? wholeWording('r refresh · Esc back', width, ['Esc back'])
-          : wholeWording(
-              '↑/↓ choose · Enter open in Models · Esc back',
-              width,
-              ['Enter open in Models · Esc back', 'Enter · Esc', 'Esc back'],
-            )
+        ? this.credentialActionBar(width)
         : rowId === 'web-search-endpoint'
           ? this.intents.readFacts().kind === 'ready'
             ? wholeWording(
@@ -1122,6 +1202,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         lines.push({ text: color.textDim('The official credential store is unavailable; no credential action is offered here.') })
       }
     }
+    const activeIndex = this.reconcileCredentialCursor()
     let selectable = -1
     for (const action of actions) {
       if (action.enabled) selectable += 1
@@ -1134,7 +1215,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         })
         continue
       }
-      const active = selectable === this.actionIndex
+      const active = selectable === activeIndex
       const marker = active ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
       const label = `${marker}${active && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
       lines.push({ text: truncateToWidth(label, Math.max(1, width), '…', false), action: action.action, enabled: true })

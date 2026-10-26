@@ -1387,6 +1387,57 @@ async function openLegacyCountRow(h: Harness): Promise<void> {
   assert.match(h.view(), /Search API Result Count/u, `the legacy Web rows are reachable:\n${h.view()}`)
 }
 
+test('an external clear while the cursor sits on Clear clamps it to the still-enabled action', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear (both enabled)
+  assert.match(h.view(), /› Clear in Models…/u)
+  // The reference is cleared OUTSIDE this surface: the fresh read removes Clear
+  // from the selectable set under the cursor.
+  h.store.web.credential = { configured: false }
+  await key(h, 'r')
+  await settlePainted(h, 'the fresh Not-configured facts', frame => frame.includes('State: Not configured'))
+  assert.match(h.view(), /› Configure in Models…/u, `the cursor is clamped onto the enabled action:\n${h.view()}`)
+  assert.doesNotMatch(h.view(), /› Clear in Models…/u)
+  assert.match(h.view(), /Clear in Models… \(unavailable\)/u)
+  assert.match(h.view(), /Enter open in Models/u, 'the bar describes the action Enter really runs')
+  // Enter really runs the clamped Configure (never a silent no-op).
+  await key(h, ENTER)
+  await settlePainted(h, 'the clamped Configure deeplink', frame =>
+    frame.includes('Settings · Models') && frame.includes('API Key Reference'))
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u)
+})
+
+test('a stale backend closes an open endpoint draft with zero writes and recovers after reconnect', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+  assert.match(h.view(), /Enter confirm · Esc cancel/u)
+  h.setReadiness('stale')
+  // The key that discovers the non-current backend must NOT reach the draft.
+  await key(h, 'x')
+  const closed = h.view()
+  assert.doesNotMatch(closed, /Enter confirm · Esc cancel/u, `the draft closed without a Confirm:\n${closed}`)
+  assert.match(closed, /read-only until it reconnects/u, `the reason is painted:\n${closed}`)
+  assert.deepEqual(h.writes, [], 'closing the draft writes nothing')
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [], 'Enter on the read-only Detail dispatches nothing')
+  // Recovery: a current backend + a fresh read restore the explicit editor path.
+  h.setReadiness('ready')
+  await key(h, 'r')
+  await settlePainted(h, 'the recovered endpoint row', frame => frame.includes('Enter edit endpoint'))
+  await key(h, ENTER)
+  assert.match(h.view(), /Enter confirm · Esc cancel/u)
+  await editEndpointDraft(h, '/v3')
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v3'])
+})
+
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
 
 test('the page states defaults, billing, the ori_question boundary and the endpoint trust warning', async t => {
