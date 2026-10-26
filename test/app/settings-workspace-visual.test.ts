@@ -8914,7 +8914,25 @@ test('R7-APP1 the real /settings route edits rows, choices and pages without eve
   assert.match(h.view(), /Verified/u, 'and its authoritative re-read verified it')
   await backToRail(h)
 
-  // 2. The Web row mounts the embedded page in THIS lease.
+  // 2. The Icon row: a SECOND migrated document row whose writer is its OWN
+  //    commit entry (`commitIconStyle`), so this leg proves the real command
+  //    route reaches a different authority than the Theme leg.
+  const iconBefore = h.app.currentIconStyle()
+  assert.notEqual(iconBefore, 'minimal', 'precondition: the runtime icon style is not yet the confirmed value')
+  await railToCategory(h, 'Appearance')
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\x1b[B') // Configured theme -> Icon style
+  assert.match(h.view(), /> Icon style/u, `the Icon row owns the selection:\n${h.view()}`)
+  await key(h, '\r') // L1 -> the Icon row's inline choice
+  assert.match(h.view(), /Choose value/u, `the Icon row opens its own choice:\n${h.view()}`)
+  await highlightCandidate(h, 'minimal')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.iconStyle, 'minimal', 'the Icon confirm really wrote the document')
+  assert.equal(h.app.currentIconStyle(), 'minimal', 'the live runtime icon style changed too')
+  assert.match(h.view(), /Verified/u, 'and the authoritative re-read verified it')
+
+  // 3. The Web row mounts the embedded page in THIS lease.
   await railToCategory(h, 'Tools')
   await key(h, '\r') // L0 -> L1
   await key(h, '\x1b[B') // Visual tools -> Web Search / Fetch
@@ -8924,7 +8942,7 @@ test('R7-APP1 the real /settings route edits rows, choices and pages without eve
   assert.equal(h.app.overlayGraphState().handles, 0, 'no second overlay mounts for the Web row')
   await backToRail(h)
 
-  // 3. The NEWEST owner: the live extension row confirms through its Registry.
+  // 4. The NEWEST owner: the live extension row confirms through its Registry.
   await backToRail(h)
   await key(h, '\x1b[F') // End -> the appended Extensions category
   assert.match(h.view(), /^> Extensions/mu)
@@ -8937,7 +8955,7 @@ test('R7-APP1 the real /settings route edits rows, choices and pages without eve
   assert.equal(registry.rows()[0]?.currentValue, '1', 'the Registry really changed')
   assert.match(h.view(), /Verified/u)
 
-  // 4. Leaving the workspace is the ordinary close, and the whole session never
+  // 5. Leaving the workspace is the ordinary close, and the whole session never
   //    called the independent `SettingsList` entry point.
   await backToRail(h)
   await key(h, '\x1b') // rail -> close
