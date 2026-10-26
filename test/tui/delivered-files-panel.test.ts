@@ -440,3 +440,27 @@ test('the Details title carries the SAME unique label the list shows', () => {
   // The HOST line still carries the safe projection of the RAW declared path.
   assert.ok(h.rows().some(row => row.includes('Host: ') && row.includes('/a/report')))
 })
+
+test('a middle-only discriminator stays visible in the list and the Details title', () => {
+  const middle = (discriminator: string): string => `/ws/docs/report-${'a'.repeat(24)}${discriminator}${'b'.repeat(24)}.md`
+  const h = harness(snapshotOf([{ turn: 1, files: [middle('X'), middle('Y')] }]))
+  h.setSize(44, 20)
+  const rows = h.rows()
+  const listed = rows.filter(row => row.includes('report-'))
+  assert.equal(listed.length, 2, `both rows are painted:\n${rows.join('\n')}`)
+  assert.notEqual(listed[0]!.trim(), listed[1]!.trim(), 'the clamp must not collapse the two rows')
+
+  // The Details title joins the same fitted labels, so it differs too.
+  h.type('enter')
+  const first = h.rows()[0]!
+  h.type('esc')
+  h.type('down')
+  h.type('enter')
+  const second = h.rows()[0]!
+  assert.ok(first.includes(' · Details') && second.includes(' · Details'), `${first}\n${second}`)
+  assert.notEqual(first, second, 'two different files must not have the same Details title')
+  // The Details body carries the COMPLETE projected path (wrapped, never clipped).
+  const body = h.rows().join('')
+  assert.ok(body.includes('report-aaaaaaaa'), `the path head is visible:\n${body}`)
+  assert.ok(body.includes('bbbbbbbb.md'), `the path tail is visible:\n${body}`)
+})

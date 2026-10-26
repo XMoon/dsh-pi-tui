@@ -20,7 +20,7 @@ import { latestLine } from '../../domain/transcript/text.ts'
 import { color } from '../theme/runtime.ts'
 import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
 import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
-import { abbreviateName } from '../pickers/name-label.ts'
+import { fitDeliveredLabels } from '../presentation/labels.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 import { deliveredFileBasename, deliveredFileLabels } from '../../domain/deliverables/catalog.ts'
 
@@ -526,20 +526,20 @@ export class DeliveredFilesComponent implements Component {
       rows.push(truncateToWidth(color.textDim(hinted), safeWidth, '…'))
     }
 
+    const verbRoom = showActions ? visibleWidth(DELIVERED_DETAILS_VERB) + 2 : 0
+    const bodyWidth = Math.max(1, safeWidth - verbRoom)
+    const indent = 2
+    // The WHOLE delivery is fitted ONCE at this width. Labels keep both ends
+    // (design-language §6.4), and a residual clamp collision gains a visible
+    // ordinal, so two different declarations can never paint the same row text.
+    const fittedLabels = fitDeliveredLabels(
+      shown.map((file, index) => sanitizeDisplaySegment(this.labels[index] ?? deliveredFileBasename(file.path))),
+      Math.max(1, bodyWidth - indent),
+    )
     for (const [index, file] of shown.entries()) {
-      // The declared path is UNTRUSTED and lands on a terminal row: the label
-      // (basename/suffix, already projected for collision purposes) goes through
-      // the ONE display projection before it can occupy cells. Copy always uses
-      // the RAW path.
-      const label = sanitizeDisplaySegment(this.labels[index] ?? deliveredFileBasename(file.path))
-      const verbRoom = showActions ? visibleWidth(DELIVERED_DETAILS_VERB) + 2 : 0
-      const bodyWidth = Math.max(1, safeWidth - verbRoom)
-      const indent = 2
-      // A long declared filename differs from its sibling near the END, so a
-      // head-only cut would paint two identical rows. Labels keep BOTH ends
-      // (design-language §6.4 `abbreviateName`), which preserves the basename
-      // and the discriminating tail.
-      const labelText = abbreviateName(label, Math.max(1, bodyWidth - indent))
+      // The declared path is UNTRUSTED and lands on a terminal row; the label is
+      // already projected (collision + clamp), so Copy still uses the RAW path.
+      const labelText = fittedLabels[index] ?? sanitizeDisplaySegment(deliveredFileBasename(file.path))
       const labelWidth = visibleWidth(labelText)
       const row = rows.length
       const pathStart = indent
