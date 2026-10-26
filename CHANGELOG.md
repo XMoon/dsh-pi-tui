@@ -9,6 +9,19 @@
 
 ### 新增
 
+- **PiTUI 的最终回答现在为已发布的图表/SVG 提供真实操作行与全屏 SVG 阅读器。**
+  图表保留精确数值并新增 `Copy Data`（复制最终 ChartFact 的格式化 JSON）；SVG 保留描述与
+  已授权的缩略图，并新增 `View` / `Copy SVG`（复制未经修改的原始源码）。`Alt+V` 在当前窗口
+  的已发布图之间循环选中，图内以 `[Selected]` 文字标记、底部提示 `Selected i/n · <标题>`；
+  `Alt+C` 复制选中的图，`Alt+O` 打开选中的 SVG。三者都是可重映射的 Host 动作，未选中时只
+  提示先按选择键；图表没有阅读器。SVG 阅读器复用现有的全屏图片工作区租约（不是新页面或
+  overlay）：默认 Preview 按当前终端真实尺寸重新派生自己的高清变体（绝不放大缩略图），
+  Tab 切到只读且已做终端净化的 Source，可用行/页/Home/End 滚动，C 与 `Copy SVG` 发送完全
+  相同、未 trim 的原始字符串，Esc 回到原来的 transcript 位置。没有图片协议或派生失败时
+  Preview 明确显示 `Preview unavailable`，Source/Copy 仍然可用；鼠标只点击真实绘出的操作
+  文字或缩略像素。`/copy` 现在复制用户看到的显示正文（不含已被渲染消费的 marker 行），
+  原始 Session、搜索与 `/transcript` 导出保持完整。
+
 - **实验性 TSP renderer 的最终回答现在支持原生图文混排，并为每张已发布图提供 Copy 操作。**
   `DSH_PI_TUI_RENDERER=tsp` 下，经 `present_visual` 发布的图表/SVG 会按各自的标记位置进入
   同一个 Assistant 卡：Tern 协商了原生图表/图片时直接绘制原生控件，未协商时始终保留完整

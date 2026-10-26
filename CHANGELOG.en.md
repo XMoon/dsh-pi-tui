@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PiTUI final answers now carry real actions for published charts/SVGs and a fullscreen SVG reader.**
+  A chart keeps its exact values and gains `Copy Data` (the final ChartFact as pretty JSON);
+  an SVG keeps its description and admitted thumbnail and gains `View` / `Copy SVG` (the raw
+  source, unmodified). `Alt+V` cycles the current window's published figures, marks the
+  selected one with a textual `[Selected]` device and shows `Selected i/n · <title>` in the
+  status line; `Alt+C` copies the selected payload and `Alt+O` opens a selected SVG. All three
+  are remappable Host actions; with no selection they name the select key instead of guessing,
+  and a chart never opens a viewer. The SVG reader reuses the existing leased fullscreen image
+  workspace (no new page or overlay): Preview is the default and derives its OWN high-resolution
+  variant from the real terminal grant (never upscales the thumbnail); Tab switches to a
+  read-only, terminal-sanitized Source with line/page/Home/End scrolling; `C` and `Copy SVG`
+  send the byte-identical untrimmed source; Esc restores the original transcript position.
+  Without an inline-image protocol (or on a failed derivative) Preview says
+  `Preview unavailable` while Source/Copy stay usable; pointer cells only hit real painted
+  actions or thumbnail pixels. `/copy` now copies the visible display body (without a marker
+  line the renderer consumed), while the durable Session, search and `/transcript` export keep
+  every byte.
+
 - **The experimental TSP renderer now mixes published figures into the final answer and offers Copy on each of them.**
   With `DSH_PI_TUI_RENDERER=tsp`, charts and SVGs published through `present_visual` enter the
   same Assistant card at their marker positions: a native chart/image is painted when Tern

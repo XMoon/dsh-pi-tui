@@ -128,6 +128,7 @@ import {
 } from './tui/panels/output-viewer-panel.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
 import { ImageWorkspacePanel } from './tui/components/media/image-workspace.ts'
+import type { SvgViewerSource } from './tui/components/media/svg-viewer.ts'
 import type { ImageAttachmentRefLike } from './domain/media/types.ts'
 import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
@@ -228,12 +229,13 @@ import { TranscriptSearchComponent } from './tui/interaction/transcript-search.t
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
 import { ChartBody } from './tui/components/transcript/chart-body.ts'
 import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/components/transcript/visual-assistant-body.ts'
+import type { VisualFigureOptions } from './tui/components/transcript/visual-figure.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
 import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
 import { humanFacingVisualResult, type PublishedVisual } from './domain/visual/publication.ts'
 import { assistantVisualPresentation, assistantVisualPresentationRevision } from './domain/visual/presentation.ts'
-import { planVisualPlacement } from './domain/visual/placement.ts'
+import { planVisualPlacement, type VisualPiece } from './domain/visual/placement.ts'
 import { isVisualToolName, PRESENT_VISUAL_TOOL_NAME } from './domain/visual/tools.ts'
 import { chartDisplayTitle, chartTextRows } from './domain/visual/chart.ts'
 import { authorizeSvg, svgDetailRows } from './domain/visual/svg.ts'
@@ -2463,6 +2465,10 @@ type TranscriptCellGesture = {
    * resolve the SAME span; rows outside the image area leave it unset so the
    * original row-only hit map/route is unchanged. */
   imageSpan?: { startCol: number; endCol: number }
+  /** PR2.5: the resolved column span of a published-visual hit (an action
+   * verb's painted cells or the thumbnail pixel body's placement width).
+   * Press and release must resolve the SAME span. */
+  visualSpan?: { startCol: number; endCol: number }
 }
 
 /** The gesture hit id of the pinned viewer subject bar's `‹ back` affordance. */
@@ -2536,15 +2542,66 @@ type FullscreenImageRowHit = {
   readonly hitId: string
 }
 
+/** One column-ranged published-visual cell of a painted fullscreen row: the
+ * figure's real action verb (`copy`/`view`) or its painted thumbnail pixel body
+ * (`body`). A row listed here resolves through this descriptor — any other cell
+ * of the figure is `inert` and must never fall through to the card disclosure. */
+type FullscreenVisualRowHit = {
+  readonly row: number
+  readonly kind: 'action' | 'body' | 'inert'
+  /** The widest painted cell of this row (body placement width / action row). */
+  readonly endCol: number
+  /** Body rows only: the viewer hit identity. */
+  readonly hitId?: string
+  /** Action rows only: every painted verb's exact cell range. */
+  readonly segments?: ReadonlyArray<{
+    readonly startCol: number
+    readonly endCol: number
+    readonly hitId: string
+  }>
+}
+
+/** The exact published-visual occurrence one mounted figure paints: the
+ * Assistant row object, its ref and the EXACT publication object the sidecar
+ * committed when the figure was built. */
+type TranscriptVisualHandle = {
+  readonly message: TranscriptMessage
+  readonly ref: string
+  readonly publication: PublishedVisual
+  /** The session-display epoch this handle was minted in: an A→B→A subject
+   * change bumps it, so no press/selection/copy receipt/viewer survives. */
+  readonly generation: number
+}
+
+/** One figure's painted geometry in one transcript row map entry. */
+type TranscriptVisualHit = {
+  readonly handle: TranscriptVisualHandle
+  readonly top: number
+  readonly height: number
+  readonly actions: ReadonlyArray<{
+    readonly action: 'copy' | 'view'
+    readonly row: number
+    readonly startCol: number
+    readonly endCol: number
+  }>
+  readonly thumbnailBody?: {
+    readonly startRow: number
+    readonly endRow: number
+    readonly endCol: number
+  }
+}
+
 /** One PAINTED transcript row of the committed fullscreen frame snapshot
- * (Image UX PR2): the owner/height plus the row-level semantic identities and
- * the column-ranged image descriptors painted in that row. Values only — the
- * snapshot never references a live row entry. */
+ * (Image UX PR2 / PR2.5): the owner/height plus the row-level semantic
+ * identities, the column-ranged image descriptors and the published-visual
+ * cells painted in that row. Values only — the snapshot never references a
+ * live row entry. */
 type FullscreenPaintedRow = {
   readonly ownerId: string
   readonly height: number
   readonly hits: ReadonlyArray<string>
   readonly imageHits?: ReadonlyArray<FullscreenImageRowHit>
+  readonly visualHits?: ReadonlyArray<FullscreenVisualRowHit>
 }
 
 /** One rendered transcript block in the fullscreen row map (mouse
@@ -2564,6 +2621,8 @@ type FullscreenRowEntry = {
   height: number
   /** Image UX PR2: every mounted image occurrence's painted geometry. */
   attachments: ReadonlyArray<TranscriptImageHit>
+  /** PR2.5: every mounted published-visual figure's painted geometry. */
+  visuals: ReadonlyArray<TranscriptVisualHit>
   /** The outer-to-inner semantic container ancestry of this row (projected, not
    * geometry-guessed). `undefined` means the row is owned by no container. */
   containerPath?: TranscriptContainerPath
@@ -2642,6 +2701,8 @@ type RenderedTranscriptBlock = {
   mount?: TranscriptGutterComponent
   truncatedMarker: boolean
   attachments: ReadonlyArray<TranscriptImageHit>
+  /** PR2.5: every mounted published-visual figure's painted geometry. */
+  visuals: ReadonlyArray<TranscriptVisualHit>
   /** The outer-to-inner semantic container ancestry of this rendered block. */
   containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
@@ -3823,6 +3884,24 @@ export class TuiApp {
    * Tool card records none because its body is not rendered. Rebuilt with the
    * message component, so it always describes the mounted projection. */
   private readonly messageImageOccurrences = new Map<TranscriptMessage, TranscriptImageOccurrence[]>()
+  /** The published-visual figure handles of each mounted Assistant row, by
+   * ref, in plan order (PR2.5). Rebuilt with the message component; a handle is
+   * current only while the sidecar still commits the SAME publication object. */
+  private readonly visualFigureHandles = new Map<TranscriptMessage, Map<string, TranscriptVisualHandle>>()
+  /** The Assistant body that owns each visual row's painted geometry. The row
+   * map reads back the LAST render at the measured width (never a second
+   * render). */
+  private readonly visualAssistantBodies = new Map<
+    TranscriptMessage,
+    { readonly body: VisualAssistantBody; readonly indent: number }
+  >()
+  /** The transient display-only visual selection (`app.visual.selectNext`). */
+  private visualSelection: { readonly message: TranscriptMessage; readonly ref: string } | undefined
+  /** Bumped on every session-subject replacement: the ONE visual epoch every
+   * handle, selection, copy receipt and viewer fence is compared against. */
+  private visualEpoch = 0
+  /** The open SVG viewer's source fence: the exact handle it was opened for. */
+  private svgViewerFence: { readonly handle: TranscriptVisualHandle } | undefined
   /** Transient collector of the occurrences produced while one message
    * component is built; consumed by `buildMessage`. */
   private capturedImageOccurrences: TranscriptImageOccurrence[] | undefined
@@ -6855,6 +6934,9 @@ export class TuiApp {
         this.requestRender()
         return true
       },
+      selectNextVisual: () => this.selectNextVisual(),
+      copySelectedVisual: () => this.copySelectedVisual(),
+      openSelectedVisual: () => this.openSelectedVisual(),
     }
   }
 
@@ -8420,6 +8502,7 @@ export class TuiApp {
         visible: blocks.length,
         rows: this.messageRows.length,
       })
+      this.reconcileVisualViewerFence()
       return
     }
 
@@ -8436,6 +8519,7 @@ export class TuiApp {
         visible: blocks.length,
         rows: this.messageRows.length,
       })
+      this.reconcileVisualViewerFence()
       return
     }
     if (result.kind === 'content') {
@@ -8449,11 +8533,12 @@ export class TuiApp {
         visible: blocks.length,
         rows: this.messageRows.length,
       })
+      this.reconcileVisualViewerFence()
       return
     }
     this.transcriptPresentationDiagnostics.noopCommits += 1
     this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'noop', { visible: blocks.length, rows: this.messageRows.length })
-
+    this.reconcileVisualViewerFence()
   }
 
   /** Replace ONLY the turn activities (the messages stay). The runner
@@ -10976,6 +11061,7 @@ export class TuiApp {
       const rendered = component.render(width)
       let truncatedMarker = false
       let attachments: ReadonlyArray<TranscriptImageHit> = []
+      let visuals: ReadonlyArray<TranscriptVisualHit> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       let subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined
@@ -10990,6 +11076,7 @@ export class TuiApp {
       } else if (block.kind === 'message') {
         truncatedMarker = block.truncated === true
         attachments = this.attachmentHitsOf(component, width, block.message)
+        visuals = this.visualHitsOf(block.message, width)
         if (isUserMessageDisclosureCandidate(block.message)) {
           userDisclosureHits = this.userDisclosureHitsFor(component, {
             kind: 'durable',
@@ -11033,6 +11120,7 @@ export class TuiApp {
         ...(searchSelector === undefined ? {} : { searchSelector }),
         truncatedMarker,
         attachments,
+        visuals,
         ...(containerPath === undefined ? {} : { containerPath }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
@@ -11297,6 +11385,7 @@ export class TuiApp {
         return { ...entry, rendered }
       }
       const attachments = this.attachmentHitsOf(entry.component, width, entry.block.message)
+      const visuals = this.visualHitsOf(entry.block.message, width)
       const userDisclosureHits = isUserMessageDisclosureCandidate(entry.block.message)
         ? this.userDisclosureHitsFor(entry.component, {
             kind: 'durable',
@@ -11326,6 +11415,7 @@ export class TuiApp {
         ...entry,
         rendered,
         attachments,
+        visuals,
         ...(searchSelection === undefined ? { searchSelection: undefined } : { searchSelection }),
         ...(searchPresentation.selector === undefined ? { searchSelector: undefined } : { searchSelector: searchPresentation.selector }),
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
@@ -11461,6 +11551,7 @@ export class TuiApp {
       ...(entry.containerPath === undefined ? {} : { containerPath: entry.containerPath }),
       height,
       attachments: entry.attachments,
+      visuals: entry.visuals,
       ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
       ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
       ...(entry.userDisclosureHits === undefined ? {} : { userDisclosureHits: entry.userDisclosureHits }),
@@ -11514,7 +11605,7 @@ export class TuiApp {
             () => this.focusLivePaddingEnabled(),
           ))
         }
-        rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+        rows.push({ height: padding, attachments: [], visuals: [], hasTrailingSpacer: false })
       }
       transcriptRow += height + padding
     })
@@ -11564,6 +11655,18 @@ export class TuiApp {
     }
     for (const message of this.messageImageOccurrences.keys()) {
       if (!live.has(message)) this.messageImageOccurrences.delete(message)
+    }
+    // PR2.5: the figure handles/bodies describe the SAME mounted batch. A
+    // paged-out row must not keep a valid hit, selection target or viewer
+    // source alive off-window.
+    for (const message of this.visualFigureHandles.keys()) {
+      if (!live.has(message)) this.visualFigureHandles.delete(message)
+    }
+    for (const message of this.visualAssistantBodies.keys()) {
+      if (!live.has(message)) this.visualAssistantBodies.delete(message)
+    }
+    if (this.visualSelection !== undefined && !live.has(this.visualSelection.message)) {
+      this.visualSelection = undefined
     }
   }
 
@@ -11851,7 +11954,7 @@ export class TuiApp {
       }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
-      if (padding > 0) rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+      if (padding > 0) rows.push({ height: padding, attachments: [], visuals: [], hasTrailingSpacer: false })
       transcriptRow += height + padding
     }
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
@@ -12481,6 +12584,7 @@ export class TuiApp {
         height: entry.height,
         hits: this.fullscreenRowHits(entry, index),
         ...(entry.attachments.length === 0 ? {} : { imageHits: this.fullscreenImageRowHits(entry) }),
+        ...(entry.visuals.length === 0 ? {} : { visualHits: this.fullscreenVisualRowHits(entry) }),
       }))
       hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
     } else {
@@ -12628,6 +12732,135 @@ export class TuiApp {
     return { hitId: 'inert', span }
   }
 
+  /** The painted published-visual cells of one row-map entry (PR2.5): each
+   * real action verb gets its exact painted cell range, the SVG thumbnail's
+   * real pixel rows are a `view` target, and every other figure row is `inert`
+   * so a click inside the figure never folds the whole Assistant card. */
+  private fullscreenVisualRowHits(entry: FullscreenRowEntry): ReadonlyArray<FullscreenVisualRowHit> {
+    const rows: FullscreenVisualRowHit[] = []
+    for (const hit of entry.visuals) {
+      const token = this.identityToken(hit.handle.message)
+      const byRow = new Map<number, Array<{ startCol: number; endCol: number; hitId: string }>>()
+      for (const action of hit.actions) {
+        const row = hit.top + action.row
+        const segments = byRow.get(row) ?? []
+        segments.push({
+          startCol: action.startCol,
+          endCol: action.endCol,
+          hitId: `visual:${action.action}:${token}:${hit.handle.ref}`,
+        })
+        byRow.set(row, segments)
+      }
+      for (let offset = 0; offset < hit.height; offset += 1) {
+        const row = hit.top + offset
+        const segments = byRow.get(row)
+        if (segments !== undefined) {
+          rows.push({
+            row,
+            kind: 'action',
+            endCol: Math.max(...segments.map(segment => segment.endCol)),
+            segments,
+          })
+          continue
+        }
+        const body = hit.thumbnailBody
+        if (body !== undefined && row >= body.startRow && row < body.endRow) {
+          rows.push({
+            row,
+            kind: 'body',
+            endCol: body.endCol,
+            hitId: `visual:view:${token}:${hit.handle.ref}`,
+          })
+          continue
+        }
+        rows.push({ row, kind: 'inert', endCol: Math.max(1, this.terminal.columns) })
+      }
+    }
+    return rows
+  }
+
+  /** Resolve one PAINTED visual descriptor against a press/release column. A
+   * row listed here NEVER falls through to the card/container ladder: an
+   * action row outside every verb resolves `inert` (plan §1.1: clicking a
+   * title/description/loading row must not open the Viewer or fold the card). */
+  private resolvePaintedVisualRowHit(
+    visualHits: ReadonlyArray<FullscreenVisualRowHit> | undefined,
+    inMessage: number,
+    x: number,
+  ): { hitId: string; span: { startCol: number; endCol: number } } | undefined {
+    const hit = visualHits?.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    if (hit.kind === 'action') {
+      for (const segment of hit.segments ?? []) {
+        if (segment.endCol > segment.startCol && x >= segment.startCol && x < segment.endCol) {
+          return { hitId: segment.hitId, span: { startCol: segment.startCol, endCol: segment.endCol } }
+        }
+      }
+      const segments = hit.segments ?? []
+      const span = segments.length === 0
+        ? { startCol: 0, endCol: hit.endCol }
+        : {
+            startCol: Math.min(...segments.map(segment => segment.startCol)),
+            endCol: hit.endCol,
+          }
+      return { hitId: 'inert', span }
+    }
+    if (hit.kind === 'body' && hit.hitId !== undefined) {
+      const span = { startCol: 0, endCol: hit.endCol }
+      if (hit.endCol <= 0 || x >= hit.endCol) return { hitId: 'inert', span }
+      return { hitId: hit.hitId, span }
+    }
+    return { hitId: 'inert', span: { startCol: 0, endCol: Math.max(1, this.terminal.columns) } }
+  }
+
+  /** Resolve one LIVE visual row against a column (PR2.5): a painted action
+   * verb is its intent, the SVG thumbnail's painted pixel rows open the same
+   * Viewer, and every other figure row is inert. `undefined` means this row
+   * carries no figure occurrence. */
+  private visualRowActionAt(
+    entry: Readonly<{ visuals: ReadonlyArray<TranscriptVisualHit> }>,
+    inMessage: number,
+    x: number,
+  ):
+    | {
+        readonly hitId: string
+        readonly kind: 'copy' | 'view' | 'inert'
+        readonly handle?: TranscriptVisualHandle
+        readonly span: { startCol: number; endCol: number }
+      }
+    | undefined {
+    for (const hit of entry.visuals) {
+      if (inMessage < hit.top || inMessage >= hit.top + hit.height) continue
+      const token = this.identityToken(hit.handle.message)
+      const row = inMessage - hit.top
+      for (const action of hit.actions) {
+        if (action.row !== row || x < action.startCol || x >= action.endCol) continue
+        return {
+          hitId: `visual:${action.action}:${token}:${hit.handle.ref}`,
+          kind: action.action,
+          handle: hit.handle,
+          span: { startCol: action.startCol, endCol: action.endCol },
+        }
+      }
+      const body = hit.thumbnailBody
+      if (body !== undefined && inMessage >= body.startRow && inMessage < body.endRow) {
+        const span = { startCol: 0, endCol: body.endCol }
+        return body.endCol > 0 && x < body.endCol
+          ? { hitId: `visual:view:${token}:${hit.handle.ref}`, kind: 'view', handle: hit.handle, span }
+          : { hitId: 'inert', kind: 'inert', span }
+      }
+      const segmentSpan = hit.actions.length === 0
+        ? 0
+        : Math.max(...hit.actions.map(action => action.endCol))
+      return {
+        hitId: 'inert',
+        kind: 'inert',
+        span: { startCol: 0, endCol: Math.max(1, segmentSpan) },
+      }
+    }
+    return undefined
+  }
+
   /** Resolve one LIVE image row against a column (Image UX PR2): the info
    * row only acts inside its painted control span (otherwise inert), every
    * visible body row is the occurrence's view target. `undefined` means this
@@ -12756,6 +12989,11 @@ export class TuiApp {
     // so an expanded Tool card's image body never folds the card.
     const imageAction = this.imageRowActionAt(entry, inMessage, x)
     if (imageAction !== undefined) return imageAction.hitId
+    // PR2.5: published-visual figure rows are their OWN action surface — a
+    // painted verb is its intent, the thumbnail's real pixel body opens the
+    // Viewer, and every other figure row is inert (never a card fold).
+    const visualAction = this.visualRowActionAt(entry, inMessage, x)
+    if (visualAction !== undefined) return visualAction.hitId
     // Nearest semantic container from the PROJECTED ancestry: a foldable card
     // toggles ITSELF; every other process row collapses the nearest container
     // (nested Work beats the outer Thought).
@@ -13375,13 +13613,15 @@ export class TuiApp {
     if (cell !== undefined) {
       const painted = snapshot.rows[cell.entryIndex]!
       const imageHit = this.resolvePaintedImageRowHit(painted.imageHits, cell.inMessage, x)
+      const visualHit = this.resolvePaintedVisualRowHit(painted.visualHits, cell.inMessage, x)
       this.fullscreenCellGesture = {
         ownerId: painted.ownerId,
         row: cell.inMessage,
-        hitId: imageHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert',
+        hitId: imageHit?.hitId ?? visualHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert',
         columns: snapshot.columns,
         termRows: snapshot.termRows,
         ...(imageHit === undefined ? {} : { imageSpan: imageHit.span }),
+        ...(visualHit === undefined ? {} : { visualSpan: visualHit.span }),
       }
       return
     }
@@ -13671,21 +13911,28 @@ export class TuiApp {
     const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
     const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex), x)
     const imageAction = this.imageRowActionAt(entry, inMessage, x)
+    const visualAction = this.visualRowActionAt(entry, inMessage, x)
     const pressed = this.fullscreenCellGesture
-    // A pressed image hit must still resolve the SAME actionable column span:
-    // a repaint/reflow that moved the control (or turned the pressed body row
-    // into an info row) drops the gesture even if a same-shaped target moved
-    // under the cell.
+    // A pressed image/visual hit must still resolve the SAME actionable column
+    // span: a repaint/reflow that moved the control (or turned the pressed body
+    // row into an info/action row) drops the gesture even if a same-shaped
+    // target moved under the cell.
     const sameImageSpan = pressed?.imageSpan === undefined
       ? imageAction === undefined
       : imageAction !== undefined
         && imageAction.span.startCol === pressed.imageSpan.startCol
         && imageAction.span.endCol === pressed.imageSpan.endCol
+    const sameVisualSpan = pressed?.visualSpan === undefined
+      ? visualAction === undefined
+      : visualAction !== undefined
+        && visualAction.span.startCol === pressed.visualSpan.startCol
+        && visualAction.span.endCol === pressed.visualSpan.endCol
     if (
       pressed?.ownerId !== ownerId ||
       pressed?.row !== inMessage ||
       pressed?.hitId !== hitId ||
-      !sameImageSpan
+      !sameImageSpan ||
+      !sameVisualSpan
     ) {
       this.fullscreenCellGesture = undefined
       return
@@ -13792,6 +14039,17 @@ export class TuiApp {
             this.toggleAttachmentCollapsed(imageAction.occurrence.message, imageAction.occurrence.imageIndex)
           } else if (imageAction.kind === 'view') {
             this.openImageViewer(imageAction.occurrence)
+          }
+          return
+        }
+        // PR2.5: a painted figure verb runs its ONE intent; the thumbnail's
+        // real pixel body opens the same leased SVG viewer. Every other figure
+        // row is inert (consumed here, never a card fold).
+        if (visualAction !== undefined) {
+          if (visualAction.kind === 'copy' && visualAction.handle !== undefined) {
+            this.copyVisualPayload(visualAction.handle)
+          } else if (visualAction.kind === 'view' && visualAction.handle !== undefined) {
+            this.openSvgViewer(visualAction.handle)
           }
           return
         }
@@ -14325,6 +14583,15 @@ export class TuiApp {
     // The candidate snapshot describes the disposed projection: drop it with
     // the components whose image occurrences it references.
     this.messageImageOccurrences.clear()
+    // PR2.5: the figure handles/bodies and the transient selection describe
+    // the disposed projection too; the viewer fence is retired by the
+    // workspace close at the same session-switch boundary. The epoch bump is
+    // what makes an A→B→A subject change expire every OLD handle even when the
+    // folder hands back the SAME message/publication objects on the return.
+    this.visualEpoch += 1
+    this.visualFigureHandles.clear()
+    this.visualAssistantBodies.clear()
+    this.visualSelection = undefined
   }
 
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
@@ -17727,6 +17994,9 @@ export class TuiApp {
       ...(message.content === undefined ? {} : { content: message.content }),
       publications,
     })
+    // A rebuild replaces the exact occurrence set this row commits: the old
+    // handles must never satisfy a press, a selection or a copy receipt.
+    this.visualFigureHandles.delete(message)
     const body = new VisualAssistantBody({
       pieces: plan.pieces,
       definitions: plan.definitions,
@@ -17734,12 +18004,53 @@ export class TuiApp {
       theme: markdownTheme,
       markdownOptions: HOST_MARKDOWN_OPTIONS,
       paint: text => color.textDim(text),
-      svgLoader: this.svgRasterLoader,
-      svgTheme: this.imageTheme,
       requestRender: () => this.settleThumbnailRender(),
+      figure: piece => this.visualFigureOptions(message, piece),
       nonText: (block, blockIndex) => this.renderVisualAssistantNonText(block, blockIndex, message),
     })
+    this.visualAssistantBodies.set(message, { body, indent: visibleWidth(bullet) })
     return new BulletedComponent(body, bullet)
+  }
+
+  /**
+   * Build the per-figure inputs for one published occurrence: the exact
+   * authorized publication, the live selection predicate and the Copy/View
+   * intents. The figure owns no Session and no keymap; every business effect
+   * resolves the CURRENT handle here at execution time.
+   */
+  private visualFigureOptions(
+    message: Extract<TranscriptMessage, { kind: 'assistant' }>,
+    piece: VisualPiece,
+  ): VisualFigureOptions {
+    const handle: TranscriptVisualHandle = {
+      message,
+      ref: piece.ref,
+      publication: piece.publication,
+      generation: this.visualEpoch,
+    }
+    let byRef = this.visualFigureHandles.get(message)
+    if (byRef === undefined) {
+      byRef = new Map()
+      this.visualFigureHandles.set(message, byRef)
+    }
+    byRef.set(piece.ref, handle)
+    const source = piece.publication.source
+    const isSvg = source.svg !== undefined && source.svgSource !== undefined
+    return {
+      publication: piece.publication,
+      selected: () => this.isVisualSelected(message, piece.ref),
+      paint: text => color.textDim(text),
+      requestRender: () => this.settleThumbnailRender(),
+      onCopy: () => this.copyVisualPayload(handle),
+      ...(isSvg ? { onView: () => this.openSvgViewer(handle) } : {}),
+      ...(isSvg && this.svgRasterLoader !== undefined && this.imageTheme !== undefined
+        ? {
+            svgLoader: this.svgRasterLoader,
+            svgTheme: this.imageTheme,
+            svgAdmissionWidth: source.svgAdmissionWidth,
+          }
+        : {}),
+    }
   }
 
   /**
@@ -17774,6 +18085,45 @@ export class TuiApp {
       return new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim })
     }
     return new Text(color.textDim(sanitizeDisplayText(finalizedBlockFallbackText(block))), 0, 0)
+  }
+
+  /**
+   * The painted published-visual geometry of one message entry, in ENTRY
+   * coordinates. The Assistant body renders at the bullet's inner width, so
+   * the figure's columns shift by the bullet prefix; rows are unchanged (the
+   * visual body is the first painted child of every Assistant wrapper).
+   */
+  private visualHitsOf(message: TranscriptMessage, width: number): ReadonlyArray<TranscriptVisualHit> {
+    const record = this.visualAssistantBodies.get(message)
+    const byRef = this.visualFigureHandles.get(message)
+    if (record === undefined || byRef === undefined) return []
+    const inner = Math.max(1, width - record.indent)
+    const hits: TranscriptVisualHit[] = []
+    for (const painted of record.body.paintedVisualHits(inner)) {
+      const handle = byRef.get(painted.ref)
+      if (handle === undefined) continue
+      hits.push({
+        handle,
+        top: painted.top,
+        height: painted.height,
+        actions: painted.actions.map(action => ({
+          action: action.action,
+          row: action.row,
+          startCol: action.startCol + record.indent,
+          endCol: action.endCol + record.indent,
+        })),
+        ...(painted.thumbnailBody === undefined
+          ? {}
+          : {
+              thumbnailBody: {
+                startRow: painted.thumbnailBody.startRow,
+                endRow: painted.thumbnailBody.endRow,
+                endCol: painted.thumbnailBody.endCol + record.indent,
+              },
+            }),
+      })
+    }
+    return hits
   }
 
   /**
@@ -17857,6 +18207,13 @@ export class TuiApp {
       const visualBody = publications === undefined || publications.length === 0
         ? undefined
         : this.renderVisualAssistantBody(message, publications, bullet)
+      if (visualBody === undefined) {
+        // The row no longer carries a qualified visual: no figure geometry may
+        // survive as a click/selection/copy target.
+        this.visualAssistantBodies.delete(message)
+        this.visualFigureHandles.delete(message)
+        if (this.visualSelection?.message === message) this.visualSelection = undefined
+      }
       const body = visualBody ?? (message.displayBlocks !== undefined
         ? this.renderAssistantDisplaySequence(message.displayBlocks, makeAssistantText, message)
         : message.content !== undefined && message.content.some(block => block.type !== 'text')
@@ -23810,6 +24167,7 @@ export class TuiApp {
     let record: WorkspaceLeaseRecord | undefined
     const panel = new ImageWorkspacePanel({
       rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
@@ -23851,6 +24209,7 @@ export class TuiApp {
     let record: WorkspaceLeaseRecord | undefined
     const panel = new ImageWorkspacePanel({
       rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
@@ -23864,6 +24223,208 @@ export class TuiApp {
       initial: { kind: 'viewer', source: { ref: current.ref, scope: current.scope } },
     })
     record = this.leaseWorkspaceScreen('image', panel)
+  }
+
+  // ── PR2.5 published-visual selection / Copy / Viewer ────────────────────
+
+  /** Whether one mounted figure is the transient visual selection. */
+  private isVisualSelected(message: TranscriptMessage, ref: string): boolean {
+    const selection = this.visualSelection
+    return selection !== undefined && selection.message === message && selection.ref === ref
+  }
+
+  /**
+   * Whether one handle's source is still the CURRENT legit occurrence: the
+   * row must still be mounted with its visual body, and the sidecar derived
+   * from the official Session must still commit the SAME publication object.
+   * A re-render that rebuilds the figure keeps the source current; a policy/
+   * window/session change does not.
+   */
+  private visualSourceCurrent(handle: TranscriptVisualHandle): boolean {
+    if (handle.generation !== this.visualEpoch) return false
+    if (!this.visualAssistantBodies.has(handle.message)) return false
+    const publications = assistantVisualPresentation(handle.message)?.publications
+    if (publications === undefined) return false
+    return publications.find(publication => publication.ref === handle.ref) === handle.publication
+  }
+
+  /** Resolve one (message, ref) against the CURRENT figure set and sidecar. */
+  private currentVisualHandle(message: TranscriptMessage, ref: string): TranscriptVisualHandle | undefined {
+    const handle = this.visualFigureHandles.get(message)?.get(ref)
+    if (handle === undefined || !this.visualSourceCurrent(handle)) return undefined
+    return handle
+  }
+
+  /** Every current published-visual occurrence of the mounted window, in plan
+   * order (mounted message order + each message's publication order). */
+  private mountedVisualHandles(): TranscriptVisualHandle[] {
+    const handles: TranscriptVisualHandle[] = []
+    for (const block of this.mountedTranscriptBlocks) {
+      if (block.block.kind !== 'message') continue
+      const message = block.block.message
+      const publications = assistantVisualPresentation(message)?.publications
+      const byRef = this.visualFigureHandles.get(message)
+      if (publications === undefined || byRef === undefined) continue
+      for (const publication of publications) {
+        const handle = byRef.get(publication.ref)
+        if (handle !== undefined && handle.publication === publication) handles.push(handle)
+      }
+    }
+    return handles
+  }
+
+  /** The selected handle, or undefined when the selection is no longer a
+   * current legit occurrence (which clears it before returning). */
+  private selectedVisualHandle(): TranscriptVisualHandle | undefined {
+    const selection = this.visualSelection
+    if (selection === undefined) return undefined
+    const handle = this.currentVisualHandle(selection.message, selection.ref)
+    if (handle === undefined) {
+      this.visualSelection = undefined
+      this.requestRender()
+      return undefined
+    }
+    return handle
+  }
+
+  /** `app.visual.selectNext`: cycle the current window's published visuals. */
+  private selectNextVisual(): boolean {
+    const handles = this.mountedVisualHandles()
+    if (handles.length === 0) {
+      this.notify('No published visuals in the current transcript window', 'info')
+      return true
+    }
+    const selection = this.visualSelection
+    const current = selection === undefined
+      ? -1
+      : handles.findIndex(handle => handle.message === selection.message && handle.ref === selection.ref)
+    const next = (current + 1) % handles.length
+    const handle = handles[next]!
+    this.visualSelection = { message: handle.message, ref: handle.ref }
+    this.requestRender()
+    this.notify(`Selected ${next + 1}/${handles.length} · ${handle.publication.source.title}`, 'info')
+    return true
+  }
+
+  /** `app.visual.copySelected`: copy the selected figure's exact payload. */
+  private copySelectedVisual(): boolean {
+    const handle = this.selectedVisualHandle()
+    if (handle === undefined) {
+      // The honest one-line route: never guess "the last visual".
+      this.notify(`Select a visual first · ${this.keybindings.keyHint('app.visual.selectNext')}`, 'info')
+      return true
+    }
+    this.copyVisualPayload(handle)
+    return true
+  }
+
+  /** `app.visual.openSelected`: open the selected SVG in the leased viewer.
+   * A Chart has no viewer (its exact values live on the row) — the request is
+   * answered truthfully instead of minting a second surface. */
+  private openSelectedVisual(): boolean {
+    const handle = this.selectedVisualHandle()
+    if (handle === undefined) {
+      this.notify(`Select a visual first · ${this.keybindings.keyHint('app.visual.selectNext')}`, 'info')
+      return true
+    }
+    if (handle.publication.source.svgSource === undefined) {
+      this.notify('Chart has no viewer', 'info')
+      return true
+    }
+    this.openSvgViewer(handle)
+    return true
+  }
+
+  /**
+   * The ONE visual payload contract: a chart copies
+   * `JSON.stringify(final ChartFact, null, 2)`; an SVG copies the admitted
+   * `PublishedVisual.source.svgSource` raw bytes (no trim, no re-encoding).
+   * The shared Client-local clipboard owner is the transport; the notice is
+   * published only after it settles AND the same source is still current.
+   */
+  private copyVisualPayload(handle: TranscriptVisualHandle): void {
+    const copy = this.copySelection
+    const runner = this.events.runOwned
+    if (copy === undefined || runner === undefined) {
+      this.notify('Copy failed', 'error')
+      return
+    }
+    const source = handle.publication.source
+    const text = source.chart !== undefined ? JSON.stringify(source.chart, null, 2) : source.svgSource
+    if (text === undefined) {
+      this.notify('Copy failed', 'error')
+      return
+    }
+    runner('visual copy', () => copy(text), {
+      onResult: (ok) => {
+        if (this.disposed || !this.visualSourceCurrent(handle)) return
+        this.notify(ok ? 'Copied visual' : 'Copy failed', ok ? 'info' : 'error')
+      },
+      onError: () => {
+        if (this.disposed || !this.visualSourceCurrent(handle)) return
+        this.notify('Copy failed', 'error')
+      },
+    })
+  }
+
+  /**
+   * Open one published SVG in the EXISTING leased image workspace, as its
+   * `svg-viewer` variant: the same physical screen lease, the same
+   * `preserveScreen` return stack and the same close owner as `/view-image`.
+   * The source string is captured immutably here; the viewer never re-derives
+   * publication authority and never starts a rasterizer of its own.
+   */
+  private openSvgViewer(handle: TranscriptVisualHandle): void {
+    const source = handle.publication.source
+    if (source.svg === undefined || source.svgSource === undefined) {
+      this.notify('Chart has no viewer', 'info')
+      return
+    }
+    if (!this.visualSourceCurrent(handle)) return
+    if (!this.canLeaseImageWorkspace()) return
+    const viewerSource: SvgViewerSource = {
+      title: source.svg.title,
+      svgSource: source.svgSource,
+      digest: source.svg.digest,
+      onCopy: () => this.copyVisualPayload(handle),
+    }
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ImageWorkspacePanel({
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      requestRender: () => this.requestRender(),
+      ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      ...(this.svgRasterLoader === undefined ? {} : { svgLoader: this.svgRasterLoader }),
+      theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
+      candidates: [],
+      resolve: () => undefined,
+      onStale: () => {
+        record?.close()
+        this.notify('the visual left the current transcript window', 'info')
+      },
+      onClose: () => record?.close(),
+      initial: { kind: 'svg-viewer', source: viewerSource },
+    })
+    this.svgViewerFence = { handle }
+    record = this.leaseWorkspaceScreen('image', panel, () => {
+      if (this.svgViewerFence?.handle === handle) this.svgViewerFence = undefined
+    })
+  }
+
+  /**
+   * Retire the SVG viewer when its source is no longer the current legit
+   * occurrence (a session switch, a newer final Assistant row, a replaced
+   * publication or a window change). The selection is display-only and dies
+   * with it; the raster subscription dies with the viewer's own dispose and
+   * the loader aborts only that variant's unused request.
+   */
+  private reconcileVisualViewerFence(): void {
+    const fence = this.svgViewerFence
+    if (fence === undefined) return
+    if (this.visualSourceCurrent(fence.handle)) return
+    this.svgViewerFence = undefined
+    this.visualSelection = undefined
+    this.closeLeasedWorkspaces('visual source changed')
   }
 
   /**

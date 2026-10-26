@@ -157,6 +157,40 @@ export const JOB_LOCAL_KEYS = {
   copy: 'c',
 } as const
 
+/**
+ * The SVG Viewer's FIXED screen-local chords (PR2.5).
+ *
+ * The Viewer is a leased READ-ONLY screen, not a Host command surface: these
+ * keys are dispatched by the viewer panel only while its screen lease is live,
+ * so they are not Host keymap actions and no remap exists for them. Keeping the
+ * machine KeyIds and their labels in ONE table means the handler and the
+ * action bar (and the panel's page devices) can never drift into two string
+ * authorities. The labels are derived through the shared key vocabulary.
+ */
+const viewerKeyLabel = (key: KeyId): string => formatHintKeys(formatKeyId(key))
+
+export const SVG_VIEWER_CHORDS = {
+  /** Switch between the Preview and Source pages (both directions). */
+  switchPage: { keys: ['tab'], label: viewerKeyLabel('tab') },
+  /** Copy the RAW SVG source (available on both pages). */
+  copy: { keys: ['c'], label: viewerKeyLabel('c') },
+  /** Close the Viewer and restore the transcript it was opened from. */
+  close: { keys: ['escape'], label: viewerKeyLabel('escape') },
+  scrollUp: { keys: ['up'], label: '↑' },
+  scrollDown: { keys: ['down'], label: '↓' },
+  pageUp: { keys: ['pageUp'], label: 'PgUp' },
+  pageDown: { keys: ['pageDown'], label: 'PgDn' },
+  first: { keys: ['home'], label: 'Home' },
+  last: { keys: ['end'], label: 'End' },
+} as const satisfies Record<string, { keys: readonly KeyId[]; label: string }>
+
+/** The Source page's fixed scroll hint, derived from the ONE chord table. */
+export const SVG_VIEWER_SCROLL_LABEL = [
+  `${SVG_VIEWER_CHORDS.scrollUp.label}/${SVG_VIEWER_CHORDS.scrollDown.label}`,
+  `${SVG_VIEWER_CHORDS.pageUp.label}/${SVG_VIEWER_CHORDS.pageDown.label}`,
+  `${SVG_VIEWER_CHORDS.first.label}/${SVG_VIEWER_CHORDS.last.label}`,
+].join(' ')
+
 /** Format one already-labelled key list for an ACTION-BAR HINT: a BARE
  *  unmodified letter stays lowercase (`s`, never `S`) because `S` reads as ⇧S in
  *  prose — the design language's key rule (§4.1). A modified chord keeps its

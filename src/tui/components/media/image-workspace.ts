@@ -37,7 +37,9 @@ import { formatKeyId } from '../../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
+import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
 import { ImageViewerPanel } from './image-viewer.ts'
+import { SvgViewerPanel, type SvgViewerSource } from './svg-viewer.ts'
 
 /** The immutable read source of one selected occurrence (resolved against the
  * CURRENT mounted batch by the app owner at selection time). */
@@ -56,8 +58,12 @@ export interface ImageWorkspaceCandidate {
 export interface ImageWorkspaceInput {
   /** Current terminal rows (re-read every paint; the screen is responsive). */
   readonly rows: () => number
+  /** Current terminal columns (the SVG Viewer's stale-geometry fence). */
+  readonly columns?: () => number
   readonly requestRender: () => void
   readonly loader?: ImageLoader
+  /** PR2.5: the ONE shared SVG raster cache (a `svg-viewer` state only). */
+  readonly svgLoader?: SvgRasterLoader
   readonly theme: { fallbackColor(text: string): string }
   /** The mounted-window candidate snapshot, in projection order. */
   readonly candidates: readonly ImageWorkspaceCandidate[]
@@ -71,10 +77,12 @@ export interface ImageWorkspaceInput {
   readonly onStale: () => void
   /** Close the whole workspace (list Esc, or the direct Viewer's Esc). */
   readonly onClose: () => void
-  /** `list` starts on the picker; `viewer` starts on a direct occurrence. */
+  /** `list` starts on the picker; `viewer` starts on a direct occurrence;
+   *  `svg-viewer` is the same leased screen's read-only SVG page set. */
   readonly initial:
     | { readonly kind: 'list' }
     | { readonly kind: 'viewer'; readonly source: ImageWorkspaceSource }
+    | { readonly kind: 'svg-viewer'; readonly source: SvgViewerSource }
 }
 
 /** The leased screen root: list state OR viewer state, never both rendered. */
@@ -83,8 +91,10 @@ export class ImageWorkspacePanel implements Component {
   /** The list instance is retained across a Viewer round trip so Esc returns
    * to the exact same selection. */
   private readonly picker: SearchablePicker | undefined
-  private viewPanel: ImageViewerPanel | undefined
+  private viewPanel: ImageViewerPanel | SvgViewerPanel | undefined
   private mode: 'list' | 'viewer'
+  /** The width the last paint granted (the Viewer's fallback column read). */
+  private lastWidth = 1
 
   constructor(input: ImageWorkspaceInput) {
     this.input = input
@@ -113,11 +123,27 @@ export class ImageWorkspacePanel implements Component {
         this.showViewer(source, true)
       }
       this.picker.onCancel = (): void => input.onClose()
+    } else if (input.initial.kind === 'svg-viewer') {
+      this.mode = 'viewer'
+      this.picker = undefined
+      this.showSvgViewer(input.initial.source)
     } else {
       this.mode = 'viewer'
       this.picker = undefined
       this.showViewer(input.initial.source, false)
     }
+  }
+
+  /** Forward one pointer press to the active Viewer (SVG has local controls). */
+  onCellPress(x: number, y: number): void {
+    if (this.mode !== 'viewer') return
+    if (this.viewPanel instanceof SvgViewerPanel) this.viewPanel.onCellPress(x, y)
+  }
+
+  /** Forward one pointer release to the active Viewer. */
+  onCellClick(x: number, y: number): void {
+    if (this.mode !== 'viewer') return
+    if (this.viewPanel instanceof SvgViewerPanel) this.viewPanel.onCellClick(x, y)
   }
 
   invalidate(): void {
@@ -149,6 +175,7 @@ export class ImageWorkspacePanel implements Component {
   }
 
   render(width: number): string[] {
+    this.lastWidth = Math.max(1, Math.floor(width))
     const rows = Math.max(1, Math.floor(this.input.rows()))
     if (this.mode === 'list' && this.picker !== undefined) {
       // The bar is ALWAYS the last physical row: grant the grid everything
@@ -229,6 +256,22 @@ export class ImageWorkspacePanel implements Component {
       requestRender: this.input.requestRender,
       onClose: fromList ? () => this.backToList() : () => this.input.onClose(),
       closeHint: fromList ? 'back' : 'close',
+    })
+    this.mode = 'viewer'
+    this.input.requestRender()
+  }
+
+  /** Create the read-only SVG Viewer inside THIS workspace lease. */
+  private showSvgViewer(source: SvgViewerSource): void {
+    this.viewPanel?.dispose()
+    this.viewPanel = new SvgViewerPanel({
+      source,
+      rows: () => this.input.rows(),
+      columns: () => this.input.columns?.() ?? this.lastWidth,
+      requestRender: () => this.input.requestRender(),
+      ...(this.input.svgLoader === undefined ? {} : { loader: this.input.svgLoader }),
+      theme: this.input.theme,
+      onClose: () => this.input.onClose(),
     })
     this.mode = 'viewer'
     this.input.requestRender()

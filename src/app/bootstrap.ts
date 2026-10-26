@@ -657,12 +657,19 @@ export function applyRunnerWithRuntime(
      * consumes. It owns NO presentation semantics (no fold, no search, no
      * viewport, no status derivation).
      */
+    // The existing main Folder is created LATER in this composition (the
+    // presentation owner below); the bridge reads it through this late-bound
+    // seam only when a display `/copy` must prove the final-row identity. No
+    // second Folder is instantiated.
+    let mainFolderForBridge: (() => ReturnType<typeof presentation.mainFolder>) | undefined
     const presentationBridge = createPresentationBridge({
       remoteSources,
       currentSessionId: () => ownership.currentSessionId(),
       currentDirectAgent: () => agentNow(),
       assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
       directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session,
+      mainFolder: () => mainFolderForBridge?.(),
+      currentGeneration: () => ownership.generation(),
     })
     /**
      * Whether the ownership subject captured at ADMISSION is still the CURRENT
@@ -1312,6 +1319,7 @@ export function applyRunnerWithRuntime(
         },
       }),
     })
+    mainFolderForBridge = () => presentation.mainFolder()
 
     /**
      * The Remote branch's live ingress handle for the CURRENT session

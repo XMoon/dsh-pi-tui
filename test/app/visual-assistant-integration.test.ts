@@ -17,12 +17,20 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import {
+  LlmAdapter,
+  ToolCallId,
+  createUserMessage,
+  type ContentBlock,
+  type GenerateOptions,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
 import { createSurfaceRuntime, type SurfaceEventRoutingSource, type SurfaceViewedChildPresentation } from '../../src/app/surface/runtime.ts'
 import { createVisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
+import { createPresentationBridge } from '../../src/app/bootstrap/presentation-bridge.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
@@ -443,6 +451,55 @@ test('a real chart publication is inserted at its final-answer marker in the pro
   } finally {
     harness.dispose()
   }
+})
+
+test('the real published turn yields the display /copy payload through the Direct bridge', async (t) => {
+  const life = testLifecycle(t)
+  const session = await bootRealSession(life, 'display-copy')
+  await session.run([
+    { calls: [{ callId: 'call-chart', name: CHART_TOOL_NAME, args: CHART }] },
+    {
+      calls: prompt => [{
+        callId: 'call-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: [{ ref: refsInPrompt(prompt)[0] }] },
+      }],
+    },
+    { text: markerAnswer('BEFORE-COPY', 'AFTER-COPY') },
+  ])
+  const events = eventsOf(session)
+  const publications = collectPublishedVisuals(session.sessionId, asVisualSessionEvents(events))
+  assert.equal(publications.length, 1, 'the real publication was accepted')
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  // The bridge reads the EXACT live Session object through its official
+  // `eventAt`/`snapshotEvents` surface and the SAME Folder the surface folds.
+  const bridge = createPresentationBridge({
+    remoteSources: undefined,
+    currentSessionId: () => session.sessionId,
+    currentDirectAgent: () => session.agent as { session: { id: string; snapshotEvents(): readonly unknown[] } },
+    assistantStreamBaselineFor: () => [],
+    // TEST STAND-IN for the official `Session.eventAt`: it slices the SAME
+    // committed snapshot; production reads the Session's own accessor.
+    directSessionFor: () => ({
+      seq: session.session.seq,
+      snapshotEvents: () => session.session.snapshotEvents(),
+      eventAt: (seq: number) => session.session.snapshotEvents()[seq],
+    }),
+    mainFolder: () => folder,
+    currentGeneration: () => 1,
+  })
+  const copy = bridge.directLastAssistantText(session.sessionId)
+  assert.equal(copy, 'BEFORE-COPY\n\n\n\nAFTER-COPY',
+    'the consumed marker line is gone; the surrounding newlines stay exactly as written')
+  const latest = events.filter(event => event.type === 'assistant/message').at(-1)
+  assert.ok(latest !== undefined)
+  const raw = latest.data.message.content
+    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+    .map(block => block.text)
+    .join('')
+  assert.ok(raw.includes('[dsh-visual-'), 'the durable official body keeps its machine marker')
+  assert.equal(raw.includes('visual-v1:'), false, 'the answer text itself carries no machine fact')
 })
 
 test('a chart generated without present_visual stays only in the tool card', async (t) => {

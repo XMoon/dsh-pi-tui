@@ -61,6 +61,10 @@ export type AppKeybindingId =
   | 'app.transcript.toggleExpand'
   | 'app.transcript.toggleThinking'
   | 'app.transcript.toggleFullscreen'
+  // Published visuals (PiTUI chart/SVG figures)
+  | 'app.visual.selectNext'
+  | 'app.visual.copySelected'
+  | 'app.visual.openSelected'
   // Editor / Clipboard
   | 'app.editor.external'
   | 'app.clipboard.pasteMedia'

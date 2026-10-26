@@ -285,6 +285,7 @@ keybindings:
   app.permission.cycle: [shift+tab, ctrl+shift+p]
   app.history.search: ctrl+r
   app.transcript.toggleThinking: false
+  app.visual.copySelected: alt+shift+c
   leader: ctrl+x
   bindings:
     app.tasks.open: <leader>t
@@ -292,7 +293,12 @@ keybindings:
 
 Semantics: string = one key; array = several; `false` = disable the
 action's effective binding; absent = builtin default; `<leader>X` = a
-leader sequence (requires `leader`). Physical `Escape` is reserved for the
+leader sequence (requires `leader`). The three published-visual actions
+(`app.visual.selectNext` / `copySelected` / `openSelected`, defaults
+`alt+v` / `alt+c` / `alt+o`) are ordinary global Host actions and support every
+form above; the SVG Viewer's own `Tab` / `C` / `Esc` chords are a leased-screen
+component contract in `SVG_VIEWER_CHORDS`, deliberately NOT Host keymap actions
+and therefore not remappable or listed by `/keybindings`. Physical `Escape` is reserved for the
 Host lifecycle path and is accepted only for `app.agent.interrupt`; the runtime
 routes it before ordinary user action resolution. A leader completion that the
 current editor-owned submit key would consume (for example,
