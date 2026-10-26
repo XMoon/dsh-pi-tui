@@ -36,6 +36,10 @@ import type { TaskBrowserJobInput } from '../../src/domain/task/browser.ts'
 import type { SessionSubject } from '../../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../../src/runtime/job-observation-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { createSurfaceRuntime, type SurfaceRendererMount } from '../../src/app/surface/runtime.ts'
+import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
+import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { createAuthorizationFlow } from '../../src/app/command/authorization.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -1728,4 +1732,133 @@ test('a workspace open unwind never flushes the partially started screen documen
     TuiAltScreen.prototype.start = originalStart
   }
   app.stop()
+})
+
+// ---------------------------------------------------------------------------
+// Image-6A: the ImageLoader teardown hook (Owner-approved narrow runtime.ts
+// scope extension). The loader itself is internal to the surface runtime, so
+// the test spies on the public `clear()` method to prove WHEN it is called.
+// ---------------------------------------------------------------------------
+
+const nullNotificationPresentationForImageLifecycle = {
+  handleFocusReport: () => {},
+  markFocused: () => {},
+  focusState: () => 'focused' as const,
+  notify: () => {},
+  enableFocusReporting: () => {},
+  disableFocusReporting: () => {},
+}
+
+function spyOnImageLoaderClear(): { clears: () => number; restore: () => void } {
+  const prototype = ImageLoader.prototype as unknown as { clear: () => void }
+  const original = prototype.clear
+  let clears = 0
+  prototype.clear = function (this: ImageLoader): void {
+    clears += 1
+    original.call(this)
+  }
+  return {
+    clears: () => clears,
+    restore: () => { prototype.clear = original },
+  }
+}
+
+function minimalSurfaceDeps(renderer?: SurfaceRendererMount): object {
+  return {
+    events: { onSubmit: () => {}, onExit: () => {} },
+    workspaceRoot: '/tmp',
+    iconStyle: 'emoji',
+    displayState: { preset: 'compact' },
+    historySearchSource: { search: () => Promise.reject(new Error('not exercised by this test')) },
+    readImage: () => Promise.reject(new Error('not exercised by this test')),
+    imageScope: () => undefined,
+    present: { call: () => undefined, result: () => undefined },
+    sessionCwd: () => '/tmp',
+    captureHistoryScope: () => ({ sessionId: 'image-6a-lifecycle', isCurrent: () => true }),
+    onTerminalResize: () => {},
+    copySelection: async () => false,
+    openExternalUrl: () => {},
+    readClipboardText: async () => undefined,
+    imageFallbackColor: (text: string) => text,
+    ...(renderer === undefined ? {} : { renderer }),
+  }
+}
+
+function mountImageLifecycleSurface(renderer?: SurfaceRendererMount) {
+  const surface = createSurfaceRuntime({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: nullNotificationPresentationForImageLifecycle,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    terminalProgress: undefined,
+    mainProgressAuthority: 'local-events',
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
+  })
+  surface.start(minimalSurfaceDeps(renderer) as never)
+  return surface
+}
+
+test('surface dispose clears the mounted PiTui image loader exactly once', async () => {
+  const spy = spyOnImageLoaderClear()
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const surface = mountImageLifecycleSurface()
+  try {
+    await vt.waitForRender()
+    startedApps.add(surface.app)
+    surface.dispose()
+    assert.equal(spy.clears(), 1, 'normal PiTui teardown clears the ONE loader once')
+    surface.dispose()
+    assert.equal(spy.clears(), 1, 'repeated surface dispose never clears twice')
+  } finally {
+    spy.restore()
+    restoreTerminal()
+  }
+})
+
+test('a throwing app.dispose() cannot strand the image-loader clear step', () => {
+  const spy = spyOnImageLoaderClear()
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const surface = mountImageLifecycleSurface()
+  const app = surface.app
+  const originalDispose = app.dispose.bind(app) as TuiApp['dispose']
+  app.dispose = () => { throw new Error('app dispose failed') }
+  try {
+    assert.throws(() => surface.dispose(), /app dispose failed/)
+    assert.equal(spy.clears(), 1, 'the non-truncating disposal batch still runs the clear step')
+  } finally {
+    app.dispose = originalDispose
+    originalDispose()
+    spy.restore()
+    restoreTerminal()
+  }
+})
+
+test('the TSP renderer branch keeps its ImageLoader lifecycle (no PiTui clear hook)', () => {
+  const spy = spyOnImageLoaderClear()
+  let rendererDisposes = 0
+  const renderer = {
+    mount: () => ({
+      display: displaySeamStub(),
+      taskPresentation: {},
+      composer: {},
+      // The disposal path reads these two presenter methods; the fake answers
+      // them so the TSP test exercises only the loader-lifecycle condition.
+      interaction: {
+        withdrawPending: () => {},
+        setSettledQuestionAnswersLookup: () => {},
+      },
+      bindInput: () => {},
+      dispose: async () => { rendererDisposes += 1 },
+    }),
+  } as unknown as SurfaceRendererMount
+  const surface = mountImageLifecycleSurface(renderer)
+  try {
+    surface.dispose()
+    assert.equal(spy.clears(), 0, 'the TSP branch is not cleared by the PiTui teardown hook')
+    assert.equal(rendererDisposes, 1, 'the renderer release still runs')
+  } finally {
+    spy.restore()
+  }
 })

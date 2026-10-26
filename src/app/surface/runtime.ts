@@ -887,12 +887,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const openingJournal = createOpeningJournal<Event>()
   let app: TuiApp | undefined
   /**
-   * PR-C: the ONE image loader of this mount. It is created in `start()` and
-   * retired by `dispose()` so an in-flight/queued preview conversion can never
-   * keep deriving images for a surface that is gone. The same loader serves
-   * both renderer branches.
+   * PR-C: the ONE image loader of this mount, retained only for the PiTui
+   * teardown hook (Image-6A owner decision). It is the SAME loader object the
+   * mount injected; this is a lifecycle reference, never a second loader or
+   * state authority. The TSP branch keeps its existing loader/renderer release
+   * semantics and is not cleared here.
    */
-  let imageLoader: ImageLoader | undefined
+  let mountedImageLoader: ImageLoader | undefined
   /** PR-D: the PiTui branch's Client-local SVG raster cache (created in `start()`). */
   let svgRasterLoader: SvgRasterLoader | undefined
   /**
@@ -2074,8 +2075,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // single acquire point) and handed to the renderer branch as the mount
       // binding, so there is never a second loader, a second cache or a
       // second read authority in the application process.
-      const mountImageLoader = new ImageLoader((ref, context) => deps.readImage(ref, context))
-      imageLoader = mountImageLoader
+      const imageLoader = new ImageLoader((ref, context) => deps.readImage(ref, context))
+      mountedImageLoader = imageLoader
       // PR-D: the Client-local SVG raster cache of THIS mount. It is created
       // at the same single acquire point; TSP has its own native-SVG blob
       // path and never uses this PiTui-only derivative.
@@ -2094,7 +2095,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // store: the draft lifecycle stays with the application owner.
         const preview = deps.draftImagePreviewSource
         const draftImages = createSurfaceDraftImageProjection(() => composerPort, preview)
-        const mounted = deps.renderer.mount({ imageLoader: mountImageLoader, imageScope: deps.imageScope, draftImages })
+        const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope, draftImages })
         display = mounted.display
         taskPresentation = mounted.taskPresentation
         composerPort = mounted.composer
@@ -2161,7 +2162,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // acquisition already asserts the final state, instead of writing idle
       // and being corrected one write later (an idle -> working flash).
       app = startProcessTui(events, {
-        ...buildOptions(deps, mountImageLoader, rasterLoader),
+        ...buildOptions(deps, imageLoader, rasterLoader),
         initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
@@ -2244,13 +2245,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // user cancellation.
         () => interaction.dispose(),
         () => app?.dispose(),
-        // PR-C/Image-6A: retire the mount's ONE image loader. `clear()` bumps
-        // the global epoch and drops raw/derived caches, recorded failures and
-        // every QUEUED preview conversion, so a disposed surface can never
-        // START another native decode; a running conversion's late settle is
-        // discarded by the same epoch. The loader is per-mount, so this reaches
-        // the TSP branch too.
-        () => imageLoader?.clear(),
+        // PR-C/Image-6A (Owner-approved minimal scope extension): retire the
+        // PiTui mount's ONE image loader. `clear()` bumps the global epoch and
+        // drops raw/derived caches, recorded failures and every QUEUED preview
+        // conversion, so a disposed surface can never START another native
+        // decode; a running conversion's late settle is discarded by the same
+        // epoch. This is a SEPARATE non-truncating step after `app.dispose()`:
+        // a throwing app cleanup still reaches it. The condition keeps the TSP
+        // branch's loader/renderer release semantics untouched.
+        () => { if (app !== undefined) mountedImageLoader?.clear() },
         // PR-D: abort in-flight SVG raster children and drop the display
         // derivative cache after the app has stopped painting.
         () => svgRasterLoader?.dispose(),
