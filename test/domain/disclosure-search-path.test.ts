@@ -1198,3 +1198,23 @@ test('a master-promoted override does not expand the tail on a command-only surf
   assert.ok((await viewport(vt)).includes('file-5.ts'),
     'the durable override still applies where its master owns the tail')
 })
+
+test('fullscreen Full without the browser capability paints no dead pointer verb', async () => {
+  // RFL-008: pointer ownership is the CAPABILITY plus the surface, not the
+  // preset alone. Here the Ctrl+O master still owns the cap (its own contract),
+  // but the mount has no browser to open, so nothing clickable may be painted.
+  const { vt, app } = startApp('full', null)
+  const { messages } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  app.setFullscreen(true)
+  const view = await viewport(vt)
+  assert.ok(!view.includes('file-5.ts'), `the master keeps its capped four:\n${view}`)
+  assert.ok(view.includes('+1 more'), `the marker survives without a browsed entry:\n${view}`)
+  assert.ok(!view.includes('Browse all'), `no dead list affordance may be painted:\n${view}`)
+  assert.ok(!view.includes('Details'), `no dead per-file affordance may be painted:\n${view}`)
+  // The master's own disclosure still works (Ctrl+O), and still paints no verb.
+  vt.sendInput('\x0f')
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('file-5.ts'), `Ctrl+O still expands the tail:\n${expanded}`)
+  assert.ok(!expanded.includes('Details'), `no dead affordance appears when expanded either:\n${expanded}`)
+})

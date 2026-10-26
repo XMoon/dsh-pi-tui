@@ -562,3 +562,25 @@ test('a generated ordinal never collides with a naturally painted label', async 
   assert.ok(!view.includes('\u001b[31m') && !view.includes('\u001b[32m'),
     'no control sequence from a declared path reaches the frame')
 })
+
+test('long declared filenames keep their distinguishing tail in the transcript tail', async () => {
+  const vt = new VirtualTerminal(40, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  const long = 'report-2026-10-client-server-migration-final-version-'
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [{ path: `/ws/docs/${long}alpha.md` }, { path: `/ws/docs/${long}beta.md` }],
+  }])
+  const view = await viewport(vt)
+  const rows = view.split('\n').filter(line => line.includes('report-2026-10'))
+  assert.equal(rows.length, 2, `both rows are painted at 40 columns:\n${view}`)
+  assert.notEqual(rows[0]!.trim(), rows[1]!.trim(), 'the two rows must differ')
+  assert.ok(rows[0]!.includes('alpha.md'), `the tail survives: ${rows[0]}`)
+  assert.ok(rows[1]!.includes('beta.md'), `the tail survives: ${rows[1]}`)
+})

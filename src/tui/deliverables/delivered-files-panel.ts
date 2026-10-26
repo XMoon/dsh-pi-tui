@@ -21,6 +21,7 @@ import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-
 import { color } from '../theme/runtime.ts'
 import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { DELIVERED_FILES_CHORDS } from '../keybindings/hints.ts'
+import { abbreviateName } from '../pickers/name-label.ts'
 import {
   deliveredFileBasename,
   deliveredFileLabels,
@@ -518,7 +519,7 @@ export class DeliveredFilesPanel implements Component {
 
     if (this.page === 'details') {
       const file = this.selectedFile()
-      const title = file === undefined ? 'Details' : `${sanitizeDisplayText(deliveredFileBasename(file.path))} · Details`
+      const title = file === undefined ? 'Details' : `${sanitizeDisplaySegment(this.labelOf(file))} · Details`
       rows.push(truncateToWidth(color.textDim(title), safeWidth, '…'))
       const bodyRows = Math.max(1, this.maxRows - 2)
       const body = this.detailsBodyLines(safeWidth)
@@ -585,7 +586,10 @@ export class DeliveredFilesPanel implements Component {
       const marker = selected ? color.primary('>') : ' '
       const label = sanitizeDisplaySegment(this.labelOf(file))
       const bodyWidth = Math.max(1, listWidth - (actions ? actionColumn : 0))
-      const labelText = truncateToWidth(label, Math.max(1, bodyWidth - 2), '…')
+      // Both ends survive the clamp (design-language §6.4): a long filename
+      // differs from its sibling near the END, and a head-only cut would paint
+      // two identical rows.
+      const labelText = abbreviateName(label, Math.max(1, bodyWidth - 2))
       const gap = actions ? Math.max(1, bodyWidth - 2 - visibleWidth(labelText)) : 0
       const painted = actions
         ? `${marker} ${color.textDim(labelText)}${' '.repeat(gap)}${color.primary(DETAILS_VERB)}`

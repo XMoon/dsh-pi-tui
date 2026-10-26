@@ -22409,6 +22409,10 @@ export class TuiApp {
    *  `/deliverables` is their entry, so no pointer affordance may be painted
    *  there. */
   private deliveredFilesPointerOwned(): boolean {
+    // A mount WITHOUT the browser capability has no executable action at all
+    // (the click would silently do nothing), so it must not paint one — the
+    // tail fails open there instead (`deliveredFilesEntryAvailable`).
+    if (this.deliveredFiles === undefined) return false
     if (this.fullscreen === undefined) return false
     return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
   }

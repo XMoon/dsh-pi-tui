@@ -20,6 +20,7 @@ import { latestLine } from '../../domain/transcript/text.ts'
 import { color } from '../theme/runtime.ts'
 import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
 import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { abbreviateName } from '../pickers/name-label.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 import { deliveredFileBasename, deliveredFileLabels } from '../../domain/deliverables/catalog.ts'
 
@@ -534,7 +535,11 @@ export class DeliveredFilesComponent implements Component {
       const verbRoom = showActions ? visibleWidth(DELIVERED_DETAILS_VERB) + 2 : 0
       const bodyWidth = Math.max(1, safeWidth - verbRoom)
       const indent = 2
-      const labelText = truncateToWidth(label, Math.max(1, bodyWidth - indent), '…')
+      // A long declared filename differs from its sibling near the END, so a
+      // head-only cut would paint two identical rows. Labels keep BOTH ends
+      // (design-language §6.4 `abbreviateName`), which preserves the basename
+      // and the discriminating tail.
+      const labelText = abbreviateName(label, Math.max(1, bodyWidth - indent))
       const labelWidth = visibleWidth(labelText)
       const row = rows.length
       const pathStart = indent
