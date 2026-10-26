@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The composer draft preview and the fullscreen image viewer now paint real JPEG/WebP pixels on a native Kitty terminal.**
+  Both previously painted PNG only, so JPEG/WebP showed `Preview unavailable`. They now reuse
+  the same background PNG derivative as transcript thumbnails (WebP contributes only its first
+  frame, EXIF orientation is applied, and the longest edge is capped at 768 pixels): the draft
+  card derives only the one last visible local image, shows `…` while converting and
+  `Preview unavailable` only on failure; the viewer keeps the original name, dimensions, media
+  type and byte count while showing that same bounded derivative instead of a full-resolution
+  original. Submitting still sends the original JPEG/WebP bytes; the `x` removal, Undo, PNG,
+  iTerm2, GIF, narrow and graphics-unsupported terminals keep their existing behavior.
+
 - **Transcript thumbnails on a native Kitty terminal now support JPEG/WebP.**
   Previously only PNG could paint pixels, so JPEG/WebP fell back to a text row. These formats
   are now converted to a bounded PNG thumbnail in the background before painting: WebP only
@@ -17,8 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapsed occurrence never starts a conversion; while converting or after a failure only
   text is shown (a failure reads `Preview unavailable`); and only a body that really painted
   pixels is clickable. PNG, the existing iTerm2 image path, GIF, and narrow or
-  graphics-unsupported terminals are unchanged; the fullscreen viewer opened from a thumbnail
-  still renders PNG originals only, so JPEG/WebP keep showing `Preview unavailable` there.
+  graphics-unsupported terminals are unchanged.
 
 - **The model can now declare that specific visuals are meant for the user.** A new
   `present_visual` tool joins the existing `dsh_pi_tui_chart` and `dsh_pi_tui_svg` under the SAME

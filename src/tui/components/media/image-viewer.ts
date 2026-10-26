@@ -16,6 +16,14 @@
  * loader's settle notification invalidates the local paint and requests one
  * frame. The loader's cache stays owned by the loader — `dispose()` only
  * releases this panel's subscription and its local `Image` instance.
+ *
+ * KITTY JPEG/WEBP (Image-6B): a Kitty surface cannot place JPEG/WebP bytes
+ * directly, so this panel paints the SAME scoped 6A derived PNG the transcript
+ * thumbnail already uses — one loader, one derivative, no second decoder or
+ * cache. A READY derivative is used immediately even when the raw read has
+ * been evicted; otherwise the panel requests the raw read first and then the
+ * derivative. The identity title, metadata and every close route keep the
+ * ORIGINAL attachment ref and its original dimensions/bytes.
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-viewer
  */
 
@@ -23,6 +31,7 @@ import { Image, getCapabilities, matchesKey, truncateToWidth, visibleWidth } fro
 import type { Component } from '@xmoon76/pi-tui'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
+import { MAX_KITTY_THUMBNAIL_SOURCE_BYTES } from '../../../client/media/image/kitty-thumbnail.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { color } from '../../theme/runtime.ts'
@@ -33,6 +42,16 @@ const DEFAULT_MAX_ROWS = 22
  * when the Viewer is stacked over the `/view-image` list (Esc returns there),
  * `close` when it was opened directly from the transcript (Esc leaves). */
 type ImageViewerCloseHint = 'back' | 'close'
+
+/** One resolved pixel payload the body can place: a raw read (PNG only) or
+ * the loader's scoped JPEG/WebP derivative. Both arrive as PNG base64; the
+ * KIND keeps the local `Image` from being reused across a source switch. */
+interface ResolvedPixelSource {
+  readonly base64: string
+  readonly kind: 'raw' | 'derived'
+  readonly widthPx: number
+  readonly heightPx: number
+}
 
 /** Everything the panel needs from its overlay owner. */
 export interface ImageViewerInput {
@@ -67,9 +86,12 @@ export class ImageViewerPanel implements Component {
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
   private instanceProtocol: 'kitty' | 'iterm2' | undefined
+  private instanceKind: 'raw' | 'derived' | undefined
   private instanceWidth: number | undefined
   private instanceBodyRows: number | undefined
   private instanceBase64: string | undefined
+  private instanceWidthPx: number | undefined
+  private instanceHeightPx: number | undefined
 
   constructor(input: ImageViewerInput) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
@@ -106,9 +128,12 @@ export class ImageViewerPanel implements Component {
     this.instance = undefined
     this.instanceAttachmentId = undefined
     this.instanceProtocol = undefined
+    this.instanceKind = undefined
     this.instanceWidth = undefined
     this.instanceBodyRows = undefined
     this.instanceBase64 = undefined
+    this.instanceWidthPx = undefined
+    this.instanceHeightPx = undefined
   }
 
   /** Idempotent teardown: release the ONE subscription and the local image
@@ -190,10 +215,17 @@ export class ImageViewerPanel implements Component {
       // visible and the state is truthful.
       return [this.status(width, 'Preview unavailable')]
     }
+    if (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp') {
+      // Image-6B: Kitty places PNG payloads only, so JPEG/WebP reuse the SAME
+      // scoped 6A derivative the transcript thumbnail already derives. Never a
+      // second decoder, cache or re-read of the original bytes.
+      return this.derivedBodyLines(width, bodyRows)
+    }
     if (!imagePixelsSupported(protocol, this.ref.mediaType)) {
-      // The shared protocol/MIME admission: Kitty accepts PNG only and this
-      // repo installs no transcoder, so any other raster would build an Image
-      // that silently degrades to a text fallback.
+      // The shared protocol/MIME admission still rejects every other raster
+      // (GIF): Kitty accepts PNG only and this repo installs no transcoder, so
+      // any other format would build an Image that silently degrades to a text
+      // fallback. JPEG/WebP never reach this check (they take the 6A branch).
       return [this.status(width, 'Preview unavailable')]
     }
     const state = this.loader.get(this.ref, this.scope)
@@ -210,7 +242,62 @@ export class ImageViewerPanel implements Component {
       return [this.status(width, `Read failed: ${sanitizedPhysicalLine(state.error.message)}`)]
     }
     if (state.bytes.byteLength === 0) return [this.status(width, 'Preview unavailable')]
-    return this.imageLines(width, bodyRows, state.base64)
+    return this.imageLines(width, bodyRows, {
+      base64: state.base64,
+      kind: 'raw',
+      widthPx: this.ref.width,
+      heightPx: this.ref.height,
+    })
+  }
+
+  /**
+   * The Kitty JPEG/WebP body (Image-6B): consume the loader's derived-PNG state
+   * for THIS immutable (scope, attachment) and never start a second path.
+   *
+   * A READY derivative is painted immediately — even when the raw read has
+   * already been evicted from the cache. Only an idle derivative asks for the
+   * raw read first; the derivative itself never re-downloads. The source-byte
+   * preflight runs BEFORE any read so an over-budget JPEG/WebP can never spend
+   * a full-bytes read it cannot convert.
+   *
+   * The native conversion error never reaches the terminal: every failure is
+   * the one bounded `Preview unavailable` status row.
+   */
+  private derivedBodyLines(width: number, bodyRows: number): string[] {
+    if (this.loader === undefined) return [this.status(width, 'Preview unavailable')]
+    // Same 20 MiB source ceiling as the 6A thumbnail; checked from the durable
+    // metadata before the raw read so the Viewer never reads bytes it cannot
+    // preview.
+    if (this.ref.bytes > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
+      return [this.status(width, 'Preview unavailable')]
+    }
+    const preview = this.loader.getKittyThumbnail(this.ref, this.scope)
+    if (preview.state === 'ready') {
+      return this.imageLines(width, bodyRows, {
+        base64: preview.base64,
+        kind: 'derived',
+        widthPx: preview.width,
+        heightPx: preview.height,
+      })
+    }
+    if (preview.state === 'loading') return [this.status(width, 'Loading…')]
+    if (preview.state === 'error') return [this.status(width, 'Preview unavailable')]
+    const state = this.loader.get(this.ref, this.scope)
+    if (state.state === 'idle') {
+      this.loader.load(this.ref, this.scope)
+      return [this.status(width, 'Loading…')]
+    }
+    if (state.state === 'loading') return [this.status(width, 'Loading…')]
+    if (state.state === 'error') {
+      return [this.status(width, `Read failed: ${sanitizedPhysicalLine(state.error.message)}`)]
+    }
+    if (state.bytes.byteLength === 0 || state.bytes.byteLength > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
+      return [this.status(width, 'Preview unavailable')]
+    }
+    // Schedule the ONE conversion for this (scope, attachment); its settle
+    // notifies the panel's existing subscription, which repaints with pixels.
+    this.loader.loadKittyThumbnail(this.ref, this.scope)
+    return [this.status(width, 'Loading…')]
   }
 
   /** Paint one dim status row, width-clamped before the paint. */
@@ -218,28 +305,32 @@ export class ImageViewerPanel implements Component {
     return color.textDim(truncateToWidth(text, width, '…'))
   }
 
-  /** Render the image at `width` and clip the rows to the body grant. */
-  private imageLines(width: number, bodyRows: number, base64: string): string[] {
-    const image = this.imageFor(width, bodyRows, base64)
+  /** Render one resolved PNG payload at `width` and clip the rows to the grant. */
+  private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource): string[] {
+    const image = this.imageFor(width, bodyRows, pixel)
     return image.render(width).slice(0, bodyRows)
   }
 
   /**
    * Reuse the local `Image` only while the exact inputs are unchanged: the
-   * attachment, the graphics protocol, the render width, the body row grant
-   * and the current base64 string. Any change rebuilds instead of rendering
-   * stale cached lines.
+   * attachment, the graphics protocol, the pixel-source KIND (raw PNG vs the
+   * scoped 6A derivative), the render width, the body row grant, the current
+   * base64 string and the payload's pixel dimensions. Any change rebuilds
+   * instead of rendering stale cached lines from the wrong protocol/source.
    */
-  private imageFor(width: number, bodyRows: number, base64: string): Image {
+  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource): Image {
     if (this.instance === undefined
       || this.instanceAttachmentId !== this.ref.attachmentId
       || this.instanceProtocol !== 'kitty'
+      || this.instanceKind !== pixel.kind
       || this.instanceWidth !== width
       || this.instanceBodyRows !== bodyRows
-      || this.instanceBase64 !== base64) {
+      || this.instanceBase64 !== pixel.base64
+      || this.instanceWidthPx !== pixel.widthPx
+      || this.instanceHeightPx !== pixel.heightPx) {
       this.instance = new Image(
-        base64,
-        this.ref.mediaType,
+        pixel.base64,
+        'image/png',
         { fallbackColor: this.theme.fallbackColor },
         {
           maxWidthCells: Math.max(1, width),
@@ -250,13 +341,16 @@ export class ImageViewerPanel implements Component {
           // hostile name can never reach the terminal through the fallback path.
           filename: sanitizedPhysicalLine(this.ref.name ?? 'image'),
         },
-        { widthPx: this.ref.width, heightPx: this.ref.height },
+        { widthPx: pixel.widthPx, heightPx: pixel.heightPx },
       )
       this.instanceAttachmentId = this.ref.attachmentId
       this.instanceProtocol = 'kitty'
+      this.instanceKind = pixel.kind
       this.instanceWidth = width
       this.instanceBodyRows = bodyRows
-      this.instanceBase64 = base64
+      this.instanceBase64 = pixel.base64
+      this.instanceWidthPx = pixel.widthPx
+      this.instanceHeightPx = pixel.heightPx
     }
     return this.instance
   }

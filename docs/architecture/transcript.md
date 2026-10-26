@@ -969,9 +969,16 @@ independent occurrences with independent fold state.
   from the thumbnail's `40×12` limits. States are distinguishable: `Loading…`,
   `Read failed: <sanitized reason>`, `Preview unavailable` (no protocol, an
   empty payload, an unsupported MIME, or a protocol this surface does not
-  support), each with the real name/dimensions/media type/bytes. The viewer is
-  read-only: no zoom, pan, export, edit, OCR, transcoding or second byte cache.
-- **Kitty JPEG/WebP thumbnails derive a bounded PNG.** Kitty places PNG
+  support), each with the real name/dimensions/media type/bytes. On a Kitty
+  surface a JPEG/WebP occurrence instead paints the SAME scoped 6A derivative
+  described below: a READY derivative is used immediately (even when the raw
+  read has been evicted), and only when none exists yet is the authorized raw
+  read requested first. Pending/failed derivatives read `Loading…` /
+  `Preview unavailable`, never a text fallback treated as pixels. The
+  768-pixel derivative bound is also the viewer's resolution ceiling: this is
+  a bounded preview, not full-resolution viewing. The viewer is read-only: no
+  zoom, pan, export, edit, OCR, transcoding or second byte cache.
+- **Kitty JPEG/WebP pixels derive one bounded PNG.** Kitty places PNG
   payloads only, so a READY JPEG/WebP source (never a GIF) is projected through
   ONE Client-local asynchronous PNG derivative: first page only, EXIF
   orientation applied, fitted inside 768×768 without enlargement, at most
@@ -998,9 +1005,11 @@ independent occurrences with independent fold state.
   paint informational rows only (a bounded `Preview unavailable`), a collapsed
   occurrence starts no conversion, and a body hit exists only when that frame
   actually emitted the Kitty placement. PNG, iTerm2 (original OSC 1337) and GIF
-  (text fallback) keep their existing paths. The Viewer does NOT gain non-PNG
-  pixels: a JPEG/WebP body click opens the same attachment and still shows
-  `Preview unavailable`.
+  (text fallback) keep their existing paths. The VIEWER consumes the SAME
+  scoped derivative instead of staying PNG-only: a JPEG/WebP body click (or a
+  `/view-image` selection) paints that PNG while the title/metadata keep the
+  ORIGINAL ref, and the viewer starts no second read, conversion or derived
+  cache.
 - **Pickers are a mounted-window snapshot.** `/view-image` candidates come from
   the SAME mounted transcript batch (message order then render order) and only
   from occurrences the Host actually rendered. `/view-image` is a PiTui-local,
@@ -1015,8 +1024,8 @@ independent occurrences with independent fold state.
   so the iTerm2 workspace shows the metadata plus `Preview unavailable`; native
   iTerm2 workspace pixels are deferred to separate renderer/protocol work.
   Transcript thumbnails keep their per-surface capability behavior; on Kitty
-  their JPEG/WebP bodies use the bounded derivative above, while the Viewer
-  stays PNG-only.
+  both their JPEG/WebP bodies and the Viewer use the SAME bounded derivative
+  above.
 
 Authority: `TuiApp` (occurrence projection, last-painted hit classifier, leased
 image workspace), `ImageThumbnail` (info/control/body geometry),
@@ -1038,6 +1047,7 @@ Proof: `test/client/image-collapse.test.ts`,
 `test/client/image-transcript.test.ts`,
 `test/client/transcript-image-viewer.test.ts`,
 `test/client/transcript-image-viewer-tui.test.ts`,
+`test/client/image-6b-product-path.test.ts`,
 `test/app/view-image-command.test.ts`,
 `test/client/fullscreen-scroll-geometry-epoch.test.ts`.
 
