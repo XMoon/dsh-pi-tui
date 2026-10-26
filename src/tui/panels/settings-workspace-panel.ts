@@ -1305,7 +1305,11 @@ export class SettingsWorkspacePanel implements Component {
    *  the change did not touch. The frame fence is unconditional; the selection
    *  and the transient edit are repaired only where they really stopped being
    *  valid. An unrelated `setValue()`/register/unload therefore keeps an open
-   *  candidate choice and the user's scroll position. */
+   *  candidate choice and the user's scroll position. A VANISHED selection is
+   *  different: it retires the open choice AND the pending/settled
+   *  presentation that belonged to it (the app-owned write keeps settling, but
+   *  it must not keep the new selection's keys locked or paint its late result
+   *  on it). */
   private applyDirectory(
     revision: number,
     count: number,
@@ -1362,14 +1366,17 @@ export class SettingsWorkspacePanel implements Component {
       // presentation and UI acknowledgement that belonged to the old record.
       this.rowId = selected.id
       selectionInvalid = true
-      this.discardTransientEdit()
     }
     if (selectionInvalid) {
-      // The selection itself changed: the transient choice and both list
-      // offsets belonged to it. A pending/settled write is app-owned and is
-      // never cancelled here (except through the token replacement above,
-      // whose UI acknowledgement must not survive).
-      this.resetChoice()
+      // The selected row/registration is GONE: its transient choice, its
+      // pending/settled presentation and both list offsets belonged to it. A
+      // pending/settled WRITE is app-owned and keeps settling through the
+      // command/Registry owner, but the UI must not keep the old task's lock or
+      // acknowledgement: the current selection may already be another owner's
+      // row, and a late settlement must never paint on it. Dropping the phase
+      // also bumps the request identity, so `settlePending` refuses the late
+      // result while the writer still reports its real outcome (health/diag).
+      this.discardTransientEdit()
       this.rowOffset = 0
       this.detailOffset = 0
       return

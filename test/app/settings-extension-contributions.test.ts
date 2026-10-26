@@ -694,28 +694,47 @@ test('a pending write whose owner group unloads settles GONE without claiming th
     assert.match(h.header(), /Settings · Extensions \[1\/2\] · root · \d+ · Rows/u,
       `the remaining first group takes the page:\n${h.view()}`)
     assert.match(h.view(), /> Beta level/u, 'the repaired page selects the surviving group first row')
-    assert.match(h.view(), /Saving…/u, 'the app-owned write still owns the pending phase')
+    // The old task's UI lock and acknowledgement die with the vanished
+    // selection: the app-owned write keeps settling, but the surviving page is
+    // NOT shown as saving and is immediately operable.
+    assert.doesNotMatch(h.view(), /Saving…/u, 'the vanished selection keeps no pending UI lock')
+    assert.match(h.view(), /Tab next group/u, 'the surviving page advertises the real group switch')
+    await h.key('\t') // beta -> gamma works while alpha's callback is still held
+    assert.match(h.header(), /Settings · Extensions \[2\/2\] · root · \d+ · Rows/u)
+    assert.match(h.view(), /> Gamma level/u)
+    await h.key('\u001b[Z') // back to beta
+    assert.match(h.header(), /Settings · Extensions \[1\/2\] · root · \d+ · Rows/u)
+    // The surviving owner's row can be edited and confirmed while the old
+    // callback is still in flight: one app-owned write at a time is a writer
+    // rule, not a stale UI lock.
+    await h.key('\r') // Detail + choice on beta
+    await h.key('\u001b[B') // on -> off
+    await h.key('\r') // explicit Confirm
+    await h.drain()
+    assert.deepEqual(calls, ['alpha:on', 'beta:off'],
+      'the surviving owner committed while the old callback was still held')
+    assert.equal(h.registry.rows().find(row => row.id === 'b1')?.currentValue, 'off')
+    assert.match(h.view(), /Verified/u, 'the surviving write verifies on its own row')
+    assert.equal(h.health().some(record => record.state === 'failed'), false,
+      'no health failure while the old callback is still pending')
 
     // Release the old callback: the registration is gone, so the settlement is
     // a GONE write — never a rejection and never a claim on beta/gamma.
     releaseChange(true)
     await h.drain()
-    assert.deepEqual(calls, ['alpha:on'], 'no surviving group callback ran')
+    assert.deepEqual(calls, ['alpha:on', 'beta:off'], 'no other callback ran')
     assert.equal(h.registry.rows().length, 2, 'only the surviving contributions remain')
     assert.equal(h.health().some(record => record.state === 'failed'), false,
       'gone records no owner health event')
     const settledFrame = h.view()
-    assert.doesNotMatch(settledFrame, /Verified|Not saved|Retry save|Saving…/u,
+    assert.doesNotMatch(settledFrame, /Not saved|Retry save|Saving…/u,
       'the retired group settlement never paints on the new group')
-    assert.match(h.view(), /> Beta level/u, 'the repaired selection still owns the beta row')
+    assert.match(settledFrame, /Verified/u, 'the surviving row keeps ITS settled status')
+    assert.match(settledFrame, /Value\s+off/u, 'the surviving value is still the painted fact')
     const goneWrite = h.warnings().find(entry => entry.fields?.field === 'ext-setting:a1')
     assert.ok(goneWrite !== undefined)
     assert.equal(goneWrite.fields?.outcome, 'not-saved')
     assert.match(String(goneWrite.fields?.reason), /unloaded or replaced/u)
-    // The surviving groups are still fully operable after the repair.
-    await h.key('\t')
-    assert.match(h.header(), /Settings · Extensions \[2\/2\] · root · \d+ · Rows/u)
-    assert.match(h.view(), /> Gamma level/u)
     assert.equal(gamma.handles.length, 1)
   } finally {
     await h.dispose()

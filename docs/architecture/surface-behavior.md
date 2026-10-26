@@ -175,7 +175,12 @@ specialist-page contract below).
   registration, unload or `setValue()` keeps an open candidate choice (re-anchored
   on its candidate identity), the selected category/row and both scroll offsets;
   only a selection that really stopped being valid (a vanished row, or the
-  emptied `Extensions` category) repairs the choice and resets its offsets.
+  emptied `Extensions` category) repairs the choice and resets its offsets. A
+  VANISHED selection also retires its pending/settled PRESENTATION and UI lock:
+  the app-owned write keeps settling through the command/Registry owner (its
+  health/diagnostic record is unchanged), but it has no row left to paint on,
+  the current selection may already belong to another owner, and the request
+  identity is advanced so a late settlement can never claim the new selection.
   When the registry empties while `Extensions` is selected, the selection lands
   on `Plugins` with the rail focused and nothing is installed, enabled or
   removed; a stale internal `initialCategory: 'extensions'` request lands on
@@ -199,7 +204,10 @@ specialist-page contract below).
   When the selected row disappears the SAME owner group keeps the page and
   selects its first surviving row; when the whole group unloads the first live
   group becomes current (its first row, Rows focus); the emptied category falls
-  back to `Plugins` as above.
+  back to `Plugins` as above. In every one of those repairs the vanished
+  registration's transient phase is retired as described above, so the repaired
+  page is immediately operable and never keeps a stale `Saving…` or a stale
+  settled word.
 - Each extension setting is a native Rows/Detail/Choice entry. The Detail states
   the RAW owner identity and the RAW registry id; a registration that
   contributed no selectable values is READ-ONLY (the Stable contribution has no

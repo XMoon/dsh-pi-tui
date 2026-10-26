@@ -205,6 +205,10 @@ interface HarnessOptions {
      * (the production queue serializes on it).
      */
     readonly gateSectionWrite?: () => Promise<void>
+    /** Make the official section's `get()` throw while `available()` stays
+     *  true: the READY-backend unreadable case, distinct from a non-current
+     *  backend. */
+    readonly getFailure?: () => string | undefined
     /** The official grouped model directory the allowlist picker reads. */
     readonly directory?: readonly {
       readonly id: string
@@ -723,9 +727,16 @@ function setup(options: HarnessOptions = {}): Harness {
       },
       subagentModelSelection: {
         available: () => subagentSection !== undefined,
-        get: () => subagentSection === undefined
-          ? { enabled: false, allowedModels: [] }
-          : { enabled: subagentSection.enabled, allowedModels: subagentSection.allowedModels.map(route => ({ ...route })) },
+        get: () => {
+          // The READY-but-UNREADABLE authority: the capability still answers,
+          // the value cannot be read. It must never be presented as an empty
+          // section that a write may base itself on.
+          const failure = agent.getFailure?.()
+          if (failure !== undefined) throw new Error(failure)
+          return subagentSection === undefined
+            ? { enabled: false, allowedModels: [] }
+            : { enabled: subagentSection.enabled, allowedModels: subagentSection.allowedModels.map(route => ({ ...route })) }
+        },
         set: async (value: { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }) => {
           await agent.gateSectionWrite?.()
           subagentWrites.push({ enabled: value.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) })
@@ -1957,6 +1968,105 @@ test('R3-06 one queued section write cannot resurrect a route a pending picker w
   assert.equal(final?.enabled, false, 'the toggle really landed')
   assert.ok(!(final?.allowedModels ?? []).some(route => route.model === removedRoute),
     `the withdrawn route ${removedRoute} never came back: ${JSON.stringify(final)}`)
+  h.dispose()
+})
+
+test('R3-06b a queued allowlist write is REFUSED when the backend goes stale while the first turn is held', async () => {
+  // Ready at dispatch time, then the Client loses currentness while the write
+  // waits: the queued turn must refuse from the FRESH authority at its own
+  // turn, never write the last-known section back, and the refusal must reach
+  // the user with its real reason.
+  let openGate: (() => void) | undefined
+  const gate = new Promise<void>(resolve => { openGate = resolve })
+  let gateStarted!: () => void
+  const started = new Promise<void>(resolve => { gateStarted = resolve })
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+      subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }, { id: 'm2' }] }],
+      gateSectionWrite: () => { gateStarted(); return gate },
+      // The ready -> stale transition happens ONLY after the first turn is
+      // already in flight.
+      getFailure: undefined,
+    },
+  })
+  await openAgentRow(h, 'Subagent allowed models')
+  await key(h, '\r') // Detail focus
+  await key(h, '\r') // Manage → the picker
+  assert.match(h.view(), /P1/u, `the picker painted the official directory:\n${h.view()}`)
+  // First intent: add m2. Its section write starts and is held.
+  await key(h, '\x1b[B') // m1 -> m2
+  await key(h, '\r')
+  await started
+  // Second intent: remove m1. It queues behind the held write.
+  await key(h, '\x1b[A') // m2 -> m1
+  await key(h, '\r')
+  await settle(h, 2)
+  assert.deepEqual(h.subagentWrites(), [], 'nothing settles while the first turn is held')
+
+  // The Client loses currentness while the second intent waits for its turn.
+  h.setReadiness('stale')
+  openGate!()
+  await settle(h, 12)
+
+  assert.equal(h.subagentWrites().length, 1, 'only the ready-time turn wrote the section')
+  assert.deepEqual(h.subagentWrites()[0]?.allowedModels, [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }],
+    'the first write carried the fresh section plus its own route')
+  // The queued stale turn wrote NOTHING: the last-known section was not written back.
+  assert.deepEqual(h.subagentSection(), {
+    enabled: true,
+    allowedModels: [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }],
+  }, 'the stale turn never removed m1')
+  // The refusal is diagnosable and reaches the user (no silent success).
+  assert.ok(h.notices().some(notice => /allowlist write failed: the configuration is stale/u.test(notice)),
+    `the queued turn's real refusal reached the user: ${JSON.stringify(h.notices())}`)
+  h.dispose()
+})
+
+test('R3-06c a READY but UNREADABLE official section is never written as an empty config', async () => {
+  // The one-shot failure targets the COMMIT read (the snapshot opened from a
+  // readable section, so the row and its candidates exist); the following
+  // refresh reads the section again and paints the real refusal.
+  let failNextRead = false
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+      subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
+      getFailure: () => {
+        if (!failNextRead) return undefined
+        failNextRead = false
+        return 'the official section could not be read'
+      },
+    },
+  })
+  await openAgentRow(h, 'Subagent model selection')
+  await key(h, '\r') // Detail + choice (off)
+  await key(h, '\x1b[B') // off -> on
+  failNextRead = true
+  await key(h, '\r') // Confirm: the commit's authoritative read throws
+  await settle(h)
+
+  assert.deepEqual(h.subagentWrites(), [], 'an unreadable section produces ZERO official writes')
+  assert.deepEqual(h.subagentSection(), { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+    'the section is not rewritten from a fabricated empty base')
+  const view = h.view()
+  assert.match(view, /Not saved/u, `the refusal is reported:\n${view}`)
+  assert.match(detailsPaneText(h).replace(/\s+/gu, ' '),
+    /the official subagent model-selection section could not be read: the official section could not be read/u,
+    `the real read failure is on screen:\n${view}`)
+  assert.doesNotMatch(view, /Status\s+Verified/u, 'an unreadable section is never Verified')
   h.dispose()
 })
 
