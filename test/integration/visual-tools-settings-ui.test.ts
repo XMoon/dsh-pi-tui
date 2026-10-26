@@ -424,6 +424,27 @@ test('a real Agent toggle Confirm is what the NEXT Session\'s subagent tool samp
     'a Session composed after the UI disable must not expose the route fields')
   assert.equal(samplesRoutes(before.agent), true,
     'and the already-composed Session is never hot-rewritten')
+
+  // THE REVERSE TRIP through the SAME UI: enable again (the saved route survived
+  // the disable, so this needs no allowlist detour), and a NEW Session samples
+  // the route fields again.
+  ui.vt.sendInput('\r') // reopen the settled row's choice
+  await ui.vt.waitForRender()
+  ui.vt.sendInput('\x1b[B') // off -> on
+  await ui.vt.waitForRender()
+  ui.vt.sendInput('\r')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Status\s+Verified/u.test(frame) && /on\b/u.test(frame),
+    () => ui.vt.waitForRender(),
+    'the re-enable Confirm must settle as Verified',
+  )
+  assert.deepEqual(port.subagentModelSelection.get(),
+    { enabled: true, allowedModels: [{ provider: 'alpha', model: 'fast' }] },
+    're-enabling kept the saved route and flipped only enabled')
+  const reEnabled = await createSession('r3-toggle-reenabled')
+  assert.equal(samplesRoutes(reEnabled.agent), true,
+    'a Session composed after the UI re-enable samples the route fields again')
 })
 
 test('a real Settings Confirm drives the Host registry and the next model request', async t => {

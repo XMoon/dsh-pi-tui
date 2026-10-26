@@ -372,6 +372,45 @@ test('EXT-4: a REJECTED write that cannot re-read the section still clears the o
     `the refusal is reported: ${JSON.stringify(harness.notices)}`)
 })
 
+test('EXT-4b: close-before-settlement never reports the optimistic list, and a failed late write corrects the outer row', async () => {
+  // The sequence the review named: the section WAS readable, the user adds a
+  // route, Escapes immediately, and the write then fails while the authority is
+  // unreadable. The picker reported a summary on close; it must be the COMMITTED
+  // one, and the late failure must correct the outer row rather than leave an
+  // uncommitted route counted there.
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+
+  // The write is HELD, then the section becomes unreadable and the write fails.
+  let release: (() => void) | undefined
+  const originalSet = harness.deps.selection.set.bind(harness.deps.selection)
+  const config = harness.deps.selection as unknown as { available(): boolean; get(): unknown; set(v: unknown): Promise<void> }
+  config.set = async (value: unknown) => {
+    await new Promise<void>(resolve => { release = resolve })
+    throw new Error('official section rejected the write')
+  }
+
+  menu.handleInput(ENTER) // optimistic: 1 route in the working copy, write pending
+  await Promise.resolve()
+  menu.handleInput(ESC) // close BEFORE the write settles
+  assert.deepEqual(harness.dones, ['0 routes'],
+    'the close reports the COMMITTED list, never the pending optimistic one')
+
+  // The authority is unreadable when the write fails.
+  config.available = () => false
+  config.get = () => { throw new Error('official section read failed') }
+  release!()
+  for (let i = 0; i < 16; i += 1) await Promise.resolve()
+
+  assert.deepEqual(harness.summaries.at(-1), '0 routes',
+    'the late failure converges the outer row to the committed list')
+  assert.deepEqual(harness.dones, ['0 routes'], 'no late `done` is ever used after close')
+  assert.equal(harness.notices.length, 0, 'a settlement after close stays silent to the user')
+
+  config.set = originalSet
+})
+
 test('EXT-5(diag): a write that fails AFTER close stays silent to the user but diagnosable to the owner', async () => {
   // No late toast is a deliberate UX choice. It is not permission to swallow the
   // failure: the owner's diagnostics must record that a dispatched write failed.
@@ -440,12 +479,15 @@ test('a write settling AFTER the picker closed converges the outer row and stays
   await settle(harness, 0)
   harness.store.failNext()
   menu.handleInput(ENTER) // toggle m1 ON — this write will FAIL
-  menu.handleInput(ESC) // ONE Esc closes (optimistic '1 route')
-  assert.deepEqual(harness.dones, ['1 route'], 'the close reports the optimistic summary')
+  menu.handleInput(ESC) // ONE Esc closes while the write is still pending
+  // The close may only report what the authority really held: the optimistic
+  // `1 route` was never stored, so the outer row keeps the committed `0 routes`.
+  assert.deepEqual(harness.dones, ['0 routes'],
+    'the close reports the COMMITTED summary, never the pending optimistic one')
   await settle(harness, 1)
   assert.deepEqual(harness.summaries.at(-1), '0 routes',
     'the post-close settle converges the outer row through `summarize` (the fork rejects a late done)')
-  assert.ok(!harness.dones.includes('0 routes'), 'a late done after close must not be used')
+  assert.ok(!harness.dones.includes('1 route'), 'a late done after close must not be used')
   assert.equal(harness.notices.length, 0, 'a failure settling after close stays silent')
 })
 
