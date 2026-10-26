@@ -7,9 +7,9 @@
  *
  * What this lane is FOR (and what it must never claim):
  *
- * - the client's OWN image viewer opened by a REAL pointer, closed by Escape,
- *   and the SIBLING navigation between two images of the SAME User body — a
- *   gesture the SDK does not describe, so it needs a physical window;
+ * - the client's OWN image viewer opened by a control-injected pointer click,
+ *   closed by Escape, and the SIBLING navigation between two images of the SAME
+ *   User body — a gesture the SDK does not describe, so it needs a real window;
  * - the controlled `dock.composer` staying visible, unclipped and typable while
  *   previews sit above it;
  * - light/dark theme painting, and the real accessibility tree.
@@ -167,7 +167,7 @@ export default async function (h) {
   }), JSON.stringify(inlineImages))
   h.measure('the accessibility image nodes', JSON.stringify(inlineImages))
 
-  // ── The client's OWN image viewer, opened by a REAL pointer ──
+  // ── The client's OWN image viewer, opened by a control-injected pointer ──
   const warm = h.snapshot()
   const viewport = h.ctl('stats').viewport ?? [0, 0, 0, 0]
   const [, vh] = viewport
@@ -186,7 +186,7 @@ export default async function (h) {
   const hovered = await h.hover(warm.chains, firstImage)
   h.measure('the pointer over the first image', JSON.stringify(hovered))
   const clicked = await h.click(warm.chains, firstImage)
-  h.check('a REAL pointer click on the image is delivered', clicked === true, JSON.stringify({ clicked }))
+  h.check('a control-injected pointer click on the image is delivered', clicked === true, JSON.stringify({ clicked }))
   const viewer = viewerOf(h.ctl('a11y'))
   h.check('the client opens its OWN image viewer on that click', viewer !== undefined,
     'the accessibility tree must carry a Dialog')

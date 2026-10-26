@@ -1,22 +1,26 @@
 #!/usr/bin/env node
 /**
  * Real-GUI Tern driver: run a UI under test inside a REAL Tern GUI WINDOW and
- * drive it with a REAL pointer.
+ * drive it through the control endpoint with control-injected pointer/key
+ * events.
  *
  * The headless driver (`scripts/tern-pane-drive.mjs`) drives `tern serve`, a
  * HEADLESS session. This one opens a real window (`tern --control EP`) on a
- * real display, which is the only way to answer the questions the headless
- * control channel cannot:
+ * real display. The headless client also accepts `move`/`hover`, `a11y` and
+ * `appearance`; the GUI lane adds the real window, the desktop font stack and
+ * the native chrome, not a new input authority:
  *
- *   - HOVER — the headless channel has no way to move a pointer;
- *   - the client's own DARK THEME and its real font stack;
- *   - the NATIVE OS WINDOW (the chrome, the title bar, the real display);
- *   - the ACCESSIBILITY TREE, i.e. what a screen reader actually reads.
+ *   - the pointer/key events are CONTROL-INJECTED through `tern ctl`, not OS
+ *     physical input;
+ *   - `a11y` reads the client's tree, not an OS screen-reader bridge;
+ *   - the real window, its native chrome and the font stack are what the
+ *     headless lane cannot reproduce.
  *
- * The GUI is a DIFFERENT CLIENT MODE, so a claim made here is at the
- * `REAL_TERN_GUI` evidence tier and does not automatically cover the headless
- * lane. The handle mirrors the headless driver's closely enough that the
- * same subject and the same assertions can be reused.
+ * The GUI is a DIFFERENT CLIENT MODE, so a claim made here is at
+ * `REAL_TERN_GUI` + `CONTROL_INJECTED_INPUT` and does not automatically cover
+ * the headless lane or `OS_INPUT_VERIFIED`. The handle mirrors the headless
+ * driver's closely enough that the same subject and the same assertions can be
+ * reused.
  *
  * ISOLATION: the window runs with `TERN_CONFIG_DIR` and `TERN_DAEMON_SOCKET`
  * pointed INSIDE THE RUN DIRECTORY, so the user's real Tern profile, plugins
@@ -277,7 +281,7 @@ async function createHarness({ ternBin, root, display }) {
   // ancestor, and report a clipped node as clickable.
   const snapshot = () => index(ctl('tree').tree ?? [])
 
-  // -------------------------------------------------------------- real input
+  // ------------------------------------- control-injected input (no OS events)
   const key = async (name, settleMs = 500) => {
     send('key', name)
     await sleep(settleMs)
@@ -320,9 +324,10 @@ async function createHarness({ ternBin, root, display }) {
     return true
   }
   /**
-   * Move the REAL pointer over a node WITHOUT clicking: the hover the headless
-   * control channel cannot deliver. The GUI's `move X Y` moves the real pointer
-   * and the client's own `stats.pointer` follows it.
+   * Move the client's pointer state over a node WITHOUT clicking. This is a
+   * CONTROL-INJECTED `move`, not an OS input event; the headless client accepts
+   * the same command. The GUI lane adds the real window, not a physical pointer.
+   * The client's own `stats.pointer` follows the injected move.
    *
    * The pointer goes to the centre of the fragment the client SHOWS, through the
    * same oracle `click` uses: a node's own centre can fall in a clipped-away

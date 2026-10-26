@@ -435,9 +435,10 @@ unchanged, so a paste during those windows reaches nothing.
 
 The headless lane mounts the production projections over one official inline
 surface and asks the client's own layout; the GUI lane adds the real window and
-its OS chrome/font stack, the OS accessibility bridge and a real pointer into
-the client's own image viewer. The client's `a11y` tree, its computed-style
-hover and its light/dark appearance are reachable headlessly too; see
+its OS chrome/font stack and renders into the client's own image viewer. Its
+pointer/key input is control-injected (`CONTROL_INJECTED_INPUT`) and its `a11y`
+tree is the client's, not an OS bridge. The client's `a11y` tree, its
+computed-style hover and its light/dark appearance are reachable headlessly too; see
 [the real-pane harness guide](../guides/tern-pane-testing.md) § Appearance and
 theme. Which script drives which lane, and every observation a run produced,
 belong to the PR/CI record — not here.
@@ -620,7 +621,13 @@ a new page or a Viewer owned by this renderer.
 | `TYPE_ONLY` | Types/contract shape | Emitted frames or client behavior |
 | `SDK_SCRIPTED` / pin tests + production synthetic-tty tests | Current encoder/decoder, emitted frames, application semantic admission under scripted events | Real-client layout, font/caret/IME and physical mouse |
 | `REAL_TERN_HEADLESS` (`tern serve` + `tern ctl`) | Versioned client nodes, actual layout boxes, PNG, control-input events, capability replies | Physical window focus, OS/IME, real hardware or GUI |
-| `REAL_TERN_GUI` / owner attestation | Only the explicitly exercised physical behaviors and environment | Full cross-version/full-profile/Remote qualification |
+| `REAL_TERN_GUI` / owner attestation | Only the explicitly exercised behaviors and environment | Full cross-version/full-profile/Remote qualification |
+
+`REAL_TERN_GUI` covers the window and its rendering. A GUI flow driven through
+`tern ctl` injects pointer/key events (`CONTROL_INJECTED_INPUT`); that is not
+`OS_INPUT_VERIFIED`, and its `a11y` tree is the client's tree, not an OS
+screen-reader bridge. Claim the OS input path or an OS accessibility bridge only
+from a separate operator-driven run.
 
 `L1-L6` is a separate composition-depth axis (semantic port → Direct adapter →
 Remote adapter → parity → official wire → application composition); it does not

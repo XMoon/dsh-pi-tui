@@ -1,8 +1,8 @@
 /**
  * The committed GUI smoke flow: the whole GUI harness path in one run — boot a
  * real GUI WINDOW on a real display, launch a subject in one of its panes, send
- * a REAL pointer click and a REAL key, read the subject's own record back, and
- * leave auditable artifacts.
+ * a control-injected pointer click and a control-injected key, read the
+ * subject's own record back, and leave auditable artifacts.
  *
  *   node scripts/tern-gui-drive.mjs scripts/tern-gui-smoke.mjs
  *
@@ -10,16 +10,17 @@
  * example for writing your own GUI flow. Everything it asserts is about the
  * INSTRUMENT (the GUI lane works), not about any `/model` or `/preset` surface.
  *
- * It also proves the four things only the GUI lane can show: the window is a
- * real native window on a real display, the pointer really moves (a HOVER),
- * the client has a real ACCESSIBILITY TREE, and the client has its own theme.
+ * It also proves the GUI window is a real native window on a real display and
+ * that the control-injected pointer/key path reaches the client. The `a11y`
+ * tree is the client's tree; physical input and an OS screen reader are not
+ * exercised. The theme switch is not exercised by this smoke.
  *
  * @module scripts/tern-gui-smoke
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** Read the subject's own event ledger — the positive control for real input. */
+/** Read the subject's own event ledger — the positive control for the injected input. */
 function recorded(root) {
   return readFileSync(join(root, 'events.jsonl'), 'utf8')
     .trim()
@@ -61,15 +62,15 @@ export default async function (h) {
     JSON.stringify(h.classNodes(snap, 'pk-btn').length))
   if (button === undefined) return
 
-  // A REAL pointer click on the real window.
+  // A control-injected pointer click on the real window.
   const clicked = await h.click(snap.chains, button)
-  h.check('a REAL pointer click on the visible fragment runs the handler',
+  h.check('a control-injected pointer click on the visible fragment runs the handler',
     clicked && h.has(h.snapshot(), 'clicks=1'),
     `clicked=${clicked} :: ${h.texts(h.snapshot()).join(' | ')}`)
 
-  // A REAL key.
+  // A control-injected key.
   await h.key('a', 700)
-  h.check('a REAL key reaches the subject loop', h.has(h.snapshot(), 'keys=1'),
+  h.check('a control-injected key reaches the subject loop', h.has(h.snapshot(), 'keys=1'),
     h.texts(h.snapshot()).join(' | '))
 
   // The subject's own record is the positive control: it proves exactly one
@@ -80,18 +81,19 @@ export default async function (h) {
     && rows.filter((row) => row.key === 'a').length === 1,
     JSON.stringify(rows))
 
-  // The pointer really moves: a HOVER is what the headless lane cannot do.
-  // The node and its chains come from the SAME snapshot: the geometry oracle
-  // indexes by node identity, so a chain from another snapshot is empty.
+  // The control-injected pointer moves. The same command works headlessly;
+  // this lane proves it on the real window. The node and its chains come from
+  // the SAME snapshot: the geometry oracle indexes by node identity, so a chain
+  // from another snapshot is empty.
   const hoverSnap = h.snapshot()
   const hoverTarget = hoverSnap.nodes.find((node) => node.tag === 'button')
   if (hoverTarget !== undefined) {
     const moved = await h.hover(hoverSnap.chains, hoverTarget)
-    h.check('the REAL pointer moves to the node it was sent to', moved?.moved === true,
+    h.check('the control-injected pointer moves to the node it was sent to', moved?.moved === true,
       JSON.stringify(moved ?? null))
   }
 
-  // The client has a real accessibility tree: what a screen reader reads.
+  // The client's accessibility tree; no OS screen reader is exercised.
   const a11y = h.ctl('a11y')
   const roles = new Set()
   const walk = (node) => {
@@ -99,7 +101,7 @@ export default async function (h) {
     for (const child of node.children ?? []) walk(child)
   }
   if (a11y) walk(a11y)
-  h.check('the client exposes a real accessibility tree', roles.size > 0,
+  h.check('the client exposes its accessibility tree', roles.size > 0,
     JSON.stringify([...roles].slice(0, 10)))
   h.measure('the accessibility roles', JSON.stringify([...roles].sort().slice(0, 20)))
 
