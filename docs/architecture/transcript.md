@@ -941,7 +941,11 @@ independent occurrences with independent fold state.
   occurrence holds the SAME base64 string in its own `Image`, and it drops
   that local reference as soon as the occurrence repaints without pixels
   (collapse, narrow/unsupported surface, capability loss, pending/error) or
-  is disposed; an evicted entry is re-derived on a later visible render.
+  is disposed; an evicted entry is re-derived on a later visible render. A
+  queued conversion whose SOURCE read was evicted is dropped without
+  recording a failure (the conversion task itself never re-downloads), so
+  the next visible render reads the attachment again and may request a
+  fresh conversion instead of inheriting a sticky error.
   Conversion never runs synchronously in `render()`. The info row and the
   viewer target always keep the ORIGINAL ref (name, dimensions, media type,
   bytes); only the painted body consumes the derived PNG and its derived

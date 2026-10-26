@@ -498,9 +498,13 @@ export class ImageLoader {
       if (!this.epochCurrent(id, job.epoch)) return
       const source = job.scope.cache.get(id)
       if (source === undefined || source.state !== 'ready') {
-        // The source read was evicted while this job waited. Never re-read it:
-        // the preview simply degrades to the existing informational rows.
-        failure = { reason: 'decode-failed' }
+        // The source read was evicted while this job waited. That is a
+        // TRANSIENT cache state, never a decode failure: recording it would
+        // make `getKittyThumbnail` return a sticky error and
+        // `loadKittyThumbnail` refuse every later request in this scope. The
+        // conversion task itself still never re-reads the attachment; the job
+        // ends without publishing and the notify in `finally` lets the next
+        // VISIBLE render go through the normal raw-read path again.
         return
       }
       if (source.bytes.byteLength > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
@@ -534,6 +538,12 @@ export class ImageLoader {
           this.notify(job.scope, id)
         } else if (failure !== undefined) {
           this.recordKittyThumbnailFailure(job.scope, id, failure.reason, failure.error)
+        } else {
+          // Dropped because the source was evicted while queued. Release the
+          // slot and wake the occurrence; the normal visible render will read
+          // the attachment again and may request a fresh conversion. No
+          // persistent failure is recorded, so this is recoverable.
+          this.notify(job.scope, id)
         }
       }
     }
