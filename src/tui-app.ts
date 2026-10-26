@@ -17533,6 +17533,32 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       return this.effectiveThinkingExpanded(message, ignoreSearch)
     }
+    // DELIVERED FILES own their disclosure through a SEPARATE capability: the
+    // `/deliverables` browser is a real owner even when the process-fold key
+    // is disabled, so this branch must resolve BEFORE the generic capability
+    // gate below. Its three cases are: master-owned (Ctrl+O on this surface),
+    // command-owned (the browser capability exists), and no operable owner
+    // (fail open).
+    if (isDeliveredFilesDisclosureCandidate(message)) {
+      const masterOwned = this.deliveredFilesMasterOwned()
+      const commandOwned = this.deliveredFilesEntryAvailable()
+      // Neither an operable Ctrl+O owner NOR the browser command exists: the
+      // tail FAILS OPEN rather than hiding files behind a dead entry.
+      if (!masterOwned && !commandOwned) return true
+      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      // A per-card override is a MASTER-owned durable choice: on a surface
+      // whose Ctrl+O owns something else it has no operator, so it must never
+      // silently expand the tail there (that leaves a permanent expansion with
+      // no affordance to undo it).
+      if (masterOwned) {
+        const override = this.expandedOverride.get(message)
+        if (override !== undefined) return override
+        return message.turn >= boundary
+      }
+      // Command-owned: the folded four until the browser opens or a search
+      // reveals a hidden match (never promoted into a durable override).
+      return false
+    }
     // The capability decides BEFORE any renderer builds a folded view: a
     // surface with no operable disclosure action (regular without an effective
     // expand key) presents every fold in full, so no hidden count, marker or
@@ -17560,25 +17586,6 @@ export class TuiApp {
       if (override !== undefined) return override
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
       return message.turn >= userBoundary
-    }
-    // Delivered files are an assistant turn-tail with a per-OWNER capability:
-    // only the regular / fullscreen-Full Ctrl+O master owns the capped state. A
-    // surface whose Ctrl+O owns something else (fullscreen Focus root bulk,
-    // fullscreen Compact Work bulk) — or whose expand key is disabled — has no
-    // operable owner at all, so the tail FAILS OPEN (all files visible) instead
-    // of rendering a collapsed disclosure nobody can operate.
-    if (isDeliveredFilesDisclosureCandidate(message)) {
-      const masterOwned = this.deliveredFilesMasterOwned()
-      // Neither an operable Ctrl+O owner NOR the browser command exists: the
-      // tail FAILS OPEN rather than hiding files behind a dead entry.
-      if (!masterOwned && !this.deliveredFilesEntryAvailable()) return true
-      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
-      const override = this.expandedOverride.get(message)
-      if (override !== undefined) return override
-      // The master keeps its turn-boundary behaviour; a command-only surface
-      // (no operable Ctrl+O for this card) shows the folded four until the
-      // browser opens or a search reveals a hidden match.
-      return masterOwned ? message.turn >= boundary : false
     }
     // A member of an OPEN Work run (Compact, or nested Work inside an expanded
     // Focus Thought). Regular has no mouse, so the open run full-reveals its own
@@ -23427,8 +23434,11 @@ export class TuiApp {
     const capability = this.deliveredFiles
     if (capability === undefined) return
     if (!capability.isCurrent(snapshot)) return
-    if (this.deliveredFilesOverlay !== undefined) {
-      this.deliveredFilesOverlay.focus()
+    // The PANEL is the lease identity, not the raw handle: a repeated open
+    // issued from a callback inside the mount must coalesce even though the
+    // handle does not exist yet.
+    if (this.deliveredFilesPanel !== undefined) {
+      this.deliveredFilesOverlay?.focus()
       return
     }
     const panel = new DeliveredFilesPanel({
@@ -23440,30 +23450,53 @@ export class TuiApp {
     })
     const frame = this.createDeliveredFilesFrame(panel)
     const size = this.deliveredFilesOverlaySize()
-    const handle = this.showOverlayOnHost(
-      frame,
-      { width: size.width, maxHeight: size.maxHeight, ...(size.margin === undefined ? {} : { margin: size.margin }) },
-      {
-        // REMOUNTABLE: a fullscreen screen swap must keep the SAME panel
-        // (filter/turn/selection/scroll survive it) behind a fresh projection.
-        remountable: true,
-        remount: (logical) => {
-          if (this.deliveredFilesPanel !== panel) return
-          const next = this.createDeliveredFilesFrame(panel)
-          this.deliveredFilesFrame = next
-          const nextSize = this.deliveredFilesOverlaySize()
-          this.rebindOverlayRaw(logical, next, {
-            width: nextSize.width,
-            maxHeight: nextSize.maxHeight,
-            ...(nextSize.margin === undefined ? {} : { margin: nextSize.margin }),
-          })
-        },
-      },
-    )
-    this.deliveredFilesOverlay = handle
-    this.deliveredFilesFrame = frame
+    // PUBLISH THE LEASE BEFORE THE MOUNT. `showOverlayOnHost` can synchronously
+    // run a plugin onFocus callback or start a fullscreen swap whose remount
+    // pass re-creates this node's projection, and BOTH must observe the
+    // committed panel: the remount below checks this identity, and a reentrant
+    // open must coalesce instead of stacking a second overlay.
     this.deliveredFilesPanel = panel
+    this.deliveredFilesFrame = frame
     this.deliveredFilesSnapshot = snapshot
+    let handle: OverlayHandle
+    try {
+      handle = this.showOverlayOnHost(
+        frame,
+        { width: size.width, maxHeight: size.maxHeight, ...(size.margin === undefined ? {} : { margin: size.margin }) },
+        {
+          // REMOUNTABLE: a fullscreen screen swap must keep the SAME panel
+          // (filter/turn/selection/scroll survive it) behind a fresh projection.
+          remountable: true,
+          remount: (logical) => {
+            if (this.deliveredFilesPanel !== panel) return
+            const next = this.createDeliveredFilesFrame(panel)
+            this.deliveredFilesFrame = next
+            const nextSize = this.deliveredFilesOverlaySize()
+            this.rebindOverlayRaw(logical, next, {
+              width: nextSize.width,
+              maxHeight: nextSize.maxHeight,
+              ...(nextSize.margin === undefined ? {} : { margin: nextSize.margin }),
+            })
+          },
+        },
+      )
+    } catch (error) {
+      // The mount failed before the broker owned anything: release the
+      // precommit atomically so a later open starts from a clean slate.
+      this.deliveredFilesPanel = undefined
+      this.deliveredFilesFrame = undefined
+      this.deliveredFilesSnapshot = undefined
+      panel.dispose()
+      throw error
+    }
+    if (this.deliveredFilesPanel !== panel) {
+      // A callback inside the mount already closed (or replaced) this lease:
+      // the fresh physical projection is orphaned and must not survive.
+      this.overlayRemounts.delete(handle)
+      handle.hide()
+      return
+    }
+    this.deliveredFilesOverlay = handle
   }
 
   /** Close the live delivered-files browser (idempotent). The lease identity is

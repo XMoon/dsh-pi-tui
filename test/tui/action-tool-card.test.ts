@@ -19,6 +19,7 @@ import {
 import type { CompactToolPresentation } from '../../src/tui/transcript/tool-presentation.ts'
 import { CompactTextPreview } from '../../src/tui/components/transcript/compact-text-preview.ts'
 import { TuiApp, transcriptContentWidth } from '../../src/tui-app.ts'
+import { deliveredFilesCapabilityStub } from '../support/delivered-files.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -267,7 +268,7 @@ test('assistant delivery tails cap folded files and expand with transcript detai
   const app = new TuiApp(
     vt,
     { onSubmit: () => {}, onExit: () => {} },
-    { workspaceRoot: '/workspace' },
+    { workspaceRoot: '/workspace', deliveredFiles: deliveredFilesCapabilityStub },
   )
   app.start()
   startedApps.add(app)
@@ -285,24 +286,24 @@ test('assistant delivery tails cap folded files and expand with transcript detai
   }])
   const folded = await viewport(vt)
   assert.ok(folded.includes('Delivered files · 5'), folded)
-  assert.ok(folded.includes('dist/one.js'), folded)
-  assert.ok(folded.includes('dist/four.js'), folded)
-  assert.ok(!folded.includes('dist/five.js'), folded)
-  assert.ok(folded.includes('… +1'), folded)
+  assert.ok(folded.includes('one.js'), folded)
+  assert.ok(folded.includes('four.js'), folded)
+  assert.ok(!folded.includes('five.js'), folded)
+  assert.ok(folded.includes('+1 more'), folded)
   assert.ok(!folded.includes('Presented /workspace'), folded)
   for (const line of folded.split('\n')) assert.ok(visibleWidth(stripTerminalSequences(line)) <= 90, JSON.stringify(line))
 
   app.setTranscriptDetailExpanded(true)
   const expanded = await viewport(vt)
-  assert.ok(expanded.includes('dist/five.js'), expanded)
+  assert.ok(expanded.includes('five.js'), expanded)
   assert.ok(expanded.includes('fifth file'), expanded)
-  assert.ok(!expanded.includes('… +1'), expanded)
+  assert.ok(!expanded.includes('+1 more'), expanded)
   for (const line of expanded.split('\n')) assert.ok(visibleWidth(stripTerminalSequences(line)) <= 90, JSON.stringify(line))
 
   app.setTranscriptDetailExpanded(false)
   const collapsedAgain = await viewport(vt)
-  assert.ok(!collapsedAgain.includes('dist/five.js'), collapsedAgain)
-  assert.ok(collapsedAgain.includes('… +1'), collapsedAgain)
+  assert.ok(!collapsedAgain.includes('five.js'), collapsedAgain)
+  assert.ok(collapsedAgain.includes('+1 more'), collapsedAgain)
 })
 
 test('an extension renderer keeps ownership of present body while host appends delivery tail', async () => {
@@ -317,7 +318,10 @@ test('an extension renderer keeps ownership of present body while host appends d
     render: () => ({ kind: 'text', spans: [{ text: 'CUSTOM ASSISTANT' }] }),
   }, 'plugin')
   const vt = new VirtualTerminal(90, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    renderers: registry,
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
   app.start()
   startedApps.add(app)
   app.setTranscript([{
@@ -337,7 +341,7 @@ test('an extension renderer keeps ownership of present body while host appends d
   assert.ok(view.includes('CUSTOM PRESENT'), view)
   assert.ok(view.includes('CUSTOM ASSISTANT'), view)
   assert.ok(view.includes('Delivered files · 1'), view)
-  assert.ok(view.includes('out/report.md'), view)
+  assert.ok(view.includes('report.md'), view)
   assert.ok(!view.includes('Present files'), view)
 })
 

@@ -135,7 +135,7 @@ test('Enter opens the selected file Details and Esc returns to the Files page', 
   const rows = h.rows()
   assert.match(rows[0]!, /report\.md · Details/)
   assert.ok(rows.some(row => row.includes('Host: ') && row.includes('/ws/docs/report.md')), rows.join('\n'))
-  assert.ok(rows.at(-1)!.includes('C Copy path'), `the action bar names the real key: ${rows.at(-1)}`)
+  assert.ok(rows.at(-1)!.includes('Shift+C Copy path'), `the action bar names the real shifted chord: ${rows.at(-1)}`)
   assert.ok(rows.at(-1)!.includes('Esc Back'))
   h.type('esc')
   assert.equal(h.panel.currentPage(), 'files')
@@ -385,4 +385,28 @@ test('an empty Turn list is a construction error, never an empty overlay', () =>
     close: () => {},
     copyPath: () => {},
   }), /at least one delivered turn/)
+})
+
+test('the design-language size matrix keeps one action bar, a body row and whole-segment drops', () => {
+  const h = harness(snapshotOf([{
+    turn: 8,
+    files: ['/ws/a.md', '/ws/b.md', '/ws/c.md', '/ws/table-of-contents-with-a-long-name.md'],
+  }]))
+  // §11.2's frozen matrix (the rows the panel is granted follow the overlay
+  // cap: maxHeight = min(24, rows - 2), then the frame's two borders).
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
+    h.setSize(columns, rows)
+    const painted = h.rows()
+    const label = `${columns}x${rows}`
+    assert.equal(painted.length, Math.min(22, rows - 4), `${label}: fills the granted rows`)
+    assertNoOverflow(painted, columns - 4)
+    // The action bar IS the last painted row of the panel.
+    const bar = painted.at(-1)!
+    assert.ok(bar.includes('Esc'), `${label}: the action bar is the last row: ${JSON.stringify(bar)}`)
+    // The body floor survives: at least one file row between header and bar.
+    assert.ok(painted.some(row => row.includes('a.md')), `${label}: at least one result row`)
+    // Whole-segment degradation only: a bar still painting more than one
+    // segment never truncates mid-word.
+    if (bar.split(' · ').length > 1) assert.ok(!bar.includes('…'), `${label}: no truncated segment`)
+  }
 })

@@ -523,7 +523,10 @@ export class DeliveredFilesComponent implements Component {
     }
 
     for (const [index, file] of shown.entries()) {
-      const label = this.labels[index] ?? deliveredFileBasename(file.path)
+      // The declared path is UNTRUSTED and lands on a terminal row: the label
+      // (basename/suffix, still source-derived) goes through the ONE display
+      // projection before it can occupy cells. Copy always uses the RAW path.
+      const label = sanitizeDisplayText(this.labels[index] ?? deliveredFileBasename(file.path)).replace(/\r\n|\r|\n/g, ' ')
       const verbRoom = showActions ? visibleWidth(DELIVERED_DETAILS_VERB) + 2 : 0
       const bodyWidth = Math.max(1, safeWidth - verbRoom)
       const indent = 2
