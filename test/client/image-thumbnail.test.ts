@@ -285,6 +285,7 @@ test('a JPEG on Kitty stays informational until the derived PNG is READY, then p
   assert.ok(pending[0]!.includes('…'), 'pending marker')
   assert.ok(!pending.join('\n').includes('\x1b_G'), 'no pixel body before READY')
   assert.equal(component.paintedImageBody(80), undefined, 'no clickable body before READY')
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(conversions, 1)
   await until(() => loader.getKittyThumbnail(JPEG_REF).state === 'ready', 'the derived PNG')
   const ready = component.render(80)
@@ -542,6 +543,7 @@ test('dispose during a pending conversion releases the subscription: no settle r
   let repaints = 0
   const component = new ImageThumbnail(JPEG_REF, loader, THEME, () => { repaints += 1 })
   component.render(80)
+  await new Promise(resolve => setImmediate(resolve))
   component.dispose()
   releaseDerived()
   await new Promise(resolve => setTimeout(resolve, 40))

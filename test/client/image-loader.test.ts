@@ -582,6 +582,7 @@ test('preview scheduling waits for a READY same-scope source and dedupes request
   // Two occurrence renders request the same (scope, id): ONE conversion.
   loader.loadKittyThumbnail(ref)
   loader.loadKittyThumbnail(ref)
+  await flush()
   assert.equal(loader.getKittyThumbnail(ref).state, 'loading')
   assert.equal(calls, 1)
   release()
@@ -677,6 +678,7 @@ test('at most two conversions run and the 33rd queued request reports busy', asy
   await flush()
   assert.equal(loader.cacheSize(), 35, 'all sources are READY before any preview is requested')
   for (const ref of refs) loader.loadKittyThumbnail(ref)
+  await flush()
   assert.equal(maxActive, 2, 'no more than two sharp jobs run at once')
   // 2 running + 32 queued were admitted; the 35th request is over capacity.
   const busy = loader.getKittyThumbnail(refs[34]!)
