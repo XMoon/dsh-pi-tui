@@ -549,13 +549,22 @@ test('a model-only pruner replacement never retracts an accepted publication', (
 })
 
 test('a replacement-only log still yields no source, and an unmarked duplicate is still ambiguous', () => {
-  // A replacement with no append-origin fact behind it proves nothing.
+  // A replacement whose append-origin result was never observed proves nothing:
+  // the replacement copy alone must not become a source.
   const replacedOnly = new LogBuilder().turnStart(1)
-  replacedOnly.call(1, 0, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS)
+  const replacedTuple = replacedOnly.call(1, 0, 'call-chart', 'dsh_pi_tui_chart', CHART_ARGS)
+  const replacedRef = visualReference({ sessionId: SESSION, ...replacedTuple })
+  const replacedBlocks = chartContentBlocks(chartFactFromArgs(CHART_ARGS))
+  // Only the MODEL-ONLY copy is present, carrying a perfectly valid fact and
+  // reference. If the skip were wrong, this would read as a real source.
+  appendReplacement(replacedOnly, 1, 0, 'call-chart', [
+    replacedBlocks[0] as ContentBlock,
+    { type: 'text', text: visualReferenceLine(replacedRef) },
+    replacedBlocks[1] as ContentBlock,
+  ])
   replacedOnly.turnEnd(1)
-  const tuple = { turn: 1, stepStartSeq: 0, callId: 'call-chart' }
-  void tuple
-  assert.deepEqual(collectVisualSources(SESSION, replacedOnly.events()), [])
+  assert.deepEqual(collectVisualSources(SESSION, replacedOnly.events()), [],
+    'a replacement copy is never a source in its own right')
 
   // An UNMARKED second result is not a replacement marker and stays ambiguous.
   const unmarked = new LogBuilder().turnStart(1)
@@ -718,6 +727,39 @@ test('a successful live receipt always parses back from its DURABLE arguments', 
   assert.equal(decision.ok, true, decision.ok ? '' : decision.reason)
   // And the REPLAY of the same log reports exactly that publication.
   assert.equal(collectPublishedVisuals(SESSION, events).length, 1)
+})
+
+test('a duplicated publisher callId is refused by the LIVE path exactly as replay does', () => {
+  // Two `present_visual` calls share one composite identity in the same step.
+  // Replay already skips ambiguous calls, so the live decision must refuse too.
+  const log = new LogBuilder().turnStart(1)
+  const { ref } = log.generate(1, 0, 'chart', 'chart')
+  log.stepEnd(1, 0)
+  log.stepStart(1, 1)
+  log.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref }] })
+  log.result(1, 1, 'present', [
+    { type: 'text', text: 'Selected 1 visual for presentation.' },
+    { type: 'text', text: `${VISUAL_PUBLISHED_PREFIX}${JSON.stringify({ version: 1, published: [{ ref }] })}` },
+  ])
+  // The SAME composite identity appears again.
+  log.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref }] })
+  log.turnEnd(1)
+  const events = log.events()
+  const stepStartSeq = events.find((event): event is Extract<VisualSessionEvent, { type: 'step/start' }> =>
+    event.type === 'step/start' && event.data.step === 1)!.seq
+
+  const live = decidePublication({
+    sessionId: SESSION,
+    events,
+    refs: [ref],
+    turn: 1,
+    stepStartSeq,
+    callId: 'present',
+  })
+  assert.equal(live.ok, false, 'the live path must refuse an ambiguous publisher')
+  assert.match(live.ok ? '' : live.reason, /no unique committed present_visual call/u)
+  // And replay agrees: nothing was published.
+  assert.deepEqual(collectPublishedVisuals(SESSION, events), [])
 })
 
 // ── the receipt parser ─────────────────────────────────────────────────────

@@ -628,7 +628,10 @@ export function decidePublication(input: {
     && candidate.turn === turn
     && candidate.stepStartSeq === stepStartSeq
     && candidate.callId === callId)
-  if (publishers.length !== 1) {
+  // A duplicated composite identity is ambiguous in BOTH directions: cold
+  // replay skips such a call, so the live path must refuse it too — otherwise a
+  // run could accept a publication that replay would never recognise.
+  if (publishers.length !== 1 || (publishers[0] as IndexedCall).ambiguous) {
     return {
       ok: false,
       reason: `no unique committed ${PRESENT_VISUAL_TOOL_NAME} call "${callId}" in the current step`,
