@@ -906,9 +906,7 @@ Enforce only what is cheap and low-false-positive; the rest is review.
 3. **Degradation-ladder test**: for each size in the frozen matrix, assert the
    dropped/kept set matches §8 (this is the test that catches "someone made the
    header taller").
-4. **Atomic state chip** (`packages/pi-tui/test/settings-list.test.ts` for the
-   renderer contract, `test/app/preset-command.test.ts` + `test/app/surface-row-grant.test.ts`
-   for the real frames): a chip is never painted partially (`[defaul`), a dropped
+4. **Atomic state chip**: a chip is never painted partially (`[defaul`), a dropped
    chip never leaves its separator, an over-wide label is clipped with `…` instead
    of overflowing, and the chip survives every width from the 44-column floor up.
 

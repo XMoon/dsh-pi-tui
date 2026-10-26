@@ -388,7 +388,7 @@ test('a real fiber registration commits from the second group through the regist
   }
 })
 
-test('a rejected second-group change stays Not saved and records only that owner health', async () => {
+test('rejected false AND rejected throw both stay Not saved and record only their own owner health', async () => {
   const h = await setupEnvironment()
   try {
     const calls: string[] = []
@@ -401,7 +401,13 @@ test('a rejected second-group change stays Not saved and records only that owner
     await registerFiber(h.ctx, (service) => {
       service.registerSetting({
         id: 'b1', label: 'Beta level', currentValue: 'on', values: ['on', 'off'], order: 1,
-        onChange: (value) => { calls.push(value); return false },
+        onChange: (value) => { calls.push(`false:${value}`); return false },
+      })
+    })
+    await registerFiber(h.ctx, (service) => {
+      service.registerSetting({
+        id: 'c1', label: 'Gamma level', currentValue: 'on', values: ['on', 'off'], order: 2,
+        onChange: (value) => { calls.push(`throw:${value}`); throw new Error('gamma refused the change') },
       })
     })
     await h.vt.waitForRender()
@@ -410,25 +416,37 @@ test('a rejected second-group change stays Not saved and records only that owner
     await h.key('\t') // the beta group
     await h.key('\r') // Detail + choice (`on`)
     await h.key('\u001b[B') // off
-    await h.key('\r') // Confirm: the plugin refuses
+    await h.key('\r') // Confirm: the plugin returns false
+    await h.drain()
+    assert.match(h.view(), /Not saved/u, 'the false refusal is painted')
+    // The THIRD group refuses by THROWING: the same rejected mapping, its own
+    // health record, never A's and never a success.
+    await h.key('\u001b') // settled Detail -> Rows
+    await h.key('\t') // gamma group
+    await h.key('\r') // Detail + choice
+    await h.key('\u001b[B') // off
+    await h.key('\r') // Confirm: the plugin throws
     await h.drain()
 
-    assert.deepEqual(calls, ['off'], 'the refusing callback ran exactly once with the raw value')
-    assert.equal(h.registry.rows().find(row => row.id === 'b1')?.currentValue, 'on',
-      'a refusal keeps the previous registry value')
-    assert.equal(h.registry.rows().find(row => row.id === 'a1')?.currentValue, 'on',
-      'the other group value is untouched')
-    assert.match(h.view(), /Not saved/u, 'the Detail reports the refusal')
+    assert.deepEqual(calls, ['false:off', 'throw:off'],
+      'each refusing callback ran exactly once with the raw value')
+    for (const id of ['a1', 'b1', 'c1']) {
+      assert.equal(h.registry.rows().find(row => row.id === id)?.currentValue, 'on',
+        `a refusal keeps ${id}'s previous registry value`)
+    }
+    assert.match(h.view(), /Not saved/u)
     const health = h.health()
     const failed = health.filter(record => record.state === 'failed')
-    assert.deepEqual(failed.map(record => record.id), ['b1'], 'ONLY the refusing owner is marked failed')
-    assert.match(failed[0]?.lastError ?? '', /setting rejected/u)
+    assert.deepEqual(failed.map(record => record.id).sort(), ['b1', 'c1'],
+      'ONLY the two refusing owners are marked failed')
+    for (const record of failed) assert.match(record.lastError ?? '', /setting rejected/u)
     assert.equal(health.find(record => record.id === 'a1')?.state, 'active', 'the other owner stays clean')
     assert.equal(h.documentWrites(), 0)
     assert.equal(
-      h.warnings().some(entry => entry.fields?.field === 'ext-setting:b1'),
-      true,
-      'the write owner keeps one diagnosable refusal',
+      h.warnings().filter(entry => entry.fields?.outcome === 'not-saved'
+        && String(entry.fields?.field).startsWith('ext-setting:')).length,
+      2,
+      'each refusal keeps exactly one diagnosable writer entry',
     )
   } finally {
     await h.dispose()
@@ -531,6 +549,174 @@ test('a replaced same-id registration never receives the old handle or a late se
       'the late settlement never paints on the replacement')
     assert.equal(h.registry.rows()[0]?.currentValue, 'off')
     assert.deepEqual(oldCalls, ['off'], 'the OLD callback settled exactly once; the NEW one never ran')
+    // The old apply settled as GONE (an unloaded registration), never as a
+    // plugin rejection: the writer keeps its diagnostic and records NO health.
+    const goneWrite = h.warnings().find(entry => entry.fields?.field === 'ext-setting:same')
+    assert.ok(goneWrite !== undefined, 'the settled write keeps a diagnosable outcome')
+    assert.equal(goneWrite.fields?.outcome, 'not-saved')
+    assert.match(String(goneWrite.fields?.reason), /unloaded or replaced/u,
+      'a replaced registration is GONE, never a fabricated plugin refusal')
+    assert.equal(h.health().some(record => record.state === 'failed'), false,
+      'gone/stale bookkeeping never creates an owner health event')
+    const sameHealth = h.health().filter(record => record.id === 'same')
+    assert.equal(sameHealth.length, 1, 'the replacement owner is the ONE live health record')
+    assert.equal(sameHealth[0]?.state, 'active',
+      'the old owner health record was untracked on unload')
+  } finally {
+    await h.dispose()
+  }
+})
+
+test('a real 0-value registration is read-only in the Detail and never reaches its callback', async () => {
+  const h = await setupEnvironment()
+  try {
+    const calls: string[] = []
+    await registerFiber(h.ctx, (service) => {
+      service.registerSetting({
+        id: 'readonly', label: 'Readonly note', description: 'registered without selectable values',
+        currentValue: 'plain text', values: [], order: 0,
+        // The presence of onChange must NEVER be taken as licence to invent an
+        // editor for a contribution that registered no selectable values.
+        onChange: (value) => { calls.push(value); return true },
+      })
+    })
+    await h.vt.waitForRender()
+    await openExtensionsRows(h)
+    assert.match(h.header(), /Settings · Extensions \[1\/1\]/u)
+    assert.match(h.view(), /Readonly note/u, 'the read-only registration is still discoverable')
+    await h.key('\r') // Rows -> Detail (a writable row would also open its choice)
+    const detail = h.view()
+    assert.match(detail, /Settings · Extensions · Readonly note/u)
+    assert.match(detail, /Value\s+plain text/u)
+    assert.match(detail, /Owner\s+\d+:.*:?/u)
+    assert.match(detail, /ID\s+readonly/u)
+    assert.match(detail, /No selectable values registered/u)
+    assert.doesNotMatch(detail, /Choose value|Change…|\[Confirm\]|Retry save/u,
+      'no choice/change/confirm/retry is invented from the onChange presence')
+    // Enter on the browse Detail is inert: no choice, no callback, no write.
+    await h.key('\r')
+    assert.doesNotMatch(h.view(), /Choose value/u)
+    assert.deepEqual(calls, [], 'the plugin onChange never runs for a read-only registration')
+    assert.equal(h.documentWrites(), 0)
+    assert.equal(h.health().some(record => record.state === 'failed'), false)
+    assert.equal(h.registry.rows().find(row => row.id === 'readonly')?.currentValue, 'plain text')
+  } finally {
+    await h.dispose()
+  }
+})
+
+test('two real fibers with the SAME name stay two distinct owner groups in the L6 composition', async () => {
+  const h = await setupEnvironment()
+  try {
+    const calls: string[] = []
+    // Cordis names both fibers `logger`; the owner identity appends the fiber
+    // uid, so the two contributions must never merge into one page.
+    const alpha = h.ctx.plugin(function logger(pluginCtx) {
+      serviceOf(pluginCtx).registerSetting({
+        id: 'l1', label: 'First log level', currentValue: 'info', values: ['info', 'debug'], order: 0,
+        onChange: (value) => { calls.push(`l1:${value}`); return true },
+      })
+    })
+    await alpha
+    const beta = h.ctx.plugin(function logger(pluginCtx) {
+      serviceOf(pluginCtx).registerSetting({
+        id: 'l2', label: 'Second log level', currentValue: 'info', values: ['info', 'debug'], order: 1,
+        onChange: (value) => { calls.push(`l2:${value}`); return true },
+      })
+    })
+    await beta
+    const owners = h.registry.rows().map(row => row.owner)
+    assert.equal(new Set(owners).size, 2, 'the same fiber NAME is not an owner identity')
+    for (const owner of owners) assert.match(owner, /^\d+:logger$/u)
+    await h.vt.waitForRender()
+    // Give the panel the fresh directory through the real render loop.
+    await openExtensionsRows(h)
+    assert.match(h.header(), /Settings · Extensions \[1\/2\] · logger · \d+ · Rows/u,
+      'the header distinguishes the two same-named owners by uid')
+    assert.match(h.view(), /First log level/u)
+    assert.doesNotMatch(h.view(), /Second log level/u, 'the second owner page is not painted')
+    await h.key('\t')
+    assert.match(h.header(), /Settings · Extensions \[2\/2\] · logger · \d+ · Rows/u)
+    assert.match(h.view(), /Second log level/u)
+    assert.doesNotMatch(h.view(), /First log level/u)
+    await h.key('\r') // Detail + choice on the second owner
+    assert.match(h.view(), /Owner\s+\d+:logger/u, 'the Detail states the RAW owner')
+    await h.key('\u001b[B') // info -> debug
+    await h.key('\r') // explicit Confirm
+    await h.drain()
+    // The settled browse Detail keeps the full registration identity.
+    assert.match(h.view(), /ID\s+l2/u)
+    assert.deepEqual(calls, ['l2:debug'], 'only the second owner callback ran')
+    assert.equal(h.registry.rows().find(row => row.id === 'l1')?.currentValue, 'info')
+    assert.equal(h.registry.rows().find(row => row.id === 'l2')?.currentValue, 'debug')
+    assert.equal(h.documentWrites(), 0)
+  } finally {
+    await h.dispose()
+  }
+})
+
+test('a pending write whose owner group unloads settles GONE without claiming the surviving groups', async () => {
+  const h = await setupEnvironment()
+  try {
+    let releaseChange!: (accepted: boolean) => void
+    const changeGate = new Promise<boolean>(resolve => { releaseChange = resolve })
+    const calls: string[] = []
+    const alpha = await registerFiber(h.ctx, (service) => {
+      service.registerSetting({
+        id: 'a1', label: 'Alpha level', currentValue: 'on', values: ['on', 'off'], order: 0,
+        onChange: (value) => { calls.push(`alpha:${value}`); return changeGate },
+      })
+    })
+    await registerFiber(h.ctx, (service) => {
+      service.registerSetting({
+        id: 'b1', label: 'Beta level', currentValue: 'on', values: ['on', 'off'], order: 1,
+        onChange: (value) => { calls.push(`beta:${value}`); return true },
+      })
+    })
+    const gamma = await registerFiber(h.ctx, (service) => {
+      service.registerSetting({
+        id: 'c1', label: 'Gamma level', currentValue: 'on', values: ['on', 'off'], order: 2,
+        onChange: (value) => { calls.push(`gamma:${value}`); return true },
+      })
+    })
+    await h.vt.waitForRender()
+    await openExtensionsRows(h)
+    assert.match(h.header(), /\[1\/3\]/u)
+    await h.key('\r') // Detail + choice on alpha
+    await h.key('\r') // explicit Confirm -> the callback is held
+    assert.match(h.view(), /Saving…/u)
+    assert.deepEqual(calls, ['alpha:on'], 'the selected owner callback started')
+
+    // The SELECTED owner unloads while its write is still pending; two other
+    // groups remain, so the directory repair lands on the beta page.
+    await alpha.fiber.dispose()
+    await h.vt.waitForRender()
+    assert.match(h.header(), /Settings · Extensions \[1\/2\] · root · \d+ · Rows/u,
+      `the remaining first group takes the page:\n${h.view()}`)
+    assert.match(h.view(), /> Beta level/u, 'the repaired page selects the surviving group first row')
+    assert.match(h.view(), /Saving…/u, 'the app-owned write still owns the pending phase')
+
+    // Release the old callback: the registration is gone, so the settlement is
+    // a GONE write — never a rejection and never a claim on beta/gamma.
+    releaseChange(true)
+    await h.drain()
+    assert.deepEqual(calls, ['alpha:on'], 'no surviving group callback ran')
+    assert.equal(h.registry.rows().length, 2, 'only the surviving contributions remain')
+    assert.equal(h.health().some(record => record.state === 'failed'), false,
+      'gone records no owner health event')
+    const settledFrame = h.view()
+    assert.doesNotMatch(settledFrame, /Verified|Not saved|Retry save|Saving…/u,
+      'the retired group settlement never paints on the new group')
+    assert.match(h.view(), /> Beta level/u, 'the repaired selection still owns the beta row')
+    const goneWrite = h.warnings().find(entry => entry.fields?.field === 'ext-setting:a1')
+    assert.ok(goneWrite !== undefined)
+    assert.equal(goneWrite.fields?.outcome, 'not-saved')
+    assert.match(String(goneWrite.fields?.reason), /unloaded or replaced/u)
+    // The surviving groups are still fully operable after the repair.
+    await h.key('\t')
+    assert.match(h.header(), /Settings · Extensions \[2\/2\] · root · \d+ · Rows/u)
+    assert.match(h.view(), /> Gamma level/u)
+    assert.equal(gamma.handles.length, 1)
   } finally {
     await h.dispose()
   }
