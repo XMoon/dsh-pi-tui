@@ -4214,47 +4214,72 @@ function focusChartPublication(ref: string): PublishedVisual {
   }
 }
 
-test('a published visual keeps its one final Assistant row and inline chart under Focus', async () => {
+test('the real Ctrl+O key folds a process-bearing visual answer and keeps one inline figure', async () => {
   const ref = `sv1_${'d'.repeat(20)}`
   const marker = `[dsh-visual-${ref}]: <#>`
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('user/message', {
-      id: MessageId('u-visual-focus'), role: 'user',
-      content: [{ type: 'text', text: 'draw it' }], source: { kind: 'user' },
+      id: MessageId('u-visual-focus-key'), role: 'user',
+      content: [{ type: 'text', text: 'draw it with work' }], source: { kind: 'user' },
     }, T0 + 1, 1),
-    eventAt('assistant/message', {
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the foldable process' } }, T0 + 2, 2),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('visual-focus-key'),
+      name: 'bash', arguments: JSON.stringify({ command: 'echo focus-key-process' }),
+    }, T0 + 3, 3),
+    eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('a-visual-focus'), role: 'assistant',
+        id: MessageId('r-visual-focus-key'), role: 'tool',
+        toolCallId: ToolCallId('visual-focus-key'),
+        content: [{ type: 'text', text: 'focus-key-result' }],
+        source: { kind: 'tool', callId: ToolCallId('visual-focus-key') },
+      },
+    }, T0 + 4, 4),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('a-visual-focus-key'), role: 'assistant',
         content: [{ type: 'text', text: `Before focus.\n\n${marker}\n\nAfter focus.` }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
-    }, T0 + 2, 2),
-    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 3, 3),
+    }, T0 + 5, 5),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 6, 6),
   ])
   const assistant = folder.messages().find(message => message.kind === 'assistant')
   assert.ok(assistant !== undefined && assistant.kind === 'assistant')
   setAssistantVisualPresentation(assistant, {
-    subjectKind: 'main', subjectId: 'focus', sourceIdentity: {}, session: {}, sessionId: 'focus', seq: 3,
-    turn: 1, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
+    subjectKind: 'main', subjectId: 'focus', sourceIdentity: {}, session: {}, sessionId: 'focus', seq: 6,
+    turn: 1, step: 1, text: assistant.text, content: undefined, assistantRevision: 0,
   }, [focusChartPublication(ref)])
 
-  const { vt, app } = startApp({ preset: 'focus' })
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset: 'focus' } })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
   show(app, folder)
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Before focus.') && view.includes('After focus.'), `final answer visible:\n${view}`)
-  assert.equal(view.split('Focus latency').length - 1, 1, `exactly one inline chart row set:\n${view}`)
-  assert.equal(view.split('[dsh-visual-').length - 1, 0, 'the marker definition never paints')
-  app.setTranscriptDetailExpanded(true)
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'precondition: the process-bearing Thought is collapsed')
+  assert.ok(hasFocusHeader(collapsed, false), `collapsed Focus header visible:\n${collapsed}`)
+  assert.equal(collapsed.split('Focus latency').length - 1, 1, `one inline chart while collapsed:\n${collapsed}`)
+
+  vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(vt.getViewport().join('\n').split('Focus latency').length - 1, 1,
-    'expanding the Thought never duplicates the final visual')
-  app.setTranscriptDetailExpanded(false)
+  const expanded = vt.getViewport().join('\n')
+  assert.equal(app.focusExpandedTurnsForTest().size, 1, 'Ctrl+O expanded the process-bearing Thought')
+  assert.ok(hasFocusHeader(expanded, true), `expanded Focus header visible:\n${expanded}`)
+  assert.equal(expanded.split('Focus latency').length - 1, 1, `the inline chart is not duplicated on expand:\n${expanded}`)
+  assert.ok(expanded.includes('Before focus.'), 'the final answer row stays visible')
+
+  vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(vt.getViewport().join('\n').split('Focus latency').length - 1, 1,
-    'collapsing the Thought never duplicates the final visual')
+  const collapsedAgain = vt.getViewport().join('\n')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a second Ctrl+O collapsed the Thought')
+  assert.ok(hasFocusHeader(collapsedAgain, false), `collapsed header restored:\n${collapsedAgain}`)
+  assert.equal(collapsedAgain.split('Focus latency').length - 1, 1, `the inline chart is not duplicated on collapse:\n${collapsedAgain}`)
   app.stop()
 })

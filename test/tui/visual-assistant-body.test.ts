@@ -848,28 +848,6 @@ test('cross-block fenced code around a skipped reasoning block matches the origi
 
 // ── A14: real key and copy paths over the visual card ─────────────────────
 
-test('the real Ctrl+O disclosure key keeps one inline figure and one Assistant row', async () => {
-  const doc = `Before key.\n\n${marker(REF_A)}\n\nAfter key.`
-  const { folder, assistant } = answerFolder(doc)
-  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A)])
-  const { vt, app } = mountApp({ width: 100, height: 60, preset: 'focus' })
-  await vt.waitForRender()
-  app.setTranscript(folder.messages(), folder.turnActivities())
-  await vt.waitForRender()
-  const first = vt.getViewport().join('\n')
-  assert.equal(first.split('Request latency').length - 1, 1, `one inline chart before the key:\n${first}`)
-  vt.sendInput('\x0f')
-  await vt.waitForRender()
-  const expanded = vt.getViewport().join('\n')
-  assert.equal(expanded.split('Request latency').length - 1, 1, `Ctrl+O does not duplicate the chart:\n${expanded}`)
-  assert.equal(assistantBulletRows(expanded, 'Before key.').length, 1, 'one Assistant bullet after Ctrl+O')
-  vt.sendInput('\x0f')
-  await vt.waitForRender()
-  const collapsed = vt.getViewport().join('\n')
-  assert.equal(collapsed.split('Request latency').length - 1, 1, `the second Ctrl+O does not duplicate it either:\n${collapsed}`)
-  app.stop()
-})
-
 test('fullscreen drag selection copies the visual Assistant body and leaves one inline figure', async () => {
   const copied: string[] = []
   const doc = `Before copy.\n\n${marker(REF_A)}\n\nAfter copy.`
