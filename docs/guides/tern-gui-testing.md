@@ -4,10 +4,11 @@
 > [`tern-pane-testing.md`](./tern-pane-testing.md); the terminal lane by
 > [`tmux-testing.md`](./tmux-testing.md). This one owns the third mode: a
 > **real Tern GUI window on a real display**, with the native OS chrome, the
-> real font stack, a real pointer and the client's own accessibility tree.
+> real font stack, a real pointer and the OS accessibility bridge.
 >
-> It is the lane that answers the questions **no headless run can answer**:
-> hover, the dark theme, the native window, and what a screen reader sees.
+> It is the lane that answers the questions **only a real window can answer**:
+> the native OS chrome, the desktop font stack, physical input, and the OS
+> accessibility bridge.
 
 ## When to use it, and when not
 
@@ -15,23 +16,29 @@
 |---|---|---|
 | Does the node tree carry the right nodes? | ✅ the cheapest lane | ✅ |
 | Does a click reach the handler exactly once? | ✅ via the control channel | ✅ via a **real pointer** |
-| **What does HOVER paint?** | ❌ **the control channel has no hover** | ✅ **this lane** |
-| **What does the DARK theme look like?** | ❌ | ✅ **this lane** |
+| **What does HOVER paint?** | ✅ `move`/`hover` + `dump` (the headless driver has no helper) | ✅ a **real pointer** |
+| **What does the DARK theme look like?** | ✅ `appearance dark` + `shot` (`theme dark <name>` picks the slot's theme) | ✅ `plugins run appearance:dark` (or Preferences › Appearance › Dark) + `shot`; the harness `appearance` is a no-op in a live window |
 | **What does the real OS window look like?** | ❌ | ✅ **this lane** |
-| **What does a SCREEN READER see?** | ❌ | ✅ **this lane** (`a11y`) |
+| **What does a SCREEN READER see?** | ✅ the `a11y` tree (no OS reader) | ✅ the **OS accessibility bridge** |
+| **Does the physical pointer/key path reach the handler?** | ❌ control-channel input only | ✅ **this lane** |
 | Is the layout right at a given size? | ✅ | ✅ (but slower to set up) |
 | Is the *program's* logic right? | ✅ prefer the headless lane | ❌ |
 
-**Prefer the headless lane for logic and this lane for pixels, hover, theme and
-accessibility.** The GUI lane needs a display and a window; the headless lane
-needs nothing but the Tern CLI.
+**Prefer the headless lane for logic and for the client's own state — including
+`move`/`hover`, the headless `appearance` switch and the `a11y` tree. Use this
+lane for the physical window and its live-window Appearance switch: the real OS
+chrome, the desktop font stack, a real pointer and the OS accessibility
+bridge.** The GUI lane needs a display and a window; the headless lane needs
+nothing but the Tern CLI.
 
 ## What you need
 
 - **A display.** On WSLg, `DISPLAY=:0` is already there and the geometry is
   real (`xdotool getdisplaygeometry` reports it). On a headless box, use
-  `Xvfb` — but note that a virtual display is still a real X server, so
-  hover/theme/a11y all work; only the OS window chrome is synthetic.
+  `Xvfb`. The client's control channel drives hover, the headless `appearance`
+  switch and the `a11y` tree without any display (that is the headless lane);
+  this lane needs the display for the real window, the desktop font stack,
+  physical input devices, the native OS chrome and the OS accessibility bridge.
 - **The Tern CLI** on `PATH` (or `TERN_BIN` pointing at it). The window is
   started by the CLI itself: `tern --control <socket>`.
 - **An isolated Tern profile.** The window MUST run with its own
@@ -53,14 +60,6 @@ The lane's first real run (client `tern 0.9.5 (2863c37)`, a WSLg X display at
 | An `el('button')` paints as **plain text** with no chrome | ✅ | ✅ |
 | The client does **not** enforce `disabled` on an `el` button: the click fires | ✅ | ✅ |
 | A **disabled** picker action's label is **invisible** (the reason survives only in `title`) | ✅ | ✅ |
-| The native picker's action bar is exposed to a screen reader as `Button` roles **with accessible names** | ❌ | ✅ |
-| A **hover** is a **computed-style** change, not a class change | ❌ | ✅ |
-
-The hover is the case that changes how a check must be written: the client's
-node tree exposes **no hover class**, so a GUI check that watches the class
-list would report "no hover state" and be **wrong**. The hover is visible in
-the computed style (`dump`): the primary action's background changes from
-`rgb(59,59,59)` to `rgb(101,101,101)` under the pointer.
 
 ## The two drivers
 
@@ -71,9 +70,9 @@ the computed style (`dump`): the primary action's background changes from
 | Run directory | `temp/tern-pane-XXXXXX` | `temp/tern-gui-XXXXXX` |
 | Subject start | `./launch.sh` typed into the server's cwd | the client's `run` world command, into the **focused pane** |
 | Screenshots | `shots/serve/<id>.png` in the run directory | the client writes them into its own `target/shots/tern/live/` — the driver **copies** them into `<run>/shots/` |
-| Hover | ❌ none | ✅ `move X Y` |
-| Theme | ❌ | ✅ `theme dark <name>` |
-| Accessibility tree | ❌ | ✅ `a11y` |
+| Hover | ❌ no helper (the client accepts `move`/`hover`; send them) | ✅ `move X Y` |
+| Appearance | ✅ `appearance`/`theme` via `send` | ✅ `plugins run appearance:dark\|light` + `theme` |
+| Accessibility tree | ✅ bare `a11y` via `ctl` | ✅ `a11y` (the OS bridge reads it) |
 
 The GUI driver is a **research-lane driver**: it is not part of `pnpm test` and
 not in CI, because it needs a display. Its own contract is covered by
@@ -96,13 +95,16 @@ export default async function (h) {
   h.check('the subject boots in the GUI window', booted)
   if (!booted) return
 
-  // The pointer, the click, the hover, the theme, the a11y tree.
+  // The pointer, the click, the appearance, the a11y tree.
   const snap = h.snapshot()
   const target = snap.nodes.find((n) => n.tag === 'button')
   await h.hover(snap.chains, target)   // a REAL pointer move
   await h.click(snap.chains, target)   // a REAL pointer click
-  h.ctl('theme', 'dark', 'titanium')  // the CLIENT's own theme
-  const a11y = h.ctl('a11y')           // what a screen reader sees
+  const state = h.ctl('state')
+  h.ctl('theme', 'dark', state.theme_dark)      // optional: the named dark theme
+  h.ctl('plugins', 'run', 'appearance:dark')    // the LIVE-WINDOW switch (`appearance dark` is a no-op here)
+  h.check('the client resolved the dark appearance', h.ctl('state').theme === 'dark')
+  const a11y = h.ctl('a11y')                // the tree the OS bridge reads
 }
 ```
 
@@ -142,7 +144,7 @@ Unchanged from the headless lane, and it is what makes the subject's record the
 
 | Member | Does |
 |---|---|
-| `ctl(...)` | a control command (`tree`, `stats`, `dump`, `a11y`, `system`, `pick`, `layers`, `perf`, `resize`, `theme`, `shot`, …) |
+| `ctl(...)` | a control command (`tree`, `stats`, `dump`, `a11y`, `system`, `pick`, `layers`, `perf`, `resize`, `theme`, `prefs`, `plugins`, `shot`, …) |
 | `send(...)` | a command delivered **once** and never retried (`click`, `key`, `move`, `run`) |
 | `snapshot()` | the client's real node tree, indexed (`{nodes, chains}`) |
 | `vis` / `texts` / `has` / `classNodes` / `descendantsText` | tree queries |
@@ -152,31 +154,46 @@ Unchanged from the headless lane, and it is what makes the subject's record the
 | `check(label, ok, detail)` / `measure(label, detail)` | an assertion / a measurement |
 | `finish(extra)` | the ledger, and the process exit code |
 
-## The GUI-specific commands
+## The control commands this driver wraps
 
-These are the ones that make the lane worth its extra setup.
+These are the client's own control and harness commands, not GUI-only
+features: the headless client accepts the same control/harness family, and the
+headless driver wraps a smaller subset. The GUI driver adds the REAL WINDOW: a
+real pointer, the window's real content size, the native OS integration and the
+OS accessibility bridge.
 
-| Command | What it gives the headless lane cannot |
+| Command | What the GUI driver adds |
 |---|---|
-| `move X Y` | **the real pointer**, without clicking. `stats.pointer` follows it. This is the ONLY way to get a hover. |
+| `move X Y` | **the real pointer**, without clicking. `stats.pointer` follows it. (The headless client also accepts `move` and `hover`; a headless flow sends them with `send`.) |
 | `resize` | the window's **content** size. A REAL WINDOW HAS A MINIMUM SIZE: the client clamps a narrow request (measured: **720px** wide on this build), so a 400px pane is not reachable in the GUI. The driver **reports** the clamp (`{requested, viewport, clamped}`) instead of failing on it — a clamped measurement must be visible, not silently applied. |
-| `click X Y` | a real pointer click on the window. The reply names the element that took the focus. |
-| `theme dark <name>` / `theme light` | the **client's own** appearance. The theme names come from `ctl state` (`theme_dark`). |
-| `a11y` | the **accessibility tree**: every node's role, name, bounds and actions. This is what a screen reader reads. |
-| `dump` | every element's path, box and **computed style** (background, color, radius, font). The hover state lives HERE, not in the class list. |
-| `system` | the window's own info: the title, the displays, the dialogs, the file associations, the input-monitor state. |
-| `pick X Y` | what is really at a point. |
-| `layers` | the last frame's compositing layers in paint order. |
+| `click X Y` | a real pointer click on the window. The reply names the element that took the focus. (The headless client accepts a control click too; this one is a physical event.) |
+| `appearance dark\|light` | the **headless** switch (the simulated system appearance). A live window accepts it but keeps its saved Appearance setting; it is not the GUI switch. |
+| `plugins run appearance:dark\|light` | the **live-window** switch: the `appearance:dark`/`appearance:light` key action, the same setting the Preferences Appearance radio drives. It saves the Appearance setting; prove `state.theme === 'dark'`. |
+| `prefs appearance` / `prefs search dark` | the manual Appearance page: the Appearance radio (System / Light / Dark). A real click on Dark/Light switches the window and saves it. |
+| `theme [dark\|light] "<name>"` | a **named theme for an appearance**; a single argument is always a name, even `dark` or `light`. The names come from `ctl state` (`theme_dark`/`theme_light`). `theme dark <name>` alone does not switch a light client. |
+| `a11y` | the accessibility tree the OS bridge reads; the headless client exposes the same tree. |
+| `dump` | every element's path, box and **computed style** (background, color, radius, font). The hover state lives HERE, not in the class list; the headless client reports the same computed style. |
+| `system` | the window's own info: the title, the displays, the dialogs, the file associations, the input-monitor state. This is the REAL OS integration; headless `system` is simulated. |
+| `pick X Y` | what is really at a point; also available headless. |
+| `layers` | the last frame's compositing layers in paint order; also available headless. |
 | `perf` | the client's own frame timing: a BARE `perf` is the summary (frames, `idleFrames`, `drawnShare`, and the `cpu`/`thread`/`app`/`update` percentiles). `perf on\|off` toggles the collection, `perf mark` marks a point and `perf since` reports the frames after it (it needs a mark first). |
-| `state` | the window's own state JSON (tabs, panes, focus, the theme). |
+| `state` | the window's own state JSON: tabs, panes, focus, and the resolved appearance (`theme`) plus the named slots (`theme_dark`/`theme_light`). |
 
 ## Rules that keep the evidence honest
 
+- **A LIVE WINDOW'S APPEARANCE IS A SAVED SETTING.** The harness `appearance`
+  command is the HEADLESS switch: a live window accepts it, returns `{ok:true}`,
+  and keeps the saved Appearance setting. The live switch is the
+  `appearance:dark` key action (`plugins run appearance:dark`,
+  `appearance:light`) or the Preferences › Appearance radio. Both save the
+  setting; prove the switch with `state.theme === 'dark'` and
+  `dump.header.theme === 'dark'`, never the reply.
 - **A hover is a COMPUTED STYLE, not a class.** The client's tree exposes no
   hover class: the class stays the same before and after the pointer moves.
-  The hover shows up in `dump` (the background changes). **A GUI hover check
-  that watches the class list is a false negative** — measure the computed
-  style.
+  The hover shows up in `dump` (the background changes). **A hover check that
+  watches the class list is a false negative** — measure the computed style.
+  The headless client reports the same computed-style change; this lane adds
+  the physical pointer path.
 - **A DISABLED control is not readable.** The client's own disabled picker
   action is a grey pill whose **label is invisible**; the reason survives only
   in the `title` attribute. A GUI capture that shows "the button is there" is
@@ -216,8 +233,10 @@ These are the ones that make the lane worth its extra setup.
   (`target/shots/tern/live/<id>.png`), not to the run directory. Copy the
   artifacts into the run directory, or the evidence is lost with the tree.
 - **A GUI run is not a headless run.** The GUI is a **different client mode**:
-  its own theme, its own font stack, its own window. A claim made in the GUI
-  is at the `REAL_TERN_GUI` tier, and it does not automatically cover the
+  the same control commands, but the window adds the native chrome, the desktop
+  font stack and the OS accessibility bridge. Its appearance is a SAVED SETTING:
+  the harness `appearance` command is not the live switch. A claim made in the
+  GUI is at the `REAL_TERN_GUI` tier, and it does not automatically cover the
   headless lane.
 
 ## The trap list (every item hit in real testing)
@@ -313,6 +332,23 @@ These are the ones that make the lane worth its extra setup.
     socket directory is KEPT: an exit hook must never delete a directory a
     surviving child may still be using. The exit hooks are the last-resort
     fallback for an exit path the driver does not own.
+22. **`theme` SELECTS A NAMED THEME, NOT THE APPEARANCE.** `theme dark <name>`
+    changes the dark slot only; on a light client the resolved appearance stays
+    light, and `theme dark` (one word) is a theme NAME, not the switch. In a
+    headless run send `appearance dark`; in a live window use
+    `plugins run appearance:dark`, prove `state.theme === 'dark'`, then capture.
+    See [`tern-pane-testing.md`](./tern-pane-testing.md#appearance-and-theme).
+23. **`appearance dark` IS A NO-OP IN A LIVE WINDOW.** The harness command
+    returns `{ok:true}` but `state.theme` and `dump.header.theme` stay at the
+    saved Appearance setting, and no visible element's computed style changes.
+    The live switch is the `appearance:dark` key action (`plugins run
+    appearance:dark`, `appearance:light`) or the Preferences › Appearance ›
+    Dark/Light radio. The action saves the setting; prove `state.theme`, never
+    the reply.
+24. **A `dump` WITH PREFERENCES OPEN CAN FAIL.** A `dump` issued while the
+    Appearance search page was open was rejected (the driver exhausted its
+    retries), and closing the sheet restored it. Read `state.theme` while the
+    sheet is open, and take `dump`/`shot` after `prefs close`.
 
 ## Scripts
 

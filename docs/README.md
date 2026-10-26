@@ -95,8 +95,8 @@ MANDATORY or BLOCKING.
 | `guides/development.md` | contributors | Worktree policy, npm/source DSH modes, doctor/bootstrap, source-build diagnosis, benchmark/replay method |
 | `guides/releasing.md` | ops | Versioning, bilingual changelog/README metadata, verification, tag and publication procedure |
 | `guides/tmux-testing.md` | contributors | When/how to verify in tmux, capture flow, Focus-replay and measurement procedures, traps |
-| `guides/tern-pane-testing.md` | TSP contributors | Real Tern-pane harness vs headless evidence, run conditions, assertion-vs-measurement and limits |
-| `guides/tern-gui-testing.md` | TSP contributors | The real Tern GUI-window lane: hover, the client's theme, the native window and the accessibility tree |
+| `guides/tern-pane-testing.md` | TSP contributors | Real Tern-pane harness vs headless evidence, run conditions, the appearance/theme switch, assertion-vs-measurement and limits |
+| `guides/tern-gui-testing.md` | TSP contributors | The real Tern GUI-window lane: the native window, the OS chrome/font stack, the live-window Appearance switch, physical input and the OS accessibility bridge |
 | `guides/footer.md` | users | `/footer` builtin items, styles, custom text/commands, extension items and troubleshooting |
 | `guides/dsh-compatibility.md` | users/contributors | Semver/prerelease matching method, manifest/matrix/mode authority, Session V2/V3 data handling, Source Mode validation |
 | `guides/testing.md` | contributors | The test-tree ownership map, the new-test rules, the lane commands and the objective discovery guards |
