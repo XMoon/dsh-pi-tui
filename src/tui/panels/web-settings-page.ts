@@ -245,9 +245,15 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private disposed = false
   private revision = 0
   private paint: PagePaint | undefined
-  /** The credential action the LAST frame painted as the ACTIVE cursor (Detail
-   *  region only). Enter must target exactly this identity. */
+  /** The credential action the LAST COMMITTED frame painted as the ACTIVE
+   *  cursor (Detail region only). Enter must target exactly this identity. It
+   *  is updated ONLY while the real render runs: a non-render projection (the
+   *  input-path rebase) must never advance it before the screen shows the new
+   *  action. */
   private paintedCredentialAction: 'configure' | 'clear' | undefined
+  /** True only inside the real `render()` call (not for input-path
+   *  projections). */
+  private painting = false
   private pressed: {
     readonly x: number
     readonly y: number
@@ -864,6 +870,15 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   render(width: number): string[] {
     if (this.disposed) return [fit('', width)]
+    this.painting = true
+    try {
+      return this.renderFrame(width)
+    } finally {
+      this.painting = false
+    }
+  }
+
+  private renderFrame(width: number): string[] {
     // A backend that turned non-current closes an open endpoint draft FIRST:
     // the frame never paints a Confirm the writer must refuse.
     this.syncEndpointWritability()
@@ -1291,7 +1306,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     const activeIndex = this.reconcileCredentialCursor()
-    this.paintedCredentialAction = undefined
+    if (this.painting) this.paintedCredentialAction = undefined
     let selectable = -1
     for (const action of actions) {
       if (action.enabled) selectable += 1
@@ -1305,7 +1320,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         continue
       }
       const active = selectable === activeIndex
-      if (active && this.region === 'detail') this.paintedCredentialAction = action.action
+      if (active && this.region === 'detail' && this.painting) this.paintedCredentialAction = action.action
       const marker = active ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
       const label = `${marker}${active && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
       lines.push({ text: truncateToWidth(label, Math.max(1, width), '…', false), action: action.action, enabled: true })
