@@ -2549,6 +2549,9 @@ type FullscreenImageRowHit = {
 type FullscreenVisualRowHit = {
   readonly row: number
   readonly kind: 'action' | 'body' | 'inert'
+  /** The first painted cell of this row (the body's placement start; 0 for
+   * action/inert rows, whose segments carry their own ranges). */
+  readonly startCol: number
   /** The widest painted cell of this row (body placement width / action row). */
   readonly endCol: number
   /** Body rows only: the viewer hit identity. */
@@ -2587,6 +2590,9 @@ type TranscriptVisualHit = {
   readonly thumbnailBody?: {
     readonly startRow: number
     readonly endRow: number
+    /** Entry-relative first/last+1 column of the REAL pixels (the Assistant
+     *  bullet indent is part of the painted left boundary). */
+    readonly startCol: number
     readonly endCol: number
   }
 }
@@ -12758,6 +12764,7 @@ export class TuiApp {
           rows.push({
             row,
             kind: 'action',
+            startCol: 0,
             endCol: Math.max(...segments.map(segment => segment.endCol)),
             segments,
           })
@@ -12768,12 +12775,13 @@ export class TuiApp {
           rows.push({
             row,
             kind: 'body',
+            startCol: body.startCol,
             endCol: body.endCol,
             hitId: `visual:view:${token}:${hit.handle.ref}`,
           })
           continue
         }
-        rows.push({ row, kind: 'inert', endCol: Math.max(1, this.terminal.columns) })
+        rows.push({ row, kind: 'inert', startCol: 0, endCol: Math.max(1, this.terminal.columns) })
       }
     }
     return rows
@@ -12806,8 +12814,10 @@ export class TuiApp {
       return { hitId: 'inert', span }
     }
     if (hit.kind === 'body' && hit.hitId !== undefined) {
-      const span = { startCol: 0, endCol: hit.endCol }
-      if (hit.endCol <= 0 || x >= hit.endCol) return { hitId: 'inert', span }
+      const span = { startCol: hit.startCol, endCol: hit.endCol }
+      if (span.endCol <= span.startCol || x < span.startCol || x >= span.endCol) {
+        return { hitId: 'inert', span }
+      }
       return { hitId: hit.hitId, span }
     }
     return { hitId: 'inert', span: { startCol: 0, endCol: Math.max(1, this.terminal.columns) } }
@@ -12850,8 +12860,8 @@ export class TuiApp {
       }
       const body = hit.thumbnailBody
       if (body !== undefined && inMessage >= body.startRow && inMessage < body.endRow) {
-        const span = { startCol: 0, endCol: body.endCol }
-        return body.endCol > 0 && x < body.endCol
+        const span = { startCol: body.startCol, endCol: body.endCol }
+        return span.endCol > span.startCol && x >= span.startCol && x < span.endCol
           ? { hitId: `visual:view:${token}:${hit.handle.ref}`, kind: 'view', handle: hit.handle, span }
           : { hitId: 'inert', kind: 'inert', span }
       }
@@ -18124,6 +18134,7 @@ export class TuiApp {
               thumbnailBody: {
                 startRow: painted.thumbnailBody.startRow,
                 endRow: painted.thumbnailBody.endRow,
+                startCol: record.indent,
                 endCol: painted.thumbnailBody.endCol + record.indent,
               },
             }),
@@ -24364,6 +24375,11 @@ export class TuiApp {
    * published only after it settles AND the same source is still current.
    */
   private copyVisualPayload(handle: TranscriptVisualHandle): void {
+    // ADMISSION, not just notice suppression: the same current-source proof
+    // `openSvgViewer` applies must gate the WRITE itself. A stale frame target
+    // must never start a clipboard write; the settle fence below only decides
+    // whether an already-started write may report.
+    if (!this.visualSourceCurrent(handle)) return
     const copy = this.copySelection
     const runner = this.events.runOwned
     if (copy === undefined || runner === undefined) {

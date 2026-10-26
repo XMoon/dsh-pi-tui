@@ -20,6 +20,7 @@ import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import type { ChartFact } from '../../src/domain/visual/chart.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import {
+  clearAssistantVisualPresentation,
   setAssistantVisualPresentation,
   type VisualPresentationKey,
 } from '../../src/domain/visual/presentation.ts'
@@ -471,7 +472,7 @@ test('the visual host actions are blocked from the parent surface inside a subag
 })
 
 
-test('a click on the READY thumbnail pixel body opens the same leased SVG viewer', async () => {
+test('the READY thumbnail pixel hit starts at the content indent: indent/right blank inert, pixels View', async () => {
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const loader = new SvgRasterLoader(async (_source, options) => ({
     png: new Uint8Array(),
@@ -488,13 +489,34 @@ test('a click on the READY thumbnail pixel body opens the same leased SVG viewer
   const lines = settled.split('\n')
   const lastDescriptionRow = lines.findIndex(line => line.includes('SVG source available in the expanded tool call')) + 1
   assert.ok(lastDescriptionRow > 0, `the description is painted:\n${settled}`)
+  // The description row's first content cell IS the figure's left boundary;
+  // the thumbnail's real pixels start at that same column, not at column 0.
+  const titleRow = lines.findIndex(line => line.includes('Service topology')) + 1
+  assert.ok(titleRow > 0, `the SVG title is painted:\n${settled}`)
+  const titleLine = lines[titleRow - 1]!
+  const contentCol = visibleWidth(titleLine.slice(0, titleLine.indexOf('Service topology'))) + 1
+  assert.ok(contentCol > 1, `the Assistant indent exists:\n${settled}`)
   // The thumbnail contributes one spacer row, then the REAL pixel body rows
   // (the sequence itself is consumed by the virtual terminal's image layer).
   const pixelRow = lastDescriptionRow + 2
   assert.ok(stripSgr(lines[pixelRow - 1] ?? '').trim() === '', `the pixel body starts after the description:\n${settled}`)
-  await clickCell(vt, { x: 4, y: pixelRow })
-  const viewer = await viewport(vt)
-  assert.ok(viewer.includes('SVG · Service topology'), `a real pixel-body click opens the viewer:\n${viewer}`)
+
+  // LEFT indent: outside the real pixel body, inert (never opens the Viewer).
+  await clickCell(vt, { x: contentCol - 1, y: pixelRow })
+  assert.equal((await viewport(vt)).includes('SVG · Service topology'), false,
+    'the indent cell is not a pixel hit')
+
+  // The first real pixel cell opens the SAME leased Viewer.
+  await clickCell(vt, { x: contentCol, y: pixelRow })
+  assert.ok((await viewport(vt)).includes('SVG · Service topology'),
+    'a real pixel-body click opens the viewer')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+
+  // RIGHT blank: beyond the painted image width, inert.
+  await clickCell(vt, { x: contentCol + 40, y: pixelRow })
+  assert.equal((await viewport(vt)).includes('SVG · Service topology'), false,
+    'the blank cells right of the image are not a pixel hit')
   app.stop()
   loader.dispose()
 })
@@ -672,6 +694,70 @@ test('a subagent parent viewer renders figure cells inert: no pointer copy and n
   assert.equal((await viewport(vt)).includes('SVG · Service topology'), false,
     'the parent viewer never opens the SVG viewer')
   app.setViewerMode(undefined)
+  app.stop()
+  loader.dispose()
+})
+
+
+test('a stale painted copy target never STARTS a clipboard write', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const { vt, app, copied } = mountApp()
+  app.setFullscreen(true)
+  const { folder, assistant } = answerFolder(`Before.\n\n${marker(REF_A)}\n\nAfter.`)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A, CHART)])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const before = await viewport(vt)
+  const cell = cellOf(before, 'Copy Data')
+  // The sidecar is revoked but the LAST PAINTED frame still carries the old
+  // target: the admission gate, not the notice fence, must refuse the write.
+  clearAssistantVisualPresentation(assistant)
+  await clickCell(vt, cell)
+  assert.deepEqual(copied, [], 'a stale frame target never starts the clipboard write')
+  const after = stripSgr(await viewport(vt))
+  assert.equal(after.includes('Copied visual'), false)
+  app.stop()
+})
+
+test('a stale Alt+C target never STARTS a clipboard write', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const { vt, app, copied } = mountApp()
+  const { folder, assistant } = answerFolder(`Before.\n\n${marker(REF_A)}\n\nAfter.`)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A, CHART)])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  vt.sendInput('\x1bv')
+  await vt.waitForRender()
+  clearAssistantVisualPresentation(assistant)
+  vt.sendInput('\x1bc')
+  await vt.waitForRender()
+  assert.deepEqual(copied, [], 'the stale selection never starts the clipboard write')
+  assert.ok(stripSgr(await viewport(vt)).includes('Select a visual first'))
+  app.stop()
+})
+
+test('a stale SVG viewer copy never STARTS a clipboard write', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const loader = new SvgRasterLoader(async (_source, options) => ({
+    png: new Uint8Array(),
+    base64: TINY_PNG_BASE64,
+    widthPx: options.targetWidth,
+    heightPx: 8,
+  }))
+  const { vt, app, copied } = mountApp({ svgLoader: loader })
+  app.setFullscreen(true)
+  const { folder, assistant } = answerFolder(`Before.\n\n${marker(REF_A)}\n\nAfter.`)
+  setAssistantVisualPresentation(assistant, key(), [svgPublication(REF_A)])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  await clickCell(vt, cellOf(await viewport(vt), 'View'))
+  assert.ok((await viewport(vt)).includes('SVG · Service topology'), 'the viewer is open')
+  clearAssistantVisualPresentation(assistant)
+  vt.sendInput('c')
+  await vt.waitForRender()
+  assert.deepEqual(copied, [], 'the closed-source viewer copy never starts the clipboard write')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   app.stop()
   loader.dispose()
 })
