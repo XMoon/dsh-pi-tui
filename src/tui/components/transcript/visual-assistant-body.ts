@@ -71,6 +71,10 @@ export interface VisualAssistantPaintedHits {
 /** The ordered Assistant body: no bullet, no row identity of its own. */
 export class VisualAssistantBody implements Component {
   private readonly children: Component[] = []
+  /** Figures in their ACTUAL painted order (the placement plan's `pieces`
+   *  order, tail included). Selection order follows this, never the
+   *  publication list, which is authority order only. */
+  private readonly figureOrder: VisualFigureComponent[] = []
   /** The hit geometry of the LAST render (width-fenced like every painted hit). */
   private paintedHits: { readonly width: number; readonly hits: readonly VisualAssistantPaintedHits[] } | undefined
 
@@ -142,7 +146,16 @@ export class VisualAssistantBody implements Component {
   }
 
   private visualComponents(piece: VisualPiece, options: VisualAssistantBodyOptions): Component[] {
-    return [new VisualFigureComponent(options.figure(piece))]
+    const figure = new VisualFigureComponent(options.figure(piece))
+    this.figureOrder.push(figure)
+    return [figure]
+  }
+
+  /** The published-visual refs in their ACTUAL display order (the placement
+   *  plan's figure sequence, tail included). The selection cycle consumes this
+   *  order; the publication list is authorization order only. */
+  visualRefs(): readonly string[] {
+    return this.figureOrder.map(figure => figure.ref)
   }
 
   /**

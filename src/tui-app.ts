@@ -24261,19 +24261,24 @@ export class TuiApp {
     return handle
   }
 
-  /** Every current published-visual occurrence of the mounted window, in plan
-   * order (mounted message order + each message's publication order). */
+  /** Every current published-visual occurrence of the mounted window, in the
+   * ACTUAL display order: the ordered figures of each Assistant body (the
+   * placement plan's `pieces`, tail included), then the mounted message order.
+   * The publication list is authorization order only — a marker order that
+   * differs from the publication order must not reorder the selection cycle. */
   private mountedVisualHandles(): TranscriptVisualHandle[] {
     const handles: TranscriptVisualHandle[] = []
     for (const block of this.mountedTranscriptBlocks) {
       if (block.block.kind !== 'message') continue
       const message = block.block.message
-      const publications = assistantVisualPresentation(message)?.publications
+      const record = this.visualAssistantBodies.get(message)
       const byRef = this.visualFigureHandles.get(message)
-      if (publications === undefined || byRef === undefined) continue
-      for (const publication of publications) {
-        const handle = byRef.get(publication.ref)
-        if (handle !== undefined && handle.publication === publication) handles.push(handle)
+      const publications = assistantVisualPresentation(message)?.publications
+      if (record === undefined || byRef === undefined || publications === undefined) continue
+      const currentByRef = new Map(publications.map(publication => [publication.ref, publication]))
+      for (const ref of record.body.visualRefs()) {
+        const handle = byRef.get(ref)
+        if (handle !== undefined && currentByRef.get(ref) === handle.publication) handles.push(handle)
       }
     }
     return handles
