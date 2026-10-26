@@ -294,8 +294,12 @@ export class KittyTerminalFacade implements Terminal {
     // gone and the ownership decision was made at the retirement boundary.
     if (imageId !== undefined && this.core.wasOwned(imageId)) return ''
     if (imageId !== undefined) return apc // a foreign owner's image: untouched
-    if (controls.d === 'A') return this.core.translateGlobalImageDelete()
-    if (controls.d === 'a') return this.core.translateGlobalPlacementDelete()
+    // Kitty's default deletion specifier is `a` ("without any other keys it
+    // deletes all images visible on screen"), so a bare `a=d` is the same
+    // global form and must be scoped too.
+    const specifier = controls.d ?? 'a'
+    if (specifier === 'A') return this.core.translateGlobalImageDelete()
+    if (specifier === 'a') return this.core.translateGlobalPlacementDelete()
     return apc
   }
 }
