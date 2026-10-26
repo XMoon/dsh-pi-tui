@@ -58,6 +58,27 @@ export type VisualSessionEvent =
     readonly data: { readonly turn: number; readonly step: number }
   }
   | {
+    /**
+     * The complete model response of one step: it is committed BEFORE that
+     * step's `tool/call` events, so it is the only durable place that already
+     * knows every call id the step will request. Its `content` carries the
+     * `tool-call` blocks, which is what makes duplicate-id detection complete.
+     */
+    readonly type: 'assistant/message'
+    readonly seq: number
+    readonly data: {
+      readonly turn: number
+      readonly step: number
+      readonly message: {
+        readonly content: readonly {
+          readonly type: string
+          readonly id?: string
+          readonly name?: string
+        }[]
+      }
+    }
+  }
+  | {
     readonly type: 'tool/call'
     readonly seq: number
     readonly surfaceOp?: unknown
@@ -95,6 +116,7 @@ const RELEVANT_EVENT_TYPES: ReadonlySet<string> = new Set([
   'turn/end',
   'step/start',
   'step/end',
+  'assistant/message',
   'tool/call',
   'tool/result',
 ])
@@ -221,6 +243,72 @@ interface IndexedResult {
 
 function callKey(turn: number, step: number, callId: string): string {
   return `${turn}:${step}:${callId}`
+}
+
+/**
+ * The tool-call ids ONE step's model response requested, with how often each id
+ * appears.
+ *
+ * `assistant/message` is appended before any of that step's `tool/call` events,
+ * so this count is complete even when a concurrency-safe publisher is already
+ * running while the loop is still appending its siblings. A count above one
+ * means the model repeated an id in a single response — a state the live gate
+ * must refuse up front, because the replay of the finished log will necessarily
+ * see the duplicate and treat the identity as ambiguous.
+ * @param events - the authority events, in log order.
+ * @returns per-step `(turn, step) -> callId -> count`.
+ */
+function stepCallIds(events: readonly VisualSessionEvent[]): Map<string, Map<string, number>> {
+  const steps = new Map<string, Map<string, number>>()
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    if (isModelOnlyReplacement(event)) continue
+    const key = `${event.data.turn}:${event.data.step}`
+    let ids = steps.get(key)
+    if (ids === undefined) {
+      ids = new Map<string, number>()
+      steps.set(key, ids)
+    }
+    for (const block of event.data.message.content) {
+      if (block.type !== 'tool-call' || typeof block.id !== 'string') continue
+      ids.set(block.id, (ids.get(block.id) ?? 0) + 1)
+    }
+  }
+  return steps
+}
+
+/**
+ * The `(turn, step)` a `step/start` seq opened, from the assistant messages.
+ *
+ * The value is a plain `"turn:step"` key used by {@link stepCallIds}. A step
+ * whose model response is not in the observed cut answers undefined, and the
+ * caller then relies on the indexed occurrences alone.
+ * @param events - the authority events.
+ * @param turn - the executing turn.
+ * @param stepStartSeq - the seq of the executing step's `step/start`.
+ * @returns the step key, or undefined when no model response was observed.
+ */
+function assistantStepOf(
+  events: readonly VisualSessionEvent[],
+  turn: number,
+  stepStartSeq: number,
+): string | undefined {
+  // The step's model response is the `assistant/message` of the same turn that
+  // lands AFTER its `step/start` and BEFORE the next step boundary, so the seq
+  // range identifies it exactly.
+  let nextBoundary = Number.POSITIVE_INFINITY
+  for (const event of events) {
+    if (event.seq <= stepStartSeq) continue
+    if (event.type !== 'step/start' && event.type !== 'step/end' && event.type !== 'turn/end') continue
+    nextBoundary = Math.min(nextBoundary, event.seq)
+  }
+  for (const event of events) {
+    if (event.type !== 'assistant/message' || isModelOnlyReplacement(event)) continue
+    if (event.data.turn !== turn) continue
+    if (event.seq <= stepStartSeq || event.seq >= nextBoundary) continue
+    return `${event.data.turn}:${event.data.step}`
+  }
+  return undefined
 }
 
 /**
@@ -622,6 +710,19 @@ export function decidePublication(input: {
   readonly callId: string
 }): PublicationDecision {
   const { sessionId, events, refs, turn, stepStartSeq, callId } = input
+  // Complete-batch identity check FIRST: the step's own model response already
+  // lists every call id it requested, so a repeated id is refused before any
+  // publisher can win a race against its own sibling's `tool/call` append.
+  const step = assistantStepOf(events, turn, stepStartSeq)
+  if (step !== undefined) {
+    const ids = stepCallIds(events).get(step)?.get(callId) ?? 0
+    if (ids > 1) {
+      return {
+        ok: false,
+        reason: `the model response for this step requested "${callId}" ${ids} times; a duplicated call id cannot publish`,
+      }
+    }
+  }
   const calls = indexCalls(sessionId, events)
   const publishers = calls.filter(candidate =>
     candidate.name === PRESENT_VISUAL_TOOL_NAME
