@@ -131,9 +131,8 @@ export class KittyTerminalFacade implements Terminal {
     // never swallowed and never left to skip `inner.stop()`.
     let failure: unknown
     try {
+      this.core.queueUnplacedRetirements()
       this.flushRetirements()
-      const cleanup = this.core.shutdownUnplaced()
-      if (cleanup !== '') this.inner.write(cleanup)
     } catch (error) {
       failure = error
     }
@@ -349,12 +348,14 @@ export class KittyTerminalFacade implements Terminal {
 
   private handleDelete(apc: string, controls: Readonly<Record<string, string>>): string {
     const imageId = numericControl(controls.i)
-    if (imageId !== undefined && this.core.owns(imageId)) {
-      // A legacy writer's delete of a managed image is its layout/frame intent.
-      // Only the Core may free the data, so the placement is what disappears.
-      return this.core.translateWriterDelete(imageId)
+    if (imageId !== undefined) {
+      // A delete for an id inside this Core's own id range — live or retired —
+      // is its layout/frame intent: only the Core may free the data, so the
+      // placement is what disappears. Anything outside that range is a foreign
+      // owner's command and is never touched.
+      const translated = this.core.translateWriterDelete(imageId)
+      return translated === '' ? apc : translated
     }
-    if (imageId !== undefined) return apc // a foreign owner's image: untouched
     // Kitty's default deletion specifier is `a` ("without any other keys it
     // deletes all images visible on screen"), so a bare `a=d` is the same
     // global form and must be scoped too.

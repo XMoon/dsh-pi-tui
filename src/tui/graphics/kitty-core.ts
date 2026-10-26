@@ -87,13 +87,30 @@ export const MAX_RESIDENT_PAYLOAD_BYTES = 64 * 1024 * 1024
 export const MAX_RESIDENT_DECODED_BYTES = 256 * 1024 * 1024
 
 /**
- * How many recently retained ids stay recognizable after their occurrence went
- * away. A legacy writer's delete for one of them must stay a scoped placement
- * removal (never a hard delete), and that delete only arrives for a frame that
- * was on screen one or two paints ago. The ring is FIXED size so app-side state
- * never grows with the number of images a session displayed.
+ * This Core hands out a CONTIGUOUS, forward-only id range starting at a random
+ * offset in the lower half of the 32-bit space. Ownership is then decidable in
+ * O(1) from two numbers, with no per-image bookkeeping and no session-long id
+ * set:
+ *
+ * - every id in `[floor, next)` is this Core's, forever — including an
+ *   occurrence whose pixels the terminal retained after it went away — so a
+ *   late legacy writer delete can never be mistaken for a foreign command and
+ *   can never free those pixels;
+ * - the range never wraps (`next` simply stops), so a historical id is NEVER
+ *   re-used and a new occurrence can never adopt old pixels;
+ * - a foreign owner's id is outside the range with probability
+ *   `1 - allocated/2^32`, so its per-id commands pass through byte-for-byte.
+ *   A genuine numeric collision is possible in principle (the plan forbids
+ *   claiming a mathematical zero); it would run the placement-removal part of
+ *   the same request for the foreign owner — its visible effect is preserved,
+ *   only the data-free would not be performed on its behalf.
+ *
+ * The range starts in the lower half so a session has at least 2^31 ids before
+ * the space is exhausted (an unreachable number: exhaustion falls back to
+ * text). Allocation is deliberately not CSPRNG-per-id: the anti-reuse guarantee
+ * must be exact, and it is, without keeping every historical id.
  */
-const RETAINED_ID_MEMORY = 256
+const ID_SPACE_START_LIMIT = 0x80000000
 
 interface OwnedRecord {
   readonly image: KittyImage
@@ -128,9 +145,12 @@ function decodedBytes(source: KittyImageSource): number {
 export class KittyGraphicsCore {
   /** The ACTIVE set: occurrences that still hold a payload (the budgeted set). */
   private readonly records = new Map<number, OwnedRecord>()
-  /** Bounded memory of ids whose painted pixels the terminal now retains. */
-  private readonly retainedIds = new Set<number>()
-  private readonly retainedOrder: number[] = []
+  /** The first id this Core ever handed out (a random start). */
+  private readonly imageIdFloor = randomInt(1, ID_SPACE_START_LIMIT)
+  /** One past the last id handed out: `[floor, next)` is exactly this Core's. */
+  private nextImageId = this.imageIdFloor
+  /** Ids whose frame write failed after possibly reaching the sink. */
+  private readonly ambiguous = new Set<number>()
   private readonly onEvent: ((event: KittyGraphicsEvent) => void) | undefined
   private nextPlacementId = 1
   private generationCounter = 0
@@ -145,11 +165,6 @@ export class KittyGraphicsCore {
   /** How many occurrences currently hold a payload (the budgeted active set). */
   get residentImageCount(): number {
     return this.records.size
-  }
-
-  /** How many recently retained ids the Core still recognizes (bounded). */
-  get retainedImageCount(): number {
-    return this.retainedIds.size
   }
 
   /** The retained base64 payload total (diagnostics + budget tests). */
@@ -177,6 +192,10 @@ export class KittyGraphicsCore {
       return undefined
     }
     const imageId = this.allocateImageId()
+    if (imageId === undefined) {
+      this.emit({ type: 'budget-fallback', detail: 'id-space' })
+      return undefined
+    }
     const image: KittyImage = {
       imageId,
       placementId: this.nextPlacementId++,
@@ -199,13 +218,19 @@ export class KittyGraphicsCore {
     return image
   }
 
-  /**
-   * Whether `imageId` belongs to this Core: a live occurrence, or a painted one
-   * whose pixels the terminal now retains (still recognized so a late legacy
-   * delete stays a scoped placement removal instead of freeing those pixels).
-   */
+  /** Whether `imageId` is a live occurrence that can receive a placement. */
   owns(imageId: number): boolean {
-    return this.records.has(imageId) || this.retainedIds.has(imageId)
+    return this.records.has(imageId)
+  }
+
+  /**
+   * Whether `imageId` was EVER this Core's. True for a live occurrence and for
+   * one whose pixels the terminal retained after the occurrence went away:
+   * both are inside the reserved id slice, so this stays exact with no
+   * per-image bookkeeping and no session-long id set.
+   */
+  ownsIdSpace(imageId: number): boolean {
+    return imageId >= this.imageIdFloor && imageId < this.nextImageId
   }
 
 
@@ -232,6 +257,7 @@ export class KittyGraphicsCore {
   notePlacement(imageId: number, buffer: KittyScreenBuffer): void {
     const record = this.records.get(imageId)
     if (record === undefined) return
+    this.ambiguous.delete(imageId)
     record.buffer = buffer
     record.placements += 1
     record.everPlaced = true
@@ -258,15 +284,10 @@ export class KittyGraphicsCore {
     if (record.everPlaced) {
       this.payloadBytes -= record.source.pngBase64.length
       this.decodedByteTotal -= decodedBytes(record.source)
-      // The pixels are the terminal's now; the Core keeps no payload and only
-      // a BOUNDED id memory so a late writer delete stays a placement removal.
+      // The pixels are the terminal's now. The id needs no record: it lives in
+      // the reserved slice, so a late writer delete is still recognised as a
+      // placement removal and the id is never handed out again.
       this.records.delete(image.imageId)
-      this.retainedIds.add(image.imageId)
-      this.retainedOrder.push(image.imageId)
-      if (this.retainedOrder.length > RETAINED_ID_MEMORY) {
-        const forgotten = this.retainedOrder.shift()!
-        this.retainedIds.delete(forgotten)
-      }
       this.emit({ type: 'retained', imageId: image.imageId })
       return
     }
@@ -288,7 +309,7 @@ export class KittyGraphicsCore {
       this.emit({ type: 'writer-delete-translated', imageId })
       return encodeKittyDeletePlacement(imageId)
     }
-    if (!this.retainedIds.has(imageId)) return ''
+    if (!this.ownsIdSpace(imageId)) return ''
     // The occurrence is gone but its pixels are terminal-retained: the layout
     // intent is still "remove the placement", never "free the data".
     this.emit({ type: 'writer-delete-translated', imageId, detail: 'retained' })
@@ -404,54 +425,64 @@ export class KittyGraphicsCore {
       const record = this.records.get(imageId)
       if (record === undefined) continue
       record.residentIn.delete(buffer)
+      if (record.everPlaced) this.ambiguous.add(imageId)
       touched += 1
     }
     this.emit({ type: 'write-failed', detail: `${buffer}:${touched}` })
   }
 
   /**
-   * Terminal stop: retire every owned image whose data never reached a
-   * placement. Those bytes are invisible and nothing can legitimately
-   * reference them, so freeing them cannot erase a scrollback pixel. Images
-   * that WERE placed are left to the owner policy the screen already
-   * expressed (the alternate screen emits its own global release before the
-   * terminal stops; the main screen deliberately preserves its scrollback).
+   * Whether a record's placement write failed after possibly reaching the
+   * screen. Its pixels may be visible, so the Owner's retention rule applies:
+   * it is never hard-deleted on ambiguity — the next placement re-sends it and
+   * a stop leaves it to the screen's own policy.
    */
-  shutdownUnplaced(): string {
-    let wire = ''
+  isAmbiguous(imageId: number): boolean {
+    return this.ambiguous.has(imageId)
+  }
+
+  /**
+   * Terminal stop: queue the retirement of every owned image whose data never
+   * reached a placement. Those bytes are invisible and nothing can legitimately
+   * reference them, so freeing them cannot erase a scrollback pixel. The
+   * facade's own take/commit/rollback path writes them, so a failing cleanup
+   * write keeps the ids queued instead of losing their accounting. Images that
+   * were placed (or whose placement write failed after possibly painting) are
+   * left to the owner policy the screen already expressed.
+   */
+  queueUnplacedRetirements(): number {
+    let queued = 0
     for (const [imageId, record] of this.records) {
-      if (record.everPlaced || record.retireQueued || record.source === undefined) continue
-      wire += encodeKittyDeleteImage(imageId)
-      this.records.delete(imageId)
-      this.payloadBytes -= record.source.pngBase64.length
-      this.decodedByteTotal -= decodedBytes(record.source)
+      if (record.everPlaced || record.retireQueued || record.retirePending || record.source === undefined) continue
+      record.retireQueued = true
       this.emit({ type: 'shutdown-unplaced', imageId })
+      queued += 1
     }
-    return wire
+    return queued
   }
 
   /** Drop every reference. No terminal IO: the terminal is already gone. */
   dispose(): void {
     this.disposed = true
     this.records.clear()
-    this.retainedIds.clear()
-    this.retainedOrder.length = 0
+    this.ambiguous.clear()
     this.payloadBytes = 0
     this.decodedByteTotal = 0
   }
 
-  private allocateImageId(): number {
-    // Node CSPRNG in [1, 0x100000000]: random ids keep this Core clear of a
-    // foreign owner's ids in the same terminal. The draw is rejected against
-    // everything the Core still tracks — the live active set and the bounded
-    // retained-id memory — so a new occurrence can never adopt an id whose
-    // pixels may still be on screen. The check is deliberately bounded: this is
-    // exactly the state the Core keeps, not a session-long id ledger.
-    for (;;) {
-      const candidate = randomInt(1, 0x100000000)
-      if (this.records.has(candidate) || this.retainedIds.has(candidate)) continue
-      return candidate
-    }
+  /**
+   * The next id in the reserved slice: a forward-only counter from a random
+   * start, so a historical id is never re-used within a process lifetime. The
+   * only rejection is a live occurrence (the counter wrapped after more than a
+   * million images, which no real session can reach); exhaustion fails closed.
+   */
+  private allocateImageId(): number | undefined {
+    // The range never wraps: a historical id can never come back, at the cost
+    // of falling back to text once the 32-bit space above the floor is spent.
+    if (this.nextImageId > 0xffffffff) return undefined
+    const imageId = this.nextImageId
+    this.nextImageId += 1
+    return imageId
   }
 
   private emit(event: KittyGraphicsEvent): void {

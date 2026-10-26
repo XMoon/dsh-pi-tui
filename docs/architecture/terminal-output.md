@@ -165,10 +165,20 @@ retirement and the resident budget.
   `a=d,d=I,i=<own id>` retirement. A legacy writer's per-id delete of a managed
   id is layout intent, not ownership: it becomes a scoped placement removal
   (`a=d,d=i,i=<id>`) so the pixels disappear in that frame while the data stays
-  resident for a re-show. A late delete for an id the Core already retired is
-  dropped.
-- **Foreign owners are untouched.** A per-id delete for an id the Core does not
-  own passes through byte-for-byte. A global `a=d,d=A` / `a=d,d=a` (including
+  resident for a re-show. This holds for the id's whole life, including after
+  its occurrence is gone: a per-id delete for ANY id inside the Core's own id
+  range is a placement removal, never a data free.
+- **Ids are a monotonic range.** The Core hands out a contiguous, forward-only
+  id range from a random start in the lower half of the 32-bit space, so (a)
+  ownership is decidable in O(1) with no session-long id set, (b) a historical
+  id can never be re-used and a new occurrence can never adopt old pixels, and
+  (c) the range never wraps — at exhaustion the Core falls back to text rather
+  than risk re-use.
+- **Foreign owners are untouched.** A per-id delete for an id outside the Core's
+  range passes through byte-for-byte (a foreign id that numerically coincides
+  with one of the Core's own ids would run the placement-removal part of the
+  same request; the plan forbids claiming that probability is zero, and no
+  host-side scheme can make it zero without retaining every historical id). A global `a=d,d=A` / `a=d,d=a` (including
   the bare `a=d`, whose `d` specifier defaults to `a`) never reaches the
   terminal; it is translated into the same operations scoped to the buffer that
   emitted it. Kitty keeps the main and the alternate screen's images in
@@ -186,6 +196,14 @@ retirement and the resident budget.
   image-id quota, because the main screen's scrollback legitimately grows with
   the session and a displayed image may never be refused (nor force-deleted)
   because of how many images came before it.
+- **A write is an offer, not an acknowledgement.** A failing `Terminal.write()`
+  never leaves the Core believing bytes landed: the images that write touched
+  lose their residency and the next placement re-sends them. Queued own-id
+  retirements are taken and only committed once the sink accepted them (a
+  failed retire write is retried), and a failing cleanup still restores the
+  physical terminal before it is reported. An ambiguous placement — the write
+  threw after possibly painting — is retained like any other possibly-visible
+  image rather than deleted on a guess.
 - **Managed commands are quiet and typed.** Transmission is
   `a=t,f=100,i=<id>,q=2` in at most 4096-character chunks and EVERY chunk
   carries `q=2`; a placement anchor is `a=p,i=...,p=...,c=...,r=...,C=1,q=2;`

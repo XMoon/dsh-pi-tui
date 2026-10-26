@@ -44,11 +44,13 @@ class RecordingTerminal implements Terminal {
   stop(): void {}
   async drainInput(): Promise<void> {}
   write(data: string): void {
+    // Record BEFORE the throw: a real tty may have accepted a prefix (or all)
+    // of the bytes by the time the write surfaces an error.
+    this.writes.push(data)
     if (this.failWhen?.(data) === true) {
       this.failWhen = undefined
       throw new Error('terminal write failed')
     }
-    this.writes.push(data)
   }
   moveBy(): void {}
   hideCursor(): void {}
@@ -289,11 +291,12 @@ test('a failed retire write keeps the id queued instead of claiming release', ()
   core.retire(image)
   terminal.failWhen = (data) => data.includes('a=d')
   assert.throws(() => facade.write('frame'), /terminal write failed/)
-  assert.equal(count(terminal.text, 'a=d'), 0, 'nothing claimed to be released')
+  assert.equal(core.owns(image.imageId), true, 'the failed retire was rolled back, not committed')
 
   // The next write retries the SAME retire and commits it only on success.
   facade.write('frame')
-  assert.equal(count(terminal.text, `a=d,d=I,i=${image.imageId}`), 1, 'the retire is retried exactly once')
+  assert.equal(count(terminal.text, `a=d,d=I,i=${image.imageId}`), 2, 'the retire was offered again')
+  assert.equal(core.owns(image.imageId), false, 'and committed only after a successful write')
 })
 
 test('clearScreen invalidates the Core even though it bypasses write()', () => {
@@ -389,8 +392,8 @@ test('a session-long run of painted thumbnails never exhausts the budget', () =>
     assert.equal(core.residentImageCount, 0, 'a painted occurrence leaves the ACTIVE set')
     assert.equal(core.residentPayloadBytes, 0, 'and keeps no payload')
   }
-  assert.ok(core.retainedImageCount <= 256, 'the retained id memory is bounded')
   assert.ok(core.register(source(PNG, 4, 4)), 'a new occurrence still admits after 100 images')
+  for (const imageId of seen) assert.equal(core.ownsIdSpace(imageId), true, 'every id stayed in the Core slice')
 })
 
 test('the decoded budget refuses an occurrence it cannot hold', () => {
@@ -399,18 +402,34 @@ test('the decoded budget refuses an occurrence it cannot hold', () => {
   assert.equal(core.register(source(PNG, side, side)), undefined, 'the decoded ceiling is enforced')
 })
 
-test('a retained id is still recognized, so a late legacy delete stays scoped', () => {
+test('a retained id stays recognizable with no per-image bookkeeping', () => {
   const { core, facade, terminal } = harness()
-  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
-  facade.write(component.render(80).join('\r\n'))
-  const imageId = component.imageId!
-  component.dispose()
-  assert.equal(core.residentImageCount, 0, 'the painted occurrence left the active set')
-  assert.equal(core.owns(imageId), true, 'but its id is still known')
-  terminal.writes.length = 0
-  facade.write(encodeKittyDeleteImage(imageId))
-  assert.equal(terminal.text, encodeKittyDeletePlacement(imageId),
-    'the legacy delete became a placement removal, never a hard delete')
+  const retained: number[] = []
+  // Retire MANY painted occurrences, then exercise the OLDEST one: a bounded
+  // recognition window would have forgotten it by now.
+  for (let index = 0; index < 600; index++) {
+    const component = new NativeKittyImage(core, source(PNG, 4, 4), { maxWidthCells: 40, fallback: '[image]' })
+    facade.write(component.render(80).join('\r\n'))
+    retained.push(component.imageId!)
+    component.dispose()
+  }
+  assert.equal(core.residentImageCount, 0, 'painted occurrences leave the active set')
+
+  for (const imageId of [retained[0]!, retained[299]!, retained[599]!]) {
+    terminal.writes.length = 0
+    facade.write(encodeKittyDeleteImage(imageId))
+    assert.equal(terminal.text, encodeKittyDeletePlacement(imageId),
+      'the legacy delete stayed a placement removal, never a hard delete')
+  }
+})
+
+test('a foreign id outside the Core slice still passes through', () => {
+  const { core, facade, terminal } = harness()
+  // Find an id outside this Core's reserved slice.
+  let foreign = 0x123456
+  while (core.ownsIdSpace(foreign)) foreign += 1
+  facade.write(encodeKittyDeleteImage(foreign))
+  assert.equal(terminal.text, encodeKittyDeleteImage(foreign), 'a foreign owner keeps its own delete')
 })
 
 test('the payload budget refuses an oversized resident set', () => {
