@@ -1423,8 +1423,13 @@ test('a stale backend closes an open endpoint draft with zero writes and recover
   const closed = h.view()
   assert.doesNotMatch(closed, /Enter confirm · Esc cancel/u, `the draft closed without a Confirm:\n${closed}`)
   assert.match(closed, /read-only until it reconnects/u, `the reason is painted:\n${closed}`)
+  // The endpoint DETAIL must not advertise the editor either: the backend is
+  // non-current, so the editor would refuse the next Confirm.
+  assert.doesNotMatch(closed, /Enter edit endpoint/u, `the stale Detail advertises no editor:\n${closed}`)
+  assert.match(closed, /r refresh · Esc back/u, 'the bar offers only the read refresh')
   assert.deepEqual(h.writes, [], 'closing the draft writes nothing')
   await key(h, ENTER)
+  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Enter on the stale Detail never opens the editor')
   assert.deepEqual(h.writes, [], 'Enter on the read-only Detail dispatches nothing')
   // Recovery: a current backend + a fresh read restore the explicit editor path.
   h.setReadiness('ready')
@@ -1436,6 +1441,31 @@ test('a stale backend closes an open endpoint draft with zero writes and recover
   await key(h, ENTER)
   await settleEndpointPanel(h)
   assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v3'])
+})
+
+test('a resize that clips the credential actions removes the Enter affordance and the hit target', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear
+  assert.match(h.view(), /Enter open in Models/u)
+  // Tall -> very short: this frame grants ONE Detail row (the reference line),
+  // so the actions are cropped out of the CURRENT frame.
+  h.vt.resize(120, 4)
+  await h.vt.waitForRender()
+  const clipped = h.view()
+  assert.doesNotMatch(clipped, /Enter open in Models/u, `the clipped frame must not advertise Enter:\n${clipped}`)
+  assert.match(clipped, /r refresh · Esc back/u, 'only the read refresh is offered')
+  // No hit target either: Enter cannot navigate.
+  await key(h, ENTER)
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'Enter on a cropped action never navigates')
+  // Tall again: the action is really painted and advertised once more.
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /› Clear in Models…/u, 'the restored frame paints the action cursor')
+  assert.match(h.view(), /Enter open in Models/u, 'the restored frame advertises the Enter')
 })
 
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────

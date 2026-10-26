@@ -874,7 +874,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       targets.push(...detail.targets)
     }
     while (lines.length < bodyRows) lines.push(fit('', width))
-    lines.push(fit(this.actionBar(width), width))
+    lines.push(fit(this.actionBar(width, bodyRows), width))
     this.paint = { width, rows: grant, bodyRows, targetRows: targets }
     return lines.slice(0, grant)
   }
@@ -901,12 +901,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   /** The credential row's Action Bar. It advertises the Models deeplink ONLY
    *  while the reconciled cursor owns a selectable action that is really inside
-   *  the painted Detail viewport — an off-screen or disabled target is never
-   *  described as an available Enter. */
-  private credentialActionBar(width: number): string {
+   *  the CURRENT render's Detail viewport — an off-screen or disabled target is
+   *  never described as an available Enter. `bodyRows` is THIS frame's grant,
+   *  never the previously painted one (a resize can shrink the grant before
+   *  `this.paint` is updated). */
+  private credentialActionBar(width: number, bodyRows: number): string {
     const active = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
     if (active === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
-    const viewport = this.detailViewport(width, this.liveBodyRows())
+    const viewport = this.detailViewport(width, bodyRows)
     const projection = this.detailProjection(width, viewport)
     const entry = projection.actionLines.find(line => line.value === active.action)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
@@ -922,7 +924,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   /** The ONE physical Action Bar line. Whole segments only: a hint that does
    *  not fit is dropped, never cut into half a word. It is painted with the
    *  hint role (§3.2 role 12), so its first cell is always real ink. */
-  private actionBar(width: number): string {
+  private actionBar(width: number, bodyRows: number): string {
     const rowId = this.selectedRowId()
     const hint = this.region === 'list'
       ? wholeWording(
@@ -931,9 +933,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           ['↑/↓ · Enter open · r refresh · Esc', '↑/↓ · Enter · Esc', 'Esc'],
         )
       : rowId === 'web-credential'
-        ? this.credentialActionBar(width)
+        ? this.credentialActionBar(width, bodyRows)
         : rowId === 'web-search-endpoint'
           ? this.intents.readFacts().kind === 'ready'
+            && this.intents.writableRefusal() === undefined
             ? wholeWording(
                 'Enter edit endpoint · Esc back',
                 width,
