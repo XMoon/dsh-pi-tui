@@ -171,13 +171,21 @@ function answerFolder(text: string, content?: readonly ContentBlock[]): {
   return { folder, assistant }
 }
 
-function mountApp(options: { width?: number; height?: number; svgRasterLoader?: SvgRasterLoader } = {}): {
+function mountApp(options: {
+  width?: number
+  height?: number
+  svgRasterLoader?: SvgRasterLoader
+  preset?: 'full' | 'compact' | 'focus'
+  copySelection?: (text: string) => Promise<boolean>
+} = {}): {
   vt: VirtualTerminal
   app: TuiApp
 } {
   const vt = new VirtualTerminal(options.width ?? 100, options.height ?? 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     ...(options.svgRasterLoader === undefined ? {} : { svgRasterLoader: options.svgRasterLoader }),
+    ...(options.preset === undefined ? {} : { displayState: { preset: options.preset } }),
+    ...(options.copySelection === undefined ? {} : { copySelection: options.copySelection }),
     imageTheme: { fallbackColor: text => text },
   })
   app.start()
@@ -835,4 +843,63 @@ test('cross-block fenced code around a skipped reasoning block matches the origi
   const body = visual.slice(0, chart).join('\n')
   assert.ok(body.includes('const x = 1') && body.includes('const y = 2'))
   app.dispose()
+})
+
+
+// ── A14: real key and copy paths over the visual card ─────────────────────
+
+test('the real Ctrl+O disclosure key keeps one inline figure and one Assistant row', async () => {
+  const doc = `Before key.\n\n${marker(REF_A)}\n\nAfter key.`
+  const { folder, assistant } = answerFolder(doc)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A)])
+  const { vt, app } = mountApp({ width: 100, height: 60, preset: 'focus' })
+  await vt.waitForRender()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const first = vt.getViewport().join('\n')
+  assert.equal(first.split('Request latency').length - 1, 1, `one inline chart before the key:\n${first}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.equal(expanded.split('Request latency').length - 1, 1, `Ctrl+O does not duplicate the chart:\n${expanded}`)
+  assert.equal(assistantBulletRows(expanded, 'Before key.').length, 1, 'one Assistant bullet after Ctrl+O')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(collapsed.split('Request latency').length - 1, 1, `the second Ctrl+O does not duplicate it either:\n${collapsed}`)
+  app.stop()
+})
+
+test('fullscreen drag selection copies the visual Assistant body and leaves one inline figure', async () => {
+  const copied: string[] = []
+  const doc = `Before copy.\n\n${marker(REF_A)}\n\nAfter copy.`
+  const { folder, assistant } = answerFolder(doc)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A)])
+  const { vt, app } = mountApp({
+    width: 100,
+    height: 40,
+    copySelection: async text => { copied.push(text); return true },
+  })
+  await vt.waitForRender()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const beforeRow = lines.findIndex(line => line.includes('Before copy.'))
+  const chartRow = lines.findIndex(line => line.includes('Request latency'))
+  assert.ok(beforeRow >= 0 && chartRow > beforeRow, `the visual rows are visible:\n${lines.join('\n')}`)
+  // Mouse coordinates are viewport 1-based; drag from the answer row through
+  // the chart body.
+  vt.sendInput(`\x1b[<0;1;${beforeRow + 1}M`)
+  vt.sendInput(`\x1b[<32;40;${chartRow + 1}M`)
+  vt.sendInput(`\x1b[<0;40;${chartRow + 1}m`)
+  await vt.waitForRender()
+  assert.equal(copied.length, 1, `the drag reached the production copy policy:\n${lines.join('\n')}`)
+  const text = copied[0] ?? ''
+  assert.ok(text.includes('Before copy.'), 'the copied text carries the answer body')
+  assert.ok(text.includes('Request latency'), 'the copied text carries the inline chart body')
+  const after = vt.getViewport().join('\n')
+  assert.equal(after.split('Request latency').length - 1, 1, 'copying never duplicates or removes the chart')
+  app.stop()
 })
