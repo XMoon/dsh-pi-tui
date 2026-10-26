@@ -26,7 +26,7 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
   configReadiness: 'ready',
   capturedAt: 0,
   rows: [
-    { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette', action: 'inspect' },
+    { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette' },
   ],
 }
 
@@ -43,7 +43,6 @@ function openPanel(
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => {},
-    onOpenLegacy: () => {},
     onCopy: () => {},
   }
   return new SettingsWorkspacePanel({ readSnapshot: () => SNAPSHOT }, intents)
@@ -91,7 +90,6 @@ test('the About page reads the configuration document exactly once and writes no
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => {},
-    onOpenLegacy: () => {},
     onCopy: () => {},
   }
   const panel = new SettingsWorkspacePanel({

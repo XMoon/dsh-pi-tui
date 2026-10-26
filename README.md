@@ -451,7 +451,7 @@ Host 公布的 preset 原始 id，只影响**以后新建**的会话，当前会
 里打开原有的可搜索多选列表（同一套分组/过滤/滚动与 `Enter toggle`），
 `Esc` 只回到 Agent 行而不是退出设置；`Subagent model selection` 是该官方 section 的 `enabled`：
 没有 allowed route 时开启会**零写入**、给出提示并把选中行移到 allowed models 行，关闭则保留全部
-已存 route。两个子代理入口与旧编辑器共用唯一一条写入队列，而且每个操作只写自己拥有的那一半
+已存 route。两个子代理入口共用唯一一条写入队列，而且每个操作只写自己拥有的那一半
 （picklist 只写 allowed route 列表、开关只写 enabled），另一半在轮到它时从官方 section 重新读取，
 所以先前的慢写不会再被后到的旧快照覆盖。
 `User shell sandbox policy` 存在 TUI 设置文档里，`Value` 是原始存储值（未设置/非法值/不可读都分别
@@ -459,12 +459,11 @@ Host 公布的 preset 原始 id，只影响**以后新建**的会话，当前会
 只有写入完成且回读一致才 `Verified`；它是 Host 的用户 shell 执行策略，不是模型工具 sandbox 策略，
 也不是权限 preset，因此不放在 Input & Terminal。
 
-新的 Settings 工作区不再跳转旧设置编辑器：所有字段都在原生行里编辑，`Extensions` 也直接列出
+Settings 工作区是唯一的设置界面：所有字段都在原生行里编辑，`Extensions` 也直接列出
 真实动态设置行（按 owner 分组分页）。Theme、Plugin Manager、键位与扩展设置的写入路径全部不变；
 Footer 与 Keyboard shortcuts 仍是同一 Settings lease 内的专页，`Appearance`、`Input & Terminal`、
-`Agent` 与 `Extensions` 都不再有过渡入口。旧 `SettingsList` 仍由 `/help`、`/skill`、
-`/preset`、`/keybindings conflicts` 这些独立消费方使用，它们各自提供自己的行；旧完整设置编辑器
-不再是 Settings 的入口。
+`Agent` 与 `Extensions` 都没有过渡入口。`SettingsList` 组件仍由 `/help`、`/skill`、`/preset`、
+`/keybindings conflicts` 这些独立消费方使用，它们各自提供自己的行。
 
 `/settings → Tools → Web Search / Fetch` 现在是**同一个 Settings 工作区里的专页**（不再先关工作区、
 再进旧编辑器）。页面固定六行：搜索 Provider（`Messages`，官方默认，或独立计费的

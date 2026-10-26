@@ -180,7 +180,7 @@ function expectSettingsLeaseHeld(app: TuiApp): void {
   assert.throws(
     () => app.openSettingsWorkspace(
       { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: 0 }) },
-      { aboutVersionFacts: { tui: 'test-bundle', dsh: undefined }, onOpenLegacy: () => {} },
+      { aboutVersionFacts: { tui: 'test-bundle', dsh: undefined } },
     ),
     /already leased/,
   )

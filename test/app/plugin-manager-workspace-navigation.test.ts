@@ -289,7 +289,7 @@ test('a second workspace lease is refused; an external disposal notifies exactly
   // lease (which is what an independent plugin screen used to be) is refused.
   assert.throws(() => harness.app.openSettingsWorkspace(
     { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
-    { aboutVersionFacts: { tui: 'test', dsh: undefined }, onOpenLegacy: () => {} },
+    { aboutVersionFacts: { tui: 'test', dsh: undefined } },
   ), /already leased/)
 
   const controller = new PluginManagerController({

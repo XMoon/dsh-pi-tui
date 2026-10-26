@@ -136,7 +136,6 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
     { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
     {
       aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
-      onOpenLegacy: () => {},
       initialCategory: 'plugins',
       onOpenPlugins: () => {
         controller.open()
