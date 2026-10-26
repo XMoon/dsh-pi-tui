@@ -167,8 +167,8 @@ test('the submenu marks "[current]" by the SELECTION IDENTITY, never a display l
     assert.equal(markedLines.length, 1, `exactly one row must be marked:\n${openAtFile}`)
     // The row LABEL is the shared head…tail abbreviation, so the marked row is tied
     // to its identity by the name's own TAIL (the description of the selected row —
-    // `auto` here, not the file row — is asserted where the real overlay selects it:
-    // test/app/surface-row-grant.test.ts).
+    // `auto` here, not the file row — is asserted by the real Settings workspace
+    // choice, which paints and confirms the selected identity).
     assert.ok(markedLines[0]?.includes(fileRow.displayName.slice(-12)),
       `the marked row must keep this file name's tail:\n${markedLines[0] as string}`)
   } finally {

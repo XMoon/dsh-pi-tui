@@ -382,21 +382,18 @@ that grant instead of the whole terminal height.
   that degradation (no second scrollport) and pins it in
   `test/tui/keybinding-editor.test.ts`; "every render branch fits the grant"
   holds for the panel's own assemblies, not for the recorder view.
-- Legacy limits are retained deliberately: `/settings` keeps
-  `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so the nested
-  `Keyboard shortcuts` submenu is bounded by 26 content rows on any terminal
-  taller than 30 rows. This is a viewport/grant fix, NOT the Settings
-  Workspace (a separate Settings Workspace design): the fork's SettingsList still lacks
-  filtered-state Home/End paging, and the main settings list still shows at
-  most six visible rows.
-- Evidence: `test/app/surface-row-grant.test.ts` (real `/settings` command →
-  live geometry → submenu → painted frame, resize, question AND approval
-  suspension, the real bare `/keybindings` budget with its teardown count, and
-  a 44-column CJK frame/painted hit map), `test/app/theme-picker.test.ts` (Theme
-  submenu grant), `test/domain/rendering.test.ts` (standalone budget, navigation and
-  close) and `test/tui/keybinding-editor.test.ts` (per-panel grants, degenerate
-  grants, painted mouse hit maps including the scrolled choice ordinal, and
-  the recorder degradation).
+- Legacy limits are retained deliberately for the independent `SettingsList`
+  consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`): the list
+  keeps `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its
+  nested `Keyboard shortcuts` submenu is bounded by 26 content rows on any
+  terminal taller than 30 rows. This is a viewport/grant rule of the legacy
+  list, NOT the Settings Workspace: `/settings` opens the Settings Workspace,
+  whose Keyboard shortcuts and Footer pages are same-lease pages with their own
+  budget contract above. The fork's SettingsList still lacks filtered-state
+  Home/End paging, and a legacy list still shows at most six visible rows. A
+  blocking owner pre-empts by closure (§10.1 above), so the retired nested
+  submenu's question/approval suspension is no longer a reachable Settings
+  surface.
 
 ## 10. One-shot closure: output viewer and task browser
 
