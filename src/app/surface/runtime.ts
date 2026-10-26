@@ -1292,30 +1292,44 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * instance or its committed `seq`, so a resume, a cold rehydrate or a
    * viewer switch can never reuse a previous subject's facts.
    */
+  /** One immutable publication index per exact Session revision. `byTurn` is
+   * the display-only turn lookup so one repaint never scans the whole history
+   * of published visuals or the whole historical activity map. */
+  interface VisualPublicationIndex {
+    readonly publications: readonly PublishedVisual[]
+    readonly byTurn: ReadonlyMap<number, readonly PublishedVisual[]>
+  }
   let visualSnapshotMemo: {
     readonly session: object
     readonly sessionId: string
     readonly seq: number
-    readonly publications: readonly PublishedVisual[]
+    readonly index: VisualPublicationIndex
   } | undefined
   /** One-shot guard for the post-commit successor repaint. A re-entrant
    * setTranscript handover is not allowed to recurse without bound; the next
    * application repaint owns any further switch. */
   let visualSuccessorRepaint = false
-  const publicationsOf = (snapshot: VisualEventSnapshot): readonly PublishedVisual[] => {
+  const publicationsOf = (snapshot: VisualEventSnapshot): VisualPublicationIndex => {
     const memo = visualSnapshotMemo
     if (memo !== undefined
       && memo.session === snapshot.session
       && memo.sessionId === snapshot.sessionId
-      && memo.seq === snapshot.seq) return memo.publications
+      && memo.seq === snapshot.seq) return memo.index
     const publications = collectPublishedVisuals(snapshot.sessionId, snapshot.events)
+    const byTurn = new Map<number, PublishedVisual[]>()
+    for (const publication of publications) {
+      const existing = byTurn.get(publication.turn)
+      if (existing === undefined) byTurn.set(publication.turn, [publication])
+      else existing.push(publication)
+    }
+    const index: VisualPublicationIndex = { publications, byTurn }
     visualSnapshotMemo = {
       session: snapshot.session,
       sessionId: snapshot.sessionId,
       seq: snapshot.seq,
-      publications,
+      index,
     }
-    return publications
+    return index
   }
 
   /**
@@ -1345,14 +1359,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       for (const message of assistantRows) clearAssistantVisualPresentation(message)
       return []
     }
-    const publications = publicationsOf(snapshot)
+    const publicationIndex = publicationsOf(snapshot)
     const sourceIdentity = projectionTokenFor(target.folder)
+    // Only the CURRENT WINDOW's turns participate. The folder activity map is
+    // the whole Session history; iterating it (or filtering the window once
+    // per historical turn) made repaint cost grow with session age.
+    const groupsByTurn = new Map<number, TranscriptMessage[]>()
+    for (const message of messages) {
+      if (!('turn' in message)) continue
+      const group = groupsByTurn.get(message.turn)
+      if (group === undefined) groupsByTurn.set(message.turn, [message])
+      else group.push(message)
+    }
     const selected = new Set<Extract<TranscriptMessage, { kind: 'assistant' }>>()
-    for (const [turn, activity] of activities) {
-      const group = messages.filter(message => 'turn' in message && message.turn === turn)
+    for (const [turn, group] of groupsByTurn) {
+      const activity = activities.get(turn)
+      if (activity === undefined) continue
       const final = eligibleFinalAssistant(activity, group)
       if (final === undefined) continue
-      const turnPublications = publications.filter(publication => publication.turn === turn)
+      const turnPublications = publicationIndex.byTurn.get(turn) ?? []
       if (turnPublications.length === 0) continue
       const message = final.message
       const key: VisualPresentationKey = {

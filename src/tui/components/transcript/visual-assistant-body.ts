@@ -16,7 +16,6 @@
  */
 
 import {
-  Markdown,
   Text,
   type Component,
   type MarkdownOptions,
@@ -79,31 +78,53 @@ export class VisualAssistantBody implements Component {
       if (existing === undefined) piecesByBlock.set(piece.blockIndex, [piece])
       else existing.push(piece)
     }
+    // Adjacent text blocks are ONE Markdown document in the original
+    // renderAssistantDisplaySequence (a bold span or a fenced code block may
+    // cross a ContentBlock boundary). Merge every text piece until a real
+    // Visual or a visible non-text component breaks the run; skipped
+    // reasoning/tool-call blocks do not break it. The planner's blockIndex and
+    // source spans stay authoritative; only the PAINT document is merged.
+    let textBuffer = ''
+    let textPrefix = ''
+    const flushText = (): void => {
+      if (textBuffer === '') return
+      this.children.push(new SharedDefinitionsMarkdown({
+        body: textBuffer,
+        definitions: textPrefix,
+        theme: options.theme,
+        markdownOptions: options.markdownOptions,
+      }))
+      textBuffer = ''
+      textPrefix = ''
+    }
+    const appendText = (source: string, blockIndex: number): void => {
+      if (textBuffer === '') textPrefix = prefixByBlock.get(blockIndex) ?? ''
+      textBuffer += source
+    }
     for (const [blockIndex, block] of options.blocks.entries()) {
       if (block.type === 'text') {
         const pieces = piecesByBlock.get(blockIndex)
         if (pieces === undefined || pieces.length === 0) {
-          this.children.push(new Markdown(sanitizeDisplayText(block.text), 0, 0, options.theme, undefined, options.markdownOptions))
+          appendText(block.text, blockIndex)
           continue
         }
         for (const piece of pieces) {
           if (piece.kind === 'text') {
-            if (piece.source === '') continue
-            this.children.push(new SharedDefinitionsMarkdown({
-              body: piece.source,
-              definitions: prefixByBlock.get(blockIndex) ?? '',
-              theme: options.theme,
-              markdownOptions: options.markdownOptions,
-            }))
+            appendText(piece.source, blockIndex)
             continue
           }
+          flushText()
           this.children.push(...this.visualComponents(piece, options))
         }
         continue
       }
       const component = options.nonText(block, blockIndex)
-      if (component !== undefined) this.children.push(component)
+      if (component !== undefined) {
+        flushText()
+        this.children.push(component)
+      }
     }
+    flushText()
     for (const piece of tail) this.children.push(...this.visualComponents(piece, options))
   }
 
