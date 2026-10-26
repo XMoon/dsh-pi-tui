@@ -15,7 +15,7 @@ import {
 } from '@xmoon76/pi-tui'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { TranscriptFolder } from '../../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { HOST_MARKDOWN_OPTIONS, markdownTheme } from '../../src/tui/theme/runtime.ts'
 import { SharedDefinitionsMarkdown } from '../../src/tui/components/transcript/shared-definitions-markdown.ts'
