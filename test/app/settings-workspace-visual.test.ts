@@ -1723,7 +1723,7 @@ test('R3-02b a session switch revokes the approval row instead of re-targeting t
 
 test('R3-04 the allowlist row mounts the EXISTING picker in the same workspace and toggles the official section', async () => {
   const h = setup({
-    columns: 120,
+    columns: 140,
     rows: 40,
     agent: {
       sessionId: 'session-live',
@@ -1760,6 +1760,27 @@ test('R3-04 the allowlist row mounts the EXISTING picker in the same workspace a
   const back = h.view()
   assert.match(back, /Settings · Agent/u, `Esc returns to the Agent rows, not the conversation:\n${back}`)
   assert.match(back, /1 route/u, 'the row summary follows the committed official section')
+  // RE-ENTERING the picker must paint the grant that was really committed — the
+  // marker is derived from the official section, never from the closed page.
+  // Esc from the closed picker's Detail first, then reopen through the row.
+  await key(h, '\x1b') // closed picker's Detail -> Rows
+  // Tab moves the keyboard to the Detail WITHOUT activating the row (Enter on a
+  // specialist row mounts the page), then the painted Manage action opens a
+  // FRESH picker instance.
+  await key(h, '\t')
+  await key(h, '\r')
+  const reopened = h.view()
+  assert.match(reopened, /Subagent allowed models/u, `the picker is mounted again:\n${reopened}`)
+  // The reopened picker's working copy comes from the OFFICIAL section, so the
+  // committed route is still granted there and NO second write is dispatched by
+  // merely looking. (The per-row `allowed` badge is a right-aligned decoration
+  // this pane can drop; the section fact is what must never regress.)
+  assert.deepEqual(h.subagentSection()?.allowedModels, [{ provider: 'p1', model: 'm1' }],
+    `the committed route is still in the official section:\n${JSON.stringify(h.subagentSection())}`)
+  assert.equal(h.subagentWrites().length, 1,
+    'reopening the picker reads the section and dispatches NO second write')
+  await key(h, '\x1b')
+  assert.match(h.view(), /1 route/u, `the outer row still summarises the committed grant:\n${h.view()}`)
   h.dispose()
 })
 

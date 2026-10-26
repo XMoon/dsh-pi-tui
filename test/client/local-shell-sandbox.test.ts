@@ -565,6 +565,38 @@ test('a REAL Settings Confirm of the shell policy is what the next `!` executes 
   const sandboxed = await waitForView(mounted, 'sandboxed-by-settings', 'the sandboxed card')
   assert.equal(shell.executeCount(), 1, 'the next `!` really entered the dsh shell capability')
   assert.ok(sandboxed.includes('sandboxed-by-settings'))
+
+  // THE REVERSE TRIP, also through the real UI: reopen /settings, Confirm
+  // `bypass` again, and the FOLLOWING `!` must return to the plain local spawn.
+  await mounted.runSettings()
+  await pressUntil('\x1b[B', () => railSelects('Agent'), 'the rail selects Agent again', 6)
+  await pressUntil('\r', () => /Settings · Agent · Rows/u.test(mounted.view()), 'Enter enters the Agent rows', 1)
+  await pressUntil('\x1b[B', () => selectedRow().includes('User shell sandbox policy'),
+    'the shell policy row is selected again', 8)
+  await pressUntil('\r', () => /Choose value/u.test(mounted.view()), 'the inline choice is open again', 1)
+  await pressUntil('\x1b[A', () => />\s*bypass(?:\s|$)/mu.test(mounted.view()), 'bypass becomes the chosen candidate', 2)
+  mounted.vt().sendInput('\r') // explicit Confirm
+  await waitForFrame(
+    () => mounted.view(),
+    frame => /Status\s+Verified/u.test(frame) && /Next ! \/ !! uses bypass/u.test(frame),
+    // Bounded settle: the owned settings write drains, then the frame repaints.
+    () => mounted.settle(),
+    'the reverse Confirm must settle as Verified with the bypass effect',
+  )
+  assert.equal(mounted.policy(), 'bypass', 'the persisted document really flipped back')
+  for (let step = 0; step < 6 && /Settings · /u.test(mounted.view()); step += 1) {
+    mounted.vt().sendInput('\x1b')
+    // Bounded settle: each Esc step repaints before the next predicate read.
+    await mounted.settle()
+  }
+  assert.doesNotMatch(mounted.view(), /Settings · /u, `the workspace closed again:\n${mounted.view()}`)
+
+  // SOURCE -> SINK, reversed: the plain local spawn runs again and the Host shell
+  // capability stays at ONE execution.
+  mounted.submit('!echo back-to-local')
+  const backToLocal = await waitForView(mounted, 'back-to-local', 'the restored local card')
+  assert.equal(shell.executeCount(), 1, 'the bypass run after the UI reverse never re-entered the sandbox')
+  assert.ok(backToLocal.includes('back-to-local'))
 })
 
 test('a policy change on the live settings document routes the NEXT `!` through the other executor', async (t) => {

@@ -537,7 +537,8 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     this.allowed = committed.map(existing => ({ ...existing }))
     this.committedAllowed = this.allowed.map(route => ({ ...route }))
     if (this.disposed) {
-      this.deps.summarize(allowlistSummary(this.allowed))
+      const summary = this.summaryOrNone()
+      if (summary !== undefined) this.deps.summarize(summary)
       return true
     }
     this.rebuild()
@@ -552,26 +553,34 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
    * it never read one).
    */
   private rollbackToCommitted(): void {
-    if (this.disposed) return
     this.allowed = this.committedAllowed.map(route => ({ ...route }))
+    if (this.disposed) {
+      // The picker is closed: its own frame is gone, but the OUTER row may still
+      // be showing the summary this picker reported on close. Correct it to the
+      // committed list instead of leaving an uncommitted route counted there.
+      const summary = this.summaryOrNone()
+      if (summary !== undefined) this.deps.summarize(summary)
+      return
+    }
     this.rebuild()
     this.deps.requestRender()
   }
 
-  /** Whether a summary may be reported at all: a picker that never read a real
-   *  section has no committed allowlist to describe. */
+  /**
+   * The summary this picker may report to the outer legacy row. It describes the
+   * last list a REAL read produced — never the working copy, which may still
+   * carry an optimistic marker for a write that has not settled (or was
+   * refused). A picker that never read a real section reports nothing at all,
+   * so the outer row keeps its own authoritative value.
+   */
   private summaryOrNone(): string | undefined {
-    return this.sectionReadable ? allowlistSummary(this.allowed) : undefined
+    return this.sectionReadable ? allowlistSummary(this.committedAllowed) : undefined
   }
 
   private close(): void {
     if (this.disposed) return
     this.disposed = true
-    // A picker that never read a real section reports NO summary: the outer row
-    // must keep its own authoritative value instead of an invented `0 routes`
-    // derived from the shipped default plus an uncommitted optimistic marker.
-    const summary = this.summaryOrNone()
-    this.deps.done(summary)
+    this.deps.done(this.summaryOrNone())
   }
 
   /** Latch the picker as closed from OUTSIDE (the /settings overlay teardown

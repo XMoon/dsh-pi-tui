@@ -374,6 +374,9 @@ test('first-time setup happy path: add an allowed route, then enable selection',
   menu.handleInput(ENTER) // toggle the highlighted model ON directly — no provider step
   await settle(harness, 1)
   assert.deepEqual(harness.settings.doc.allowedModels, [{ provider: 'p', model: 'm1' }], 'the first route commits')
+  // The picker's own chain re-reads the committed section after the write
+  // settles; the close summary describes that read, not the earlier marker.
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
   menu.handleInput('\x1b') // ONE Esc returns to /settings and reports the summary
   assert.deepEqual(dones, ['1 route'], 'a single Esc closes and the outer row shows the fresh route count')
   // Now the toggle may be enabled: the gate must NOT block a non-empty
