@@ -1177,12 +1177,16 @@ test('the Web page Configure deeplink completes a REAL masked set on the SAME re
   await openWebCredentialRow(h)
   assert.match(h.view(), /State: Not configured/u, 'the row starts from the official Not-configured fact')
   await key(h, '\r') // Configure in Models… (the only enabled action)
-  // Wait for the ACTIONABLE reference page, not just its header: the page reads
-  // the reference after its first frame, and an Enter delivered while it is
-  // still reading is dropped (the CI-exposed race).
+  // Wait for the ACTIONABLE reference page, not just its header or a disabled
+  // action label: the page paints `  Configure API Key…` even while the
+  // reference read is pending (a dropped Enter is exactly the CI race). The
+  // settled state is proven by `Stored Not set` AND the ENABLED+SELECTED
+  // marker `> Configure API Key…` (paintAction only adds `>` for an enabled
+  // selected action).
   await waitForFrame(h.view, frame => frame.includes('Settings · Models')
-    && frame.includes('API Key Reference') && frame.includes('Configure API Key…'),
-    () => h.vt.waitForRender(), 'the Models reference page and its actions')
+    && /Stored\s+Not set/u.test(frame)
+    && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(), 'the Models reference page with an actionable Configure')
   assert.match(h.view(), /DEEPSEEK_API_KEY/u, 'Models owns the SAME official reference')
   // The masked editor: Enter opens the key prompt, the fake secret is typed,
   // Enter reviews and Enter submits to the official store.
@@ -1216,8 +1220,8 @@ test('the Web page Clear deeplink completes a REAL unset on the SAME reference a
   assert.match(h.view(), /State: Configured/u)
   await key(h, '\x1b[B') // Configure -> the enabled Clear in Models…
   await key(h, '\r')
-  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && /Clear credential|Clear stored credential/u.test(frame),
-    () => h.vt.waitForRender(), 'the Models clear confirmation')
+  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && frame.includes('> Clear credential'),
+    () => h.vt.waitForRender(), 'the Models clear confirmation with an enabled action')
   assert.match(h.view(), /DEEPSEEK_API_KEY/u, 'the clear target is the SAME official reference')
   await key(h, '\r') // the ONE explicit clear confirmation
   await waitForFrame(h.view, frame => /API key DEEPSEEK_API_KEY cleared|cleared/u.test(frame),
@@ -1238,8 +1242,8 @@ test('the Web page Clear deeplink cancel writes nothing', async () => {
   await openWebCredentialRow(h)
   await key(h, '\x1b[B') // Clear in Models…
   await key(h, '\r')
-  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && /Clear credential|Clear stored credential/u.test(frame),
-    () => h.vt.waitForRender(), 'the Models clear confirmation')
+  await waitForFrame(h.view, frame => frame.includes('Settings · Models') && frame.includes('> Clear credential'),
+    () => h.vt.waitForRender(), 'the Models clear confirmation with an enabled action')
   await key(h, '\x1b') // cancel
   assert.deepEqual(h.calls.filter(call => call.startsWith('unset:')), [],
     'a cancelled clear performs ZERO credential writes')
