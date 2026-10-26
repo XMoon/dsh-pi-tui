@@ -1778,6 +1778,30 @@ test('an Enter on a credential action invalidated by a fresh read is refused and
   assert.match(h.view(), /DEEPSEEK_API_KEY/u)
 })
 
+test('a Detail scroll projection cannot advance the painted action before the frame', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  await key(h, DOWN) // cursor on Clear, painted
+  h.store.web.credential = { configured: false }
+  const settledBefore = h.settledReadCount()
+  h.vt.sendInput('r')
+  await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
+  assert.match(h.view(), /› Clear in Models…/u, 'the frame still paints Clear')
+  // A Detail scroll runs detailProjection()/credentialDetail() BEFORE any paint;
+  // that input-path projection must not advance the painted action identity.
+  h.vt.sendInput('\x1b[6~')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u,
+    'a projection-only reconcile never lets Enter route to a different action')
+  assert.match(h.view(), /› Configure in Models…/u, 'the repaint shows the reconciled action')
+  await key(h, ENTER)
+  await settlePainted(h, 'the Models route after the repaint', frame => frame.includes('Settings · Models'))
+})
+
 test('a mouse click on a credential action invalidated by a fresh read is refused', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
@@ -1792,10 +1816,9 @@ test('a mouse click on a credential action invalidated by a fresh read is refuse
   const settledBefore = h.settledReadCount()
   h.vt.sendInput('r')
   await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
-  // Press/release on the PAINTED Clear target: the click must not redirect onto
-  // the reconciled Configure.
+  // Press AND release on the PAINTED Clear target BEFORE any render: the click
+  // must not redirect onto the reconciled Configure.
   h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}M`)
-  await h.vt.waitForRender()
   h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}m`)
   await h.vt.waitForRender()
   assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale mouse target never routes')
