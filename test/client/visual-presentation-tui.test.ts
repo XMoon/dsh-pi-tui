@@ -618,3 +618,20 @@ test('a copy settled after a subject replacement never posts its receipt on the 
   assert.equal(view.includes('Copy failed'), false, 'an ownership change is not a clipboard failure')
   app.stop()
 })
+
+
+test('a disabled select action leaves an honest hint without a dangling separator', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const { vt, app } = mountApp()
+  app.applyUserKeybindings({ 'app.visual.selectNext': false }, () => {})
+  const { folder, assistant } = answerFolder(`Before.\n\n${marker(REF_A)}\n\nAfter.`)
+  setAssistantVisualPresentation(assistant, key(), [chartPublication(REF_A, CHART)])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  vt.sendInput('\x1bc')
+  await vt.waitForRender()
+  const view = stripSgr(await viewport(vt))
+  assert.ok(view.includes('Select a visual first'), view)
+  assert.equal(view.includes('Select a visual first ·'), false, 'no dangling separator without a live key')
+  app.stop()
+})

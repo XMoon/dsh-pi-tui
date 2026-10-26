@@ -96,6 +96,28 @@ class Log {
     ])
   }
 
+  /** Append one MODEL-ONLY surface replacement (compaction/pruner rewrite). */
+  replaceAssistant(turn: number, step: number, content: readonly ContentBlock[], startSeq: number, endSeq: number): number {
+    const seq = this.events.length
+    this.events.push({
+      type: 'assistant/message',
+      seq,
+      time: seq + 1,
+      surfaceOp: { op: 'replace', startSeq, endSeq },
+      data: {
+        turn,
+        step,
+        message: {
+          id: MessageId(`replacement-${turn}-${step}`),
+          role: 'assistant',
+          content,
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent)
+    return seq
+  }
+
   get latestAssistantSeq(): number {
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       if (this.events[index]?.type === 'assistant/message') return Number(this.events[index]!.seq)
@@ -247,4 +269,18 @@ test('no assistant message yet returns undefined without touching the Folder', (
   const log = new Log().turnStart(1)
   const bridge = bridgeOf({ events: log.events })
   assert.equal(bridge.directLastAssistantText(SESSION), undefined)
+})
+
+
+test('a model-only surface replacement is never the display /copy source', () => {
+  const { log } = publishedTurn('Before.\n\n', '\n\nAfter.')
+  const shadow = log.replaceAssistant(1, 3, [{ type: 'text', text: 'SHADOW-COPY' }], 0, 1)
+  const folder = new TranscriptFolder()
+  folder.apply(log.events)
+  // The visible fold skips the replacement; the display copy must read the same
+  // append-origin answer, not the model-facing shadow.
+  assert.equal(folder.assistantSettlementSeq(1, 3), undefined)
+  assert.notEqual(folder.assistantSettlementSeq(1, 2), shadow)
+  const bridge = bridgeOf({ events: log.events, folder })
+  assert.equal(bridge.directLastAssistantText(SESSION), 'Before.\n\n\n\nAfter.')
 })
