@@ -26,6 +26,7 @@
 import {
   Image,
   getCapabilities,
+  imageFallback,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -36,6 +37,7 @@ import { SVG_MAX_RASTER_PIXELS, SVG_MAX_RASTER_SIDE } from '../../../domain/visu
 import { admitSvg, type SvgAdmission } from '../../../domain/visual/svg-admission.ts'
 import { isolatedSvgRasterSupported } from '../../../client/media/svg/rasterize.ts'
 import type { SvgRasterLoader, SvgRasterState } from '../../../client/media/svg/raster-loader.ts'
+import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { SVG_VIEWER_CHORDS, SVG_VIEWER_SCROLL_LABEL } from '../../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
@@ -65,6 +67,12 @@ export interface SvgViewerInput {
   readonly loader?: SvgRasterLoader
   readonly theme: { fallbackColor(text: string): string }
   readonly onClose: () => void
+  /**
+   * The ONE managed graphics owner of this physical terminal (Image-7A). The
+   * Preview page paints through the Core when it is admitted; the legacy
+   * `Image` path stays for every other surface.
+   */
+  readonly nativeGraphics?: NativeKittyGraphics
 }
 
 /** The two Viewer pages. */
@@ -93,9 +101,9 @@ interface SvgViewerPress {
   readonly termRows: number
 }
 
-/** The local `Image` placement keyed by its exact inputs. */
+/** The local pixel placement keyed by its exact inputs. */
 interface SvgPreviewImage {
-  readonly instance: Image
+  readonly instance: PixelBody
   readonly width: number
   readonly bodyRows: number
   readonly base64: string
@@ -120,6 +128,8 @@ export class SvgViewerPanel implements Component {
   private subscribedWidth: number | undefined
   private unsubscribe: (() => void) | undefined
   private previewImage: SvgPreviewImage | undefined
+  /** Whether the current `previewImage` is a managed Core occurrence. */
+  private previewImageNative = false
   /** The last painted frame's hit geometry (never re-derived on a press). */
   private painted: SvgViewerPainted | undefined
   private press: SvgViewerPress | undefined
@@ -227,6 +237,7 @@ export class SvgViewerPanel implements Component {
 
   /** Drop the local image placement and painted geometry (not the source). */
   invalidate(): void {
+    this.previewImage?.instance.dispose?.()
     this.previewImage = undefined
     this.painted = undefined
     this.press = undefined
@@ -235,6 +246,7 @@ export class SvgViewerPanel implements Component {
   /** Release this Viewer's subscription and its exact unused raster variant. */
   dispose(): void {
     this.releaseVariant()
+    this.previewImage?.instance.dispose?.()
     this.previewImage = undefined
     this.painted = undefined
     this.press = undefined
@@ -442,33 +454,51 @@ export class SvgViewerPanel implements Component {
 
   /** Render the ready PNG at the body grant, rebuilding only on exact input change. */
   private imageLines(width: number, bodyRows: number, state: Extract<SvgRasterState, { state: 'ready' }>): string[] {
+    const native = this.input.nativeGraphics
     if (this.previewImage === undefined
       || this.previewImage.width !== width
       || this.previewImage.bodyRows !== bodyRows
       || this.previewImage.base64 !== state.base64
       || this.previewImage.widthPx !== state.widthPx
-      || this.previewImage.heightPx !== state.heightPx) {
+      || this.previewImage.heightPx !== state.heightPx
+      || this.previewImageNative !== (native !== undefined)) {
+      this.previewImage?.instance.dispose?.()
+      // The fork's text fallback interpolates this name into a painted row and
+      // does NOT strip terminal controls; project it to one safe physical row
+      // at this boundary like every other external label.
+      const label = sanitizedPhysicalLine(this.input.source.title)
       this.previewImage = {
-        instance: new Image(
-          state.base64,
-          'image/png',
-          { fallbackColor: this.input.theme.fallbackColor },
-          {
-            maxWidthCells: Math.max(1, width),
-            maxHeightCells: Math.max(1, bodyRows),
-            // The fork's text fallback interpolates this name into a painted
-            // row and does NOT strip terminal controls; project it to one safe
-            // physical row at this boundary like every other external label.
-            filename: sanitizedPhysicalLine(this.input.source.title),
-          },
-          { widthPx: state.widthPx, heightPx: state.heightPx },
-        ),
+        instance: native === undefined
+          ? new Image(
+            state.base64,
+            'image/png',
+            { fallbackColor: this.input.theme.fallbackColor },
+            {
+              maxWidthCells: Math.max(1, width),
+              maxHeightCells: Math.max(1, bodyRows),
+              filename: label,
+            },
+            { widthPx: state.widthPx, heightPx: state.heightPx },
+          )
+          : native.image(
+            { pngBase64: state.base64, widthPx: state.widthPx, heightPx: state.heightPx },
+            {
+              maxWidthCells: Math.max(1, width),
+              maxHeightCells: Math.max(1, bodyRows),
+              fallback: this.input.theme.fallbackColor(imageFallback(
+                'image/png',
+                { widthPx: state.widthPx, heightPx: state.heightPx },
+                label,
+              )),
+            },
+          ),
         width,
         bodyRows,
         base64: state.base64,
         widthPx: state.widthPx,
         heightPx: state.heightPx,
       }
+      this.previewImageNative = native !== undefined
     }
     return this.previewImage.instance.render(width).slice(0, bodyRows)
   }

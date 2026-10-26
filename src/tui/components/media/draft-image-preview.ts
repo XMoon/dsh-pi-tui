@@ -33,8 +33,9 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/draft-image-preview
  */
 
-import { Image, getCapabilities, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { Image, getCapabilities, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
+import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { color } from '../../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
@@ -104,6 +105,12 @@ export interface DraftImagePreviewOptions {
    * removable.
    */
   removable?: (occurrence: DraftImageOccurrence) => boolean
+  /**
+   * The ONE managed graphics owner of this physical terminal (Image-7A). On a
+   * native-admitted Kitty terminal the card's pixels come from the Core; every
+   * other terminal keeps the legacy fork `Image` path.
+   */
+  nativeGraphics?: NativeKittyGraphics
 }
 
 /** The identity row's admission/derivation state for the current card. */
@@ -141,7 +148,9 @@ export class DraftImagePreview implements Component {
    */
   private readonly convertThumbnail: KittyThumbnailConverter
   /** Per-display-instance cache: id + occurrence + mime + width + protocol. */
-  private readonly imageCache = new Map<string, Image>()
+  private readonly imageCache = new Map<string, PixelBody>()
+  /** The ONE managed graphics owner of this physical terminal, when admitted. */
+  private readonly nativeGraphics: NativeKittyGraphics | undefined
   /** Encoded bytes are immutable per draft; keyed by id + byte length. */
   private readonly base64Cache = new Map<string, string>()
   private occurrenceCache: { text: string; occurrences: readonly DraftImageOccurrence[] } | undefined
@@ -176,6 +185,7 @@ export class DraftImagePreview implements Component {
     this.theme = theme
     this.requestRender = options.requestRender
     this.convertThumbnail = convertThumbnail
+    this.nativeGraphics = options.nativeGraphics
   }
 
   /** The last-painted geometry, or undefined before the first render. */
@@ -363,23 +373,37 @@ export class DraftImagePreview implements Component {
   ): string[] {
     const image = occurrence.image
     const protocol = getCapabilities().images ?? 'none'
-    const key = `${image.id}:${occurrence.ordinal}:${image.mediaType}:${cardWidth}:${maxRows}:${protocol}:${image.byteLength}:direct`
+    const native = this.nativeGraphics
+    const key = `${image.id}:${occurrence.ordinal}:${image.mediaType}:${cardWidth}:${maxRows}:${protocol}:${image.byteLength}:direct:${native === undefined ? 'legacy' : 'managed'}`
     usedKeys.add(key)
     usedIds.add(image.id)
     let cached = this.imageCache.get(key)
     if (cached === undefined) {
       const name = this.displayName(image)
-      cached = new Image(
-        this.base64For(image),
-        image.mediaType,
-        this.theme,
-        {
-          maxWidthCells: cardWidth,
-          maxHeightCells: maxRows,
-          ...(name === '' ? {} : { filename: name }),
-        },
-        { widthPx: image.width, heightPx: image.height },
-      )
+      cached = native === undefined
+        ? new Image(
+          this.base64For(image),
+          image.mediaType,
+          this.theme,
+          {
+            maxWidthCells: cardWidth,
+            maxHeightCells: maxRows,
+            ...(name === '' ? {} : { filename: name }),
+          },
+          { widthPx: image.width, heightPx: image.height },
+        )
+        : native.image(
+          { pngBase64: this.base64For(image), widthPx: image.width, heightPx: image.height },
+          {
+            maxWidthCells: cardWidth,
+            maxHeightCells: maxRows,
+            fallback: this.theme.fallbackColor(imageFallback(
+              image.mediaType,
+              { widthPx: image.width, heightPx: image.height },
+              name === '' ? undefined : name,
+            )),
+          },
+        )
       this.imageCache.set(key, cached)
     }
     // The fork clamps to `width - 2`; pass two extra cells so the rendered
@@ -399,23 +423,37 @@ export class DraftImagePreview implements Component {
     usedIds: Set<number>,
   ): string[] {
     const image = occurrence.image
-    const key = `${image.id}:${occurrence.ordinal}:derived-kitty:${this.draftGeneration}:${cardWidth}:${maxRows}:${png.width}:${png.height}:${png.byteLength}`
+    const native = this.nativeGraphics
+    const key = `${image.id}:${occurrence.ordinal}:derived-kitty:${this.draftGeneration}:${cardWidth}:${maxRows}:${png.width}:${png.height}:${png.byteLength}:${native === undefined ? 'legacy' : 'managed'}`
     usedKeys.add(key)
     usedIds.add(image.id)
     let cached = this.imageCache.get(key)
     if (cached === undefined) {
       const name = this.displayName(image)
-      cached = new Image(
-        png.base64,
-        'image/png',
-        this.theme,
-        {
-          maxWidthCells: cardWidth,
-          maxHeightCells: maxRows,
-          ...(name === '' ? {} : { filename: name }),
-        },
-        { widthPx: png.width, heightPx: png.height },
-      )
+      cached = native === undefined
+        ? new Image(
+          png.base64,
+          'image/png',
+          this.theme,
+          {
+            maxWidthCells: cardWidth,
+            maxHeightCells: maxRows,
+            ...(name === '' ? {} : { filename: name }),
+          },
+          { widthPx: png.width, heightPx: png.height },
+        )
+        : native.image(
+          { pngBase64: png.base64, widthPx: png.width, heightPx: png.height },
+          {
+            maxWidthCells: cardWidth,
+            maxHeightCells: maxRows,
+            fallback: this.theme.fallbackColor(imageFallback(
+              'image/png',
+              { widthPx: png.width, heightPx: png.height },
+              name === '' ? undefined : name,
+            )),
+          },
+        )
       this.imageCache.set(key, cached)
     }
     return cached.render(cardWidth + 2).slice(0, maxRows)
@@ -556,7 +594,7 @@ export class DraftImagePreview implements Component {
 
   /** Drop every per-instance pixel/base64 cache (no card is displayed). */
   private clearPixelCaches(): void {
-    for (const image of this.imageCache.values()) image.invalidate()
+    for (const image of this.imageCache.values()) image.dispose?.()
     this.imageCache.clear()
     this.base64Cache.clear()
   }
@@ -565,7 +603,7 @@ export class DraftImagePreview implements Component {
   private prunePixelCaches(usedKeys: ReadonlySet<string>, usedIds: ReadonlySet<number>): void {
     for (const [key, image] of this.imageCache) {
       if (usedKeys.has(key)) continue
-      image.invalidate()
+      image.dispose?.()
       this.imageCache.delete(key)
     }
     for (const key of [...this.base64Cache.keys()]) {
