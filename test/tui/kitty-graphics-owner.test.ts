@@ -390,6 +390,35 @@ test('the budget falls back instead of evicting a possibly visible image', () =>
   assert.ok(core.register(source(PNG, 4, 4)), 'a released slot is reusable')
 })
 
+test('the ID budget counts terminal-retained painted ids too', () => {
+  const { core } = harness()
+  for (let index = 0; index < MAX_RESIDENT_IMAGES; index++) {
+    const component = new NativeKittyImage(core, source(PNG, 4, 4), { maxWidthCells: 40, fallback: '[image]' })
+    component.render(80)
+    // Painted, then the occurrence goes away: the id is terminal-retained.
+    component.dispose()
+  }
+  assert.equal(core.residentImageCount, MAX_RESIDENT_IMAGES, 'retained ids still occupy the ledger')
+  assert.equal(core.register(source(PNG, 4, 4)), undefined, 'a 33rd id falls back instead of growing the terminal')
+})
+
+test('a retained id whose buffer released its pixels is retired from the ledger', () => {
+  const { core, facade } = harness()
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  // Painted in the ALT buffer only.
+  facade.write('\x1b[?1049h')
+  facade.write(component.render(80).join('\r\n'))
+  const imageId = component.imageId!
+  component.dispose()
+  assert.equal(core.residentImageCount, 1, 'the painted id is retained')
+  // The alt buffer's own release frees the only copy: the id is now provably
+  // gone and must not keep occupying the budget.
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  assert.equal(core.residentImageCount, 0, 'the provably released id left the ledger')
+  assert.equal(core.owns(imageId), false)
+  assert.equal(core.wasOwned(imageId), true, 'a late legacy delete for it stays a no-op')
+})
+
 test('the payload budget refuses an oversized resident set', () => {
   const { core } = harness()
   const big = 'A'.repeat(Math.floor(MAX_RESIDENT_PAYLOAD_BYTES / 2) + 4)
