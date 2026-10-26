@@ -23481,11 +23481,16 @@ export class TuiApp {
         },
       )
     } catch (error) {
-      // The mount failed before the broker owned anything: release the
-      // precommit atomically so a later open starts from a clean slate.
-      this.deliveredFilesPanel = undefined
-      this.deliveredFilesFrame = undefined
-      this.deliveredFilesSnapshot = undefined
+      // Release the precommit ONLY while THIS mount still owns it. A callback
+      // inside a failing mount may already have closed this lease and installed
+      // a NEWER one (close → open B → A throws): erasing B's fields here would
+      // leave its broker node live with no app lease identity, and the next open
+      // (which coalesces on the panel field) would stack a second overlay.
+      if (this.deliveredFilesPanel === panel) {
+        this.deliveredFilesPanel = undefined
+        this.deliveredFilesFrame = undefined
+        this.deliveredFilesSnapshot = undefined
+      }
       panel.dispose()
       throw error
     }

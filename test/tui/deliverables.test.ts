@@ -488,3 +488,28 @@ test('the delivered tail stays inside 40/72/100/140 columns', async () => {
     }
   }
 })
+
+test('paths that differ only in stripped control bytes keep distinct painted labels', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  const hostile = '/a/report\u001b]52;c;YQ==\u0007.md'
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [{ path: hostile }, { path: '/b/report.md' }],
+  }])
+  const view = await viewport(vt)
+  const rows = view.split('\n').filter(line => line.includes('report.md'))
+  assert.equal(rows.length, 2, `both declared files are painted:\n${view}`)
+  const [first, second] = rows.map(row => row.trim())
+  assert.notEqual(first, second, 'the two rows must stay distinguishable after the display projection')
+  assert.ok(first!.includes('a/report.md'), `first label keeps its directory: ${first}`)
+  assert.ok(second!.includes('b/report.md'), `second label keeps its directory: ${second}`)
+  assert.ok(!view.includes('YQ=='), 'no OSC 52 payload reaches the frame')
+  assert.ok(!view.includes('\u001b]52'), 'no OSC introducer reaches the frame')
+})
