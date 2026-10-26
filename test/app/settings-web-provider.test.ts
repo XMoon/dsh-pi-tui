@@ -1679,6 +1679,63 @@ test('a resize that crops the highlighted candidate removes the Enter confirm af
   assert.deepEqual(h.writes, ['count:20'])
 })
 
+test('a list wheel re-anchors the Detail on the NEW row authoritative candidates', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0) // provider Detail keeps the keyboard
+  await chooseCandidate(h, 1) // DeepSeek Search API highlighted, not confirmed
+  assert.match(h.view(), /› DeepSeek Search API/u)
+  const listY = 5 // header + metadata + rule + pane header + row 0 (1-based SGR cell)
+  // The wheel moves the list SELECTION while the Detail keeps the keyboard.
+  h.vt.sendInput(`\x1b[<65;5;${listY}M`)
+  await h.vt.waitForRender()
+  const after = h.view()
+  assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
+  assert.match(after, /› HTTP · anonymous default/u,
+    `the NEW row's current candidate is highlighted, never the stale index:\n${after}`)
+  assert.doesNotMatch(after, /› DeepSeek Fetch API/u)
+  // Enter confirms the NEW row's CURRENT value (already-current → zero writes).
+  await key(h, ENTER)
+  await settlePainted(h, 'the already-current confirmation to settle', frame => !frame.includes('Saving…'))
+  assert.deepEqual(h.writes, [], 'the wheel-selected row never confirms the previous row candidate')
+
+  // The credential row's action cursor converges the same way.
+  await key(h, ESC) // Detail -> list
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear
+  assert.match(h.view(), /› Clear in Models…/u)
+  h.vt.sendInput(`\x1b[<64;5;${listY}M`) // wheel up -> endpoint row
+  await h.vt.waitForRender()
+  h.vt.sendInput(`\x1b[<65;5;${listY}M`) // wheel down -> credential row again
+  await h.vt.waitForRender()
+  const credential = h.view()
+  assert.match(credential, /› Configure in Models…/u,
+    `the credential cursor re-anchors on the first selectable action:\n${credential}`)
+  assert.doesNotMatch(credential, /› Clear in Models…/u)
+})
+
+test('a dispatched choice write never advertises Enter confirm while it is saving', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  h.store.writeDelayMs = 300
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  const saving = h.view()
+  assert.match(saving, /Saving…/u, `the in-flight state is painted:\n${saving}`)
+  assert.doesNotMatch(saving, /Enter confirm/u, `no Confirm is advertised while saving:\n${saving}`)
+  await key(h, ENTER) // must not dispatch a second intent
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  assert.equal(h.writes.length, 1, 'Enter while saving dispatched nothing')
+  assert.match(h.view(), /Verified/u)
+  await settlePainted(h, 'the settled bar', frame => frame.includes('Enter confirm'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+})
+
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
 
 test('the page states defaults, billing, the ori_question boundary and the endpoint trust warning', async t => {
