@@ -124,7 +124,9 @@ test('deep collisions grow only as far as needed, and identical paths stay a bas
     'q1/final/report.md',
     'q2/final/report.md',
     'notes.md',
-    'notes.md',
+    // Two verbatim-identical declarations cannot be told apart by the path; the
+    // ordinal pass is the ONE honest visible device (the Fold normally dedupes).
+    'notes.md (2)',
   ])
 })
 
@@ -189,4 +191,24 @@ test('collision labels are derived from the PROJECTED text, not the raw bytes', 
   assert.deepEqual(projected, ['a/report.md', 'b/report.md'])
   assert.notEqual(projected[0], projected[1])
   assert.equal(files[0]!.path, `/a/${hostile}`, 'the raw declaration is untouched')
+})
+
+test('projected-empty names never fall back to the raw path and stay distinguishable', async () => {
+  const { sanitizeDisplaySegment } = await import('../../src/tui/presentation/terminal-text.ts')
+  const red = '/a/report\u001b[31m'
+  const green = '/a/report\u001b[32m'
+  const files = [file(red), file(green), file('/a/report.md')]
+  const labels = deliveredFileLabels(files, { project: sanitizeDisplaySegment })
+  // The two control-only names project to the SAME visible path (`a/report`), so
+  // the ordinal pass keeps them apart; the third file keeps its own basename.
+  assert.deepEqual(labels, ['report', 'report (2)', 'report.md'])
+  for (const label of labels) {
+    assert.ok(!label.includes('\u001b'), `no control byte may survive in a label: ${JSON.stringify(label)}`)
+    assert.ok(label !== '', 'no label may be empty')
+  }
+  // A path that projects to NOTHING is still a presentable row.
+  assert.deepEqual(deliveredFileLabels([file('\u001b[31m')], { project: sanitizeDisplaySegment }), ['(unnamed)'])
+  // Raw declarations are never rewritten.
+  assert.equal(files[0]!.path, red)
+  assert.equal(files[1]!.path, green)
 })

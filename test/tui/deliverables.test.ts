@@ -513,3 +513,25 @@ test('paths that differ only in stripped control bytes keep distinct painted lab
   assert.ok(!view.includes('YQ=='), 'no OSC 52 payload reaches the frame')
   assert.ok(!view.includes('\u001b]52'), 'no OSC introducer reaches the frame')
 })
+
+test('declarations whose paths project to nothing stay distinguishable when painted', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [{ path: '/a/report\u001b[31m' }, { path: '/a/report\u001b[32m' }],
+  }])
+  const view = await viewport(vt)
+  const rows = view.split('\n').filter(line => line.includes('report'))
+  assert.equal(rows.length, 2, `both declared files are painted:\n${view}`)
+  const labels = rows.map(row => row.trim())
+  assert.notEqual(labels[0], labels[1], 'the two rows must stay distinguishable')
+  assert.ok(!view.includes('\u001b[31m') && !view.includes('\u001b[32m'),
+    'no control sequence from a declared path reaches the frame')
+})

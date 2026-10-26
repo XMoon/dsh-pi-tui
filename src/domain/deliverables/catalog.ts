@@ -135,16 +135,20 @@ export function deliveredFileLabels(
   options: { readonly project?: (segment: string) => string } = {},
 ): readonly string[] {
   const project = options.project ?? ((segment: string) => segment)
-  const segments = files.map(file => deliveredPathSegments(file.path).map(project))
+  // Empty PROJECTED segments carry no visible identity (a path made only of
+  // removed control bytes), so they are dropped before the collision pass: a
+  // raw-only difference must never survive into the visible label.
+  const segments = files.map(file => deliveredPathSegments(file.path).map(project).filter(segment => segment !== ''))
   const basenames = segments.map(parts => parts[parts.length - 1] ?? '')
-  return segments.map((parts, index) => {
+  const labels = segments.map((parts, index) => {
     const basename = basenames[index] ?? ''
-    if (basename === '') return files[index]?.path ?? ''
+    // Nothing visible at all: a truthful placeholder keeps the row presentable
+    // and still participates in the ordinal pass below.
+    if (basename === '') return '(unnamed)'
     const collision = segments.some((other, otherIndex) => otherIndex !== index
       && (other[other.length - 1] ?? '') === basename)
     if (!collision) return basename
-    // Grow the suffix until it is unique among the colliding basenames. Two
-    // identical paths never separate; the basename is the honest answer there.
+    // Grow the suffix until it is unique among the colliding basenames.
     for (let depth = 2; depth <= parts.length; depth += 1) {
       const suffix = parts.slice(-depth).join('/')
       const shared = segments.some((other, otherIndex) => otherIndex !== index
@@ -152,6 +156,16 @@ export function deliveredFileLabels(
       if (!shared) return suffix
     }
     return basename
+  })
+  // A LAST-RESORT ordinal pass: when even the projected path is identical (two
+  // declarations that differ only in removed control bytes), a visible ordinal
+  // is the ONE honest way to keep the rows distinguishable. It is derived from
+  // the fold's declaration order, so it is stable for this delivery.
+  const seen = new Map<string, number>()
+  return labels.map(label => {
+    const count = (seen.get(label) ?? 0) + 1
+    seen.set(label, count)
+    return count === 1 ? label : `${label} (${count})`
   })
 }
 
