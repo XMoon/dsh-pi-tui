@@ -1083,10 +1083,17 @@ test('a visual Assistant keeps the search anchor for a folded delivered-file tar
   app.setTranscript([card], folder.turnActivities())
   await vt.waitForRender()
   assert.ok(assistantVisualPresentation(card) !== undefined, 'precondition: the Answer has a visual sidecar')
-  app.setTranscriptSearchTarget({ query: 'hidden-target', match, message: card })
-  app.scrollToSearchTarget()
+  // A PASSIVE rebind does not grant the temporary reveal, so the folded tail
+  // stays closed and the hidden path has no rendered occurrence. The target is
+  // still a legitimate semantic hit and must keep its anchor selection.
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([card]),
+    target: { query: 'hidden-target', match, message: card },
+    grantReveal: false,
+  })
   const lines = await viewport(vt)
-  assert.ok(lines.some(line => line.includes('hidden-target.md')), `the reveal opens the folded delivered file:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('hidden-target.md')),
+    `precondition: the folded tail hides the target:\n${lines.join('\n')}`)
   const mounted = (app as unknown as {
     mountedTranscriptBlocks: ReadonlyArray<{
       block: { message?: TranscriptMessage }
