@@ -21,6 +21,7 @@ import { buildSpawnPlan } from '../../scripts/run-with-temp-root.mjs'
 const RUNNER = fileURLToPath(new URL('../../scripts/run-with-temp-root.mjs', import.meta.url))
 const HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/holder.mjs', import.meta.url))
 const LINGERING_HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/lingering-holder.mjs', import.meta.url))
+const EXIT_ZERO_HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/exit-zero-on-signal.mjs', import.meta.url))
 const POSIX_ONLY = process.platform === 'win32' ? 'signal forwarding to a process group is POSIX-only' : false
 
 function run(args, options = {}) {
@@ -97,6 +98,38 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
   })
 }
 
+// A child that handles the interruption itself and exits 0 must not turn the
+// run into a success: the first received signal owns the wrapper's status.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  test(`a child that handles ${signal} and exits 0 still yields the interruption status`, { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+    const life = testLifecycle(t)
+    const dir = life.tempDir('dsh-runner-handled-')
+    const marker = join(dir, 'evidence.log')
+    const child = spawn(process.execPath, [RUNNER, process.execPath, EXIT_ZERO_HOLDER], {
+      env: { ...process.env, PROBE_MARKER: marker, DSH_TEST_KEEP_TMP: undefined },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+    const exited = new Promise((resolve) => child.on('exit', (code, exitSignal) => resolve({ code, signal: exitSignal })))
+    life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+
+    const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
+    const [, , tmpdirField] = ready.split(' ')
+    const tmpRoot = tmpdirField.slice('tmpdir='.length)
+    life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
+
+    child.kill(signal)
+    const result = await exited
+    assert.equal(result.code, { SIGTERM: 143, SIGINT: 130 }[signal],
+      `the received signal owns the runner's status, got ${JSON.stringify(result)}`)
+    // The child exited 0 and the group settled, so this is not a cleanup
+    // failure: the root is removed.
+    assert.doesNotMatch(stderr, /cleanup unproven/u)
+    assert.equal(existsSync(tmpRoot), false, 'a settled group releases its root')
+  })
+}
+
 test('a direct child that exits normally leaves the root to a live descendant', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('dsh-runner-lingering-')
@@ -120,10 +153,11 @@ test('a direct child that exits normally leaves the root to a live descendant', 
   life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
 
   const result = await exited
-  // The direct child's own status is preserved ...
-  assert.equal(result.code, 0, `the runner passes the normal exit through, got ${JSON.stringify(result)}`)
-  // ... and the root it left behind is NOT deleted while the descendant lives.
-  assert.match(stderr, /keeping .*process group \d+ still has live members after the direct child exited/u)
+  // The child SUCCEEDED, but the wrapper cannot prove its group is gone: that
+  // is a cleanup failure, not a pass. The child's status stays diagnostic.
+  assert.equal(result.code, 1, `an unproven cleanup is a non-zero run, got ${JSON.stringify(result)}`)
+  assert.match(stderr, /cleanup unproven: keeping .*still has live members after the direct child exited \(the direct child exited 0\)/u)
+  // The root it left behind is NOT deleted while the descendant lives.
   assert.equal(existsSync(tmpRoot), true, 'the root outlives a normally-exiting leader while a descendant uses it')
   assert.equal(isExecuting(descendant), true, 'the descendant keeps running, untouched by the wrapper')
 })

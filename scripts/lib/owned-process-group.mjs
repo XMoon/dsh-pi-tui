@@ -208,6 +208,15 @@ export async function stopOwnedGroup(
   const pgid = child.pid
   // A child that never spawned has no group, so there is nothing to wait for.
   if (pgid === undefined) return true
+  if (child.exitCode !== null || child.signalCode !== null) {
+    // The leader is already gone, so its pid slot — and therefore the group id
+    // — may name a different group. NOTHING is signalled without proof, not
+    // even the FIRST forwarded signal: a live ChildProcess is the only thing
+    // that makes the numeric pgid trustworthy here. If the group is already
+    // empty it is provably gone; otherwise the caller reports the unproven
+    // group.
+    return !groupAlive(pgid)
+  }
   // Captured while the leader is (normally) alive: the escalation needs this
   // identity, or a witness recorded under it.
   const leaderStartTime = statStartTime(pgid)

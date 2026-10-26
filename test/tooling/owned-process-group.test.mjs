@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -51,7 +52,7 @@ async function startOwnedGroup(t, prefix) {
   const [, rawPid] = ready.split(' ')
   const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
   life.defer(() => { killStillExecuting([descendant]) })
-  return { child, descendant, exited }
+  return { child, descendant, exited, marker }
 }
 
 test('the group probe reports a live descendant and never signals it', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
@@ -156,6 +157,22 @@ test('a recorded witness proves the group after the leader was reaped and the es
   await exited
   const survivors = await waitForNoExecuting([descendant], 5_000)
   assert.deepEqual(survivors, [], `a verified witness authorizes the SIGKILL escalation: ${JSON.stringify(survivors)}`)
+})
+
+test('the FIRST group signal is not sent once the leader is already gone', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+  const { child, descendant, exited, marker } = await startOwnedGroup(t, 'owned-group-first-signal-')
+  // The leader exits and is reaped BEFORE any teardown is requested: its pid —
+  // and therefore the numeric pgid — may already name a different group, so
+  // not even the first forwarded signal may be sent without proof.
+  try { child.kill('SIGTERM') } catch { /* already gone */ }
+  await exited
+  const settled = await stopOwnedGroup(child, 'SIGTERM', { graceMs: 300, settleMs: 300 })
+  assert.equal(settled, false)
+  // The descendant ignores TERM; had the first signal been sent, it would have
+  // recorded it. Nothing was signalled.
+  assert.doesNotMatch(readFileSync(marker, 'utf8'), /ignored SIGTERM/u,
+    'no group signal may be sent once the leader is gone')
+  assert.equal(isExecuting(descendant), true)
 })
 
 test('a reused pgid is never signalled', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
