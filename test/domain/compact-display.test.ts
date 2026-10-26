@@ -15,6 +15,8 @@ import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/a
 import { TuiApp } from '../../src/tui-app.ts'
 import type { DisplayState } from '../../src/domain/display/preset.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -1967,4 +1969,55 @@ test('a userless wakeup turn keeps its trigger and folds internal Context in Com
     app.dispose()
     startedApps.delete(app)
   }
+})
+
+
+// ── published visuals are display-only, never a Compact projection change ──
+
+function compactChartPublication(ref: string): PublishedVisual {
+  return {
+    ref, turn: 0, step: 1, stepStartSeq: 5, callSeq: 6, resultSeq: 7, callId: 'present-compact',
+    source: {
+      ref, type: 'chart', title: 'Compact latency', turn: 0, step: 0, stepStartSeq: 1, callSeq: 2, resultSeq: 3, callId: 'chart-compact',
+      chart: { version: 1, type: 'chart', kind: 'bars', title: 'Compact latency', unit: 'ms', series: [{ label: 'p50', value: 42 }] },
+      svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined,
+    },
+  }
+}
+
+test('Compact renders a published visual inline while the raw marker stays search-visible', async () => {
+  const ref = `sv1_${'e'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const text = `Before compact.\n\n${marker}\n\nAfter compact.`
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('compact-visual'), role: 'assistant',
+        content: [{ type: 'text', text }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 1, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 2, 2),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  setAssistantVisualPresentation(assistant, {
+    subjectKind: 'main', subjectId: 'compact', sourceIdentity: {}, session: {}, sessionId: 'compact', seq: 3,
+    turn: 0, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
+  }, [compactChartPublication(ref)])
+  const { vt, app } = startApp('compact')
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  const before = view.indexOf('Before compact.')
+  const chart = view.indexOf('Compact latency', before)
+  const after = view.indexOf('After compact.')
+  assert.ok(before >= 0 && chart > before && after > chart, `Compact keeps the inline order:\n${view}`)
+  assert.ok(!view.includes('[dsh-visual-'), 'the marker definition is never painted')
+  assert.ok(folder.search('dsh-visual').length > 0, 'the raw search authority still sees the marker')
+  assert.ok(folder.search('After compact').length > 0, 'the visible answer remains searchable')
+  app.stop()
 })

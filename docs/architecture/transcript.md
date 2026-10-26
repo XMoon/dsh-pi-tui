@@ -210,6 +210,9 @@ the `tui-transcript-imports-renderer-mechanics` architecture rule:
 | PiTui compact slot/Preparing/action presentation + cache signatures | `src/tui/components/transcript/compact-process-preview.ts` |
 | PiTui Context cluster header and standalone Context rows | `src/tui/components/transcript/{context-cluster,context-row}.ts` |
 | rendered-row search geometry/highlight | `src/tui/components/transcript/search-presentation.ts` |
+| final-Assistant qualification (shared by Focus and visuals) | `src/domain/transcript/final-assistant.ts` |
+| published-visual placement + shared-definition context | `src/domain/visual/placement.ts`, `src/domain/visual/presentation.ts` |
+| PiTui ordered Assistant visual body + definition-prefix Markdown | `src/tui/components/transcript/{visual-assistant-body,shared-definitions-markdown}.ts` |
 
 `tui/transcript/**` imports no PiTui, Tern, `TuiApp`, theme/icons, renderer
 registry or concrete TUI component; it reads the semantic owners from
@@ -788,6 +791,38 @@ answer", "folded JSON-result cards show the summary, never the raw JSON",
 "settled ask_user_question cards show the answered count", "goal cards without
 a goal say no goal set").
 
+## Assistant-owned published visuals
+
+A published visual is Assistant-owned presentation evidence only through the
+`present_visual` authority over the exact Session log. The final-answer
+projection consumes the SAME final-Assistant qualification as Focus
+(`src/domain/transcript/final-assistant.ts`): only a completed or max-tokens
+turn's structural latest step, with renderable content, may own a visual.
+Publication refs from a different turn, a window outside the answer, or a
+replaced/forged receipt never enter the row.
+
+`src/domain/visual/placement.ts` owns the ONE placement projection. The
+Assistant's original `ContentBlock` text is the sole coordinate authority:
+strict `[dsh-visual-sv1_…]: <#>` top-level definitions are consumed as source
+spans, the renderer receives a single ordered `text | visual` sequence with
+explicit empty boundaries, and unconsumed published refs are appended to the
+answer body in first-publication order before the delivered-files tail. Ordinary
+link definitions of a continuous Markdown text run are re-supplied only as a
+display-only prefix so cross-segment references keep their real href; that
+prefix never enters the Session, search corpus, `/transcript` export or model
+bytes. The plan never reads render width, focus state, a tool card or a client
+canvas.
+
+One eligible Assistant remains one transcript row, one component-cache entry and
+one disclosure owner. Its body may mix Markdown, `ChartBody`, `SvgThumbnail` and
+the existing non-text blocks under the single original Agent bullet; the
+visual-projection revision is part of the row's cache identity. Full, Compact,
+Focus and expanded Focus all render that same row. A marker's text is hidden
+from the display surface but remains readable raw source; search authority stays
+the raw message corpus, and a display-only suppression is allowed only for a
+match whose hidden marker paints no occurrence.
+
+## Long user messages
 ## Long user messages
 
 A text-only durable user message over 10 rendered visual rows collapses to head

@@ -28,8 +28,18 @@
   不部分成功、不暗中重试；策略替换生成结果或发布结果同样会撤销资格。成功回执是“已选定 N 个
   图”的人类摘要加一条严格的 `visual-published-v1` 机器行，失败回执只有可读原因。发布不新增
   任何会话事件、持久化发布表或缓存，冷回放从同一份日志得到相同结论；三个工具的人类可读
-  卡片、搜索与 `/transcript` 导出都不会显示这些机器行，而原始会话记录仍然完整保留。当前
-  仍沿用原有 Tool Card，最终回答里的插图属于后续阶段。
+  卡片、搜索与 `/transcript` 导出都不会显示这些机器行，而原始会话记录仍然完整保留。已有
+  Tool Card 仍按原样显示，发布过的图现在还会进入最终回答（见下一条）。
+- **已发布的图表/SVG 现在会出现在最终回答里，而且只有一条 Assistant 行。** 严格合法的
+  `[dsh-visual-sv1_…]: <#>` 定义会在其原文位置原位插入对应图形，同一 ref 最多一次；正文里
+  没有 marker 的已发布图按首次发布顺序附在回答末尾、交付文件之前；未发布、伪造、重复或
+  写在代码块/缩进/引用里的形似定义不会插图，也不会吞掉原文字。链接定义仍按原 Markdown
+  语义生效：图前引用、图后定义或反向都能解析到原来的目的地，定义本身只作为显示层上下文，
+  不写回会话、模型消息、搜索原文或 `/transcript` 导出。最终回答仍是一个 transcript 行、
+  一个 bullet、一个组件缓存与同一个 disclosure owner，Full/Compact/Focus、展开/折叠、
+  调整宽度与搜索跳转都不会复制图形或改变归属；原有 Tool/Work 卡片、SVG 描述与源码查看
+  入口保持不变。Direct 主会话与可读的 viewed child 已可用；Remote 与 TSP 原生混排不在本次
+  声明范围内。
 - **`/settings → Agent` 现在直接编辑权限、委派与用户 shell 策略五项，`Agent settings…` 过渡行退休。**
   顺序固定为 `Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
   `Subagent model selection` → `User shell sandbox policy`，每项只有一个权威：审批策略是**当前会话**

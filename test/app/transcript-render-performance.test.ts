@@ -4,6 +4,9 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import { TranscriptFolder, type TranscriptMessage, type TurnActivity } from '../../src/transcript.ts'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -539,4 +542,56 @@ test('a steady MULTI-SLOT compact render never rescans its unchanged text', asyn
   component.render(80)
   assert.equal(component.displayProjectionRunsForTest(), afterFirstFrame + 1,
     'only the changed slot is reprojected')
+})
+
+
+test('a stable inline visual Assistant repaint is a no-op with a stable mounted component', () => {
+  const ref = `sv1_${'9'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1),
+    eventAt('assistant/message', {
+      turn: 1,
+      step: 0,
+      message: {
+        id: MessageId('visual-render-perf'),
+        role: 'assistant',
+        content: [{ type: 'text', text: `Before.\n\n${marker}\n\nAfter.` }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 2),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const assistant = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(assistant !== undefined)
+  const publication: PublishedVisual = {
+    ref, turn: 1, step: 1, stepStartSeq: 5, callSeq: 6, resultSeq: 7, callId: 'present-perf',
+    source: {
+      ref, type: 'chart', title: 'Perf latency', turn: 1, step: 0, stepStartSeq: 1, callSeq: 2, resultSeq: 3, callId: 'chart-perf',
+      chart: { version: 1, type: 'chart', kind: 'bars', title: 'Perf latency', unit: 'ms', series: [{ label: 'p50', value: 42 }] },
+      svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined,
+    },
+  }
+  setAssistantVisualPresentation(assistant, {
+    subjectKind: 'main', subjectId: 'perf', sourceIdentity: {}, session: {}, sessionId: 'perf', seq: 3,
+    turn: 1, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
+  }, [publication])
+  const { app } = startApp()
+  showFolder(app, folder)
+  const first = diagnostics(app)
+  const batch = mountedTranscriptBatch(app)
+  const visualBlock = batch.find(entry => entry.component !== undefined && String(entry.component).includes('Visual'))
+  const assistantBatch = batch.find(entry => entry.rendered.some(line => line.includes('Perf latency')))
+  assert.ok(assistantBatch !== undefined, 'the inline chart is in the mounted batch')
+  assert.ok(visualBlock !== undefined || assistantBatch !== undefined)
+  showFolder(app, folder)
+  const second = diagnostics(app)
+  assert.equal(second.noopCommits, first.noopCommits + 1, 'an unchanged visual answer takes the no-op path')
+  assert.equal(second.structuralCommits, first.structuralCommits)
+  assert.equal(second.structuralFallbacks, first.structuralFallbacks)
+  assert.equal(mountedTranscriptBatch(app).length, batch.length, 'the mounted batch identity is preserved')
+  app.dispose()
 })

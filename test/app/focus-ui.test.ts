@@ -26,6 +26,8 @@ import type { ToolPresenter } from '../../src/tui/transcript/tool-presentation.t
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader } from '../support/focus-header.ts'
+import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -4196,4 +4198,63 @@ test('a next-turn wakeup tool-jobs notice stays before the collapsed Thought', a
   assert.ok(wakeRow >= 0, `the wakeup cause remains visible:\n${view}`)
   assert.ok(headerRow >= 0 && wakeRow < headerRow, `the wakeup notice precedes the Thought:\n${view}`)
   assert.equal(countFocusHeaders(view), 1, `the notice is not absorbed into a second Thought:\n${view}`)
+})
+
+
+// ── published visuals own the same final row under Focus ──────────────────
+
+function focusChartPublication(ref: string): PublishedVisual {
+  return {
+    ref, turn: 1, step: 1, stepStartSeq: 5, callSeq: 6, resultSeq: 7, callId: 'present-focus',
+    source: {
+      ref, type: 'chart', title: 'Focus latency', turn: 1, step: 0, stepStartSeq: 1, callSeq: 2, resultSeq: 3, callId: 'chart-focus',
+      chart: { version: 1, type: 'chart', kind: 'bars', title: 'Focus latency', unit: 'ms', series: [{ label: 'p50', value: 42 }] },
+      svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined,
+    },
+  }
+}
+
+test('a published visual keeps its one final Assistant row and inline chart under Focus', async () => {
+  const ref = `sv1_${'d'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u-visual-focus'), role: 'user',
+      content: [{ type: 'text', text: 'draw it' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a-visual-focus'), role: 'assistant',
+        content: [{ type: 'text', text: `Before focus.\n\n${marker}\n\nAfter focus.` }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 2, 2),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 3, 3),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  setAssistantVisualPresentation(assistant, {
+    subjectKind: 'main', subjectId: 'focus', sourceIdentity: {}, session: {}, sessionId: 'focus', seq: 3,
+    turn: 1, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
+  }, [focusChartPublication(ref)])
+
+  const { vt, app } = startApp({ preset: 'focus' })
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Before focus.') && view.includes('After focus.'), `final answer visible:\n${view}`)
+  assert.equal(view.split('Focus latency').length - 1, 1, `exactly one inline chart row set:\n${view}`)
+  assert.equal(view.split('[dsh-visual-').length - 1, 0, 'the marker definition never paints')
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n').split('Focus latency').length - 1, 1,
+    'expanding the Thought never duplicates the final visual')
+  app.setTranscriptDetailExpanded(false)
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n').split('Focus latency').length - 1, 1,
+    'collapsing the Thought never duplicates the final visual')
+  app.stop()
 })

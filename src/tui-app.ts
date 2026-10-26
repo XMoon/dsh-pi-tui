@@ -227,10 +227,13 @@ import {
 import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
 import { ChartBody } from './tui/components/transcript/chart-body.ts'
+import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/components/transcript/visual-assistant-body.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
 import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
-import { humanFacingVisualResult } from './domain/visual/publication.ts'
+import { humanFacingVisualResult, type PublishedVisual } from './domain/visual/publication.ts'
+import { assistantVisualPresentation, assistantVisualPresentationRevision } from './domain/visual/presentation.ts'
+import { planVisualPlacement, type TextPiece } from './domain/visual/placement.ts'
 import { isVisualToolName, PRESENT_VISUAL_TOOL_NAME } from './domain/visual/tools.ts'
 import { chartDisplayTitle, chartTextRows } from './domain/visual/chart.ts'
 import { authorizeSvg, svgDetailRows } from './domain/visual/svg.ts'
@@ -2375,6 +2378,10 @@ interface MessageComponentEntry {
   /** Live indexed Assistant mutations can retain the projection array in
    * place; this revision remains part of the cache identity. */
   presentationRevision?: number
+  /** The committed visual-projection revision of an Assistant row. A new
+   * published figure (or a cleared sidecar) must rebuild the one Assistant
+   * body at its existing row, never mint a second transcript row. */
+  visualPresentationRevision?: number
   /** Durable assistant interruption metadata; the marker is rendered outside
    * the assistant body so searchable/model-facing text stays unchanged. */
   interrupted?: boolean
@@ -11048,6 +11055,29 @@ export class TuiApp {
     return result.matches
   }
 
+  /**
+   * Display-only suppression of a "void" search target: the semantic corpus
+   * still contains the hidden marker line, but no painted row does. Suppress
+   * the anchor wash for that exact case only; the N/M navigation count and the
+   * raw search authority are deliberately unchanged.
+   */
+  private searchTargetRendersNoOccurrence(message: TranscriptMessage, query: string): boolean {
+    if (message.kind !== 'assistant') return false
+    const presentation = assistantVisualPresentation(message)
+    if (presentation === undefined || presentation.publications.length === 0) return false
+    const plan = planVisualPlacement({
+      text: message.text,
+      ...(message.content === undefined ? {} : { content: message.content }),
+      publications: presentation.publications,
+    })
+    const visible = plan.pieces
+      .filter((piece): piece is TextPiece => piece.kind === 'text')
+      .map(piece => piece.source)
+      .join('\n')
+      .toLowerCase()
+    return !visible.includes(query.trim().toLowerCase())
+  }
+
   /** The rendered search presentation of ONE block while a search is active.
    * The current target builds PROVEN source geometry from the renderer-declared
    * regions; every other VISIBLE message block that is a semantic match card is
@@ -11066,6 +11096,9 @@ export class TuiApp {
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
     const matches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
     if (!current && matches.length === 0) return { current: false }
+    if (current && matches.length === 0 && this.searchTargetRendersNoOccurrence(block.message, target.query)) {
+      return { current: false }
+    }
     if (current) {
       const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
       const geometry = buildSourceGeometry(matches, regions, transcriptSearchSourceKey(target.match.source))
@@ -17379,6 +17412,7 @@ export class TuiApp {
         entry.content = message.kind === 'user' || message.kind === 'assistant' ? message.content : undefined
         entry.displayBlocks = message.kind === 'assistant' ? message.displayBlocks : undefined
         entry.presentationRevision = message.kind === 'assistant' ? assistantPresentationRevision(message) : undefined
+        entry.visualPresentationRevision = message.kind === 'assistant' ? assistantVisualPresentationRevision(message) : undefined
         entry.interrupted = message.kind === 'assistant' ? message.interrupted === true : undefined
         entry.running = message.kind === 'thinking' ? message.running : undefined
         entry.label = message.kind === 'system' ? message.label : undefined
@@ -17433,6 +17467,7 @@ export class TuiApp {
         return entry.text !== message.text || entry.content !== message.content
           || entry.displayBlocks !== message.displayBlocks
           || entry.presentationRevision !== assistantPresentationRevision(message)
+          || entry.visualPresentationRevision !== assistantVisualPresentationRevision(message)
           || entry.interrupted !== (message.interrupted === true)
       case 'thinking':
         return entry.text !== message.text || entry.running !== message.running
@@ -17628,6 +17663,74 @@ export class TuiApp {
   }
 
   /**
+   * Render the ONE ordered Assistant body for qualified published visuals.
+   * The bullet wrapper stays the SAME single `BulletedComponent` owner as the
+   * no-visual path; the ordered body only replaces the inner markdown/block
+   * sequence, never the transcript row or its disclosure identity.
+   */
+  private renderVisualAssistantBody(
+    message: Extract<TranscriptMessage, { kind: 'assistant' }>,
+    publications: readonly PublishedVisual[],
+    bullet: string,
+  ): Component {
+    const blocks = message.content !== undefined && message.content.length > 0
+      ? message.content
+      : [{ type: 'text' as const, text: message.text }]
+    const plan = planVisualPlacement({
+      text: message.text,
+      ...(message.content === undefined ? {} : { content: message.content }),
+      publications,
+    })
+    const body = new VisualAssistantBody({
+      pieces: plan.pieces,
+      definitions: plan.definitions,
+      blocks,
+      theme: markdownTheme,
+      markdownOptions: HOST_MARKDOWN_OPTIONS,
+      paint: text => color.textDim(text),
+      svgLoader: this.svgRasterLoader,
+      svgTheme: this.imageTheme,
+      requestRender: () => this.settleThumbnailRender(),
+      nonText: (block, blockIndex) => this.renderVisualAssistantNonText(block, blockIndex, message),
+    })
+    return new BulletedComponent(body, bullet)
+  }
+
+  /**
+   * Materialize one non-text Assistant ContentBlock through the EXISTING host
+   * renderer (image occurrence + viewer ownership, file row, bounded fallback).
+   * This is the same behavior `renderBlockSequence` uses at that position.
+   */
+  private renderVisualAssistantNonText(
+    block: import('@deepseek-ai/dsh-llm').ContentBlock,
+    blockIndex: number,
+    message: Extract<TranscriptMessage, { kind: 'assistant' }>,
+  ): Component | undefined {
+    if (block.type === 'reasoning' || block.type === 'tool-call') return undefined
+    if (block.type === 'image') {
+      let imageIndex = 0
+      for (const [index, candidate] of (message.content ?? []).entries()) {
+        if (index >= blockIndex) break
+        if (candidate.type === 'image') imageIndex += 1
+      }
+      if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
+        return this.imageThumbnail(
+          block.attachment as ImageAttachmentRefLike,
+          message,
+          imageIndex,
+          this.occurrenceCollapsedRef(message, imageIndex),
+        )
+      }
+      this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
+      return new Text(sanitizeDisplayText(textWithAttachmentMarkers([block])), 0, 0)
+    }
+    if (block.type === 'file') {
+      return new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim })
+    }
+    return new Text(color.textDim(sanitizeDisplayText(finalizedBlockFallbackText(block))), 0, 0)
+  }
+
+  /**
    * Render one transcript message as a pi-tui component — the HOST
    * renderer (M7: extensions are consulted by buildMessage, which owns
    * the plugin chain + identity; renderMessage itself never re-runs a
@@ -17701,11 +17804,18 @@ export class TuiApp {
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
       const makeAssistantText = (text: string): Component =>
         new BulletedComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
-      const body = message.displayBlocks !== undefined
+      // ONLY the exact final Assistant row carries a sidecar (the runtime
+      // derives it from the complete Direct Session log). Every other answer
+      // keeps the original path byte for byte.
+      const publications = assistantVisualPresentation(message)?.publications
+      const visualBody = publications === undefined || publications.length === 0
+        ? undefined
+        : this.renderVisualAssistantBody(message, publications, bullet)
+      const body = visualBody ?? (message.displayBlocks !== undefined
         ? this.renderAssistantDisplaySequence(message.displayBlocks, makeAssistantText, message)
         : message.content !== undefined && message.content.some(block => block.type !== 'text')
           ? this.renderBlockSequence(message.content, makeAssistantText, message)
-          : makeAssistantText(message.text)
+          : makeAssistantText(message.text))
       let bodyWithStatus = body
       if (message.interrupted) {
         const interrupted = new Container()
@@ -17713,7 +17823,10 @@ export class TuiApp {
         interrupted.addChild(new Text(color.textDimItalic('  (interrupted)'), 0, 0))
         bodyWithStatus = interrupted
       }
-      return this.withDeliveredFiles(bodyWithStatus, message, expanded)
+      const withFiles = this.withDeliveredFiles(bodyWithStatus, message, expanded)
+      if (visualBody === undefined) return withFiles
+      if (withFiles === visualBody) return withFiles
+      return new VisualAssistantDisposalFrame(withFiles, visualBody)
     }
     if (message.kind === 'thinking') {
       // The unified Thinking disclosure card (plan §4/§13): COMPACT is
