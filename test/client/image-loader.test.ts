@@ -842,3 +842,52 @@ test('clear() drops QUEUED conversions: a disposed surface starts no new decoder
   assert.equal(loader.getKittyThumbnail(refs[2]!).state, 'idle')
   assert.equal(loader.kittyThumbnailCacheSize(), 0)
 })
+
+test('a source evicted while a preview is QUEUED is dropped, not a sticky decode failure', async () => {
+  const pending: Array<() => void> = []
+  let started = 0
+  const convert: KittyThumbnailConverter = () => new Promise<KittyThumbnailPng>(resolve => {
+    started += 1
+    pending.push(() => resolve(derived()))
+  })
+  // The regression condition: the DEFAULT 32-entry raw cache.
+  const loader = new ImageLoader(async () => ({ ref: {}, data: new Uint8Array([1, 2, 3]) }), new ImageCache(), convert)
+  const a = previewRefOf('evict-a')
+  const b = previewRefOf('evict-b')
+  const c = previewRefOf('evict-c')
+  for (const ref of [a, b, c]) loader.load(ref)
+  await flush()
+  loader.loadKittyThumbnail(a)
+  loader.loadKittyThumbnail(b)
+  await flush()
+  loader.loadKittyThumbnail(c)
+  await flush()
+  assert.equal(started, 2, 'A and B hold the two conversion slots')
+  assert.equal(loader.getKittyThumbnail(c).state, 'loading', 'C waits in the queue')
+  // 32 more distinct raw reads push C out of the default 32-entry raw cache.
+  const pressure = Array.from({ length: 32 }, (_value, index) => previewRefOf(`evict-p${index}`))
+  for (const ref of pressure) loader.load(ref)
+  await flush()
+  assert.equal(loader.get(c).state, 'idle', "C's raw bytes are evicted while it is queued")
+  // Release the two running jobs: C starts, finds no source and must NOT be
+  // recorded as a persistent decode failure.
+  pending.shift()!()
+  await flush()
+  pending.shift()!()
+  await flush()
+  assert.equal(started, 2, 'the dropped job never invokes the decoder')
+  assert.equal(loader.getKittyThumbnail(c).state, 'idle',
+    'a transient raw-cache eviction is not a sticky preview error')
+  // Recovery through the normal raw-read + preview-request path: a later
+  // visible render can read the attachment again and derive again.
+  loader.load(c)
+  await flush()
+  assert.equal(loader.get(c).state, 'ready', 'the attachment can be read again')
+  loader.loadKittyThumbnail(c)
+  await flush()
+  assert.equal(loader.getKittyThumbnail(c).state, 'loading', 'a fresh conversion is allowed')
+  pending.shift()!()
+  await flush()
+  assert.equal(loader.getKittyThumbnail(c).state, 'ready')
+  assert.equal(started, 3, 'exactly one new conversion, no retry storm')
+})

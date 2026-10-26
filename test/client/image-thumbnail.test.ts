@@ -722,3 +722,57 @@ test('dispose drops the local Image reference immediately', async () => {
   component.dispose()
   assert.equal(retainedImage(component), undefined, 'dispose drops the local Image without any loader settle')
 })
+
+test('a source evicted while its preview is queued recovers on the next visible render', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const realDerived = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
+  const held: Array<() => void> = []
+  let conversions = 0
+  const converter: KittyThumbnailConverter = () => {
+    conversions += 1
+    // A and B hold the two conversion slots; every later request resolves.
+    if (conversions <= 2) {
+      return new Promise(resolve => { held.push(() => resolve(realDerived)) })
+    }
+    return Promise.resolve(realDerived)
+  }
+  // The regression condition: the DEFAULT 32-entry raw cache.
+  const loader = imageLoaderWith(SAMPLE_JPEG, converter)
+  const a = { ...JPEG_REF, attachmentId: 'recover-a', name: 'a.jpg' }
+  const b = { ...JPEG_REF, attachmentId: 'recover-b', name: 'b.jpg' }
+  const c = { ...JPEG_REF, attachmentId: 'recover-c', name: 'recover.jpg' }
+  for (const ref of [a, b, c]) loader.load(ref)
+  await until(() => loader.get(a).state === 'ready' && loader.get(b).state === 'ready' && loader.get(c).state === 'ready', 'raw reads')
+  loader.loadKittyThumbnail(a)
+  loader.loadKittyThumbnail(b)
+  await until(() => conversions === 2, 'two held conversions')
+  loader.loadKittyThumbnail(c)
+  assert.equal(loader.getKittyThumbnail(c).state, 'loading')
+  // Evict C's raw bytes while it waits in the queue (32-entry default cache).
+  const pressure = Array.from({ length: 32 }, (_value, index) => ({ ...JPEG_REF, attachmentId: `recover-p${index}`, name: `p${index}.jpg` }))
+  for (const ref of pressure) loader.load(ref)
+  await until(() => loader.get(c).state === 'idle', 'the raw source is evicted')
+  held.shift()!()
+  held.shift()!()
+  await until(() => loader.getKittyThumbnail(c).state === 'idle', 'the dropped job releases its slot without a failure')
+  // The next visible render goes through the ordinary raw-read path and then
+  // re-requests the derivative; it must paint a REAL Kitty PNG, not remain
+  // stuck on Preview unavailable.
+  const component = new ImageThumbnail(c, loader, THEME, () => {})
+  const first = component.render(80)
+  assert.ok(first[0]!.includes('🖼️ recover.jpg · 120×80'), `the occurrence remains identifiable: ${first[0]}`)
+  await until(() => loader.get(c).state === 'ready', 'the attachment is read again')
+  const pending = component.render(80)
+  assert.ok(pending[0]!.includes('…'), 'the fresh conversion is pending')
+  await until(() => loader.getKittyThumbnail(c).state === 'ready', 'the re-derived preview')
+  const lines = component.render(80)
+  const body = kittyBody(lines)
+  assert.ok(body !== undefined, 'the recovered attachment paints a Kitty body')
+  assert.ok(body.header.includes('f=100'), 'the recovered body is a PNG transmission')
+  assert.deepEqual(pngDimensions(body.png), { width: 120, height: 80 })
+  assert.equal(conversions, 3, 'exactly one fresh conversion, no retry storm')
+  component.render(80)
+  component.render(80)
+  assert.equal(conversions, 3, 'steady renders never re-convert')
+})
