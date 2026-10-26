@@ -735,7 +735,7 @@ test('a duplicated publisher callId is refused by the LIVE path exactly as repla
   const log = new LogBuilder().turnStart(1)
   const { ref } = log.generate(1, 0, 'chart', 'chart')
   log.stepEnd(1, 0)
-  log.stepStart(1, 1)
+  const presentStepStartSeq = log.stepStart(1, 1)
   log.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref }] })
   log.result(1, 1, 'present', [
     { type: 'text', text: 'Selected 1 visual for presentation.' },
@@ -745,21 +745,79 @@ test('a duplicated publisher callId is refused by the LIVE path exactly as repla
   log.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref }] })
   log.turnEnd(1)
   const events = log.events()
-  const stepStartSeq = events.find((event): event is Extract<VisualSessionEvent, { type: 'step/start' }> =>
-    event.type === 'step/start' && event.data.step === 1)!.seq
-
   const live = decidePublication({
     sessionId: SESSION,
     events,
     refs: [ref],
     turn: 1,
-    stepStartSeq,
+    stepStartSeq: presentStepStartSeq,
     callId: 'present',
   })
   assert.equal(live.ok, false, 'the live path must refuse an ambiguous publisher')
   assert.match(live.ok ? '' : live.reason, /no unique committed present_visual call/u)
   // And replay agrees: nothing was published.
   assert.deepEqual(collectPublishedVisuals(SESSION, events), [])
+})
+
+test('a duplicate publisher ID is refused even when observed BEFORE the duplicate tool/call lands', () => {
+  // The reachable race: the step's model response already lists the id TWICE,
+  // the first publisher takes its observation, and the second `tool/call` has
+  // not been appended yet. Only the complete model response can catch this.
+  const log = new LogBuilder().turnStart(1)
+  const { ref } = log.generate(1, 0, 'chart', 'chart')
+  log.stepEnd(1, 0)
+  const presentStepStartSeq = log.stepStart(1, 1)
+  // The assistant message declares the SAME id twice.
+  log.appendRaw({
+    type: 'assistant/message',
+    data: {
+      turn: 1,
+      step: 1,
+      message: {
+        content: [
+          { type: 'tool-call', id: 'present', name: PRESENT_VISUAL_TOOL_NAME },
+          { type: 'tool-call', id: 'present', name: PRESENT_VISUAL_TOOL_NAME },
+        ],
+      },
+    },
+  })
+  // Only the FIRST call is in the observed cut.
+  log.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref }] })
+  const observedCut = log.events()
+  const live = decidePublication({
+    sessionId: SESSION,
+    events: observedCut,
+    refs: [ref],
+    turn: 1,
+    stepStartSeq: presentStepStartSeq,
+    callId: 'present',
+  })
+  assert.equal(live.ok, false, 'the duplicate is refused from the model response alone')
+  assert.match(live.ok ? '' : live.reason, /requested "present" 2 times/u)
+
+  // The control: a SINGLE requested id at the same point is still accepted.
+  const control = new LogBuilder().turnStart(1)
+  const controlRef = control.generate(1, 0, 'chart', 'chart').ref
+  control.stepEnd(1, 0)
+  const controlStepStartSeq = control.stepStart(1, 1)
+  control.appendRaw({
+    type: 'assistant/message',
+    data: {
+      turn: 1,
+      step: 1,
+      message: { content: [{ type: 'tool-call', id: 'present', name: PRESENT_VISUAL_TOOL_NAME }] },
+    },
+  })
+  control.callInOpenStep(1, 1, 'present', 'present_visual', { visuals: [{ ref: controlRef }] })
+  const controlDecision = decidePublication({
+    sessionId: SESSION,
+    events: control.events(),
+    refs: [controlRef],
+    turn: 1,
+    stepStartSeq: controlStepStartSeq,
+    callId: 'present',
+  })
+  assert.equal(controlDecision.ok, true, controlDecision.ok ? '' : controlDecision.reason)
 })
 
 // ── the receipt parser ─────────────────────────────────────────────────────
