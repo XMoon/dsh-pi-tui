@@ -15,11 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negotiated it, and the full final title, exact values or SVG description stay readable otherwise,
   never fabricating a drawing. The surrounding Markdown keeps its link definitions, code, lists and
   footnotes. Each figure carries a real Copy button: a chart copies the final ChartFact as pretty
-  JSON, an SVG copies the raw source; `Alt+V` cycles the selected figure of the current window and
-  scrolls it into view, `Alt+C` copies the current selection, and an unselected chord shows a hint.
-  Copy reuses the existing ClientActions clipboard policy; an old frame, an old session or a
-  still-settling write never posts a success notice onto a newer subject, and a modal, the Work
-  details reader, a Picker or the Work Hub outranks the button and both chords. Unpublished,
+  JSON, an SVG copies the raw source; `Alt+V` cycles the selected figure of the current window in
+  paint order and marks it with `Selected · i/n`, `Alt+C` copies the current selection, and an
+  unselected chord shows a hint. Whether the selected figure is already inside the current viewport
+  remains the Tern client's own transcript scroll position; the program adds no page, Reader or
+  second scroll owner. Copy reuses the existing ClientActions clipboard policy; an old frame, an old
+  session or a still-settling write never posts a success notice onto a newer subject, and a modal,
+  the Work details reader, a Picker or the Work Hub outranks the button and both chords. Unpublished,
   forged or invalidated sources paint no figure, no Copy button and no image bytes.
 
 - **The composer draft preview and the fullscreen image viewer now paint real JPEG/WebP pixels on a native Kitty terminal.**

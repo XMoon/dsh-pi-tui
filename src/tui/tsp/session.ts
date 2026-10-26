@@ -54,7 +54,7 @@ import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
+import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -1882,7 +1882,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // carries a figure. They are renderer-local product chords, not public
     // keymap entries, so the dock names them directly.
     if (visualOrder.length > 0) {
-      lines.push(ui.text({ key: 'visual-actions', text: 'Alt+V select visual · Alt+C copy' }))
+      lines.push(ui.text({
+        key: 'visual-actions',
+        text: `${TSP_VISUAL_SELECT_LABEL} select visual · ${TSP_VISUAL_COPY_LABEL} copy`,
+      }))
     }
     for (const notice of dock.notices) {
       const noticeText = sanitizeDisplayText(notice.text)
@@ -2250,7 +2253,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const target = current === undefined ? undefined : visualTargets.get(current.ref)
     if (target === undefined) {
       selectedVisual = undefined
-      display.notify('Alt+V to select a visual', 'info')
+      display.notify(`${TSP_VISUAL_SELECT_LABEL} to select a visual`, 'info')
       return
     }
     issueVisualCopy(target)

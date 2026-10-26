@@ -21,6 +21,18 @@ import type { KeyId } from '@xmoon76/pi-tui'
 export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'
 
 /**
+ * The TSP renderer's FIXED published-visual selection/copy chords (PR3 §2.4).
+ *
+ * Same category as {@link TSP_CONTINUED_INSPECTION_LABEL}: the TSP surface owns
+ * no Host keymap action, so these chords are dispatched from the raw SDK key
+ * stream and can never come from `keyHint`/`keysFor`. They also cannot go stale
+ * under a remap, because no remap exists for them. The labels live HERE, with
+ * the key-label vocabulary, so a renderer module never hard-codes the chords.
+ */
+export const TSP_VISUAL_SELECT_LABEL = 'Alt+V'
+export const TSP_VISUAL_COPY_LABEL = 'Alt+C'
+
+/**
  * The History editor-seat tenant's FIXED labels (Phase 3B / B3-A).
  *
  * The seat is a per-surface COMPONENT contract, not a Host command: it owns no

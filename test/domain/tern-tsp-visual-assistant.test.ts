@@ -131,6 +131,8 @@ function assistantRow(text: string, content?: readonly ContentBlock[]): Extract<
 
 /** Attach the display-only sidecar to the exact row (the PR2 handoff). */
 function present(message: TranscriptMessage, publications: readonly PublishedVisual[]): void {
+  const text = 'text' in message && typeof message.text === 'string' ? message.text : ''
+  const content = 'content' in message ? message.content : undefined
   setAssistantVisualPresentation(message, {
     subjectKind: 'main',
     subjectId: 'session-1',
@@ -140,8 +142,8 @@ function present(message: TranscriptMessage, publications: readonly PublishedVis
     seq: 1,
     turn: 1,
     step: 0,
-    text: 'body' in message ? message.text : '',
-    content: 'content' in message ? message.content : undefined,
+    text,
+    content,
     assistantRevision: 0,
   }, publications)
 }
@@ -603,4 +605,55 @@ test('selection changes only the badge text, never the figure or button keys', (
   assert.deepEqual(keys(plain), keys(selected))
   assert.deepEqual(nodesOfKind(plain, 'badge'), [])
   assert.deepEqual(nodesOfKind(selected, 'badge').map(badge => badge.props['text']), ['Selected · 1/2'])
+})
+
+// ── Duplicate declarations and forged markers ──────────────────────────────
+
+test('a duplicated publication entry paints exactly one figure and one Copy control', () => {
+  const publication = chartPublication()
+  const message = assistantRow(`${marker(publication.ref)}`)
+  present(message, [publication, publication])
+  const card = cardOf(message)
+
+  assert.equal(figureNodes(card).length, 1)
+  assert.equal(copyButtons(card).length, 1)
+})
+
+test('a marker with a non-<#> destination or an escaped line stays text and never becomes a figure', () => {
+  const published = svgPublication()
+  const forgedHref = `[dsh-visual-${REF_CHART}]: <https://example.com/not-a-marker>`
+  const escaped = `\\[dsh-visual-${REF_THIRD}]: <#>`
+  const message = assistantRow(`${forgedHref}\n\n${escaped}\n\nTail`)
+  present(message, [published])
+  const card = cardOf(message)
+
+  // Only the published SVG is tailed; the forged lines keep their bytes.
+  assert.deepEqual(figureKeys(card), [`body-visual-${published.ref}`])
+  const runs = mdTexts(card).join('')
+  assert.equal(runs.includes(forgedHref), true)
+  assert.equal(runs.includes(escaped), true)
+})
+
+// ── Markdown semantics across the figure split ─────────────────────────────
+
+test('a list, fence, bold/code and raw footnote text keep their exact source across the figure', () => {
+  const publication = chartPublication()
+  const before = '## Heading\n\n- item one\n- item two\n\n```\nconst x = 1\n```\n\n**bold** and `code`, a [doc][ref] and footnote[^1].\n\n'
+  const after = '\n\n> quote after\n\n[^1]: the footnote text.\n\n[ref]: https://example.com/x'
+  const linkDefinition = '[ref]: https://example.com/x\n\n'
+  const message = assistantRow(`${before}${marker(publication.ref)}${after}`)
+  present(message, [publication])
+  const card = cardOf(message)
+  const runs = mdTexts(card)
+
+  assert.equal(figureNodes(card).length, 1)
+  assert.equal(runs.length, 2)
+  // The ordinary link definition is re-supplied to BOTH runs. The pinned Tern
+  // client does not implement footnote syntax (it paints `[^1]` literally), so
+  // the footnote definition is ordinary tail text and must survive byte-exact
+  // instead of being promoted into a display-only definition prefix.
+  assert.equal(runs[0], `${linkDefinition}${before}`)
+  assert.equal(runs[1], `${linkDefinition}${after}`)
+  assert.equal(runs[1].includes('[^1]: the footnote text.'), true)
+  assert.equal(runs.join('').includes('dsh-visual-'), false)
 })

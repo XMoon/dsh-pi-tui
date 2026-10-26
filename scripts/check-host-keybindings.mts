@@ -172,6 +172,12 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // label lives in the key-label authority and the renderer imports it, which
   // is why this row is owned by the keybindings tree.
   { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'" },
+  // (8b) The TSP renderer's FIXED published-visual chords (PR3): the same
+  // category as (8) — the TSP surface owns no keymap action, the chords are
+  // dispatched from the raw SDK key stream, and the labels live in the
+  // key-label authority so the renderer imports them.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_VISUAL_SELECT_LABEL = 'Alt+V'" },
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_VISUAL_COPY_LABEL = 'Alt+C'" },
   // (9) The History editor-seat tenant's FIXED labels (B3-A, same category as
   // (8)): the seat is a per-surface component contract, so its panel may not
   // hard-code the chords and they cannot come from `keyHint` — no keymap action

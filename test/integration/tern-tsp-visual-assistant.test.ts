@@ -406,9 +406,12 @@ async function mountTspSurface(session: RealSession, folder: TranscriptFolder): 
     appendOpeningViewerEvent: () => false,
     main: () => presentation,
     viewedChildId: () => undefined,
-    viewedChild: () => undefined,
+    // This fixture has no Viewer: the source never selects a viewed child, so
+    // a viewer path that did get reached must fail loudly instead of reading a
+    // fabricated child presentation.
+    viewedChild: () => { throw new Error('this fixture has no viewed-child presentation') },
     mainFolder: () => folder,
-    viewedChildFolder: () => undefined,
+    viewedChildFolder: () => { throw new Error('this fixture has no viewed-child folder') },
     pendingSubjectId: () => undefined,
     pendingSnapshot: () => undefined,
     submissionEchoes: () => undefined,
