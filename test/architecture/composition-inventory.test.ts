@@ -742,6 +742,9 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
       'src/app/bootstrap/session-startup.ts',
       'src/app/bootstrap/task-source.ts',
       'src/app/bootstrap/terminal-output.ts',
+      // The fork-inherited published-visual ancestry proof (PR5 hotfix) is a
+      // composition helper like the snapshot selector it feeds.
+      'src/app/bootstrap/visual-lineage.ts',
       'src/app/bootstrap/visual-snapshot.ts',
     ],
   )
