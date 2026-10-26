@@ -185,6 +185,93 @@ test('a bare a=d (the protocol default) is also a global delete', () => {
   assert.ok(terminal.text.includes(encodeKittyDeletePlacement(imageId)), 'it becomes a scoped placement removal')
 })
 
+test('a global delete in the alt buffer never touches a main-screen image', () => {
+  const { terminal, facade, core } = harness()
+  const main = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(main.render(80).join('\r\n'))
+  const mainId = main.imageId!
+
+  // Enter the alternate buffer and place a DIFFERENT image there.
+  facade.write('\x1b[?1049h')
+  const alt = new NativeKittyImage(core, source('AAAA', 32, 32), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(alt.render(80).join('\r\n'))
+  const altId = alt.imageId!
+  terminal.writes.length = 0
+
+  // The alternate screen's own release at stop is a GLOBAL delete in the alt
+  // buffer: it may only release what the alt buffer holds.
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  const text = terminal.text
+  assert.ok(text.includes(`a=d,d=I,i=${altId}`), 'the alt buffer releases its own image')
+  assert.ok(!text.includes(`i=${mainId}`), 'the main screen\'s image is never mentioned')
+
+  // Leaving the alternate buffer restores the main screen with its data intact.
+  terminal.writes.length = 0
+  facade.write('\x1b[?1049l')
+  facade.write(main.render(80).join('\r\n'))
+  assert.equal(count(terminal.text, 'a=t,f=100'), 0, 'the main image was never re-transmitted')
+  assert.equal(count(terminal.text, 'a=p,'), 1, 'it is simply placed again')
+})
+
+test('a global image delete only releases data the current buffer holds', () => {
+  const { terminal, facade, core } = harness()
+  const image = core.register(source())
+  const imageId = image!.imageId
+  // Transmitted and placed in the MAIN buffer only.
+  facade.write(core.transmissionFor(imageId, 'main') + encodeKittyPlacement(imageId, 1, { columns: 4, rows: 2 }))
+  terminal.writes.length = 0
+  facade.write('\x1b[?1049h')
+  terminal.writes.length = 0
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  assert.ok(!terminal.text.includes('a=d'), 'nothing is released while the alt buffer owns no copy')
+})
+
+test('the gate holds a graphics introducer split between ESC and _G', () => {
+  const { terminal, facade, core } = harness()
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(component.render(80).join('\r\n'))
+  const imageId = component.imageId!
+
+  // `ESC` | `_G...`: the introducer must not reach the terminal unparsed.
+  terminal.writes.length = 0
+  facade.write('\x1b')
+  facade.write('_Ga=d,d=A,q=2\x1b\\')
+  assert.ok(terminal.text.includes(`a=d,d=I,i=${imageId}`), 'the split global delete was translated')
+  assert.ok(!/\x1b_Ga=d,d=A/.test(terminal.text), 'the global form never reached the terminal')
+
+  // `ESC_` | `G...`: same boundary, one character later.
+  const other = new NativeKittyImage(core, source('AAAA', 8, 8), { maxWidthCells: 40, fallback: '[image]' })
+  other.render(80)
+  const otherId = other.imageId!
+  terminal.writes.length = 0
+  facade.write('\x1b_')
+  facade.write(`Ga=d,d=I,i=${otherId},q=2\x1b\\`)
+  assert.ok(terminal.text.includes(`a=d,d=i,i=${otherId}`), 'the foreign-managed delete was still interpreted')
+})
+
+test('a managed placement split inside the introducer still gets its transmission', () => {
+  const { terminal, facade, core } = harness()
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  const anchor = component.render(80)[0]!
+  // Split exactly between ESC and `_G`.
+  facade.write(anchor.slice(0, 1))
+  facade.write(anchor.slice(1))
+  assert.equal(count(terminal.text, 'a=t,f=100'), 1, 'the transmission is injected once')
+  assert.ok(terminal.text.indexOf('a=t,f=100') < terminal.text.indexOf('a=p,'), 'and before the placement')
+})
+
+test('clearScreen invalidates the Core even though it bypasses write()', () => {
+  const { terminal, facade, core } = harness()
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  const anchor = component.render(80)[0]!
+  facade.write(anchor)
+  assert.equal(count(terminal.text, 'a=t,f=100'), 1)
+  terminal.writes.length = 0
+  facade.clearScreen()
+  facade.write(anchor)
+  assert.equal(count(terminal.text, 'a=t,f=100'), 1, 'the cleared payload is sent again')
+})
+
 test('the gate joins a graphics command split across writes', () => {
   const { terminal, facade, core } = harness()
   const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
@@ -220,20 +307,35 @@ test('a screen-buffer switch invalidates residency', () => {
   assert.equal(count(terminal.text, 'a=t,f=100'), 1, 'the new buffer has no copy of the data')
 })
 
-test('retirement is queued, emitted by the next write, and never reuses the id', () => {
+test('a never-painted occurrence is queued and hard-retired by the next write', () => {
+  const { terminal, facade, core } = harness()
+  // Uploaded, but no placement ever landed: no screen or scrollback can
+  // reference it, so its bytes are safe to release.
+  const image = core.register(source())!
+  facade.write(core.transmissionFor(image.imageId, 'main'))
+  core.retire(image)
+  terminal.writes.length = 0
+  facade.write('after')
+  assert.ok(terminal.text.startsWith(encodeKittyDeleteImage(image.imageId)), 'the hard retire precedes the frame')
+  assert.ok(terminal.text.endsWith('after'), 'the frame is still written')
+})
+
+test('a PAINTED occurrence is terminal-retained: never hard-deleted, id never reused', () => {
   const { terminal, facade, core } = harness()
   const first = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
-  const firstId = first.render(80), firstImageId = first.imageId!
-  facade.write(firstId.join('\r\n'))
+  facade.write(first.render(80).join('\r\n'))
+  const firstImageId = first.imageId!
+  // The component goes away (transcript trim / rebuild), but its pixels may
+  // still be in the viewport or the scrollback.
   first.dispose()
   terminal.writes.length = 0
   facade.write('after')
-  assert.ok(terminal.text.startsWith(encodeKittyDeleteImage(firstImageId)), 'the hard retire precedes the frame')
-  assert.ok(terminal.text.endsWith('after'), 'the frame is still written')
+  assert.ok(!terminal.text.includes('a=d'), 'the Core never frees a painted image')
+  assert.equal(core.residentPayloadBytes, 0, 'its own payload copy is released')
 
   const second = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
   second.render(80)
-  assert.notEqual(second.imageId, firstImageId, 'a retired id is never handed out again')
+  assert.notEqual(second.imageId, firstImageId, 'a retained id is never handed out again')
 })
 
 test('the budget falls back instead of evicting a possibly visible image', () => {
@@ -266,7 +368,7 @@ test('stop releases uploaded-but-never-placed images and preserves painted ones'
   const paintedId = painted.imageId!
   // An occurrence whose bytes were offered but whose placement never landed.
   const unplaced = core.register(source('AAAA', 8, 8))!
-  facade.write(core.transmissionFor(unplaced.imageId))
+  facade.write(core.transmissionFor(unplaced.imageId, 'main'))
 
   terminal.writes.length = 0
   facade.stop()

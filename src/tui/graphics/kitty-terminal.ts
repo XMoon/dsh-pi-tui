@@ -25,7 +25,7 @@
  */
 
 import type { ProgramStatus, Terminal, TerminalProgressState } from '@xmoon76/pi-tui'
-import type { KittyGraphicsCore } from './kitty-core.ts'
+import type { KittyGraphicsCore, KittyScreenBuffer } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 
 /**
@@ -54,6 +54,27 @@ const TEXT_SIGNALS: readonly TextSignal[] = [
   { sequence: '\x1b[?1049l', kind: 'exit-alt' },
 ]
 
+/**
+ * The longest suffix of `text` that could still grow into a gated sequence on
+ * the next write: a graphics introducer (`ESC`, `ESC _`) or the head of one of
+ * the destructive signals. The writer splits a frame at its own chunk
+ * boundary, which can land INSIDE the introducer — forwarding that prefix
+ * would let the terminal assemble a command this gate never parsed.
+ */
+function trailingHoldbackLength(text: string): number {
+  let longest = 0
+  for (const sequence of [KITTY_APC_INTRODUCER, ...TEXT_SIGNALS.map((signal) => signal.sequence)]) {
+    const limit = Math.min(sequence.length - 1, text.length)
+    for (let length = limit; length > longest; length--) {
+      if (sequence.startsWith(text.slice(text.length - length))) {
+        longest = length
+        break
+      }
+    }
+  }
+  return longest
+}
+
 function numericControl(value: string | undefined): number | undefined {
   if (value === undefined || value === '') return undefined
   const parsed = Number(value)
@@ -73,6 +94,8 @@ export class KittyTerminalFacade implements Terminal {
   private partialApc = ''
   /** A trailing escape prefix that may complete the next write's signals. */
   private pendingText = ''
+  /** Which physical screen buffer the writer is currently drawing into. */
+  private buffer: KittyScreenBuffer = 'main'
   private disposed = false
 
   constructor(inner: Terminal, core: KittyGraphicsCore) {
@@ -135,7 +158,11 @@ export class KittyTerminalFacade implements Terminal {
   }
 
   clearScreen(): void {
+    // The real terminal erases every image intersecting the screen here, so the
+    // Core's residency must be invalidated even though this path bypasses
+    // `write()`.
     this.inner.clearScreen()
+    this.core.invalidateResidency(this.buffer, 'clearScreen')
   }
 
   setTitle(title: string): void {
@@ -187,12 +214,15 @@ export class KittyTerminalFacade implements Terminal {
     for (;;) {
       const start = input.indexOf(KITTY_APC_INTRODUCER, cursor)
       if (start === -1) {
-        wire += this.scanText(input.slice(textStart), true)
+        const tail = input.slice(textStart)
+        const hold = trailingHoldbackLength(tail)
+        wire += this.scanText(hold === 0 ? tail : tail.slice(0, tail.length - hold))
+        if (hold !== 0) this.pendingText = tail.slice(tail.length - hold)
         break
       }
       // A text segment followed by a graphics command is never the end of the
       // stream: holding any of it back would reorder it past that command.
-      wire += this.scanText(input.slice(textStart, start), false)
+      wire += this.scanText(input.slice(textStart, start))
       const end = input.indexOf(KITTY_APC_TERMINATOR, start + KITTY_APC_INTRODUCER.length)
       if (end === -1) {
         this.partialApc = input.slice(start)
@@ -209,31 +239,23 @@ export class KittyTerminalFacade implements Terminal {
   }
 
   /**
-   * Observe the writer's destructive text signals. The text is returned
-   * untouched — when `allowHoldback` is set and the input ends inside a
-   * signal, that prefix is held back and re-emitted (in order) with the next
-   * write.
+   * Observe the writer's destructive text signals and return the text
+   * untouched. A signal split across writes is completed by the holdback in
+   * `write()` before this runs, so anything recognised here is whole.
    */
-  private scanText(text: string, allowHoldback: boolean): string {
+  private scanText(text: string): string {
     if (text === '') return ''
     let index = 0
     while (index < text.length) {
       const at = text.indexOf('\x1b', index)
       if (at === -1) break
       const signal = TEXT_SIGNALS.find((candidate) => text.startsWith(candidate.sequence, at))
-      if (signal !== undefined) {
-        this.applyTextSignal(signal.kind)
-        index = at + signal.sequence.length
+      if (signal === undefined) {
+        index = at + 1
         continue
       }
-      const rest = text.slice(at)
-      if (allowHoldback && TEXT_SIGNALS.some((candidate) => candidate.sequence.startsWith(rest))) {
-        // The write ended inside a signal: hold the prefix and return the
-        // visible text before it, exactly as if the signal arrived whole.
-        this.pendingText = rest
-        return text.slice(0, at)
-      }
-      index = at + 1
+      this.applyTextSignal(signal.kind)
+      index = at + signal.sequence.length
     }
     return text
   }
@@ -241,7 +263,7 @@ export class KittyTerminalFacade implements Terminal {
   private applyTextSignal(kind: TextSignal['kind']): void {
     switch (kind) {
       case 'clear-screen':
-        this.core.invalidateResidency('2J')
+        this.core.invalidateResidency(this.buffer, '2J')
         return
       case 'clear-scrollback':
         // Stage-0 S0-4 measured `none` / `2J-only` / `3J-only` / `2J+3J` in
@@ -251,13 +273,20 @@ export class KittyTerminalFacade implements Terminal {
         // again). The rule is therefore measured, not inferred from the spec —
         // this is a data-invalidating clear exactly like `2J`, and the next
         // placement must re-transmit first.
-        this.core.invalidateResidency('3J')
+        this.core.invalidateResidency(this.buffer, '3J')
         return
       case 'enter-alt':
+        // The alternate buffer starts empty: anything the Core placed there in
+        // an earlier alternate session is gone. The MAIN buffer keeps its
+        // images (Kitty stores them per screen), so its data stays resident.
+        this.buffer = 'alt'
+        this.core.invalidateResidency('alt', 'enter-alt')
+        return
       case 'exit-alt':
-        // Each screen buffer keeps its own image set: a switch lands on a
-        // buffer that may not hold the Core's data.
-        this.core.invalidateResidency(kind)
+        // Leaving discards the alternate buffer's images; the main buffer's
+        // images and placements survive the round trip untouched.
+        this.core.invalidateResidency('alt', 'exit-alt')
+        this.buffer = 'main'
         return
     }
   }
@@ -278,8 +307,8 @@ export class KittyTerminalFacade implements Terminal {
     // Data must be resident BEFORE the placement lands: the transmission is
     // injected at the placement's own position in the stream, never earlier
     // (a clear between the two writes would invalidate it again).
-    const transmission = this.core.transmissionFor(imageId)
-    this.core.notePlacement(imageId)
+    const transmission = this.core.transmissionFor(imageId, this.buffer)
+    this.core.notePlacement(imageId, this.buffer)
     return transmission + apc
   }
 
@@ -298,8 +327,8 @@ export class KittyTerminalFacade implements Terminal {
     // deletes all images visible on screen"), so a bare `a=d` is the same
     // global form and must be scoped too.
     const specifier = controls.d ?? 'a'
-    if (specifier === 'A') return this.core.translateGlobalImageDelete()
-    if (specifier === 'a') return this.core.translateGlobalPlacementDelete()
+    if (specifier === 'A') return this.core.translateGlobalImageDelete(this.buffer)
+    if (specifier === 'a') return this.core.translateGlobalPlacementDelete(this.buffer)
     return apc
   }
 }

@@ -168,9 +168,19 @@ retirement and the resident budget.
   resident for a re-show. A late delete for an id the Core already retired is
   dropped.
 - **Foreign owners are untouched.** A per-id delete for an id the Core does not
-  own passes through byte-for-byte. A global `a=d,d=A` / `a=d,d=a` never
-  reaches the terminal; it is translated into the same operations scoped to the
-  Core's own ids only.
+  own passes through byte-for-byte. A global `a=d,d=A` / `a=d,d=a` (including
+  the bare `a=d`, whose `d` specifier defaults to `a`) never reaches the
+  terminal; it is translated into the same operations scoped to the buffer that
+  emitted it. Kitty keeps the main and the alternate screen's images in
+  separate stores, so a leased alternate screen can never cost the main screen
+  its data.
+- **Painted pixels are terminal-retained.** An occurrence that goes away after
+  being painted does not hard-delete its image: the pixels may still be in the
+  viewport or the scrollback. The Core drops its own payload copy and keeps the
+  id known (never re-used, never deleted by the Core); only an upload that
+  never reached a placement is auto-released. The main screen's `stop()` never
+  sends `d=I` in either `preserveScreen` mode; the alternate screen releases
+  the ids it placed, and only those.
 - **Managed commands are quiet and typed.** Transmission is
   `a=t,f=100,i=<id>,q=2` in at most 4096-character chunks and EVERY chunk
   carries `q=2`; a placement anchor is `a=p,i=...,p=...,c=...,r=...,C=1,q=2;`
