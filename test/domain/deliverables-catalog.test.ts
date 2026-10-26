@@ -212,3 +212,22 @@ test('projected-empty names never fall back to the raw path and stay distinguish
   assert.equal(files[0]!.path, red)
   assert.equal(files[1]!.path, green)
 })
+
+test('a generated ordinal never steals a label another declaration naturally has', async () => {
+  const { sanitizeDisplaySegment } = await import('../../src/tui/presentation/terminal-text.ts')
+  // Two declarations collapse to `report` after projection, and a THIRD one
+  // naturally carries `report (2)`.
+  const files = [
+    file('/a/report\u001b[31m'),
+    file('/a/report\u001b[32m'),
+    file('/b/report (2)'),
+  ]
+  const labels = deliveredFileLabels(files, { project: sanitizeDisplaySegment })
+  assert.equal(new Set(labels).size, labels.length, `the final labels must be globally unique: ${JSON.stringify(labels)}`)
+  assert.deepEqual(labels, ['report', 'report (3)', 'report (2)'])
+  // The natural label is never rewritten; the duplicate takes the next free
+  // ordinal instead.
+  assert.equal(labels[2], 'report (2)')
+  // RAW declarations remain the Copy/search authority.
+  assert.deepEqual(files.map(entry => entry.path), ['/a/report\u001b[31m', '/a/report\u001b[32m', '/b/report (2)'])
+})

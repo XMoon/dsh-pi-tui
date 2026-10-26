@@ -157,15 +157,37 @@ export function deliveredFileLabels(
     }
     return basename
   })
-  // A LAST-RESORT ordinal pass: when even the projected path is identical (two
-  // declarations that differ only in removed control bytes), a visible ordinal
-  // is the ONE honest way to keep the rows distinguishable. It is derived from
-  // the fold's declaration order, so it is stable for this delivery.
-  const seen = new Map<string, number>()
+  return globallyUniqueLabels(labels)
+}
+
+/**
+ * The LAST-RESORT uniqueness pass: when even the projected path is identical
+ * (two declarations that differ only in removed control bytes), a visible
+ * ordinal is the ONE honest way to keep the rows distinguishable.
+ *
+ * It must not manufacture a NEW collision with a label another declaration
+ * naturally has: every natural label of this delivery is RESERVED, so a
+ * generated ordinal skips any value already taken. The result is globally
+ * unique by construction, in the fold's declaration order (stable for the
+ * delivery), and the raw path stays the Copy/search authority.
+ */
+function globallyUniqueLabels(labels: readonly string[]): readonly string[] {
+  const reserved = new Set(labels)
+  const used = new Set<string>()
   return labels.map(label => {
-    const count = (seen.get(label) ?? 0) + 1
-    seen.set(label, count)
-    return count === 1 ? label : `${label} (${count})`
+    if (!used.has(label)) {
+      used.add(label)
+      return label
+    }
+    // With N labels, the candidates (2)..(N+1) always contain a free one:
+    // `reserved` and `used` hold at most N taken values each.
+    for (let ordinal = 2; ordinal <= labels.length + 2; ordinal += 1) {
+      const candidate = `${label} (${ordinal})`
+      if (reserved.has(candidate) || used.has(candidate)) continue
+      used.add(candidate)
+      return candidate
+    }
+    throw new Error('delivered file labels: no free ordinal')
   })
 }
 

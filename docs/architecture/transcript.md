@@ -701,7 +701,9 @@ wraps. Disambiguation runs on the SAFE-DISPLAY projection of the path (the same
 one that paints it), so two declarations that differ only in bytes the
 projection removes cannot collapse into one visible label; when even that
 projection is identical, a visible ordinal suffix (`name (2)`) keeps the rows
-distinguishable. The RAW declared path stays the Copy and search authority. Collapsed shows at most four files; the marker row names the command. An
+distinguishable, and that ordinal never takes a label another declaration of the
+same delivery naturally carries (the final labels are globally unique). The RAW
+declared path stays the Copy and search authority. Collapsed shows at most four files; the marker row names the command. An
 expanded tail (an explicit master expansion or a granted search reveal) renders
 the complete declaration list. `Browse all` / per-file `Details` are painted
 ONLY where a real pointer owner exists (fullscreen Full); the regular surface's
