@@ -120,11 +120,22 @@ export function filterDeliveredFiles(
  * prefix. Path comparison is case-sensitive (Host path semantics) even on a
  * case-insensitive client filesystem. A path repeated verbatim (the fold
  * normally de-duplicates it) keeps its basename.
+ *
+ * `project` is the SAME safe-display projection the caller paints with (the
+ * terminal-control sanitizer). Collision detection runs on the PROJECTED
+ * segments, so two declared paths that differ only in bytes the projection
+ * removes cannot collapse into one visible label — the raw path stays the
+ * search/copy authority either way.
  * @param files - the declared files of one Turn, in fold order.
+ * @param options.project - the display projection applied to every path segment.
  * @returns one label per file, positionally aligned with `files`.
  */
-export function deliveredFileLabels(files: readonly PresentedFilePresentation[]): readonly string[] {
-  const segments = files.map(file => deliveredPathSegments(file.path))
+export function deliveredFileLabels(
+  files: readonly PresentedFilePresentation[],
+  options: { readonly project?: (segment: string) => string } = {},
+): readonly string[] {
+  const project = options.project ?? ((segment: string) => segment)
+  const segments = files.map(file => deliveredPathSegments(file.path).map(project))
   const basenames = segments.map(parts => parts[parts.length - 1] ?? '')
   return segments.map((parts, index) => {
     const basename = basenames[index] ?? ''

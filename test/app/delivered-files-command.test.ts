@@ -460,3 +460,120 @@ test('panel keystrokes never reach the composer draft', async () => {
   await viewport(vt)
   assert.equal(app.getDraft(), 'keep me', 'the overlay owned every keystroke')
 })
+
+test('a typed /deliverables is claimed + executed by the production client command plane', async () => {
+  // REAL parser → REAL ClientCommandRegistry → the REAL artifacts registrar's
+  // definition → the production classification/admission predicates → the
+  // production local SINK. No handler is invoked by hand here.
+  const { parseCommand } = await import('@deepseek-ai/dsh-commands')
+  const { createClientCommandRegistry } = await import('../../src/app/command/client-command-registry.ts')
+  const { classifyCommandLine } = await import('../../src/domain/command/policy.ts')
+  const { resolveSubmitDelivery } = await import('../../src/app/submission/command-policy.ts')
+  const clientCommands = createClientCommandRegistry(parseCommand)
+  const vt = new VirtualTerminal(100, 30)
+  const snap = snapshot([{ turn: 5, files: ['/ws/dispatch-report.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { deliveredFiles: capability(snap) })
+  app.start()
+  startedApps.add(app)
+
+  // The SAME registration seam the coordinator uses: every TUI-local spec
+  // becomes one Client definition per name (aliases register separately).
+  const registerOne = (definition: Parameters<typeof clientCommands.register>[0]) => {
+    clientCommands.register(definition)
+    return () => {}
+  }
+  const commands = createArtifactsCommands({
+    runner: {
+      app,
+      deliveredFilesSnapshot: () => snap,
+    } as unknown as Parameters<typeof createArtifactsCommands>[0]['runner'],
+    app,
+    composer: () => app,
+    registerOne,
+    registerTuiCommand: (spec) => {
+      registerOne({
+        name: spec.name,
+        description: spec.description,
+        ...(spec.input === undefined ? {} : { input: spec.input }),
+        handler: spec.handler,
+      })
+    },
+    detach: () => {},
+    notifyOutcome: () => {},
+  })
+  commands.registerDeliverables()
+
+  const parsed = parseCommand('/deliverables')
+  assert.ok(parsed !== undefined)
+  assert.equal(clientCommands.claimsLine(parsed), true, 'the live Client registry owns the exact line')
+  assert.deepEqual(classifyCommandLine({
+    hostOriginClaim: undefined,
+    tuiCommand: clientCommands.claimsLine(parsed),
+    extensionCommand: false,
+    skillInvocation: false,
+  }), { kind: 'client-command', source: 'tui' }, 'the production classifier routes it to the Client plane')
+  assert.equal(resolveSubmitDelivery(parsed, false, 'enter', undefined, true), 'queue',
+    'a claimed local line never follows the prompt delivery policy')
+
+  // The production local SINK executes the registered handler.
+  const execution = await clientCommands.execute({ line: '/deliverables', signal: new AbortController().signal })
+  assert.equal(execution?.result.kind, 'success', 'the Client plane executed the real handler')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Delivered files · Turn 5'), `the dispatched command mounted the panel:\n${view}`)
+
+  // An argued line is NOT an invocation of a definition without `input`.
+  assert.equal(clientCommands.claimsLine(parseCommand('/deliverables other')), false,
+    'an argued line falls through instead of reaching the handler')
+})
+
+test('a newer lease survives when the OLD mount itself fails after re-entry', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const first = snapshot([{ turn: 4, files: ['/ws/first.md'] }])
+  const second = snapshot([{ turn: 8, files: ['/ws/second.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: {
+      snapshot: () => second,
+      isCurrent: () => true,
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  // The REAL reentrancy window: `OverlayBroker.commitMount` runs the broker's
+  // focus transition (and therefore any plugin onFocus) AFTER the logical node
+  // is registered. Simulate a callback that closes A and installs lease B, then
+  // make A's own mount fail on its way back.
+  const broker = (app as unknown as {
+    overlayBroker: { commitMount: (prepared: never, raw: never) => unknown; handles: () => ReadonlySet<unknown> }
+  }).overlayBroker
+  const originalCommit = broker.commitMount.bind(broker) as (prepared: never, raw: never) => unknown
+  let commits = 0
+  broker.commitMount = ((prepared: never, raw: never) => {
+    const handle = originalCommit(prepared, raw)
+    commits += 1
+    if (commits === 1) {
+      app.closeDeliveredFiles()
+      app.openDeliveredFiles(first)
+      throw new Error('mount A failed after re-entry')
+    }
+    return handle
+  }) as typeof broker.commitMount
+  try {
+    assert.throws(() => app.openDeliveredFiles(first), /mount A failed after re-entry/)
+  } finally {
+    broker.commitMount = originalCommit as typeof broker.commitMount
+  }
+  // ONE managed overlay node remains, and it is the newer lease.
+  assert.equal(broker.handles().size, 1, 'the failed lease released its own broker node')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Delivered files · Turn 4'), `the newer lease stays mounted:\n${view}`)
+  assert.ok(!view.includes('second.md'), 'the failed lease painted nothing')
+  // The surviving lease still owns the coalescing identity: a later open must
+  // not stack a second panel on top of it.
+  const mountsBefore = (app as unknown as { overlayBroker: { handles: () => ReadonlySet<unknown> } }).overlayBroker.handles().size
+  app.openDeliveredFiles(first)
+  const mountsAfter = (app as unknown as { overlayBroker: { handles: () => ReadonlySet<unknown> } }).overlayBroker.handles().size
+  assert.equal(mountsAfter, mountsBefore, 'the later open coalesced onto the surviving lease')
+  const after = await viewport(vt)
+  assert.equal(after.split('\n').filter(line => line.includes('Delivered files · Turn 4')).length, 1,
+    `exactly one live panel:\n${after}`)
+})

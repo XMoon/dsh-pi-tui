@@ -19,7 +19,7 @@ import { longMessageDisclosureWindow } from '../transcript/long-message-disclosu
 import { latestLine } from '../../domain/transcript/text.ts'
 import { color } from '../theme/runtime.ts'
 import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
-import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 import { deliveredFileBasename, deliveredFileLabels } from '../../domain/deliverables/catalog.ts'
 
@@ -465,7 +465,10 @@ export class DeliveredFilesComponent implements Component {
   ) {
     this.files = files
     this.expanded = expanded
-    this.labels = deliveredFileLabels(files)
+    // Collision labels come from the SAME projection used to paint them, so a
+    // path that differs only in removed control bytes can never collapse into
+    // an identical visible label.
+    this.labels = deliveredFileLabels(files, { project: sanitizeDisplaySegment })
     this.pointerActions = options.pointerActions === true
     this.commandEntry = options.commandEntry === true
   }
@@ -524,9 +527,10 @@ export class DeliveredFilesComponent implements Component {
 
     for (const [index, file] of shown.entries()) {
       // The declared path is UNTRUSTED and lands on a terminal row: the label
-      // (basename/suffix, still source-derived) goes through the ONE display
-      // projection before it can occupy cells. Copy always uses the RAW path.
-      const label = sanitizeDisplayText(this.labels[index] ?? deliveredFileBasename(file.path)).replace(/\r\n|\r|\n/g, ' ')
+      // (basename/suffix, already projected for collision purposes) goes through
+      // the ONE display projection before it can occupy cells. Copy always uses
+      // the RAW path.
+      const label = sanitizeDisplaySegment(this.labels[index] ?? deliveredFileBasename(file.path))
       const verbRoom = showActions ? visibleWidth(DELIVERED_DETAILS_VERB) + 2 : 0
       const bodyWidth = Math.max(1, safeWidth - verbRoom)
       const indent = 2

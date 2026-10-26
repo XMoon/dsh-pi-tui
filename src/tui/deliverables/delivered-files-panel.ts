@@ -19,7 +19,7 @@
 import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
-import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { DELIVERED_FILES_CHORDS } from '../keybindings/hints.ts'
 import {
   deliveredFileBasename,
@@ -216,7 +216,7 @@ export class DeliveredFilesPanel implements Component {
     const turn = this.currentTurn()
     let labels = this.labelsByTurn.get(turn)
     if (labels === undefined) {
-      labels = deliveredFileLabels(this.currentFiles())
+      labels = deliveredFileLabels(this.currentFiles(), { project: sanitizeDisplaySegment })
       this.labelsByTurn.set(turn, labels)
     }
     const index = this.currentFiles().indexOf(file)
@@ -583,7 +583,7 @@ export class DeliveredFilesPanel implements Component {
       const index = listTop + offset
       const selected = index === selectedIndex
       const marker = selected ? color.primary('>') : ' '
-      const label = sanitizeDisplayText(this.labelOf(file))
+      const label = sanitizeDisplaySegment(this.labelOf(file))
       const bodyWidth = Math.max(1, listWidth - (actions ? actionColumn : 0))
       const labelText = truncateToWidth(label, Math.max(1, bodyWidth - 2), '…')
       const gap = actions ? Math.max(1, bodyWidth - 2 - visibleWidth(labelText)) : 0

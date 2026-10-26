@@ -253,6 +253,19 @@ export function sanitizeDisplayText(source: string): string {
 }
 
 /**
+ * Project one untrusted LABEL onto a single terminal-safe line.
+ *
+ * The same control removal as {@link sanitizeDisplayText}, plus the line-break
+ * fold a one-row cell needs. Callers that must DISAMBIGUATE several labels
+ * (a delivery's colliding basenames) apply THIS projection before comparing,
+ * so two sources that differ only in removed control bytes cannot collapse into
+ * one visible label. The raw source stays the copy/search authority.
+ */
+export function sanitizeDisplaySegment(source: string): string {
+  return sanitizeDisplayText(source).replace(/\r\n|\r|\n/g, ' ')
+}
+
+/**
  * Project untrusted log/terminal text onto terminal-safe display text:
  * whitelisted complete SGR survives, a lone CR becomes LF so progress frames
  * stay readable as history, and any retained SGR ends with an app-owned reset.

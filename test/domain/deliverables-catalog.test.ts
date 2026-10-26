@@ -175,3 +175,18 @@ test('the filter is locale-neutral and handles CJK, spaces and special character
   assert.deepEqual(filterDeliveredFiles(files, '[draft]'), [files[1]])
   assert.deepEqual(filterDeliveredFiles(files, 'plain.md'), [files[2]])
 })
+
+test('collision labels are derived from the PROJECTED text, not the raw bytes', async () => {
+  const { sanitizeDisplaySegment } = await import('../../src/tui/presentation/terminal-text.ts')
+  const hostile = 'report\u001b]52;c;YQ==\u0007.md'
+  const files = [file(`/a/${hostile}`), file('/b/report.md')]
+  // Raw comparison: the two basenames differ (the control bytes are part of the
+  // raw string), so no directory suffix is added.
+  assert.deepEqual(deliveredFileLabels(files), [hostile, 'report.md'])
+  // Projected comparison: both PAINT as `report.md`, so the visible labels must
+  // stay distinguishable. The raw paths remain the copy/search authority.
+  const projected = deliveredFileLabels(files, { project: sanitizeDisplaySegment })
+  assert.deepEqual(projected, ['a/report.md', 'b/report.md'])
+  assert.notEqual(projected[0], projected[1])
+  assert.equal(files[0]!.path, `/a/${hostile}`, 'the raw declaration is untouched')
+})
