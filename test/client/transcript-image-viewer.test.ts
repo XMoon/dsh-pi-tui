@@ -17,6 +17,7 @@ import {
   convertKittyThumbnail,
 } from '../../src/client/media/image/kitty-thumbnail.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
+import { color } from '../../src/tui/theme/runtime.ts'
 
 const PNG_REF: ImageAttachmentRefLike = {
   attachmentId: 'att-png',
@@ -214,6 +215,7 @@ test('a rejected read paints Read failed and folds hostile whitespace into one r
   const lines = panel.render(60)
   const body = lines[1]!
   assert.ok(stripSgr(body).includes('Read failed: storage'), `error row names the failure: ${stripSgr(body)}`)
+  assert.ok(body.includes(color.error('Read failed:')), 'the failure word uses the error ink')
   assert.ok(stripSgr(body).includes('down'), 'the folded remainder stays visible')
   assert.ok(!body.includes('\n') && !body.includes('\t'), 'an embedded newline/tab never breaks the row')
   // The pane FILLS its grant and pins the bottom bar to the last row; the
@@ -367,6 +369,7 @@ test('a corrupt JPEG degrades to the bounded unavailable row, never a native err
   const text = lines.map(line => stripSgr(line)).join('\n')
   const bodyText = lines.slice(1, -1).map(line => stripSgr(line)).join('\n')
   assert.ok(text.includes('Preview unavailable'), `safe failure row:\n${text}`)
+  assert.ok(lines[1]!.includes(color.error('Preview unavailable')), 'the failed placeholder word uses the error ink')
   assert.ok(!text.includes('\x1b_G'), 'no pixel placement for a failed derivative')
   assert.ok(!/corrupt|premature|Invalid|JPEG/i.test(bodyText), `the native decoder error never reaches the terminal:\n${bodyText}`)
   assert.ok(stripSgr(lines[lines.length - 1]!).includes('120×80 · image/jpeg · 300 B'), 'original metadata survives')
@@ -403,6 +406,7 @@ test('over-budget JPEGs and unsupported rasters are refused before any read', as
     panel.setMaxRows(8)
     const lines = panel.render(60)
     assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'), `${ref.mediaType} states the real reason`)
+    assert.ok(lines[1]!.includes(color.error('Preview unavailable')), `${ref.mediaType} uses the error ink for the failure word`)
     await drainLoaderSettle()
     assert.equal(reads, 0, `${ref.mediaType} starts no read`)
     assert.ok(!panel.render(60).join('\n').includes('\x1b_G'), `${ref.mediaType} paints no fake body`)
@@ -696,4 +700,80 @@ test('the viewer never hands an unsanitized attachment name to the fork fallback
     assert.ok(!name!.includes('\u001b]0;'), `no OSC survives into the fork filename: ${JSON.stringify(name)}`)
     assert.ok(!name!.includes('pwned'), `no OSC payload survives: ${JSON.stringify(name)}`)
   }
+})
+
+test('the row-grant matrix stays I/O-free below three rows and clips the body to grant-2', async () => {
+  capabilities('kitty')
+  const ref: ImageAttachmentRefLike = { ...REAL_JPEG_REF, attachmentId: 'att-matrix-jpeg' }
+  const scope = { key: 'viewer-jpeg:matrix' }
+  let reads = 0
+  let conversions = 0
+  const loader = new ImageLoader(
+    async () => { reads += 1; return { ref: {}, data: SAMPLE_JPEG } },
+    new ImageCache(),
+    async (input, mediaType) => { conversions += 1; return convertKittyThumbnail(input, mediaType) },
+  )
+  loader.load(ref, scope)
+  await until(() => loader.get(ref, scope).state === 'ready', 'the matrix raw read')
+  loader.loadKittyThumbnail(ref, scope)
+  await until(() => loader.getKittyThumbnail(ref, scope).state === 'ready', 'the matrix derivative')
+  assert.deepEqual([reads, conversions], [1, 1], 'the matrix fixture derives exactly once')
+
+  for (const granted of [1, 2, 3, 4, 10, 24]) {
+    for (const width of [40, 80]) {
+      const panel = panelOf(loader, { ref, scope })
+      panel.setMaxRows(granted)
+      const lines = panel.render(width)
+      assert.equal(lines.length, granted, `row ${granted} × width ${width} fills its grant exactly`)
+      for (const line of lines) {
+        assert.ok(visibleWidth(line) <= width, `row ${granted} × width ${width}: ${JSON.stringify(line)}`)
+      }
+      assert.ok(stripSgr(lines[lines.length - 1]!).endsWith('Esc close'), 'the close hint is pinned to the last granted row')
+      if (granted <= 2) {
+        assert.ok(!lines.join('\n').includes('\x1b_G'), `${granted} rows must not paint a body`)
+      } else {
+        const body = lines.slice(1, -1)
+        assert.equal(body.length, granted - 2, 'the body absorbs exactly the grant minus the two chrome rows')
+        const painted = body.filter(line => line.includes('\x1b_G')).length
+        assert.ok(painted <= body.length, 'the image never exceeds the body grant')
+      }
+      panel.dispose()
+    }
+  }
+  assert.deepEqual([reads, conversions], [1, 1], 'the whole matrix added no read/conversion')
+})
+
+test('dispose while the derived conversion is pending never repaints or keeps a local Image', async () => {
+  capabilities('kitty')
+  const ref: ImageAttachmentRefLike = { ...REAL_JPEG_REF, attachmentId: 'att-pending-dispose' }
+  const scope = { key: 'viewer-jpeg:pending-dispose' }
+  const derived = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
+  let release!: (value: typeof derived) => void
+  let conversions = 0
+  const loader = new ImageLoader(
+    async () => ({ ref: {}, data: SAMPLE_JPEG }),
+    new ImageCache(),
+    () => {
+      conversions += 1
+      return new Promise(resolve => { release = resolve })
+    },
+  )
+  let requested = 0
+  const panel = panelOf(loader, { ref, scope, requestRender: () => { requested += 1 } })
+  panel.setMaxRows(10)
+  const listeners = loader.listenerCount()
+  panel.render(60)
+  await until(() => loader.get(ref, scope).state === 'ready', 'the raw read before dispose')
+  panel.render(60)
+  await until(() => conversions === 1, 'the pending derived conversion')
+  panel.dispose()
+  panel.dispose()
+  assert.equal(loader.listenerCount(), listeners - 1, 'dispose unsubscribes exactly once')
+  const requestedAtDispose = requested
+  release(derived)
+  await drainLoaderSettle()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(requested, requestedAtDispose, 'the late derived settle requests no frame for the disposed panel')
+  assert.equal((panel as unknown as { instance?: unknown }).instance, undefined, 'a disposed panel holds no local Image')
+  assert.equal((panel as unknown as { unsubscribe?: unknown }).unsubscribe, undefined)
 })

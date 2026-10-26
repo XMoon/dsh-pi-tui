@@ -1,16 +1,17 @@
 /**
- * Image-6B product-path integration (plan §6 Batch 3 / D20-D22): the REAL
- * staged draft bytes become the production-shaped prepared prompt, the same
- * bytes are read back as durable transcript attachments, the transcript paints
- * their scoped 6A derivatives, and `/view-image` opens the Viewer on those same
- * derivatives — all through one `ImageLoader`, no model/account/network and no
- * second image service or fake decoder.
+ * Image-6B product-path integration (plan §6 Batch 3 / D20-D22): real staged
+ * bytes are submitted through the REAL TuiApp composer gesture into a local
+ * capturing sink (no model/account/network), the sink snapshots the production
+ * `preparePrompt` of the accepted payload, and those accepted bytes are read
+ * back as durable transcript attachments. The transcript paints their scoped
+ * 6A derivatives and `/view-image` opens the Viewer on those same derivatives
+ * — one `ImageLoader`, no second image service or fake decoder.
  *
  * The draft card and the durable transcript are two authorities over the SAME
  * encoded bytes: the draft store keeps the Client-local staged bytes; the
  * durable ref models what the Host accepted on submit. This test proves the
- * 6A decoder is not duplicated between them and that the original media type,
- * dimensions and bytes survive the whole journey.
+ * submission entry handed the accepted payload unchanged and that the 6A
+ * decoder is not duplicated between the two sides.
  * @module @xmoon76/dsh-pi-tui/image-6b-product-path.test
  */
 
@@ -23,6 +24,7 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { preparePrompt } from '../../src/app/submission/prepared-prompt.ts'
+import type { PreparedPrompt } from '../../src/runtime/prepared-prompt.ts'
 import { ImageCache } from '../../src/client/media/image/cache.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { convertKittyThumbnail } from '../../src/client/media/image/kitty-thumbnail.ts'
@@ -63,23 +65,59 @@ function writtenKittyImageIds(vt: VirtualTerminal): string[] {
   return [...ids]
 }
 
+/** What the production submit dispatch actually handed the application owner. */
+interface CapturedSubmission {
+  readonly text: string
+  readonly prepared: PreparedPrompt
+  readonly releases: (() => void)[]
+}
+
 function startApp(
   vt: VirtualTerminal,
   loader: ImageLoader,
   store: DraftImageStore,
-): TuiApp {
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+): {
+  app: TuiApp
+  bridge: { acquired: number; released: number; active: number }
+  captured(): CapturedSubmission | undefined
+} {
+  const bridge = { acquired: 0, released: 0, active: 0 }
+  let sink: CapturedSubmission | undefined
+  const app = new TuiApp(vt, {
+    // The production controller classifies/validates the line synchronously
+    // and takes its own attachment reservation inside this dispatch. The
+    // fixture sink stands in for that business takeover and captures the
+    // production prepared-prompt snapshot BEFORE the draft clear.
+    onSubmit: (text) => {
+      const prepared = preparePrompt('session-6b-product', text, { images: store })
+      sink = { text, prepared, releases: [store.pinReferenced(text)] }
+    },
+    onExit: () => {},
+  }, {
     imageLoader: loader,
     draftImagePreviewSource: { values: () => store.values() },
     draftImagePreviewLiveDraft: read => store.setLiveDraftTextSource(read),
+    draftImagePreviewReserve: (text) => {
+      const release = store.pinReferenced(text)
+      bridge.acquired += 1
+      bridge.active += 1
+      let done = false
+      return () => {
+        if (done) return
+        done = true
+        bridge.released += 1
+        bridge.active -= 1
+        release()
+      }
+    },
     imageTheme: { fallbackColor: text => text },
   })
   app.start()
   startedApps.add(app)
-  return app
+  return { app, bridge, captured: () => sink }
 }
 
-test('staged JPEG/WebP → prepared prompt → transcript → /view-image paints the SAME 6A derivative', async () => {
+test('staged JPEG/WebP → REAL submit sink → transcript → /view-image paints the SAME 6A derivative', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
 
@@ -100,43 +138,9 @@ test('staged JPEG/WebP → prepared prompt → transcript → /view-image paints
     name: 'graphic.webp',
   })
 
-  // 2. The production-shaped submission snapshot: the SAME `preparePrompt` the
-  //    local submission path uses. The accepted content must still be the
-  //    ORIGINAL encoded images, in order.
-  const prepared = preparePrompt('session-6b-product', `${stagedJpeg.placeholder} ${stagedWebp.placeholder}`, { images: store })
-  const preparedImages = prepared.segments.filter(segment => segment.type === 'image')
-  assert.equal(preparedImages.length, 2, 'the prepared prompt carries both staged images')
-  assert.deepEqual([...preparedImages[0]!.image.bytes], [...SAMPLE_JPEG], 'the submitted JPEG bytes are unchanged')
-  assert.deepEqual([...preparedImages[1]!.image.bytes], [...SAMPLE_WEBP], 'the submitted WebP bytes are unchanged')
-  assert.deepEqual(
-    preparedImages.map(segment => [segment.image.mediaType, segment.image.width, segment.image.height]),
-    [['image/jpeg', 120, 80], ['image/webp', 120, 80]],
-    'the submitted MIME and dimensions are the original ones',
-  )
-
-  // 3. The durable facts the Host would return, read back through the OFFICIAL
-  //    image loader path (one read per attachment, no second image service).
-  const jpegRef: ImageAttachmentRefLike = {
-    attachmentId: 'att-6b-jpeg',
-    mediaType: 'image/jpeg',
-    bytes: preparedImages[0]!.image.byteLength,
-    width: preparedImages[0]!.image.width,
-    height: preparedImages[0]!.image.height,
-    name: preparedImages[0]!.image.name,
-  }
-  const webpRef: ImageAttachmentRefLike = {
-    attachmentId: 'att-6b-webp',
-    mediaType: 'image/webp',
-    bytes: preparedImages[1]!.image.byteLength,
-    width: preparedImages[1]!.image.width,
-    height: preparedImages[1]!.image.height,
-    name: preparedImages[1]!.image.name,
-  }
-  const durableBytes = new Map<string, Uint8Array>([
-    [jpegRef.attachmentId, preparedImages[0]!.image.bytes],
-    [webpRef.attachmentId, preparedImages[1]!.image.bytes],
-  ])
+  // 2. The durable read path: ONE official loader read per accepted attachment.
   const reads = new Map<string, number>()
+  const durableBytes = new Map<string, Uint8Array>()
   let conversions = 0
   const loader = new ImageLoader(
     async (ref) => {
@@ -153,9 +157,9 @@ test('staged JPEG/WebP → prepared prompt → transcript → /view-image paints
   )
 
   const vt = new VirtualTerminal(100, 60)
-  const app = startApp(vt, loader, store)
+  const { app, bridge, captured } = startApp(vt, loader, store)
 
-  // 4. The composer draft card paints real pixels for the last staged image
+  // 3. The composer draft card paints real pixels for the last staged image
   //    (first JPEG, then WebP after the draft grows).
   app.setDraft(stagedJpeg.placeholder)
   await until(() => writtenKittyImageIds(vt).length >= 1, 'the JPEG draft card')
@@ -170,9 +174,50 @@ test('staged JPEG/WebP → prepared prompt → transcript → /view-image paints
   const webpDraft = vt.getViewport().join('\n')
   assert.ok(webpDraft.includes('🖼️ #2/2 · 120×80 · 138 B'), `the draft card follows the LAST occurrence:\n${webpDraft}`)
 
-  // 5. The accepted submission clears the composer, then the durable
-  //    transcript renders the SAME bytes as transcript image occurrences.
-  app.setDraft('')
+  // 4. REAL submit gesture: the fork editor's Enter dispatches through TuiApp
+  //    into the sink. The sink captures the production prepared snapshot of
+  //    the ACCEPTED text; no hand-made string path is used.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = captured()
+  assert.ok(submitted !== undefined, 'the production submit dispatch reached the sink')
+  assert.equal(submitted.text, `${stagedJpeg.placeholder} ${stagedWebp.placeholder}`, 'the accepted text is the expanded draft')
+  assert.equal(app.getDraft(), '', 'the production clear ran after the accepted submit')
+  assert.equal(bridge.acquired, 1, 'the submit clear used the one scoped reservation bridge')
+  assert.equal(bridge.released, 1, 'the bridge was released exactly once')
+  assert.equal(bridge.active, 0, 'no bridge survives the submit dispatch')
+
+  const preparedImages = submitted.prepared.segments.filter(segment => segment.type === 'image')
+  assert.equal(preparedImages.length, 2, 'the accepted payload carries both staged images')
+  assert.deepEqual([...preparedImages[0]!.image.bytes], [...SAMPLE_JPEG], 'the accepted JPEG bytes are unchanged')
+  assert.deepEqual([...preparedImages[1]!.image.bytes], [...SAMPLE_WEBP], 'the accepted WebP bytes are unchanged')
+  assert.deepEqual(
+    preparedImages.map(segment => [segment.image.mediaType, segment.image.width, segment.image.height]),
+    [['image/jpeg', 120, 80], ['image/webp', 120, 80]],
+    'the accepted MIME/order/dimensions are the original ones',
+  )
+
+  // 5. The durable refs are built from THE ACCEPTED payload (the host would
+  //    return these after persisting exactly those bytes).
+  const jpegRef: ImageAttachmentRefLike = {
+    attachmentId: 'att-6b-jpeg',
+    mediaType: 'image/jpeg',
+    bytes: preparedImages[0]!.image.byteLength,
+    width: preparedImages[0]!.image.width,
+    height: preparedImages[0]!.image.height,
+    name: preparedImages[0]!.image.name,
+  }
+  const webpRef: ImageAttachmentRefLike = {
+    attachmentId: 'att-6b-webp',
+    mediaType: 'image/webp',
+    bytes: preparedImages[1]!.image.byteLength,
+    width: preparedImages[1]!.image.width,
+    height: preparedImages[1]!.image.height,
+    name: preparedImages[1]!.image.name,
+  }
+  durableBytes.set(jpegRef.attachmentId, preparedImages[0]!.image.bytes)
+  durableBytes.set(webpRef.attachmentId, preparedImages[1]!.image.bytes)
+
   app.setFullscreen(true)
   const folder = new TranscriptFolder()
   folder.apply([userMessage([
@@ -191,7 +236,7 @@ test('staged JPEG/WebP → prepared prompt → transcript → /view-image paints
   assert.deepEqual(
     [reads.get(jpegRef.attachmentId), reads.get(webpRef.attachmentId)],
     [1, 1],
-    'each durable attachment is read exactly once',
+    'each accepted durable attachment is read exactly once',
   )
   const conversionsAfterThumbnails = conversions
   assert.equal(conversionsAfterThumbnails, 2, 'each READY source is converted exactly once')
@@ -253,6 +298,8 @@ test('staged JPEG/WebP → prepared prompt → transcript → /view-image paints
   assert.ok(!restored.includes('Images · current transcript'), 'the workspace closed')
   assert.ok(!vt.writes.join('').includes('\x1b]1337;File='), 'no iTerm2 sequence was used on Kitty')
 
+  // The captured business reservation ends when the local sink finishes.
+  submitted.releases.pop()?.()
   app.setFullscreen(false)
   app.stop()
 })

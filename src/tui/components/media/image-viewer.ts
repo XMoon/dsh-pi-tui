@@ -200,11 +200,11 @@ export class ImageViewerPanel implements Component {
   /** The body area: exactly one status row, or the clipped image rows. */
   private bodyLines(width: number, bodyRows: number): string[] {
     if (bodyRows <= 0) return []
-    if (this.loader === undefined) return [this.status(width, 'Preview unavailable')]
+    if (this.loader === undefined) return [this.failedStatus(width, 'Preview unavailable')]
     const protocol = getCapabilities().images
     if (protocol === null || protocol === undefined) {
       // No inline graphics: never start a pointless full-bytes read.
-      return [this.status(width, 'Preview unavailable')]
+      return [this.failedStatus(width, 'Preview unavailable')]
     }
     if (protocol !== 'kitty') {
       // Image UX PR2 Owner decision: the leased workspace shows real pixels
@@ -213,7 +213,7 @@ export class ImageViewerPanel implements Component {
       // which the fork's ANSI width layer does not parse); native iTerm2
       // pixels are deferred to separate fork/protocol work. Metadata stays
       // visible and the state is truthful.
-      return [this.status(width, 'Preview unavailable')]
+      return [this.failedStatus(width, 'Preview unavailable')]
     }
     if (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp') {
       // Image-6B: Kitty places PNG payloads only, so JPEG/WebP reuse the SAME
@@ -226,7 +226,7 @@ export class ImageViewerPanel implements Component {
       // (GIF): Kitty accepts PNG only and this repo installs no transcoder, so
       // any other format would build an Image that silently degrades to a text
       // fallback. JPEG/WebP never reach this check (they take the 6A branch).
-      return [this.status(width, 'Preview unavailable')]
+      return [this.failedStatus(width, 'Preview unavailable')]
     }
     const state = this.loader.get(this.ref, this.scope)
     if (state.state === 'idle') {
@@ -239,9 +239,9 @@ export class ImageViewerPanel implements Component {
       // Read failures are single physical rows: the projection folds any
       // embedded CR/LF/TAB (and drops terminal control bytes) before the
       // width clamp.
-      return [this.status(width, `Read failed: ${sanitizedPhysicalLine(state.error.message)}`)]
+      return [this.failedStatus(width, 'Read failed:', sanitizedPhysicalLine(state.error.message))]
     }
-    if (state.bytes.byteLength === 0) return [this.status(width, 'Preview unavailable')]
+    if (state.bytes.byteLength === 0) return [this.failedStatus(width, 'Preview unavailable')]
     return this.imageLines(width, bodyRows, {
       base64: state.base64,
       kind: 'raw',
@@ -261,15 +261,16 @@ export class ImageViewerPanel implements Component {
    * a full-bytes read it cannot convert.
    *
    * The native conversion error never reaches the terminal: every failure is
-   * the one bounded `Preview unavailable` status row.
+   * the one bounded `Preview unavailable` status row, with the failure word in
+   * the `error` ink (design-language role 16).
    */
   private derivedBodyLines(width: number, bodyRows: number): string[] {
-    if (this.loader === undefined) return [this.status(width, 'Preview unavailable')]
+    if (this.loader === undefined) return [this.failedStatus(width, 'Preview unavailable')]
     // Same 20 MiB source ceiling as the 6A thumbnail; checked from the durable
     // metadata before the raw read so the Viewer never reads bytes it cannot
     // preview.
     if (this.ref.bytes > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
-      return [this.status(width, 'Preview unavailable')]
+      return [this.failedStatus(width, 'Preview unavailable')]
     }
     const preview = this.loader.getKittyThumbnail(this.ref, this.scope)
     if (preview.state === 'ready') {
@@ -281,7 +282,7 @@ export class ImageViewerPanel implements Component {
       })
     }
     if (preview.state === 'loading') return [this.status(width, 'Loading…')]
-    if (preview.state === 'error') return [this.status(width, 'Preview unavailable')]
+    if (preview.state === 'error') return [this.failedStatus(width, 'Preview unavailable')]
     const state = this.loader.get(this.ref, this.scope)
     if (state.state === 'idle') {
       this.loader.load(this.ref, this.scope)
@@ -289,10 +290,10 @@ export class ImageViewerPanel implements Component {
     }
     if (state.state === 'loading') return [this.status(width, 'Loading…')]
     if (state.state === 'error') {
-      return [this.status(width, `Read failed: ${sanitizedPhysicalLine(state.error.message)}`)]
+      return [this.failedStatus(width, 'Read failed:', sanitizedPhysicalLine(state.error.message))]
     }
     if (state.bytes.byteLength === 0 || state.bytes.byteLength > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
-      return [this.status(width, 'Preview unavailable')]
+      return [this.failedStatus(width, 'Preview unavailable')]
     }
     // Schedule the ONE conversion for this (scope, attachment); its settle
     // notifies the panel's existing subscription, which repaints with pixels.
@@ -300,9 +301,17 @@ export class ImageViewerPanel implements Component {
     return [this.status(width, 'Loading…')]
   }
 
-  /** Paint one dim status row, width-clamped before the paint. */
+  /** Paint one placeholder/loading status row (design-language role 16:
+   * `textDim`), width-clamped before the paint. */
   private status(width: number, text: string): string {
-    return color.textDim(truncateToWidth(text, width, '…'))
+    return truncateToWidth(color.textDim(text), width, '…')
+  }
+
+  /** Paint one FAILED placeholder row: the failure word carries the `error`
+   * ink while any detail stays `textDim` (role 16). */
+  private failedStatus(width: number, label: string, detail?: string): string {
+    const painted = `${color.error(label)}${detail === undefined || detail === '' ? '' : color.textDim(` ${detail}`)}`
+    return truncateToWidth(painted, width, '…')
   }
 
   /** Render one resolved PNG payload at `width` and clip the rows to the grant. */
