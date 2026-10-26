@@ -359,11 +359,37 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     })
   }
 
+  /**
+   * Move the LIST selection and converge the Detail state onto the NEW row in
+   * the same transaction: its authoritative candidate index, its credential
+   * action index and its viewport. Every row change (keyboard, wheel, click)
+   * goes through here, so a stale index can never be confirmed against a row
+   * the user just scrolled to (the wheel used to bypass this convergence).
+   */
+  private selectRowIndex(index: number): void {
+    const next = Math.min(Math.max(0, index), WEB_SETTINGS_ROW_IDS.length - 1)
+    if (next === this.cursor) return
+    this.commitPresentation(() => {
+      this.cursor = next
+      this.syncDetailToRow(this.intents.readFacts())
+    })
+  }
+
+  /** Point the Detail at the SELECTED row's real state: the authority's current
+   *  candidate, the first selectable credential action, and a viewport that
+   *  reveals them. Presentation only; no read and no write. */
+  private syncDetailToRow(facts: WebSettingsFacts): void {
+    this.detailOffset = 0
+    this.choiceIndex = this.currentChoiceIndex(facts)
+    this.actionIndex = 0
+    this.reconcileCredentialCursor()
+    this.rebaseDetailForChoice(this.choiceIndex)
+    this.rebaseDetailForAction(this.actionIndex)
+  }
+
   private move(delta: number): void {
     if (this.region === 'list') {
-      const next = Math.min(Math.max(0, this.cursor + delta), WEB_SETTINGS_ROW_IDS.length - 1)
-      if (next === this.cursor) return
-      this.commitPresentation(() => { this.cursor = next })
+      this.selectRowIndex(this.cursor + delta)
       return
     }
     const values = this.choiceValues()
@@ -399,9 +425,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private page(delta: number): void {
     if (this.region === 'list') {
       const step = Math.max(1, this.listViewport(this.liveWidth(), this.liveBodyRows()))
-      const next = Math.min(Math.max(0, this.cursor + delta * step), WEB_SETTINGS_ROW_IDS.length - 1)
-      if (next === this.cursor) return
-      this.commitPresentation(() => { this.cursor = next })
+      this.selectRowIndex(this.cursor + delta * step)
       return
     }
     this.scrollDetail(delta * Math.max(1, this.detailViewport(this.liveWidth(), this.liveBodyRows())))
@@ -409,9 +433,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   private jump(start: boolean): void {
     if (this.region === 'list') {
-      const next = start ? 0 : WEB_SETTINGS_ROW_IDS.length - 1
-      if (next === this.cursor) return
-      this.commitPresentation(() => { this.cursor = next })
+      this.selectRowIndex(start ? 0 : WEB_SETTINGS_ROW_IDS.length - 1)
       return
     }
     const values = this.choiceValues()
@@ -903,6 +925,12 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  candidate is inside THIS render's Detail viewport (the same gate the
    *  dispatch uses), so a resize can never advertise a Confirm it will drop. */
   private choiceActionBar(width: number, bodyRows: number): string {
+    // A dispatched write owns the row: the bar states it and never advertises a
+    // Confirm that `confirmChoice()` would silently drop.
+    const rowId = this.selectedSettingId()
+    if (rowId !== undefined && this.phases.get(rowId)?.kind === 'saving') {
+      return wholeWording('Saving… · Esc back', width, ['Esc back'])
+    }
     const requested = this.choiceValues()[this.choiceIndex]
     if (requested === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
     const viewport = this.detailViewport(width, bodyRows)
@@ -1339,9 +1367,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  undone by the cursor-visibility fence (and the active cursor stays
    *  visible, never a ghost action on a scrolled-out row). */
   private scrollList(delta: number): void {
-    const next = Math.min(Math.max(0, this.cursor + delta), WEB_SETTINGS_ROW_IDS.length - 1)
-    if (next === this.cursor) return
-    this.commitPresentation(() => { this.cursor = next })
+    this.selectRowIndex(this.cursor + delta)
   }
 
   private activateTarget(target: PageTarget): void {
@@ -1350,7 +1376,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       if (index < 0) return
       // Selecting a row is presentation only; activating it opens the SAME
       // Detail the keyboard's Enter opens.
-      this.commitPresentation(() => { this.cursor = index })
+      this.selectRowIndex(index)
       this.openSelectedRow()
       return
     }
