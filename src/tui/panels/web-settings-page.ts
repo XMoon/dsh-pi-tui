@@ -843,8 +843,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.detailOffset = Math.min(Math.max(0, next), projection.maxOffset)
   }
 
-  /** Whether the highlighted credential action is really on screen. */
+  /** Whether the highlighted credential action is really on the LAST PAINTED
+   *  frame: it must own a painted hit target AND be inside the painted
+   *  viewport. A current-facts projection alone is not enough (a list frame
+   *  paints no action at all). */
   private paintedActionVisible(action: string): boolean {
+    const paintedTarget = this.paint?.targetRows.some(target => target.kind === 'action' && target.id === action)
+    if (paintedTarget !== true) return false
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
     const projection = this.detailProjection(width, viewport)
@@ -857,6 +862,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   /** Whether the highlighted candidate line is INSIDE the painted Detail
    *  viewport: an off-screen highlight may never be confirmed by Enter. */
   private paintedChoiceVisible(value: string): boolean {
+    // Same painted-frame proof as the credential action: the option must own a
+    // painted hit target (a list frame paints none) and be inside the painted
+    // viewport of the current facts projection.
+    const paintedTarget = this.paint?.targetRows.some(target => target.kind === 'option' && target.id === value)
+    if (paintedTarget !== true) return false
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
     const projection = this.detailProjection(width, viewport)
@@ -879,6 +889,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   private renderFrame(width: number): string[] {
+    // The marker belongs to THIS frame only: a list/endpoint/non-credential
+    // frame must never retain the credential action an earlier Detail painted.
+    this.paintedCredentialAction = undefined
     // A backend that turned non-current closes an open endpoint draft FIRST:
     // the frame never paints a Confirm the writer must refuse.
     this.syncEndpointWritability()
@@ -1306,7 +1319,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     const activeIndex = this.reconcileCredentialCursor()
-    if (this.painting) this.paintedCredentialAction = undefined
     let selectable = -1
     for (const action of actions) {
       if (action.enabled) selectable += 1

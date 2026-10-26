@@ -1802,6 +1802,27 @@ test('a Detail scroll projection cannot advance the painted action before the fr
   await settlePainted(h, 'the Models route after the repaint', frame => frame.includes('Settings · Models'))
 })
 
+test('a list frame cannot retain the credential action a previous Detail painted', async t => {
+  const h = setup({ columns: 44, rows: 20 }) // narrow: the list frame paints no Detail at all
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail, Configure painted
+  assert.match(h.view(), /› Configure in Models…/u)
+  await key(h, ESC) // back to the list; this frame paints NO credential action
+  assert.doesNotMatch(h.view(), /Configure in Models…/u)
+  // Re-open the Detail and press Enter BEFORE its first frame: the marker from
+  // the earlier Detail must not survive the list frame it was replaced by.
+  h.vt.sendInput('\r') // reopen the Detail (openSelectedRow; no paint yet)
+  h.vt.sendInput('\r') // Enter before the newly opened Detail is painted
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'an unpainted Detail action is never activated')
+  assert.match(h.view(), /› Configure in Models…/u, 'the Detail paints its own cursor before any activation')
+  await key(h, ENTER)
+  await settlePainted(h, 'the Models route after the Detail painted', frame => frame.includes('Settings · Models'))
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u)
+})
+
 test('a mouse click on a credential action invalidated by a fresh read is refused', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
