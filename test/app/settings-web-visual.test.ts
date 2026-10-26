@@ -367,8 +367,14 @@ for (const [columns, rows] of SIZES) {
     await key(h, ENTER) // mount the endpoint editor
     const frame = h.view()
     assert.match(frame, /Enter confirm · Esc cancel/u, `the whole confirm/cancel bar survives at ${columns}x${rows}`)
-    // The trust warning leads with the actionable half and never loses it.
-    assert.match(frame, /Only confirm a trusted https base/u, `the trust warning is painted:\n${frame}`)
+    // The COMPLETE disclosure is mandatory before any confirm: a trusted https
+    // base, the API key AND query sent there, and the URL-shape/trust boundary.
+    const disclosure = frame.replace(/\s+/gu, ' ')
+    assert.match(disclosure, /Only confirm a trusted https base:/u, `the trust warning is painted:\n${frame}`)
+    assert.match(disclosure, /it receives the API key and the query/u,
+      `the credential+query disclosure is painted:\n${frame}`)
+    assert.match(disclosure, /The URL shape is not a trust check/u,
+      `the URL-shape/trust boundary is painted:\n${frame}`)
     assert.ok(!/Esc ca$|Esc can$|Esc canc$|Enter confir$/u.test(frame), 'no hint is painted as a partial word')
     for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
     assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Enter confirm · Esc cancel')
