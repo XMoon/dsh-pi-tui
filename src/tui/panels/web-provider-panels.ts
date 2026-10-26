@@ -70,6 +70,9 @@ export class WebEndpointPanel implements Component {
   /** The total line budget the HOST grants this panel (its semantic hint
    *  included). `undefined` = the legacy submenu grant: every line paints. */
   private maxRows: number | undefined
+  /** Whether the LAST render painted the complete trust disclosure: only then
+   *  may a Confirm be dispatched. */
+  private confirmEnabled = false
   private state:
     | { readonly kind: 'hint' | 'saving' }
     | { readonly kind: 'error'; readonly verdict: 'not-saved' | 'outcome-unknown'; readonly message: string }
@@ -134,18 +137,23 @@ export class WebEndpointPanel implements Component {
 
   invalidate(): void {}
 
+  /**
+   * The complete trust disclosure. It is deliberately SHORT enough to wrap into
+   * three whole lines at the 44-column floor while still stating all three
+   * load-bearing facts: a trusted https base, the API key AND query are sent
+   * there, and the URL shape is not a trust check. The page's read-only Detail
+   * carries the longer explanation.
+   */
+  private static readonly TRUST_WARNING =
+    'Only confirm a trusted https base: it receives the API key and the query. The URL shape is not a trust check.'
+
   render(width: number): string[] {
     const title = row(color.textStrong('Search / Fetch API Endpoint'), width)
     const draft = this.input.render(width).map(line => row(line, width))
-    const status = row(this.statusLine(width), width)
-    // The trust warning leads with the ACTIONABLE instruction so a short grant
-    // keeps the meaning: only a trusted HTTPS base, because the credential and
-    // the query are sent there (the URL shape is not a trust check).
-    const danger = wrapTextWithAnsi(
-      'Only confirm a trusted https base: changing it sends the DeepSeek API credential and the query to that target, '
-        + 'for both the Search and Fetch APIs. The URL shape is checked, not the host\'s trust.',
-      Math.max(1, width - 2),
-    ).map(line => row(color.textDim(line), width))
+    const savingLine = this.state.kind === 'saving' ? row(this.statusLine(width), width) : undefined
+    const errorLine = this.state.kind === 'error' ? row(this.statusLine(width), width) : undefined
+    const warning = wrapTextWithAnsi(WebEndpointPanel.TRUST_WARNING, Math.max(1, width - 2))
+      .map(line => row(color.textDim(line), width))
     const base = wrapTextWithAnsi(
       `Official base: https://api.deepseek.com/v1/tools; /search and /fetch are appended.`,
       Math.max(1, width - 2),
@@ -153,17 +161,50 @@ export class WebEndpointPanel implements Component {
       ? `${color.textDim('Official base: ')}${color.text(line.slice('Official base: '.length))}`
       : color.textDim(line), width))
     const hint = row(color.textDim('Enter confirm · Esc cancel'), width)
-    if (this.maxRows === undefined) return [title, ...draft, status, ...danger, ...base, hint]
+    if (this.maxRows === undefined) {
+      // The legacy submenu grant is unbounded: keep the full presentation.
+      this.confirmEnabled = true
+      return [title, ...draft, row(this.statusLine(width), width), ...warning, ...base, hint]
+    }
     const bodyBudget = Math.max(0, this.maxRows - 1)
-    const body = [title, ...draft, status, ...danger, ...base]
-    if (bodyBudget >= body.length) return [...body, hint]
-    // The draft and the verdict word are mandatory; the warning follows as
-    // WHOLE wrapped lines (never a half sentence); the title and the official
-    // base are decoration that drops first.
-    const rest = Math.max(0, bodyBudget - draft.length - 1)
-    const keptDanger = danger.slice(0, rest)
-    const kept = new Set<string>([...draft, status, ...keptDanger])
-    return [...body.filter(line => kept.has(line)), hint]
+    // The disclosure is MANDATORY: a Confirm may only exist while it is fully
+    // painted. A dispatched write shows `Saving…` in the bar (it can never be
+    // cancelled); an error keeps the confirm hint when its verdict fits in the
+    // body, so the draft can be corrected and re-submitted.
+    const mandatory = draft.length + warning.length
+    this.confirmEnabled = mandatory <= bodyBudget
+    const optional = new Set<string>()
+    if (this.confirmEnabled) {
+      let spare = bodyBudget - mandatory
+      const take = (lines: readonly string[]): void => {
+        if (spare <= 0) return
+        for (const line of lines) {
+          if (spare <= 0) return
+          optional.add(line)
+          spare -= 1
+        }
+      }
+      // Display order is title → draft → warning → error → base → idle hint; the
+      // PRIORITY order below only decides which optional lines survive.
+      if (errorLine !== undefined) take([errorLine])
+      take([title])
+      take(base)
+      if (savingLine === undefined && errorLine === undefined) take([row(this.statusLine(width), width)])
+    }
+    const body: string[] = []
+    const pushOptional = (line: string): void => { if (optional.has(line)) body.push(line) }
+    pushOptional(title)
+    body.push(...draft, ...warning)
+    if (errorLine !== undefined) pushOptional(errorLine)
+    for (const line of base) pushOptional(line)
+    const idleLine = savingLine === undefined && errorLine === undefined
+      ? row(this.statusLine(width), width)
+      : undefined
+    if (idleLine !== undefined) pushOptional(idleLine)
+    const bar = !this.confirmEnabled
+      ? row(color.textDim('Esc cancel · enlarge for the trust warning'), width)
+      : savingLine ?? (errorLine !== undefined && !optional.has(errorLine) ? errorLine : hint)
+    return [...body.slice(0, bodyBudget), bar]
   }
 
   private statusLine(width: number): string {
@@ -180,6 +221,10 @@ export class WebEndpointPanel implements Component {
   }
 
   private async submit(): Promise<void> {
+    // A Confirm whose mandatory trust disclosure is not fully painted is
+    // refused (the bar states how to reveal it): the human never confirms an
+    // external-send target blind.
+    if (!this.confirmEnabled) return
     if (this.settled || this.state.kind === 'saving') return
     const url = this.input.getValue().trim()
     this.state = { kind: 'saving' }

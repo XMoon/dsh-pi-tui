@@ -1468,6 +1468,29 @@ test('a resize that clips the credential actions removes the Enter affordance an
   assert.match(h.view(), /Enter open in Models/u, 'the restored frame advertises the Enter')
 })
 
+test('an endpoint grant too short for the trust disclosure refuses the confirm', async t => {
+  const h = setup({ columns: 44, rows: 3 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // the endpoint row opens its editor with a 1-line body
+  const tiny = h.view()
+  assert.doesNotMatch(tiny, /Enter confirm/u, `a cropped disclosure offers no Confirm:\n${tiny}`)
+  assert.match(tiny, /enlarge for the trust warning/u, 'the bar states how to reveal the disclosure')
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [], 'a blind Confirm dispatches nothing')
+  // Revealing the disclosure re-enables the explicit confirm path.
+  h.vt.resize(44, 8)
+  await h.vt.waitForRender()
+  const revealed = await settlePainted(h, 'the revealed disclosure', frame => frame.includes('Enter confirm · Esc cancel'))
+  const disclosure = revealed.replace(/\s+/gu, ' ')
+  assert.match(disclosure, /it receives the API key and the query/u)
+  assert.match(disclosure, /The URL shape is not a trust check/u)
+  await editEndpointDraft(h, '/v4')
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v4'])
+})
+
 // ── D3-2: the page states the real rc.2 facts ──────────────────────────────
 
 test('the page states defaults, billing, the ori_question boundary and the endpoint trust warning', async t => {
