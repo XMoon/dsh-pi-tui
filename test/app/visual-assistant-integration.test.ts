@@ -27,6 +27,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionLogOffset, SessionSeq, buildForkSeed, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
 import { createSurfaceRuntime, type SurfaceEventRoutingSource, type SurfaceViewedChildPresentation } from '../../src/app/surface/runtime.ts'
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
@@ -148,6 +149,11 @@ interface RealSession {
   setEnabled(next: boolean): void
 }
 
+/** The narrow persistence face the retirement barrier uses. */
+interface SessionPersistenceLike {
+  flush(): Promise<void>
+}
+
 /** One production-equivalent Host composition shared by every Session of a test. */
 interface RealContext {
   readonly ctx: Context
@@ -155,14 +161,28 @@ interface RealContext {
   create(label: string): Promise<RealSession>
   /** Create the official fork child of one live Session in THIS context. */
   fork(source: RealSession, label: string): Promise<RealSession>
+  /**
+   * Retire one live Agent (its Session leaves the live registry) and flush the
+   * whole durability barrier, so a later ancestor observation is a REAL cold
+   * read from persistence.
+   */
+  retire(session: RealSession): Promise<void>
 }
 
-async function bootRealContext(life: TestLifecycle, label: string): Promise<RealContext> {
+async function bootRealContext(
+  life: TestLifecycle,
+  label: string,
+  options: { readonly persistent?: boolean } = {},
+): Promise<RealContext> {
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
   await mountAgentLoopTestDependencies(ctx, {})
+  if (options.persistent === true) {
+    await ctx.plugin(JsonlSessionPersistence, { root: life.tempDir('dsh-fork-cold-parent-') })
+  }
   await mountAgentLoopTestHarness(ctx)
   await ctx.plugin(SessionQuerySqlite, { path: ':memory:', openAt: 'never' })
+  const handles = new Map<string, { dispose(): Promise<void> }>()
   let enabled = true
   applyVisualTools(ctx, { enabled: { get: () => enabled } } as never)
   const provider = `visual-assistant-${label}`
@@ -202,6 +222,7 @@ async function bootRealContext(life: TestLifecycle, label: string): Promise<Real
         agentOptions: { provider, model: 'm' },
         setup: () => {},
       })
+      handles.set(sessionId, handle as unknown as { dispose(): Promise<void> })
       return wrap(sessionId, handle)
     },
     async fork(source: RealSession, idLabel: string): Promise<RealSession> {
@@ -220,7 +241,15 @@ async function bootRealContext(life: TestLifecycle, label: string): Promise<Real
         agentOptions: { provider, model: 'm' },
         setup: () => {},
       })
+      handles.set(sessionId, handle as unknown as { dispose(): Promise<void> })
       return wrap(sessionId, handle)
+    },
+    async retire(session: RealSession): Promise<void> {
+      const handle = handles.get(session.sessionId)
+      assert.ok(handle !== undefined, 'the retired Session has an owned handle')
+      handles.delete(session.sessionId)
+      await handle.dispose()
+      await (ctx.get('sessionPersistence') as SessionPersistenceLike | undefined)?.flush()
     },
   }
 }
@@ -1442,6 +1471,52 @@ test('A -> B -> C keeps the grandparent, parent and child figures exactly once e
       b.sessionId,
       c.sessionId,
     ], 'three origins, each proven at its own level')
+  } finally {
+    subject.harness.dispose()
+  }
+})
+
+// ── cold parent: the fork's ancestor is only in persistence ────────────────
+
+test('a fork whose parent is no longer live proves its inherited figures from the persisted log', async (t) => {
+  const life = testLifecycle(t)
+  const boot = await bootRealContext(life, 'fork-cold-parent', { persistent: true })
+  const source = await boot.create('source')
+  await runTwoFigureAnswer(source, CHART, SVG)
+  const sourceSpan = { startSeq: 0, endSeqExclusive: source.session.seq, sessionId: source.sessionId }
+
+  const sessions = boot.ctx.get('sessions') as { get(id: unknown): unknown }
+  assert.ok(sessions.get(source.sessionId) !== undefined, 'the parent is live before retirement')
+  await boot.retire(source)
+  assert.equal(sessions.get(source.sessionId), undefined,
+    'the parent LEFT the live registry: the ancestor observation below must be a cold persistence read')
+
+  const child = await boot.fork(source, 'child')
+  assert.equal(child.session.header.isSeeded, true)
+  assert.equal(String(child.session.header.parentSession), source.sessionId)
+
+  const folder = new TranscriptFolder()
+  folder.apply(child.session.snapshotEvents())
+  const subject = mountForkSubject(boot.ctx.get('sessionQuery') as VisualLineageQuery, child, folder)
+  try {
+    await subject.harness.repaint()
+    assert.equal(subject.tasks.length, 1, 'ONE cold-parent ancestry read for the selected identity')
+    await subject.tasks[0]
+    await subject.harness.vt.waitForRender()
+    const view = subject.harness.vt.getViewport().join('\n')
+    const before = view.indexOf('Before.')
+    const chart = view.indexOf('Request latency', before)
+    const between = view.indexOf('Between.')
+    const svg = view.indexOf('Service topology', between)
+    const after = view.indexOf('After.')
+    assert.ok(before >= 0 && chart > before && between > chart && svg > between && after > svg,
+      `both inherited figures replay inline from the cold parent log:\n${view}`)
+    const snapshot = subject.snapshot()
+    assert.ok(snapshot !== undefined)
+    assert.deepEqual(snapshot.verifiedOriginSpans, [
+      sourceSpan,
+      { startSeq: source.session.seq, endSeqExclusive: child.session.seq, sessionId: child.sessionId },
+    ], 'the cold observation proves the parent prefix exactly like the live one')
   } finally {
     subject.harness.dispose()
   }
