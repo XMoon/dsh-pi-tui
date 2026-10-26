@@ -220,6 +220,18 @@
 
 ### 变更
 
+- **`/settings → Tools → Web Search / Fetch` 从旧编辑器迁入同一个 Settings 工作区专页。**
+  `Enter`（或行详情里的 `Configure Web…`）不再是关闭工作区跳旧编辑器，而是在同一个 lease/正文里
+  打开固定六行的 Web 页面：搜索 Provider、Fetch Provider、Search API 结果数（快选 5/10/20/50，
+  Host 里已有的其他整数照原样显示）、`Share Original Question`、API endpoint（沿用原 endpoint
+  编辑器：完整 URL + 明确 Enter 确认 + 凭据/查询外发警告）与只读的 `DeepSeek API Key`。每个值只有
+  明确 Enter 确认才写入；写入经同一个 Web FIFO 后由权威回读判定 `Verified` / `Not saved`（并显示
+  Host 实际保留的值）/ `Outcome unknown`，确认已持有的值不会重复写入。自定义 provider id 原样
+  显示且不提供可确认候选；不可用/Remote 后端只打开只读说明页。密钥仍只显示引用名、是否配置与来源
+  层，`Configure in Models…` / `Clear in Models…` 在同一个 lease 内切到既有 Models `API Key
+  Reference` 页完成写入，Web 页自身从不收集密钥或执行 `/login` 文本命令。旧的完整编辑器保留，其
+  历史 Web 行与新页面共用同一个写入队列与读取权威。
+
 - **Settings 的一级分类改为固定的九类，并按需出现 `Extensions`。** `/settings`（与 `/status`）
   的分类现在是 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal /
   Tools / Plugins`；只有扩展设置注册表里确实存在设置行时才在末尾追加 `Extensions`。注册、卸载或

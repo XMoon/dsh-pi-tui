@@ -307,6 +307,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`/settings → Tools → Web Search / Fetch` moved from the legacy editor into a page in the same
+  Settings workspace.** `Enter` (or the row Detail's `Configure Web…`) no longer retires the
+  workspace and opens the old editor: it mounts the frozen six-row Web page in the same lease and
+  body — search provider, fetch provider, Search API result count (5/10/20/50 quick picks; another
+  stored integer is reported exactly), `Share Original Question`, the API endpoint (the existing
+  endpoint editor: a full URL, an explicit Enter confirm and the credential/query external-send
+  warning) and the read-only `DeepSeek API Key`. Each value is written only by its own explicit
+  Enter confirm; the write joins the single Web FIFO and the authoritative read-back then decides
+  `Verified` / `Not saved` (naming the value the Host really keeps) / `Outcome unknown`, and
+  confirming a value the Host already holds performs no redundant write. A custom provider id is
+  reported verbatim and offers no confirmable candidate; an unavailable or Remote backend opens a
+  read-only page with its reason. The key still shows only the reference, whether it is configured
+  and its source layer: `Configure in Models…` / `Clear in Models…` switch to the existing Models
+  `API Key Reference` page in the SAME lease, so the Web page never collects the key and never runs
+  `/login` text. The existing complete editor is retained and its historical Web rows share the
+  same write queue and read authority.
+
 - **Settings now has nine fixed first-level categories plus a conditional `Extensions`.**
   `/settings` (and `/status`) lists `About / Models / Account / Agent / Appearance /
   Conversation / Input & Terminal / Tools / Plugins`, and appends `Extensions` only while the

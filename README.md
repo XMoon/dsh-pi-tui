@@ -449,20 +449,28 @@ Host 公布的 preset 原始 id，只影响**以后新建**的会话，当前会
 编辑器并定位到对应的一项，Theme、Plugin Manager、键位与扩展设置的写入路径全部不变。`Agent`
 分类已经没有未迁移项，所以它的 `Agent settings…` 过渡行随之退休。
 
-`/settings` 的 `Tools` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
-的 Web 段并定位到第一项。段内可切换搜索 Provider（`Messages`，官方默认，或独立计费的
-`DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`），设置 Search API
-结果数（1–50，快选 5/10/20/50）、`Share Original Question`（官方默认为开启；每次新的 Search API
-调用附带最多 128 字符的触发人类问题 `ori_question`，不发送完整历史或系统提示词）与 API endpoint
-base（必须显式确认 https 地址；凭据与查询会发往该地址）。两套 API 都是独立的 opt-in 收费
-provider：登录或普通 Messages 套餐不保证覆盖其费用，默认的 `Messages`/`HTTP` 组合也不会调用收费
-API。Web 配置是 base profile 所有的设置，不是 Bxx Optional Bundle；安装或启用任何其他 Bundle
-都不会改变这两个 provider。
-`[current]` 只在官方写入与权威回读一致后移动，失败显示 `Not saved`；选择对下一次搜索/获取生效，
-运行中的操作不会被追溯切换。DeepSeek API key 只显示是否配置与来源层；配置/清除会关闭当前 Web 编辑器，并在 Models 的遮蔽
-`API Key Reference` 页完成（`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` 只负责导航）。Esc 从 Web 段返回
-同一 `Web Search / Fetch` 行；从 `Open existing settings…` 进入的旧路径仍返回会话。Remote 后端显示
-不可用，不发任何 Host 命名空间。
+`/settings → Tools → Web Search / Fetch` 现在是**同一个 Settings 工作区里的专页**（不再先关工作区、
+再进旧编辑器）。页面固定六行：搜索 Provider（`Messages`，官方默认，或独立计费的
+`DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`）、Search API
+结果数（官方范围 1–50，快选 5/10/20/50；Host 里已有的其他整数照原样显示、不会被改写）、
+`Share Original Question`（官方默认开启；每次新的 Search API 调用附带最多 128 字符的触发人类问题
+`ori_question`，不发送完整历史或系统提示词）与 API endpoint base（沿用原有 endpoint 编辑器：完整
+URL 草稿 + 明确 Enter 确认，并警告凭据与查询会发往该 HTTPS 地址；URL 形状会校验，但目标是否可信
+必须由人判断），最后是只读的 `DeepSeek API Key`。两套 API 都是独立的 opt-in 收费 provider：登录或
+普通 Messages 套餐不保证覆盖其费用，默认的 `Messages`/`HTTP` 组合也不会调用收费 API。Web 配置是
+base profile 所有的设置，不是 Bxx Optional Bundle；安装或启用任何其他 Bundle 都不会改变这两个
+provider。
+
+每个值只有**明确 Enter 确认**才写入，移动焦点、展开详情、Tab、刷新、退出都不会写入；写入后由权威
+回读判定 `Verified` / `Not saved`（并显示 Host 保留的值）/ `Outcome unknown`，从不按提交意图伪造
+成功。自定义的 provider id 原样显示、不提供可确认候选，也不会被导航悄悄替换成 `Messages`/`HTTP`；
+确认一个 Host 已有的值不会产生多余写入。选择对下一次搜索/获取生效，运行中的操作不会被追溯切换。
+DeepSeek API key 只显示是否配置与来源层，`Configure in Models…` / `Clear in Models…` 会在同一个
+Settings lease 里跳到既有的 Models `API Key Reference` 页完成遮蔽输入或清除确认——Web 页自身从不
+收集密钥，也不执行 `/login` / `/logout` 文本命令。按 `Esc` 从详情回到 Web 列表、再回到
+`Web Search / Fetch` 行；Remote 或不可用的 Host 段仍可打开只读说明页，但不提供任何写入入口。
+旧的完整编辑器仍然保留（Footer/Keybindings、Extensions 等过渡行照旧），其历史 Web 行在退休前与
+新页面共用同一个写入队列与读取权威。
 
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格(也可在 Appearance 里直接改):`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只

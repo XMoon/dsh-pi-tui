@@ -50,6 +50,19 @@ import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings } from '../../runtime/config-port.ts'
 import { WebCredentialPanel, WebEndpointPanel, WebWriteVerdictError, type WebCredentialAction } from '../panels/web-provider-panels.ts'
+import {
+  WEB_CREDENTIAL_REF,
+  WEB_FETCH_PROVIDER_CANDIDATES,
+  WEB_QUESTION_CANDIDATES,
+  WEB_SEARCH_COUNT_CANDIDATES,
+  WEB_SEARCH_PROVIDER_CANDIDATES,
+  WEB_SETTING_ROW_ID_SET,
+  WEB_SETTINGS_PAGE_TITLE,
+  WebSettingsPage,
+  type WebCommitResult,
+  type WebSettingRowId,
+  type WebSettingsFacts,
+} from '../panels/web-settings-page.ts'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
@@ -332,38 +345,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   // after a mutation AND its authoritative read-back agree.
 
   /** The exact credential reference the official DeepSeek web providers
-   *  resolve (`apiKeyEnv`'s shipped default). The value never reaches the TUI. */
-  const WEB_CREDENTIAL_REF = 'DEEPSEEK_API_KEY'
+   *  resolve (`apiKeyEnv`'s shipped default). The value never reaches the TUI.
+   *  The page module owns the SAME constant: one source for both surfaces. */
   const WEB_CREDENTIAL_ROW_ID = 'web-credential'
-  /** The `Tools`-category launcher row id (a NAVIGATION row: it never becomes a
+  /** The `Tools`-category Web page row id (a NAVIGATION row: it never becomes a
    *  Workspace editable field, so the editable-row count is unchanged). */
   const WEB_LAUNCHER_ROW_ID = 'web-settings'
-  /** The legacy row the launcher focuses AND the identity that makes Esc
-   *  restore the Workspace instead of returning to the conversation. */
-  const WEB_LAUNCHER_TARGET_ROW = 'web-search-provider'
-  const WEB_SEARCH_PROVIDER_VALUES = [
-    { id: 'deepseek-official', label: 'Messages', default: true },
-    { id: 'deepseek-search-api', label: 'DeepSeek Search API', default: false },
-  ] as const
-  const WEB_FETCH_PROVIDER_VALUES = [
-    { id: 'http', label: 'HTTP', default: true },
-    { id: 'deepseek-fetch-api', label: 'DeepSeek Fetch API', default: false },
-  ] as const
-  const WEB_SEARCH_COUNT_VALUES = ['5', '10', '20', '50'] as const
-  const WEB_ORIGINAL_QUESTION_VALUES = ['on', 'off'] as const
-  type WebSettingRowId =
-    | 'web-search-provider'
-    | 'web-fetch-provider'
-    | 'web-search-count'
-    | 'web-send-original-question'
-    | 'web-search-endpoint'
-  const WEB_SETTING_ROW_IDS: ReadonlySet<string> = new Set([
-    'web-search-provider',
-    'web-fetch-provider',
-    'web-search-count',
-    'web-send-original-question',
-    'web-search-endpoint',
-  ])
+  /** The SAME official candidate identities the Web page renders (one source,
+   *  so the legacy editor and the page can never disagree). */
+  const WEB_SEARCH_PROVIDER_VALUES = WEB_SEARCH_PROVIDER_CANDIDATES
+  const WEB_FETCH_PROVIDER_VALUES = WEB_FETCH_PROVIDER_CANDIDATES
+  const WEB_SEARCH_COUNT_VALUES = WEB_SEARCH_COUNT_CANDIDATES
+  const WEB_ORIGINAL_QUESTION_VALUES = WEB_QUESTION_CANDIDATES
+  const WEB_SETTING_ROW_IDS = WEB_SETTING_ROW_ID_SET
   /** One row's transient write state (PRESENTATION only; never a shadow value). */
   type WebRowPhase = 'saving' | 'not-saved' | 'outcome-unknown'
   const webRowPhases = new Map<WebSettingRowId, { readonly kind: WebRowPhase; readonly reason?: string }>()
@@ -457,6 +451,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   const webSettingsAvailable = (): boolean => runner.config.web.available()
+
+  /** The LATEST authority facts the Web page renders. A pending read is
+   *  `pending` (never a last-known value presented as current); an unavailable
+   *  backend, a failed read and a resolved-but-unreadable read each state their
+   *  OWN reason. */
+  const webSettingsFacts = (): WebSettingsFacts => {
+    if (!webSettingsAvailable()) {
+      return { kind: 'unavailable', reason: 'the Host Web provider settings are not available on this backend' }
+    }
+    if (!webReadSettled) return { kind: 'pending' }
+    if (webReadFailure !== undefined) return { kind: 'unavailable', reason: webReadFailure }
+    if (webSettings === undefined) return { kind: 'unavailable', reason: 'the Host Web settings could not be read' }
+    return { kind: 'ready', settings: webSettings }
+  }
 
   /** A provider's official display name, or the configured custom id verbatim
    *  (a custom route is reported as-is and never silently replaced). */
@@ -676,7 +684,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  the first frame already carries authoritative values; a missing or failed
    *  read is stated, never defaulted. */
   const webWorkspaceRowFacts = (): { summary: string; freshness: SettingsWorkspaceFreshness; description: string } => {
-    const description = 'Host Web settings for the base profile, not an Optional Bundle. Defaults: Messages search · HTTP fetch; other bundles never change them and the defaults call no billed API. The Search/Fetch APIs are billed separately as opt-in providers (a Messages plan does not guarantee coverage) and send the request to the configured endpoint. Share Original Question is on by default: it sends up to 128 characters of the human question (never the full history or system prompt). The key stays in the official credential reference and is never shown. A value reads Verified only after the Host write and authoritative read-back agree. Enter configure.'
+    const description = 'Host Web settings for the base profile, not an Optional Bundle. Defaults: Messages search · HTTP fetch; other bundles never change them and the defaults call no billed API. The Search/Fetch APIs are billed separately as opt-in providers (a Messages plan does not guarantee coverage) and send the request to the configured endpoint. Share Original Question is on by default: it sends up to 128 characters of the human question (never the full history or system prompt). The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
     if (!webSettingsAvailable()) {
       return { summary: 'Unavailable', freshness: 'unavailable', description: `${description} Not supported on this backend.` }
     }
@@ -695,91 +703,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
   }
 
-  /** One Web section write, serialized behind every other Web write: a slow
-   *  earlier mutation can never land after a newer one. The row is reconciled
-   *  from the authoritative read-back on settle — never from the request. */
+  /** The ONE Web write chain of this command owner. Every Web mutation (the
+   *  page's five fields, the legacy editor's rows and the endpoint draft) joins
+   *  THIS chain: a slow earlier mutation can never land after a newer one. */
   let webWriteChain: Promise<void> = Promise.resolve()
 
-  /** The verdict of ONE write intent against the NEWEST committed authority.
-   *  Verified means the Host really HOLDS the requested value: a resolved
-   *  mutation is not a save. A readable difference (a competing writer, a
-   *  canonical form, an official bound) is `Not saved` — the row reports it and
-   *  goes back to the value the Host kept — while an unreadable authority stays
-   *  `Outcome unknown`, because the mutation may or may not have applied. */
-  const settleWebWrite = (
-    id: WebSettingRowId,
-    requested: string,
-    revert: (value: string) => void,
-    previous: string,
-  ): void => {
-    if (webSettings === undefined) {
-      webRowPhases.set(id, { kind: 'outcome-unknown' })
-    } else {
-      const committed = webSettledValue(id)
-      if (committed === requested) {
-        webRowPhases.delete(id)
-      } else {
-        webRowPhases.set(id, { kind: 'not-saved' })
-        revert(committed ?? previous)
-      }
-    }
-    repaintWebItems?.()
-  }
-
-  const queueWebSettingWrite = (
-    id: WebSettingRowId,
-    requested: string,
-    write: () => Promise<void>,
-    revert: (previousValue: string) => void,
-  ): void => {
-    if (webSettings === undefined) {
-      // No verified authority read: the write is refused with the reason
-      // instead of mutating a state the UI cannot verify (§B3.4).
-      webRowPhases.set(id, { kind: 'not-saved', reason: 'the current Web settings could not be read' })
-      repaintWebItems?.()
-      if (legacyEditorOpen) app.notify('Web settings · Not saved: the current Web settings could not be read', 'error')
-      return
-    }
-    const previous = webRowValue(id)
-    webRowPhases.set(id, { kind: 'saving' })
-    repaintWebItems?.()
-    webWriteChain = webWriteChain.then(async () => {
-      try {
-        await write()
-      } catch (error) {
-        webRowPhases.set(id, { kind: 'not-saved', reason: safeErrorMessage(error) })
-        revert(previous)
-        repaintWebItems?.()
-        if (legacyEditorOpen) {
-          app.notify(`Web settings · Not saved: ${safeErrorMessage(error)}`, 'error')
-        }
-        return
-      }
-      const verified = await rereadWebSettings()
-      if (!verified.fresh) {
-        // A NEWER read owns the facts: this snapshot is superseded. WAIT for the
-        // newest settlement (§B3.4 currentness) and judge by what it committed —
-        // never a verdict from the superseded snapshot, and never a stale phase.
-        await awaitWebSettled()
-        settleWebWrite(id, requested, revert, previous)
-        return
-      }
-      if (verified.settings === undefined) {
-        // The mutation may have applied: never report success, and never
-        // pretend a rollback either — the next read owns the display.
-        webRowPhases.set(id, { kind: 'outcome-unknown' })
-        repaintWebItems?.()
-        if (legacyEditorOpen) {
-          app.notify('Web settings · Outcome unknown: the Host write could not be verified', 'info')
-        }
-        return
-      }
-      settleWebWrite(id, requested, revert, previous)
-    })
-  }
-
-  /** Queue one Web-section operation on the ONE owner FIFO (the endpoint
-   *  editor uses it too: a text write never races a selection). */
+  /** Queue one Web-section operation on the ONE owner FIFO. */
   const queueWebOperation = <T>(task: () => Promise<T>): Promise<T> => {
     const run = webWriteChain.then(task)
     webWriteChain = run.then(() => undefined, () => undefined)
@@ -787,30 +716,211 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /** The exact ConfigPort operation one choice row means (undefined = the value
-   *  is not one this UI writes, so the row is restored unchanged). */
+   *  is not one this UI writes, so the row is restored unchanged). The ENDPOINT
+   *  row is owned by the exclusive endpoint editor, which passes its draft
+   *  through `commitWebIntent` directly. */
   const webWriteFor = (id: WebSettingRowId, value: string): (() => Promise<void>) | undefined => {
     switch (id) {
       case 'web-search-provider': {
-        const candidate = WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.label === value)
+        const candidate = WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.label === value || entry.id === value)
         return candidate === undefined ? undefined : () => runner.config.web.setSearchProvider(candidate.id)
       }
       case 'web-fetch-provider': {
-        const candidate = WEB_FETCH_PROVIDER_VALUES.find(entry => entry.label === value)
+        const candidate = WEB_FETCH_PROVIDER_VALUES.find(entry => entry.label === value || entry.id === value)
         return candidate === undefined ? undefined : () => runner.config.web.setFetchProvider(candidate.id)
       }
       case 'web-search-count': {
         const count = Number(value)
-        return Number.isInteger(count) ? () => runner.config.web.setSearchApiCount(count) : undefined
+        return Number.isInteger(count) && count >= 1 && count <= 50
+          ? () => runner.config.web.setSearchApiCount(count)
+          : undefined
       }
       case 'web-send-original-question':
         return value !== 'on' && value !== 'off'
           ? undefined
           : () => runner.config.web.setSendOriginalQuestion(value === 'on')
       case 'web-search-endpoint':
-        // Owned by the exclusive endpoint submenu (it validates, writes and
-        // verifies before closing), so the row's commit carries no second write.
+        // Owned by the exclusive endpoint editor (it validates, writes and
+        // verifies before closing), so the row's own commit carries no write.
         return undefined
     }
+  }
+
+  /** The RAW identity one requested value means, or undefined when this UI never
+   *  writes it. Providers accept their official id OR their display label (the
+   *  legacy editor's cycle offers labels, the page offers ids); the write itself
+   *  only ever uses the official id. */
+  const webRequestedIdentity = (id: WebSettingRowId, requested: string): string | undefined => {
+    switch (id) {
+      case 'web-search-provider':
+        return WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.id === requested || entry.label === requested)?.id
+      case 'web-fetch-provider':
+        return WEB_FETCH_PROVIDER_VALUES.find(entry => entry.id === requested || entry.label === requested)?.id
+      case 'web-search-count': {
+        const count = Number(requested)
+        return Number.isInteger(count) && count >= 1 && count <= 50 ? String(count) : undefined
+      }
+      case 'web-send-original-question':
+        return requested === 'on' || requested === 'off' ? requested : undefined
+      case 'web-search-endpoint':
+        return requested.trim() === '' ? undefined : requested
+    }
+  }
+
+  /** The RAW identity the LATEST authoritative settings hold (never a display
+   *  label): the write verdict compares THIS against the requested identity, so
+   *  a canonical form / a winning external writer is a readable difference. */
+  const webCommittedIdentity = (settings: WebProviderSettings, id: WebSettingRowId): string | undefined => {
+    switch (id) {
+      case 'web-search-provider': return settings.searchProvider
+      case 'web-fetch-provider': return settings.fetchProvider
+      case 'web-search-count': return String(settings.api.count)
+      case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
+      case 'web-search-endpoint': return settings.api.baseURL
+    }
+  }
+
+  /** A read issued AFTER a dispatched write, judged by the NEWEST settlement:
+   *  a superseded snapshot never decides the verdict. */
+  const settleWebReadAfterWrite = async (): Promise<void> => {
+    const verified = await rereadWebSettings()
+    if (!verified.fresh) {
+      // A newer read owns the facts: WAIT for its settlement and judge by what
+      // it committed, never by the superseded snapshot.
+      await awaitWebSettled()
+    }
+  }
+
+  /**
+   * The ONE Web commit entry (C2-R4 §5): the page's five fields AND the legacy
+   * editor's rows both confirm through this function, so there is exactly ONE
+   * FIFO, ONE latest-read fence and ONE settlement vocabulary:
+   *
+   *  - (1) the caller already decided the exact field + value;
+   *  - (2) the intent joins the command-owned chain;
+   *  - (3) its turn re-proves readiness/availability and takes the NEWEST
+   *    committed read as the base — a snapshot a later read superseded is never
+   *    a commit base;
+   *  - (4) the candidate / custom-provider / value guard runs with ZERO Host
+   *    writes on refusal;
+   *  - (5) the ONE official setter is dispatched;
+   *  - (6) a fresh read-back decides `verified` / `not-saved` / `outcome-unknown`;
+   *  - (7) the result is returned to whichever presentation still exists.
+   *
+   * An already-current request writes NOTHING and is `verified` from the real
+   * authority (browsing/confirming the current value is not a mutation).
+   */
+  const commitWebIntent = async (id: WebSettingRowId, requested: string): Promise<WebCommitResult> =>
+    queueWebOperation(async (): Promise<WebCommitResult> => {
+      if (!webSettingsAvailable()) {
+        return { kind: 'not-saved', reason: 'the Host Web provider settings are unavailable on this backend' }
+      }
+      const readiness = runner.config.configReadiness()
+      if (readiness !== 'ready') {
+        return { kind: 'not-saved', reason: `the configuration is ${readiness}; the Web setting was not changed` }
+      }
+      await awaitWebSettled()
+      const base = webSettings
+      if (base === undefined) {
+        return { kind: 'not-saved', reason: 'the current Web settings could not be read' }
+      }
+      const requestedIdentity = webRequestedIdentity(id, requested)
+      if (requestedIdentity === undefined) {
+        return { kind: 'not-saved', reason: `"${requested}" is not a value this page writes` }
+      }
+      if (id === 'web-search-provider' || id === 'web-fetch-provider') {
+        const candidates = id === 'web-search-provider' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES
+        const currentId = webCommittedIdentity(base, id)
+        // A CUSTOM route is displayed verbatim and is NEVER overwritten here:
+        // zero writes, explicit cause. Only a fresh authority can change that.
+        if (currentId !== undefined && !candidates.some(candidate => candidate.id === currentId)) {
+          return {
+            kind: 'not-saved',
+            reason: `the configured provider is a custom route (${currentId}); only the official candidates are selectable here`,
+          }
+        }
+        const candidate = candidates.find(entry => entry.id === requestedIdentity)
+        // The official auto-selection already applies the default candidate:
+        // confirming it is a zero-write Verified, never a redundant pin.
+        if (currentId === requestedIdentity || (currentId === undefined && candidate?.default === true)) {
+          return { kind: 'verified', actual: requestedIdentity }
+        }
+      } else if (webCommittedIdentity(base, id) === requestedIdentity) {
+        return { kind: 'verified', actual: requestedIdentity }
+      }
+      const write = id === 'web-search-endpoint'
+        ? () => runner.config.web.setSearchApiBaseURL(requested)
+        : webWriteFor(id, requested)
+      if (write === undefined) {
+        return { kind: 'not-saved', reason: `"${requested}" is not a value this page writes` }
+      }
+      try {
+        await write()
+      } catch (error) {
+        const reason = safeErrorMessage(error)
+        // A REJECTED write is attributed from a FRESH read: an authority that no
+        // longer carries the requested identity refutes it; an authority that
+        // now carries it cannot attribute the rejection, and a rejected write is
+        // never Verified.
+        await settleWebReadAfterWrite()
+        const rejectedActual = webSettings === undefined ? undefined : webCommittedIdentity(webSettings, id)
+        if (rejectedActual === undefined) return { kind: 'outcome-unknown', reason }
+        if (rejectedActual !== requestedIdentity) return { kind: 'not-saved', reason, actual: rejectedActual }
+        return {
+          kind: 'outcome-unknown',
+          reason: `${reason}; the Host now reads the submitted value, so the rejection cannot be attributed`,
+        }
+      }
+      await settleWebReadAfterWrite()
+      const actual = webSettings === undefined ? undefined : webCommittedIdentity(webSettings, id)
+      if (actual === undefined) {
+        return { kind: 'outcome-unknown', reason: 'the Host write could not be verified: the Web settings could not be read back' }
+      }
+      if (actual === requestedIdentity) return { kind: 'verified', actual }
+      const keeps = webSettledValue(id) ?? actual
+      return { kind: 'not-saved', reason: `the Host keeps "${keeps}" instead of the submitted value`, actual }
+    })
+
+  /**
+   * The legacy `SettingsList` row's write entry: ONE `commitWebIntent` on the
+   * shared FIFO, with its verdict mapped back to the fork row's display
+   * (`currentValue` / `valueParts` / `revert` / notify). The Web page maps the
+   * SAME result to its own Detail — one settlement, two presentations.
+   */
+  const queueWebSettingWrite = (
+    id: WebSettingRowId,
+    requested: string,
+    revert: (previousValue: string) => void,
+  ): void => {
+    const previous = webSettledValue(id)
+    webRowPhases.set(id, { kind: 'saving' })
+    repaintWebItems?.()
+    detach(`web settings ${id} write`, async () => {
+      const result = await commitWebIntent(id, requested)
+      if (result.kind === 'verified') {
+        webRowPhases.delete(id)
+      } else {
+        webRowPhases.set(id, {
+          kind: result.kind,
+          ...result.reason === '' ? {} : { reason: result.reason },
+        })
+      }
+      repaintWebItems?.()
+      if (result.kind !== 'verified') {
+        const actual = result.kind === 'not-saved' ? result.actual : undefined
+        // The fork optimistically moved its cycle: put the display back on the
+        // value the Host really keeps (never the attempted one).
+        revert(actual ?? webSettledValue(id) ?? previous ?? '')
+        if (legacyEditorOpen) {
+          app.notify(
+            result.kind === 'not-saved'
+              ? `Web settings · Not saved: ${result.reason}`
+              : `Web settings · Outcome unknown: ${result.reason}`,
+            result.kind === 'not-saved' ? 'error' : 'info',
+          )
+        }
+      }
+    }, { notify: false })
   }
 
   /** Close the settings surface FIRST, then delegate to the EXISTING command
@@ -818,7 +928,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  settings overlay. The Esc-return path is deliberately NOT used here: the
    *  credential command owns the surface next. */
   const runWebCredentialCommand = (line: string): void => {
-    webReturnToWorkspace = false
     closeLegacyEditor?.()
     detach(`web credential ${line}`, () => runner.clientCommands.execute({
       line,
@@ -841,11 +950,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     },
   ]
 
-  /** Whether Esc from the legacy editor must RESTORE the Settings workspace on
-   *  the Web launcher row (the Web-entry return path). The original
-   *  `Open existing settings…` entry keeps its conversation return. */
-  let webReturnToWorkspace = false
-
   /** The ONE Settings workspace open path: the lease is taken SYNCHRONOUSLY
    *  (the first frame is immediate), then the Host Web facts are read for THIS
    *  panel generation and the SAME generation repaints its OWN row when the read
@@ -853,6 +957,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  ROW-scoped: the Web authority changed, so the TUI settings document is never
    *  read a second time (one guarded document read per surface). */
   let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void } | undefined
+  /** The MOUNTED Web Search / Fetch page (C2-R4). It is created by the root's
+   *  explicit activation, dies with the workspace, and is never a second
+   *  settings authority: a fact settlement repaints the root, whose frame
+   *  re-renders the page from the LATEST command-owned read. */
+  let activeWebPage: WebSettingsPage | undefined
 
   interface WorkspaceOpenSpec {
     readonly initialRowId?: SettingsWorkspaceRowId
@@ -1070,7 +1179,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const registry = runner.extensions?.settings.snapshot()
           return { revision: registry?.revision ?? 0, count: registry?.rows.length ?? 0 }
         },
-        onRefresh: () => { startWebSettingsRead(token) },
+        onRefresh: () => { startWebSettingsRead() },
       },
       {
         onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
@@ -1126,6 +1235,32 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             },
           })
         },
+        // C2-R4: the ONE embedded Web Search / Fetch page, mounted in this same
+        // workspace body on the Tools row's explicit activation. The page reads
+        // the LATEST command-owned Host read, commits through the SAME single
+        // Web FIFO, and hands the credential row's typed Models initial view to
+        // the root — it never touches a secret and never runs `/login` text.
+        createWebSettingsPage: (done, navigateToModels) => {
+          // Entering the page triggers a FRESH authoritative read: the first
+          // frame states Loading… instead of presenting a snapshot from an
+          // earlier open as the current value.
+          startWebSettingsRead()
+          const page = new WebSettingsPage({
+            readFacts: webSettingsFacts,
+            credentialAvailable: () => runner.config.credentials.available(),
+            commit: (id, requested) => commitWebIntent(id, requested),
+            refresh: () => { startWebSettingsRead() },
+            navigateToModels: initial => { navigateToModels(initial) },
+            requestRender: () => { if (!app.isDisposed()) app.requestRender() },
+            run: (label, task) => detach(label, task, { notify: false }),
+            done: () => {
+              if (activeWebPage === page) activeWebPage = undefined
+              done()
+            },
+          })
+          activeWebPage = page
+          return page
+        },
         // The About page's two version facts: read ONCE per workspace open on
         // the Client side. `tui` is this bundle's own version and `dsh` the
         // installed Harness version — neither is derived from the other, and
@@ -1142,6 +1277,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           // inert before any physical switch is attempted.
           const wasActive = activeSettingsWorkspace?.token === token
           if (wasActive) activeSettingsWorkspace = undefined
+          // C2-R4: the mounted Web page's command reference dies with this open
+          // (the panel itself disposes the instance on teardown). A late fact
+          // settlement then repaints nothing.
+          activeWebPage = undefined
           // The controller dies with the workspace: the subscription and any
           // in-flight read are released exactly once.
           aboutController?.dispose()
@@ -1175,7 +1314,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
     )
     activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
-    startWebSettingsRead(token)
+    startWebSettingsRead()
     // C3 (plan §3.2 step 6): the workspace's OWN home is About, so a plain
     // open IS a semantic About entry — exactly ONE scoped snapshot refresh,
     // started only now that `openSettingsWorkspace` returned its live handle
@@ -1203,10 +1342,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     webReadSettled = false
   }
 
-  /** Start ONE authority read for the panel generation `token`: the pending
-   *  state is applied and the launcher row repainted BEFORE the async read, and
-   *  the SAME generation repaints its own row when the read settles. */
-  const startWebSettingsRead = (_token: object): void => {
+  /** Start ONE authority read: the pending state is applied and the launcher
+   *  row repainted BEFORE the async read, and the generation that currently
+   *  owns the surface repaints its own row (and the mounted Web page) when the
+   *  read settles. Used on workspace open, on entering the Web page and on `r`. */
+  const startWebSettingsRead = (): void => {
     beginWebSettingsRead()
     activeSettingsWorkspace?.refreshWebRow()
     detach('web provider settings read', async () => {
@@ -1214,18 +1354,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // surface (never a superseded one).
       await readWebSettings()
     }, { notify: false })
-  }
-
-  /** Restore the Settings workspace on the Web launcher row. The workspace is
-   *  always restored (its own readiness row states a non-ready backend); a
-   *  newer owner of the surface refuses the lease and the failure is reported. */
-  const reopenSettingsWorkspaceAtWebRow = (): void => {
-    if (app.isDisposed()) return
-    try {
-      openSettingsWorkspaceAt(WEB_LAUNCHER_ROW_ID)
-    } catch (error) {
-      app.notify(`could not restore the settings workspace: ${safeErrorMessage(error)}`, 'error')
-    }
   }
 
   /** The Web section rows, in the frozen order. An unavailable section renders
@@ -1306,54 +1434,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               // The endpoint text write is a Web-section write like any other:
               // it joins the ONE owner FIFO so a selection and a text edit can
               // never race the official revision-checked mutation.
-              save: (url: string) => queueWebOperation(async () => {
-                if (webSettings === undefined) {
-                  throw new WebWriteVerdictError('not-saved', 'the current Web settings could not be read')
-                }
+              save: async (url: string) => {
+                // The endpoint draft joins the SAME commit entry as the five rows
+                // (one enqueue, one FIFO, one read-back verdict); only `verified`
+                // resolves and closes the draft.
                 webRowPhases.set('web-search-endpoint', { kind: 'saving' })
                 repaintWebItems?.()
-                try {
-                  await runner.config.web.setSearchApiBaseURL(url)
-                } catch (error) {
-                  webRowPhases.set('web-search-endpoint', { kind: 'not-saved' })
-                  repaintWebItems?.()
-                  throw error
-                }
-                const verified = await rereadWebSettings()
-                if (!verified.fresh) {
-                  // The PANEL owns a modal verdict, so it must never be told a
-                  // superseded result: WAIT for the newest read, then judge by
-                  // the facts it committed (success closes the panel, a
-                  // mismatch reports the NEWEST value, an unreadable authority
-                  // stays honestly unknown).
-                  await awaitWebSettled()
-                  const committed = webSettledValue('web-search-endpoint')
-                  if (committed === url) {
-                    webRowPhases.delete('web-search-endpoint')
-                    repaintWebItems?.()
-                    return
-                  }
-                  if (committed === undefined) {
-                    webRowPhases.set('web-search-endpoint', { kind: 'outcome-unknown' })
-                    repaintWebItems?.()
-                    throw new WebWriteVerdictError('outcome-unknown', 'the current Web settings could not be read — reopen the section to read the current value')
-                  }
-                  webRowPhases.set('web-search-endpoint', { kind: 'not-saved' })
-                  repaintWebItems?.()
-                  throw new WebWriteVerdictError('not-saved', `the Host keeps "${committed}" instead of the submitted endpoint`)
-                }
-                const settings = verified.settings
-                if (settings === undefined) {
-                  webRowPhases.set('web-search-endpoint', { kind: 'outcome-unknown' })
-                  repaintWebItems?.()
-                  throw new WebWriteVerdictError('outcome-unknown', 'the endpoint write could not be verified against the Host — reopen the section to read the current value')
-                }
-                webRowPhases.delete('web-search-endpoint')
+                const result = await commitWebIntent('web-search-endpoint', url)
+                if (result.kind === 'verified') webRowPhases.delete('web-search-endpoint')
+                else webRowPhases.set('web-search-endpoint', { kind: result.kind, reason: result.reason })
                 repaintWebItems?.()
-                if (settings.api.baseURL !== url) {
-                  throw new WebWriteVerdictError('not-saved', `the Host keeps "${settings.api.baseURL}" instead of the submitted endpoint`)
-                }
-              }),
+                if (result.kind === 'verified') return
+                throw new WebWriteVerdictError(result.kind, result.reason)
+              },
               requestRender: () => app.requestRender(),
               run: (label, task) => detach(label, task, { notify: false }),
             }),
@@ -3516,17 +3609,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           'keyboard-shortcuts',
         ),
         {
-          // S2/PR-B §3.3: the ONE discoverable entry to the Web provider
-          // settings section. The row opens the EXISTING legacy editor focused
-          // on that section's first row (no second settings framework). R4
-          // replaces this launcher with an in-place section.
+          // C2-R4: the ONE discoverable entry to the Web provider settings
+          // page. It opens the embedded `WebSettingsPage` in THIS workspace's
+          // lease/body (the same specialist mechanism the Agent allowlist row
+          // uses) — never the legacy editor and never a second overlay. The row
+          // deliberately carries NO `edit`: its six fields are written by the
+          // page's own explicit confirms, not by a scalar workspace candidate.
           id: WEB_LAUNCHER_ROW_ID,
           category: 'tools',
-          label: 'Web Search / Fetch',
+          label: WEB_SETTINGS_PAGE_TITLE,
           ...webWorkspaceRowFacts(),
           scope: 'Host Web provider settings',
-          action: 'open-legacy',
-          legacyTargetId: 'web-search-provider',
+          action: 'inspect',
+          specialist: 'web-settings',
         },
         // The registry's live directory, newest snapshot only. Without a live
         // row there is no Extensions category at all (the panel derives the
@@ -3671,10 +3766,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           repaintWebItems?.()
           app.requestRender()
         })
-        // The return path belongs to THIS open: the Web launcher restores the
-        // Workspace on its own row, while the compatibility entry keeps the
-        // original conversation return.
-        webReturnToWorkspace = targetId === WEB_LAUNCHER_TARGET_ROW
         // The section snapshots its items BEFORE the mounted read settles:
         // entering it starts from `Loading…`, never from the last-known value.
         if (webSettingsAvailable()) beginWebSettingsRead()
@@ -4372,18 +4463,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 ), { notify: true })
               }
             } else if (WEB_SETTING_ROW_IDS.has(id)) {
-              // The Web provider rows: ONE serialized write entry per section,
-              // reconciled from the authoritative read-back (see
-              // queueWebSettingWrite). The endpoint row is owned by its
-              // exclusive submenu, which already wrote and verified before it
-              // closed, so its commit carries no second write.
-              const write = webWriteFor(id as WebSettingRowId, value)
-              if (write === undefined) {
+              // The Web provider rows: ONE serialized commit entry, reconciled
+              // from the authoritative read-back (see `commitWebIntent`). The
+              // endpoint row is owned by its exclusive editor, which passes its
+              // own draft through the SAME entry, so its cycle carries no write.
+              if (webWriteFor(id as WebSettingRowId, value) === undefined) {
                 if (id === 'web-search-endpoint') return
                 revert(webRowValue(id as WebSettingRowId))
                 return
               }
-              queueWebSettingWrite(id as WebSettingRowId, value, write, revert)
+              queueWebSettingWrite(id as WebSettingRowId, value, revert)
             } else if (id === 'fullscreen') {
               if (value === 'off' || value === 'on') {
                 app.setFullscreen(value === 'on')
@@ -4416,14 +4505,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             settingsOpen = false
             legacyEditorOpen = false
             allowlistMenu?.dispose()
-            // S2/PR-B §B3.4: leaving the Web section restores the Settings
-            // Workspace on the Web launcher row; the compatibility entry keeps
-            // its original conversation return. Reopening is SYNCHRONOUS — a
-            // late async settle never revives a closed surface.
-            if (webReturnToWorkspace) {
-              webReturnToWorkspace = false
-              reopenSettingsWorkspaceAtWebRow()
-            }
           },
           // Teardown-aware: a fullscreen screen swap (or any other hide path)
           // removes the panel WITHOUT the Esc cancel, so the mounted state must

@@ -37,6 +37,8 @@ process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 
 const DOWN = '\x1b[B'
+const HOME = '\x1b[H'
+const UP = '\x1b[A'
 const ENTER = '\r'
 const ESC = '\x1b'
 
@@ -100,6 +102,9 @@ interface Harness {
   readonly log: readonly string[]
   /** Hold the NEXT authority read until the returned release is called. */
   readonly holdRead: () => () => void
+  /** Hold EVERY authority read issued until the returned release is called
+   *  (a page entry starts its own fresh read; a one-shot gate would miss it). */
+  readonly holdAllReads: () => () => void
   readonly view: () => string
   readonly invoke: (name?: string) => unknown
   readonly dispose: () => void
@@ -121,6 +126,7 @@ function setup(options: {
   const log: string[] = []
   const settledWrites: string[] = []
   let readGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
+  let readHoldAll: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   let readsIssued = 0
   let readsSettled = 0
   const store = {
@@ -210,6 +216,17 @@ function setup(options: {
     refreshStatus: () => {},
     tuiSettings: { get: () => doc, replace: (next: TuiSettingsDoc) => { Object.assign(doc, next) } },
     config: settingsDirectPageConfig({
+      // The Models reference view this file's Web->Models case opens needs a
+      // mounted provider directory (the real one is the Models suite's job).
+      providers: {
+        available: () => true,
+        listCredentialOptions: () => [],
+        readCatalog: () => ({ options: [], profiles: [] }),
+        readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] }),
+        configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
+        writeProfile: async () => {},
+        writeKeylessProfile: async () => ({ kind: 'written' as const }),
+      },
       configReadiness: () => 'ready',
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
@@ -224,6 +241,7 @@ function setup(options: {
           readsIssued += 1
           const gate = readGate
           readGate = undefined
+          const held = readHoldAll
           // A held read stays the snapshot of the moment it was ISSUED: a real
           // Host read cannot observe a write that happens while it is pending.
           const captured = { ...store.web, api: { ...store.web.api } }
@@ -231,6 +249,7 @@ function setup(options: {
           const unreadable = !store.available || store.readUndefined
           try {
             if (gate !== undefined) await gate.promise
+            if (held !== undefined) await held.promise
             if (throws) throw new Error('settings descriptor unreadable')
             if (unreadable) return undefined
             return captured
@@ -290,6 +309,19 @@ function setup(options: {
       readGate = { promise, release }
       return release
     },
+    holdAllReads: () => {
+      let release = (): void => {}
+      const promise = new Promise<void>(resolve => { release = () => resolve() })
+      const record = {
+        promise,
+        release: () => {
+          if (readHoldAll === record) readHoldAll = undefined
+          release()
+        },
+      }
+      readHoldAll = record
+      return record.release
+    },
     view,
     invoke,
     dispose: () => {
@@ -304,37 +336,6 @@ function setup(options: {
 async function key(h: Harness, data: string): Promise<void> {
   h.vt.sendInput(data)
   await h.vt.waitForRender()
-}
-
-/** Open `/settings` and reach the `Tools` rows level (the Web launcher's own
- *  category; Visual tools is the first row). */
-async function openOtherRows(h: Harness): Promise<void> {
-  h.invoke('settings')
-  for (let attempt = 0; attempt < 20 && !h.view().includes('Settings ·'); attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-    await h.vt.waitForRender()
-  }
-  // The workspace opens on the About home: walk the rail to the Tools category,
-  // then enter its Rows level.
-  await selectSettingsCategory(h.vt, 'Tools')
-  await key(h, ENTER)
-}
-
-/** Drive `/settings` to the Web Search / Fetch row through the real workspace
- *  keys (categories → Tools → the Web row), then open it. */
-async function openWebSection(h: Harness): Promise<void> {
-  await openOtherRows(h)
-  await key(h, DOWN)
-  await key(h, ENTER)
-  // Both the Workspace row and the section start PENDING and settle with the
-  // authoritative read; every assertion below is about the settled facts (the
-  // transient frames have their own tests, which hold the read themselves).
-  // `Loading…` disappearing is not enough: the rows can be painted before the
-  // section's Current facts arrive. Waiting on the PAINTED settled fact also
-  // fails loudly (with the Host read/write counters) instead of returning
-  // silently when the section never settles.
-  await settlePainted(h, 'the Web section to paint its settled facts', frame =>
-    !frame.includes('Loading…') && /Current: |\[unavailable\]/u.test(frame))
 }
 
 /** Wait until the PAINTED frame satisfies `predicate`, with the read/write
@@ -357,17 +358,6 @@ async function settlePainted(
       + `writes: ${JSON.stringify(h.writes)}; settled: ${JSON.stringify(h.settledWrites())}`)
   }
   return h.view()
-}
-
-/** The endpoint editor's settle: the panel's own verdict is PAINTED (Success
- *  closes it, `Not saved`/`Outcome unknown` stays with its message). The write
- *  itself must have SETTLED on the Host side before the wait can be satisfied. */
-async function settleEndpointPanel(h: Harness): Promise<string> {
-  const submitted = `endpoint:${h.store.web.api.baseURL}`
-  return await settlePainted(h, `the endpoint write's painted verdict (${submitted})`, frame =>
-    !frame.includes('Saving…')
-    && (!frame.includes('Enter confirm · Esc cancel')
-      || /Not saved|Outcome unknown/u.test(frame)))
 }
 
 /** Wait until at least `expected` authority reads have SETTLED on the Host side
@@ -432,163 +422,251 @@ async function awaitWriteSettlement(h: Harness, label: string, mark: number): Pr
   return h.view()
 }
 
-/** Open the Web section's endpoint editor on its CURRENT value and confirm the
- *  draft through the real panel keys (Enter opens the submenu, Enter submits).
- *  The write is only DISPATCHED here: callers that assert the settled verdict
- *  use {@link settleEndpointPanel}; the currentness cases deliberately keep the
- *  verification read pending. */
-async function confirmEndpointDraft(h: Harness): Promise<void> {
-  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  await key(h, ENTER)
+/** Move the page LIST cursor to `index` (0-based, the frozen order) from the
+ *  list's own Home position. Selection only: nothing opens, nothing writes. */
+async function pageListSelect(h: Harness, index: number): Promise<void> {
+  await key(h, HOME)
+  for (let step = 0; step < index; step += 1) await key(h, DOWN)
+}
+
+/** Open the Web page's row Detail for `index` from the LIST. */
+async function openWebRow(h: Harness, index: number): Promise<void> {
+  await pageListSelect(h, index)
   await key(h, ENTER)
 }
 
-test('the workspace row reports the configured providers and opens the Web section focused', async t => {
+/** Return from a row Detail to the page LIST at its first row. Esc from a
+ *  Detail only steps back (never writes); the caller must not be at the list
+ *  already, where Esc would close the page. */
+async function webListTop(h: Harness): Promise<void> {
+  await key(h, ESC)
+  await key(h, HOME)
+}
+
+/** Highlight one candidate of the open choice (Home = first candidate, then
+ *  Down). Moving the highlight never writes. */
+async function chooseCandidate(h: Harness, index: number): Promise<void> {
+  await key(h, HOME)
+  for (let step = 0; step < index; step += 1) await key(h, DOWN)
+}
+
+/** Open `/settings` and reach the `Tools` rows level (the Web launcher's own
+ *  category; Visual tools is the first row). */
+async function openOtherRows(h: Harness): Promise<void> {
+  h.invoke('settings')
+  for (let attempt = 0; attempt < 20 && !h.view().includes('Settings ·'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
+}
+
+/** Wait for the page's SETTLED facts (the mount triggers a fresh Host read). */
+async function settleWebPage(h: Harness): Promise<string> {
+  return settlePainted(h, 'the Web page to paint its settled facts', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+}
+
+/** Drive `/settings` → Tools → Web Search / Fetch into the Web page and wait
+ *  for its settled authority facts. */
+async function openWebPage(h: Harness): Promise<string> {
+  await openOtherRows(h)
+  await key(h, DOWN)
+  await key(h, ENTER)
+  return settleWebPage(h)
+}
+
+/** Leave the Settings surface through its real Esc ladder (the page may own a
+ *  Detail/List level; the workspace itself needs the last Esc). */
+async function closeWorkspace(h: Harness): Promise<void> {
+  for (let attempt = 0; attempt < 8 && h.view().includes('Settings ·'); attempt += 1) await key(h, ESC)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the workspace really closed')
+}
+
+/** Append to the endpoint editor's seeded draft. The editor opens on the
+ *  authoritative value; a REAL write needs a different draft (an unchanged
+ *  draft is a zero-write `verified`). */
+async function editEndpointDraft(h: Harness, suffix: string): Promise<void> {
+  for (const character of suffix) await key(h, character)
+}
+
+/** The endpoint editor's settle: its own verdict is PAINTED (a verified save
+ *  closes it; Not saved/Outcome unknown stays with its message). */
+async function settleEndpointPanel(h: Harness): Promise<string> {
+  const submitted = `endpoint:${h.store.web.api.baseURL}`
+  return await settlePainted(h, `the endpoint write's painted verdict (${submitted})`, frame =>
+    !frame.includes('Saving…')
+    && (!frame.includes('Enter confirm · Esc cancel')
+      || /Not saved|Outcome unknown/u.test(frame)))
+}
+
+test('the workspace row reports the configured providers and opens the Web page focused', async t => {
   const h = setup()
   t.after(h.dispose)
   h.invoke('settings')
   await h.vt.waitForRender()
-  // The Tools category's Web row carries the live configured summary. The
-  // workspace opens on the About home: walk the rail to Tools first.
   await selectSettingsCategory(h.vt, 'Tools')
   await key(h, ENTER)
   assert.match(h.view(), /Web Search \/ Fetch/u)
-  // Select the launcher row: its Detail carries the authoritative summary and
-  // the billing/credential/Enter-configure facts (the narrow row column only
-  // shows the summary prefix).
+  // The launcher's own Detail carries the authoritative summary plus the
+  // billing/credential/entry facts (the narrow row column only shows a prefix).
   await key(h, DOWN)
   const rowView = h.view()
   const compactRow = (): string => rowView.replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
+  assert.match(rowView, /Configure Web…/u, 'the row Detail paints the ONE page entry')
   assert.match(compactRow(), /billed separately/u)
   assert.match(compactRow(), /not an Optional.*?Bundle/u)
   assert.match(compactRow(), /Share Original Question is on by default/u)
   assert.match(compactRow(), /up to 128 characters/u)
   assert.match(compactRow(), /authoritative read-back agree/u)
   assert.match(compactRow(), /credential reference/u)
-  assert.match(compactRow(), /Enter configure/u)
+  assert.match(compactRow(), /Enter opens the Web/u)
 
-  // Enter on the launcher row crosses the real Workspace -> Legacy handoff.
+  // Enter mounts the SAME-lease Web page and triggers a FRESH Host read.
   await key(h, ENTER)
-  assert.match(h.view(), /Web Search Provider/u, 'the legacy editor opened at the Web section')
-  assert.match(h.view(), /Web Search Provider +\[current\] \[default\]/u,
-    'the current value and the packaged default are INDEPENDENT state chips')
-  assert.match(h.view(), /Current: Messages/u, 'the selected row states the current value in full')
-  // The deeplink focused the FIRST Web row: Enter commits the search provider.
-  // The settlement is the PAINTED verified row (the write's read-back landed);
-  // the chip/value assertions below are about that settled frame.
+  const page = await settleWebPage(h)
+  assert.match(page, /Settings · Tools · Web Search \/ Fetch/u, 'the page is the Tools row sub-view')
+  // The six frozen rows, in order, on one frame (120x40 paints the whole list).
+  let previous = -1
+  for (const label of ['Web Search Provider', 'Web Fetch Provider', 'Search API Result Count',
+    'Share Original Question', 'Search / Fetch Endpoint', 'DeepSeek API Key']) {
+    const at = page.indexOf(label)
+    assert.ok(at > previous, `the frozen row order holds (${label}):\n${page}`)
+    previous = at
+  }
+  assert.match(page, /Current: Messages/u, 'the selected row states the real Host value')
+  assert.match(page, /› Messages · built-in default \[current\]/u,
+    'the current candidate carries the [current] chip')
+  assert.equal(h.readCount() >= 1, true, 'opening the page really read the Host')
+
+  // Enter opens the Detail, the highlight moves, Enter confirms EXACTLY once.
   await key(h, ENTER)
-  await settlePainted(h, 'the verified search provider row', frame =>
-    frame.includes('Current: DeepSeek Search API'))
+  await chooseCandidate(h, 1) // Messages -> DeepSeek Search API
+  assert.equal(h.writes.length, 0, 'choosing a candidate never writes')
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  await settlePainted(h, 'the verified provider Detail', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Verified'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
-  assert.match(h.view(), /Web Search Provider +\[current\] +│/u,
-    'the verified read-back keeps the current chip on the selected candidate')
-  assert.match(h.view(), /Current: DeepSeek Search API/u, 'the selected row states the new value in full')
-  assert.doesNotMatch(h.view(), /Web Search Provider +\[current\] \[default\]/u,
-    'the non-default candidate never claims the packaged default')
+  assert.match(h.view(), /Verified/u, 'the write is verified by the read-back')
+  assert.match(h.view(), /› DeepSeek Search API .*\[current\]/u,
+    'the [current] chip follows the verified read-back')
+  assert.doesNotMatch(h.view(), /› Messages .*\[current\]/u, 'the old candidate loses the chip')
 })
 
-test('a failed write reverts the row and never reports a save', async t => {
+test('a failed write is reported as Not saved and never claims a save', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
+  await openWebPage(h)
   h.store.failNext = 'settings mutate rejected'
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   await key(h, ENTER)
-  await settlePainted(h, 'the failed write reported as Not saved', frame =>
-    frame.includes('Web settings · Not saved: settings mutate rejected'))
+  const refused = await settlePainted(h, 'the failed write reported as Not saved', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host store keeps the previous value')
-  assert.match(h.view(), /Web settings · Not saved: settings mutate rejected/u, 'the failure is reported as Not saved')
+  assert.match(refused, /Not saved · settings mutate rejected/u, `the failure is reported as Not saved:\n${refused}`)
+  assert.doesNotMatch(refused, /Verified/u, 'a rejected write is never Verified')
+  assert.match(refused, /Current: Messages/u, 'the Detail states the value the Host still holds')
 })
 
-test('rapid conflicting selections commit in order and the row ends on the verified value', async t => {
-  const h = setup({ searchProvider: 'deepseek-search-api' })
+test('two confirmed intents commit in FIFO order and never overlap', async t => {
+  const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  // Two intents in the same burst: never two concurrent writes, last one wins.
+  h.store.writeDelayMs = 150
+  await openWebPage(h)
+  // Intent A (search provider): dispatched, deliberately slow.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   await key(h, ENTER)
+  // Intent B (count 10 -> 20) while A is still in flight: it joins the SAME
+  // single FIFO, so it can only START after A settled.
+  await webListTop(h)
+  await openWebRow(h, 2)
+  await chooseCandidate(h, 2) // 5,10,20,50 -> 20
+  const markB = settledWritesMark(h)
   await key(h, ENTER)
-  // Both intents settle in FIFO order; the ROW must end on the verified
-  // read-back of the LAST one, so wait for that painted fact.
-  await settlePainted(h, 'the row settled on the last intent', frame =>
-    frame.includes('Current: DeepSeek Search API') && !frame.includes('Saving…'))
-  assert.deepEqual(h.writes, ['search:deepseek-official', 'search:deepseek-search-api'])
+  await awaitWriteSettlement(h, 'count:20', markB)
+  assert.deepEqual(h.log, [
+    'begin:search:deepseek-search-api',
+    'search:deepseek-search-api',
+    'begin:count:20',
+    'count:20',
+  ], 'the second intent does not even START until the first settled')
+  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
-  assert.match(h.view(), /DeepSeek Search API/u, 'the row shows the authoritative read-back')
+  assert.equal(h.store.web.api.count, 20)
 })
 
 test('a resolved provider mutation the Host does not commit is Not saved, never a save', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  assert.match(h.view(), /Current: Messages/u, 'the section starts from the settled facts')
-
-  // The mutation RESOLVES, but the Host's own answer keeps Messages (a competing
-  // external writer / the official store's canonical answer): only the read-back
-  // decides, so this is never reported as a save.
+  await openWebPage(h)
   h.store.keptProviderValue = 'deepseek-official'
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   await key(h, ENTER)
-  // The verdict is a PAINTED fact: wait for the row's `[Not saved]` state
-  // (the read-back really landed and was judged) instead of assuming it within
-  // a fixed 20ms.
-  await settlePainted(h, 'the refused mutation to paint [Not saved]', frame =>
-    /Web Search Provider .*\[Not saved\]/u.test(frame) && frame.includes('Current: Not saved'))
+  const refused = await settlePainted(h, 'the refused mutation to paint Not saved', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation really ran')
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host kept its own value')
-  const refusedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
-  assert.match(refusedRow, /\[Not saved\]/u, `the row reports the Host's answer:\n${h.view()}`)
-  assert.doesNotMatch(refusedRow, /\[current\]/u, 'the row never claims a verified value')
-  assert.match(h.view(), /Current: Not saved/u, 'the row Detail states the same verdict')
+  assert.match(refused, /the Host keeps "Messages" instead of the submitted value/u,
+    `the verdict names the value the Host keeps:\n${refused}`)
+  assert.match(refused, /Current: Messages/u, 'the Detail reports the Host value, never the request')
+  assert.doesNotMatch(refused, /Verified/u)
 
-  // The selector went back to the value the Host HOLDS: the next Enter resumes
-  // the cycle from Messages (-> DeepSeek Search API), never from the rejected
-  // intent — which would have submitted Messages a second time.
-  const markSecondIntent = settledWritesMark(h)
+  // The highlight returns to the value the Host HOLDS: confirming again submits
+  // the OTHER candidate (deepseek-search-api), never the rejected intent twice.
+  await webListTop(h)
+  await openWebRow(h, 0)
+  const markSecond = settledWritesMark(h)
+  await chooseCandidate(h, 1)
   await key(h, ENTER)
-  await awaitWriteSettlement(h, 'search:deepseek-search-api', markSecondIntent)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markSecond)
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-search-api'],
     'the selector sits on the Host value, not on the rejected intent')
 })
 
-test('two selections on the same row end on the Host value when the second is not committed', async t => {
+test('two confirmed selections end on the Host value when the second is not committed', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
+  await openWebPage(h)
 
-  // First intent (Messages -> DeepSeek Search API): committed and verified.
-  // The section already paints `[current]` on Messages, so a chip-only predicate
-  // would be satisfied by the PRE-write frame. Wait for THIS write's settlement
-  // and then for the specific verified value.
+  // First: Messages -> DeepSeek Search API (verified).
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   const markFirst = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markFirst)
-  await settlePainted(h, 'the first selection to paint the verified value', frame =>
-    frame.includes('Current: DeepSeek Search API') && !frame.includes('[Not saved]'))
+  await settlePainted(h, 'the first selection to paint Verified', frame =>
+    frame.includes('Verified') && frame.includes('Current: DeepSeek Search API'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
-  const verifiedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
-  assert.match(verifiedRow, /\[current\]/u, 'the first selection is verified')
 
-  // Second intent on the SAME row (back to Messages) resolves, but the Host
-  // keeps the first selection.
+  // Second: back to Messages, but the Host keeps the first selection.
+  await webListTop(h)
+  await openWebRow(h, 0)
   h.store.keptProviderValue = 'deepseek-search-api'
+  await chooseCandidate(h, 0)
   const markSecond = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-official', markSecond)
-  await settlePainted(h, 'the refused second intent to paint [Not saved]', frame =>
-    /Web Search Provider .*\[Not saved\]/u.test(frame))
-  assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-official'],
-    'the second intent really ran')
+  const refused = await settlePainted(h, 'the refused second intent', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the Host keeps the first selection')
-  const refusedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
-  assert.match(refusedRow, /\[Not saved\]/u, `the row reports the refused second intent:\n${h.view()}`)
+  assert.match(refused, /the Host keeps "DeepSeek Search API"/u, `the verdict names the kept value:\n${refused}`)
 
-  // The row's cursor is the value the Host kept, so the next cycle submits
-  // Messages again; a transient verdict word in that field (or the rejected
-  // intent left in it) would have resumed the cycle from the wrong position.
-  const markThirdIntent = settledWritesMark(h)
+  // The highlight follows the Host value (index 1), so the next confirm submits
+  // the OTHER candidate — never the rejected intent again.
+  await webListTop(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 0)
+  const markThird = settledWritesMark(h)
   await key(h, ENTER)
-  await awaitWriteSettlement(h, 'search:deepseek-official', markThirdIntent)
+  await awaitWriteSettlement(h, 'search:deepseek-official', markThird)
   assert.deepEqual(
     h.writes,
     ['search:deepseek-search-api', 'search:deepseek-official', 'search:deepseek-official'],
@@ -596,116 +674,116 @@ test('two selections on the same row end on the Host value when the second is no
   )
 })
 
-test('the Web section deeplink is reachable from the workspace and Esc cancels without a write', async t => {
+test('the page deeplink is reachable and Esc cancels without a write', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  await key(h, DOWN)
-  await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  assert.deepEqual(h.writes, ['fetch:deepseek-fetch-api'], 'the second row is the fetch provider')
-  await key(h, ESC)
-  assert.deepEqual(h.writes, ['fetch:deepseek-fetch-api'], 'Esc after a commit writes nothing else')
+  await openWebPage(h)
+  await openWebRow(h, 1) // Web Fetch Provider
+  assert.match(h.view(), /Current: HTTP/u)
+  await chooseCandidate(h, 1) // HTTP -> DeepSeek Fetch API
+  assert.equal(h.writes.length, 0, 'moving the highlight writes nothing')
+  await key(h, ESC) // Detail -> list, still no write
+  assert.deepEqual(h.writes, [])
+  assert.match(h.view(), /Enter open/u, 'Esc from the Detail returned to the page list')
+  await key(h, ESC) // list -> Tools rows
+  // The root keeps the row's Detail focus, exactly like the allowlist picker
+  // return: the Tools rows are painted again with the Web row selected.
+  assert.match(h.view(), /Rows \(2\)/u, 'Esc from the list returns to the Tools rows')
+  assert.match(h.view(), /Configure Web…/u, 'the Web row owns the frame again')
+  assert.deepEqual(h.writes, [], 'the whole cancel path wrote nothing')
 })
 
-test('closing and reopening the section shows the committed values', async t => {
+test('closing and reopening the page shows the committed values', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  await settlePainted(h, 'the verified write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
-  // Esc from the Web section restores the Workspace (v2 §B3.4); the restored
-  // workspace then needs its own Esc ladder to reach the conversation.
-  await key(h, ESC)
-  assert.match(h.view(), /Settings · Tools/u)
-  await key(h, ESC)
-  await key(h, ESC)
-  // Reopen the whole surface: the row summary and the section read the store.
-  await openWebSection(h)
-  assert.match(h.view(), /DeepSeek Search API/u, 'the reopened section shows the committed value')
+  // Detail -> list -> Tools rows -> categories -> close.
+  await webListTop(h)
+  await closeWorkspace(h)
+  await openWebPage(h)
+  assert.match(h.view(), /Current: DeepSeek Search API/u, 'the reopened page shows the committed value')
 })
 
-test('an unavailable section offers no write and no submenu', async t => {
+test('an unavailable section offers no write and no candidates', async t => {
   const h = setup({ available: false })
   t.after(h.dispose)
-  await openWebSection(h)
-  assert.match(h.view(), /\[unavailable\]/u, 'every Web row states the unavailable fact')
-  // The rows carry no values to cycle and no submenu: Enter is inert, and the
-  // workspace summary states the backend limitation.
+  const page = await openWebPage(h)
+  assert.match(page, /Unavailable/u, 'the rows state the unreadable authority')
+  assert.match(page, /the Host Web provider settings are not available on this backend/u, 'the Detail names the real reason')
+  // Enter opens the read-only Detail; Enter there must not write.
+  await openWebRow(h, 0)
+  assert.doesNotMatch(h.view(), /Enter confirm/u, 'no confirm affordance exists without an authority')
   await key(h, ENTER)
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
-  assert.deepEqual(h.writes, [])
+  assert.deepEqual(h.writes, [], 'an unreadable configuration never accepts a write')
 })
 
-test('the credential row delegates to the existing /login and /logout command lines', async t => {
+test('the credential row shows the reference and hands the Models deeplink to the root', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  // Reach the credential row (the sixth Web row) and open its action panel.
-  for (let index = 0; index < 5; index += 1) await key(h, DOWN)
+  await openWebPage(h)
+  await openWebRow(h, 5)
+  const detail = h.view()
+  assert.match(detail, /Reference: DEEPSEEK_API_KEY/u, 'the official credential reference is named')
+  assert.match(detail, /State: Configured · source: file/u, 'presence/source come from the store')
+  assert.match(detail, /› Configure in Models…/u, 'Configure is the active action')
+  assert.match(detail, /Clear in Models…/u, 'Clear is offered for a configured reference')
+  assert.doesNotMatch(detail, /secret|sk-/u, 'no secret value is ever painted')
+
+  // Enter mounts the EXISTING Models page in the SAME lease — never `/login`.
   await key(h, ENTER)
-  assert.match(h.view(), /DeepSeek API Key/u)
-  assert.match(h.view(), /Configure/u)
-  assert.match(h.view(), /Configured/u, 'the live presence/source comes from the credential store')
-  await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  assert.deepEqual(h.delegated, ['/login DEEPSEEK_API_KEY'],
-    'the panel closed the editor and delegated to the existing command path')
+  await settlePainted(h, 'the Models page on the DEEPSEEK_API_KEY reference', frame =>
+    frame.includes('Settings · Models') && frame.includes('DEEPSEEK_API_KEY'))
+  assert.match(h.view(), /Settings · Models/u, 'the root switched to the Models category')
+  assert.deepEqual(h.delegated, [], 'no /login command line was executed by the Web page')
 })
 
-test('Esc from the Web section restores the Settings workspace on the Web launcher row', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebSection(h)
-  await key(h, ESC)
-  assert.match(h.view(), /Settings · Tools/u, 'the legacy editor closed back into the Settings workspace')
-  assert.match(h.view(), /Web Search \/ Fetch/u)
-  // The restored workspace carries the Web row's OWN detail (the launcher row),
-  // never the default theme row.
-  assert.match(h.view(), /Host Web settings/u)
-  assert.match(h.view(), /Search: Messages · Fetch: HTTP/u)
-})
-
-test('a configured custom provider id stays visible, marked unavailable and not selectable', async t => {
+test('a configured custom provider id stays visible and offers no candidate', async t => {
   const h = setup({ searchProvider: 'acme-search' })
   t.after(h.dispose)
-  await openWebSection(h)
-  assert.match(h.view(), /acme-search/u, 'the custom route is reported as-is')
-  assert.match(h.view(), /\[unavailable\]/u, 'it is marked unavailable for this selector')
-  assert.match(h.view(), /Current: acme-search/u)
+  const page = await openWebPage(h)
+  assert.match(page, /acme-search/u, 'the custom route is reported as-is')
+  await openWebRow(h, 0)
+  const detail = h.view()
+  assert.match(detail, /Current: acme-search/u)
+  assert.match(detail, /CUSTOM route/u, 'the Detail states that it is not selectable here')
+  assert.doesNotMatch(detail, /› /u, 'no selectable candidate is painted')
+  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists for a custom route')
   await key(h, ENTER)
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
-  assert.deepEqual(h.writes, [], 'a custom route is never silently replaced by a cycle')
+  assert.deepEqual(h.writes, [], 'a custom route is never silently replaced')
 })
 
 test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', async t => {
   const h = setup()
   t.after(h.dispose)
   h.store.writeDelayMs = 150
-  await openWebSection(h)
-  // Queue the (slow) provider write, then immediately open the endpoint editor
-  // and confirm it: with ONE owner FIFO the endpoint write starts only after the
-  // provider write settled.
+  await openWebPage(h)
+  // Queue the (slow) provider write first.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   await key(h, ENTER)
-  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  await key(h, ENTER)
+  // Then open the endpoint editor and confirm its draft: with ONE owner FIFO the
+  // endpoint write starts only after the provider write settled.
+  await webListTop(h)
+  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+  await editEndpointDraft(h, '/v2')
   const markEndpoint = settledWritesMark(h)
-  await key(h, ENTER)
-  // The FIFO's own completion: the endpoint write is queued BEHIND the slow
-  // provider write, so waiting for BOTH to settle is the authoritative fact
-  // (a 200ms window only guessed that the 150ms delay had elapsed).
-  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools', markEndpoint)
+  await key(h, ENTER) // confirm the endpoint draft
+  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools/v2', markEndpoint)
   assert.deepEqual(h.log, [
     'begin:search:deepseek-search-api',
     'search:deepseek-search-api',
-    'begin:endpoint:https://api.deepseek.com/v1/tools',
-    'endpoint:https://api.deepseek.com/v1/tools',
+    'begin:endpoint:https://api.deepseek.com/v1/tools/v2',
+    'endpoint:https://api.deepseek.com/v1/tools/v2',
   ], 'the endpoint write does not even START until the pending selection settled')
   assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
@@ -714,394 +792,353 @@ test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', a
 test('an unreadable authority after a successful read drops to Unavailable, never a stale current', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
+  await openWebPage(h)
   assert.match(h.view(), /\[current\]/u, 'the first read paints the verified state')
-  // Leave the editor, close the workspace and make the authority fail.
-  await key(h, ESC)
-  await key(h, ESC)
-  await key(h, ESC)
+  await closeWorkspace(h)
   h.store.readThrows = true
   await openOtherRows(h)
   assert.match(h.view(), /Unavailable/u, 'the launcher states the failure')
   assert.doesNotMatch(h.view(), /Search: Messages/u, 'the old summary never survives as current')
   await key(h, DOWN)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  const providerLine = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
-  assert.doesNotMatch(providerLine, /\[current\]|\[default\]/u,
-    'no legacy row claims a current/default value it cannot read')
-  assert.match(providerLine, /\[unavailable\]|Unavailable/u)
-  assert.match(h.view(), /Current: Unavailable/u)
-})
-
-test('a half-mounted Web configuration is unavailable and offers no write', async t => {
-  const h = setup({ available: false })
-  t.after(h.dispose)
-  await openWebSection(h)
-  assert.match(h.view(), /\[unavailable\]/u)
-  await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  assert.deepEqual(h.writes, [], 'an unreadable configuration never accepts a write')
+  const page = await settlePainted(h, 'the page to paint the failed read', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+  assert.match(page, /Unavailable/u)
+  assert.match(page, /settings descriptor unreadable/u, 'the reason is the real read failure')
+  assert.doesNotMatch(page, /\[current\]/u, 'no row claims a current value it cannot read')
+  assert.deepEqual(h.writes, [])
 })
 
 test('a mounted but MALFORMED Web section reads as unavailable and accepts no write', async t => {
   const h = setup()
   t.after(h.dispose)
   h.store.readUndefined = true
-  await openWebSection(h)
-  assert.match(h.view(), /Unavailable/u, 'an unreadable section is stated, never shown as current')
+  const page = await openWebPage(h)
+  assert.match(page, /Unavailable/u, 'an unreadable section is stated, never shown as current')
+  assert.doesNotMatch(page, /\[current\]/u)
+  await openWebRow(h, 0)
   await key(h, ENTER)
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
   assert.deepEqual(h.writes, [], 'a malformed section never accepts a write')
-  const providerLine = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
-  assert.doesNotMatch(providerLine, /\[current\]/u)
 })
 
 test('a workspace opened while the authority is pending paints Loading…, never the previous state', async t => {
   const h = setup()
   t.after(h.dispose)
-  // A first, settled read: the summary is known and would be the cached value.
-  await openWebSection(h)
+  await openWebPage(h)
   assert.match(h.view(), /\[current\]/u, 'the settled read paints the verified state')
-  await key(h, ESC)
-  await key(h, ESC)
-  await key(h, ESC)
+  await closeWorkspace(h)
 
-  const release = h.holdRead()
+  const release = h.holdAllReads()
   t.after(release)
   h.invoke('settings')
-  // The held read cannot settle, so every frame painted before it settles is
-  // the pending state (without the pre-snapshot pending entry these frames
-  // would carry the previous summary as current).
   await h.vt.waitForRender()
-  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
   const firstFrame = h.view()
-  assert.match(firstFrame, /Loading…/u, `the first frames of the reopened workspace are pending:\n${firstFrame}`)
+  assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending:\n${firstFrame}`)
   assert.doesNotMatch(firstFrame, /Search: Messages/u,
     'the previous summary is never presented as the current state')
 
-  // The settled read then repaints the SAME generation.
+  // Entering the page starts its OWN fresh read, which is held too: the page's
+  // first frames state Loading… instead of a last-known value.
+  await key(h, DOWN)
+  await key(h, ENTER)
+  const pendingPage = h.view()
+  assert.match(pendingPage, /Web Search Provider/u)
+  assert.match(pendingPage, /Loading…/u, `the page starts pending:\n${pendingPage}`)
+  assert.doesNotMatch(pendingPage, /\[current\]/u)
+
   release()
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  const settled = h.view()
-  assert.match(settled, /Search: Messages/u, `the settled read paints the facts:\n${settled}`)
-  assert.doesNotMatch(settled, /Loading…/u)
+  const settled = await settlePainted(h, 'the held reads to settle the page', frame =>
+    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+  assert.match(settled, /\[current\]/u)
 })
 
 test('a new read clears the previous read ERROR: pending, not a stale Unavailable', async t => {
   const h = setup()
   t.after(h.dispose)
   h.store.readThrows = true
-  await openWebSection(h)
+  await openWebPage(h)
   assert.match(h.view(), /Unavailable/u, 'the failed read is stated')
-  await key(h, ESC)
-  await key(h, ESC)
-  await key(h, ESC)
+  await closeWorkspace(h)
 
   h.store.readThrows = false
-  const release = h.holdRead()
+  const release = h.holdAllReads()
   t.after(release)
   h.invoke('settings')
   await h.vt.waitForRender()
-  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending again:\n${firstFrame}`)
   assert.doesNotMatch(firstFrame, /Unavailable/u, 'the previous error state does not survive into the new read')
   release()
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  assert.match(h.view(), /Search: Messages/u)
+  await settlePainted(h, 'the new read to paint the facts', frame =>
+    frame.includes('Search: Messages') && !frame.includes('Loading…'))
 })
 
 test('the workspace `r` refresh re-enters pending instead of repainting the cached summary', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  // Esc returns to the Workspace ON the Web row (rows level, already focused).
-  await key(h, ESC)
+  await openWebPage(h)
+  await key(h, ESC) // list -> Tools rows (the Web row stays selected)
   assert.match(h.view(), /Settings · Tools/u, 'Esc restored the Workspace rows level')
   assert.match(h.view(), /Search: Messages/u, 'the settled summary is visible on the rows level')
 
-  const release = h.holdRead()
+  const release = h.holdAllReads()
   t.after(release)
   await key(h, 'r')
   const pending = h.view()
   assert.match(pending, /Loading…/u, `the refresh enters the pending state:\n${pending}`)
   assert.doesNotMatch(pending, /Search: Messages/u, 'the cached summary is not repainted while the read is pending')
   release()
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  assert.match(h.view(), /Search: Messages/u)
+  await settlePainted(h, 'the refreshed read to paint the facts', frame =>
+    frame.includes('Search: Messages') && !frame.includes('Loading…'))
 })
 
-test('entering the legacy Web section paints Loading…, never the last-known value', async t => {
+test('entering the Web page paints Loading…, never the last-known value', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  assert.match(h.view(), /\[current\]/u, 'the settled section paints the verified state')
+  await openWebPage(h)
+  assert.match(h.view(), /\[current\]/u, 'the settled page paints the verified state')
   await key(h, ESC)
   assert.match(h.view(), /Settings · Tools/u)
 
-  // Hold the read the section's own mount will request.
-  const release = h.holdRead()
+  // The page's own mount read is held: its first frame states Loading….
+  const release = h.holdAllReads()
   t.after(release)
   await key(h, ENTER)
   const pending = h.view()
-  assert.match(pending, /\[Loading…\]/u, `the section starts pending:\n${pending}`)
-  const pendingRow = pending.split('\n').find(line => line.includes('Web Search Provider')) ?? ''
-  assert.doesNotMatch(pendingRow, /\[current\]|\[default\]/u,
-    'no row claims a current/default value while the read is in flight')
-  assert.match(pending, /Current: Loading…/u, 'the description states the pending fact')
-
+  assert.match(pending, /Loading…/u, `the page starts pending:\n${pending}`)
+  assert.doesNotMatch(pending, /\[current\]/u,
+    'no row claims a current value while the read is in flight')
   release()
   const settled = await settlePainted(h, 'the mounted read to repaint the verified state', frame =>
     /\[current\]/u.test(frame) && frame.includes('Current: Messages'))
-  assert.match(settled, /\[current\]/u, `the mounted read repaints the verified state:\n${settled}`)
-  assert.match(settled, /Current: Messages/u)
   assert.doesNotMatch(settled, /Loading…/u)
 })
 
-test('a section reopened after a FAILED read states Loading…, not the stale error', async t => {
+test('a page reopened after a FAILED read states Loading…, not the stale error', async t => {
   const h = setup()
   t.after(h.dispose)
   h.store.readThrows = true
-  await openWebSection(h)
+  await openWebPage(h)
   assert.match(h.view(), /Unavailable/u, 'the failure is stated')
   await key(h, ESC)
 
   h.store.readThrows = false
-  const release = h.holdRead()
+  const release = h.holdAllReads()
   t.after(release)
   await key(h, ENTER)
   const pending = h.view()
-  assert.match(pending, /\[Loading…\]/u, `the reopened section is pending:\n${pending}`)
+  assert.match(pending, /Loading…/u, `the reopened page is pending:\n${pending}`)
   assert.doesNotMatch(pending, /Current: Unavailable/u, 'the previous read error does not survive into the new read')
   release()
-  await settlePainted(h, 'the reopened section to repaint the settled facts', frame =>
-    frame.includes('Current: Messages'))
-  assert.match(h.view(), /Current: Messages/u)
+  await settlePainted(h, 'the reopened page to repaint the settled facts', frame =>
+    frame.includes('Current: Messages') && !frame.includes('Loading…'))
 })
 
-test('an OLD read settling after a write never repaints the reopened Workspace (owner-generation fence)', async t => {
+test('an OLD read settling after a write never repaints the page with the pre-write state', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  assert.match(h.view(), /Current: Messages/u, 'the section starts from the settled facts')
-  await key(h, ESC)
-  assert.match(h.view(), /Settings · Tools/u, 'Esc restored the Workspace rows level')
+  await openWebPage(h)
+  assert.match(h.view(), /Current: Messages/u)
+  await key(h, ESC) // list -> Tools rows
 
-  // Hold the Workspace's own read (R_ws1): it observes the PRE-write Host state
-  // and will settle LAST, after the write and a newer Workspace read.
-  const release = h.holdRead()
-  t.after(release)
-  await key(h, ESC)
-  await key(h, ESC) // leave the Settings surface entirely
-  // Re-enter: the workspace open starts a read, which the gate holds.
-  h.invoke('settings')
-  await h.vt.waitForRender()
-  for (const pressed of [DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER]) await key(h, pressed)
-  await key(h, DOWN)
+  // R1 observes the pre-write Host and is held; the page's own entry read (R2)
+  // supersedes it before any write.
+  const releaseR1 = h.holdRead()
+  t.after(releaseR1)
+  await key(h, 'r')
+  assert.match(h.view(), /Loading…/u, 'R1 is pending on the rows level')
   await key(h, ENTER)
-  // The section's OWN settled row is the fact (it re-entered pending): nothing
-  // below may run on the loading frame.
-  await settlePainted(h, 'the section to settle from the newest read', frame =>
-    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('Current: Loading…'))
-  assert.match(h.view(), /\[current\]/u, 'the section settled from the newest read')
+  const settledPage = await settlePainted(h, 'the page entry read R2 to settle', frame =>
+    frame.includes('Current: Messages') && !frame.includes('Loading…'))
 
-  // A real write, then Esc back to the Workspace (whose own read is newer).
-  const settledReadsBeforeWrite = h.settledReadCount()
+  // A real write, then the held R1 settles: its pre-write snapshot must not
+  // overwrite the committed facts.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   const markWrite = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markWrite)
-  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the write committed')
-  await key(h, ESC)
-  // The Workspace's newer read must SETTLE before the stale one is released:
-  // otherwise the assertion below could pass only because the newer read had
-  // not painted yet.
-  await awaitReadSettlement(h, settledReadsBeforeWrite + 1, 'the newer Workspace read to settle')
-  assert.match(h.view(), /Search: DeepSeek Search API/u, `the Workspace shows the committed facts:\n${h.view()}`)
+  await settlePainted(h, 'the verified write', frame => frame.includes('Verified'))
 
-  // The OLD held read settles now: it must NOT repaint the Workspace with the
-  // pre-write summary. Wait for ITS OWN settlement, so "no stale repaint" is a
-  // fact about a completed read rather than an assumption about a timer.
   const settledBeforeRelease = h.settledReadCount()
-  release()
-  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the stale Workspace read to settle')
+  releaseR1()
+  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the stale pre-write read to settle')
   const after = h.view()
-  assert.match(after, /Search: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
-  assert.doesNotMatch(after, /Search: Messages/u, 'the pre-write summary never comes back')
+  assert.match(after, /Current: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
+  assert.doesNotMatch(after, /Current: Messages/u, 'the pre-write value never comes back')
 })
 
-test('a SUPERSEDED write readback never decides the verdict (owner-generation fence)', async t => {
+test('a SUPERSEDED write readback never decides the verdict', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  assert.match(h.view(), /Current: Messages/u)
+  await openWebPage(h)
 
-  // The write's readback captures an UNREADABLE Host (the mutation itself still
-  // commits); it is held while a NEWER read observes the post-write facts.
+  // The write's readback R1 observes an UNREADABLE Host and is held while a
+  // NEWER read R2 (the page's `r`) observes the post-write facts.
   h.store.readUndefined = true
-  const release = h.holdRead()
-  t.after(release)
+  const releaseR1 = h.holdRead()
+  t.after(releaseR1)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   const markMutation = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markMutation)
-  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
-  assert.match(h.view(), /Saving…/u, 'the write really issues its verification read (R1 is pending)')
+  assert.match(h.view(), /Saving…/u, 'the write really issued its verification read (R1 is pending)')
 
-  // A newer read (Esc → the restored Workspace) observes the post-write Host and
-  // commits those facts. Wait for THAT read's own settlement.
   h.store.readUndefined = false
-  const settledBeforeNewer = h.settledReadCount()
-  await key(h, ESC)
-  await awaitReadSettlement(h, settledBeforeNewer + 1, 'the newer Workspace read to settle')
-  assert.match(h.view(), /Search: DeepSeek Search API/u, 'the newer read committed the post-write facts')
+  await key(h, 'r')
+  const newer = await settlePainted(h, 'the newer read R2 to commit the post-write facts', frame =>
+    frame.includes('Current: DeepSeek Search API') && !frame.includes('Loading…'))
+  assert.doesNotMatch(newer, /Not saved|Outcome unknown/u, 'R2 committed the post-write facts')
 
-  // The superseded readback settles now: it must not turn the committed result
-  // into a stale `Outcome unknown`/`Not saved`, and the rows keep the newest
-  // authority facts. R1's own settlement is the witness that the stale
-  // continuation really reached the surface.
+  // R1 settles now (unreadable, superseded): it must not turn the committed
+  // result into a stale verdict.
   const settledBeforeRelease = h.settledReadCount()
-  release()
-  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the superseded write readback to settle')
+  releaseR1()
+  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the superseded readback to settle')
   const after = h.view()
-  assert.doesNotMatch(after, /Outcome unknown|Not saved/u,
+  assert.doesNotMatch(after, /Not saved|Outcome unknown/u,
     `no stale verdict leaks into the surface:\n${after}`)
-  assert.match(after, /Search: DeepSeek Search API/u, 'the newest facts survive')
-
-  // Re-open the section: the superseded readback must not have left a stale
-  // verdict phase on the row (the reopened row states the verified value).
-  await key(h, ENTER)
-  const reopened = await settlePainted(h, 'the reopened row to state the verified value', frame =>
-    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('Loading…'))
-  assert.doesNotMatch(reopened, /\[Outcome unknown\]|\[Not saved\]/u,
-    `the reopened row carries no stale verdict:\n${reopened}`)
-  assert.match(reopened, /\[current\]/u, 'the reopened row states the verified value')
+  assert.match(after, /Current: DeepSeek Search API/u, 'the newest facts survive')
 })
 
 test('a superseded readback settling while the newer read is STILL pending never judges', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
+  await openWebPage(h)
 
-  // R1 (the write's readback) captures an unreadable Host and is held.
   h.store.readUndefined = true
   const releaseR1 = h.holdRead()
   t.after(releaseR1)
-  const settledBeforeR1 = h.settledReadCount()
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
   const markR1Write = settledWritesMark(h)
   await key(h, ENTER)
-  // The WRITE's own settlement (not a window) is the fact that R1 exists: the
-  // row is already `Saving…` because its verification read is pending.
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markR1Write)
-  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
-  assert.match(h.view(), /Saving…/u, 'the write really issued its verification read (R1 is pending)')
+  assert.match(h.view(), /Saving…/u, 'R1 is pending')
 
-  // A NEWER read R2 starts (Esc → the restored Workspace) and is ALSO held, so
-  // it is pending when R1 settles.
-  const releaseR2 = h.holdRead()
-  t.after(releaseR2)
+  // R2 is ALSO held, so it is pending when R1 settles.
   h.store.readUndefined = false
-  await key(h, ESC)
-  assert.match(h.view(), /Loading…/u, 'the newer read is still pending')
+  const releaseR2 = h.holdAllReads()
+  t.after(releaseR2)
+  await key(h, 'r')
+  assert.match(h.view(), /Loading…/u, 'the newer read R2 is still pending')
 
-  // R1 settles first: the row must stay PENDING, never a stale verdict. R1's OWN
-  // settlement is the witness that its continuation reached the surface.
+  const settledBeforeR1 = h.settledReadCount()
   releaseR1()
   const settledAfterR1 = await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
-  assert.doesNotMatch(settledAfterR1, /Outcome unknown|Not saved/u,
+  assert.doesNotMatch(settledAfterR1, /Not saved|Outcome unknown/u,
     `a superseded readback must not judge while the newer read is pending:\n${settledAfterR1}`)
 
-  // R2 settles: the newest facts decide, with no stale verdict left behind.
+  // R2 settles: the newest facts decide.
   const settledBeforeR2 = h.settledReadCount()
   releaseR2()
   await awaitReadSettlement(h, settledBeforeR2 + 1, 'the newest read R2 to settle')
   const settled = await settlePainted(h, 'the newest read to paint its facts', frame =>
-    frame.includes('Search: DeepSeek Search API'))
-  assert.match(settled, /Search: DeepSeek Search API/u, `the newest facts win:\n${settled}`)
-  await key(h, ENTER)
-  const reopened = await settlePainted(h, 'the reopened row to state the verified value', frame =>
-    /Web Search Provider .*\[current\]/u.test(frame) && !frame.includes('Loading…'))
-  assert.doesNotMatch(reopened, /\[Outcome unknown\]|\[Not saved\]/u,
-    `the reopened row carries no stale verdict:\n${reopened}`)
-  assert.match(reopened, /\[current\]/u)
+    frame.includes('Current: DeepSeek Search API') && !frame.includes('Loading…'))
+  assert.doesNotMatch(settled, /Not saved|Outcome unknown/u, `the newest facts win:\n${settled}`)
 })
 
-/**
- * One SUPERSEDED endpoint-readback scenario. R1 (the write's verification read)
- * is held while it observes an UNREADABLE Host, so a verdict taken from the
- * superseded snapshot would be wrong in every scenario; the verdict must come
- * from the NEWEST read. `arrangeNewest` sets what that newest read observes and
- * `assertVerdict` checks the row's settled state.
- */
+test('a verified endpoint save closes the editor on the Host value', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+  assert.match(h.view(), /Enter confirm · Esc cancel/u)
+  await editEndpointDraft(h, '/v2')
+  await key(h, ENTER) // confirm the edited draft value
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v2'], 'the mutation committed')
+  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'the verified save closed the editor')
+  assert.ok(h.view().includes('Current: https://api.deepseek.com/v1/tools'),
+    `the row states the verified endpoint:\n${h.view()}`)
+})
+
+test('the endpoint editor reports Not saved with the value the Host actually kept', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  h.store.endpointStoredValue = 'https://other.example/v1'
+  await openWebRow(h, 4)
+  await editEndpointDraft(h, '/v2')
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  const frame = h.view()
+  assert.match(frame, /Not saved/u, `the editor states the Host's own answer:\n${frame}`)
+  assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
+    `the editor reports the value the Host kept:\n${frame}`)
+  assert.ok(frame.includes('Enter confirm · Esc cancel'), 'the draft stays in the editor for correction')
+})
+
+test('the endpoint editor reports Outcome unknown when the read-back is unreadable', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  h.store.readUndefined = true
+  await openWebRow(h, 4)
+  await editEndpointDraft(h, '/v2')
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  const frame = h.view()
+  assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
+  assert.ok(frame.includes('the Host write could not be verified'),
+    `the editor states what could not be observed:\n${frame}`)
+  assert.doesNotMatch(frame, /Not saved/u, 'an unreadable read-back is never reported as not-saved')
+})
+
+/** One SUPERSEDED endpoint-readback scenario over the frozen sizes: R1 (the
+ *  write's verification read) observes an UNREADABLE Host and is held; R2 (the
+ *  page's `r`) observes the NEWEST facts and is also held. R1 settles while R2
+ *  is pending, then R2 decides. A verdict from the superseded R1 would be wrong
+ *  in every scenario. */
 function supersededEndpointCase(
   name: string,
   arrangeNewest: (h: Harness) => void,
-  assertVerdict: (frame: string, columns: number, h: Harness) => Promise<void> | void,
+  assertVerdict: (frame: string, h: Harness) => Promise<void> | void,
 ): void {
-  for (const [columns, rows] of SUPERSEDED_SIZES) test(`a superseded endpoint readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
-    const h = setup({ columns, rows })
-    t.after(h.dispose)
-    await openWebSection(h)
-    const readsBefore = h.readCount()
+  for (const [columns, rows] of SUPERSEDED_SIZES) {
+    test(`a superseded endpoint readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
+      const h = setup({ columns, rows })
+      t.after(h.dispose)
+      await openWebPage(h)
+      h.store.readUndefined = true
+      const releaseR1 = h.holdRead()
+      t.after(releaseR1)
+      await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+      await editEndpointDraft(h, '/v2')
+      await key(h, ENTER) // dispatch the endpoint write
+      await settlePainted(h, 'the endpoint editor to state Saving…', frame => frame.includes('Saving…'))
 
-    h.store.readUndefined = true
-    const releaseR1 = h.holdRead()
-    t.after(releaseR1)
-    await confirmEndpointDraft(h)
-    assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools'], 'the endpoint mutation committed')
-    assert.match(h.view(), /Saving…/u, 'the real endpoint panel verifies before it settles')
-    assert.equal(h.readCount(), readsBefore + 1, 'the write issued its verification read R1')
+      h.store.readUndefined = false
+      arrangeNewest(h)
+      const releaseR2 = h.holdAllReads()
+      t.after(releaseR2)
+      // Leave the editor (zero write): the dispatced write keeps settling in the
+      // command owner, and the page's own `r` then starts the NEWER read R2.
+      await key(h, ESC)
+      await key(h, 'r')
+      assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
 
-    // R2: the FIRST Esc only cancels the panel (the open submenu owns the key);
-    // the SECOND leaves the Web section, and the RESTORED Workspace starts the
-    // newer read — held, so it is still pending when R1 settles.
-    h.store.readUndefined = false
-    arrangeNewest(h)
-    const releaseR2 = h.holdRead()
-    t.after(releaseR2)
-    await key(h, ESC)
-    // The endpoint row's LABEL truncates at the 44-column floor, so the needle
-    // is the part every size keeps: the first Esc closed only the submenu.
-    assert.ok(h.view().includes('Search / Fetch'), 'the first Esc only closed the endpoint submenu')
-    await key(h, ESC)
-    assert.ok(h.view().includes('Settings · Tools'), 'the restored Workspace owns the surface')
-    assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
-    assert.equal(h.readCount(), readsBefore + 2, 'R2 really started — never a no-op witness')
+      const settledBeforeR1 = h.settledReadCount()
+      releaseR1()
+      await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
+      assert.doesNotMatch(h.view(), /Not saved|Outcome unknown/u,
+        `a superseded readback must not judge while the newer read is pending:\n${h.view()}`)
 
-    // R1 settles while R2 is pending: the superseded snapshot must NOT decide.
-    // R1's OWN settlement is the witness — otherwise this absence could hold
-    // simply because the superseded readback had not reached the surface yet.
-    const settledBeforeR1 = h.settledReadCount()
-    releaseR1()
-    await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
-    assert.doesNotMatch(h.view(), /\[Outcome unknown\]|\[Not saved\]/u,
-      `a superseded readback must not judge while the newest read is pending:\n${h.view()}`)
-
-    // A read STARTED during the wait (re-entering the section) is the newer
-    // authority: R2's own settlement must not decide either.
-    const releaseR3 = h.holdRead()
-    t.after(releaseR3)
-    await key(h, ENTER)
-    assert.equal(h.readCount(), readsBefore + 3, 're-entering the section issued the newer read R3')
-    const settledBeforeR2 = h.settledReadCount()
-    releaseR2()
-    await awaitReadSettlement(h, settledBeforeR2 + 1, 'the superseded readback R2 to settle')
-    assert.doesNotMatch(h.view(), /\[Outcome unknown\]|\[Not saved\]/u,
-      `R2 must not judge while R3 is pending:\n${h.view()}`)
-
-    // R3 (the newest authority) settles: ITS facts decide the verdict. Wait for
-    // the painted verdict itself, which is what the case asserts.
-    releaseR3()
-    await settlePainted(h, 'the newest read to paint its verdict', frame =>
-      !frame.includes('Loading…') && !frame.includes('Saving…'))
-    for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-    await assertVerdict(h.view(), columns, h)
-  })
+      const settledBeforeR2 = h.settledReadCount()
+      releaseR2()
+      await awaitReadSettlement(h, settledBeforeR2 + 1, 'the newest read R2 to settle')
+      await settlePainted(h, 'the newest read to paint its verdict', frame =>
+        !frame.includes('Loading…') && !frame.includes('Saving…'))
+      await assertVerdict(h.view(), h)
+    })
+  }
 }
 
 /** The frozen sizes for the changed verdict sink. */
@@ -1110,39 +1147,32 @@ const SUPERSEDED_SIZES = [[120, 40], [80, 10], [44, 20]] as const
 supersededEndpointCase(
   'the newest read observed the submitted endpoint',
   () => {},
-  (frame, columns) => {
-    assert.doesNotMatch(frame, /\[Outcome unknown\]|\[Not saved\]/u, `a verified write leaves no verdict:\n${frame}`)
-    if (columns >= 120) {
-      assert.ok(frame.includes('Current: https://api.deepseek.com/v1/tools'),
-        `the row states the verified endpoint:\n${frame}`)
-    }
+  async (frame, h) => {
+    assert.doesNotMatch(frame, /Not saved|Outcome unknown/u, `a verified write leaves no verdict:\n${frame}`)
+    // The endpoint editor always opens on the authoritative value: seeing it
+    // there proves the newest read decided (the row's own slot truncates).
+    await openWebRow(h, 4)
+    assert.ok(h.view().includes('https://api.deepseek.com/v1/tools'),
+      `the editor opens on the verified endpoint:\n${h.view()}`)
+    await key(h, ESC)
   },
 )
 
 supersededEndpointCase(
   'the Host kept another value',
   h => { h.store.web.api.baseURL = 'https://other.example/v1' },
-  async (frame, columns, h) => {
+  async (frame, h) => {
     // R1 was UNREADABLE: an `Outcome unknown` here would be the superseded
     // snapshot's answer, so `Not saved` proves the NEWEST facts decided.
-    assert.match(frame, /\[Not saved\]/u, `a kept value is reported as Not saved:\n${frame}`)
+    assert.match(frame, /Not saved/u, `a kept value is reported as Not saved:\n${frame}`)
     assert.doesNotMatch(frame, /Outcome unknown/u, `the superseded snapshot never decides:\n${frame}`)
-    // The endpoint panel (whose own message named the Host's value) is already
-    // closed when a superseded verdict lands, so the ROW's Detail has to carry
-    // the newest authority value or the user never sees it.
-    // The 44-column floor drops the Detail description (the frozen drop order):
-    // there the value is read from the endpoint editor, which always opens on
-    // the authoritative value.
-    if (columns < 80) {
-      await key(h, ENTER)
+    if (!frame.includes('the Host keeps "https://other.example/v1"')) {
+      // The narrow page paints only the list, so the kept value is read from
+      // the endpoint editor, which always opens on the authoritative value.
+      await openWebRow(h, 4)
       assert.ok(h.view().includes('https://other.example/v1'),
-        `the endpoint editor opens on the value the Host keeps at ${columns} columns:\n${h.view()}`)
+        `the editor opens on the value the Host keeps:\n${h.view()}`)
       await key(h, ESC)
-    }
-    if (columns >= 80) {
-      assert.ok(frame.includes('Current: Not saved'), `the row states the verdict:\n${frame}`)
-      assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
-        `the row reports the value the Host actually keeps:\n${frame}`)
     }
   },
 )
@@ -1150,124 +1180,90 @@ supersededEndpointCase(
 supersededEndpointCase(
   'the newest read could not read the Host',
   h => { h.store.readUndefined = true },
-  (frame, columns) => {
-    assert.match(frame, /\[Outcome unknown\]/u, `an unobservable result is Outcome unknown:\n${frame}`)
-    if (columns >= 120) {
-      assert.ok(frame.includes('Current: Outcome unknown'), `the row states the same verdict:\n${frame}`)
-    }
+  (frame) => {
+    assert.match(frame, /Outcome unknown/u, `an unobservable result is Outcome unknown:\n${frame}`)
+    assert.doesNotMatch(frame, /Not saved/u)
   },
 )
 
-test('a superseded write holds the ONE owner FIFO until the newest read settles', async t => {
+test('the page and the legacy Web row share ONE authority and one FIFO', async t => {
   const h = setup()
   t.after(h.dispose)
-  h.store.writeDelayMs = 150
-  await openWebSection(h)
-
-  // write1 (a slow provider selection) is queued first and its verification read
-  // R1 is HELD. write2 (the endpoint save) is queued behind it while write1's
-  // Host write still runs — the rows stay selectable until a read starts.
-  const releaseR1 = h.holdRead()
-  t.after(releaseR1)
-  // The mark must be taken BEFORE the write it is about to observe starts:
-  // write1 is dispatched by the FIRST Enter, and the delay is 150ms — slower
-  // keys or a loaded machine could settle it during the navigation below, and a
-  // mark taken afterwards would then wait forever for an already-finished write.
-  const markWrite1 = settledWritesMark(h)
+  // A PAGE write commits first (deliberately slow, so a second overlapping
+  // write would be observable).
+  h.store.writeDelayMs = 100
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const markPage = settledWritesMark(h)
   await key(h, ENTER)
-  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  await key(h, ENTER)
-  await key(h, ENTER)
-  // Wait for write1's OWN settlement (it is deliberately slow): that is the
-  // fact "write1 committed", not the fact that 250ms happened to elapse.
-  await awaitWriteSettlement(h, 'search:deepseek-search-api', markWrite1)
-  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'write1 committed while write2 still waits')
-  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
-  const readsBeforeR2 = h.readCount()
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markPage)
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  await closeWorkspace(h)
 
-  // R2 (the restored Workspace's read) supersedes R1 and stays pending.
-  const releaseR2 = h.holdRead()
-  t.after(releaseR2)
-  await key(h, ESC)
-  await key(h, ESC)
-  assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
-  assert.equal(h.readCount(), readsBeforeR2 + 1, 'R2 really started')
+  // The still-supported LEGACY editor is reachable through its transition row.
+  // Its Web rows read the SAME authority and write through the SAME FIFO.
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  await selectSettingsCategory(h.vt, 'Input & Terminal')
+  await key(h, ENTER) // rows level
+  for (let step = 0; step < 6; step += 1) await key(h, DOWN) // the transition row
+  await key(h, ENTER) // hand off to the existing editor at Keyboard shortcuts
+  await settlePainted(h, 'the legacy editor to mount on its row', frame =>
+    frame.includes('Keyboard shortcuts'))
+  // Up from the editor's last item walks back to the Web rows; Up*4 is the
+  // Search API Result Count row.
+  for (let step = 0; step < 4; step += 1) await key(h, UP)
+  assert.match(h.view(), /Search API Result Count/u, `the legacy editor still owns the Web rows:\n${h.view()}`)
+  const markLegacy = settledWritesMark(h)
+  await key(h, ENTER) // cycle 10 -> 20 through the legacy row
+  await awaitWriteSettlement(h, 'count:20', markLegacy)
+  assert.equal(h.maxConcurrentWrites(), 1, 'ONE FIFO: never two Web writes in flight')
+  assert.equal(h.store.web.api.count, 20)
 
-  // R1 settles: write1's verdict waits for R2, so its successor must NOT start.
-  // R1's own settlement is the witness that its continuation reached the FIFO.
-  const settledBeforeR1 = h.settledReadCount()
-  releaseR1()
-  await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
-  assert.ok(!h.log.some(entry => entry.startsWith('begin:endpoint:')),
-    `write2 must not start while the newest read is pending:\n${h.log.join('\n')}`)
-  // R2 settles: write2 is unblocked, and its OWN settlement proves it really ran.
-  const markWrite2 = settledWritesMark(h)
-  releaseR2()
-  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools', markWrite2)
-  assert.ok(h.log.some(entry => entry.startsWith('begin:endpoint:')),
-    `write2 starts once the newest read settled:\n${h.log.join('\n')}`)
-  assert.deepEqual(h.writes, ['search:deepseek-search-api', 'endpoint:https://api.deepseek.com/v1/tools'])
+  // Up to the provider row: the legacy row reports the PAGE's committed value,
+  // so both surfaces read the same authority (never a private copy).
+  for (let step = 0; step < 2; step += 1) await key(h, UP)
+  const providerRow = h.view()
+  assert.match(providerRow, /Web Search Provider/u)
+  assert.match(providerRow, /Current: DeepSeek Search API/u,
+    `the legacy row reads the value the page committed:\n${providerRow}`)
+  await key(h, ESC) // leave the legacy editor (no Web-return path any more)
+
+  // Re-entering the page shows BOTH committed values from one fresh read.
+  await openWebPage(h)
+  assert.match(h.view(), /Current: DeepSeek Search API/u)
+  await key(h, DOWN)
+  await key(h, DOWN)
+  assert.match(h.view(), /Current: 20/u, `the page reads the legacy write:\n${h.view()}`)
 })
 
-test('a verified endpoint save closes the panel on the Host value', async t => {
+// ── D3-2: the page states the real rc.2 facts ──────────────────────────────
+
+test('the page states defaults, billing, the ori_question boundary and the endpoint trust warning', async t => {
   const h = setup()
   t.after(h.dispose)
-  await openWebSection(h)
-  await confirmEndpointDraft(h)
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools'], 'the mutation committed')
-  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'the verified save closed the panel')
-  assert.ok(h.view().includes('Current: https://api.deepseek.com/v1/tools'),
-    `the row states the verified endpoint:\n${h.view()}`)
-})
-
-test('the endpoint editor reports Not saved with the value the Host actually kept', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebSection(h)
-  // The official store KEEPS a canonical form of the submitted base: the
-  // read-back differs from the request, so the write is never verified.
-  h.store.endpointStoredValue = 'https://other.example/v1'
-  await confirmEndpointDraft(h)
-  await settleEndpointPanel(h)
-  const frame = h.view()
-  assert.match(frame, /Not saved/u, `the panel states the Host's own answer:\n${frame}`)
-  assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
-    `the panel reports the value the Host kept:\n${frame}`)
-  assert.ok(frame.includes('Enter confirm · Esc cancel'), 'the draft stays in the panel for correction')
-})
-
-test('the endpoint editor reports Outcome unknown when the read-back is unreadable', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebSection(h)
-  h.store.readUndefined = true
-  await confirmEndpointDraft(h)
-  await settleEndpointPanel(h)
-  const frame = h.view()
-  assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
-  assert.ok(frame.includes('the endpoint write could not be verified'),
-    `the panel states what could not be observed:\n${frame}`)
-  assert.doesNotMatch(frame, /Not saved/u, 'an unreadable read-back is never reported as not-saved')
-})
-
-// ── D3-2: the existing Web rows state the real rc.2 help ───────────────────
-
-test('the Web provider and Share Original Question rows state defaults, billing and the ori_question boundary', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebSection(h)
+  await openWebPage(h)
   const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
-  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not guarantee coverage\)/u)
-  assert.match(compact(), /up to 128 characters of the triggering question are sent as ori_question/u)
-  assert.match(compact(), /The choice applies to the next search/u)
+  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed/u)
+  assert.match(compact(), /a Messages plan does not guarantee coverage/u)
+  assert.match(compact(), /No write happens without an explicit Enter/u)
+  // The Share Original Question row states the packed ON default and the exact
+  // payload boundary (not the full history/system prompt).
+  await pageListSelect(h, 3)
+  assert.match(compact(), /Current: on/u)
+  assert.match(compact(), /packed default for the DeepSeek Search API/u)
+  assert.match(compact(), /up to 128 characters of the triggering human question as ori_question/u)
+  assert.match(compact(), /never the full history or the system prompt/u)
   // The endpoint row is base-owned Web configuration, not a Bundle, and states
-  // the trusted-https/credential boundary.
-  for (let index = 0; index < 3; index += 1) await key(h, DOWN)
-  assert.match(compact(), /On \(packed default for the DeepSeek Search API\)/u)
-  assert.match(compact(), /never the full history or system prompt/u)
-  await key(h, DOWN)
-  assert.match(compact(), /base-owned, not an Optional Bundle/u)
-  assert.match(compact(), /Changing it sends the credential and query there; confirm only a trusted HTTPS base/u)
+  // the trusted-HTTPS/credential boundary.
+  await pageListSelect(h, 4)
+  assert.match(compact(), /Enter opens the endpoint editor/u)
+  assert.match(compact(), /Changing it sends the/u)
+  assert.match(compact(), /DeepSeek API credential and the query to that target/u)
+  assert.match(compact(), /confirm only a trusted HTTPS base/u)
+  assert.match(compact(), /the URL shape/u)
+  assert.match(compact(), /is checked, not the host's trust/u)
+  assert.match(compact(), /Official base: https:\/\/api\.deepseek\.com\/v1\/tools/u)
 })

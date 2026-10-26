@@ -33,6 +33,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { DirectWebProviderConfig } from '../../../src/runtime/direct/config-direct.ts'
 import { mountWebProviderPlane } from '../../support/web-provider-plane.ts'
 import { testLifecycle, type TestLifecycle } from '../../support/temp-lifecycle.ts'
+import { selectSettingsCategory } from '../../support/settings-rail.ts'
 
 const SESSION = 'session-web-l5'
 const QUESTION = 'what changed in the last release of the harness?'
@@ -341,12 +342,12 @@ function toolResultOf(agent: Agent, callId: string): string | undefined {
   return undefined
 }
 
-const KEY = { down: '\x1b[B', enter: '\r', tab: '\t', esc: '\x1b' } as const
+const KEY = { down: '\x1b[B', home: '\x1b[H', enter: '\r', esc: '\x1b' } as const
 
-/** Drive the REAL existing `/settings → Other → Web Search / Fetch` surface:
- *  select the Search API provider and the 20-result count, then leave the
- *  workspace. The real ConfigPort + Host settings mutate/readback performs the
- *  write; no Direct config object is used here. */
+/** Drive the REAL `/settings → Tools → Web Search / Fetch` page (C2-R4):
+ *  confirm the DeepSeek Search API provider and the 20-result count, then leave
+ *  the workspace. The real ConfigPort + Host settings mutate/readback performs
+ *  every write; no Direct config object is used here. */
 async function writeWebSettingsThroughTui(app: S4D3Application, config: DirectWebProviderConfig): Promise<void> {
   for (const character of '/settings') app.vt.sendInput(character)
   await app.settle()
@@ -356,28 +357,35 @@ async function writeWebSettingsThroughTui(app: S4D3Application, config: DirectWe
     app.vt.sendInput(KEY.enter)
     await app.settle()
   }
-  for (const key of [KEY.tab, KEY.tab, KEY.down, KEY.down, KEY.down, KEY.enter]) {
+  await app.waitFor(() => app.view().includes('Settings ·'), 'the Settings workspace')
+  // The workspace home is About: walk the rail to Tools, then its Rows level.
+  await selectSettingsCategory(app.vt, 'Tools')
+  for (const key of [KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
     await app.settle()
   }
-  app.vt.sendInput(KEY.down) // the Web Search / Fetch launcher row
-  await app.settle()
-  app.vt.sendInput(KEY.enter)
-  await app.settle()
   await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
-    'the real Web settings section')
-  app.vt.sendInput(KEY.enter) // Messages -> DeepSeek Search API
+    'the real Web Search / Fetch page')
+  // Row 1: Enter opens the Detail, Down highlights DeepSeek Search API, Enter
+  // is the ONE explicit confirm. The painted Verified proves the read-back.
+  for (const key of [KEY.enter, KEY.down, KEY.enter]) {
+    app.vt.sendInput(key)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Current: DeepSeek Search API') && app.view().includes('Verified'),
+    'the verified search provider write')
+  // Back to the list, then row 3 (Search API Result Count): 10 -> 20.
+  for (const key of [KEY.esc, KEY.home, KEY.down, KEY.down, KEY.enter, KEY.down, KEY.enter]) {
+    app.vt.sendInput(key)
+    await app.settle()
+  }
+  await app.waitFor(() => app.view().includes('Current: 20') && app.view().includes('Verified'),
+    'the verified count write')
+  app.vt.sendInput(KEY.esc) // Detail -> list
   await app.settle()
-  app.vt.sendInput(KEY.down)
-  app.vt.sendInput(KEY.down)
-  await app.settle()
-  app.vt.sendInput(KEY.enter) // count 10 -> 20
-  await app.settle()
-  app.vt.sendInput(KEY.esc) // back to the Settings workspace
-  await app.settle()
-  // A pending authoritative reload may swallow the first close gesture; Esc
-  // is idempotent, so close until the workspace really leaves the frame.
-  for (let attempt = 0; attempt < 4 && app.view().includes('Settings ·'); attempt += 1) {
+  // A pending authoritative reload may swallow a close gesture; Esc is
+  // idempotent, so close until the workspace really leaves the frame.
+  for (let attempt = 0; attempt < 6 && app.view().includes('Settings ·'); attempt += 1) {
     app.vt.sendInput(KEY.esc)
     await app.settle()
   }

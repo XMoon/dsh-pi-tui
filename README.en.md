@@ -590,25 +590,35 @@ export normally. The Direct backend shows `Verified` only after also confirming 
 registry state; Remote has no registry read and therefore reports the saved configuration
 without claiming the runtime registration took effect.
 
-`Tools` in `/settings` now has a `Web Search / Fetch` row: it retires the workspace,
-opens the existing editor's Web section and focuses its first item. The section switches the search
-provider (`Messages`, the official default, or the separately billed `DeepSeek Search API`), the fetch
-provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API result count (1–50,
-quick picks 5/10/20/50), `Share Original Question` (on by default; each new Search API call carries
-up to 128 characters of the triggering human question as `ori_question`, never the full history or
-system prompt) and the API endpoint base (an https address the user must confirm explicitly; the
-credential and query are sent to it). Both APIs are separate opt-in billed providers: a login or an
-ordinary Messages plan does not guarantee coverage of their fees, and the default
-`Messages`/`HTTP` combination calls no billed API. This Web configuration belongs to the base
-profile, not to a Bxx Optional Bundle, so installing or enabling another bundle never changes these
-providers. `[current]` moves only after
-the official mutation and its authoritative read-back agree, and a refused write reads `Not saved`.
-The choice applies to the next search/fetch; a running operation is never changed retroactively. The
-DeepSeek API key row shows only whether the reference is configured and its source layer; configure
-or clear it through the masked API Key Reference in Models after the current Web editor closes
-(`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` only navigate). Esc from the Web section restores the same
-`Web Search / Fetch` row; the original `Open existing settings…` entry still returns to the
-conversation. A Remote backend reports the section unavailable and names no Host namespace.
+`/settings → Tools → Web Search / Fetch` is now a **page inside the same Settings workspace**
+instead of a hand-off to the existing editor. It paints exactly six rows: the search provider
+(`Messages`, the official default, or the separately billed `DeepSeek Search API`), the fetch
+provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API result count (the
+official domain is 1–50 with 5/10/20/50 quick picks; another stored integer is reported exactly and
+never rewritten), `Share Original Question` (on by default; each new Search API call carries up to
+128 characters of the triggering human question as `ori_question`, never the full history or system
+prompt) and the API endpoint base (the existing endpoint editor: a full URL draft plus an explicit
+Enter confirm and the warning that the credential and query are sent to that HTTPS target — the URL
+shape is validated, the host's trust is the human's call), then the read-only `DeepSeek API Key`.
+Both APIs are separate opt-in billed providers: a login or an ordinary Messages plan does not
+guarantee coverage of their fees, and the default `Messages`/`HTTP` combination calls no billed API.
+This Web configuration belongs to the base profile, not to a Bxx Optional Bundle, so installing or
+enabling another bundle never changes these providers.
+
+A value is written only by its own explicit Enter confirm; moving the focus, opening a detail, Tab,
+refresh and exit never write. The authoritative read-back then decides `Verified` /
+`Not saved` (naming the value the Host keeps) / `Outcome unknown` — a submitted intent never becomes
+a fake success. A custom provider id is reported verbatim, offers no confirmable candidate and is
+never silently replaced by `Messages`/`HTTP`; confirming a value the Host already holds performs no
+redundant write. The choice applies to the next search/fetch; a running operation is never changed
+retroactively. The DeepSeek API key row shows only whether the reference is configured and its
+source layer; `Configure in Models…` / `Clear in Models…` switch to the existing Models
+`API Key Reference` page in the SAME Settings lease for the masked input or the clear confirmation —
+the Web page never collects the key and never runs `/login` / `/logout` text. Esc steps from a detail
+back to the Web list and then back to the `Web Search / Fetch` row; a Remote or unavailable Host
+section still opens a read-only page with its reason but offers no write. The existing complete
+editor is retained (Footer/Keybindings and Extensions transition rows keep working), and its
+historical Web rows share the SAME write queue and read authority until they are retired.
 
 The `Icon style` option in `/settings` (also directly editable under Appearance) switches the TUI's structural icons:
 `Emoji` (default, colorful), `Symbols` (compact single-cell terminal

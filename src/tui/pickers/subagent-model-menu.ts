@@ -247,6 +247,12 @@ export function projectSubagentAllowlist(input: {
  * overlay); Esc returns to `/settings` in one step.
  */
 export class SubagentModelAllowlistPicker implements Component, Focusable, RowBudgetAware {
+  /** The pane-header / breadcrumb name the Settings workspace root paints for
+   *  this embedded specialist page (C2-R3). */
+  readonly title = 'Subagent allowed models'
+  /** The breadcrumb segment after the owning row (`Settings · Agent ·
+   *  Subagent allowed models · Allowed models`). */
+  readonly breadcrumbSuffix = 'Allowed models'
   private readonly deps: SubagentAllowlistPickerDeps
   /** Whether this picker has ever read a REAL section (see the constructor). */
   private sectionReadable = false

@@ -16,7 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/panels/web-provider-panels
  */
 
-import { Input, matchesKey, truncateToWidth, type Component } from '@xmoon76/pi-tui'
+import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
 
 /**
@@ -67,6 +67,9 @@ export class WebEndpointPanel implements Component {
   private readonly save: (url: string) => Promise<void>
   private readonly requestRender: () => void
   private readonly runTask: WebPanelTaskRunner
+  /** The total line budget the HOST grants this panel (its semantic hint
+   *  included). `undefined` = the legacy submenu grant: every line paints. */
+  private maxRows: number | undefined
   private state:
     | { readonly kind: 'hint' | 'saving' }
     | { readonly kind: 'error'; readonly verdict: 'not-saved' | 'outcome-unknown'; readonly message: string }
@@ -101,6 +104,17 @@ export class WebEndpointPanel implements Component {
     this.done(undefined)
   }
 
+  /**
+   * The host's row-budget seam: the granted lines INCLUDE this panel's own
+   * semantic hint line, which is the last line of `render()`. The mandatory
+   * facts (the draft input and the external-send warning) always survive; a
+   * short grant drops the title, the official base and the status line instead
+   * of painting half a sentence with a different meaning.
+   */
+  setMaxRows(rows: number): void {
+    this.maxRows = Math.max(1, Math.floor(rows))
+  }
+
   handleInput(data: string): void {
     if (this.settled) return
     if (matchesKey(data, 'escape')) {
@@ -121,22 +135,48 @@ export class WebEndpointPanel implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-    return [
-      row(color.textStrong('Search / Fetch API Endpoint'), width),
-      ...this.input.render(width),
-      row(this.statusLine(), width),
-      row(`${color.textDim('Changing this sends the DeepSeek API credential and the query to a different endpoint; both the Search and Fetch APIs use it. Only a trusted https base should be confirmed.')}`, width),
-      row(`${color.textDim('Official base: ')}${color.text('https://api.deepseek.com/v1/tools')}${color.textDim('; /search and /fetch are appended.')}`, width),
-      row(color.textDim('Enter confirm · Esc cancel'), width),
-    ]
+    const title = row(color.textStrong('Search / Fetch API Endpoint'), width)
+    const draft = this.input.render(width).map(line => row(line, width))
+    const status = row(this.statusLine(width), width)
+    // The trust warning leads with the ACTIONABLE instruction so a short grant
+    // keeps the meaning: only a trusted HTTPS base, because the credential and
+    // the query are sent there (the URL shape is not a trust check).
+    const danger = wrapTextWithAnsi(
+      'Only confirm a trusted https base: changing it sends the DeepSeek API credential and the query to that target, '
+        + 'for both the Search and Fetch APIs. The URL shape is checked, not the host\'s trust.',
+      Math.max(1, width - 2),
+    ).map(line => row(color.textDim(line), width))
+    const base = wrapTextWithAnsi(
+      `Official base: https://api.deepseek.com/v1/tools; /search and /fetch are appended.`,
+      Math.max(1, width - 2),
+    ).map(line => row(line.startsWith('Official base:')
+      ? `${color.textDim('Official base: ')}${color.text(line.slice('Official base: '.length))}`
+      : color.textDim(line), width))
+    const hint = row(color.textDim('Enter confirm · Esc cancel'), width)
+    if (this.maxRows === undefined) return [title, ...draft, status, ...danger, ...base, hint]
+    const bodyBudget = Math.max(0, this.maxRows - 1)
+    const body = [title, ...draft, status, ...danger, ...base]
+    if (bodyBudget >= body.length) return [...body, hint]
+    // The draft and the verdict word are mandatory; the warning follows as
+    // WHOLE wrapped lines (never a half sentence); the title and the official
+    // base are decoration that drops first.
+    const rest = Math.max(0, bodyBudget - draft.length - 1)
+    const keptDanger = danger.slice(0, rest)
+    const kept = new Set<string>([...draft, status, ...keptDanger])
+    return [...body.filter(line => kept.has(line)), hint]
   }
 
-  private statusLine(): string {
+  private statusLine(width: number): string {
     if (this.state.kind === 'saving') return color.textDim('Saving…')
     if (this.state.kind === 'error') {
       return `${verdictWord(this.state.verdict)}${color.textDim(` · ${this.state.message}`)}`
     }
-    return color.textDim('Confirm only a trusted https URL: the saved endpoint receives the credential.')
+    // The idle hint drops WHOLE: a narrow grant keeps the actionable half
+    // instead of painting a truncated sentence.
+    const hint = ['Confirm only a trusted https URL: the saved endpoint receives the credential.',
+      'Confirm only a trusted https URL.', 'Trusted https only.']
+      .find(text => visibleWidth(text) <= width - 2) ?? ''
+    return color.textDim(hint)
   }
 
   private async submit(): Promise<void> {

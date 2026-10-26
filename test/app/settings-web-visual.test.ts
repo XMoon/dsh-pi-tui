@@ -1,20 +1,25 @@
 /**
- * S2/PR-B §4A.3 — the frozen visual matrix for the NEW `/settings` Web surface.
+ * C2-R4 — the frozen visual matrix for the `/settings → Tools → Web Search /
+ * Fetch` page.
  *
  * Every case renders the REAL `TuiApp` on a `VirtualTerminal` and reads the
- * PHYSICAL frame plus the cell ink of the state chips:
+ * PHYSICAL frame plus the cell ink of the state vocabulary:
  *
- * - the Workspace `Tools` → `Web Search / Fetch` launcher is visible and
- *   reachable at 200×50, 120×40, 100×40, 80×24, 80×10, 72×24 and 44×20;
- * - the legacy Web section paints the value/`[current]`/`[default]` state
- *   facts whole (never `[defaul`), truncates the LABEL with `…` instead, and
- *   keeps `Esc` reachable;
- * - the endpoint editor keeps its title, danger note, full URL and
- *   `Enter confirm · Esc cancel` at the narrow sizes;
- * - the credential panel keeps its title and the two explicit actions;
- * - the ink roles come from the LIVE palette (`textMuted` chips, `warning`
- *   problems, `error` not-saved) in dark and light, and the frames do not
- *   depend on the icon style.
+ * - the page is reachable at 200×50, 120×40, 100×40, 80×24, 80×10, 72×24,
+ *   44×20 and 44×8, paints the six frozen rows (cropped/scrolled when the
+ *   grant is short), keeps the ONE physical Action Bar, and never overflows a
+ *   physical line;
+ * - the Detail pane names the real Host facts (`Current: …`) and the whole
+ *   `[current]` chip; a candidate/verdict is never painted partially;
+ * - the endpoint editor keeps its trust warning and its ONE
+ *   `Enter confirm · Esc cancel` bar at the narrow sizes;
+ * - the credential row keeps the official reference, the presence/source and
+ *   BOTH explicit Models actions at 44×8 and above;
+ * - the ink roles come from the LIVE palette (`textMuted` chips, `error`
+ *   not-saved, `success` verified) in dark and light, and the frames do not
+ *   depend on the icon style;
+ * - pointer gestures use the LAST PAINTED hit map: a press→resize→release is
+ *   refused, a click on an action that is not painted does nothing.
  *
  * FIXTURE: the real command registration + TuiApp + VirtualTerminal.
  * STAND-IN: the Host config service behind the ConfigPort (the real official
@@ -41,15 +46,23 @@ import { waitForFrame } from '../support/frame-wait.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
+import {
+  assertBarIsLastRow,
+  assertNoHalfSegmentInBar,
+  assertOneActiveDevice,
+} from '../support/design-language-frames.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 
+const HOME = '\x1b[H'
 const DOWN = '\x1b[B'
+const UP = '\x1b[A'
 const ENTER = '\r'
 const ESC = '\x1b'
-/** The frozen matrix (docs/architecture/design-language.md §11.2 / §8). */
-const SIZES = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+/** The frozen matrix (docs/architecture/design-language.md §11.2 / §8) plus the
+ *  short floor this page is additionally qualified at. */
+const SIZES = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8]] as const
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -78,14 +91,24 @@ const DEFAULT_DOC: TuiSettingsDoc = {
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
-  readonly store: { web: WebProviderSettings; available: boolean; failNext: string | undefined; endpointStoredValue: string | undefined }
+  readonly store: {
+    web: WebProviderSettings
+    available: boolean
+    failNext: string | undefined
+    endpointStoredValue: string | undefined
+  }
   readonly view: () => string
   readonly plain: () => readonly string[]
   readonly invoke: (name?: string) => unknown
   readonly dispose: () => void
 }
 
-function setup(options: { readonly columns: number; readonly rows: number; readonly endpoint?: string; readonly iconStyle?: 'emoji' | 'symbols' | 'minimal' }): Harness {
+function setup(options: {
+  readonly columns: number
+  readonly rows: number
+  readonly endpoint?: string
+  readonly iconStyle?: 'emoji' | 'symbols' | 'minimal'
+}): Harness {
   const vt = new VirtualTerminal(options.columns, options.rows)
   const store = {
     available: true,
@@ -136,12 +159,6 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
     captureLiveSessionScope: () => undefined,
-    // C3 About seams: this fixture composes no StatusRuntime, so the
-    // sessionless capture is the only reachable state (no scoped read can
-    // start). The subscription STILL must return a real disposer: opening
-    // `/settings` builds the About controller, its close calls `dispose()`,
-    // and a non-function return would abort the TuiApp teardown and leak the
-    // process slot into every later test.
     isSessionScopeCurrent: () => false,
     currentSessionStats: async () => undefined,
     sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
@@ -167,6 +184,17 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
     currentApprovalOverride: () => undefined,
     applyFooterSettings: () => {},
     config: settingsDirectPageConfig({
+      // The Models reference view (the credential deeplink sink) must be
+      // mounted; the real provider plane is the Models suite's job.
+      providers: {
+        available: () => true,
+        listCredentialOptions: () => [],
+        readCatalog: () => ({ options: [], profiles: [] }),
+        readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] }),
+        configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
+        writeProfile: async () => {},
+        writeKeylessProfile: async () => ({ kind: 'written' as const }),
+      },
       configReadiness: () => 'ready',
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
@@ -216,277 +244,203 @@ async function key(h: Harness, data: string): Promise<void> {
   await h.vt.waitForRender()
 }
 
-/** Reach the `Tools` rows level of the real Settings workspace (the Web
- *  launcher lives there; Visual tools is the first row). */
-async function openOtherRows(h: Harness): Promise<void> {
-  h.invoke('settings')
-  // The workspace opens on the About home: walk the rail to the Tools category
-  // (the Web launcher lives there), then enter its Rows level. The wait is on
-  // the PAINTED rail, never a 5ms polling window.
-  await waitForPainted(h, 'the Settings workspace to paint its rail', frame => frame.includes('Settings ·'))
-  await selectSettingsCategory(h.vt, 'Tools')
-  await key(h, ENTER)
-}
+/** One native SGR left-button gesture (1-based terminal cells). */
+const press = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`) }
+const release = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`) }
 
-/** Wait until the PAINTED frame satisfies `predicate` (a real rendered frame per
- *  round via `test/support/frame-wait.ts` — never a timer guess about the Host
- *  read). Returns the satisfied frame. */
+/** Wait until the PAINTED frame satisfies `predicate` (a real rendered frame,
+ *  never a timer guess about the Host read). */
 async function waitForPainted(h: Harness, label: string, predicate: (frame: string) => boolean): Promise<string> {
   await waitForFrame(() => h.view(), predicate, () => h.vt.waitForRender(), label)
   return h.view()
 }
 
-/** Reach the legacy Web section through the real Workspace handoff.
- *
- *  The section's facts start PENDING and settle with the authoritative Host read,
- *  so the helper waits for the SETTLED section (the row's verified chip, or the
- *  stated unavailable/loading-free state) before the caller presses keys: a key
- *  the pending frame drops is lost for good, and a content assertion taken on
- *  the pending frame would judge the transient. */
-async function openWebSection(h: Harness): Promise<void> {
+/** Reach the `Tools` rows level of the real Settings workspace. */
+async function openOtherRows(h: Harness): Promise<void> {
+  h.invoke('settings')
+  await waitForPainted(h, 'the Settings workspace to paint its rail', frame => frame.includes('Settings ·'))
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
+}
+
+/** Open the Web page and wait for its settled authority facts (the page's own
+ *  mount triggers a fresh Host read, so the first frames are Loading…). */
+async function openWebPage(h: Harness): Promise<void> {
   await openOtherRows(h)
   await key(h, DOWN)
   await key(h, ENTER)
-  await waitForPainted(h, 'the Web section to paint its settled facts', frame =>
-    frame.includes('Web Search Provider')
-    && !frame.includes('[Loading…]')
-    && !frame.includes('Current: Loading…'))
+  await waitForPainted(h, 'the Web page to paint its settled facts', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+}
+
+/** Move the page list cursor to one row (Home = first). */
+async function selectListRow(h: Harness, index: number): Promise<void> {
+  await key(h, HOME)
+  for (let step = 0; step < index; step += 1) await key(h, DOWN)
 }
 
 for (const [columns, rows] of SIZES) {
-  test(`the Web launcher and section stay readable and reachable at ${columns}×${rows}`, async t => {
+  test(`the Web page is reachable and budgeted at ${columns}×${rows}`, async t => {
     const h = setup({ columns, rows })
     t.after(h.dispose)
     await openOtherRows(h)
     const launcherRows = h.plain()
     assert.ok(launcherRows.some(line => line.includes('Web Search / Fetch')),
       `the launcher row is painted at ${columns}x${rows}:\n${launcherRows.join('\n')}`)
-    for (const line of launcherRows) {
+    await key(h, DOWN)
+    await key(h, ENTER)
+    const frame = await waitForPainted(h, `the Web page at ${columns}x${rows}`, frame =>
+      frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+    // The six frozen rows exist and the FIRST is always visible at the top; a
+    // short grant crops/scolls the rest instead of inventing a compact mode.
+    assert.match(frame, /Web Search Provider/u, 'the first frozen row is painted')
+    assert.match(frame, /Enter open/u, 'the list bar states the ONE action')
+    const painted = h.plain()
+    for (const line of painted) {
       assert.ok(visibleWidth(line) <= columns, `no frame line exceeds ${columns} cells: ${JSON.stringify(line)}`)
     }
-    await key(h, DOWN)
-    assert.ok(h.view().includes('Web Search / Fetch'), 'the launcher stays selected and inspectable')
-    await key(h, ENTER)
-    const section = h.plain()
-    // The section's state chips are WHOLE (never `[defaul`) and the label is
-    // what truncates; the action bar keeps Esc.
-    assert.ok(section.some(line => line.includes('[current]')), `the current chip survives at ${columns}x${rows}:\n${section.join('\n')}`)
-    for (const line of section) {
-      assert.ok(!line.includes('[curren ') && !line.includes('[defaul '), `no chip is painted partially: ${JSON.stringify(line)}`)
-      assert.ok(!line.includes('[curren|'), 'no chip is cut by a frame edge')
-      assert.ok(visibleWidth(line) <= columns, `no section line exceeds ${columns} cells: ${JSON.stringify(line)}`)
+    // The physical last row is the page's ONE Action Bar.
+    assertBarIsLastRow(painted, (row, col) => h.vt.getCellFgRgb(row, col), 'Esc')
+    assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
+    // Exactly ONE active chrome device: the focused pane header (or none at a
+    // narrow width, where the page paints a single region).
+    const headerRow = painted.findIndex(line => line.includes('[Web Search / Fetch]') || line.includes('[Current / Detail]'))
+    if (headerRow >= 0) {
+      const primaries = assertOneActiveDevice({
+        rows: painted,
+        readColor: (row, col) => h.vt.getCellFgRgb(row, col),
+        primaryRgb: hexToRgb(currentPalette.primary),
+      }, {
+        rows: [headerRow],
+        labelPrefixes: ['[Web Search / Fetch]', '[Current / Detail]'],
+      })
+      assert.equal(primaries.length, 1, `exactly one active pane header at ${columns}x${rows}:\n${frame}`)
     }
-    // The legacy list's own hint row is a single truncatable string (fork
-    // behaviour): at the narrow sizes the word lives in the selected row's
-    // description instead, and the key itself always works.
-    assert.ok(section.some(line => line.includes('Esc')), `Esc is stated at ${columns}x${rows}:\n${section.join('\n')}`)
+    // Scroll the list to the last row: every row stays reachable at every size.
+    for (let step = 0; step < 5; step += 1) await key(h, DOWN)
+    const scrolled = h.view()
+    // The wide/medium projections paint the Detail pane; a narrow frame paints
+    // the list alone, where the selected row's own value IS the Host fact.
+    assert.match(scrolled, /Current: |Reference: |Configured · source: file/u,
+      `the selected row states a real Host fact:\n${scrolled}`)
+    const lastRowPainted = scrolled.includes('DeepSeek API Key') || scrolled.includes('Search / Fetch Endpoint')
+      || scrolled.includes('Search API Result Count') || scrolled.includes('Share Original Question')
+    assert.ok(lastRowPainted, `the scroll really reveals later frozen rows:\n${scrolled}`)
+    // Esc from the list returns to the Tools row (never a second overlay).
     await key(h, ESC)
-    assert.ok(h.view().includes('Settings · Tools'),
-      `Esc returns to the Workspace at ${columns}x${rows}`)
-    const [narrowest] = [section.find(line => line.includes('Web Search Provider')) ?? '']
-    assert.ok(narrowest.length > 0, 'the provider row exists')
+    assert.match(h.view(), /Settings · Tools/u, 'Esc returns to the Tools level')
+    assert.doesNotMatch(h.view(), /Legacy|existing settings editor/iu,
+      'the legacy SettingsList is never opened by the Web row')
+  })
+}
+
+for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [44, 20], [44, 8]] as const) {
+  test(`the Detail pane paints the current fact and whole chips at ${columns}×${rows}`, async t => {
+    const h = setup({ columns, rows })
+    t.after(h.dispose)
+    await openWebPage(h)
+    await selectListRow(h, 0)
+    await key(h, ENTER) // the row Detail
+    const frame = h.view()
+    assert.match(frame, /Current: Messages/u, `the Detail states the real Host value:\n${frame}`)
+    assert.match(frame, /Enter confirm/u, 'the Detail bar advertises the ONE confirm action')
+    if (columns >= 80) {
+      assert.match(frame, /\[current\]/u, 'the current chip is painted WHOLE')
+      assert.ok(!frame.includes('[curren ') && !frame.includes('[curren|') && !frame.includes('[curren]'),
+        `no chip is painted partially:\n${frame}`)
+    }
+    // Moving the highlight never writes and keeps ONE active cursor.
+    await key(h, DOWN)
+    assert.match(h.view(), /› DeepSeek Search API/u, 'the cursor moved to the next candidate')
+    const painted = h.plain()
+    for (const line of painted) assert.ok(visibleWidth(line) <= columns)
   })
 }
 
 for (const [columns, rows] of SIZES) {
-  test(`the endpoint editor keeps its title, danger note and confirm/cancel hint at ${columns}×${rows}`, async t => {
+  test(`the endpoint editor keeps its trust warning and confirm/cancel bar at ${columns}×${rows}`, async t => {
     const longEndpoint = 'https://gateway.example.test/deepseek/v1/tools/with/a/long/path'
     const h = setup({ columns, rows, endpoint: longEndpoint })
     t.after(h.dispose)
-    await openWebSection(h)
-    // The endpoint row is the fifth Web setting: reach it and open the editor.
-    for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-    await key(h, ENTER)
-    const frame = h.plain()
-    assert.ok(frame.some(line => line.includes('Search / Fetch API Endpoint')),
-      `the editor title is painted at ${columns}x${rows}:\n${frame.join('\n')}`)
-    assert.ok(frame.some(line => line.includes('Changing this sends the DeepSeek API')),
-      'the external-send danger note survives')
-    assert.ok(frame.some(line => line.includes('Enter confirm') && line.includes('Esc cancel')),
-      `the whole confirm/cancel hint survives at ${columns}x${rows}`)
-    for (const line of frame) {
-      assert.ok(!/Esc ca$|Esc can$|Esc canc$/.test(line), 'the hint is never a partial word')
-      assert.ok(visibleWidth(line) <= columns)
-    }
-    await key(h, ESC)
+    await openWebPage(h)
+    await selectListRow(h, 4)
+    await key(h, ENTER) // mount the endpoint editor
+    const frame = h.view()
+    assert.match(frame, /Enter confirm · Esc cancel/u, `the whole confirm/cancel bar survives at ${columns}x${rows}`)
+    // The trust warning leads with the actionable half and never loses it.
+    assert.match(frame, /Only confirm a trusted https base/u, `the trust warning is painted:\n${frame}`)
+    assert.ok(!/Esc ca$|Esc can$|Esc canc$|Enter confir$/u.test(frame), 'no hint is painted as a partial word')
+    for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
+    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Enter confirm · Esc cancel')
+    await key(h, ESC) // cancel without a write
+    assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Esc cancels the draft')
   })
 }
 
-for (const [label, endpoint, wideNeedle] of [
-  ['the packaged default', 'https://api.deepseek.com/v1/tools', 'https://api.deepseek.com/v1/tools'],
-  ['a custom valid base', 'https://gateway.example.test/deepseek/v1', 'https://gateway.example.test'],
-] as const) {
-  for (const [columns, rows] of SIZES) {
-    test(`a readable endpoint row states its URL, never [unavailable] at ${columns}×${rows}: ${label}`, async t => {
-      const h = setup({ columns, rows, endpoint })
-      t.after(h.dispose)
-      await openWebSection(h)
-      // The endpoint row is the fifth Web setting: select it so its Detail is
-      // the parsed one, then read the ROW's own value slot. Only the LABEL
-      // truncates with `…` at the 44-column floor, so the needle is its stem.
-      for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-      const row = h.plain().find(line => line.includes('Search / Fetch API Endp')) ?? ''
-      assert.ok(row.length > 0, `the endpoint row is painted at ${columns}x${rows}:\n${h.plain().join('\n')}`)
-      assert.ok(!row.includes('[unavailable]'),
-        `a readable endpoint is never claimed unavailable at ${columns}x${rows}:\n${row}`)
-      // The slot paints the authoritative URL (truncated to the cells it has at
-      // the narrow sizes), never a state word.
-      assert.ok(row.includes(columns >= 72 ? wideNeedle : 'https://'),
-        `the row states the URL the Host returned at ${columns}x${rows}:\n${row}`)
-      for (const line of h.plain()) {
-        assert.ok(visibleWidth(line) <= columns, `no frame line exceeds ${columns} cells: ${JSON.stringify(line)}`)
-      }
-    })
-  }
+for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [44, 8]] as const) {
+  test(`the credential row keeps the reference, presence and BOTH actions at ${columns}×${rows}`, async t => {
+    const h = setup({ columns, rows })
+    t.after(h.dispose)
+    await openWebPage(h)
+    await selectListRow(h, 5)
+    await key(h, ENTER)
+    const frame = h.view()
+    assert.match(frame, /Reference: DEEPSEEK_API_KEY/u, `the official reference is painted:\n${frame}`)
+    assert.match(frame, /Configured/u, 'presence/source come from the store')
+    assert.match(frame, /Configure in Models…/u, 'Configure is painted')
+    assert.match(frame, /Clear in Models…/u, 'Clear is painted (the reference is configured)')
+    assert.match(frame, /Enter open in Models/u, 'the ONE action bar names the Models deeplink')
+    assert.doesNotMatch(frame, /sk-|secret value/iu, 'no secret is ever painted')
+    for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
+    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc back')
+    // Enter opens the EXISTING Models page in the same lease.
+    await key(h, ENTER)
+    await waitForPainted(h, 'the Models page on the reference', frame =>
+      frame.includes('Settings · Models')
+      && (frame.includes('API Key Reference') || frame.includes('DEEPSEEK_API_KEY')))
+    assert.match(h.view(), /Settings · Models/u)
+    assert.match(h.view(), /API Key Reference/u, 'the Models page owns the reference view')
+  })
 }
 
-test('an unreadable endpoint authority still paints [unavailable] on the row', async t => {
-  const h = setup({ columns: 120, rows: 40 })
-  t.after(h.dispose)
-  h.store.available = false
-  await openWebSection(h)
-  // The window shows only the first rows of the section: scroll the endpoint row
-  // into view (the fifth Web setting) before reading its value slot.
-  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  const row = h.plain().find(line => line.includes('Search / Fetch API Endp')) ?? ''
-  assert.ok(row.includes('[unavailable]'),
-    `an authority that cannot be read is stated as unavailable:\n${h.plain().join('\n')}`)
-})
-
-test('the credential panel keeps its title and both explicit actions at 72×24 and 44×20', async t => {
-  for (const [columns, rows] of [[72, 24], [44, 20]] as const) {
-    const h = setup({ columns, rows })
-    try {
-      await openWebSection(h)
-      for (let index = 0; index < 5; index += 1) await key(h, DOWN)
-      await key(h, ENTER)
-      const frame = h.plain()
-      assert.ok(frame.some(line => line.includes('DeepSeek API Key')), `title at ${columns}x${rows}:\n${frame.join('\n')}`)
-      assert.ok(frame.some(line => line.includes('Configure')), 'Configure… is reachable')
-      assert.ok(frame.some(line => line.includes('Clear')), 'Clear… is reachable')
-      assert.ok(frame.some(line => line.includes('Esc')), 'Esc is reachable')
-      await key(h, ESC)
-    } finally {
-      h.dispose()
-    }
-  }
-})
-
-for (const [columns, rows] of SIZES) test(`a refused endpoint write reports the value the Host keeps at ${columns}x${rows}`, async t => {
-  const h = setup({ columns, rows })
-  t.after(h.dispose)
-  await openWebSection(h)
-  // The Host KEEPS another value than the submitted endpoint (a canonical form
-  // or a winning project layer). The panel states the verdict and the value;
-  // once the panel is gone (the section reopened from the Workspace) the ROW's
-  // own `Current:` fact still reports the value the Host keeps.
-  h.store.endpointStoredValue = 'https://other.example/v1'
-  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  await key(h, ENTER)
-  await key(h, ENTER)
-  // The verdict is a PAINTED fact of the panel (the write and its read-back
-  // settled), so wait for it instead of guessing the async round trip in 20ms.
-  const panel = await waitForPainted(h, `the refused endpoint verdict at ${columns} columns`, frame =>
-    frame.includes('Not saved'))
-  assert.match(panel, /Not saved/u, `the panel states Not saved at ${columns} columns:\n${panel}`)
-  if (columns >= 72) {
-    assert.ok(panel.includes('the Host keeps "https://other.example/v1"'),
-      `the panel names the kept value at ${columns} columns:\n${panel}`)
-  }
-  await key(h, ESC)
-  await key(h, ESC)
-  await key(h, ENTER)
-  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-  const reopened = await waitForPainted(h, `the reopened row fact at ${columns} columns`, frame =>
-    frame.includes('Current: https://other.example/v1'))
-  assert.ok(reopened.includes('Current: https://other.example/v1'),
-    `the reopened row reports the value the Host keeps at ${columns} columns:\n${reopened}`)
-  for (const line of h.plain()) {
-    assert.ok(visibleWidth(line) <= columns, `no refused-endpoint row overflows ${columns} cells: ${JSON.stringify(line)}`)
-  }
-})
-
-test('the refused-endpoint fact survives the light, custom and minimal-icon skins', async t => {
-  // ONE live TuiApp per process: the skins are checked sequentially on their own
-  // open. The changed row text is plain/dim description text, so the requirement
-  // is that the FACT is unchanged and no new glyph appears.
-  const skins = [
-    { label: 'light', iconStyle: 'emoji', theme: (): void => { setTheme('light') } },
-    { label: 'custom symbols', iconStyle: 'symbols', theme: (): void => { setTheme('custom', { ...currentPalette, textMuted: '#123456' }) } },
-    { label: 'dark minimal icons', iconStyle: 'minimal', theme: (): void => { setTheme('dark') } },
-  ] as const
-  try {
-    for (const skin of skins) {
-      skin.theme()
-      const h = setup({ columns: 120, rows: 40, iconStyle: skin.iconStyle })
-      try {
-        await openWebSection(h)
-        h.store.endpointStoredValue = 'https://other.example/v1'
-        for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-        await key(h, ENTER)
-        await key(h, ENTER)
-        await waitForPainted(h, `the ${skin.label} skin's refused verdict`, frame =>
-          frame.includes('Not saved'))
-        assert.match(h.view(), /Not saved/u, `the ${skin.label} skin states the verdict:\n${h.view()}`)
-        assert.ok(h.view().includes('the Host keeps "https://other.example/v1"'),
-          `the ${skin.label} skin names the kept value:\n${h.view()}`)
-        await key(h, ESC)
-        await key(h, ESC)
-        await key(h, ENTER)
-        for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-        await waitForPainted(h, `the ${skin.label} skin's row fact`, frame =>
-          frame.includes('Current: https://other.example/v1'))
-        assert.ok(h.view().includes('Current: https://other.example/v1'),
-          `the ${skin.label} skin keeps the row fact:\n${h.view()}`)
-        for (const line of h.plain()) {
-          assert.ok(visibleWidth(line) <= 120, `no ${skin.label} row overflows: ${JSON.stringify(line)}`)
-        }
-      } finally {
-        h.dispose()
-      }
-    }
-  } finally {
-    setTheme('dark')
-  }
-})
-
-test('the state chips use their frozen ink roles in dark and light', async t => {
-  /** The ink of one chip ON the row that owns it (the description text also
-   *  mentions the chip words, and it is painted textDim). */
+test('the state vocabulary uses its frozen ink roles in dark and light', async t => {
   const chipCell = (h: Harness, rowNeedle: string, needle: string): number | undefined => {
     const lines = h.plain()
     const row = lines.findIndex(line => line.includes(rowNeedle) && line.includes(needle))
     assert.ok(row >= 0, `the frame paints ${needle} on ${rowNeedle}:\n${h.view()}`)
     return h.vt.getCellFgRgb(row, lines[row]!.indexOf(needle))
   }
-  // ONE live TuiApp per process: the two palettes are checked sequentially.
   setTheme('dark')
   const dark = setup({ columns: 120, rows: 40 })
   try {
-    await openWebSection(dark)
-    assert.equal(chipCell(dark, 'Web Search Provider', '[current]'), hexToRgb(currentPalette.textMuted), 'the current chip is textMuted')
-    assert.equal(chipCell(dark, 'Web Search Provider', '[default]'), hexToRgb(currentPalette.textMuted), 'the default chip is textMuted')
-    const darkChip = chipCell(dark, 'Web Search Provider', '[current]')
-    // A refused write paints the not-saved chip in error ink (the word rides
-    // the chip: never a colour-only signal).
-    dark.store.failNext = 'mutate rejected'
+    await openWebPage(dark)
+    await selectListRow(dark, 0)
     await key(dark, ENTER)
-    await waitForPainted(dark, 'the failed write to paint its Not saved chip', frame =>
-      frame.includes('[Not saved]'))
-    assert.ok(dark.view().includes('[Not saved]'), `the failed write states Not saved:\n${dark.view()}`)
-    assert.equal(chipCell(dark, 'Web Search Provider', '[Not saved]'), hexToRgb(currentPalette.error), 'Not saved wears the error token')
+    const darkChip = chipCell(dark, 'Messages', '[current]')
+    assert.equal(darkChip, hexToRgb(currentPalette.textMuted), 'the current chip is textMuted')
+    // A REFUSED write paints Not saved in error ink (the word rides the state).
+    dark.store.failNext = 'mutate rejected'
+    await key(dark, DOWN)
+    await key(dark, ENTER)
+    await waitForPainted(dark, 'the refused write verdict', frame => frame.includes('Not saved'))
+    const verdictRow = dark.plain().findIndex(line => line.includes('Not saved ·'))
+    assert.ok(verdictRow >= 0, `the Detail paints the verdict:\n${dark.view()}`)
+    const verdictCol = dark.plain()[verdictRow]!.indexOf('Not saved ·')
+    assert.equal(dark.vt.getCellFgRgb(verdictRow, verdictCol), hexToRgb(currentPalette.error),
+      'Not saved wears the error token')
     dark.dispose()
 
-    // The LIGHT palette supplies the same roles on its own open. A live switch
-    // while the legacy editor is mounted keeps the pre-painted chip ANSI until
-    // the next open — the SAME property as the existing pre-painted state chips
-    // of the theme/preset pickers (recorded in the S2 evidence).
+    // The LIGHT palette supplies the same roles on its own open.
     setTheme('light')
     const light = setup({ columns: 120, rows: 40 })
     try {
-      await openWebSection(light)
-      assert.equal(chipCell(light, 'Web Search Provider', '[current]'), hexToRgb(currentPalette.textMuted), 'the light palette supplies the chip ink')
-      assert.notEqual(hexToRgb(currentPalette.textMuted), darkChip, 'the two palettes really differ')
+      await openWebPage(light)
+      await selectListRow(light, 0)
+      await key(light, ENTER)
+      assert.equal(chipCell(light, 'Messages', '[current]'), hexToRgb(currentPalette.textMuted),
+        'the light palette supplies the same role')
+      assert.notEqual(hexToRgb(currentPalette.textMuted), darkChip ?? -1,
+        'the two palettes really differ (the probe was not vacuous)')
     } finally {
       light.dispose()
     }
@@ -495,112 +449,127 @@ test('the state chips use their frozen ink roles in dark and light', async t => 
   }
 })
 
+test('a VERIFIED write paints Verified in the success role', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  try {
+    await openWebPage(h)
+    await selectListRow(h, 0)
+    await key(h, ENTER)
+    await key(h, DOWN)
+    await key(h, ENTER)
+    await waitForPainted(h, 'the verified verdict', frame => frame.includes('Verified'))
+    const lines = h.plain()
+    const row = lines.findIndex(line => line.includes('Verified'))
+    assert.ok(row >= 0)
+    const col = lines[row]!.indexOf('Verified')
+    assert.equal(h.vt.getCellFgRgb(row, col), hexToRgb(currentPalette.success),
+      'Verified wears the success token')
+  } finally {
+    h.dispose()
+    setTheme('dark')
+  }
+})
+
 test('a CJK custom provider id stays cell-safe at the frozen sizes', async t => {
-  for (const [columns, rows] of [[100, 40], [44, 20]] as const) {
+  for (const [columns, rows] of [[100, 40], [44, 20], [44, 8]] as const) {
     const h = setup({ columns, rows })
     try {
       h.store.web.searchProvider = '搜索-提供方-一号'
-      await openWebSection(h)
+      await openWebPage(h)
       const frame = h.plain()
       for (const line of frame) {
         assert.ok(visibleWidth(line) <= columns, `no CJK row overflows ${columns} cells: ${JSON.stringify(line)}`)
       }
       assert.ok(frame.some(line => line.includes('搜索-提供方-一号')), `the custom id is reported as-is at ${columns}x${rows}`)
-      assert.ok(frame.some(line => line.includes('[unavailable]')), 'a custom route stays unavailable for this selector')
     } finally {
       h.dispose()
     }
   }
 })
 
-test('a CUSTOM palette supplies the chip roles on its own open', async t => {
-  setTheme('custom', { ...currentPalette, textMuted: '#123456' })
+test('a LIVE palette switch re-paints the page with the NEW ink (no cached ANSI)', async t => {
   const h = setup({ columns: 120, rows: 40 })
   try {
-    await openWebSection(h)
-    const lines = h.plain()
-    const row = lines.findIndex(line => line.includes('Web Search Provider') && line.includes('[current]'))
-    assert.ok(row >= 0, `the frame paints the chips:\n${h.view()}`)
-    assert.equal(h.vt.getCellFgRgb(row, lines[row]!.indexOf('[current]')), hexToRgb('#123456'),
-      'the custom palette supplies the chip ink (no token is hard-coded)')
-  } finally {
-    h.dispose()
-    setTheme('dark')
-  }
-})
-
-test('a LIVE palette switch re-bakes the mounted Web chips (frozen §4A.2)', async t => {
-  const h = setup({ columns: 120, rows: 40 })
-  try {
-    await openWebSection(h)
+    await openWebPage(h)
+    await selectListRow(h, 0)
+    await key(h, ENTER)
     const ink = (needle: string): number | undefined => {
       const lines = h.plain()
-      const row = lines.findIndex(line => line.includes('Web Search Provider') && line.includes(needle))
+      const row = lines.findIndex(line => line.includes(needle))
       assert.ok(row >= 0, `the frame paints ${needle}:\n${h.view()}`)
       return h.vt.getCellFgRgb(row, lines[row]!.indexOf(needle))
     }
     assert.equal(ink('[current]'), hexToRgb(currentPalette.textMuted), 'the chip starts on the live palette')
-    // The REAL switch path: the app installs the palette and notifies observers
-    // (the Web rows rebuild their pre-painted chips in that callback).
     h.app.applyPalette({ ...currentPalette, textMuted: '#123456' })
     await h.vt.waitForRender()
     assert.equal(ink('[current]'), hexToRgb('#123456'),
-      'the mounted chip follows the NEW palette instead of its creation-time ANSI')
+      'the mounted page follows the NEW palette instead of its creation-time ANSI')
   } finally {
     h.dispose()
     setTheme('dark')
   }
 })
 
-test('the credential action cursor wears the frozen `primary` role', async t => {
-  const h = setup({ columns: 120, rows: 40 })
-  try {
-    await openWebSection(h)
-    for (let index = 0; index < 5; index += 1) await key(h, DOWN)
-    await key(h, ENTER)
-    const lines = h.plain()
-    const row = lines.findIndex(line => line.includes('Configure…'))
-    assert.ok(row >= 0, `the credential panel paints its actions:\n${h.view()}`)
-    const cursorColumn = lines[row]!.indexOf('›')
-    assert.ok(cursorColumn >= 0, 'the focused action carries the cursor')
-    assert.equal(h.vt.getCellFgRgb(row, cursorColumn), hexToRgb(currentPalette.primary),
-      'the active cursor uses the frozen primary role, never accent')
-  } finally {
-    h.dispose()
-  }
-})
-
-// ── D3-2: the existing Web settings help states the real rc.2 facts ────────
-
-test('the launcher and Web rows explain opt-in billing, defaults and ori_question', async t => {
+test('a click on a list row opens its Detail; a press→resize→release never does', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
-  await openOtherRows(h)
-  await key(h, DOWN)
-  const compact = (): string => h.plain().join(' ').replace(/[\u2500-\u257f]/gu, ' ').replace(/\s+/gu, ' ')
-  assert.match(compact(), /Host Web settings for the base profile, .*?not an Optional Bundle/u)
-  // The wide projection paints the category rail beside the detail column, so
-  // a detail line that wraps gets the rail's own cells between the two lines.
-  // Assert the contiguous semantic halves instead of a cross-column sentence.
-  assert.match(compact(), /Messages search · HTTP fetch/u)
-  // The sentence wraps across the rail column: assert its contiguous halves.
-  assert.match(compact(), /never change them and the/u)
-  assert.match(compact(), /defaults call no billed API/u)
-  assert.match(compact(), /a Messages plan does not guarantee coverage/u)
-  assert.match(compact(), /Share Original Question is on by default/u)
-  assert.match(compact(), /up to 128 characters of the human question/u)
-  assert.match(compact(), /never the full history or system prompt/u)
-  assert.match(compact(), /Verified only after the Host write and authoritative read-back agree/u)
+  await openWebPage(h)
+  const lines = h.plain()
+  const countRow = lines.findIndex(line => line.includes('Search API Result Count'))
+  assert.ok(countRow >= 0)
+  press(h, countRow, 4)
+  release(h, countRow, 4)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Current: 10/u, `the clicked row opened its Detail:\n${h.view()}`)
 
-  await key(h, DOWN)
+  // Back to the list, then a gesture straddling a RESIZE is refused.
+  await key(h, ESC)
+  const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
+  assert.ok(providerRow >= 0)
+  press(h, providerRow, 4)
+  h.vt.resize(100, 30)
+  await h.vt.waitForRender()
+  release(h, providerRow, 4)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Enter open/u, 'the refused gesture stays at the list (no Detail opened)')
+})
+
+test('a click on an option only highlights it; the explicit Enter is the ONE write', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await selectListRow(h, 0)
   await key(h, ENTER)
-  assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
-  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not guarantee coverage\)/u)
-  assert.match(compact(), /up to 128 characters of the triggering question are sent as ori_question/u)
+  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · opt-in'))
+  assert.ok(optionRow >= 0, `the candidate row is painted:\n${h.view()}`)
+  press(h, optionRow, 40)
+  release(h, optionRow, 40)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'a click never writes')
+  await key(h, ENTER) // the explicit confirm of the highlighted candidate
+  await waitForPainted(h, 'the confirmed write', frame => frame.includes('Verified'))
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
 
-  // The Share Original Question row states the packaged ON default and the
-  // exact payload boundary (not the full history/system prompt).
-  for (let index = 0; index < 3; index += 1) await key(h, DOWN)
-  assert.match(compact(), /On \(packed default for the DeepSeek Search API\)/u)
-  assert.match(compact(), /never the full history or system prompt/u)
+test('an unavailable authority paints the reason and offers no Confirm', async t => {
+  for (const [columns, rows] of [[120, 40], [44, 20], [44, 8]] as const) {
+    const h = setup({ columns, rows })
+    try {
+      h.store.available = false
+      await openOtherRows(h)
+      await key(h, DOWN)
+      await key(h, ENTER)
+      const frame = await waitForPainted(h, 'the unavailable page', frame =>
+        frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+      assert.match(frame, /Unavailable/u, `the unreadable authority is stated:\n${frame}`)
+      await key(h, ENTER) // the read-only Detail
+      const detail = h.view().replace(/\s+/gu, ' ')
+      assert.match(detail, /the Host Web provider settings are not available on this backend/u,
+        'the Detail names the real reason')
+      assert.doesNotMatch(h.view(), /Enter confirm/u, 'no Confirm affordance exists without an authority')
+      for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
+    } finally {
+      h.dispose()
+    }
+  }
 })
