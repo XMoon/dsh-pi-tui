@@ -410,3 +410,33 @@ test('the design-language size matrix keeps one action bar, a body row and whole
     if (bar.split(' · ').length > 1) assert.ok(!bar.includes('…'), `${label}: no truncated segment`)
   }
 })
+
+test('long filenames that differ only at the end stay distinguishable in the list', () => {
+  const long = 'report-2026-10-client-server-migration-final-version-'
+  const h = harness(snapshotOf([{ turn: 1, files: [`/ws/docs/${long}alpha.md`, `/ws/docs/${long}beta.md`] }]))
+  h.setSize(44, 20)
+  const rows = h.rows()
+  const listed = rows.filter(row => row.includes('report-2026-10'))
+  assert.equal(listed.length, 2, `both rows are painted:\n${rows.join('\n')}`)
+  assert.notEqual(listed[0]!.trim(), listed[1]!.trim(), 'the rows must differ')
+  assert.ok(listed[0]!.includes('alpha.md'), `the distinguishing tail survives: ${listed[0]}`)
+  assert.ok(listed[1]!.includes('beta.md'), `the distinguishing tail survives: ${listed[1]}`)
+  assert.ok(listed[0]!.includes('…'), 'the clamp is visible, never silent')
+})
+
+test('the Details title carries the SAME unique label the list shows', () => {
+  const h = harness(snapshotOf([{
+    turn: 1,
+    files: ['/a/report\u001b[31m', '/a/report\u001b[32m'],
+  }]))
+  h.setSize(100, 30)
+  h.type('enter')
+  assert.ok(h.rows()[0]!.includes('report · Details'), h.rows()[0]!)
+  h.type('esc')
+  h.type('down')
+  h.type('enter')
+  assert.ok(h.rows()[0]!.includes('report (2) · Details'),
+    `the second declaration keeps its own title:\n${h.rows()[0]}`)
+  // The HOST line still carries the safe projection of the RAW declared path.
+  assert.ok(h.rows().some(row => row.includes('Host: ') && row.includes('/a/report')))
+})
