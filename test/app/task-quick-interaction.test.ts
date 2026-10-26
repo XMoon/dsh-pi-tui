@@ -1059,7 +1059,7 @@ test('Job and Settings workspace leases retire active Quick and never restore it
   assert.ok(!view(h.vt).includes('Task Quick'), 'the closed workspace leaves no Quick identity row')
 
   assert.equal(h.app.enterTaskQuick(), true, 'Quick may be explicitly reopened after returning')
-  const settingsHandle = h.app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: { tui: '0.0.0-test', dsh: '0.0.0-test' } })
+  const settingsHandle = h.app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: { tui: '0.0.0-test', dsh: '0.0.0-test' } })
   await h.vt.waitForRender()
   assert.ok(h.app.focusedComponentForTest() instanceof SettingsWorkspacePanel, 'Settings takes ownership')
   assert.equal(h.app.taskQuickFocusedForTest(), false, 'the Settings lease retires Quick')
@@ -1079,7 +1079,7 @@ test('a synchronous Footer callback workspace wins over an older Quick opener', 
     if (reenter) {
       reenter = false
       if (app === undefined) throw new Error('the TUI must be mounted before the reentrant witness')
-      nestedSettings = app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: { tui: '0.0.0-test', dsh: '0.0.0-test' } })
+      nestedSettings = app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: { tui: '0.0.0-test', dsh: '0.0.0-test' } })
     }
     return originalFooterText.call(host)
   }

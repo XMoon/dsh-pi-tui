@@ -4,7 +4,7 @@
  * This is the ONE Web provider configuration surface. It is mounted as an
  * EMBEDDED SPECIALIST PAGE inside the existing Settings Workspace lease (the
  * same body/chrome/Action Bar as the subagent allowlist picker) — never a
- * second alt-screen overlay and never the legacy `SettingsList`.
+ * second alt-screen overlay.
  *
  * Authority is deliberately NOT here:
  *  - the six displayed facts come from the command owner's LATEST authoritative
@@ -88,15 +88,6 @@ export const WEB_SETTINGS_ROW_IDS = [
   'web-credential',
 ] as const
 export type WebSettingsRowId = (typeof WEB_SETTINGS_ROW_IDS)[number]
-
-/** The five configured rows as a membership guard for the legacy editor. */
-export const WEB_SETTING_ROW_ID_SET: ReadonlySet<string> = new Set<WebSettingRowId>([
-  'web-search-provider',
-  'web-fetch-provider',
-  'web-search-count',
-  'web-send-original-question',
-  'web-search-endpoint',
-])
 
 /** The latest authority facts the page renders. `pending` is a read in flight
  *  (or about to start): the page must never present a pre-open value as the

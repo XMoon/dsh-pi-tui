@@ -44,6 +44,7 @@ import { SettingsRegistry } from '../../src/extension/internal/settings-registry
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
+import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
 import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState } from '../../src/runtime/config-port.ts'
@@ -8007,18 +8008,20 @@ test('Fullscreen stores the preference while the workspace still owns the screen
   h.dispose()
 })
 
-// Regression: C2-R2 acceptance R2-08.
-test('Fullscreen never switches the screen when the workspace closes for another reason', async () => {
-  // A Legacy hand-off closes the workspace through the compatibility bridge: the
-  // verified preference must NOT swap the screen behind the mounting editor.
+// Regression: C2-R2 acceptance R2-08 / C2-R7 acceptance R7-17.
+test('Fullscreen never switches the screen while a same-lease specialist page owns the workspace', async () => {
+  // A specialist page (not a user exit) keeps the workspace leased: the
+  // verified preference must NOT swap the physical screen behind it.
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark', fullscreen: 'off' } })
   await chooseRow(h, 'Input & Terminal', INPUT_TERMINAL_ROWS, 'Fullscreen')
   await highlightCandidate(h, 'on')
   await key(h, '\r')
   await settle(h)
   assert.equal(h.doc.fullscreen, 'on')
-  // Navigate to the remaining handoff row and activate it: `legacy-handoff`.
-  await key(h, '\x1b') // back to the rows level
+  // Walk to the LAST row and mount its same-lease page. A settled choice's Esc
+  // lands on the Rows level (B-02), so ONE back key is what the user presses.
+  await key(h, '\x1b')
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Input & Terminal · Rows/u, `the Rows level owns the keys:\n${h.view()}`)
   for (let step = 0; step < INPUT_TERMINAL_ROWS.length - 1; step += 1) await key(h, '\x1b[B')
   assert.ok(h.view().includes('> Keyboard shortcuts…'))
   await key(h, '\r')
@@ -8026,6 +8029,7 @@ test('Fullscreen never switches the screen when the workspace closes for another
   assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts/u,
     'the same-lease page still owns the Settings screen')
   assert.equal(h.app.isFullscreen(), false, 'opening the page never swaps the screen')
+  assert.equal(h.doc.fullscreen, 'on', 'the verified preference is still stored for the next mount')
   h.dispose()
 })
 
@@ -8845,5 +8849,144 @@ test('a Fullscreen On -> Off choice switches OFF after the normal exit', async (
   assert.equal(h.app.isFullscreen(), false, 'the normal exit leaves the alt screen')
   assert.equal(h.replacements(), 1, 'the post-close switch wrote NO second document copy')
   assert.equal(h.fullscreenChanges(), 0, 'and fired no persistence callback')
+  h.dispose()
+})
+
+/** Walk back to the category rail from whatever level/page owns the keyboard.
+ *  The bound is the deepest legal stack (page -> Detail -> Rows -> rail), so a
+ *  missing step fails the case instead of hanging it. */
+async function backToRail(h: Harness): Promise<void> {
+  for (let step = 0; step < 4; step += 1) {
+    if (/Settings · Categories/u.test(h.rowsPlain()[0] ?? '')) return
+    await key(h, '\x1b')
+  }
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Categories/u, `the rail never regained the keyboard:\n${h.view()}`)
+}
+
+/** From the rail, walk to one category by resuming at the FIRST category: the
+ *  rail keeps its previous selection, so Home is what makes the walk absolute. */
+async function railToCategory(h: Harness, category: string): Promise<void> {
+  await backToRail(h)
+  await key(h, '\x1b[H')
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Categories/u)
+  assert.match(h.view(), /^> About/mu, `Home must land on the first category:\n${h.view()}`)
+  await h.walkToCategory(category)
+}
+
+// Regression: C2-R7 acceptance R7-APP1 / R7-03 / R7-13.
+test('R7-APP1 the real /settings route edits rows, choices and pages without ever calling app.openSettings', async () => {
+  // ONE live extension registration: its row is the newest Settings content and
+  // its confirm goes through the real Registry, so the negative control covers
+  // the newest owner as well as the original document rows.
+  const registry = new SettingsRegistry(() => {})
+  const registryCalls: string[] = []
+  const handle = registry.register({
+    id: 'acme.r7-threshold',
+    label: 'R7 threshold',
+    description: 'the R7 acceptance registration',
+    currentValue: '3',
+    values: ['1', '3', '5'],
+    order: 10,
+    onChange: (value) => { registryCalls.push(value); return true },
+  }, 'acme-r7')
+  const h = setup({ columns: 140, rows: 40, settingsRegistry: registry })
+
+  // The counted call is the REAL public method, wrapped only on this instance:
+  // the unbound original is saved and invoked through `.call` so the recorder
+  // cannot silently divert to a prototype-bound copy. It is restored verbatim.
+  const originalOpenSettings = h.app.openSettings
+  let openSettingsCalls = 0
+  const instance = h.app as unknown as { openSettings: typeof originalOpenSettings }
+  instance.openSettings = function (this: TuiApp, ...args: Parameters<typeof originalOpenSettings>) {
+    openSettingsCalls += 1
+    return originalOpenSettings.apply(this, args)
+  }
+
+  // 1. A migrated document row: the REAL choice confirms and verifies.
+  await h.open('Appearance')
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\r') // L1 -> the inline choice
+  assert.match(h.view(), /Choose value/u)
+  await highlightCandidate(h, 'light')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.theme, 'light', 'the Settings workspace really wrote the document')
+  assert.match(h.view(), /Verified/u, 'and its authoritative re-read verified it')
+  await backToRail(h)
+
+  // 2. The Web row mounts the embedded page in THIS lease.
+  await railToCategory(h, 'Tools')
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\x1b[B') // Visual tools -> Web Search / Fetch
+  await key(h, '\r') // the row's own page
+  assert.match(h.rowsPlain()[0]!, /Settings · Tools · Web Search \/ Fetch/u,
+    `the Web page owns THIS workspace body:\n${h.view()}`)
+  assert.equal(h.app.overlayGraphState().handles, 0, 'no second overlay mounts for the Web row')
+  await backToRail(h)
+
+  // 3. The NEWEST owner: the live extension row confirms through its Registry.
+  await backToRail(h)
+  await key(h, '\x1b[F') // End -> the appended Extensions category
+  assert.match(h.view(), /^> Extensions/mu)
+  await key(h, '\r') // rail -> the owner's Rows level
+  await key(h, '\r') // the row's native choice
+  await highlightCandidate(h, '1')
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(registryCalls, ['1'], 'the live registration received the confirmed value')
+  assert.equal(registry.rows()[0]?.currentValue, '1', 'the Registry really changed')
+  assert.match(h.view(), /Verified/u)
+
+  // 4. Leaving the workspace is the ordinary close, and the whole session never
+  //    called the independent `SettingsList` entry point.
+  await backToRail(h)
+  await key(h, '\x1b') // rail -> close
+  assert.ok(!h.view().includes('Settings ·'), `the workspace closed normally:\n${h.view()}`)
+  assert.equal(openSettingsCalls, 0, 'no /settings gesture opened the independent SettingsList editor')
+
+  // Positive control: the recorder is NOT inert. A direct call on the SAME
+  // instance is counted, so the zero above is a real observation and not a
+  // wrapper that silently diverted to the prototype.
+  const closer = h.app.openSettings([], () => {}, () => {})
+  assert.equal(openSettingsCalls, 1, 'the instance recorder sees a real openSettings call')
+  closer()
+  await h.vt.waitForRender()
+
+  instance.openSettings = originalOpenSettings
+  assert.equal(Object.is(instance.openSettings, originalOpenSettings), true, 'the wrapper is restored verbatim')
+  handle.dispose()
+  h.dispose()
+})
+
+// Regression: C2-R7 acceptance R7-13 (the independent SettingsList consumers).
+test('R7-13 /keybindings conflicts still paints its conflicts in the independent SettingsList', async () => {
+  // The conflicts command is the ONE independent `app.openSettings` consumer
+  // that the R7 retirement could plausibly break, because the same command
+  // module lost the legacy editor. A REAL conflict is installed on THIS app's
+  // live keymap, so the command takes its own `conflicts.length > 0` branch.
+  const h = setup({ columns: 140, rows: 40 })
+  h.app.keybindingsManager().setUserConfiguration(
+    parseUserKeybindings({ 'app.input.submit': 'ctrl+shift+h', 'app.todo.toggle': 'ctrl+shift+h' }),
+  )
+  const conflicts = h.app.keybindingsManager().snapshot().conflicts
+  assert.ok(conflicts.length > 0, `precondition: the live keymap really has a conflict:\n${JSON.stringify(conflicts)}`)
+  h.invoke('keybindings', 'conflicts')
+  await settle(h)
+  assert.equal(h.app.overlayGraphState().handles, 1, 'the independent SettingsList really mounted as its own overlay')
+  const frame = h.view()
+  assert.match(frame, /Ctrl\+Shift\+H\s+conflict/u, `the conflict row names the shared chord:\n${frame}`)
+  // The row's description wraps at the overlay width, so the two action names
+  // are read separately from the ONE description block between the chord row
+  // and the list's own hint line.
+  const description = frame
+    .slice(frame.indexOf('conflict'), frame.indexOf('Type to search'))
+    // The overlay's box-drawing cells are not content: drop them before the
+    // wrapped description is collapsed into ONE sentence.
+    .replace(/[\u2500\u2502\u256d\u256e\u2570\u256f]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+  assert.match(description, /app\.input\.submit \(editor, user\)/u, `the first conflicting action is named:\n${frame}`)
+  assert.match(description, / vs /u, 'the row states the conflict, not just two actions')
+  assert.match(description, /app\.todo\.toggle \(global, user\)/u, `the second conflicting action is named:\n${frame}`)
+  assert.ok(!frame.includes('Settings · Categories'), 'the independent list is NOT the Settings workspace')
   h.dispose()
 })

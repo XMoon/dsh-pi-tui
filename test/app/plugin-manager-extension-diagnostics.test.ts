@@ -650,7 +650,6 @@ async function mountProductionPage(options: {
     { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
     {
       aboutVersionFacts: { tui: 'test', dsh: undefined },
-      onOpenLegacy: () => {},
       initialCategory: 'plugins',
       // The composition zone knows the concrete page the runtime factory was
       // created with; this is the same ONE narrowing production bootstrap does.

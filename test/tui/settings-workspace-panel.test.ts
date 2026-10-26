@@ -44,7 +44,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'TUI settings document',
       freshness: 'ready',
       description: 'palette',
-      action: 'inspect',
       edit: {
         field: 'theme',
         primary: 'runtime',
@@ -65,7 +64,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'glyph vocabulary',
-      action: 'inspect',
       edit: {
         field: 'icon-style',
         primary: 'runtime',
@@ -87,7 +85,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'TUI settings document · Footer runtime',
       freshness: 'ready',
       description: 'the stored Footer mode',
-      action: 'inspect',
       edit: {
         field: 'footer-mode',
         primary: 'persisted',
@@ -108,7 +105,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Footer runtime · TUI settings document',
       freshness: 'runtime',
       description: 'the same-lease Footer layout page',
-      action: 'inspect',
       specialist: 'footer-configurator',
     },
     {
@@ -120,7 +116,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime',
       freshness: 'runtime',
       description: 'display preset',
-      action: 'inspect',
       edit: {
         field: 'display-preset',
         primary: 'runtime',
@@ -141,7 +136,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Current TUI display state',
       freshness: 'runtime',
       description: 'bulk expansion for recent collapsible content',
-      action: 'inspect',
       edit: {
         field: 'expand',
         primary: 'runtime',
@@ -162,7 +156,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Current TUI display state',
       freshness: 'runtime',
       description: 'reasoning blocks',
-      action: 'inspect',
       edit: {
         field: 'thinking',
         primary: 'runtime',
@@ -183,7 +176,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'mid-turn update cadence',
-      action: 'inspect',
       edit: {
         field: 'progress-updates',
         primary: 'runtime',
@@ -205,7 +197,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'visible-answer density',
-      action: 'inspect',
       edit: {
         field: 'response-style',
         primary: 'runtime',
@@ -227,7 +218,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'TUI settings document · input preference',
       freshness: 'ready',
       description: 'what a plain Enter does while the agent is running',
-      action: 'inspect',
       edit: {
         field: 'busy-enter',
         primary: 'persisted',
@@ -248,7 +238,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'Git trailer prompt guidance',
-      action: 'inspect',
       edit: {
         field: 'git-attribution',
         primary: 'runtime',
@@ -270,7 +259,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'Home/End navigation preset',
-      action: 'inspect',
       edit: {
         field: 'home-end-keys',
         primary: 'runtime',
@@ -291,7 +279,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'TUI settings document · Client screen mode',
       freshness: 'ready',
       description: 'Save preference, then leave Settings normally to switch the transcript screen.',
-      action: 'inspect',
       edit: {
         field: 'fullscreen',
         primary: 'persisted',
@@ -312,7 +299,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'wheel step for the next fullscreen entry',
-      action: 'inspect',
       edit: {
         field: 'wheel-scroll-lines',
         primary: 'runtime',
@@ -333,7 +319,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'when a completion notifies',
-      action: 'inspect',
       edit: {
         field: 'notification-mode',
         primary: 'runtime',
@@ -355,7 +340,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'how a completion notification is delivered',
-      action: 'inspect',
       edit: {
         field: 'notification-method',
         primary: 'runtime',
@@ -376,7 +360,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client runtime · optional TUI preference persistence',
       freshness: 'runtime',
       description: 'terminal-native status protocols',
-      action: 'inspect',
       edit: {
         field: 'terminal-progress',
         primary: 'runtime',
@@ -396,7 +379,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Official subagent model-selection section',
       freshness: 'ready',
       description: 'the official allowed child routes',
-      action: 'inspect',
       specialist: 'subagent-allowlist',
     },
     {
@@ -408,7 +390,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'DSH Host profile · permission default for new sessions',
       freshness: 'ready',
       description: 'the Host permission default for new sessions',
-      action: 'inspect',
       edit: {
         field: 'default-permission',
         primary: 'persisted',
@@ -428,7 +409,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Client keymap · TUI settings document',
       freshness: 'ready',
       description: 'the same-lease keyboard shortcuts page',
-      action: 'inspect',
       specialist: 'keybindings',
     },
     {
@@ -439,7 +419,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'DSH Host profile · every agent on this Host',
       freshness: 'ready',
       description: 'profile-wide built-in tools switch',
-      action: 'inspect',
     },
     {
       id: 'web-settings',
@@ -449,7 +428,6 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       scope: 'Host Web provider settings',
       freshness: 'ready',
       description: 'Host-owned Web settings',
-      action: 'inspect',
       specialist: 'web-settings',
     },
   ],
@@ -651,10 +629,6 @@ interface Harness {
   readonly closes: () => number
   /** How many times a configuration write was dispatched. */
   readonly commits: () => number
-  /** How many times the legacy editor handoff was requested. */
-  readonly legacyOpens: () => number
-  /** The exact legacy-editor target of every handoff, in order. */
-  readonly legacyTargets: () => readonly (string | undefined)[]
   /** The settle callbacks of the dispatched writes, in order. */
   readonly settlements: readonly ((outcome: SettingsWorkspaceCommitOutcome) => void)[]
   /** Every commit request the panel really dispatched, in order. */
@@ -708,8 +682,6 @@ function setup(options: {
   let specialistRefreshes = 0
   let closes = 0
   let commits = 0
-  const legacyTargets: (string | undefined)[] = []
-  let legacyOpens = 0
   const committed: SettingsWorkspaceCommitRequest[] = []
   const intents: SettingsWorkspacePanelIntents = {
     aboutVersionFacts: { tui: '0.5.3', dsh: '0.2.1-rc.2' },
@@ -718,7 +690,6 @@ function setup(options: {
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => { closes += 1 },
-    onOpenLegacy: (targetId) => { legacyOpens += 1; legacyTargets.push(targetId) },
     ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
     onCopy: (text) => { options.onCopy?.(text) },
     onCommit: (request, settle) => {
@@ -815,8 +786,6 @@ function setup(options: {
     },
     closes: () => closes,
     commits: () => commits,
-    legacyOpens: () => legacyOpens,
-    legacyTargets: () => legacyTargets,
     committed,
     settlements,
     specialistPages,
@@ -1044,7 +1013,7 @@ test('Tab enters each direct content page and returns About/Account content to t
     // Re-entering reuses the mounted page: no second Host watch.
     assert.equal(h.built.length, 2, 'no page was rebuilt by the focus jumps')
     assert.equal(h.commits(), 0, 'region jumps never write')
-    assert.equal(h.legacyOpens(), 0, 'region jumps never open the legacy editor')
+    assert.equal(h.closes(), 0, 'region jumps never close the workspace')
   }
 })
 
@@ -1060,7 +1029,7 @@ test('Tab cycles the legacy panes without opening the Detail choice, and Shift+T
     assert.match(header(h), /Settings · Appearance · Configured theme/u, `Tab focuses Detail at ${columns}`)
     assert.doesNotMatch(plain(h), /Choose value/u, 'Tab focusing Detail never begins a choice')
     assert.equal(h.commits(), 0, 'focusing Detail never writes')
-    assert.equal(h.legacyOpens(), 0, 'focusing Detail never opens the legacy editor')
+    assert.equal(h.closes(), 0, 'focusing Detail never closes the workspace')
     h.panel.handleInput('\t')
     assert.match(header(h), /Settings · Categories/u, `Tab wraps back to the rail at ${columns}`)
     // Reverse: the same three panes in the opposite direction.
@@ -1192,7 +1161,7 @@ test('a Tab focus change revokes a pointer press recorded on the previous pane',
   h.panel.onCellPress(x, y)
   h.panel.handleInput('\t')
   h.panel.onCellClick(x, y)
-  assert.equal(h.legacyOpens(), 0, 'the straddling release must not open the legacy editor')
+  assert.equal(h.commits(), 0, 'the straddling release must not dispatch a write')
   assert.match(header(h), /Settings · Appearance · Rows/u, 'the Tab focus is not overwritten by the old press')
 })
 
@@ -1354,7 +1323,7 @@ function staticAboutSource(view: AboutStatusView, onRefresh: () => void = () => 
 // advertises `c copy value`, and no `c`/`C` byte — raw, Kitty CSI-u or
 // modifyOtherKeys — reaches the clipboard owner at ANY level or edit phase.
 // The negative control is the CLIPBOARD SINK (not "no Host call") and every
-// positive Legacy behavior (change/confirm/retry/legacy handoff) still runs.
+// positive configuration behavior (change/confirm/retry) still runs.
 test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any level or phase', () => {
   const encodedCopyKeys = ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const columns of [72, 100, 120] as const) {
@@ -2035,7 +2004,6 @@ const extensionSettingRow = (options: {
     scope: `Extension runtime · ${options.owner}`,
     freshness: 'runtime',
     description: `registered at runtime by ${options.owner}`,
-    action: 'inspect',
     extensionOwner: options.owner,
     extensionRegistrationToken: options.token,
     ...values.length === 0 ? {} : {
@@ -2119,7 +2087,7 @@ test('T01 the directory is the nine fixed categories with no Other settings and 
   assert.match(plain(h), /> Plugins/u, 'End selects the last real category')
   h.panel.handleInput('\r')
   assert.match(header(h), /Settings · Plugins/u, 'Enter opens the Plugins content, never Extensions')
-  assert.equal(h.legacyOpens(), 0, 'reaching the rail end opens nothing')
+  assert.equal(h.commits(), 0, 'reaching the rail end writes nothing')
 })
 
 test('T02 a live extension appends Extensions; its rows are the live registration and browsing writes', () => {
@@ -2150,19 +2118,19 @@ test('T02 a live extension appends Extensions; its rows are the live registratio
   assert.match(rowsFrame, /Rows \(1\) · demo-extension/u, 'the Rows pane header names the group')
   assert.match(rowsFrame, /Demo level/u, 'the real registration is painted')
   assert.match(rowsFrame, /Extension runtime · 1:demo-extension/u, 'the row scope states the raw owner')
-  assert.equal(h.legacyOpens(), 0, 'reaching the row opens nothing')
   assert.equal(h.commits(), 0, 'reaching the row writes nothing')
+  assert.equal(h.closes(), 0, 'reaching the row closes nothing')
   // A single group keeps the ROOT Tab semantics: Rows -> Details.
   h.panel.handleInput('\t')
   assert.match(header(h), /Settings · Extensions · Demo level/u, 'one group keeps the region Tab')
-  assert.equal(h.legacyOpens(), 0, 'a Tab focus change never opens the legacy editor')
+  assert.equal(h.commits(), 0, 'a Tab focus change writes nothing')
   h.panel.handleInput('\u001b') // Detail -> Rows
   // Only explicit activation opens the native choice, which writes nothing until
   // its Confirm and never hands off to the legacy editor.
   h.panel.handleInput('\r')
   assert.match(plain(h), /Choose value/u, 'the extension row opens the native choice')
   assert.equal(h.commits(), 0, 'opening the choice writes nothing')
-  assert.equal(h.legacyOpens(), 0, 'the extension rows never hand off to the legacy editor')
+  assert.equal(h.closes(), 0, 'the extension rows never close the workspace')
 })
 
 test('T03 display rows live in Conversation while Theme/Icon stay in Appearance', () => {
@@ -2200,7 +2168,7 @@ test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboa
   const agent = plain(h)
   assert.match(agent, /Subagent allowed models|Default permission/u, 'the migrated Agent rows are painted')
   assert.doesNotMatch(agent, /Agent settings…/u, 'Agent has no unmigrated field left, so it paints no launcher')
-  assert.equal(h.legacyTargets().length, 0, 'focusing the Agent rail opens no editor')
+  assert.equal(h.closes(), 0, 'focusing the Agent rail closes nothing')
   assert.equal(h.commits(), 0, 'browsing never writes')
 
   const input = setup()
@@ -2218,7 +2186,7 @@ test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboa
   input.panel.handleInput('\r')
   assert.equal(input.specialistPages.length, 1, 'Input & Terminal opens the SAME-LEASE page')
   assert.equal(input.specialistPages[0]!.title, 'Keyboard shortcuts')
-  assert.equal(input.legacyTargets().length, 0, 'the page never opens the legacy editor')
+  assert.equal(input.closes(), 0, 'the page never closes the workspace')
   assert.equal(input.commits(), 0, 'the page entry itself writes nothing')
   assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'the page row paints no scalar editor')
 })
@@ -2252,7 +2220,7 @@ test('T05 a width cycle keeps the selected category/row/focus and refuses old co
   h.panel.onCellClick(3, targetRow)
   assert.match(header(h), /Settings · Conversation · Rows/u, 'the stale release activated nothing')
   assert.equal(h.commits(), 0)
-  assert.equal(h.legacyOpens(), 0)
+  assert.equal(h.closes(), 0)
 })
 
 test('T06 losing the Extensions directory falls back to Plugins and refuses every stale gesture', () => {
@@ -2281,8 +2249,8 @@ test('T06 losing the Extensions directory falls back to Plugins and refuses ever
   h.panel.handleInput('\u001b[C') // stale Right
   h.panel.handleInput('\u007f') // stale Backspace
   wheelAt(h, 3, 5)
-  assert.equal(h.legacyOpens(), 0, 'no stale gesture opens the legacy editor')
   assert.equal(h.commits(), 0, 'no stale gesture writes')
+  assert.equal(h.closes(), 0, 'no stale gesture closes the workspace')
   assert.match(header(h), /Settings · Categories/u, 'the recovery moved the keyboard to the rail')
   // The repaint shows the nine fixed categories with Plugins selected, never an
   // empty Extensions page.
@@ -2373,8 +2341,8 @@ test('T08 a 44x8 frame scrolls and reveals the rail and never activates an off-s
   wheelAt(h, 3, 1)
   h.panel.onCellPress(3, 0)
   h.panel.onCellClick(3, 0)
-  assert.equal(h.legacyOpens(), 0, 'no invisible row may open the legacy editor')
   assert.equal(h.commits(), 0, 'no invisible row may write')
+  assert.equal(h.closes(), 0, 'no invisible row may close the workspace')
 })
 
 // ── C2-R1: the five new writable rows ─────────────────────────────────────
@@ -2586,7 +2554,7 @@ test('T06b an app-driven fact reread that discovers an empty directory recovers 
   assert.match(frame, /Categories \(9\)/u)
   assert.match(frame, /> Plugins/u, 'Plugins is the stable fallback')
   assert.doesNotMatch(frame, /Extensions/u, 'the spent category is gone')
-  assert.equal(h.legacyOpens(), 0, 'the reread opened nothing')
+  assert.equal(h.closes(), 0, 'the reread closed nothing')
 })
 
 // ── C2-R0 review fix: an unrelated registry change never cancels an edit ──
@@ -2644,7 +2612,7 @@ test('an unrelated registry change keeps an open candidate choice and its scroll
   // The preserved choice still confirms through the one write channel.
   h.panel.handleInput('\r')
   assert.equal(h.commits(), 1, 'the preserved choice still dispatches exactly one write')
-  assert.equal(h.legacyOpens(), 0, 'no registry change opened the legacy editor')
+  assert.equal(h.closes(), 0, 'no registry change closed the workspace')
 })
 
 test('a registry change that drops the chosen candidate identity drops the choice', () => {
@@ -2726,7 +2694,7 @@ test('losing the Extensions category still repairs the selection and its offsets
   // clamped, Up moves the CATEGORY, proving the rail — not a stale row — owns it.
   h.panel.handleInput('\u001b[A')
   assert.match(plain(h), /^> Tools/mu, 'the rail owns the keyboard after the repair')
-  assert.equal(h.legacyOpens(), 0)
+  assert.equal(h.closes(), 0)
 })
 
 // ── C2-R6: the per-owner GROUP PAGES of the Extensions Rows level ──────────
@@ -2788,7 +2756,7 @@ test('the Extensions page projects one owner group at a time in first-appearance
   h.panel.handleInput('\u001b[Z')
   assert.match(header(h), /\[3\/3\] · gamma/u, 'backward wraps to the last group')
   assert.equal(h.commits(), 0, 'group switching never writes')
-  assert.equal(h.legacyOpens(), 0, 'group switching never opens the legacy editor')
+  assert.equal(h.closes(), 0, 'group switching never closes the workspace')
 })
 
 test('two owners with the same fiber name stay two groups and the header distinguishes them by uid', () => {
@@ -3453,8 +3421,6 @@ test('R4-C1 the Web row mounts ONE embedded page in this workspace with its own 
   assert.match(frame, /Settings · Tools · Web Search \/ Fetch/u, 'the breadcrumb names the row sub-view')
   assert.match(frame, /\[Web Search \/ Fetch\]  Current \/ Detail/u, 'the page supplies its pane header')
   assert.equal(h.closes(), 0, 'opening the page never closes the workspace')
-  assert.equal(h.legacyOpens(), 0, 'the Web row never opens the legacy editor')
-  assert.deepEqual(h.legacyTargets(), [])
   // The page owns the keyboard.
   h.panel.handleInput('x')
   assert.deepEqual(page.inputs, ['x'])
@@ -3561,13 +3527,85 @@ test('R4-C5 the page mounts from ONE real body row and is never built without a 
   assert.equal(floor.webBuilds(), 0, 'an invisible body never starts the page')
 })
 
-test('R4-C6 the Web row paints the ONE Configure Web… entry and never a legacy handoff', () => {
+test('R4-C6 the Web row paints the ONE Configure Web… entry and never a second surface', () => {
   const h = setup({ webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
   assert.match(plain(h), /Configure Web…/u, 'the Detail paints the page entry')
   assert.match(plain(h), /Host Web provider settings|Host-owned Web settings/u)
   h.panel.handleInput('\r')
-  assert.equal(h.legacyOpens(), 0, 'Enter never opens the legacy editor')
   assert.equal(h.webBuilds(), 1, 'Enter opens the SAME-lease page')
+  assert.equal(h.closes(), 0, 'Enter never closes the workspace')
+})
+
+// ── C2-R7: the row contract has no legacy action left ─────────────────────
+
+test('R7-TS1 read-only / writable / specialist rows own their own verb and a row hit activates only the painted row', () => {
+  // READ-ONLY row (Visual tools without a candidate source): Enter opens the
+  // Detail, states the read-only fact and never starts a choice.
+  const readonly = setup()
+  openToolsRows(readonly)
+  assert.match(plain(readonly), /Visual tools/u)
+  readonly.panel.handleInput('\r')
+  assert.match(header(readonly), /Settings · Tools · Visual tools/u, 'Enter opens the read-only Detail')
+  assert.match(plain(readonly), /read-only here · no candidate is available right now/u,
+    'the Detail states the read-only fact instead of a retired editor hand-off')
+  assert.doesNotMatch(plain(readonly), /Choose value|Open existing settings/u, 'no choice and no legacy button')
+  assert.equal(readonly.commits(), 0, 'reading the Detail writes nothing')
+  assert.equal(readonly.closes(), 0, 'reading the Detail never closes the workspace')
+
+  // Right on the Rows level is the SAME verb for that row.
+  const right = setup()
+  openToolsRows(right)
+  right.panel.handleInput('\u001b[C')
+  assert.match(header(right), /Settings · Tools · Visual tools/u, 'Right opens the read-only Detail too')
+  assert.doesNotMatch(plain(right), /Choose value/u, 'a read-only row never starts a choice')
+  assert.equal(right.commits(), 0)
+
+  // WRITABLE row: both verbs reach the ONE native choice and write nothing yet.
+  for (const data of ['\r', '\u001b[C'] as const) {
+    const writable = setup()
+    walkTo(writable, 'appearance')
+    writable.panel.handleInput('\r') // rail -> the Appearance rows (Theme first)
+    writable.panel.handleInput(data)
+    assert.match(plain(writable), /Choose value/u, `${JSON.stringify(data)} opens the writable row choice`)
+    assert.equal(writable.commits(), 0, 'opening a choice writes nothing')
+    assert.equal(writable.closes(), 0, 'opening a choice never closes the workspace')
+  }
+
+  // SPECIALIST row: Enter mounts its own page in this lease, never a choice and
+  // never a second surface.
+  const specialist = setup({ webPage: true })
+  openToolsRows(specialist)
+  specialist.panel.handleInput('\u001b[B') // Visual tools -> Web Search / Fetch
+  specialist.panel.handleInput('\r')
+  assert.equal(specialist.webBuilds(), 1, 'the specialist row mounts its page')
+  assert.doesNotMatch(plain(specialist), /Choose value/u, 'the specialist row has no scalar choice')
+  assert.equal(specialist.commits(), 0, 'mounting the page writes nothing')
+  assert.equal(specialist.closes(), 0, 'mounting the page never closes the workspace')
+
+  // MOUSE: a complete press/release pair activates ONLY the row it painted —
+  // it selects that row, builds no page and dispatches nothing.
+  const pointer = setup({ webPage: true })
+  openToolsRows(pointer)
+  const frame = plain(pointer).split('\n')
+  const webRow = frame.findIndex(line => line.includes('Web Search / Fetch'))
+  assert.ok(webRow >= 0, `the Web row must be painted:\n${frame.join('\n')}`)
+  const webCol = frame[webRow]!.indexOf('Web Search / Fetch')
+  // The gesture is proven to matter FIRST: a mismatched press cell under the
+  // same revision is refused, so the successful activation below is not a
+  // no-op test passing for the wrong reason.
+  pointer.panel.onCellPress(webCol + 1, webRow)
+  pointer.resize(120, 39)
+  pointer.panel.onCellClick(webCol + 1, webRow)
+  assert.doesNotMatch(plain(pointer), /> Web Search \/ Fetch/u, 'the stale release selected nothing')
+  assert.equal(pointer.webBuilds(), 0)
+  pointer.resize(120, 40)
+  plain(pointer)
+  pointer.panel.onCellPress(webCol + 1, webRow)
+  pointer.panel.onCellClick(webCol + 1, webRow)
+  assert.match(plain(pointer), /> Web Search \/ Fetch/u, 'the release selects the painted row')
+  assert.equal(pointer.webBuilds(), 0, 'a row hit only selects; it never mounts the page')
+  assert.equal(pointer.commits(), 0, 'a row hit writes nothing')
+  assert.equal(pointer.closes(), 0, 'a row hit never closes the workspace')
 })

@@ -18,8 +18,8 @@
  * {@link SettingsWorkspaceWritableField}) is a request through the existing
  * `onCommit` intent; the writer behind that intent stays the ONE existing
  * authority of its field, so the panel never applies, persists or re-reads a
- * value itself. Every other setting keeps its existing read and
- * legacy-editor handoff behavior. Configuration rows expose no copy verb at all:
+ * value itself. Every other setting stays a read projection of its own
+ * authority. Configuration rows expose no copy verb at all:
  * their `value` is read-only presentation, and there is no replacement copy
  * entry for a configuration field. About's `c`/`C` copy About's OWN facts
  * (runtime, Session identity, statistics, performance, Context) — never a
@@ -74,9 +74,7 @@ export type SettingsWorkspaceFocus = SettingsWorkspacePage | 'content'
  *  it paints inside this SAME workspace lease and shares its ONE chrome. */
 export type SettingsWorkspaceDirectCategoryId = 'about' | 'models' | 'account' | 'plugins'
 
-/** The stable identity of one readonly pilot row. The `*-settings-legacy` rows
- *  are the R0 TRANSITION launchers: each one names the exact existing-editor
- *  row it focuses and runs no write of its own. C2-R6 adds the dynamic
+/** The stable identity of one row. C2-R6 adds the dynamic
  *  `ext-setting:<registry id>` identity of ONE live extension registration:
  *  the prefix is the only dynamic shape the panel activates, and activation
  *  additionally requires membership in the CURRENT snapshot. */
@@ -106,13 +104,10 @@ export type SettingsWorkspaceRowId =
   | 'footer-mode'
   | 'footer-configurator'
   | 'keyboard-shortcuts'
-  | 'extension-settings-legacy'
   | `ext-setting:${string}`
 
 /** The prefix that separates a dynamic extension-setting row from the static
- *  workspace ids. It mirrors the legacy editor's deeplink prefix; the two are
- *  different surfaces (one paints rows, the other hands off) and share only
- *  the spelling of the registry id. */
+ *  workspace ids: the ONE dynamic row shape the panel activates. */
 const EXTENSION_SETTING_ROW_PREFIX = 'ext-setting:'
 
 /** How current one row's value is, as the reader proved it. */
@@ -208,12 +203,8 @@ export interface SettingsWorkspaceRow {
   readonly scope: string
   readonly freshness: SettingsWorkspaceFreshness
   readonly description: string
-  readonly action: 'inspect' | 'open-legacy'
-  /** The legacy-editor row an `open-legacy` action must focus (the Settings
-   *  workspace deeplink, S2/PR-B §3.3). Absent = the editor opens at its top. */
-  readonly legacyTargetId?: string
   /** Present ONLY on the writable pilot rows (B2-B). A row without it is never
-   *  editable, whatever its action. */
+   *  editable. */
   readonly edit?: SettingsWorkspaceEdit
   /** C2-R3/C2-R4: the ONE row that opens an embedded SPECIALIST page inside
    *  this same workspace body (the existing subagent allowlist picker, the Web
@@ -384,9 +375,9 @@ export interface SettingsWorkspacePanelIntents {
    * C2-R3: the ONE embedded specialist page factory, activated ONLY by an
    * explicit Manage/Enter on a row that carries `specialist`. It returns the
    * EXISTING subagent allowlist picker instance, which is mounted in this
-   * workspace's body under the SAME screen lease (no second alt-screen, no
-   * legacy editor). `done` returns to the Agent rows; `onAuthoritativeChange`
-   * asks the root for a fresh snapshot of that row.
+   * workspace's body under the SAME screen lease (no second alt-screen).
+   * `done` returns to the Agent rows; `onAuthoritativeChange` asks the root
+   * for a fresh snapshot of that row.
    */
   readonly createSubagentAllowlistPicker?: (
     done: () => void,
@@ -434,9 +425,6 @@ export interface SettingsWorkspacePanelIntents {
   /** Esc/Backspace from the outermost level (`categories`); every layout
    *  steps one level back before it can close. */
   readonly onClose: () => void
-  /** The compatibility bridge: open the existing complete settings editor,
-   *  focused on the row the destination asked for (absent = its top). */
-  readonly onOpenLegacy: (targetId?: string) => void
   /** Copy the exact captured source value through the app's clipboard owner. */
   readonly onCopy: (text: string) => void
   /**
@@ -640,7 +628,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'legacy' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -653,7 +641,7 @@ interface HitTarget {
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
 interface DetailButton {
-  readonly verb: 'change' | 'retry' | 'manage' | 'legacy' | 'confirm' | 'cancel'
+  readonly verb: 'change' | 'retry' | 'manage' | 'confirm' | 'cancel'
   readonly text: string
   /** The identity the painted button acts on: the candidate it commits, or the
    *  selected row it belongs to. It is the painted hit target's id. */
@@ -750,7 +738,6 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'footer-mode'
     || id === 'footer-configurator'
     || id === 'keyboard-shortcuts'
-    || id === 'extension-settings-legacy'
     || id.startsWith(EXTENSION_SETTING_ROW_PREFIX)
 }
 
@@ -2835,22 +2822,19 @@ export class SettingsWorkspacePanel implements Component {
     }
     const includeTitle = this.currentLayout() !== 'narrow'
     const buttons = row === undefined ? [] : this.detailButtons(row)
-    // A row without a write channel says so instead of looking editable: this
-    // category's own transition launcher opens the existing complete settings
-    // editor. The note is NOT a button and grants nothing: it keeps its own
-    // pinned row when the row has no action left to carry it (the Legacy Copy
-    // verb is retired). The decoration is dropped WHOLE when it does not fit —
-    // a half-cut note would read as a different statement.
-    const note = buttons.some(button => button.verb === 'legacy')
-      ? 'opens the existing complete settings editor'
+    // A row without a write channel says so instead of looking editable. The
+    // note is NOT a button and grants nothing: it keeps its own pinned row
+    // when the row has no action left to carry it. The decoration is dropped
+    // WHOLE when it does not fit — a half-cut note would read as a different
+    // statement.
+    const note =
       // A specialist row whose page is refused right now (a non-current
-      // authority) must state WHAT is refused instead of pointing at the legacy
-      // editor, which no longer owns this field at all.
-      : row?.specialist !== undefined && row.specialistAvailable === false
+      // authority) must state WHAT is refused.
+      row?.specialist !== undefined && row.specialistAvailable === false
         ? 'not editable while the backend is not current'
-        : row !== undefined && row.edit === undefined && row.action === 'inspect'
-          // A migrated field has no legacy editor owner: the note must not send
-          // the user to an editor that cannot change it.
+        : row !== undefined && row.edit === undefined
+          // A read-only field has no writable owner: the note must not imply
+          // that a candidate exists when none does.
           ? 'read-only here · no candidate is available right now'
           : ''
     const noteAloneFits = buttons.length === 0 && note !== '' && visibleWidth(note) <= width
@@ -3069,7 +3053,7 @@ export class SettingsWorkspacePanel implements Component {
   /**
    * The actions the pinned row may paint for this row in the CURRENT phase.
    *  A pending commit disables the edit verbs (ONE commit at a time) and a
-   *  non-writable row offers only its legacy handoff.
+   *  non-writable row offers only its specialist page, if it has one.
    *
    *  A verb label never wears brackets (design language §4.5): `Verb [Key]` when
    *  the affordance has a key, `Verb` for a click-only action, `Verb…` when it
@@ -3106,7 +3090,6 @@ export class SettingsWorkspacePanel implements Component {
         })
       }
     }
-    if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…', id: row.id })
     return buttons
   }
 
@@ -3306,7 +3289,7 @@ export class SettingsWorkspacePanel implements Component {
     } else if (this.focus === 'categories') {
       segments = this.navigationActionBarSegments()
     } else if (this.focus === 'rows') {
-      const rowAction = row?.action === 'open-legacy' ? 'open' : row?.edit === undefined || row.edit.options.length === 0 ? 'details' : 'choose'
+      const rowAction = row?.edit === undefined || row.edit.options.length === 0 ? 'details' : 'choose'
       // C2-R6: on the Extensions Rows level Tab/Shift+Tab cycle the PLUGIN
       // GROUPS, so the bar advertises that instead of the root's `Tab panes`
       // region hint (which would be a false hint there). One group keeps the
@@ -4667,10 +4650,6 @@ export class SettingsWorkspacePanel implements Component {
    *  transition; focus is committed before the candidate source is re-read. */
   private enterDetail(): void {
     const row = this.selectedRow()
-    if (row?.action === 'open-legacy') {
-      this.intents.onOpenLegacy(row.legacyTargetId)
-      return
-    }
     // C2-R3: the specialist row has no L2 choice of its own — its ONE action
     // mounts the embedded page in this same lease.
     if (row?.specialist !== undefined) {
@@ -5411,11 +5390,10 @@ export class SettingsWorkspacePanel implements Component {
       }
       case 'row': {
         if (!isWorkspaceRowId(target.id)) return
+        // The painted row IS the target: selecting it is the whole gesture
+        // (Enter/Right then decide between the Detail, the choice and the
+        // row's specialist page).
         this.selectRow(target.id, 'rows')
-        // The row's `open-legacy` action is the ONE navigation verb (never an
-        // edit) and the painted row IS its target, exactly like Enter.
-        const legacyRow = this.selectedRow()
-        if (legacyRow?.action === 'open-legacy') this.intents.onOpenLegacy(legacyRow.legacyTargetId)
         return
       }
       case 'about-action': {
@@ -5428,14 +5406,6 @@ export class SettingsWorkspacePanel implements Component {
         // falls through to its pane and copies nothing.
         if (target.id === 'about:copy-all') this.copyAboutAll()
         else if (target.id === 'about:refresh') this.aboutRefresh()
-        return
-      }
-      case 'legacy': {
-        this.takeColumnFocus('detail')
-        // The Detail bar belongs to the SELECTED row: its own deeplink target
-        // travels with the action (absent = the editor's top).
-        const legacyDetailRow = this.selectedRow()
-        this.intents.onOpenLegacy(legacyDetailRow?.action === 'open-legacy' ? legacyDetailRow.legacyTargetId : undefined)
         return
       }
       case 'change':

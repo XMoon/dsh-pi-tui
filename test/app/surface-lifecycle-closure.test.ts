@@ -1350,12 +1350,11 @@ function settingsWorkspaceSource(): SettingsWorkspaceSource {
       configReadiness: 'ready',
       capturedAt: Date.now(),
       rows: [
-        { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette', action: 'inspect' },
-        { id: 'icon-style', category: 'appearance', label: 'Icon style', summary: 'emoji', value: 'emoji', scope: 'TUI settings document', freshness: 'ready', description: 'icons', action: 'inspect' },
-        { id: 'extension-settings-legacy', category: 'appearance', label: 'Configure extension settings…', summary: 'Existing settings editor', scope: 'Existing settings editor', freshness: 'ready', description: 'legacy', action: 'open-legacy', legacyTargetId: 'keyboard-shortcuts' },
-        { id: 'display-preset', category: 'conversation', label: 'Transcript display', summary: 'full', value: 'full', scope: 'Client runtime', freshness: 'runtime', description: 'display', action: 'inspect' },
-        { id: 'thinking', category: 'conversation', label: 'Thinking detail', summary: 'collapsed', value: 'collapsed', scope: 'Current TUI display state', freshness: 'runtime', description: 'thinking', action: 'inspect' },
-        { id: 'default-permission', category: 'agent', label: 'Default permission', summary: 'workspace-write', value: 'workspace-write', scope: 'DSH Host profile · permission default for new sessions', freshness: 'ready', description: 'permission default', action: 'inspect' },
+        { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette' },
+        { id: 'icon-style', category: 'appearance', label: 'Icon style', summary: 'emoji', value: 'emoji', scope: 'TUI settings document', freshness: 'ready', description: 'icons' },
+        { id: 'display-preset', category: 'conversation', label: 'Transcript display', summary: 'full', value: 'full', scope: 'Client runtime', freshness: 'runtime', description: 'display' },
+        { id: 'thinking', category: 'conversation', label: 'Thinking detail', summary: 'collapsed', value: 'collapsed', scope: 'Current TUI display state', freshness: 'runtime', description: 'thinking' },
+        { id: 'default-permission', category: 'agent', label: 'Default permission', summary: 'workspace-write', value: 'workspace-write', scope: 'DSH Host profile · permission default for new sessions', freshness: 'ready', description: 'permission default' },
       ],
     }),
   }
@@ -1363,7 +1362,7 @@ function settingsWorkspaceSource(): SettingsWorkspaceSource {
 
 test('a Question preempts the Settings workspace; a blocking owner refuses a new lease and the workspace never resurrects', async () => {
   const { vt, app } = startApp()
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true, 'the Settings panel owns the physical keyboard')
 
@@ -1375,7 +1374,7 @@ test('a Question preempts the Settings workspace; a blocking owner refuses a new
 
   // A new lease while the blocking owner owns the surface is refused outright.
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /blocking modal owns the surface/,
   )
 
@@ -1399,7 +1398,7 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
 
   // Settings refuses while the Job owns the surface.
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /workspace screen is already leased/,
   )
   vt.sendInput('\x1b') // close the Job workspace
@@ -1408,7 +1407,6 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
 
   let closes = 0
   const handle = app.openSettingsWorkspace(settingsWorkspaceSource(), {
-    onOpenLegacy: () => {},
     aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
@@ -1416,7 +1414,7 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
   assert.equal(settingsScreenOpen(app), true)
   // A second Settings lease and a Job lease are both refused while it owns the screen.
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /workspace screen is already leased/,
   )
   assert.throws(
@@ -1443,7 +1441,6 @@ test('TuiApp.dispose releases a leased Settings workspace exactly once', async (
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
-    onOpenLegacy: () => {},
     aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
@@ -1456,41 +1453,44 @@ test('TuiApp.dispose releases a leased Settings workspace exactly once', async (
   assert.equal(closes, 1, 'a repeated dispose cannot double-notify')
 })
 
-test('a legacy handoff that loses the surface to a NEWER workspace never mounts the legacy editor', async () => {
+test('a retired Settings lease cannot close a newer lease opened synchronously by onClose', async () => {
   const { vt, app } = startApp()
-  let legacyOpens = 0
+  let closes = 0
   let innerOpened = false
+  let inner: ReturnType<TuiApp['openSettingsWorkspace']> | undefined
   const outer = app.openSettingsWorkspace(settingsWorkspaceSource(), {
-    onOpenLegacy: () => { legacyOpens += 1 },
     aboutVersionFacts: ABOUT_VERSION_FACTS,
     // A synchronous callback during the close leases a NEWER workspace: the
-    // stale handoff must then refuse instead of stacking the legacy editor on
-    // the new screen.
+    // retired record must never close what replaced it.
     onClose: () => {
-      app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
+      closes += 1
+      inner = app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS })
       innerOpened = true
     },
   })
   await vt.waitForRender()
-  assert.equal(settingsScreenOpen(app), true)
-  // Wide (80x24): the About home -> Appearance -> rows -> its transition
-  // launcher. The rail order is About, Models, Account, Agent, Appearance, ...
-  // and the launcher is the LAST Appearance row (Theme, Icon style, launcher).
-  for (let step = 0; step < 4; step += 1) {
-    vt.sendInput('\x1b[B'); await vt.waitForRender()
-  }
-  vt.sendInput('\r'); await vt.waitForRender()
-  for (let step = 0; step < 2; step += 1) {
-    vt.sendInput('\x1b[B'); await vt.waitForRender()
-  }
-  vt.sendInput('\r'); await vt.waitForRender()
+  assert.equal(settingsScreenOpen(app), true, 'the outer workspace owns the surface')
+
+  // The REAL production close lifecycle entry (the same `close()` the lease
+  // returns), not a synthetic legacy launcher input.
+  outer.close()
+  await vt.waitForRender()
+  assert.equal(closes, 1, 'the real close lifecycle ran its callback exactly once')
   assert.equal(innerOpened, true, 'the close callback really leased a newer workspace')
-  assert.equal(legacyOpens, 0, 'the stale intent must not open the legacy editor')
   assert.equal(settingsScreenOpen(app), true, 'the newer Settings workspace keeps the surface')
-  assert.equal(app.overlayGraphState().handles, 0, 'no legacy overlay may mount on the new screen')
-  assert.match(app.notifyTextForTest(), /could not open the settings editor: the surface changed/)
-  outer.close() // a stale closer is a strict no-op
+  assert.equal(app.overlayGraphState().handles, 0, 'no second overlay may mount on the new screen')
+
+  // The retired record's closer is inert against the CURRENT lease.
+  outer.close()
+  await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true, 'the stale closer cannot release the newer lease')
+  assert.equal(closes, 1, 'the stale closer cannot re-run the retired callback')
+
+  // The newer lease still closes through its OWN lifecycle entry.
+  inner!.close()
+  await vt.waitForRender()
+  assert.equal(settingsScreenOpen(app), false, 'the current lease closes normally')
+  assert.equal(app.overlayGraphState().handles, 0, 'closing the newer lease leaves no overlay behind')
   app.stop()
 })
 
@@ -1498,7 +1498,6 @@ test('the session hydration boundary retires a leased Settings workspace exactly
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
-    onOpenLegacy: () => {},
     aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
@@ -1515,7 +1514,7 @@ test('the session hydration boundary retires a leased Settings workspace exactly
 
 test('an Approval and a Save Location both pre-empt the Settings workspace, which then refuses a new lease', async () => {
   const { vt, app } = startApp()
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
 
@@ -1523,7 +1522,7 @@ test('an Approval and a Save Location both pre-empt the Settings workspace, whic
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), false, 'the approval pre-empts the workspace')
   assert.throws(
-    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS }),
     /blocking modal owns the surface/,
   )
   vt.sendInput('\x1b')
@@ -1531,7 +1530,7 @@ test('an Approval and a Save Location both pre-empt the Settings workspace, whic
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), false, 'the workspace must not resurrect after the approval')
 
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   const save = app.askSaveLocation(
     { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
@@ -1550,7 +1549,6 @@ test('stop() releases a leased Settings workspace once and restarts with no ghos
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
-    onOpenLegacy: () => {},
     aboutVersionFacts: ABOUT_VERSION_FACTS,
     onClose: () => { closes += 1 },
   })
@@ -1574,7 +1572,7 @@ test('a Settings round trip preserves an open Task Browser overlay (same instanc
   harness.tasks.openTasksBrowser('full')
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1)
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), true)
   assert.ok(!view(vt).includes('job job-a'), 'the workspace HIDES the browser rows while it owns the screen')
@@ -1587,15 +1585,15 @@ test('a Settings round trip preserves an open Task Browser overlay (same instanc
   app.stop()
 })
 
-test('a legacy handoff never crosses a blocking owner started by its own close', async () => {
+test('closing Settings while onClose mounts a blocking Question never resurrects the Settings lease', async () => {
   const { vt, app } = startApp()
-  let legacyOpens = 0
   let question: Promise<unknown> | undefined
-  app.openSettingsWorkspace(settingsWorkspaceSource(), {
-    onOpenLegacy: () => { legacyOpens += 1 },
+  let closes = 0
+  const handle = app.openSettingsWorkspace(settingsWorkspaceSource(), {
     aboutVersionFacts: ABOUT_VERSION_FACTS,
     // The close callback starts a REAL blocking owner instead of a workspace.
     onClose: () => {
+      closes += 1
       question = app.askQuestions([{ id: 'q1', question: 'still there?', options: [{ label: 'yes' }] }])
       // Attach the rejection handler immediately: cancelling the question must
       // never surface as an unhandled rejection.
@@ -1603,25 +1601,26 @@ test('a legacy handoff never crosses a blocking owner started by its own close',
     },
   })
   await vt.waitForRender()
-  // Wide (80x24): the About home -> Appearance -> rows -> its transition
-  // launcher (the last Appearance row). Agent has no launcher any more.
-  for (let step = 0; step < 4; step += 1) {
-    vt.sendInput('\x1b[B'); await vt.waitForRender()
-  }
-  vt.sendInput('\r'); await vt.waitForRender()
-  for (let step = 0; step < 2; step += 1) {
-    vt.sendInput('\x1b[B'); await vt.waitForRender()
-  }
-  vt.sendInput('\r'); await vt.waitForRender()
+  assert.equal(settingsScreenOpen(app), true, 'the Settings lease owns the surface first')
+
+  // The REAL close lifecycle entry: the panel's Esc and the returned closer are
+  // the same production path.
+  handle.close()
+  await vt.waitForRender()
+  assert.equal(closes, 1, 'the close lifecycle ran its callback exactly once')
   assert.ok(question !== undefined, 'the close callback really started a blocking owner')
-  assert.equal(legacyOpens, 0, 'the handoff must not cross the new blocking owner')
-  assert.equal(app.overlayGraphState().handles, 0, 'no legacy overlay may mount under the question')
   assert.ok(view(vt).includes('still there?'), 'the question owns the pane')
+  assert.equal(settingsScreenOpen(app), false, 'the Settings lease never resurrects under the question')
+  assert.equal(app.overlayGraphState().handles, 0, 'no overlay may mount under the question')
+
+  // Cancelling the blocker must not reveal a ghost Settings screen.
   vt.sendInput('\x1b')
   await question.catch(() => {})
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 0, 'cancelling the question must not reveal a hidden legacy overlay')
-  assert.ok(!view(vt).includes('Type to search'), 'no legacy editor was ever mounted')
+  assert.equal(question !== undefined && closes === 1, true, 'the same close ran exactly once')
+  assert.equal(settingsScreenOpen(app), false, 'no ghost Settings screen after the question is gone')
+  assert.equal(app.overlayGraphState().handles, 0, 'no ghost overlay after the question is gone')
+  assert.ok(!view(vt).includes('Settings ·'), 'no Settings chrome survives the closed workspace')
   app.stop()
 })
 
@@ -1642,7 +1641,7 @@ test('closing a workspace hands the terminal over without flushing its own docum
 
   // ── Settings: Esc is the close path the user takes ────────────────────────
   capturing = true
-  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS })
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS })
   await vt.waitForRender()
   assert.ok(captured().includes('Settings'), 'control: the live Settings document is what writes the mark')
   writes.length = 0
@@ -1719,7 +1718,7 @@ test('a workspace open unwind never flushes the partially started screen documen
     writes.length = 0
     capturing = true
     assert.throws(
-      () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {}, aboutVersionFacts: ABOUT_VERSION_FACTS }),
+      () => app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS }),
       /post-start open failure/,
     )
     await vt.waitForRender()

@@ -1614,10 +1614,7 @@ export type SettingsWorkspaceCloseReason = 'user-exit' | 'legacy-handoff' | 'for
 /**
  * The opening options of ONE Settings workspace (Phase 3B / B2-A). The
  * `/settings` command owns the readonly read projection; the app owns only the
- * temporary physical screen lease over it. `onOpenLegacy` is the compatibility
- * bridge: it is invoked AFTER this workspace has retired and the surface it
- * paused is restored, so the existing SettingsList mounts on the real return
- * surface instead of stacking under a second physical owner.
+ * temporary physical screen lease over it.
  */
 export interface SettingsWorkspaceOpenOptions {
   /**
@@ -1640,13 +1637,6 @@ export interface SettingsWorkspaceOpenOptions {
   /** C3: the About page left (pending About updates become no-ops). */
   readonly onAboutLeave?: () => void
   /**
-   * Invoked with the target row the opened legacy editor must focus (the
-   * Settings workspace row's `legacyTargetId`), or without one when the
-   * compatibility row opens the editor at its top. The target is presentation
-   * only: the editor itself owns every row id.
-   */
-  readonly onOpenLegacy: (targetId?: string) => void
-  /**
    * The ONE host-write channel of a writable row (Phase 3B / B2-B). The command
    * owns the Host semantics (apply + persist + authoritative re-read) and
    * resolves with the REAL outcome; the workspace runs it through its owned task
@@ -1667,8 +1657,7 @@ export interface SettingsWorkspaceOpenOptions {
   ) => import('./tui/plugin-manager/workspace.ts').EmbeddedPluginPage | undefined
   /** Fired once when the workspace is torn down by ANY path, with the reason
    *  the lease really closed. `user-exit` is the panel's own L0 Esc/Close
-   *  gesture, `legacy-handoff` the compatibility bridge into the existing
-   *  editor, and everything else (forced teardown, an interrupting modal, a
+   *  gesture and everything else (forced teardown, an interrupting modal, a
    *  replacement screen) is `forced`. A callback that ignores the argument
    *  stays compatible (C2-R2). */
   readonly onClose?: (reason: SettingsWorkspaceCloseReason) => void
@@ -1732,11 +1721,10 @@ export interface SettingsWorkspaceOpenOptions {
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
-/** The live row handle of an OPEN legacy settings list: a section whose facts
- *  arrive asynchronously (the Web credential state) updates the already
- *  mounted rows through these TWO public fork seams, or focuses the row a
- *  deeplink targets. It holds no write authority and is valid only while the
- *  overlay is mounted. */
+/** The live row handle of an OPEN `SettingsList` overlay: a section whose
+ *  facts arrive asynchronously updates the already mounted rows through these
+ *  TWO public fork seams, or focuses the row a deeplink targets. It holds no
+ *  write authority and is valid only while the overlay is mounted. */
 export interface SettingsListRowHandle {
   /** Move the list cursor to one row id (a search filter may hide it). */
   focus(itemId: string): void
@@ -23650,7 +23638,7 @@ export class TuiApp {
    * ONE workspace screen owns the terminal, and a blocking Question/Approval/Save
    * owner refuses the lease entirely.
    * @param source - the readonly read projection of the `/settings` command.
-   * @param options - the legacy-settings bridge and the teardown notification.
+   * @param options - the pages, the write channel and the teardown notification.
    * @returns the instance-fenced handle of THIS workspace.
    */
   openSettingsWorkspace(
@@ -23660,8 +23648,8 @@ export class TuiApp {
     this.assertWorkspaceLeaseAvailable('Settings')
     let record: WorkspaceLeaseRecord
     // The ONE close reason of THIS open (C2-R2): the panel's own L0 gesture
-    // sets `user-exit`, the legacy bridge sets `legacy-handoff`, and every
-    // other teardown keeps the conservative `forced`.
+    // sets `user-exit`, and every other teardown keeps the conservative
+    // `forced`.
     let closeReason: SettingsWorkspaceCloseReason = 'forced'
     const panel = new SettingsWorkspacePanel(source, {
       rows: () => this.terminal.rows,
@@ -23679,7 +23667,6 @@ export class TuiApp {
         closeReason = 'user-exit'
         record.close()
       },
-      onOpenLegacy: (targetId?: string) => openLegacy(targetId),
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),
       ...(options.createModelsPage === undefined ? {} : { createModelsPage: options.createModelsPage }),
       ...(options.createAccountPage === undefined ? {} : { createAccountPage: options.createAccountPage }),
@@ -23742,9 +23729,8 @@ export class TuiApp {
         })
       },
     }, {
-      // The Web Settings re-entry restores ITS row (S2/PR-B §B3.4): a return
-      // from the legacy Web section never lands the user on the default theme
-      // row.
+      // A typed row deeplink restores ITS row: a re-entry from a specialist
+      // page (or the Web page) never lands the user on the default theme row.
       ...options.initialRowId === undefined ? {} : { initialRowId: options.initialRowId },
       ...options.initialSpecialist === undefined ? {} : { initialSpecialist: options.initialSpecialist },
       ...options.initialCategory === undefined ? {} : { initialCategory: options.initialCategory },
@@ -23753,37 +23739,6 @@ export class TuiApp {
     })
     record = this.leaseWorkspaceScreen('settings', panel, () => options.onClose?.(closeReason))
     const close = (): void => record.close()
-    /** The compatibility bridge: retire THIS workspace and restore the surface it
-     *  paused BEFORE the existing settings editor can mount — the legacy
-     *  `app.openSettings()` call may synchronously re-enter, so the lease must
-     *  already be gone. A failed open restores the main surface with a real error
-     *  and never resurrects the closed workspace. */
-    const openLegacy = (targetId?: string): void => {
-      if (this.workspaceLease !== record) return
-      // The hand-off is NOT a user exit: a verified fullscreen preference must
-      // never swap the screen behind the editor that is about to mount.
-      closeReason = 'legacy-handoff'
-      close()
-      if (this.disposed) return
-      if (
-        this.jobWorkspace !== undefined ||
-        this.workspaceLease !== undefined ||
-        this.activeQuestions !== undefined ||
-        this.approvals.isActive() ||
-        this.activeSaveLocation !== undefined ||
-        this.activeScreen !== record.returnScreen
-      ) {
-        this.notify('could not open the settings editor: the surface changed', 'error')
-        return
-      }
-      try {
-        options.onOpenLegacy(targetId)
-      } catch (error) {
-        if (!this.disposed) {
-          this.notify(`could not open the settings editor: ${safeErrorMessage(error)}`, 'error')
-        }
-      }
-    }
     return {
       close,
       refreshRow: (rowId, facts) => {
@@ -24558,7 +24513,7 @@ export class TuiApp {
    * report still colour the surface? It is never a persistence truth, and the runtime
    * owner keeps it because the persisted document lags a just-confirmed choice whose
    * write is still in flight. Every SELECTION site records it (the boot restore, the
-   * legacy `/settings` theme row, the Settings workspace, the reload re-apply and the
+   * `/settings` theme row, the Settings workspace, the reload re-apply and the
    * advanced host-state `setTheme`); DERIVED applies never do (a detection's own answer,
    * a scheme report, the plugin-unload fallback).
    */

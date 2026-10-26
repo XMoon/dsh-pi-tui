@@ -579,7 +579,7 @@ inside the SAME workspace lease (same grouping, filtering, scrolling and `Enter 
 `Esc` returns to the Agent rows rather than leaving Settings; `Subagent model selection` is that
 official section's `enabled` — enabling with no allowed route performs ZERO writes, states the
 guidance and moves the selection to the allowed-models row, while disabling keeps every saved
-route. Both subagent surfaces share ONE write queue with the legacy editor, and each action writes
+route. Both subagent surfaces share ONE write queue, and each action writes
 only its own half (the picker writes the allowed-route list, the toggle writes `enabled`) while the
 other half is re-read from the official section when its turn comes — so an earlier slow write is
 never overwritten by a later stale snapshot. `User shell sandbox policy` is stored in the TUI settings
@@ -589,13 +589,13 @@ bypass"), and only an agreed read-back is `Verified`. It is the Host user-shell 
 not the model's tool sandbox policy and not a permission preset, which is why it does not live in
 Input & Terminal.
 
-The new Settings workspace never jumps to the legacy settings editor: every field is edited in its
-native rows and `Extensions` lists the real live registrations directly (grouped and paged by
-owner). Theme, the Plugin Manager, keybindings and extension settings keep every existing write
-path; Footer and Keyboard shortcuts remain same-lease pages, and `Appearance`, `Input & Terminal`,
-`Agent` and `Extensions` carry no transition entry. The legacy `SettingsList` remains in
-use only by its independent consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`),
-which supply their own rows; the complete legacy settings editor is no longer a Settings entry.
+The Settings workspace is the one settings surface: every field is edited in its native rows and
+`Extensions` lists the real live registrations directly (grouped and paged by owner). Theme, the
+Plugin Manager, keybindings and extension settings keep every existing write path; Footer and
+Keyboard shortcuts remain same-lease pages, and `Appearance`, `Input & Terminal`, `Agent` and
+`Extensions` carry no transition entry. The `SettingsList` component remains in use only by its
+independent consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`), which supply their
+own rows.
 
 `/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
 Host's `pi-tui-visual-tools.enabled` configuration. That one switch governs THREE model tools:

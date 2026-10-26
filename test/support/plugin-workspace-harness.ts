@@ -243,7 +243,6 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     },
     {
       aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
-      onOpenLegacy: () => {},
       onClose: () => {},
       initialCategory: startOn === 'rail' ? 'about' : 'plugins',
       onOpenPlugins: (onYieldNavigation) => {

@@ -440,9 +440,9 @@ specialist-page contract below).
     message); disabling keeps every saved route; `Verified` requires BOTH the
     toggle and the route list to read back.
   - Both subagent surfaces write through ONE command-owner section queue (the
-    workspace toggle, the embedded picker and the still-supported legacy editor
-    rows). Every user action is an intent, and the queue applies it to the
-    official section as it stands when that intent's turn comes:
+    workspace toggle and its embedded picker). Every user action is an intent,
+    and the queue applies it to the official section as it stands when that
+    intent's turn comes:
     - the toggle owns ONLY `enabled`;
     - a picker toggle owns exactly ONE `(provider, model)` pair, applied as an
       add or a remove — never a replacement of the whole list, so two surfaces
@@ -485,12 +485,14 @@ specialist-page contract below).
     deliberately not part of `Input & Terminal`. When the Host provides no
     user-shell the preference still stores, and the existing executor fails
     closed instead of degrading to a local spawn.
-- The Settings workspace has NO hand-off to the legacy settings editor: every
-  field it reaches is edited by its own native row, so no category carries a
-  transition launcher. The legacy `SettingsList` component remains reachable
-  only through its independent consumers (`/help`, `/skill`, `/preset`,
-  `/keybindings conflicts`), which supply their own row lists; the old complete
-  settings editor body is not part of the Settings surface.
+- The Settings workspace is the ONE settings surface: every field it reaches
+  is edited by its own native row, row choice, embedded page or typed deeplink,
+  so no category carries a transition launcher and no Settings gesture hands
+  the user off to a second editor. The retired complete settings editor (and
+  its Web rows, phase map and credential hand-off) no longer exists. The
+  `SettingsList` component itself remains: independent commands (`/help`,
+  `/skill`, `/preset`, `/keybindings conflicts`) open it with their own row
+  lists through `TuiApp.openSettings`, which is not a Settings workspace path.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On) plus the
   `Web Search / Fetch` page entry, in that frozen order.
@@ -544,8 +546,7 @@ specialist-page contract below).
   fragment and a trailing `/search`/`/fetch` are refused with no Host write.
 
   Every write is ONE explicit Enter confirmation that enters the command
-  owner's single Web FIFO (the SAME queue the still-supported legacy editor rows
-  use until their retirement). At its turn the intent re-proves readiness and
+  owner's single Web FIFO. At its turn the intent re-proves readiness and
   section availability, takes the NEWEST committed read as its base, refuses a
   custom-route/candidate violation with ZERO writes and dispatches the ONE
   official setter. A fresh read-back then decides the settled word: `Verified`
@@ -646,9 +647,9 @@ specialist-page contract below).
   List root returns to the rail, and `Esc` from the List root returns to the
   rail with the page instance, its view/query/selection/scroll and the
   controller's install request id intact. Only a real category change or the
-  Settings teardown disposes the page and releases its Host claim. The legacy
-  complete editor is not reachable from any Settings level: the workspace never
-  hands off to it. `Extensions` is a real configuration category whose Rows
+  Settings teardown disposes the page and releases its Host claim. No Settings
+  level hands the user off to a second editor. `Extensions` is a real
+  configuration category whose Rows
   project one owning extension's live settings at a time (see the Settings
   Workspace contract above).
 - The screen lease/currentness mechanics are owned by

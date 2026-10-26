@@ -98,7 +98,6 @@ test('a throwing plugin page dispose still fires the one-shot Settings lease not
     { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
     {
       aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
-      onOpenLegacy: () => {},
       onClose: () => { closed += 1 },
       initialCategory: 'plugins',
       onOpenPlugins: () => page,
