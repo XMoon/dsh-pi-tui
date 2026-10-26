@@ -1,10 +1,10 @@
 {
-  "digest": "9f1d09e1efc5cd41d338fb1d66ec82ccbcadb5269ec760895c230d05ac2eaba0",
+  "digest": "a54becfbc7354870d9a5314d3dee39c886cc85170df7fd8a7f8a1f0be7d36644",
   "inputs": [
     {
       "path": "package.json",
       "present": true,
-      "sha256": "caa6e0d82170569c9fc2771872f442b85c7aed8ca56f3ce62e3a3cb9c2f4f8a9",
+      "sha256": "65f8c2343d8e9aeb50f1e1d7fd8d0d56d5a8c9681e69b740acce8db43e4d5dd7",
       "why": "the manifest decides what is packed and how it is rewritten"
     },
     {
@@ -28,7 +28,7 @@
     {
       "path": "pnpm-lock.yaml",
       "present": true,
-      "sha256": "35b6c4a7f7643ea3cf13296964632ebac5b02bcc8e4a7dad31bfe3f36f0f5b43",
+      "sha256": "5535e21a068cd734ddf8fcab22e9c3052f432a26bbd670d7f33508312ec2184e",
       "why": "the lockfile pins the build toolchain that produces the payload"
     },
     {
@@ -59,8 +59,8 @@
       "entryCount": 40,
       "differingFiles": [],
       "manifestDifferences": [],
-      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40048155158",
-      "commit": "db889aa9bc2a71e7b46da649365cec40cd505d03",
+      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40258197273",
+      "commit": "238b488c44fbfc6bf44547e8bf3f4327e8a26c8c",
       "note": "Recorded from the PR #397 CI comparison: a REAL ordinary-vs-lifecycle-free pack of the exact inputs digested above (40 entries each, no differing file, no manifest difference). Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
     }
   }
