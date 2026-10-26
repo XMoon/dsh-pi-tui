@@ -641,9 +641,9 @@ source layer; `Configure in Models…` / `Clear in Models…` switch to the exis
 `API Key Reference` page in the SAME Settings lease for the masked input or the clear confirmation —
 the Web page never collects the key and never runs `/login` / `/logout` text. Esc steps from a detail
 back to the Web list and then back to the `Web Search / Fetch` row; a Remote or unavailable Host
-section still opens a read-only page with its reason but offers no write. The existing complete
-editor is retained through the ONE remaining `Extensions` transition row, and its historical Web
-rows share the SAME write queue and read authority until they are retired.
+section still opens a read-only page with its reason but offers no write. No second settings editor
+exists: the Web page is the only Web configuration surface, its writes enter the ONE command-owner
+FIFO, and its facts come from the same authoritative Host read-back.
 
 The `Icon style` option in `/settings` (also directly editable under Appearance) switches the TUI's structural icons:
 `Emoji` (default, colorful), `Symbols` (compact single-cell terminal

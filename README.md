@@ -485,8 +485,8 @@ DeepSeek API key 只显示是否配置与来源层，`Configure in Models…` / 
 Settings lease 里跳到既有的 Models `API Key Reference` 页完成遮蔽输入或清除确认——Web 页自身从不
 收集密钥，也不执行 `/login` / `/logout` 文本命令。按 `Esc` 从详情回到 Web 列表、再回到
 `Web Search / Fetch` 行；Remote 或不可用的 Host 段仍可打开只读说明页，但不提供任何写入入口。
-旧的完整编辑器仍然保留（入口只剩 `Extensions` 过渡行），其历史 Web 行在退休前与新页面共用
-同一个写入队列与读取权威。
+不存在第二个设置编辑器：Web 页是唯一的 Web 配置界面，它的写入走同一条命令层 FIFO，
+读取来自同一份 Host 权威回读。
 
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格(也可在 Appearance 里直接改):`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
