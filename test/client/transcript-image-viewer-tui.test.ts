@@ -933,16 +933,15 @@ test('a hostile attachment name cannot emit terminal controls through the /view-
 // Image-6A: real TuiApp + VirtualTerminal / AltScreen JPEG & WebP previews
 // ---------------------------------------------------------------------------
 
-const IMAGE_FIXTURES = new URL('../fixtures/images/', import.meta.url)
-function fixture(name: string): Buffer {
-  return readFileSync(new URL(name, IMAGE_FIXTURES))
-}
+const SAMPLE_JPEG = readFileSync(new URL('../fixtures/images/transcript-sample.jpg', import.meta.url))
+const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
+const CORRUPT_JPEG = readFileSync(new URL('../fixtures/images/transcript-corrupt.jpg', import.meta.url))
 
 function jpegRef(): ImageAttachmentRefLike {
   return {
     attachmentId: 'att-jpeg',
     mediaType: 'image/jpeg',
-    bytes: fixture('transcript-sample.jpg').byteLength,
+    bytes: SAMPLE_JPEG.byteLength,
     width: 120,
     height: 80,
     name: 'photo.jpg',
@@ -953,7 +952,7 @@ function webpRef(): ImageAttachmentRefLike {
   return {
     attachmentId: 'att-webp',
     mediaType: 'image/webp',
-    bytes: fixture('transcript-sample.webp').byteLength,
+    bytes: SAMPLE_WEBP.byteLength,
     width: 48,
     height: 32,
     name: 'graphic.webp',
@@ -999,7 +998,7 @@ test('JPEG and WebP paint real Kitty pixels after their derived PNGs, and body c
   const refs = new Map([[jpeg.attachmentId, jpeg], [webp.attachmentId, webp]])
   const loader = new ImageLoader(async (ref) => ({
     ref: {},
-    data: ref.attachmentId === jpeg.attachmentId ? fixture('transcript-sample.jpg') : fixture('transcript-sample.webp'),
+    data: ref.attachmentId === jpeg.attachmentId ? SAMPLE_JPEG : SAMPLE_WEBP,
   }))
   const { vt, app } = await startTallApp(loader)
   app.setFullscreen(true)
@@ -1049,9 +1048,9 @@ test('a pending JPEG preview has NO pixel body and cannot open the Viewer; READY
   const jpeg = jpegRef()
   let releaseDerived!: () => void
   let conversions = 0
-  const derived = await convertKittyThumbnail(fixture('transcript-sample.jpg'), 'image/jpeg')
+  const derived = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
   const loader = new ImageLoader(
-    async () => ({ ref: {}, data: fixture('transcript-sample.jpg') }),
+    async () => ({ ref: {}, data: SAMPLE_JPEG }),
     new ImageCache(),
     () => {
       conversions += 1
@@ -1090,12 +1089,12 @@ test('a corrupt JPEG degrades to safe text with no pixel body and no Viewer', as
   const ref: ImageAttachmentRefLike = {
     attachmentId: 'att-corrupt',
     mediaType: 'image/jpeg',
-    bytes: fixture('transcript-corrupt.jpg').byteLength,
+    bytes: CORRUPT_JPEG.byteLength,
     width: 120,
     height: 80,
     name: 'broken.jpg',
   }
-  const loader = new ImageLoader(async () => ({ ref: {}, data: fixture('transcript-corrupt.jpg') }))
+  const loader = new ImageLoader(async () => ({ ref: {}, data: CORRUPT_JPEG }))
   const { vt, app } = await startTallApp(loader)
   app.setFullscreen(true)
   const folder = new TranscriptFolder()
@@ -1122,7 +1121,7 @@ test('two occurrences of one JPEG share one read and one conversion, with two di
   let reads = 0
   let conversions = 0
   const loader = new ImageLoader(
-    async () => { reads += 1; return { ref: {}, data: fixture('transcript-sample.jpg') } },
+    async () => { reads += 1; return { ref: {}, data: SAMPLE_JPEG } },
     new ImageCache(),
     async (input, mediaType) => {
       conversions += 1
@@ -1166,9 +1165,9 @@ test('invalidating a running JPEG conversion never paints its late derivative', 
   const jpeg = jpegRef()
   let releaseDerived!: () => void
   let conversions = 0
-  const derived = await convertKittyThumbnail(fixture('transcript-sample.jpg'), 'image/jpeg')
+  const derived = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
   const loader = new ImageLoader(
-    async () => ({ ref: {}, data: fixture('transcript-sample.jpg') }),
+    async () => ({ ref: {}, data: SAMPLE_JPEG }),
     new ImageCache(),
     () => {
       conversions += 1

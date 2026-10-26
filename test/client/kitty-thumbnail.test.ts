@@ -19,11 +19,14 @@ import {
   convertKittyThumbnail,
 } from '../../src/client/media/image/kitty-thumbnail.ts'
 
-const FIXTURES = new URL('../fixtures/images/', import.meta.url)
-
-function fixture(name: string): Buffer {
-  return readFileSync(new URL(name, FIXTURES))
-}
+const SAMPLE_JPEG = readFileSync(new URL('../fixtures/images/transcript-sample.jpg', import.meta.url))
+const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
+const ANIMATED_WEBP = readFileSync(new URL('../fixtures/images/transcript-animated.webp', import.meta.url))
+const ALPHA_WEBP = readFileSync(new URL('../fixtures/images/transcript-alpha.webp', import.meta.url))
+const ORIENTED_JPEG = readFileSync(new URL('../fixtures/images/transcript-oriented.jpg', import.meta.url))
+const CORRUPT_JPEG = readFileSync(new URL('../fixtures/images/transcript-corrupt.jpg', import.meta.url))
+const CORRUPT_WEBP = readFileSync(new URL('../fixtures/images/transcript-corrupt.webp', import.meta.url))
+const OVER_LIMIT_JPEG = readFileSync(new URL('../fixtures/images/transcript-over-limit.jpg', import.meta.url))
 
 /** Decode a derived PNG back into raw pixels for the colour/orientation checks. */
 async function rawPixels(pngBase64: string): Promise<{ data: Buffer; width: number; height: number; channels: number }> {
@@ -37,7 +40,7 @@ function pixel(data: Buffer, width: number, channels: number, x: number, y: numb
 }
 
 test('a real JPEG becomes a bounded PNG with its real dimensions', async () => {
-  const png = await convertKittyThumbnail(fixture('transcript-sample.jpg'), 'image/jpeg')
+  const png = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
   const bytes = Buffer.from(png.base64, 'base64')
   assert.equal(png.byteLength, bytes.length, 'byteLength is the raw PNG size')
   assert.deepEqual([...bytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 'PNG signature')
@@ -49,7 +52,7 @@ test('a real JPEG becomes a bounded PNG with its real dimensions', async () => {
 })
 
 test('a real static WebP becomes a PNG (no animation metadata)', async () => {
-  const png = await convertKittyThumbnail(fixture('transcript-sample.webp'), 'image/webp')
+  const png = await convertKittyThumbnail(SAMPLE_WEBP, 'image/webp')
   const bytes = Buffer.from(png.base64, 'base64')
   const metadata = await sharp(bytes).metadata()
   assert.equal(metadata.format, 'png')
@@ -58,9 +61,9 @@ test('a real static WebP becomes a PNG (no animation metadata)', async () => {
 })
 
 test('a multi-frame WebP derives only its FIRST frame', async () => {
-  const source = await sharp(fixture('transcript-animated.webp'), { animated: true }).metadata()
+  const source = await sharp(ANIMATED_WEBP, { animated: true }).metadata()
   assert.equal(source.pages, 2, 'the fixture really has two frames')
-  const png = await convertKittyThumbnail(fixture('transcript-animated.webp'), 'image/webp')
+  const png = await convertKittyThumbnail(ANIMATED_WEBP, 'image/webp')
   const pixels = await rawPixels(png.base64)
   // Frame 1 is solid red; frame 2 is solid blue. A derivative that carried the
   // second frame (or an animation loop) would not be red.
@@ -72,7 +75,7 @@ test('a multi-frame WebP derives only its FIRST frame', async () => {
 })
 
 test('a transparent WebP keeps its alpha channel', async () => {
-  const png = await convertKittyThumbnail(fixture('transcript-alpha.webp'), 'image/webp')
+  const png = await convertKittyThumbnail(ALPHA_WEBP, 'image/webp')
   const pixels = await rawPixels(png.base64)
   assert.equal(pixels.channels, 4, 'alpha survives the derivative')
   assert.equal(pixel(pixels.data, pixels.width, pixels.channels, 5, 10)[3], 0, 'left half is transparent')
@@ -80,7 +83,7 @@ test('a transparent WebP keeps its alpha channel', async () => {
 })
 
 test('EXIF orientation is applied to the pixels AND the derived dimensions', async () => {
-  const png = await convertKittyThumbnail(fixture('transcript-oriented.jpg'), 'image/jpeg')
+  const png = await convertKittyThumbnail(ORIENTED_JPEG, 'image/jpeg')
   // Stored 60×30 with orientation 6: the DISPLAYED image is 30×60.
   assert.deepEqual([png.width, png.height], [30, 60], 'derived dimensions are the oriented ones')
   const pixels = await rawPixels(png.base64)
@@ -93,28 +96,28 @@ test('EXIF orientation is applied to the pixels AND the derived dimensions', asy
 
 test('a corrupt JPEG is rejected by the real decoder', async () => {
   await assert.rejects(
-    convertKittyThumbnail(fixture('transcript-corrupt.jpg'), 'image/jpeg'),
+    convertKittyThumbnail(CORRUPT_JPEG, 'image/jpeg'),
     /corrupt|premature|Invalid|JPEG/i,
   )
 })
 
 test('a corrupt WebP is rejected by the real decoder', async () => {
   await assert.rejects(
-    convertKittyThumbnail(fixture('transcript-corrupt.webp'), 'image/webp'),
+    convertKittyThumbnail(CORRUPT_WEBP, 'image/webp'),
     /corrupt|unable|WEBP/i,
   )
 })
 
 test('an input above the 25 MP decode ceiling is rejected before conversion', async () => {
-  const source = await sharp(fixture('transcript-over-limit.jpg')).metadata()
+  const source = await sharp(OVER_LIMIT_JPEG).metadata()
   assert.equal(source.width! * source.height!, 25_005_000, 'fixture exceeds 25_000_000 pixels')
   await assert.rejects(
-    convertKittyThumbnail(fixture('transcript-over-limit.jpg'), 'image/jpeg'),
+    convertKittyThumbnail(OVER_LIMIT_JPEG, 'image/jpeg'),
     /pixel limit/i,
   )
 })
 
 test('small sources are never enlarged (withoutEnlargement)', async () => {
-  const png = await convertKittyThumbnail(fixture('transcript-alpha.webp'), 'image/webp')
+  const png = await convertKittyThumbnail(ALPHA_WEBP, 'image/webp')
   assert.deepEqual([png.width, png.height], [48, 32], 'the 48×32 source keeps its size')
 })
