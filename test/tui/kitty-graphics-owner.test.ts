@@ -423,6 +423,29 @@ test('a retained id stays recognizable with no per-image bookkeeping', () => {
   }
 })
 
+test('the alternate screen still releases an id it painted before it retired', () => {
+  const { core, facade, terminal } = harness()
+  facade.write('\x1b[?1049h')
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(component.render(80).join('\r\n'))
+  const imageId = component.imageId!
+  // Esc back to the list: the Viewer panel goes away, the pixels do not.
+  component.dispose()
+  assert.equal(core.owns(imageId), false, 'the occurrence left the active ledger')
+  terminal.writes.length = 0
+  // Second Esc closes the workspace: the alternate screen's own global release.
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  assert.ok(terminal.text.includes(encodeKittyDeleteImage(imageId)),
+    'the alternate screen released the id IT painted')
+
+  // A later close of a fresh alternate session must not release it again.
+  terminal.writes.length = 0
+  facade.write('\x1b[?1049l')
+  facade.write('\x1b[?1049h')
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  assert.ok(!terminal.text.includes(`i=${imageId}`), 'that session is over')
+})
+
 test('a foreign id outside the Core slice still passes through', () => {
   const { core, facade, terminal } = harness()
   // Find an id outside this Core's reserved slice.

@@ -145,6 +145,13 @@ function decodedBytes(source: KittyImageSource): number {
 export class KittyGraphicsCore {
   /** The ACTIVE set: occurrences that still hold a payload (the budgeted set). */
   private readonly records = new Map<number, OwnedRecord>()
+  /**
+   * Every id placed in the CURRENT alternate session, including occurrences
+   * that were already retired (their pixels are terminal-retained). The
+   * alternate screen owns exactly these on the way out, and the set dies with
+   * that session, so it can never grow with the main screen's history.
+   */
+  private readonly altSessionIds = new Set<number>()
   /** The first id this Core ever handed out (a random start). */
   private readonly imageIdFloor = randomInt(1, ID_SPACE_START_LIMIT)
   /** One past the last id handed out: `[floor, next)` is exactly this Core's. */
@@ -256,6 +263,7 @@ export class KittyGraphicsCore {
     const record = this.records.get(imageId)
     if (record === undefined) return
     record.buffer = buffer
+    if (buffer === 'alt') this.altSessionIds.add(imageId)
     record.placements += 1
     record.everPlaced = true
     this.emit({ type: 'placement-written', imageId, detail: buffer })
@@ -344,7 +352,17 @@ export class KittyGraphicsCore {
       if (!record.residentIn.delete(buffer)) continue
       record.placements = 0
       wire += encodeKittyDeleteImage(record.image.imageId)
-
+    }
+    if (buffer === 'alt') {
+      // An occurrence that was placed in the alternate buffer and then retired
+      // left `records`, but its pixels were still that screen's to release.
+      // They can only live in that buffer (an occurrence is placed on ONE
+      // screen), so the alternate screen's own exit frees them by id.
+      for (const imageId of this.altSessionIds) {
+        if (this.records.has(imageId)) continue
+        wire += encodeKittyDeleteImage(imageId)
+      }
+      this.altSessionIds.clear()
     }
     if (wire !== '') this.emit({ type: 'global-delete-translated', detail: `images:${buffer}` })
     return wire
@@ -358,6 +376,8 @@ export class KittyGraphicsCore {
    * main screen its data.
    */
   invalidateResidency(buffer: KittyScreenBuffer, reason: string): void {
+    // The alternate buffer's identity dies with the session that owned it.
+    if (buffer === 'alt') this.altSessionIds.clear()
     let invalidated = 0
     for (const record of this.records.values()) {
       if (!record.residentIn.delete(buffer)) continue
@@ -452,6 +472,7 @@ export class KittyGraphicsCore {
   dispose(): void {
     this.disposed = true
     this.records.clear()
+    this.altSessionIds.clear()
     this.payloadBytes = 0
     this.decodedByteTotal = 0
   }
