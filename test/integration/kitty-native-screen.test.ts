@@ -43,6 +43,8 @@ class RecordingTerminal implements Terminal {
   columns = 100
   rows = 40
   kittyProtocolActive = false
+  /** When set, the matching write throws AFTER recording the bytes. */
+  failWhen: ((data: string) => boolean) | undefined
 
   get text(): string {
     return this.writes.join('')
@@ -53,6 +55,10 @@ class RecordingTerminal implements Terminal {
   async drainInput(): Promise<void> {}
   write(data: string): void {
     this.writes.push(data)
+    if (this.failWhen?.(data) === true) {
+      this.failWhen = undefined
+      throw new Error('terminal write failed')
+    }
   }
   moveBy(): void {}
   hideCursor(): void {}
@@ -615,4 +621,84 @@ test('metadata registration does not hand upload authority to the alt screen', (
   assert.equal(core.owns(imageId), false, 'the occurrence left the active ledger')
   assert.equal(core.residentPayloadBytes, 0, 'its payload copy is released')
   screen.stop()
+})
+
+
+/**
+ * X066 (Owner-approved fork hardening): a failing cleanup write in the alternate
+ * screen's own `beforeTerminalStop()` must not strand the terminal. The screen
+ * hooks and the physical release still run, the alternate screen still exits,
+ * the ORIGINAL cleanup error still propagates, and the Core never treats the
+ * failed delete as a success.
+ */
+function failingStop(kind: 'alt' | 'main', preserveScreen: boolean) {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const terminal = new RecordingTerminal()
+  const stopped: string[] = []
+  const originalStop = terminal.stop.bind(terminal)
+  terminal.stop = () => {
+    stopped.push('terminal.stop')
+    originalStop()
+  }
+  const originalShow = terminal.showCursor.bind(terminal)
+  terminal.showCursor = () => {
+    stopped.push('showCursor')
+    originalShow()
+  }
+  const core = new KittyGraphicsCore()
+  const facade = new KittyTerminalFacade(terminal, core)
+  const image = new NativeKittyImage(core, { pngBase64: PNG, widthPx: 64, heightPx: 64 }, {
+    maxWidthCells: 20,
+    maxHeightCells: 6,
+    fallback: '[image]',
+  })
+  class Rows implements Component {
+    render(width: number): string[] {
+      return ['head', ...image.render(width), 'tail']
+    }
+    invalidate(): void {
+      image.invalidate()
+    }
+  }
+  const screen = kind === 'alt'
+    ? new TuiAltScreen(facade, undefined, undefined, { mouse: false })
+    : new TuiMainScreen(facade)
+  screen.addChild(new Rows())
+  screen.start()
+  screen.renderNow()
+  const imageId = image.imageId!
+  terminal.writes.length = 0
+  // The alternate screen's own global cleanup is the first write of its stop.
+  terminal.failWhen = (data) => data.includes('a=d')
+  let failure: unknown
+  try {
+    screen.stop({ preserveScreen })
+  } catch (error) {
+    failure = error
+  }
+  return {
+    failure: failure instanceof Error ? failure.message : null,
+    stopped,
+    altExit: terminal.text.includes('\x1b[?1049l'),
+    owned: core.owns(imageId),
+  }
+}
+
+test('a failing cleanup write still restores the terminal and keeps the error (alt)', () => {
+  for (const preserveScreen of [false, true]) {
+    const result = failingStop('alt', preserveScreen)
+    assert.equal(result.failure, 'terminal write failed', `preserveScreen=${preserveScreen}: the original error propagates`)
+    assert.ok(result.stopped.includes('showCursor'), 'the cursor was restored')
+    assert.ok(result.stopped.includes('terminal.stop'), 'the physical terminal was released')
+    assert.ok(result.altExit, 'the alternate screen was exited')
+    assert.equal(result.owned, true, 'the Core did not treat the failed delete as a success')
+  }
+})
+
+test('a normal main-screen stop is unaffected by the teardown hardening', () => {
+  const result = failingStop('main', false)
+  assert.equal(result.failure, null, 'a main stop does not write a kitty global delete')
+  assert.ok(result.stopped.includes('showCursor'))
+  assert.ok(result.stopped.includes('terminal.stop'))
+  assert.equal(result.owned, true)
 })

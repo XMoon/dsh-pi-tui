@@ -1410,13 +1410,31 @@ export abstract class TuiBase extends Container implements TUI {
 		// Release a pending narrow background observation: a stopped screen must
 		// never apply a late OSC 11 result (and its timer must not stay armed).
 		this.settleBackgroundProbe(undefined);
-		if (this.terminalColorSchemeNotificationsEnabled) {
-			this.terminal.write("\x1b[?2031l");
-		}
-		this.beforeTerminalStop(options);
-		this.terminal.showCursor();
-		this.terminal.stop();
-		this.afterTerminalStop(options);
+		// (dsh-pi-tui divergence X066.) The teardown steps are exception-safe:
+		// every step is still ATTEMPTED after an earlier one throws, because a
+		// throwing `beforeTerminalStop()` (a failing image/cleanup write) would
+		// otherwise strand the terminal in raw mode, with the cursor hidden and
+		// the alternate screen still active. The FIRST failure is the one
+		// rethrown, so a later recovery failure never masks the original cause,
+		// and a recovery-only failure is never reported as success.
+		const failures: unknown[] = [];
+		const attempt = (step: () => void): void => {
+			try {
+				step();
+			} catch (error) {
+				failures.push(error);
+			}
+		};
+		attempt(() => {
+			if (this.terminalColorSchemeNotificationsEnabled) {
+				this.terminal.write("\x1b[?2031l");
+			}
+		});
+		attempt(() => this.beforeTerminalStop(options));
+		attempt(() => this.terminal.showCursor());
+		attempt(() => this.terminal.stop());
+		attempt(() => this.afterTerminalStop(options));
+		if (failures.length > 0) throw failures[0];
 	}
 
 	renderNow(force = false): void {

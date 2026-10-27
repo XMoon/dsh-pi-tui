@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 66
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 50, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 67
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 51, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -158,6 +158,7 @@
 | X063 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X064 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X065 | ACTIVE | LOW | HARD_HOST_API | NO |
+| X066 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -5573,3 +5574,77 @@ The host Kitty Graphics Core owns image ids, placements and retirement, and pain
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced for Image-7A PR1 after an external review proved the cropping regression by comparing the managed component against the legacy Image in the same module graph.
+
+### X066 — Exception-safe TuiBase.teardown so a failing cleanup write cannot strand the terminal
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`
+- Last audited: `2026-10-27`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+TuiBase.stop() ran its four teardown steps linearly: the screen hook (beforeTerminalStop), cursor restore, physical terminal release, then afterTerminalStop, which is where the alternate screen writes its ?1049l exit. A throwing hook aborted the rest, leaving the terminal in raw mode with the cursor hidden and the alternate screen active. That was latent upstream, but the host now has a real reachable trigger: the Kitty graphics facade deliberately throws when a cleanup write fails (Terminal.write is an offer, not an ACK), and the alternate screen emits its global image release from beforeTerminalStop. The Owner approved APPROVED_MINIMAL_FORK_STOP_HARDENING after the failure was reproduced with a real TuiAltScreen + the production facade: the error propagated and terminal.stop(), showCursor() and ?1049l were all skipped. The fix is confined to the shared stop lifecycle: every step is still attempted, the FIRST failure is rethrown so a later recovery failure cannot mask the cause, and a recovery-only failure is never reported as success. No host fallback escape writing, no second stop state machine, no change to the Kitty Core deletion policy.
+
+#### Changed surface
+
+- `TuiBase.stop()` executes each teardown step through a collecting `attempt()` and throws the first recorded failure after all steps ran. The normal-path order (beforeTerminalStop -> showCursor -> terminal.stop -> afterTerminalStop) is unchanged and no public member is added.
+
+#### Dependency map
+
+**Vendor internal**
+- `beforeTerminalStop`/`afterTerminalStop` are the only hook seams; the change calls them in the same order and with the same options object.
+- No other TuiBase member changes, and no terminal writes are added.
+- Audit note: The hardening is local to stop(); it introduces no state and no ordering change on the success path.
+
+**Inheritance / structural**
+- Both screen subclasses override the hooks and inherit the new sequencing; the alternate screen still exits the alternate buffer from afterTerminalStop.
+- Audit note: The structural contract (hook order, options identity) is preserved; only failure handling changed.
+
+**Host**
+- The host facade can now throw from a cleanup write without leaving the terminal unrestored; the host adds no fallback teardown of its own.
+- Audit note: The host relies on the fork owning the teardown order; it does not duplicate it.
+
+**Public / extension**
+- No extension-visible surface changes: stop() keeps its signature and its error behaviour only becomes stricter (a previously masked failure now propagates).
+- Audit note: Additive in robustness only; no member repurposed or removed.
+
+**Behavioral coupling**
+- Success path is byte-identical; the failure path performs the previously skipped steps and surfaces the first cause.
+- Audit note: The only behavioural change is that teardown completes under failure.
+
+#### Guarding tests
+
+- packages/pi-tui/test/stop-exception-safety.test.ts: each step still runs when an earlier one throws, the first failure wins, a recovery-only failure is reported, and the success path keeps its order.
+- test/integration/kitty-native-screen.test.ts: a real TuiAltScreen whose global cleanup write fails still calls showCursor/terminal.stop, still emits ?1049l, keeps the original error and leaves the Core ownership uncommitted (both preserveScreen modes); a normal main-screen stop is unaffected.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/tui.ts
+- src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream stop() aborts on a throwing teardown step; the fork attempts every step and rethrows the first failure, so terminal restoration is best-effort even when a cleanup write fails.
+
+#### Retirement conditions
+
+- Upstream stop() attempts all teardown steps after a step throws and rethrows the first failure.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced for Image-7A PR1 after an external review proved the terminal was left unrestored when the Kitty cleanup write failed.
