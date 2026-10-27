@@ -1106,3 +1106,50 @@ test('a superseded read is discarded SILENTLY and ends in a neutral, recoverable
   assert.equal(h.preview().kind, 'loading-stat', 're-entering issues a NEW request')
   assert.equal(h.statCalls(), statsBeforeReentry + 1, 'the re-entry really asked the Host again')
 })
+
+test('a near-limit single line is wrapped for the VIEWPORT, not re-wrapped per keystroke', async () => {
+  // One legal UTF-8 line close to the Host's 2 MiB page bound, on a narrow
+  // terminal: the full wrap is ~50k physical rows. Navigation must only
+  // materialise what it shows.
+  const longLine = 'x'.repeat(2 * 1024 * 1024 - 16)
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/huge.txt'] }]), {
+    autoResolve: {
+      stat: { version: 'v1', bytes: longLine.length },
+      offset: 1,
+      limit: DELIVERED_FILE_PAGE_LINES,
+      text: longLine,
+      lines: 1,
+      eof: true,
+    },
+  })
+  h.setSize(40, 16)
+  h.type('enter')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  interface WrapProbe { readonly wrappedSourceLines: number }
+  const probe = (): number => (h.panel as unknown as WrapProbe).wrappedSourceLines
+
+  // The first paint wraps the ONE source line at most once.
+  h.rows()
+  const afterOpen = probe()
+  assert.ok(afterOpen <= 1, `opening wraps the source line once (${afterOpen})`)
+
+  // Twenty consecutive scroll steps: each only extends the visible window, so
+  // the counter stays at ONE source line — never 50k physical rows, never a
+  // re-wrap of the whole page per keystroke.
+  const started = Date.now()
+  for (let step = 0; step < 20; step += 1) {
+    h.type('down')
+    h.rows()
+  }
+  const elapsed = Date.now() - started
+  assert.equal(probe(), afterOpen, 'scrolling never re-wraps the source line')
+  assert.ok(elapsed < 2_000, `twenty scroll steps stay responsive (${elapsed}ms)`)
+
+  // The rows really advanced: the viewport moved down within the wrapped line.
+  const pageUp = h.rows()
+  assert.ok(pageUp.length > 0)
+  // A width change invalidates the cache (one fresh wrap of the same line).
+  h.setSize(64, 16)
+  h.rows()
+  assert.equal(probe(), 1, 'a width change re-derives exactly one wrapped line')
+})

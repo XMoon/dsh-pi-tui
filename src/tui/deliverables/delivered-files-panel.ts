@@ -532,7 +532,12 @@ export class DeliveredFilesPanel implements Component {
     }
     if (DELIVERED_FILES_CHORDS.copyPath.keys.some(key => matchesKey(data, key))) return this.copySelectedPath()
     const bodyRows = this.detailsBodyRows()
-    const total = this.detailsLayout(this.paintedWidth === 0 ? 80 : this.paintedWidth).lines.length
+    // The scroll clamp needs "is there another row?", not the whole page: one row
+    // past the viewport is enough, so a 2 MiB line is never wrapped in full here.
+    const scrollWidth = this.paintedWidth === 0 ? 80 : this.paintedWidth
+    const scrollLayout = this.detailsLayout(scrollWidth, this.detailsTop + bodyRows + 1)
+    const total = scrollLayout.lines.length
+    void scrollLayout
     if (matchesKey(data, 'up')) {
       this.detailsTop = Math.max(0, this.detailsTop - 1)
       this.requestRender()
@@ -933,7 +938,46 @@ export class DeliveredFilesPanel implements Component {
     return Math.max(1, this.maxRows - 2)
   }
 
-  private detailsLayout(width: number): { lines: string[]; previewStart: number } {
+  /**
+   * The WRAPPED projection of the current text page, materialised only as far as
+   * the caller needs. A page is at most 120 source lines, but ONE of them may be
+   * a near-2 MiB line: wrapping it at a narrow width yields tens of thousands of
+   * physical rows, so re-wrapping the whole page on every keystroke and again on
+   * every paint is not affordable. The cache is keyed by the page IDENTITY and
+   * the width, and a page / version / width change discards it.
+   */
+  private wrapCache: {
+    page: DeliveredFilePage
+    width: number
+    source: string[]
+    sourceLine: number
+    rows: string[]
+  } | undefined
+  /** Internal diagnostic: logical source lines wrapped since the last reset. */
+  private wrappedSourceLines = 0
+
+  private ensurePreviewRows(contentWidth: number, needed: number): { rows: string[]; complete: boolean } {
+    const state = this.preview
+    if (state.kind !== 'text-page') return { rows: [], complete: true }
+    const page = state.page
+    let cache = this.wrapCache
+    if (cache === undefined || cache.page !== page || cache.width !== contentWidth) {
+      cache = { page, width: contentWidth, source: page.text.split('\n'), sourceLine: 0, rows: [] }
+      this.wrapCache = cache
+      this.wrappedSourceLines = 0
+    }
+    while (cache.rows.length < needed && cache.sourceLine < cache.source.length) {
+      // Source lines are NEVER dropped: a long line wraps losslessly.
+      const source = sanitizeDisplayText(cache.source[cache.sourceLine]!)
+      cache.sourceLine += 1
+      this.wrappedSourceLines += 1
+      const wrapped = wrapPreservingText(source, contentWidth)
+      cache.rows.push(...wrapped)
+    }
+    return { rows: cache.rows, complete: cache.sourceLine >= cache.source.length }
+  }
+
+  private detailsLayout(width: number, neededPreviewRows = 0): { lines: string[]; previewStart: number } {
     const file = this.selectedFile()
     if (file === undefined) return { lines: [], previewStart: 0 }
     const contentWidth = Math.max(8, Math.floor(width))
@@ -953,7 +997,12 @@ export class DeliveredFilesPanel implements Component {
     }
     lines.push('')
     const previewStart = lines.length
-    lines.push(...this.previewLines(contentWidth))
+    if (this.preview.kind === 'text-page' && this.preview.page.lines > 0) {
+      const { rows } = this.ensurePreviewRows(contentWidth, neededPreviewRows)
+      lines.push(...rows)
+    } else {
+      lines.push(...this.previewLines(contentWidth))
+    }
     return { lines, previewStart }
   }
 
@@ -976,7 +1025,7 @@ export class DeliveredFilesPanel implements Component {
       const title = file === undefined ? 'Details' : `${titleLabel}${titleSuffix}`
       rows.push(truncateToWidth(color.textDim(title), safeWidth, '…'))
       const bodyRows = Math.max(1, this.maxRows - 2)
-      const layout = this.detailsLayout(safeWidth)
+      const layout = this.detailsLayout(safeWidth, this.detailsTop + bodyRows)
       const body = layout.lines
       if (this.previewScrollToContent) {
         this.previewScrollToContent = false

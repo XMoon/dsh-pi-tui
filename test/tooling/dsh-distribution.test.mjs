@@ -567,3 +567,43 @@ test('npm distribution defaults to the declared package target, never a stale li
   // An explicit caller target still wins so historical lanes keep working.
   assert.equal(loadDshDistribution({ mode: 'npm', version: '0.1.5-rc.2' }).version, '0.1.5-rc.2')
 })
+
+test('a workspace that already owns `overrides:` receives the managed entries INSIDE it', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-override-merge-')
+  const path = join(workspace, 'pnpm-workspace.yaml')
+  writeFileSync(path, [
+    'packages:',
+    '- packages/*',
+    '',
+    'overrides:',
+    '  zod: 4.6.7',
+    '',
+    'verifyDepsBeforeRun: warn',
+    '',
+  ].join('\n'))
+  const distribution = { kind: 'source-pack', packages: new Map([['@deepseek-ai/dsh', { path: workspace }]]) }
+  writeDshWorkspaceOverrides(workspace, distribution)
+  const once = readFileSync(path, 'utf8')
+  // YAML forbids a duplicate top-level key: exactly one `overrides:` mapping...
+  assert.equal(once.split('\n').filter(line => /^overrides:/u.test(line)).length, 1, once)
+  // ...which keeps the file's OWN pin and gains the managed entries.
+  assert.match(once, /^ {2}zod: 4\.6\.7$/mu)
+  assert.match(once, /@deepseek-ai\/dsh/u)
+  assert.match(once, /BEGIN DSH SOURCE OVERRIDES/u)
+  // A second write REPLACES the managed region instead of nesting it.
+  writeDshWorkspaceOverrides(workspace, distribution)
+  assert.equal(readFileSync(path, 'utf8'), once, 'the managed block is idempotent')
+  // Removing the managed block restores the file byte for byte.
+  writeDshWorkspaceOverrides(workspace, { kind: 'npm', version: '0.0.0-test' })
+  assert.equal(readFileSync(path, 'utf8'), [
+    'packages:',
+    '- packages/*',
+    '',
+    'overrides:',
+    '  zod: 4.6.7',
+    '',
+    'verifyDepsBeforeRun: warn',
+    '',
+  ].join('\n'))
+})
