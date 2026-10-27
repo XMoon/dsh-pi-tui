@@ -41,6 +41,7 @@ import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
+import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause, type InProcessHostCarrier } from './host-runtime.ts'
 
@@ -302,6 +303,7 @@ const REMOTE_CONTRIBUTIONS = [
   llmRemote,
   fileUploadsRemote,
   userQuestionsRemote,
+  workspaceFilesRemote,
 ] as const
 
 /** The composed official Client runtime. Not exported from the package root. */

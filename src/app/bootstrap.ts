@@ -2906,6 +2906,24 @@ export function applyRunnerWithRuntime(
         snapshot: () => surface.deliveredFilesSnapshot(),
         isCurrent: (snapshot) => surface.isDeliveredFilesSnapshotCurrent(snapshot),
       },
+      // Delivered files (PR2): the Host READ port, BOUND to the snapshot's own
+      // display subject. The app reselects no session of its own and never
+      // falls back to the Client filesystem; an assembly without the port gets
+      // the definite unavailable state.
+      deliveredFilePreview: (snapshot) => {
+        const port = backend.deliveredFileRead
+        return {
+          stat: (path, signal) => port.stat(snapshot.sessionId, path, signal),
+          read: (path, offset, limit, signal) => port.read(snapshot.sessionId, path, offset, limit, signal),
+        }
+      },
+      reportDeliveredFileFailure: (message, error) => {
+        // Structured, never a swallowed failure: the unclassified cause stays
+        // readable in the diagnostics channel beside the message.
+        diag.error(message, {
+          error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+        })
+      },
       // Headless-test seam (M3-4 PR3 image L6): the live image draft store.
       // Production paths never read it.
       draftImageStoreForTest: draftImages,

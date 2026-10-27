@@ -755,12 +755,39 @@ feedback belongs to ONE request token: only the latest copy may paint
 overwrite a newer attempt, and leaving the page (or entering it again) retires
 the previous visit's pending settlement.
 
-**Details is metadata in this contract**: the declared Host path and
-description, with `C` copying the RAW declared path string (the display is
-sanitized; the copy payload is not). Reading file CONTENT is a separate
-Host-owned capability and is not part of this presentation contract: the tail
-and the browser never read a file, never imply the declaration is a snapshot,
-and never claim a preview.
+**The Details page is the read-only PREVIEW.** It paints the declared Host path
+and description plus AT MOST ONE page of the file's text, read through the
+Host-owned `DeliveredFileReadPort` (see `host-client.md`). `C` still copies the
+RAW declared path string (the display is sanitized; the copy payload is not),
+and `Enter Preview` — not "Details" — names the entry, because the page really
+reads.
+
+The preview's rules are part of this contract:
+
+- entering Preview performs a REAL `stat` first (the declared event item is not
+  a snapshot); only its live answer opens a page;
+- a known binary/opaque suffix (`.png .jpg .jpeg .gif .webp .bmp .pdf .zip .gz
+  .tar .7z .doc .docx .xls .xlsx .ppt .pptx`, case-insensitive) shows the stat
+  metadata and `Preview unavailable for this file type` and reads NO bytes;
+- every other file reads ONE `120`-line window and holds at most that page. Text
+  is painted as safe monospace source — never a partial Markdown render — so an
+  unterminated fenced block cannot change the rendering structure, and no source
+  line is dropped;
+- `↑↓` scrolls the painted body; `PgUp`/`PgDn` scroll it first and only request
+  the neighbouring 120-line window at the page edge (`PgDn` only while
+  `eof=false`, `PgUp` only while `offset>1`);
+- a page whose `version` differs from the already-held page RESTARTS the preview
+  from `stat`+offset 1 and says `File changed; preview restarted` — two versions
+  are never spliced; a `lines=0, eof=true` page is a definite `(end of file)`,
+  never a retry loop;
+- switching file/Turn, leaving the page, or disposing the panel revokes the
+  in-flight read, and a reply whose request identity is no longer current paints
+  nothing (a superseded read and the caller's own cancellation are not states);
+- the six definite refusals (`not-found`, `not-text`, `not-regular-file`,
+  `too-large`, `session-unavailable`, `service-unavailable`) paint one fixed
+  readable sentence each, metadata where known, and keep Copy/Back; an
+  unclassified failure paints `Unable to preview file` AND is reported to the
+  surface diagnostics — never shown as a fake success.
 
 ### Nested Focus Work
 

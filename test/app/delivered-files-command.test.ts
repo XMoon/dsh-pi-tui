@@ -148,7 +148,7 @@ test('/deliverables really mounts the ONE managed overlay on the newest Turn', a
   const view = await viewport(vt)
   assert.ok(view.includes('Delivered files · Turn 9'), `the overlay header is painted:\n${view}`)
   assert.ok(view.includes('> report.md'), `the first file is selected:\n${view}`)
-  assert.ok(view.includes('Enter Details · ↑↓ Select'), `the real key path is advertised in the §7.2 order:\n${view}`)
+  assert.ok(view.includes('Enter Preview · ↑↓ Select'), `the real key path is advertised in the §7.2 order:\n${view}`)
 })
 
 test('a snapshot that stopped being current never mounts', async () => {

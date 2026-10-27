@@ -924,8 +924,15 @@ test('the Remote branch OMITS the Host-derived access section when the permissio
   const hostPreset = 'm3-4-pr2-preset'
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
   // A Host sandbox service that answers WITHOUT a session (the exact hole the
-  // plan's §6.6 forbids on Remote): `resolve(undefined)` yields a mode.
-  seedHost.ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'danger-full-access' }) } as never)
+  // plan's §6.6 forbids on Remote): `resolve(undefined)` yields a mode. The
+  // fixture now mounts the OFFICIAL `sandboxPolicy` service (the Remote
+  // composition's workspace-file prerequisite needs it), so the hole is
+  // reproduced by overriding that live service — a second `provide` would
+  // collide with the already-registered service.
+  const sandbox = seedHost.ctx.get('sandboxPolicy') as unknown as {
+    resolve(session?: unknown): { readonly mode: string }
+  }
+  sandbox.resolve = () => ({ mode: 'danger-full-access' })
   await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
   const app = await waitForApp(fixture)

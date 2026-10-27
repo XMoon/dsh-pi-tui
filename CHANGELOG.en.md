@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `/deliverables` Details page now really reads and previews Host text files, and names
+  each way a read can fail.**
+  `Enter Preview` fetches live Host metadata first (a delivery declaration is no longer treated
+  as a snapshot) and then reads ONE 120-line page of UTF-8 text, painted as plain monospace
+  source (Markdown source is preserved rather than partially re-rendered, no source line is
+  dropped, and no raw ANSI/OSC is injected). Known binary/document suffixes show the metadata
+  and `Preview unavailable for this file type` without reading a byte; `↑↓` scrolls the current
+  page, `PgDn`/`PgUp` scroll the viewport first and only request the neighbouring 120-line
+  window at a page edge (`PgDn` only while not at EOF, `PgUp` only while not on the first page),
+  with no prefetch and no whole-file aggregation. A file that changes between pages drops the
+  old page and restarts from metadata + line 1 with `File changed; preview restarted`, never
+  splicing two versions; an empty page at EOF shows `(end of file)`. Deleted files, non-UTF-8
+  content, a path that is no longer a regular file, a page over the Host read cap, an
+  unavailable Session scope and an unavailable Host preview service each paint a fixed,
+  readable sentence while keeping `Shift+C Copy path` and Back; an unclassified cause paints
+  `Unable to preview file` and is reported to diagnostics instead of being faked into success.
+  Switching file/Turn, leaving the page or closing the panel revokes the in-flight read, so a
+  superseded reply never paints. `C` still copies the raw Host path. Direct and the
+  experimental Remote serve the SAME read-only semantic port (Remote over the official
+  generated `workspaceFiles` Remote); there is no Client filesystem fallback, no TUI-specific
+  RPC, and no image/PDF/native open or download capability.
 - **Settings → Extensions is now a real dynamic settings page grouped by extension.**
   Every setting an extension contributes through `registerSetting` appears as a real entry in
   `Settings → Extensions`, grouped and paged by its registering owner: one extension's settings

@@ -46,6 +46,7 @@ import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import { mountWorkspaceFileService } from '../support/remote-application-fixture.ts'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
@@ -356,6 +357,9 @@ async function createHostFixture(
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
     await ctx.plugin(LocalFileSystem)
+    // The official Host workspace-file service the Remote composition requires
+    // (the production bundle patch always mounts this row).
+    await mountWorkspaceFileService(ctx)
     // 0.2.1-rc.2's SessionController nests the official skill catalog, whose
     // `SessionSkillCatalog.inject` requires the real `workingDirectory` owner;
     // without it the `skills/list` Remote never registers. The official base

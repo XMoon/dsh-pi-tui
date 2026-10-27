@@ -14,6 +14,12 @@
  *   loader, presets, userQuestions, workspace, filesystem
  * - the official in-process Client/Gateway path over the real carrier
  * - M3 additive Host rows mount/unwind with the composed runtime
+ * - the OFFICIAL `@deepseek-ai/dsh-api-workspace-files` Host service plus the
+ *   Host sandbox-policy service it injects (Delivered files PR2): the same two
+ *   official services the production `cordis.patch.yml` row composes. The
+ *   bundle's patch ALWAYS mounts that row, so the Remote composition's
+ *   `workspaceFiles` prerequisite is a production fact here too — reproducing
+ *   it is parity, not a substitution.
  * - with `pluginManagerProfile: true` (M3-5 PR4): a real managed profile
  *   directory (`profileContext`) plus the real base-owned
  *   `@deepseek-ai/dsh-plugin-manager` Host service, so the Remote Plugin
@@ -297,6 +303,25 @@ function isolateFixtureHome(root: string): () => void {
 }
 
 /** The ordinary rc.2 Host fixture: real services, no M3 rows, no Remote composition. */
+/**
+ * Mount the OFFICIAL Host workspace-file service the Remote composition
+ * requires (`@deepseek-ai/dsh-api-workspace-files`) together with the sandbox
+ * policy it injects.
+ *
+ * The production `cordis.patch.yml` ALWAYS mounts that row, so a Host graph
+ * that composes the Remote backend must reproduce the same two official
+ * services — exactly once, never a second copy and never a stand-in. Exported
+ * so every suite that builds its OWN Host Context composes the same rows
+ * instead of hand-rolling them.
+ * @param ctx - the Host Context the graph mounts onto.
+ */
+export async function mountWorkspaceFileService(ctx: Context): Promise<void> {
+  const SandboxPolicyService = (await import('@deepseek-ai/dsh-sandbox-policy')).default
+  await ctx.plugin(SandboxPolicyService)
+  const WorkspaceFiles = (await import('@deepseek-ai/dsh-api-workspace-files')).default
+  await ctx.plugin(WorkspaceFiles)
+}
+
 export async function createRemoteApplicationHostFixture(
   life: TestLifecycle,
   presetId: string,
@@ -409,6 +434,9 @@ export async function createRemoteApplicationHostFixture(
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
     await ctx.plugin(LocalFileSystem)
+    // The OFFICIAL Host file service (the bundle's `workspace-files` row) — a
+    // Remote-composition prerequisite, mounted exactly once.
+    await mountWorkspaceFileService(ctx)
     // 0.2.1-rc.2's SessionController nests the official skill catalog and the real
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).

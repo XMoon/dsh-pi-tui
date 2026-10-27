@@ -73,6 +73,11 @@ const HOST_PREREQUISITE_SERVICES = [
   'sessionQuery',
   'workspaceRegistry',
   'jobController',
+  // The official Host file service the delivered-files preview reads through.
+  // The bundle mounts it exactly once (its `cordis.patch.yml` row); a Host
+  // without it cannot serve the preview at all, so this is a composition error
+  // rather than a degradable state.
+  'workspaceFiles',
 ] as const
 
 /**
