@@ -38,7 +38,7 @@ import type {
 } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 import type { TmuxKittyAdmission } from './tmux-admission.ts'
-import { KITTY_VIRTUAL_PLACEHOLDER, encodeTmuxPassthrough } from './tmux-virtual.ts'
+import { encodeTmuxPassthrough, hasKittyVirtualCells } from './tmux-virtual.ts'
 
 /**
  * The physical-write refusal of a tmux virtual handle whose live admission was
@@ -142,21 +142,6 @@ function trailingHoldbackLength(text: string): number {
     }
   }
   return longest
-}
-
-/**
- * Parse one placeholder row's OWN identity colors: the low 24 bits of the image
- * id in the foreground and of the placement id in the underline. The anchor's
- * `i`/`p` stay authoritative; this validates existing bytes and never
- * reconstructs geometry. A plain-text `U+10EEEE` has no such color pair.
- */
-function gridIdentityOf(line: string): { imageId: number; placementId: number } | undefined {
-  const foreground = /\x1b\[38;2;(\d{1,3});(\d{1,3});(\d{1,3})m/.exec(line)
-  const underline = /\x1b\[58:2::(\d{1,3}):(\d{1,3}):(\d{1,3})m/.exec(line)
-  if (foreground === null || underline === null) return undefined
-  const rgb = (match: RegExpExecArray): number =>
-    ((Number(match[1]) & 0xff) << 16) | ((Number(match[2]) & 0xff) << 8) | (Number(match[3]) & 0xff)
-  return { imageId: rgb(foreground), placementId: rgb(underline) }
 }
 
 function numericControl(value: string | undefined): number | undefined {
@@ -380,12 +365,13 @@ export class KittyTerminalFacade implements Terminal {
     // a chunk must pass the same admission gate, or a revocation between chunks
     // would let the old image's cells reach a different client.
     //
-    // The grid is identified by its IDENTITY BYTES, never by the bare presence
-    // of `U+10EEEE`: that code point is ordinary Unicode and legal user text,
-    // so a character test would classify a plain transcript line as an image and
-    // (once revoked) refuse the whole text frame forever. A managed grid row
-    // carries explicit foreground/underline colors naming an id inside this
-    // Core's reserved slice.
+    // The grid is identified by its COMPLETE CELL STRUCTURE — the placeholder
+    // base plus the row, column and high-byte diacritics — never by the bare
+    // presence of `U+10EEEE`: that code point is ordinary Unicode and legal user
+    // text, so a character test would classify a plain transcript line as an
+    // image and (once revoked) refuse the whole text frame forever. The
+    // structure also survives a physical cut inside a row, where the tail
+    // carries cells but no colour prefix.
     const hasManagedPlacement = segments.some((segment) => {
       if (segment.kind === 'apc') return this.managedPlacementId(segment.apc) !== undefined
       return this.managedGridIn(segment.text)
@@ -518,22 +504,14 @@ export class KittyTerminalFacade implements Terminal {
   /**
    * Whether one TEXT segment carries at least one REAL managed grid row.
    *
-   * The classifier is the row's IDENTITY BYTES, never the bare `U+10EEEE`
-   * codepoint: that codepoint is ordinary Unicode and legal user text, so a
-   * character test would misclassify a plain transcript line (and, once
-   * revoked, refuse that text frame forever). A managed grid row carries the
-   * image id in its foreground color and the placement id in its underline; the
-   * id must fall inside THIS Core's reserved slice, which no user text can
-   * accidentally match.
+   * The classifier is the COMPLETE cell structure — placeholder base plus the
+   * row, column and high-byte diacritics — never the bare `U+10EEEE` codepoint,
+   * which is legal user text. It also never depends on a colour prefix being in
+   * the SAME physical chunk: the fork's 1 MiB writer can cut inside a row, and a
+   * tail of cells alone still carries complete cells.
    */
   private managedGridIn(text: string): boolean {
-    if (!text.includes(KITTY_VIRTUAL_PLACEHOLDER)) return false
-    for (const line of text.split('\n')) {
-      if (!line.includes(KITTY_VIRTUAL_PLACEHOLDER)) continue
-      const identity = gridIdentityOf(line)
-      if (identity !== undefined && this.core.ownsLowImageBits(identity.imageId)) return true
-    }
-    return false
+    return hasKittyVirtualCells(text)
   }
 
   /**

@@ -274,16 +274,6 @@ export class KittyGraphicsCore {
    * 32-bit id without the Core's own authority. The slice is contiguous, so this
    * is an exact interval test on the low bits, not a second id registry.
    */
-  ownsLowImageBits(low: number): boolean {
-    const span = this.nextImageId - this.imageIdFloor
-    // A slice at least 2^24 wide names EVERY low value at least once.
-    if (span >= 0x1000000) return true
-    const first = this.imageIdFloor & 0xffffff
-    const last = (this.nextImageId - 1) & 0xffffff
-    // A narrower slice that crosses the 24-bit boundary covers both ends.
-    return first <= last ? low >= first && low <= last : low >= first || low <= last
-  }
-
 
 
   /**

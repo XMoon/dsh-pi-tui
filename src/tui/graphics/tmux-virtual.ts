@@ -72,6 +72,26 @@ const DIACRITIC_CHARS: readonly string[] = ROWCOLUMN_DIACRITICS.map((codePoint) 
 /** The largest row/column index the diacritic table can express. */
 export const KITTY_VIRTUAL_MAX_CELLS = DIACRITIC_CHARS.length
 
+/** Membership of the row/column diacritic table, for structural cell tests. */
+const DIACRITIC_SET: ReadonlySet<string> = new Set(DIACRITIC_CHARS)
+
+/**
+ * Whether `text` carries at least one REAL virtual grid cell: the placeholder
+ * base followed by the ROW, COLUMN and image-high-byte diacritics. This is the
+ * complete grid semantics, and it is what separates a managed cell from a bare
+ * `U+10EEEE` in ordinary user text — that code point alone is legal Unicode and
+ * never carries this three-mark structure.
+ */
+export function hasKittyVirtualCells(text: string): boolean {
+  for (let index = text.indexOf(KITTY_VIRTUAL_PLACEHOLDER); index !== -1;
+    index = text.indexOf(KITTY_VIRTUAL_PLACEHOLDER, index + KITTY_VIRTUAL_PLACEHOLDER.length)) {
+    const marks = [...text.slice(index + KITTY_VIRTUAL_PLACEHOLDER.length,
+      index + KITTY_VIRTUAL_PLACEHOLDER.length + 3)]
+    if (marks.length === 3 && marks.every(mark => DIACRITIC_SET.has(mark))) return true
+  }
+  return false
+}
+
 /**
  * The component bounds its geometry BEFORE encoding. The encoder must fail
  * fast instead of silently truncating a row/column count: a truncated grid and

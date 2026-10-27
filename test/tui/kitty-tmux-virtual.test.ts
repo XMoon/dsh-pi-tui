@@ -16,6 +16,7 @@ import {
   encodeKittyPlaceholderGrid,
   encodeKittyVirtualPlacement,
   encodeTmuxPassthrough,
+  hasKittyVirtualCells,
 } from '../../src/tui/graphics/tmux-virtual.ts'
 
 const P = KITTY_VIRTUAL_PLACEHOLDER
@@ -101,4 +102,26 @@ test('every grid row ends with an explicit foreground/underline reset', () => {
     assert.ok(line.endsWith('\x1b[39;59m'), 'no color may leak into the next screen row')
     assert.equal(visibleWidth(line), 3)
   }
+})
+
+test('the managed-cell test needs the COMPLETE three-diacritic structure', () => {
+  const grid = encodeKittyPlaceholderGrid(0x12345678, 7, 40, 2)
+  assert.equal(hasKittyVirtualCells(grid[0]!), true, 'a real grid row is a cell run')
+  assert.equal(hasKittyVirtualCells(grid[1]!), true, 'every grid row is a cell run')
+
+  // A bare placeholder codepoint is ordinary text: no row/column/high-byte marks.
+  assert.equal(hasKittyVirtualCells(`plain ${P} text`), false)
+  // Even ONE missing diacritic is not a cell (a user cannot produce the triple).
+  const cell = [...grid[0]!.slice(grid[0]!.indexOf(P))].slice(0, 4).join('')
+  assert.equal(hasKittyVirtualCells(P), false)
+  assert.equal(hasKittyVirtualCells(cell), true, 'the fixture really is one cell')
+  assert.equal(hasKittyVirtualCells(cell.slice(0, 3)), false, 'an incomplete cell is not a cell')
+
+  // A MID-ROW tail (the writer cut after the colour prefix) still carries
+  // complete cells, so it is still recognised without any colour bytes.
+  const row = grid[1]!
+  const cut = row.indexOf(P) + 40
+  const tail = row.slice(cut)
+  assert.equal(tail.includes('38;2;'), false, 'fixture: the tail has no colour prefix')
+  assert.equal(hasKittyVirtualCells(tail), true, 'the mid-row tail is still a managed cell run')
 })
