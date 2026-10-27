@@ -320,13 +320,14 @@ test('a binary suffix shows metadata only: ZERO Host reads, counted at the real 
   }
 })
 
-test('a real Remote generation replacement never paints its late success or refusal', async (t) => {
+test('a real Remote generation replacement never paints its late success OR its late refusal', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 'pr2-gen-preset')
   const workspace = life.tempDir('dsh-pr2-gen-ws-')
   mkdirSync(workspace, { recursive: true })
-  const filePath = join(workspace, 'gen.md')
-  writeFileSync(filePath, 'generation one\n')
+  const existingPath = join(workspace, 'gen.md')
+  writeFileSync(existingPath, 'generation one\n')
+  const missingPath = join(workspace, 'does-not-exist.md')
   const sessionId = SessionId('pr2-gen-session')
   await host.harness.create(sessionId, undefined, { cwd: workspace })
   let hostRuntime: RemoteHostRuntime | undefined
@@ -334,50 +335,65 @@ test('a real Remote generation replacement never paints its late success or refu
   try {
     hostRuntime = await createRemoteHostRuntime(host.ctx)
     client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
-    // The REAL Remote adapter over the official generated namespace, with a
-    // generation source this test can advance.
-    let generation: unknown = client.connection.generation
-    const port = new RemoteDeliveredFileReadPort(client.remote.workspaceFiles, {
-      getSnapshot: () => generation as never,
-      subscribe: () => () => {},
-    })
-    const panel = new DeliveredFilesPanel({
-      snapshot: {
-        subjectKind: 'main',
-        sessionId,
-        sourceIdentity: {},
-        turns: [{ turn: 1, files: [{ path: filePath }] }],
+    const wire = client
+
+    // §10 T21: BOTH late outcomes must pass the currentness fence. The case is
+    // parameterised so the two replies travel the identical path.
+    const cases = [
+      {
+        label: 'late SUCCESS',
+        declared: existingPath,
+        forbidden: ['generation one'],
       },
-      initial: { turn: 1, path: filePath, page: 'details' },
-      preview: {
-        stat: (path: string, signal: AbortSignal) => {
-          // DISPATCH FIRST (the adapter captures the generation there), then
-          // advance it before the reply is awaited: the reply must be classified
-          // as superseded.
-          const pending = port.stat(sessionId, path, signal)
-          generation = { id: 'superseded' }
-          return pending
+      {
+        label: 'late REFUSAL',
+        declared: missingPath,
+        forbidden: ['File no longer exists on Host', 'Unable to preview file', 'Not a UTF-8 text file'],
+      },
+    ] as const
+
+    for (const current of cases) {
+      // A generation source this test can advance AFTER the dispatch: that is the
+      // replacement race (the adapter captures the generation where it sends).
+      let generation: unknown = wire.connection.generation
+      const port = new RemoteDeliveredFileReadPort(wire.remote.workspaceFiles, {
+        getSnapshot: () => generation as never,
+        subscribe: () => () => {},
+      })
+      const panel = new DeliveredFilesPanel({
+        snapshot: {
+          subjectKind: 'main',
+          sessionId,
+          sourceIdentity: {},
+          turns: [{ turn: 1, files: [{ path: current.declared }] }],
         },
-        read: (path: string, offset: number, signal: AbortSignal) => port.read(sessionId, path, offset, signal),
-      },
-      requestRender: () => {},
-      close: () => {},
-      copyPath: (_path, settle) => settle(true),
-    })
-    panel.setMaxRows(20)
-    const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
-    const deadline = Date.now() + 5_000
-    while (paint().includes('Loading') && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 10))
+        initial: { turn: 1, path: current.declared, page: 'details' },
+        preview: {
+          stat: (path: string, signal: AbortSignal) => {
+            const pending = port.stat(sessionId, path, signal)
+            generation = { id: `superseded-${current.label}` }
+            return pending
+          },
+          read: (path: string, offset: number, signal: AbortSignal) => port.read(sessionId, path, offset, signal),
+        },
+        requestRender: () => {},
+        close: () => {},
+        copyPath: (_path, settle) => settle(true),
+      })
+      panel.setMaxRows(20)
+      const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+      const deadline = Date.now() + 5_000
+      while (paint().includes('Loading') && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      const painted = paint()
+      assert.ok(!painted.includes('Loading'), `[${current.label}] the page settles:\n${painted}`)
+      for (const forbidden of current.forbidden) {
+        assert.ok(!painted.includes(forbidden), `[${current.label}] a superseded reply never paints "${forbidden}":\n${painted}`)
+      }
+      assert.ok(painted.includes(current.declared), `[${current.label}] the declared metadata stays:\n${painted}`)
+      assert.equal(panel.currentPage(), 'details', `[${current.label}] the page survives its own reply`)
     }
-    const painted = paint()
-    // T21: the late reply is UI-silent — no success, no Host refusal, no stale
-    // bytes, and no endless loading.
-    assert.ok(!painted.includes('generation one'), `a superseded success never paints:\n${painted}`)
-    assert.ok(!painted.includes('Unable to preview file'), `a superseded reply is not a failure claim:\n${painted}`)
-    assert.ok(!painted.includes('File no longer exists'), painted)
-    assert.ok(!painted.includes('Loading'), `the page settles:\n${painted}`)
-    assert.ok(painted.includes(filePath), `the declared metadata stays:\n${painted}`)
   } finally {
     await client?.dispose()
     await hostRuntime?.dispose()
