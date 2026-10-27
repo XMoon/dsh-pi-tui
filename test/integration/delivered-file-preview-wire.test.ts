@@ -26,6 +26,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from '../../src/app/remote/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../src/app/remote/host-runtime.ts'
 import { DeliveredFileReadError } from '../../src/runtime/deliverables-port.ts'
+import { DirectDeliveredFileReadPort } from '../../src/runtime/direct/deliverables-direct.ts'
 import { DeliveredFilesPanel } from '../../src/tui/deliverables/delivered-files-panel.ts'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { RemoteDeliveredFileReadPort } from '../../src/runtime/remote/deliverables-remote.ts'
@@ -177,5 +178,82 @@ test('the generated workspaceFiles Remote serves a real Host stat/read and a rea
   } finally {
     await client?.dispose()
     await hostRuntime?.dispose()
+  }
+})
+
+test('126 delivered files: only the SELECTED file reaches the Host, counted at the real service', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'pr2-bulk-preset')
+  const workspace = life.tempDir('dsh-pr2-bulk-ws-')
+  mkdirSync(workspace, { recursive: true })
+  const sessionId = SessionId('pr2-bulk-session')
+  await host.harness.create(sessionId, undefined, { cwd: workspace })
+
+  // 126 REAL files, each with a unique body.
+  const paths: string[] = []
+  for (let index = 0; index < 126; index += 1) {
+    const path = join(workspace, `f-${String(index + 1).padStart(3, '0')}.md`)
+    writeFileSync(path, `body of file ${index + 1}\n`)
+    paths.push(path)
+  }
+
+  // Count AT THE ACTUAL Host service: patch the mounted official instance's own
+  // methods (unbound originals, restored in `finally`), so the count is what the
+  // Host really served — never a stub's tally.
+  const service = host.ctx.get('workspaceFiles') as unknown as {
+    stat(...args: unknown[]): Promise<unknown>
+    read(...args: unknown[]): Promise<unknown>
+  }
+  const originalStat = service.stat
+  const originalRead = service.read
+  const served: string[] = []
+  service.stat = function patchedStat(this: unknown, ...args: unknown[]) {
+    served.push(`stat:${String(args[1])}`)
+    return originalStat.apply(this, args)
+  }
+  service.read = function patchedRead(this: unknown, ...args: unknown[]) {
+    served.push(`read:${String(args[1])}`)
+    return originalRead.apply(this, args)
+  }
+  try {
+    const port = new DirectDeliveredFileReadPort(host.ctx)
+    const bound = {
+      stat: (path: string, signal: AbortSignal) => port.stat(sessionId, path, signal),
+      read: (path: string, offset: number, signal: AbortSignal) => port.read(sessionId, path, offset, signal),
+    }
+    const panel = new DeliveredFilesPanel({
+      snapshot: {
+        subjectKind: 'main',
+        sessionId,
+        sourceIdentity: {},
+        turns: [{ turn: 1, files: paths.map(path => ({ path })) }],
+      },
+      initial: { turn: 1, path: paths[0], page: 'details' },
+      preview: bound,
+      requestRender: () => {},
+      close: () => {},
+      copyPath: (_path, settle) => settle(true),
+    })
+    panel.setMaxRows(20)
+    const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+    const deadline = Date.now() + 5_000
+    while (!paint().includes('body of file 1') && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(paint().includes('body of file 1'), paint())
+
+    // F08: entering ONE preview is one stat + one read, for THAT path only.
+    assert.deepEqual(served, [`stat:${paths[0]}`, `read:${paths[0]}`],
+      `126 declared files must not fan out into 126 Host requests: ${JSON.stringify(served)}`)
+
+    // Selecting another row on the Files page still reads nothing.
+    served.length = 0
+    panel.handleInput('\u001b') // Esc back to Files
+    for (let step = 0; step < 5; step += 1) panel.handleInput('\u001b[B') // ↓
+    panel.render(96)
+    assert.deepEqual(served, [], `browsing the list issues no Host request: ${JSON.stringify(served)}`)
+  } finally {
+    service.stat = originalStat
+    service.read = originalRead
   }
 })

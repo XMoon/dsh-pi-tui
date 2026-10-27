@@ -796,3 +796,60 @@ test('the panel follows the LIVE surface: swapping fullscreen adds and removes t
   assert.ok(!back.includes('Details'), `the verb is withdrawn again after the swap:\n${back}`)
   app.stop()
 })
+
+test('a subject change retires an IN-FLIGHT preview read and never paints it', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  let currentSubject = true
+  let releaseStat: (() => void) | undefined
+  const statsAsked: string[] = []
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-a',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path: '/ws/a.md' }] }],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => currentSubject },
+    deliveredFilePreview: () => ({
+      // The read stays in flight until this test releases it.
+      stat: (path: string) => {
+        statsAsked.push(path)
+        return new Promise(resolve => {
+          releaseStat = () => resolve({ version: 'v1', bytes: 16 })
+        })
+      },
+      read: async () => ({
+        stat: { version: 'v1', bytes: 16 },
+        offset: 1,
+        limit: 120,
+        text: 'STALE PAGE BYTES',
+        lines: 1,
+        eof: true,
+      }),
+    }),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snapshot)
+  await viewport(vt)
+  vt.sendInput('\r') // Enter Preview: the stat is now in flight
+  await viewport(vt)
+  assert.deepEqual(statsAsked, ['/ws/a.md'], 'the request really started')
+
+  // The DISPLAY SUBJECT changes (viewed Session switched): the app retires the
+  // stale surface on the next transcript commit.
+  currentSubject = false
+  app.setTranscript([{ kind: 'assistant', turn: 2, text: 'other session' }], new Map())
+  await viewport(vt)
+
+  // Even when the abandoned read finally settles, nothing of it may paint.
+  releaseStat?.()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const after = await viewport(vt)
+  assert.ok(!after.includes('STALE PAGE BYTES'), `the abandoned page never paints:\n${after}`)
+  assert.ok(!after.includes('a.md · Details'), `the stale overlay is gone:\n${after}`)
+  app.stop()
+})

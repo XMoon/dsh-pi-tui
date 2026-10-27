@@ -103,3 +103,51 @@ async function assertRejectionCode(promise: Promise<unknown>, code: string): Pro
     return true
   })
 }
+
+test('the Direct adapter serves the COLD persisted header, an absolute path outside the workspace, and real refusals', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'pr2-direct-cold-preset')
+  const workspace = life.tempDir('dsh-pr2-cold-ws-')
+  mkdirSync(workspace, { recursive: true })
+  const outsideDir = life.tempDir('dsh-pr2-cold-outside-')
+  mkdirSync(outsideDir, { recursive: true })
+  const insidePath = join(workspace, 'cold.md')
+  const outsidePath = join(outsideDir, 'outside.md')
+  writeFileSync(insidePath, 'cold-bytes\n')
+  writeFileSync(outsidePath, 'outside-bytes\n')
+  const sessionId = SessionId('pr2-direct-cold')
+  await host.harness.create(sessionId, undefined, { cwd: workspace })
+  const port = new DirectDeliveredFileReadPort(host.ctx)
+
+  // T17 / F03: an ABSOLUTE path the official Host FS can read but that lives
+  // OUTSIDE the Session workspace must still be served (upstream authority, not
+  // a Client workspace containment check).
+  const outside = await port.read(sessionId, outsidePath, 1, abort)
+  assert.equal(outside.text, 'outside-bytes', 'the Host file authority allows an outside absolute path')
+
+  // T17 COLD path: drop the LIVE Session entry, so the adapter must resolve the
+  // scope from the PERSISTED header instead. This is the exact cold-start case.
+  const sessions = host.ctx.get('sessions') as unknown as { store: Map<string, unknown>; get(id: string): unknown }
+  assert.notEqual(sessions.get(sessionId), undefined, 'precondition: the Session is live')
+  sessions.store.delete(sessionId)
+  assert.equal(sessions.get(sessionId), undefined, 'the live entry is gone: only persistence remains')
+  const coldStat = await port.stat(sessionId, 'cold.md', abort)
+  assert.equal(coldStat.bytes, Buffer.byteLength('cold-bytes\n'), 'the persisted header resolved the workspace root')
+  const coldPage = await port.read(sessionId, 'cold.md', 1, abort)
+  assert.equal(coldPage.text, 'cold-bytes', 'a RELATIVE declared path resolves against the cold header cwd')
+
+  // T25: REAL Host refusals, never invented at the port.
+  // `stat` is METADATA: it answers even for a file the TEXT read refuses, which
+  // is what lets the failure page still show the size/path.
+  const invalidPath = join(workspace, 'invalid-utf8.bin')
+  writeFileSync(invalidPath, Buffer.from([0xc3, 0x28, 0x0a]))
+  const invalidStat = await port.stat(sessionId, invalidPath, abort)
+  assert.equal(invalidStat.bytes, 3, 'the Host still reports the metadata')
+  await assertRejectionCode(port.read(sessionId, invalidPath, 1, abort), 'not-text')
+
+  const giantPath = join(workspace, 'giant-line.txt')
+  writeFileSync(giantPath, 'x'.repeat(3 * 1024 * 1024))
+  const giantStat = await port.stat(sessionId, giantPath, abort)
+  assert.equal(giantStat.bytes, 3 * 1024 * 1024)
+  await assertRejectionCode(port.read(sessionId, giantPath, 1, abort), 'too-large')
+})
