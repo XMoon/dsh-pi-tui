@@ -821,3 +821,55 @@ test('a GIF keeps the text fallback and never reaches the managed core', async (
   assert.equal(component.paintedImageBody(80), undefined, 'a fallback row is never a clickable pixel body')
   assert.equal(writes.join(''), '', 'nothing reached the terminal writer')
 })
+
+/**
+ * The fallback row obeys the SAME width contract as the legacy path
+ * (`truncateToWidth(fallbackColor(...), width)`): a long attachment name must
+ * never overrun the columns this component was granted, and never wrap into a
+ * second row.
+ */
+test('a GIF fallback with a long name is clamped to the granted width', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const terminal = {
+    writes: [] as string[], columns: 80, rows: 24, kittyProtocolActive: false,
+    start() {}, stop() {}, async drainInput() {}, write(data: string) { this.writes.push(data) },
+    moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {},
+    clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {}, setProgressState() {},
+  }
+  const core = new KittyGraphicsCore()
+  const graphics = {
+    image: (source: never, options: never) => new NativeKittyImage(core, source, options),
+    terminal: new KittyTerminalFacade(terminal, core),
+    dispose: () => {},
+  }
+  const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0, 0, 0, 0])
+  const loader = new ImageLoader(async () => ({ ref: {}, data: gif }))
+  const ref = {
+    attachmentId: 'gif-long',
+    mediaType: 'image/gif' as const,
+    bytes: gif.length,
+    width: 1920,
+    height: 1080,
+    name: 'an-extremely-long-attachment-name-that-would-overflow-a-narrow-terminal.gif',
+  }
+  loader.load(ref)
+  const component = new ImageThumbnail(ref, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+  component.render(60)
+  await new Promise((resolve) => setTimeout(resolve, 25))
+
+  // Widths at or above NARROW_WIDTH_THRESHOLD take the two-row branch; below it
+  // the existing narrow-terminal contract paints one identity row.
+  for (const width of [60, 44, NARROW_WIDTH_THRESHOLD]) {
+    const lines = component.render(width)
+    assert.equal(lines.length, 2, `width ${width}: identity row plus fallback, never a wrapped extra row`)
+    // The fallback row is the one this branch owns, and the legacy path clamped
+    // it with `truncateToWidth`. (The identity row's own clamp is pre-existing
+    // behaviour outside this branch — the screen truncates defensively.)
+    const fallback = lines[1]!
+    assert.ok(fallback.includes('[Image:'), `width ${width}: the fallback row is second`)
+    assert.ok(
+      visibleWidth(fallback) <= width,
+      `width ${width}: the fallback stays inside the grant (got ${visibleWidth(fallback)})`,
+    )
+  }
+})
