@@ -231,9 +231,23 @@ function lexicalSegments(path: string): string[] {
 function absoluteHostPath(path: string): AbsoluteHostPath | undefined {
   const slashPath = path.replace(/\\/g, '/')
   if (slashPath.startsWith('//')) {
-    const segments = lexicalSegments(slashPath.slice(2))
-    if (segments.length < 2) return undefined
-    return { anchor: `unc:${segments[0]}/${segments[1]}`, segments }
+    // The UNC SERVER and SHARE are the fixed root anchor; `..` is applied only
+    // to the remainder and can never pop the share (Windows share-root
+    // semantics: \\server\share\..\x is \\server\share\x).
+    const raw = slashPath.slice(2).split('/')
+    const anchor: string[] = []
+    let index = 0
+    for (; index < raw.length && anchor.length < 2; index += 1) {
+      const segment = raw[index]!
+      if (segment === '' || segment === '.') continue
+      if (segment === '..') return undefined
+      anchor.push(segment)
+    }
+    if (anchor.length < 2) return undefined
+    return {
+      anchor: `unc:${anchor[0]}/${anchor[1]}`,
+      segments: [...anchor, ...lexicalSegments(raw.slice(index).join('/'))],
+    }
   }
   // A drive letter is absolute ONLY with its separator. Bare `C:` is a
   // Windows DRIVE-RELATIVE path, not a workspace root, so it must not establish

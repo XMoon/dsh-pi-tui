@@ -282,3 +282,20 @@ test('deliveredDisplayPath keeps POSIX and Windows absolute domains distinct', (
   assert.equal(deliveredDisplayPath('/server/share/a.md', '//server/share'), '/server/share/a.md')
   assert.equal(deliveredDisplayPath('//server/other/a.md', '//server/share'), '//server/other/a.md')
 })
+
+test('a UNC share is a fixed root: .. cannot pop the server/share anchor', () => {
+  const share = String.raw`\\server\share`
+  const folder = String.raw`\\server\share\folder`
+  assert.equal(deliveredDisplayPath(String.raw`\\server\share\..\folder\a.md`, folder), 'a.md',
+    'share-root .. normalizes back under the share, then the file is inside the folder root')
+  assert.equal(deliveredDisplayPath(String.raw`\\server\share\..\a.md`, share), 'a.md',
+    'share-root .. cannot escape the share')
+  assert.equal(deliveredDisplayPath(String.raw`\\server\share\sub\..\a.md`, share), 'a.md',
+    'an ordinary inside-share .. still normalizes')
+  assert.equal(deliveredDisplayPath(String.raw`\\server\share\..\other\a.md`, folder),
+    String.raw`\\server\share\..\other\a.md`, 'a different folder under the same share is outside this root')
+  assert.equal(deliveredDisplayPath(String.raw`\\server\other\a.md`, share),
+    String.raw`\\server\other\a.md`, 'a different share is outside the anchor')
+  assert.equal(deliveredDisplayPath(String.raw`\\server\..\share\a.md`, share),
+    String.raw`\\server\..\share\a.md`, 'a .. before the share anchor is not a trusted UNC root')
+})
