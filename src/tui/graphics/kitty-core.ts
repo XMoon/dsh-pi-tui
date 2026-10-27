@@ -266,6 +266,8 @@ export class KittyGraphicsCore {
     return imageId >= this.imageIdFloor && imageId < this.nextImageId
   }
 
+
+
   /**
    * The wire the facade must emit immediately BEFORE a placement of
    * `imageId`: the full quiet transmission when the current buffer no longer
