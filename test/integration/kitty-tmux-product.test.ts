@@ -30,6 +30,7 @@ import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
 import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
+import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import { svgHumanText } from '../../src/domain/visual/svg.ts'
 
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
@@ -558,34 +559,22 @@ test('ONE app drives draft -> submit -> transcript -> viewer -> Esc with the SAM
   await settleFrames()
 })
 
-test('a REAL SVG tool message publishes, thumbnails and opens the Viewer from the SAME app', async (t) => {
-  // ONE app, ONE injected SvgRasterLoader, ONE clipboard sink: the SVG goes in as
-  // a durable TOOL MESSAGE (the way the Host delivers it), the app's own card
-  // renderer authorizes it and mounts the thumbnail, the thumbnail's View action
-  // opens the leased Viewer, and Copy Source writes through the app's real
-  // `copySelection` callback.
+test('a REAL SVG tool message is authorized and thumbnailed by the app\'s OWN raster loader', async (t) => {
+  // Evidence scope, stated precisely: a durable TOOL MESSAGE (the way the Host
+  // delivers it) goes through the app's own card renderer, which authorizes the
+  // SVG and mounts an inline raster produced by the ONE `SvgRasterLoader` the
+  // app was constructed with.
+  //
+  // This case does NOT open the SVG Viewer and does NOT copy: a tool-card SVG
+  // exposes the inline raster only, while the View/Copy affordances belong to
+  // the Assistant PUBLICATION path (`visualFigureHandles` → `openSvgViewer` /
+  // `copyVisualPayload`). The Viewer's own Preview/Source/Copy/resize contract is
+  // covered by `test/client/svg-viewer.test.ts`.
   const h = product(t, { sink: 'virtual' })
   assert.ok(h.graphics)
   const vt = h.terminal as SinkTerminal & { flush(): Promise<void>; getViewport(): string[] }
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
     + '<rect width="64" height="32" fill="#3b82f6"/></svg>'
-  const clipboard: string[] = []
-  const runs: string[] = []
-  const app = h.app as unknown as {
-    events: { runOwned?: (label: string, task: () => Promise<boolean>, options?: unknown) => void }
-  }
-  // The REAL clipboard sink the app was constructed with is `copySelection`;
-  // `runOwned` is the owned-task entry (the app refuses to copy without BOTH).
-  ;(h.app as unknown as { copySelection?: unknown }).copySelection = (text: string): Promise<boolean> => {
-    clipboard.push(text)
-    return Promise.resolve(true)
-  }
-  if (app.events.runOwned === undefined) {
-    app.events.runOwned = (label, task) => {
-      runs.push(label)
-      void task()
-    }
-  }
 
   const svgFact = {
     version: 1,
@@ -687,4 +676,115 @@ test('the SVG thumbnail paints through the managed handle and reports its REAL b
     thumbnail.dispose()
     svgLoader.dispose()
   }
+})
+
+test('a REAL Assistant publication feeds the SAME app raster loader, Viewer Preview/Source and Copy', async (t) => {
+  // The SVG Viewer's View/Copy affordances exist ONLY on the Assistant
+  // publication path (`visualFigureOptions` → `openSvgViewer` / `copyVisualPayload`),
+  // so this case drives that path: a real assistant row with the durable
+  // `[dsh-visual-…]` markers, the PR2 publication sidecar, then the figure's own
+  // View action and Copy Source through the app's real clipboard owner.
+  const h = product(t, { sink: 'virtual' })
+  assert.ok(h.graphics)
+  const vt = h.terminal as SinkTerminal & { flush(): Promise<void>; getViewport(): string[] }
+  const settleFrames = async (): Promise<void> => {
+    await settle(h.app)
+    await vt.flush()
+  }
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+    + '<rect width="64" height="32" fill="#3b82f6"/></svg>'
+  const ref = 'assistant-svg'
+  const source = {
+    ref,
+    type: 'svg' as const,
+    title: 'Service topology',
+    turn: 1,
+    step: 0,
+    stepStartSeq: 10,
+    callSeq: 11,
+    resultSeq: 12,
+    callId: 'call-svg',
+    chart: undefined,
+    svg: {
+      version: 1,
+      type: 'svg' as const,
+      title: 'Service topology',
+      description: 'Gateway -> App',
+      digest: createHash('sha256').update(svg, 'utf8').digest('hex'),
+      bytes: Buffer.byteLength(svg, 'utf8'),
+    },
+    svgSource: svg,
+    svgAdmissionWidth: 640,
+  }
+  const publication = {
+    ref,
+    turn: 1,
+    step: 0,
+    stepStartSeq: 20,
+    callSeq: 21,
+    resultSeq: 22,
+    callId: 'present-svg',
+    source,
+  }
+  const message = {
+    kind: 'assistant',
+    turn: 1,
+    text: `Service topology\n\n[dsh-visual-${ref}]: <#>`,
+  } as never
+  setAssistantVisualPresentation(message, {
+    subjectKind: 'main',
+    subjectId: 'session-1',
+    sourceIdentity: {},
+    session: {},
+    sessionId: 'session-1',
+    seq: 1,
+    turn: 1,
+    step: 0,
+    text: (message as unknown as { text: string }).text,
+    content: undefined,
+    assistantRevision: 0,
+  }, [publication as never])
+
+  h.terminal.writes.length = 0
+  ;(h.app as unknown as { setTranscript(messages: unknown[]): void }).setTranscript([message])
+  await until(() => (h.rasterCalls() ?? 0) >= 1, 'the app rasterized the published SVG')
+  await settleFrames()
+  const cardText = h.terminal.writes.join('')
+  assert.ok(cardText.length > 0, 'the published figure painted a frame')
+  assert.ok(cardText.includes(PLACEHOLDER),
+    `the published figure's thumbnail painted through the managed handle: ${JSON.stringify(cardText.slice(0, 160))}`)
+
+  const handles = [...(h.app as unknown as {
+    visualFigureHandles: Map<unknown, Map<string, unknown>>
+  }).visualFigureHandles.values()].flatMap(byRef => [...byRef.values()])
+  assert.equal(handles.length, 1, 'the app published exactly ONE visual handle for the row')
+  const callsBeforeViewer = h.rasterCalls()
+
+  // The figure's OWN View action (the production handler on the handle).
+  h.terminal.writes.length = 0
+  ;(h.app as unknown as { openSvgViewer(handle: unknown): void }).openSvgViewer(handles[0])
+  await settleFrames()
+  const viewerText = h.terminal.writes.join('')
+  assert.ok(viewerText.length > 0, 'opening the SVG Viewer painted a frame')
+  assert.ok(viewerText.includes(PLACEHOLDER), 'the Viewer painted its OWN width variant')
+  assert.equal(unwrappedApc(viewerText), false, 'the Viewer batch was DCS-wrapped')
+  assert.ok((h.rasterCalls() ?? 0) > callsBeforeViewer,
+    'the Viewer derived a DIFFERENT width variant from the same shared loader')
+
+  // Copy Source through the app's real clipboard owner.
+  const clipboard: string[] = []
+  const runs: string[] = []
+  ;(h.app as unknown as { copySelection?: unknown }).copySelection = (text: string): Promise<boolean> => {
+    clipboard.push(text)
+    return Promise.resolve(true)
+  }
+  ;(h.app as unknown as { events: { runOwned?: (label: string, task: () => Promise<boolean>) => void } })
+    .events.runOwned = (label, task) => {
+      runs.push(label)
+      void task()
+    }
+  ;(h.app as unknown as { handleInput(data: string): void }).handleInput('c')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.deepEqual(clipboard, [svg], 'the RAW SVG reached the real clipboard sink')
+  assert.ok(runs.some(label => label.includes('visual copy')), `the copy ran as an owned task: ${runs.join(',')}`)
 })
