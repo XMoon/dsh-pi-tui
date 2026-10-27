@@ -29,8 +29,16 @@ import {
   KITTY_VIRTUAL_MAX_CELLS,
   encodeKittyPlaceholderGrid,
   encodeKittyVirtualPlacement,
-  encodeManagedVirtualMarker,
 } from './tmux-virtual.ts'
+
+/** The private provenance prefix shared with the fork layout (X067). */
+const MANAGED_VIRTUAL_MARKER_PREFIX = '\x1b_pi:tmux-image:v1:i='
+const MANAGED_VIRTUAL_MARKER_TERMINATOR = '\x1b\\'
+
+/** Encode the zero-width provenance marker for ONE live Core handle. */
+function encodeManagedVirtualMarker(imageId: number, placementId: number): string {
+  return `${MANAGED_VIRTUAL_MARKER_PREFIX}${imageId},p=${placementId}${MANAGED_VIRTUAL_MARKER_TERMINATOR}`
+}
 
 /**
  * One occurrence's tmux virtual Kitty body.
