@@ -175,10 +175,15 @@ export class DeliveredFilesPanel implements Component {
   /** The LAST painted frame: geometry + semantic hit targets. */
   private paintedWidth = 0
   private paintedRows = 0
-  private paintedListRows: ReadonlyMap<number, number> = new Map()
-  /** Painted `Details` verb cells: row → { index, startCol, endCol }. Only the
+  private paintedListRows: ReadonlyMap<number, string> = new Map()
+  /** The list identity this hit map was painted for: any state change that can
+   *  reorder the list (a committed filter, a Turn switch) invalidates it BEFORE
+   *  the next frame, so a click can never resolve against a list the user is no
+   *  longer looking at. */
+  private paintedListIdentity = ''
+  /** Painted `Details` verb cells: row → { path, startCol, endCol }. Only the
    *  painted columns open the page; the rest of the row only selects. */
-  private paintedActionRows: ReadonlyMap<number, { readonly index: number; readonly startCol: number; readonly endCol: number }> = new Map()
+  private paintedActionRows: ReadonlyMap<number, { readonly path: string; readonly startCol: number; readonly endCol: number }> = new Map()
 
   constructor(options: DeliveredFilesPanelOptions) {
     this.snapshot = options.snapshot
@@ -299,7 +304,21 @@ export class DeliveredFilesPanel implements Component {
       return
     }
     if (!files.some(file => file.path === this.selectedPath)) this.selectedPath = files[0]!.path
-    this.listTop = Math.max(0, Math.min(this.listTop, Math.max(0, files.length - this.listRows())))
+    // The selection must stay VISIBLE: filtering can move it far above the
+    // current viewport (a retained file after the rows before it were filtered
+    // out), so the top is re-derived from the selected index in BOTH
+    // directions instead of only clamped to a legal scroll range.
+    this.revealSelection(files, Math.max(0, files.findIndex(file => file.path === this.selectedPath)))
+  }
+
+  /** Scroll the minimal distance that puts one index inside the viewport. */
+  private revealSelection(files: readonly { readonly path: string }[], index: number): void {
+    const rows = Math.max(1, this.listRows())
+    const maxTop = Math.max(0, files.length - rows)
+    let top = Math.max(0, Math.min(this.listTop, maxTop))
+    if (index < top) top = index
+    else if (index >= top + rows) top = index - rows + 1
+    this.listTop = Math.max(0, Math.min(top, maxTop))
   }
 
   private moveSelection(delta: number): void {
@@ -349,6 +368,7 @@ export class DeliveredFilesPanel implements Component {
       if (after === before) return
       this.filter = after
       this.normalizeSelection()
+      this.invalidatePaintedHits()
       this.requestRender()
       return
     }
@@ -437,6 +457,9 @@ export class DeliveredFilesPanel implements Component {
     this.filterInput.focused = false
     this.filter = this.filterInput.getValue()
     this.normalizeSelection()
+    // The committed filter changes membership/order: the currently painted hit
+    // cells describe the OLD list, so they are dropped until the next frame.
+    this.invalidatePaintedHits()
     this.requestRender()
   }
 
@@ -448,6 +471,7 @@ export class DeliveredFilesPanel implements Component {
     this.filterInput.setValue('')
     this.filter = ''
     if (hadQuery) this.normalizeSelection()
+    if (hadQuery) this.invalidatePaintedHits()
     this.requestRender()
   }
 
@@ -469,6 +493,8 @@ export class DeliveredFilesPanel implements Component {
   }
 
   private openFilesForTurn(turn: number): void {
+    // A Turn switch replaces the whole list: the old cells are dead.
+    this.invalidatePaintedHits()
     this.turnCursor = turn
     this.page = 'files'
     this.seat = 'list'
@@ -505,17 +531,22 @@ export class DeliveredFilesPanel implements Component {
     // recorded rows before the next paint.
     if (Math.floor(event.width) !== this.paintedWidth || Math.floor(event.height) !== this.paintedRows) return undefined
     if (this.page !== 'files' || this.seat !== 'list') return undefined
+    // LAST-PAINTED identity: the frame's list must still be the live list. A
+    // committed filter, a Turn switch or any other membership/order change
+    // invalidates the recorded cells, so a click can never act on a row the
+    // user never saw there.
+    if (this.paintedListIdentity !== this.listIdentity()) return undefined
     const action = this.paintedActionRows.get(event.y)
     if (action !== undefined && event.x >= action.startCol && event.x < action.endCol) {
-      const file = this.filteredFiles()[action.index]
+      const file = this.filteredFiles().find(candidate => candidate.path === action.path)
       if (file === undefined) return undefined
       this.selectedPath = file.path
       this.openDetails()
       return { handled: true, render: true }
     }
-    const index = this.paintedListRows.get(event.y)
-    if (index === undefined) return undefined
-    const file = this.filteredFiles()[index]
+    const path = this.paintedListRows.get(event.y)
+    if (path === undefined) return undefined
+    const file = this.filteredFiles().find(candidate => candidate.path === path)
     if (file === undefined) return undefined
     // A list click SELECTS; opening needs the explicit Details action.
     this.selectedPath = file.path
@@ -574,8 +605,8 @@ export class DeliveredFilesPanel implements Component {
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width))
     const rows: string[] = []
-    const actionRows = new Map<number, { index: number; startCol: number; endCol: number }>()
-    const listRows = new Map<number, number>()
+    const actionRows = new Map<number, { path: string; startCol: number; endCol: number }>()
+    const listRows = new Map<number, string>()
     // ONE fitted label set for this width, shared by every surface of the page.
     const fittedByPath = this.fittedLabelsFor(safeWidth)
 
@@ -615,7 +646,8 @@ export class DeliveredFilesPanel implements Component {
       }
       while (rows.length < this.maxRows - 1) rows.push('')
       rows.push(this.actionBar(safeWidth))
-      this.paint(safeWidth, rows, listRows, actionRows)
+      // The Turns page has no pointer targets of its own.
+      this.paint(safeWidth, rows, new Map(), actionRows)
       return rows
     }
 
@@ -644,29 +676,33 @@ export class DeliveredFilesPanel implements Component {
     const visible = filtered.slice(listTop, listTop + area)
     const selectedIndex = this.selectedIndex()
     const actions = safeWidth >= ACTION_COLUMN_MIN_WIDTH
-    const actionColumn = visibleWidth(DETAILS_VERB) + 2
 
     for (const [offset, file] of visible.entries()) {
       const index = listTop + offset
       const selected = index === selectedIndex
       const marker = selected ? color.primary('>') : ' '
       const label = fittedByPath.get(file.path) ?? sanitizeDisplaySegment(this.labelOf(file))
-      const bodyWidth = Math.max(1, listWidth - (actions ? actionColumn : 0))
-      // Both ends survive the clamp (design-language §6.4): a long filename
-      // differs from its sibling near the END, and a head-only cut would paint
-      // two identical rows.
-      const labelText = label
-      const gap = actions ? Math.max(1, bodyWidth - 2 - visibleWidth(labelText)) : 0
-      const painted = actions
-        ? `${marker} ${color.textDim(labelText)}${' '.repeat(gap)}${color.primary(DETAILS_VERB)}`
-        : `${marker} ${color.textDim(labelText)}`
-      rows.push(truncateToWidth(painted, listWidth, '…'))
-      listRows.set(rows.length - 1, index)
-      if (actions) {
-        const startCol = listWidth - visibleWidth(DETAILS_VERB)
-        if (visibleWidth(painted) >= startCol) {
-          actionRows.set(rows.length - 1, { index, startCol, endCol: listWidth })
-        }
+      if (!actions) {
+        rows.push(truncateToWidth(`${marker} ${color.textDim(label)}`, listWidth, '…'))
+        listRows.set(rows.length - 1, file.path)
+        continue
+      }
+      // The verb is right-aligned against the LIST cell, and its hit cells are
+      // measured from the ACTUAL painted prefix: a hit computed from the room
+      // the label left over disagreed with what the user sees.
+      const verbWidth = visibleWidth(DETAILS_VERB)
+      const visibleLabel = truncateToWidth(label, Math.max(1, listWidth - verbWidth - 3), '…')
+      const prefix = `${marker} ${color.textDim(visibleLabel)}`
+      const gap = Math.max(1, listWidth - verbWidth - visibleWidth(prefix))
+      const paintedPrefix = `${prefix}${' '.repeat(gap)}`
+      const startCol = visibleWidth(paintedPrefix)
+      rows.push(truncateToWidth(`${paintedPrefix}${color.primary(DETAILS_VERB)}`, listWidth, '…'))
+      listRows.set(rows.length - 1, file.path)
+      if (startCol + verbWidth <= listWidth) {
+        // The PAINTED identity is the raw path: a repaint that swapped the list
+        // (a committed filter, a Turn switch) must not resolve this cell against
+        // whatever file now occupies the same index.
+        actionRows.set(rows.length - 1, { path: file.path, startCol, endCol: startCol + verbWidth })
       }
     }
     // Fill the list window so the two-column side pane and the action bar keep
@@ -763,16 +799,32 @@ export class DeliveredFilesPanel implements Component {
     }
   }
 
+  /** The identity of the LIST the current frame paints (order + membership). */
+  private listIdentity(): string {
+    if (this.page !== 'files') return ''
+    return `${this.currentTurn()}\u0000${this.filter}\u0000${this.filteredFiles().map(file => file.path).join('\u0000')}`
+  }
+
+  /** Drop every recorded hit target (a state change invalidates the frame). */
+  private invalidatePaintedHits(): void {
+    this.paintedListRows = new Map()
+    this.paintedActionRows = new Map()
+    this.paintedWidth = 0
+    this.paintedRows = 0
+    this.paintedListIdentity = ''
+  }
+
   private paint(
     width: number,
     rows: readonly string[],
-    listRows: ReadonlyMap<number, number>,
-    actionRows: ReadonlyMap<number, { readonly index: number; readonly startCol: number; readonly endCol: number }>,
+    listRows: ReadonlyMap<number, string>,
+    actionRows: ReadonlyMap<number, { readonly path: string; readonly startCol: number; readonly endCol: number }>,
   ): void {
     this.paintedWidth = width
     this.paintedRows = rows.length
     this.paintedListRows = listRows
     this.paintedActionRows = actionRows
+    this.paintedListIdentity = this.listIdentity()
   }
 }
 
