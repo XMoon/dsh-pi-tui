@@ -24,6 +24,8 @@ const KEY = {
   pageUp: '\x1b[5~',
   pageDown: '\x1b[6~',
   tab: '\t',
+  C: 'C',
+  T: 'T',
 } as const
 
 interface Harness {
@@ -656,4 +658,99 @@ test('a Turns switch invalidates the old hit frame too', () => {
   })
   assert.equal(handled, undefined, 'the pre-switch frame is dead')
   assert.equal(h.panel.currentPage(), 'files')
+})
+
+test('the Details page opens only on a COMPLETE click, never on a press', () => {
+  const h = harness(snapshotOf([{ turn: 1, files: ['/ws/a.md', '/ws/b.md'] }]))
+  h.setSize(74, 24)
+  const raw = h.paint().map(row => stripTerminalSequences(row))
+  const row = raw.findIndex(line => line.includes('a.md') && line.includes('Details'))
+  const verbStart = raw[row]!.indexOf('Details')
+  const event = (type: 'press' | 'click' | 'drag', x: number) => ({
+    type, button: 'left' as const, x, y: row, screenX: x, screenY: row,
+    width: raw[row]!.length, height: raw.length, shift: false, alt: false, ctrl: false,
+  })
+  // A PRESS ON THE VERB selects and consumes, and opens NOTHING: the gesture may
+  // still turn into a drag.
+  assert.equal(h.panel.handleMouse(event('press', verbStart + 1))?.handled, true)
+  assert.equal(h.panel.currentPage(), 'files', 'a press must never open the page')
+  // The synthetic click (same cell, no drag) is the ONE opener.
+  assert.equal(h.panel.handleMouse(event('click', verbStart + 1))?.handled, true)
+  assert.equal(h.panel.currentPage(), 'details')
+  h.type('esc')
+  assert.equal(h.panel.currentPage(), 'files')
+  // A drag away then release: the panel receives no click at all, so nothing
+  // opened — exactly the terminal layer's contract.
+  h.panel.handleMouse(event('press', verbStart + 1))
+  assert.equal(h.panel.currentPage(), 'files', 'press + drag away leaves the page closed')
+})
+
+test('shrinking the viewport keeps the selected file VISIBLE', () => {
+  const files = Array.from({ length: 60 }, (_, index) => `/ws/f-${String(index + 1).padStart(3, '0')}.md`)
+  const h = harness(snapshotOf([{ turn: 1, files }]))
+  // Tall frame: the selection sits near the BOTTOM of a long viewport.
+  h.setSize(100, 40)
+  h.rows()
+  for (let step = 0; step < 18; step += 1) h.type('down')
+  const selected = h.panel.selection().path!
+  assert.ok(h.rows().some(row => row.startsWith('> ') && row.includes(selected.slice(selected.lastIndexOf('/') + 1))),
+    'precondition: the selection is visible in the tall frame')
+
+  // Shrink: fewer granted rows than before.
+  h.setSize(40, 16)
+  const small = h.rows()
+  const marked = small.filter(row => row.startsWith('> '))
+  assert.equal(marked.length, 1, `exactly one selected row in the small frame:\n${small.join('\n')}`)
+  assert.ok(marked[0]!.includes(selected.slice(selected.lastIndexOf('/') + 1)),
+    `the selection stays visible after the shrink:\n${small.join('\n')}`)
+  assert.equal(h.panel.selection().path, selected, 'the identity is unchanged')
+
+  // Growing back keeps it visible too.
+  h.setSize(100, 40)
+  const large = h.rows()
+  assert.ok(large.some(row => row.startsWith('> ') && row.includes(selected.slice(selected.lastIndexOf('/') + 1))))
+  assert.equal(h.panel.selection().path, selected)
+})
+
+test('copy feedback belongs to the LATEST request and never outlives its page', () => {
+  const pending: Array<(ok: boolean) => void> = []
+  let renders = 0
+  const panel = new DeliveredFilesPanel({
+    snapshot: snapshotOf([{ turn: 1, files: ['/ws/a.md'] }]),
+    requestRender: () => { renders += 1 },
+    close: () => {},
+    copyPath: (_path, settle) => { pending.push(settle) },
+  })
+  panel.setMaxRows(22)
+  const rows = () => panel.render(96).map(row => stripTerminalSequences(row))
+  panel.handleInput('\r')
+  assert.equal(panel.currentPage(), 'details')
+  rows()
+
+  // Two copies in flight; the FIRST (slower) one settles last.
+  panel.handleInput(KEY.C)
+  panel.handleInput(KEY.C)
+  assert.equal(pending.length, 2, 'both writes reached the clipboard')
+  pending[1]!(false)
+  pending[0]!(true)
+  assert.ok(rows().at(-1)!.includes('Could not copy path'),
+    `the LATEST settlement wins, not the slower earlier one:\n${rows().at(-1)}`)
+  void renders
+
+  // Leave the page, come back to the SAME file: the previous visit's pending
+  // settlement must not paint on the new page.
+  panel.handleInput(KEY.esc)
+  rows()
+  panel.handleInput('\r')
+  rows()
+  assert.ok(!rows().at(-1)!.includes('Path copied'), 'a fresh page starts with no feedback')
+  panel.handleInput(KEY.C)
+  const stale = pending.at(-1)!
+  panel.handleInput(KEY.esc)
+  rows()
+  panel.handleInput('\r')
+  rows()
+  stale(true)
+  assert.ok(!rows().at(-1)!.includes('Path copied'),
+    `the abandoned visit's settlement cannot paint on the re-entered page:\n${rows().at(-1)}`)
 })
