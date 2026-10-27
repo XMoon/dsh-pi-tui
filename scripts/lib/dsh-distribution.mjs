@@ -570,13 +570,24 @@ export function buildDshOverrides(distribution, options = {}) {
   return overrides
 }
 
-function overrideYaml(overrides) {
-  const lines = [SOURCE_OVERRIDE_START, 'overrides:']
+function overrideYaml(overrides, { embedded = false } = {}) {
+  // A workspace file that already owns a top-level `overrides:` mapping cannot
+  // receive a second `overrides:` key (YAML would reject the duplicate). The
+  // managed entries are then written INSIDE that mapping, keeping the file's
+  // own pins and the managed markers for idempotent replacement.
+  const lines = [SOURCE_OVERRIDE_START]
+  if (!embedded) lines.push('overrides:')
   for (const [name, value] of Object.entries(overrides).sort(([a], [b]) => a.localeCompare(b))) {
     lines.push(`  ${JSON.stringify(name)}: ${JSON.stringify(value)}`)
   }
   lines.push(SOURCE_OVERRIDE_END)
   return lines.join('\n')
+}
+
+/** The index just past an EXISTING top-level `overrides:` header, or -1. */
+function existingOverridesHeaderEnd(text) {
+  const match = /^overrides:[ \t]*$/mu.exec(text)
+  return match === null ? -1 : match.index + match[0].length
 }
 
 /**
@@ -608,7 +619,10 @@ export function writeDshWorkspaceOverrides(workspaceDir, distribution, fileName 
     if (Object.keys(overrides).length === 0) {
       writeFileSync(path, base, 'utf8')
     } else {
-      const next = `${base.trimEnd()}\n${overrideYaml(overrides)}\n`
+      const headerEnd = existingOverridesHeaderEnd(base)
+      const next = headerEnd < 0
+        ? `${base.trimEnd()}\n${overrideYaml(overrides)}\n`
+        : `${base.slice(0, headerEnd)}\n${overrideYaml(overrides, { embedded: true })}${base.slice(headerEnd)}`
       writeFileSync(path, next, 'utf8')
     }
   } catch (error) {
