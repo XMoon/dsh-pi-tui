@@ -49,23 +49,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gone, and Settings no longer jumps to the legacy settings editor.
 - **The transcript's delivered-files tail now shows at most four rows, and a new
   `/deliverables` browser lists, filters and copies their paths in one panel.**
-  A final answer's `present` declarations render as a compact tail: one row per
-  file with the basename (plus the shortest distinguishing directory suffix when
-  a delivery repeats one), an inline description that never wraps, and a
-  `+N more · /deliverables` marker beyond four. In fullscreen Full the tail also
-  paints clickable `Browse all` / per-file `Details` verbs whose hits only cover
-  the cells actually drawn, with OSC 8 links and text selection always winning
-  first. `/deliverables` opens ONE managed overlay over the currently displayed
-  session (including a viewed child): `Files / Turns / Details`, with `↑↓` to
-  select, `Enter` for details, `/` to filter (case-insensitive over basename,
-  full Host path and description), `T` to switch among Turns with deliveries,
-  `C` to copy the raw Host path, and `Esc` to go back or close; the pointer is a
-  shortcut and the whole flow stays keyboard-complete. Details shows only the
-  DECLARED Host path and description: Copy sends that raw string, no file content
-  is read, and a declaration is never presented as a file snapshot. Ctrl+O keeps
-  its existing expand/collapse ownership where it is available; where it belongs
-  to another owner the tail stays capped behind the command; with neither owner
-  it fails open and paints no inoperable hint.
+  A final answer's `present` declarations render as a compact tail: each file is
+  at most TWO rows. The first row is the path relative to the CURRENT display
+  subject's workspace (a viewed child's own root while a child is shown; an
+  outside-root path stays absolute), and the second row is the description on its
+  own indented line. Each row is one physical line with both ends preserved;
+  the complete raw path and description remain available in Details and Copy.
+  Beyond four files the tail ends in `+N more · /deliverables`. On a fullscreen
+  AltScreen the tail paints clickable `Browse all` / per-file `Details` verbs in
+  Full, Compact AND Focus alike, with hits only on the cells actually drawn and
+  OSC 8 links/text selection always winning first; a regular split surface paints
+  no dead button and keeps `/deliverables` as its entry. `/deliverables` opens
+  ONE managed overlay over the currently displayed session (including a viewed
+  child): `Files / Turns / Details`, with `↑↓` to select, `Enter` for details,
+  `/` to filter (case-insensitive over basename, full Host path and description),
+  `T` to switch among Turns with deliveries, `C` to copy the raw Host path, and
+  `Esc` to go back or close. The pointer is a shortcut and the whole flow stays
+  keyboard-complete: the action bar paints real `[Filter] · [Turns] · [Close]`,
+  `[Back]` and `[Copy path]` buttons, a painted Turns row opens that Turn, and a
+  regular surface keeps keyboard-only hints instead of paint-less buttons. The
+  overlay is now a centered percentage window — full width on narrow terminals
+  and at most 120×38 on wide ones, never the old near-fullscreen jump — and a
+  page switch never changes its size. Details shows the declared Host path, its
+  description and the existing one-page read-only preview; `Copy path` always
+  sends the raw string, and a declaration is never presented as a file snapshot.
+  Ctrl+O keeps its existing expand/collapse ownership where it is available;
+  where it belongs to another owner the tail stays capped behind the command;
+  with neither owner it fails open and paints no inoperable hint.
 - **PiTUI final answers now carry real actions for published charts/SVGs and a fullscreen SVG reader.**
   A chart keeps its exact values and gains `Copy Data` (the final ChartFact as pretty JSON);
   an SVG keeps its description and admitted thumbnail and gains `View` / `Copy SVG` (the raw

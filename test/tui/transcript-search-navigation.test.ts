@@ -813,11 +813,11 @@ test('navigation: tool args and result anchor rows are visually distinct without
 test('navigation: a deliverable description truncated on its row never strong-highlights a substituted occurrence', async () => {
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
-  // The description never wraps (one file = one row), so a match beyond the
-  // truncated display is not rendered at all. The row is still anchored to the
-  // RAW description region; it must never paint a guessed strong occurrence at
-  // a cell the renderer did not derive.
-  const description = `${'x'.repeat(120)} alpha beta alpha beta`
+  // The description is one physical row with both ends preserved, so a match
+  // in the ABBREVIATED middle is not rendered at all. The row is still
+  // anchored to the RAW description region; it must never paint a guessed
+  // strong occurrence at a cell the renderer did not derive.
+  const description = `${'x'.repeat(120)} alpha beta alpha beta ${'y'.repeat(120)}`
   const folder = new TranscriptFolder()
   folder.hydrate([
     event('turn/start', { turn: 1 }, 0),
@@ -838,9 +838,12 @@ test('navigation: a deliverable description truncated on its row never strong-hi
   app.setTranscript([card], folder.turnActivities())
   app.setTranscriptSearchTarget({ query: 'alpha beta', match, message: card })
   const lines = await viewport(vt)
-  const row = lines.findIndex(line => line.includes('report.md') && line.includes('xxx'))
-  assert.ok(row >= 0, `the truncated description renders on the file row:\n${lines.join('\n')}`)
-  assert.ok(!lines[row]!.includes('alpha'), `the match is beyond the truncation, not rendered:\n${lines[row]}`)
+  const pathRow = lines.findIndex(line => line.includes('report.md'))
+  assert.ok(pathRow >= 0, `the delivered path row renders:\n${lines.join('\n')}`)
+  const row = pathRow + 1
+  assert.ok(lines[row]!.trimStart().startsWith('xxx'),
+    `the description owns the NEXT row and keeps its head:\n${lines.join('\n')}`)
+  assert.ok(!lines[row]!.includes('alpha'), `the middle match is abbreviated away, not rendered:\n${lines[row]}`)
   for (let col = 0; col < 90; col += 1) {
     assert.ok(!isStrongCell(vt, row, col), `no guessed strong cell at column ${col}`)
   }
@@ -850,9 +853,10 @@ test('navigation: a deliverable description truncated on its row never strong-hi
 test('navigation: a truncated description keeps its full RAW source in the search corpus', async () => {
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
-  // The display is a truncation, never the search corpus: a token the row cut
-  // away is still found by the fold's own search projection (M3 contract).
-  const description = `${'abcdefghij'.repeat(12)} needle-ghij tail`
+  // The display is an abbreviation, never the search corpus: a token the row
+  // cuts away from its middle is still found by the fold's own search
+  // projection (M3 contract).
+  const description = `${'a'.repeat(80)} needle-ghij ${'b'.repeat(80)}`
   const folder = new TranscriptFolder()
   folder.hydrate([
     event('turn/start', { turn: 1 }, 0),
@@ -873,9 +877,11 @@ test('navigation: a truncated description keeps its full RAW source in the searc
   app.setTranscript([card], folder.turnActivities())
   app.setTranscriptSearchTarget({ query: 'needle-ghij', match, message: card })
   const lines = await viewport(vt)
-  const row = lines.findIndex(line => line.includes('report.md') && line.includes('abcdefghij'))
-  assert.ok(row >= 0, `the truncated description renders:\n${lines.join('\n')}`)
-  assert.ok(!lines[row]!.includes('needle-ghij'), `the row cuts the token away:\n${lines[row]}`)
+  const pathRow = lines.findIndex(line => line.includes('report.md'))
+  assert.ok(pathRow >= 0, `the delivered path row renders:\n${lines.join('\n')}`)
+  const row = pathRow + 1
+  assert.ok(lines[row]!.includes('a'.repeat(20)), `the description is painted on its own row:\n${lines.join('\n')}`)
+  assert.ok(!lines[row]!.includes('needle-ghij'), `the row cuts the middle token away:\n${lines[row]}`)
   app.stop()
 })
 

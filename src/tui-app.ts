@@ -135,6 +135,7 @@ import {
   DeliveredFilesPanel,
   type DeliveredFilesOpenIntent,
 } from './tui/deliverables/delivered-files-panel.ts'
+import { deliveredFilesOverlayCanvas, deliveredFilesOverlayGeometry } from './tui/deliverables/overlay-size.ts'
 import type { DeliveredFilePreviewCapability } from './runtime/deliverables-port.ts'
 import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
@@ -17770,11 +17771,12 @@ export class TuiApp {
       || this.surfacedInteractionFailsOpen(message)
       || (this.fullscreen === undefined && (insideFocusSecondary || insideOpenWorkRun))
     // The delivered tail's PAINTED actions depend on the surface (a real
-    // pointer owner can reach the verbs only in fullscreen Full) and on whether
-    // the browser capability exists. Both are render inputs, so the cache must
-    // rebuild when they change.
+    // pointer owner needs the AltScreen) and on whether the browser
+    // capability exists. The path labels are relativized against the CURRENT
+    // display subject's workspace, so a viewer's root is a render input too.
+    // All three are part of the cache identity.
     const deliverableSurface = (message.kind === 'assistant' && (message.deliverables?.length ?? 0) > 0)
-      ? `${this.deliveredFilesPointerOwned() ? 'pointer' : 'plain'}:${this.deliveredFilesEntryAvailable() ? 'command' : 'none'}`
+      ? `${this.deliveredFilesPointerOwned() ? 'pointer' : 'plain'}:${this.deliveredFilesEntryAvailable() ? 'command' : 'none'}:${this.displayWorkspaceRoot() ?? ''}`
       : ''
     return { expanded, fullReveal, expandHint, deliverableSurface }
   }
@@ -18456,6 +18458,10 @@ export class TuiApp {
       // A surface without the injected browser capability has no executable
       // `/deliverables` entry, so the tail must not advertise one.
       commandEntry: this.deliveredFilesEntryAvailable(),
+      // The CURRENT display subject's root: a viewer's files must never be
+      // shortened against the main Session's cwd (and a missing root keeps the
+      // declared path unchanged instead of guessing one).
+      workspaceRoot: this.displayWorkspaceRoot(),
     }))
     return result
   }
@@ -22447,19 +22453,35 @@ export class TuiApp {
   }
 
   /** Whether a painted per-file `Details` / list `Browse all` verb on the
-   *  transcript tail is a REAL pointer target: only a fullscreen surface
-   *  routes transcript pointer events, and only the Full preset's click ladder
-   *  can reach a card action (Compact/Focus use the click for their own
-   *  Work/Thought owners). Regular terminals have no transcript mouse at all —
-   *  `/deliverables` is their entry, so no pointer affordance may be painted
-   *  there. */
+   *  transcript tail is a REAL pointer target: only a fullscreen AltScreen
+   *  routes transcript pointer events. This answers the TRANSCRIPT half only —
+   *  the display preset is deliberately absent, because the tail's pointer
+   *  capability is Full/Compact/Focus parity, not a preset permission. Regular
+   *  terminals have no transcript mouse at all — `/deliverables` is their
+   *  entry, so no pointer affordance may be painted there. */
   private deliveredFilesPointerOwned(): boolean {
     // A mount WITHOUT the browser capability has no executable action at all
     // (the click would silently do nothing), so it must not paint one — the
     // tail fails open there instead (`deliveredFilesEntryAvailable`).
     if (this.deliveredFiles === undefined) return false
-    if (this.fullscreen === undefined) return false
-    return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
+    return this.fullscreen !== undefined
+  }
+
+  /** Whether the Delivered files OVERLAY receives pointer events: the overlay
+   *  is a managed alt-screen surface of its own, so its pointer owner is the
+   *  live AltScreen — never a DisplayPreset. Evaluated live by the panel
+   *  because the SAME panel survives a fullscreen screen swap. */
+  private deliveredFilesOverlayPointerOwned(): boolean {
+    return this.fullscreen !== undefined
+  }
+
+  /** The workspace root of the CURRENT display subject: the viewed child's own
+   *  root while a child viewer is mounted, else the live main Session's root.
+   *  A missing root is a real answer (the tail then paints the declared path
+   *  unchanged); it must never fall back to `process.cwd()` or a stale
+   *  component-captured cwd. */
+  private displayWorkspaceRoot(): string | undefined {
+    return this.displaySubjectPresentation?.workspaceRoot ?? this.workspaceRoot
   }
 
   /** The effective disclosure state of one ephemeral pending-user row: the
@@ -23500,11 +23522,13 @@ export class TuiApp {
       // Delivered files PR2: the Host read capability BOUND to this snapshot's
       // subject, resolved once per open. The panel never chooses a Session.
       ...(preview === undefined ? {} : { preview }),
-      // A per-row verb is painted only where a pointer can reach it: PiTui
-      // enables terminal mouse reporting on the fullscreen alt screen alone.
-      // LIVE, not captured: the SAME panel survives a fullscreen screen swap, so
-      // the answer must follow the surface it is painted on.
-      pointerActions: () => this.deliveredFilesPointerOwned(),
+      // A per-row verb / footer action is painted only where a pointer can
+      // reach it: PiTui enables terminal mouse reporting on the fullscreen alt
+      // screen alone. LIVE, not captured: the SAME panel survives a fullscreen
+      // screen swap, so the answer must follow the surface it is painted on.
+      // This is the OVERLAY's own pointer ownership and deliberately ignores
+      // the DisplayPreset (the overlay is not the transcript click ladder).
+      pointerActions: () => this.deliveredFilesOverlayPointerOwned(),
       // The ONE owned-task entry (AGENTS.md): every preview request is an owned
       // workflow, so its failure reaches diagnostics instead of escaping.
       ...(this.events.runOwned === undefined
@@ -23517,7 +23541,12 @@ export class TuiApp {
       reportUnclassifiedFailure: (message, error) => this.deliverablePreviewFailure(message, error),
     })
     const frame = this.createDeliveredFilesFrame(panel)
-    const size = this.deliveredFilesOverlaySize()
+    // The HOST CANVAS is the formula's maximum window; the responsive frame
+    // paints the live formula result centered inside it, so a later terminal
+    // resize can grow/shrink the frame without a remount. The frame's own
+    // geometry and the panel's row grant still come from the ONE
+    // `deliveredFilesOverlaySize()` result.
+    const canvas = deliveredFilesOverlayCanvas()
     // PUBLISH THE LEASE BEFORE THE MOUNT. `showOverlayOnHost` can synchronously
     // run a plugin onFocus callback or start a fullscreen swap whose remount
     // pass re-creates this node's projection, and BOTH must observe the
@@ -23530,7 +23559,7 @@ export class TuiApp {
     try {
       handle = this.showOverlayOnHost(
         frame,
-        { width: size.width, maxHeight: size.maxHeight, ...(size.margin === undefined ? {} : { margin: size.margin }) },
+        { width: canvas.width, maxHeight: canvas.maxHeight },
         {
           // REMOUNTABLE: a fullscreen screen swap must keep the SAME panel
           // (filter/turn/selection/scroll survive it) behind a fresh projection.
@@ -23539,11 +23568,9 @@ export class TuiApp {
             if (this.deliveredFilesPanel !== panel) return
             const next = this.createDeliveredFilesFrame(panel)
             this.deliveredFilesFrame = next
-            const nextSize = this.deliveredFilesOverlaySize()
             this.rebindOverlayRaw(logical, next, {
-              width: nextSize.width,
-              maxHeight: nextSize.maxHeight,
-              ...(nextSize.margin === undefined ? {} : { margin: nextSize.margin }),
+              width: canvas.width,
+              maxHeight: canvas.maxHeight,
             })
           },
         },
@@ -23602,19 +23629,12 @@ export class TuiApp {
     this.closeDeliveredFiles()
   }
 
-  /** The delivered-files overlay's sizing ladder (design-language 64/72/88/full).
-   *  A wide terminal that can hold the two-column layout uses the `full` step;
-   *  the one-column pages use the standard ladder, snapped DOWN, and a sub-64
-   *  terminal takes exactly its own width (there is no minimum terminal width —
-   *  the panel degrades through its row budget instead). */
+  /** The delivered-files overlay's geometry: the ONE centered percentage
+   *  window of the PR A contract (design-language §12.2 per-surface
+   *  exception). The frame and the overlay options both read THIS result. */
   private deliveredFilesOverlaySize(): { width: number; maxHeight: number; margin: number | undefined } {
-    const columns = Math.max(1, this.terminal.columns)
-    const rows = Math.max(1, this.terminal.rows)
-    if (columns >= 110 && rows >= 20) {
-      return { width: Math.max(1, columns - 2), maxHeight: Math.max(1, rows - 2), margin: 1 }
-    }
-    const width = columns < 64 ? columns : columns >= 88 ? 88 : columns >= 72 ? 72 : 64
-    return { width, maxHeight: Math.max(1, Math.min(24, rows - 2)), margin: undefined }
+    const geometry = deliveredFilesOverlayGeometry(this.terminal.columns, this.terminal.rows)
+    return { width: geometry.width, maxHeight: geometry.maxHeight, margin: undefined }
   }
 
   private createDeliveredFilesFrame(panel: DeliveredFilesPanel): ResponsiveOverlayFrame {
