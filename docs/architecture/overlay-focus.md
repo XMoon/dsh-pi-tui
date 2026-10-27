@@ -93,7 +93,7 @@ The callbacks to consider (not just `focus()`): Advanced `onFocus` /
 | fullscreen rebind / restore | the logical graph survives; rebind with `initialFocus:false` | rebind / one restore focus | none |
 | session switch / final teardown | close the Job/Settings workspace before its parent browser; clear refs | — | none |
 | Job workspace open / close | commit the screen lease, latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the workspace panel's `Esc`/`tasks.stop` intents | `activeScreen` derives the physical owner from the lease (see §10.1) |
-| Settings workspace open / close | commit the screen lease (mutually exclusive with the Job lease), latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the Settings panel's `Esc` intents, `TuiApp.dispose()`/`stop()`, and the `closeLeasedWorkspaces` choke point (session switch, blocking-owner pre-emption, retired visual viewer) | `activeScreen` derives the physical owner from the lease (see §10.3) |
+| Settings workspace open / close | commit the screen lease (mutually exclusive with the Job lease), latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the Settings panel's `Esc` intents, `TuiApp.dispose()`/`stop()`, and the `closeLeasedWorkspaces` choke point for the two contexts that can own this lease (session switch, blocking-owner pre-emption) | `activeScreen` derives the physical owner from the lease (see §10.3) |
 | `custom()` done/close (factory or callback) | `settled` latch; the mounted lease is reclaimed | focus callbacks | no stale `pendingBrokerSettles` entry |
 
 ## 4. Reentrancy matrix
