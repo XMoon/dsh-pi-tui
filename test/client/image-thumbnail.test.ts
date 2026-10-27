@@ -936,3 +936,33 @@ test('an admitted tmux virtual handle paints where the fork reports no protocol,
   assert.ok(revoked.includes('🖼️ tmux.png'), 'the identity row is still painted')
   graphics.dispose()
 })
+
+/**
+ * Image-7B-B (plan §3 B3): the fold is decided BEFORE `loader.get`/`load`. A
+ * collapsed occurrence that mounts with an IDLE loader must not start a durable
+ * read at all — deciding the fold after the read spends a full attachment read
+ * for pixels that can never be painted.
+ */
+test('a COLLAPSED occurrence with an idle loader starts no read at all', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  let reads = 0
+  const loader = new ImageLoader(async () => {
+    reads += 1
+    return { ref: {}, data: new Uint8Array([1, 2, 3]) }
+  })
+  const component = new ImageThumbnail(REF, loader, THEME, () => {}, () => true)
+  const lines = component.render(80)
+  assert.equal(reads, 0, 'a folded occurrence read no durable bytes')
+  assert.equal(loader.get(REF).state, 'idle', 'the loader state was never advanced')
+  assert.equal(lines.length, 1, 'only the constant info row was painted')
+  assert.ok(lines[0]!.includes('🖼️ shot.png'), 'the identity row is still painted')
+  assert.equal(component.paintedImageBody(80), undefined, 'a folded row is never a clickable body')
+
+  // Expanding the SAME loader starts the read exactly once: the fold was the
+  // only reason it had not started.
+  const live = new ImageThumbnail(REF, loader, THEME, () => {}, () => false)
+  live.render(80)
+  await until(() => reads === 1, 'the expanded occurrence read')
+  assert.equal(reads, 1, 'the expanded occurrence read the payload exactly once')
+})
