@@ -928,6 +928,7 @@ test('an admitted tmux virtual handle paints where the fork reports no protocol,
   // The live binding changes: the VERY SAME component must repaint text, and its
   // cache key must miss so no previously painted placeholder row survives.
   cli.setReply('show-options', { text: 'on\n' })
+  // The contract IS a time window: the 250 ms probe TTL must expire.
   await new Promise<void>(resolve => setTimeout(resolve, 260))
   const revoked = component.render(80).join('\n')
   assert.equal(revoked.includes(KITTY_VIRTUAL_PLACEHOLDER), false, 'no placeholder cell survived the revocation')

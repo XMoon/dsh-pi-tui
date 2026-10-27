@@ -853,6 +853,7 @@ test('a REAL Assistant publication feeds the SAME app raster loader, Viewer Prev
       void task()
     }
   ;(h.app as unknown as { handleInput(data: string): void }).handleInput('c')
+  // A bounded observation window: the owned clipboard task settles on a later tick.
   await new Promise(resolve => setTimeout(resolve, 100))
   assert.deepEqual(clipboard, [svg], 'the RAW SVG reached the real clipboard sink')
   assert.ok(runs.some(label => label.includes('visual copy')), `the copy ran as an owned task: ${runs.join(',')}`)
@@ -903,6 +904,7 @@ test('a malformed SVG tool message is refused by the app and paints text only', 
   appInternal.setTranscript([message])
   appInternal.toggleMessageExpanded(appInternal.messages[0])
   await settle(h.app)
+  // A bounded observation window: had the gate let the card through, its raster work would already have started.
   await new Promise(resolve => setTimeout(resolve, 300))
 
   const written = h.terminal.writes.join('')
