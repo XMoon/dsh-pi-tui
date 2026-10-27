@@ -130,7 +130,13 @@ test('source to sink: the admitted component really emits the managed grid, and 
     const core = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
     const facade = new KittyTerminalFacade(terminal, core, { placementMode: 'tmux-virtual', admission })
     try {
-      const graphics = { mode: 'tmux-virtual' as const, canPaint: () => admission.isAllowed(false) }
+      const graphics = {
+        mode: 'tmux-virtual' as const,
+        canPaint: () => admission.isAllowed(false),
+        image: () => { throw new Error('not used in this case') },
+        terminal: facade,
+        dispose: () => {},
+      }
       assert.equal(effectiveImageProtocol(graphics), 'kitty', 'the classifier admits the frame the component paints')
 
       const image = new TmuxKittyImage(
