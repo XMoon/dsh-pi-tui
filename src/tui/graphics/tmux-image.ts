@@ -26,6 +26,7 @@ import type { KittyGraphics, NativeKittyImageBody, NativeKittyImageOptions } fro
 import { KittyTerminalFacade } from './kitty-terminal.ts'
 import { TmuxKittyAdmission, probeTmuxKittyIdentity } from './tmux-admission.ts'
 import {
+  KITTY_VIRTUAL_GRID_MARKER,
   KITTY_VIRTUAL_MAX_CELLS,
   encodeKittyPlaceholderGrid,
   encodeKittyVirtualPlacement,
@@ -144,7 +145,7 @@ export class TmuxKittyImage implements Component {
     const grid = encodeKittyPlaceholderGrid(handle.imageId, handle.placementId, columns, rows)
     const marker = encodeManagedVirtualMarker(handle.imageId, handle.placementId)
     const lines = [marker + encodeKittyVirtualPlacement(handle.imageId, handle.placementId, columns, rows) + grid[0]!]
-    for (let row = 1; row < rows; row++) lines.push(grid[row]!)
+    for (let row = 1; row < rows; row++) lines.push(KITTY_VIRTUAL_GRID_MARKER + grid[row]!)
     return lines
   }
 }
