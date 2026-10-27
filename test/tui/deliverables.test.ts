@@ -1309,3 +1309,24 @@ test('the tail keeps an escaping .. path absolute and normalizes an inside .. pa
   assert.ok(!lines.some(line => line.startsWith('  ../outside/report.md')),
     `the escaping path must not be painted relative:\n${lines.join('\n')}`)
 })
+
+test('a POSIX-root workspace still paints workspace-relative delivered paths', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: '/',
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [{ path: '/artifacts/a.md' }],
+  }])
+  const lines = (await viewport(vt)).split('\n')
+  assert.ok(lines.some(line => line.startsWith('  artifacts/a.md')),
+    `the POSIX root is a trusted workspace root:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.startsWith('  /artifacts/a.md')),
+    `the absolute path must not win over the valid root:\n${lines.join('\n')}`)
+})

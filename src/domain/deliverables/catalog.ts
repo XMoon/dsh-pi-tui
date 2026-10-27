@@ -207,10 +207,12 @@ function deliveredPathSegments(path: string): readonly string[] {
  *  root). `undefined` means the input is not an absolute Host path shape. */
 function absoluteHostSegments(path: string): readonly string[] | undefined {
   const slashPath = path.replace(/\\/g, '/')
-  const drive = /^([A-Za-z]:)(\/|$)/.exec(slashPath)
+  // A drive letter is absolute ONLY with its separator. Bare `C:` is a
+  // Windows DRIVE-RELATIVE path, not a workspace root, so it must not establish
+  // a trusted root (and a declared `C:foo` is not an absolute file path).
+  const drive = /^([A-Za-z]:)\//.exec(slashPath)
   if (drive !== null) {
-    const rest = slashPath.slice(drive[1]!.length + (drive[2] === '/' ? 1 : 0))
-    return [drive[1]!, ...lexicalSegments(rest)]
+    return [drive[1]!, ...lexicalSegments(slashPath.slice(drive[1]!.length + 1))]
   }
   if (slashPath.startsWith('/')) return lexicalSegments(slashPath.slice(1))
   return undefined
@@ -251,7 +253,10 @@ export function deliveredDisplayPath(path: string, workspaceRoot: string | undef
   if (workspaceRoot === undefined || workspaceRoot === '') return path
   const root = absoluteHostSegments(workspaceRoot)
   const target = absoluteHostSegments(path)
-  if (root === undefined || target === undefined || root.length === 0) return path
+  if (root === undefined || target === undefined) return path
+  // An EMPTY root segment list is the valid POSIX root `/` (not a missing
+  // root): every absolute target is inside it, so `/artifacts/a.md` displays as
+  // `artifacts/a.md`. The target-equal-root case below still keeps `/` itself.
   if (target.length <= root.length) return path
   for (const [index, segment] of root.entries()) {
     if (target[index] !== segment) return path
