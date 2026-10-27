@@ -1599,3 +1599,34 @@ test('tmux virtual: a differential frame rewriting ONLY a non-anchor grid row is
     h.dispose()
   }
 })
+
+test('tmux virtual: a cut INSIDE the anchor row cells is still proved by that row marker', (t) => {
+  // Row 0 carries the anchor, but a 1 MiB boundary can fall INSIDE its own grid
+  // cells: the continuation has no anchor. Row 0 therefore carries a per-row
+  // marker as well, so the tail is still recognised as managed.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 150,
+      maxHeightCells: 40,
+      fallback: '[fallback]',
+    })
+    const row0 = image.render(190)[0]!
+    const firstCell = row0.indexOf(P)
+    assert.ok(firstCell > 0, 'fixture: row 0 really carries cells')
+    const cut = firstCell + 40
+    const head = row0.slice(0, cut)
+    const tail = row0.slice(cut)
+    assert.ok(tail.includes(P), 'fixture: the tail carries cells')
+    h.graphics.terminal.write(head)
+    const before = h.terminal.text
+    h.cli.setReply('list-clients', { text: '' })
+    assert.throws(() => h.graphics.terminal.write(tail), TmuxGraphicsRevokedError,
+      'a cut inside the anchor row must still be refused')
+    assert.equal(h.terminal.text, before, 'the refused tail emitted nothing')
+  } finally {
+    h.dispose()
+  }
+})
