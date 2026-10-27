@@ -687,39 +687,56 @@ its own:
   (fullscreen Compact's Work bulk, fullscreen Focus's Thought roots) keeps the
   capped tail — the first four files plus the `+N more · Browse all
   (/deliverables)` row — because the browser command really is executable there.
-  No `(ctrl+o)` hint is painted for a key that drives another owner. A search
-  match on a hidden file reveals the tail TEMPORARILY; a dismiss releases it and
-  never mints a durable override (no master exists to undo one).
+  No `(ctrl+o)` hint is painted for a key that drives another owner. On a real
+  AltScreen the tail also paints the same clickable `Browse all` / per-file
+  `Details` verbs as Full: pointer capability follows the screen, never the
+  display preset. A search match on a hidden file reveals the tail TEMPORARILY; a
+  dismiss releases it and never mints a durable override (no master exists to
+  undo one).
 - **No operable owner.** A mount without the browser capability has neither
   owner, so the tail FAILS OPEN (every file visible) and paints no dead command
   entry and no pointer verb.
 
-**Tail layout.** One file is one row: the BASENAME first, extended with the
-shortest trailing directory suffix that makes it unique inside that delivery
-(case-sensitive Host-path comparison), then an inline description that never
-wraps. Disambiguation runs on the SAFE-DISPLAY projection of the path (the same
-one that paints it), so two declarations that differ only in bytes the
-projection removes cannot collapse into one visible label; when even that
-projection is identical, a visible ordinal suffix (`name (2)`) keeps the rows
-distinguishable, and that ordinal never takes a label another declaration of the
-same delivery naturally carries (the final labels are globally unique).
+**Tail layout.** Each file is at most TWO physical rows. The first row is the
+workspace-relative path of the CURRENT DISPLAY SUBJECT — the viewed child's own
+workspace root while a child is displayed, the main Session's root otherwise —
+indented two cells. A path outside that root stays absolute, and a surface
+without a trusted root paints the declared path unchanged: the tail never guesses
+a cwd and never relativizes against the parent of a viewed child. The second row
+exists only when the declaration has a description and is a four-cell-indented
+line of its own. Neither row wraps: the path is fitted once per width with both
+ends preserved and a collision ordinal, and the description is abbreviated with
+both ends preserved. A click on the description row is never a file action; the
+complete raw path and description live in the browser Details and Copy, which
+stay byte-exact.
 
-The same two devices apply to the DISPLAY-WIDTH clamp: an over-wide label keeps
-both ends, and when that clamp would still paint two different declarations
-identically, the later row gains a visible ordinal inside the fitted width. The
-browser fits ONE label set per page width and reuses it for the list, the wide
-side pane and the Details title, so those surfaces can never disagree. Because a
-clamp cannot promise to keep an arbitrary middle character, the Details page
-always paints the COMPLETE safe projection of the declared path (wrapped, never
-clipped) — that is the identity of last resort, and Copy stays byte-exact on the
-RAW path. Collapsed shows at most four files; the marker row names the command. An
-expanded tail (an explicit master expansion or a granted search reveal) renders
-the complete declaration list. `Browse all` / per-file `Details` are painted
-ONLY where a real pointer owner exists (fullscreen Full); the regular surface's
-entry is the slash command.
+Disambiguation runs on the SAFE-DISPLAY projection of the RELATIVIZED path (the
+same one that paints it), so two declarations whose visible labels collide — a
+clamp collision, a projection that removes only control bytes, or two files that
+differ only in an abbreviated middle — gain a visible ordinal (`name (2)`) that
+never takes a label another declaration of the same delivery naturally carries.
+The browser fits ONE label set per page width and reuses it for the list, the
+wide side pane and the Details title, so those surfaces can never disagree.
+Because a clamp cannot promise to keep an arbitrary middle character, the
+Details page always paints the COMPLETE safe projection of the declared path
+(wrapped, never clipped) — that is the identity of last resort, and Copy stays
+byte-exact on the RAW path. Collapsed shows at most four files; the marker row
+names the command. An expanded tail (an explicit master expansion or a granted
+search reveal) renders the complete declaration list. `Browse all` / per-file
+`Details` are painted only where a real pointer owner exists — the live AltScreen
+AND the injected browser capability — in Full, Compact and Focus alike; the
+regular surface paints no dead verb and keeps the slash command as its entry.
+The description row never carries a pointer action.
 
-**The browser** is ONE managed overlay (`Files / Turns / Details`) behind ONE
-lease, opened by `/deliverables` and by a painted tail verb. Its data is the
+**The browser** is ONE managed, CENTERED overlay (`Files / Turns / Details`)
+behind ONE lease, opened by `/deliverables` and by a painted tail verb. Its
+geometry is the Delivered-files per-surface exception documented in
+`design-language.md` §12.2 (a percentage window with a hard width/height cap,
+not the old wide-terminal near-fullscreen step). The frame's outer size and the
+panel's row grant come from ONE live geometry result; the host canvas is that
+formula's maximum window (120×38), which the fork re-clamps to the live terminal
+every frame, so a resize grows or shrinks the centered frame without remounting
+the panel or losing its state. Its data is the
 CURRENT display subject's FULL grouped projection (`messages()` without a
 `maxTurns` window), derived on demand at open time — never per repaint, and never
 from the bounded display window. Selection identity is `turn + raw Host path`, so
@@ -749,11 +766,26 @@ backward page key stick on one page forever.
 
 A POINTER gesture follows the terminal layer's own contract: a PRESS may select
 a row and consume the cell, but entering a page requires the synthesized
-`click` (same cell, no drag), so press-then-drag-away opens nothing. Copy
-feedback belongs to ONE request token: only the latest copy may paint
+`click` (same cell, no drag), so press-then-drag-away opens nothing. A Files
+list row keeps press-and-click selection in this release (the modal does not yet
+turn an unconsumed press into native text selection); only PR B may make that
+row click-only together with the fork's selection opt-in.
+
+On a real AltScreen the action bar paints real buttons — Files
+`[Filter] · [Turns] · [Close]`, Turns `[Back]`, Details
+`[Copy path] · [Back]` — while the keyboard hints drop whole first and the
+buttons themselves drop whole only when the bar cannot fit them. A press consumes
+a button without running it; only a complete click runs the existing keyboard
+operation (`/`, Turns, Esc/Back, Copy path). A painted Turns row is a complete-
+click target for that Turn; a press only consumes it. On a regular surface the
+bar stays keyboard-only, so no bracketed button is ever painted without a
+pointer owner, and a clipped button publishes no hit.
+
+Copy feedback belongs to ONE request token: only the latest copy may paint
 `Path copied` / `Could not copy path`, a slower earlier write can never
 overwrite a newer attempt, and leaving the page (or entering it again) retires
-the previous visit's pending settlement.
+the previous visit's pending settlement. The settled notice keeps `[Back]` as a
+real target instead of replacing the whole bar.
 
 **The Details page is the read-only PREVIEW.** It paints the declared Host path
 and description plus AT MOST ONE page of the file's text, read through the

@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { CommandDefinition, CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS } from '../../src/index.ts'
 import { deliveredFolder, deliveredSurfaceRouting, mountDeliveredSurface } from '../support/delivered-files.ts'
@@ -22,6 +22,7 @@ import type { TranscriptMessage } from '../../src/transcript.ts'
 import { createArtifactsCommands } from '../../src/tui/commands/artifacts.ts'
 import type { SubmissionControllerDeps } from '../../src/app/submission/controller.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { deliveredFilesOverlayGeometry } from '../../src/tui/deliverables/overlay-size.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -779,4 +780,162 @@ test('a typed /deliverables reaches the panel through the REAL submission contro
   await viewport(vt)
   assert.ok(sessionsCreated.length > 0 || modelPrompts.length > 0,
     'the same fixture does deliver an ordinary prompt through the session path')
+})
+
+test('the overlay footer buttons run through the real AltScreen pointer path', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([
+    { turn: 9, files: [{ path: '/ws/report.md', description: 'Final report' }] },
+    { turn: 4, files: ['/ws/old.md'] },
+  ])
+  const copied: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+    copySelection: async (text) => { copied.push(text); return true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snap)
+  await viewport(vt)
+
+  const clickOn = async (label: string): Promise<void> => {
+    const view = await viewport(vt)
+    const rows = view.split('\n')
+    const row = rows.findLastIndex(line => line.includes(label))
+    assert.ok(row >= 0, `${label} is painted:\n${view}`)
+    const column = rows[row]!.indexOf(label) + 2
+    clickCell(vt, column, row)
+    await viewport(vt)
+  }
+
+  // [Filter] enters the real filter seat; the painted list really filters.
+  await clickOn('[Filter]')
+  assert.ok((await viewport(vt)).includes('Filter: '), 'the Filter button enters the filter seat')
+  vt.sendInput('rep')
+  vt.sendInput('\r')
+  assert.ok((await viewport(vt)).includes('report.md'), 'the committed filter keeps the match')
+
+  // [Turns] opens the Turns page; a painted Turn row opens THAT Turn.
+  await clickOn('[Turns]')
+  assert.ok((await viewport(vt)).includes('Delivered files · 2 Turns'))
+  const turnsView = await viewport(vt)
+  const turnRow = turnsView.split('\n').findIndex(line => line.includes('Turn 4'))
+  assert.ok(turnRow >= 0, turnsView)
+  clickCell(vt, turnsView.split('\n')[turnRow]!.indexOf('Turn 4'), turnRow)
+  assert.ok((await viewport(vt)).includes('Delivered files · Turn 4'), 'the clicked Turn is the page subject')
+  assert.ok((await viewport(vt)).includes('old.md'))
+
+  // Details [Copy path] uses the RAW path and shows the settled outcome; [Back]
+  // stays clickable beside the notice.
+  vt.sendInput('\r')
+  assert.ok((await viewport(vt)).includes('old.md · Details'))
+  await clickOn('[Copy path]')
+  assert.deepEqual(copied, ['/ws/old.md'], 'the button copies the raw declared path')
+  const copiedView = await viewport(vt)
+  assert.ok(copiedView.includes('Path copied'), `the real clipboard settlement is painted:\n${copiedView}`)
+  await clickOn('[Back]')
+  assert.ok((await viewport(vt)).includes('Delivered files · Turn 4'), 'Back returns to the Files page')
+
+  // [Close] really releases the ONE lease.
+  await clickOn('[Close]')
+  assert.ok(!(await viewport(vt)).includes('Delivered files · Turn 4'), 'the overlay is gone')
+})
+
+test('close -> reopen mounts ONE fresh lease and the background transcript stays inert', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([{ turn: 6, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([deliveredAssistant(6, 'answer body', [{ path: '/ws/a.md' }])], new Map())
+  app.setFullscreen(true)
+  const tail = await viewport(vt)
+  const tailRow = tail.split('\n').findIndex(line => line.includes('a.md') && line.includes('Details'))
+  assert.ok(tailRow >= 0, `fixture: the tail verb is painted:\n${tail}`)
+
+  app.openDeliveredFiles(snap)
+  await viewport(vt)
+  // A background transcript click behind the capturing overlay opens NOTHING.
+  const tailColumn = tail.split('\n')[tailRow]!.lastIndexOf('Details') + 2
+  clickCell(vt, tailColumn, tailRow)
+  assert.equal((await viewport(vt)).split('\n').filter(line => line.includes('Delivered files · Turn 6')).length, 1,
+    'the background click never stacks a second overlay')
+
+  // Close releases the lease; a reopen paints exactly one fresh panel.
+  app.closeDeliveredFiles()
+  assert.ok(!(await viewport(vt)).includes('Delivered files · Turn 6'), 'close releases the overlay')
+  app.openDeliveredFiles(snap)
+  const reopened = await viewport(vt)
+  assert.equal(reopened.split('\n').filter(line => line.includes('Delivered files · Turn 6')).length, 1,
+    `one lease after reopen:\n${reopened}`)
+})
+
+test('the ONE overlay paints the frozen percentage geometry at every matrix size', async () => {
+  const snap = snapshot([{ turn: 1, files: ['/ws/a.md'] }])
+  const cases: readonly [number, number][] = [[44, 20], [72, 24], [80, 10], [80, 24], [120, 40], [160, 50], [200, 50]]
+  for (const [columns, rows] of cases) {
+    const vt = new VirtualTerminal(columns, rows)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      displayState: { preset: 'full' },
+      deliveredFiles: capability(snap),
+    })
+    app.start()
+    startedApps.add(app)
+    app.setFullscreen(true)
+    app.openDeliveredFiles(snap)
+    const lines = (await viewport(vt)).split('\n')
+    const top = lines.findIndex(line => line.includes('╭'))
+    const bottom = lines.findIndex((line, index) => index > top && line.includes('╰'))
+    assert.ok(top >= 0 && bottom > top, `${columns}x${rows}: the frame is painted:\n${lines.join('\n')}`)
+    const expected = deliveredFilesOverlayGeometry(columns, rows)
+    assert.equal(visibleWidth(lines[top]!.trim()), expected.width, `${columns}x${rows}: outer width`)
+    assert.equal(bottom - top + 1, expected.maxHeight, `${columns}x${rows}: outer height cap`)
+    assert.equal(lines[top]!.indexOf('╭'), Math.floor((columns - expected.width) / 2),
+      `${columns}x${rows}: centered with the default anchor`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  // The SAME frame survives a page switch, and a real terminal resize
+  // re-resolves the geometry from the same authority.
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snap)
+  const frameOf = async (): Promise<{ width: number; maxHeight: number }> => {
+    // The resize/remount batcher runs as a microtask before the throttled
+    // frame is written, so observe the frame only after it settles.
+    for (let step = 0; step < 6; step += 1) await Promise.resolve()
+    const lines = (await viewport(vt)).split('\n')
+    const top = lines.findIndex(line => line.includes('╭'))
+    const bottom = lines.findIndex((line, index) => index > top && line.includes('╰'))
+    assert.ok(top >= 0 && bottom > top, lines.join('\n'))
+    return { width: visibleWidth(lines[top]!.trim()), maxHeight: bottom - top + 1 }
+  }
+  assert.deepEqual(await frameOf(), deliveredFilesOverlayGeometry(120, 40))
+  vt.sendInput('\r')
+  assert.deepEqual(await frameOf(), deliveredFilesOverlayGeometry(120, 40), 'Details keeps the Files frame')
+  vt.resize(160, 50)
+  assert.deepEqual(await frameOf(), deliveredFilesOverlayGeometry(160, 50), 'a resize re-resolves the SAME authority')
 })

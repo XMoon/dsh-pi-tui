@@ -42,6 +42,28 @@ export type DeliveredFilesPage = 'files' | 'turns' | 'details'
 /** Which local seat owns the keyboard on the Files page. */
 export type DeliveredFilesSeat = 'list' | 'filter'
 
+/** The pointer actions the ONE action bar can paint. Keyboard equivalents
+ *  (`/`, `T`/Shift+C, Esc) stay unchanged; a button is only a pointer shape of
+ *  the same existing operation. */
+type FooterAction = 'filter' | 'turns' | 'close' | 'back' | 'copy-path'
+
+/** One painted action-bar cell range in panel coordinates. */
+interface PaintedFooterHit {
+  readonly action: FooterAction
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** One action-bar segment. `rank` is the whole-segment drop order: the highest
+ *  rank is removed first, and rank 0 is the terminal action that is never
+ *  dropped (only clipped, with its hit withdrawn). */
+interface FooterSegment {
+  readonly text: string
+  readonly tone: 'hint' | 'button' | 'notice'
+  readonly rank: number
+  readonly action?: FooterAction
+}
+
 /** Where the browser opens: the turn/file the user actually acted on. */
 export interface DeliveredFilesOpenIntent {
   readonly turn?: number
@@ -212,16 +234,6 @@ function wrapPreservingText(text: string, width: number): string[] {
   return lines
 }
 
-/** The keyboard hints of one page, most important last (Esc is always last). */
-interface HintSegments {
-  readonly select?: string
-  readonly toggle?: string
-  readonly filter?: string
-  readonly turns?: string
-  readonly enter: string
-  readonly esc: string
-}
-
 export class DeliveredFilesPanel implements Component {
   private readonly snapshot: DeliveredFilesSnapshot
   private readonly requestRender: () => void
@@ -278,6 +290,15 @@ export class DeliveredFilesPanel implements Component {
   /** Painted `Details` verb cells: row → { path, startCol, endCol }. Only the
    *  painted columns open the page; the rest of the row only selects. */
   private paintedActionRows: ReadonlyMap<number, { readonly path: string; readonly startCol: number; readonly endCol: number }> = new Map()
+  /** The page/seat the recorded hit maps belong to. A page or seat change
+   *  retires every recorded cell BEFORE the next frame. */
+  private paintedPage: DeliveredFilesPage | undefined
+  private paintedSeat: DeliveredFilesSeat | undefined
+  /** The action-bar row and its painted button cells. */
+  private paintedFooterRow = -1
+  private paintedFooterHits: ReadonlyArray<PaintedFooterHit> = []
+  /** Painted Turns-page rows: row → Turn. Only a complete click opens one. */
+  private paintedTurnRows: ReadonlyMap<number, number> = new Map()
 
   constructor(options: DeliveredFilesPanelOptions) {
     this.snapshot = options.snapshot
@@ -305,9 +326,14 @@ export class DeliveredFilesPanel implements Component {
     }
   }
 
-  /** Adopt the granted content row budget (overlay maxHeight minus borders). */
+  /** Adopt the granted content row budget (overlay maxHeight minus borders).
+   *  A changed grant reflows every row, so the last-painted hit maps are dead
+   *  until the next frame. */
   setMaxRows(rows: number): void {
-    this.maxRows = Math.max(1, Math.floor(rows))
+    const next = Math.max(1, Math.floor(rows))
+    if (next === this.maxRows) return
+    this.maxRows = next
+    this.invalidatePaintedHits()
   }
 
   /** Test/diagnostic read: the page the panel currently presents. */
@@ -327,10 +353,7 @@ export class DeliveredFilesPanel implements Component {
   dispose(): void {
     this.disposed = true
     this.cancelPreview()
-    this.paintedWidth = 0
-    this.paintedRows = 0
-    this.paintedListRows = new Map()
-    this.paintedActionRows = new Map()
+    this.invalidatePaintedHits()
   }
 
   // ── data derivation (never stored as a second list) ──────────────────────
@@ -510,26 +533,11 @@ export class DeliveredFilesPanel implements Component {
       this.openFilesForTurn(this.turnCursor)
       return
     }
-    if (matchesKey(data, 'escape')) {
-      // Back to the files of the Turn that was selected BEFORE the visit: the
-      // cursor move on this page is not a commitment.
-      this.page = 'files'
-      this.seat = 'list'
-      this.turnCursor = this.restoreTurn
-      this.requestRender()
-      return
-    }
+    if (matchesKey(data, 'escape')) return this.backFromTurns()
   }
 
   private handleDetailsInput(data: string): void {
-    if (matchesKey(data, 'escape')) {
-      this.cancelPreview()
-      this.page = 'files'
-      this.seat = 'list'
-      this.copyState = 'idle'
-      this.requestRender()
-      return
-    }
+    if (matchesKey(data, 'escape')) return this.backFromDetails()
     if (DELIVERED_FILES_CHORDS.copyPath.keys.some(key => matchesKey(data, key))) return this.copySelectedPath()
     const bodyRows = this.detailsBodyRows()
     // The scroll clamp needs "is there another row?", not the whole page: one row
@@ -569,6 +577,26 @@ export class DeliveredFilesPanel implements Component {
       const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
       if (page !== undefined && !page.eof) this.requestPreviewPage(page.offset + DELIVERED_FILE_PAGE_LINES)
     }
+  }
+
+  /** The ONE Back transition from Turns (`[Back]` and Esc share it): the cursor
+   *  move on that page is not a commitment, so the ORIGINAL Files Turn returns. */
+  private backFromTurns(): void {
+    if (this.page !== 'turns') return
+    this.page = 'files'
+    this.seat = 'list'
+    this.turnCursor = this.restoreTurn
+    this.requestRender()
+  }
+
+  /** The ONE Back transition from Details (`[Back]` and Esc share it). */
+  private backFromDetails(): void {
+    if (this.page !== 'details') return
+    this.cancelPreview()
+    this.page = 'files'
+    this.seat = 'list'
+    this.copyState = 'idle'
+    this.requestRender()
   }
 
   private enterFilter(): void {
@@ -653,6 +681,9 @@ export class DeliveredFilesPanel implements Component {
     // settlement belonging to a page the user already left stays stale.
     this.copySerial += 1
     const serial = this.copySerial
+    // The pending clipboard settlement is a NEW frame state: the old action
+    // bar's cells are retired until the fresh outcome frame paints.
+    this.invalidatePaintedHits()
     this.copyPath(file.path, (ok) => {
       if (this.disposed || serial !== this.copySerial) return
       // The selection may have moved while the clipboard write was pending: a
@@ -875,15 +906,46 @@ export class DeliveredFilesPanel implements Component {
     if (this.disposed || !this.pointerOwned()) return undefined
     if (event.type !== 'press' && event.type !== 'click') return undefined
     if (event.button !== 'left') return undefined
-    // A PRESS may only SELECT a row. Entering a page is a complete gesture:
-    // the terminal layer synthesizes `click` only when the press and the release
-    // stayed on the same cell without a drag, so a press-then-drag-away must not
-    // have opened anything already.
+    // A PRESS may only SELECT / consume. Entering a page, running a footer
+    // action or opening a Turn is a complete gesture: the terminal layer
+    // synthesizes `click` only when the press and the release stayed on the
+    // same cell without a drag.
     const completeClick = event.type === 'click'
-    // Only a frame painted at THIS width can be hit: a resize invalidates the
-    // recorded rows before the next paint.
+    // Only a frame painted at THIS geometry can be hit: a resize (or a changed
+    // content grant) invalidates the recorded rows before the next paint.
     if (Math.floor(event.width) !== this.paintedWidth || Math.floor(event.height) !== this.paintedRows) return undefined
-    if (this.page !== 'files' || this.seat !== 'list') return undefined
+    // The frame's page/seat must still be the live one: a page or seat change
+    // retires every recorded cell until the next paint.
+    if (this.paintedPage !== this.page) return undefined
+    const liveSeat = this.page === 'files' ? this.seat : 'list'
+    if (this.paintedSeat !== liveSeat) return undefined
+
+    // The action bar owns its painted button cells on EVERY page. A press
+    // consumes but never runs the action; only the synthesized click does.
+    if (event.y === this.paintedFooterRow) {
+      const hit = this.paintedFooterHits.find(candidate =>
+        event.x >= candidate.startCol && event.x < candidate.endCol)
+      if (hit === undefined) return undefined
+      if (!completeClick) return { handled: true }
+      this.runFooterAction(hit.action)
+      return { handled: true, render: true }
+    }
+
+    // Turns rows: a complete click moves the cursor to THAT Turn and opens its
+    // Files page — the same effect as Enter Open. A press only consumes.
+    if (this.page === 'turns') {
+      const turn = this.paintedTurnRows.get(event.y)
+      if (turn === undefined) return undefined
+      if (!completeClick) return { handled: true }
+      this.openFilesForTurn(turn)
+      return { handled: true, render: true }
+    }
+
+    // The Details body is a read-only preview; only its footer is interactive.
+    if (this.page === 'details') return undefined
+
+    // Files body: only the list seat claims rows.
+    if (this.seat !== 'list') return undefined
     // LAST-PAINTED identity: the frame's list must still be the live list. A
     // committed filter, a Turn switch or any other membership/order change
     // invalidates the recorded cells, so a click can never act on a row the
@@ -907,7 +969,9 @@ export class DeliveredFilesPanel implements Component {
     if (path === undefined) return undefined
     const file = this.filteredFiles().find(candidate => candidate.path === path)
     if (file === undefined) return undefined
-    // A list click SELECTS; opening needs the explicit Details action.
+    // The PR A contract keeps a non-verb Files row selectable on BOTH press and
+    // click: the opaque Modal does not turn an unconsumed press into a native
+    // selection, so a click-only row would be dead until PR B's fork opt-in.
     this.selectedPath = file.path
     this.requestRender()
     return { handled: true, render: true }
@@ -1093,10 +1157,11 @@ export class DeliveredFilesPanel implements Component {
       const windowed = body.slice(top, top + bodyRows)
       while (windowed.length < bodyRows) windowed.push('')
       rows.push(...windowed.map(line => truncateToWidth(line, safeWidth, '…')))
-      rows.push(this.actionBar(safeWidth, this.copyState === 'ok'
+      const footer = this.footerLayout(safeWidth, this.copyState === 'ok'
         ? 'Path copied'
-        : this.copyState === 'failed' ? 'Could not copy path' : undefined))
-      this.paint(safeWidth, rows, listRows, actionRows)
+        : this.copyState === 'failed' ? 'Could not copy path' : undefined)
+      rows.push(footer.text)
+      this.paint(safeWidth, rows, listRows, actionRows, footer.hits)
       return rows
     }
 
@@ -1108,15 +1173,20 @@ export class DeliveredFilesPanel implements Component {
       const current = Math.max(0, turns.findIndex(candidate => candidate.turn === this.turnCursor))
       const top = Math.max(0, Math.min(current, turns.length - area))
       const visible = turns.slice(top, top + area)
+      const turnRows = new Map<number, number>()
       for (const entry of visible) {
         const selected = entry.turn === this.turnCursor
         const label = `Turn ${entry.turn} · ${entry.files.length} ${entry.files.length === 1 ? 'file' : 'files'}`
+        const row = rows.length
         rows.push(truncateToWidth(`${selected ? color.primary('>') : ' '} ${label}`, safeWidth, '…'))
+        turnRows.set(row, entry.turn)
       }
       while (rows.length < this.maxRows - 1) rows.push('')
-      rows.push(this.actionBar(safeWidth))
-      // The Turns page has no pointer targets of its own.
-      this.paint(safeWidth, rows, new Map(), actionRows)
+      const footer = this.footerLayout(safeWidth)
+      rows.push(footer.text)
+      // A painted Turn row is a complete-click target; the action bar owns its
+      // own buttons. Nothing else on this page claims a cell.
+      this.paint(safeWidth, rows, new Map(), actionRows, footer.hits, turnRows)
       return rows
     }
 
@@ -1195,8 +1265,9 @@ export class DeliveredFilesPanel implements Component {
         rows[rowIndex] = `${padTo(left, listWidth)}   ${truncateToWidth(right, sideWidth, '…')}`
       }
     }
-    rows.push(this.actionBar(safeWidth))
-    this.paint(safeWidth, rows, listRows, actionRows)
+    const footer = this.footerLayout(safeWidth)
+    rows.push(footer.text)
+    this.paint(safeWidth, rows, listRows, actionRows, footer.hits)
     return rows
   }
 
@@ -1229,49 +1300,141 @@ export class DeliveredFilesPanel implements Component {
     return truncateToWidth(`${prefix}${query[0] ?? ''}`, width, '…')
   }
 
-  /** The action bar: page hints in the design-language order, Esc last, with
-   *  the low-priority hints dropped first on a narrow screen. */
-  private actionBar(width: number, notice?: string): string {
-    if (notice !== undefined) {
-      const painted = notice === 'Path copied' ? color.success(notice) : color.error(notice)
-      return truncateToWidth(painted, width, '…')
+  /**
+   * The action bar: real pointer buttons (`[Filter] · [Turns] · [Close]`,
+   * `[Back]`, `[Copy path] · [Back]`) plus keyboard-only hints. Hints are
+   * dropped WHOLE first; a button is dropped whole only when the bar cannot
+   * fit it, and the terminal action (`[Close]` / `[Back]`) is never dropped
+   * while its text still fits. A button that would be clipped paints no hit.
+   */
+  private footerLayout(width: number, notice?: string): { readonly text: string; readonly hits: readonly PaintedFooterHit[] } {
+    const kept = [...this.footerSegments(notice)]
+    const plainWidth = (): number => kept.reduce((total, segment, index) =>
+      total + visibleWidth(segment.text) + (index === 0 ? 0 : 3), 0)
+    while (plainWidth() > width) {
+      let dropIndex = -1
+      let dropRank = 0
+      for (const [index, segment] of kept.entries()) {
+        if (segment.rank > dropRank) {
+          dropRank = segment.rank
+          dropIndex = index
+        }
+      }
+      if (dropIndex === -1) break
+      kept.splice(dropIndex, 1)
     }
-    const hints = this.hints()
-    // §7.2 order: the primary action, then navigation, then secondary verbs,
-    // then pure browsing hints, with Esc last.
-    const segments: string[] = [hints.enter]
-    if (hints.select !== undefined) segments.push(hints.select)
-    if (hints.filter !== undefined) segments.push(hints.filter)
-    if (hints.turns !== undefined) segments.push(hints.turns)
-    segments.push(hints.esc)
-    const render = (): string => segments.map(segment => color.textDim(segment)).join(color.textDim(' · '))
-    // Degrade least-informative first, keeping the action and Esc readable.
-    const dropOrder = [hints.turns, hints.filter, hints.select]
-    for (const candidate of dropOrder) {
-      if (candidate === undefined) continue
-      const index = segments.indexOf(candidate)
-      if (index === -1) continue
-      if (visibleWidth(render()) <= width) break
-      segments.splice(index, 1)
-    }
-    return truncateToWidth(render(), width, '…')
+    let text = ''
+    let column = 0
+    const hits: PaintedFooterHit[] = []
+    kept.forEach((segment, index) => {
+      if (index > 0) {
+        text += color.textDim(' · ')
+        column += 3
+      }
+      const startCol = column
+      if (segment.tone === 'button') {
+        text += color.primary(segment.text)
+        if (segment.action !== undefined) {
+          hits.push({ action: segment.action, startCol, endCol: startCol + visibleWidth(segment.text) })
+        }
+      } else if (segment.tone === 'notice') {
+        text += notice === 'Path copied' ? color.success(segment.text) : color.error(segment.text)
+      } else {
+        text += color.textDim(segment.text)
+      }
+      column += visibleWidth(segment.text)
+    })
+    // The only way the bar exceeds `width` now is a terminal action wider than
+    // the whole row: clip it and publish NO hit for the clipped cells.
+    if (column > width) return { text: truncateToWidth(text, width, '…'), hits: [] }
+    return { text, hits }
   }
 
-  private hints(): HintSegments {
-    if (this.page === 'details') return { enter: `${DELIVERED_FILES_CHORDS.copyPath.label} Copy path`, esc: 'Esc Back' }
-    if (this.page === 'turns') return { select: '↑↓ Select', enter: 'Enter Open', esc: 'Esc Back' }
-    if (this.seat === 'filter') {
-      return {
-        enter: 'Enter Apply',
-        esc: this.filter === '' ? 'Esc Back' : 'Esc Clear',
+  /** The ordered action-bar segments of the current page/seat.
+   *
+   *  Only a real AltScreen gets pointer BUTTONS. A regular surface keeps the
+   *  pre-PR keyboard hints (never a bracketed button with no owner), exactly
+   *  like the transcript tail fails open to its slash-command entry. */
+  private footerSegments(notice?: string): readonly FooterSegment[] {
+    const pointer = this.pointerOwned()
+    if (this.page === 'details') {
+      const segments: FooterSegment[] = []
+      if (notice !== undefined) segments.push({ text: notice, tone: 'notice', rank: pointer ? 1 : 4 })
+      if (pointer) {
+        // Copy path is the optional middle action; Back stays reachable.
+        segments.push({ text: '[Copy path]', tone: 'button', rank: 2, action: 'copy-path' })
+        segments.push({ text: '[Back]', tone: 'button', rank: 0, action: 'back' })
+      } else {
+        segments.push({ text: `${DELIVERED_FILES_CHORDS.copyPath.label} Copy path`, tone: 'hint', rank: 2 })
+        segments.push({ text: 'Esc Back', tone: 'hint', rank: 0 })
       }
+      return segments
     }
-    return {
-      select: '↑↓ Select',
-      enter: 'Enter Preview',
-      filter: '/ Filter',
-      turns: `${DELIVERED_FILES_CHORDS.turns.label} Turns`,
-      esc: 'Esc Close',
+    if (this.page === 'turns') {
+      return pointer
+        ? [
+            { text: '↑↓ Select', tone: 'hint', rank: 2 },
+            { text: 'Enter Open', tone: 'hint', rank: 1 },
+            { text: '[Back]', tone: 'button', rank: 0, action: 'back' },
+          ]
+        : [
+            { text: '↑↓ Select', tone: 'hint', rank: 2 },
+            { text: 'Enter Open', tone: 'hint', rank: 1 },
+            { text: 'Esc Back', tone: 'hint', rank: 0 },
+          ]
+    }
+    if (this.seat === 'filter') {
+      return pointer
+        ? [
+            { text: 'Enter Apply', tone: 'hint', rank: 2 },
+            { text: this.filter === '' ? 'Esc Back' : 'Esc Clear', tone: 'hint', rank: 1 },
+            { text: '[Close]', tone: 'button', rank: 0, action: 'close' },
+          ]
+        : [
+            { text: 'Enter Apply', tone: 'hint', rank: 2 },
+            { text: this.filter === '' ? 'Esc Back' : 'Esc Clear', tone: 'hint', rank: 0 },
+          ]
+    }
+    if (pointer) {
+      // The full bar is 60 cells; at 44 terminal columns the two keyboard hints
+      // drop whole and the three buttons remain, exactly as the design mock.
+      return [
+        { text: 'Enter Preview', tone: 'hint', rank: 4 },
+        { text: '↑↓ Select', tone: 'hint', rank: 3 },
+        { text: '[Filter]', tone: 'button', rank: 2, action: 'filter' },
+        { text: '[Turns]', tone: 'button', rank: 1, action: 'turns' },
+        { text: '[Close]', tone: 'button', rank: 0, action: 'close' },
+      ]
+    }
+    // Keyboard-only fallback: whole-segment drops keep the primary action and
+    // Esc, never a half-painted hint.
+    return [
+      { text: 'Enter Preview', tone: 'hint', rank: 4 },
+      { text: '↑↓ Select', tone: 'hint', rank: 3 },
+      { text: '/ Filter', tone: 'hint', rank: 2 },
+      { text: `${DELIVERED_FILES_CHORDS.turns.label} Turns`, tone: 'hint', rank: 1 },
+      { text: 'Esc Close', tone: 'hint', rank: 0 },
+    ]
+  }
+
+  /** Run ONE painted action-bar action (only a complete click reaches here). */
+  private runFooterAction(action: FooterAction): void {
+    switch (action) {
+      case 'filter':
+        this.enterFilter()
+        return
+      case 'turns':
+        this.openTurns()
+        return
+      case 'close':
+        this.close()
+        return
+      case 'back':
+        if (this.page === 'details') this.backFromDetails()
+        else this.backFromTurns()
+        return
+      case 'copy-path':
+        this.copySelectedPath()
     }
   }
 
@@ -1285,9 +1448,14 @@ export class DeliveredFilesPanel implements Component {
   private invalidatePaintedHits(): void {
     this.paintedListRows = new Map()
     this.paintedActionRows = new Map()
+    this.paintedFooterHits = []
+    this.paintedFooterRow = -1
+    this.paintedTurnRows = new Map()
     this.paintedWidth = 0
     this.paintedRows = 0
     this.paintedListIdentity = ''
+    this.paintedPage = undefined
+    this.paintedSeat = undefined
   }
 
   private paint(
@@ -1295,12 +1463,20 @@ export class DeliveredFilesPanel implements Component {
     rows: readonly string[],
     listRows: ReadonlyMap<number, string>,
     actionRows: ReadonlyMap<number, { readonly path: string; readonly startCol: number; readonly endCol: number }>,
+    footerHits: ReadonlyArray<PaintedFooterHit> = [],
+    turnRows: ReadonlyMap<number, number> = new Map(),
   ): void {
     this.paintedWidth = width
     this.paintedRows = rows.length
     this.paintedListRows = listRows
     this.paintedActionRows = actionRows
+    this.paintedFooterHits = footerHits
+    // The action bar is ALWAYS the last painted row of every page.
+    this.paintedFooterRow = rows.length - 1
+    this.paintedTurnRows = turnRows
     this.paintedListIdentity = this.listIdentity()
+    this.paintedPage = this.page
+    this.paintedSeat = this.page === 'files' ? this.seat : 'list'
   }
 }
 

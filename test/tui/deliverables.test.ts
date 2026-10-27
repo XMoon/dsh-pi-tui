@@ -321,9 +321,12 @@ test('turn-end delivery attachment invalidates the live assistant component', as
   app.setTranscript(folder.messages(), folder.turnActivities())
   const after = await viewport(vt)
   assert.ok(after.includes('Delivered files · 1'), after)
-  assert.ok(after.includes('report.md'), after)
-  assert.ok(!after.includes('out/report.md'), `${after}\nthe tail shows the basename, never the declared path`)
-  assert.ok(after.includes('Final report'), after)
+  assert.ok(after.includes('out/report.md'), `${after}\nthe tail shows the declared path when no trusted root exists`)
+  const deliveredLines = after.split('\n')
+  const pathRow = deliveredLines.findIndex(line => line.includes('out/report.md'))
+  assert.ok(pathRow >= 0, after)
+  assert.ok(deliveredLines[pathRow + 1]!.includes('Final report'),
+    `the description owns its own indented row:\n${after}`)
   assert.deepEqual(folder.search('report').map(match => ({ id: match.id, turn: match.turn })), [
     { id: 0, turn: 1 },
     { id: 0, turn: 1 },
@@ -361,7 +364,7 @@ test('Focus keeps the delivery tail on the final assistant message', async () =>
   assert.ok(!expanded.includes('+1 more'), expanded)
 })
 
-test('the delivered tail paints basenames, never a raw Host path', async () => {
+test('the delivered tail paints the CURRENT workspace-relative path, never the old root', async () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workspaceRoot: '/old' })
   app.start()
@@ -370,14 +373,16 @@ test('the delivered tail paints basenames, never a raw Host path', async () => {
     kind: 'assistant',
     turn: 1,
     text: 'final',
-    deliverables: [{ path: '/new/a.txt' }],
+    deliverables: [{ path: '/new/docs/a.txt' }],
   }])
 
+  // The component was built under /old, then the session identity moved to
+  // /new: the tail must rebuild with the CURRENT root, not the captured one.
   app.setWelcomeCard({ cwd: '/new', sessionId: 'session-2', model: 'test/model', version: 'test' })
   const view = await viewport(vt)
-  assert.ok(view.includes('  a.txt'), view)
-  assert.ok(!view.includes('/new/a.txt'), view)
-  assert.ok(!view.includes('/old/a.txt'), view)
+  assert.ok(view.includes('  docs/a.txt'), view)
+  assert.ok(!view.includes('/new/docs/a.txt'), view)
+  assert.ok(!view.includes('/old/docs/a.txt'), view)
 })
 
 test('delivery tails reflow without visual overflow at supported widths', async () => {
@@ -416,25 +421,27 @@ test('the delivered tail keeps a constant row budget for 1..200 files', async ()
       .render(width)
       .map(row => stripTerminalSequences(row))
 
-  // N=1..4: every file, no extra marker, and the minimal browse entry.
+  // N=1..4: every file, no extra marker, and the minimal browse entry. Each
+  // file is TWO rows here (path + description).
   assert.equal(tail(1, 100).filter(row => row.includes('file-1.md')).length, 1)
   for (const count of [1, 4]) {
     const rows = tail(count, 100)
     assert.ok(!rows.some(row => row.includes('more')), `N=${count} paints no +N marker:\n${rows.join('\n')}`)
     assert.ok(rows[0]!.includes('/deliverables'), `N=${count} keeps the browse entry:\n${rows[0]}`)
   }
-  // N=5 and N=200 cost the SAME number of rows: title + 4 files + one marker.
+  // N=5 and N=200 cost the SAME number of rows: title + 4 files x 2 rows +
+  // one marker.
   const five = tail(5, 100)
   const twoHundred = tail(200, 100)
   assert.equal(five.length, twoHundred.length, 'a large delivery never grows the transcript tail')
-  assert.equal(five.length, 6)
+  assert.equal(five.length, 10)
   assert.ok(five.some(row => row.includes('+1 more')), five.join('\n'))
   assert.ok(twoHundred.some(row => row.includes('+196 more')), twoHundred.join('\n'))
   assert.ok(!twoHundred.some(row => row.includes('file-5.md')), 'only the first four are painted')
-  assert.ok(twoHundred[5]!.includes('/deliverables'), 'the tail row names the command')
+  assert.ok(twoHundred[9]!.includes('/deliverables'), 'the tail row names the command')
 
   // An EXPANDED tail is the explicit user request: it re-renders every file.
-  assert.equal(new DeliveredFilesComponent(delivery(5), true, { commandEntry: true }).render(100).length, 6)
+  assert.equal(new DeliveredFilesComponent(delivery(5), true, { commandEntry: true }).render(100).length, 11)
 
   // Fullscreen Full paints the real pointer verbs; a regular surface does not.
   const pointer = tail(5, 100, { pointerActions: true })
@@ -483,14 +490,10 @@ test('the delivered tail stays inside 40/72/100/140 columns', async () => {
     for (const line of view.split('\n')) {
       assert.ok(visibleWidth(stripTerminalSequences(line)) <= columns, `${columns}: ${JSON.stringify(line)}`)
     }
-    // The narrow layout drops the description and the per-file verb.
-    if (columns === 40) {
-      assert.ok(!view.includes('一个很长的描述'), '40 columns keeps filenames only')
-      assert.ok(!view.includes('Details'), '40 columns paints no pointer verb')
-    }
-    if (columns >= 100) {
-      assert.ok(view.includes('一个很长的描述'), `${columns}: the description is visible when it fits`)
-    }
+    // Every width paints the description on its OWN row; only the pointer
+    // verb waits for the fullscreen AltScreen / action budget.
+    assert.ok(view.includes('一个很长的描述'), `${columns}: the description is visible on its own row`)
+    assert.ok(!view.includes('Details'), `${columns}: a regular surface paints no dead pointer verb`)
   }
 })
 
@@ -563,7 +566,8 @@ test('a generated ordinal never collides with a naturally painted label', async 
   assert.equal(rows.length, 3, `all three declared files are painted:\n${view}`)
   const labels = rows.map(row => row.trim())
   assert.equal(new Set(labels).size, 3, `three visibly distinct rows:\n${labels.join('\n')}`)
-  assert.ok(rows.some(row => row.trim() === 'report (2)'), `the natural label survives:\n${labels.join('\n')}`)
+  assert.ok(labels.includes('/b/report (2)'), `the natural label survives:\n${labels.join('\n')}`)
+  assert.ok(labels.includes('/a/report (2)'), `the generated ordinal keeps the full path prefix:\n${labels.join('\n')}`)
   assert.ok(!view.includes('\u001b[31m') && !view.includes('\u001b[32m'),
     'no control sequence from a declared path reaches the frame')
 })
@@ -583,11 +587,11 @@ test('long declared filenames keep their distinguishing tail in the transcript t
     deliverables: [{ path: `/ws/docs/${long}alpha.md` }, { path: `/ws/docs/${long}beta.md` }],
   }])
   const view = await viewport(vt)
-  const rows = view.split('\n').filter(line => line.includes('report-2026-10'))
+  const rows = view.split('\n').filter(line => line.includes('alpha.md') || line.includes('beta.md'))
   assert.equal(rows.length, 2, `both rows are painted at 40 columns:\n${view}`)
   assert.notEqual(rows[0]!.trim(), rows[1]!.trim(), 'the two rows must differ')
-  assert.ok(rows[0]!.includes('alpha.md'), `the tail survives: ${rows[0]}`)
-  assert.ok(rows[1]!.includes('beta.md'), `the tail survives: ${rows[1]}`)
+  assert.ok(rows.some(row => row.includes('alpha.md')), `the tail survives:\n${rows.join('\n')}`)
+  assert.ok(rows.some(row => row.includes('beta.md')), `the tail survives:\n${rows.join('\n')}`)
 })
 
 test('a middle-only discriminator survives the transcript clamp', async () => {
@@ -934,4 +938,282 @@ test('a REAL subject switch through SurfaceRuntime aborts the in-flight read (sa
   } finally {
     surface.dispose()
   }
+})
+
+test('the tail follows the display subject root: main -> viewed child -> main, outside-root raw', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: '/main/ws',
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/main/ws', sessionId: 'main-session', model: 'test/model', version: 'test' })
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'main',
+    deliverables: [
+      { path: '/main/ws/docs/report.md', description: 'main document' },
+      { path: '/outside/report.md', description: 'outside root' },
+    ],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('  docs/report.md'), view)
+  assert.ok(view.includes('/outside/report.md'), `an outside-root path stays absolute:\n${view}`)
+  assert.ok(!view.includes('/main/ws/docs/report.md'), view)
+
+  // The viewer's OWN workspace root, not the main cwd, relativizes child files.
+  app.commitDisplaySubject({}, {}, {
+    sessionId: 'child-session',
+    workspaceRoot: '/child/ws',
+    title: '',
+    todos: [],
+    goal: undefined,
+  })
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 2,
+    text: 'child',
+    deliverables: [{ path: '/child/ws/notes/child.md', description: 'child document' }],
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('  notes/child.md'), view)
+  assert.ok(!view.includes('/child/ws/notes/child.md'), view)
+  assert.ok(!view.includes('docs/report.md'), 'the previous subject tail is gone')
+
+  // Back to main: the original root applies again.
+  app.commitDisplaySubject({}, {}, undefined)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'main again',
+    deliverables: [{ path: '/main/ws/docs/report.md' }],
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('  docs/report.md'), view)
+})
+
+for (const preset of ['full', 'compact', 'focus'] as const) {
+  test(`the tail Details verb opens the exact file in fullscreen ${preset}`, async () => {
+    const vt = new VirtualTerminal(120, 40)
+    const snap = {
+      subjectKind: 'main' as const,
+      sessionId: 'session-1',
+      sourceIdentity: {},
+      turns: [{ turn: 2, files: [{ path: 'out/report.md', description: 'report' }] }],
+    }
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      displayState: { preset },
+      deliveredFiles: { snapshot: () => snap, isCurrent: () => true },
+    })
+    app.start()
+    startedApps.add(app)
+    // A REAL settled turn: the Focus projection needs its TurnActivity and
+    // the fold attaches the declaration to the closing Assistant row.
+    const folder = new TranscriptFolder()
+    folder.hydrate([
+      event('turn/start', { turn: 2 }, 0),
+      delivery(1, [{ path: 'out/report.md', description: 'report' }], 2),
+      assistant(2, 0, 'done', 2),
+      event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 3),
+    ])
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    app.setFullscreen(true)
+    const view = await viewport(vt)
+    const rows = view.split('\n')
+    const row = rows.findIndex(line => line.includes('out/report.md') && line.includes('Details'))
+    assert.ok(row >= 0, `${preset}: the tail paints its Details verb on the alt screen:\n${view}`)
+    const column = rows[row]!.lastIndexOf('Details') + 2
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+    const after = await viewport(vt)
+    assert.ok(after.includes('report.md · Details'), `${preset}: the complete click opens Details:\n${after}`)
+    assert.ok(after.includes('Host: out/report.md'), `${preset}: the exact raw path reaches the browser:\n${after}`)
+  })
+}
+
+for (const preset of ['full', 'compact', 'focus'] as const) {
+  test(`the tail Browse all verb opens the card's Turn in fullscreen ${preset}`, async () => {
+    const files = Array.from({ length: 5 }, (_, index) => ({ path: `out/file-${index + 1}.md` }))
+    const vt = new VirtualTerminal(120, 40)
+    const snap = {
+      subjectKind: 'main' as const,
+      sessionId: 'session-1',
+      sourceIdentity: {},
+      turns: [{ turn: 2, files }],
+    }
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      displayState: { preset },
+      deliveredFiles: { snapshot: () => snap, isCurrent: () => true },
+    })
+    app.start()
+    startedApps.add(app)
+    const folder = new TranscriptFolder()
+    folder.hydrate([
+      event('turn/start', { turn: 2 }, 0),
+      delivery(1, files, 2),
+      assistant(2, 0, 'done', 2),
+      event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 3),
+    ])
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    app.setFullscreen(true)
+    const view = await viewport(vt)
+    const rows = view.split('\n')
+    const row = rows.findIndex(line => line.includes('Browse all'))
+    assert.ok(row >= 0, `${preset}: Browse all is painted:\n${view}`)
+    const column = rows[row]!.lastIndexOf('Browse all') + 2
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+    const after = await viewport(vt)
+    assert.ok(after.includes('Delivered files · Turn 2'), `${preset}: the card's Turn opened:\n${after}`)
+    assert.ok(after.includes('file-1.md'), after)
+  })
+}
+
+/** Slice a painted row by CELL columns (CJK/emoji make string indices differ). */
+function cellText(row: string, start: number, end: number): string {
+  let column = 0
+  let text = ''
+  for (const char of row) {
+    const width = visibleWidth(char)
+    if (column >= start && column + width <= end) text += char
+    column += width
+  }
+  return text
+}
+
+test('the two-line tail keeps every width, span and hit aligned with painted cells', () => {
+  for (const width of [40, 44, 72, 80, 120, 160, 200]) {
+    // A fresh component per width: the cached array is width-keyed, but the
+    // span/hit contract is about THIS render.
+    const fresh = new DeliveredFilesComponent([
+      { path: '/ws/artifacts/image-7b-s0-20261027T055117Z-....tar.gz', description: 'Image 7B S0 本地实机调研证据包，含原始数据、截图、判定及校验索引。' },
+      { path: '/ws/a/report.md', description: 'duplicate basename A' },
+      { path: '/ws/b/report.md', description: 'duplicate basename B' },
+      { path: '/ws/证据包/迁移🧪.md', description: 'CJK 文件名与多列字符' },
+      { path: '/ws/evil/report\u001b]52;c;YQ==\u0007.md', description: 'control bytes \u001b[31m must not paint' },
+    ], true, { pointerActions: true, commandEntry: true, workspaceRoot: '/ws' })
+    const raw = fresh.render(width)
+    const plain = raw.map(row => stripTerminalSequences(row))
+    for (const row of plain) {
+      assert.ok(visibleWidth(row) <= width, `${width}: ${JSON.stringify(row)}`)
+      assert.ok(!row.includes('\u001b]52') && !row.includes('YQ==') && !row.includes('\u001b[31m'),
+        `${width}: no declared-path control sequence may paint: ${JSON.stringify(row)}`)
+    }
+    assert.equal(fresh.lastFieldSpans.length, 5, `${width}: one span per file`)
+    for (const span of fresh.lastFieldSpans) {
+      const pathText = cellText(plain[span.pathRow]!, span.pathStart, span.pathEnd)
+      assert.ok(pathText.length > 0, `${width}: the path span is painted`)
+      if (span.descriptionRows.length > 0) {
+        const description = span.descriptionRows[0]!
+        assert.equal(description.row, span.pathRow + 1, `${width}: the description owns the NEXT row`)
+        assert.ok(plain[description.row]!.startsWith('    '), `${width}: the description is indented four cells`)
+        assert.ok(cellText(plain[description.row]!, description.start, description.end).length > 0)
+      }
+    }
+    // Every published pointer hit is exactly the painted verb text.
+    for (const hit of fresh.paintedFileActionHits(width)) {
+      const text = cellText(plain[hit.row]!, hit.startCol, hit.endCol)
+      assert.ok(text === 'Details' || text === 'Browse all', `${width}: hit paints ${JSON.stringify(text)}`)
+    }
+    // The two duplicate basenames keep distinct relative paths.
+    const reportPaths = fresh.lastFieldSpans
+      .map(span => cellText(plain[span.pathRow]!, span.pathStart, span.pathEnd))
+      .filter(text => text.includes('report'))
+    assert.ok(reportPaths.includes('a/report.md'), `${width}: the first duplicate keeps its directory: ${reportPaths.join(' | ')}`)
+    assert.ok(reportPaths.includes('b/report.md'), `${width}: the second duplicate keeps its directory: ${reportPaths.join(' | ')}`)
+    assert.equal(new Set(reportPaths).size, reportPaths.length,
+      `${width}: no two declared files may paint the same label: ${reportPaths.join(' | ')}`)
+  }
+})
+
+test('search keeps the full raw path authority while the tail paints a relative path', async () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 1 }, 0),
+    delivery(1, [{ path: '/ws/docs/evidence/report.md', description: 'raw authority' }]),
+    assistant(2, 0, 'final'),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: '/ws',
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  const view = await viewport(vt)
+  assert.ok(view.includes('docs/evidence/report.md'), view)
+  assert.ok(!view.includes('/ws/docs/evidence/report.md'), view)
+
+  const rawMatches = folder.search('/ws/docs/evidence/report.md')
+  assert.deepEqual(rawMatches.map(match => match.source), [{ kind: 'assistant-deliverable', index: 0, field: 'path' }],
+    'the search corpus keeps the complete raw Host path')
+  const relativeMatches = folder.search('docs/evidence/report.md')
+  assert.ok(relativeMatches.length > 0, 'the painted relative path is also searchable')
+})
+
+for (const preset of ['full', 'compact', 'focus'] as const) {
+  test(`a non-verb tail cell never opens a file in fullscreen ${preset}`, async () => {
+    const vt = new VirtualTerminal(120, 40)
+    const snap = {
+      subjectKind: 'main' as const,
+      sessionId: 'session-1',
+      sourceIdentity: {},
+      turns: [{ turn: 2, files: [{ path: 'out/report.md', description: 'a description line' }] }],
+    }
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      displayState: { preset },
+      deliveredFiles: { snapshot: () => snap, isCurrent: () => true },
+    })
+    app.start()
+    startedApps.add(app)
+    const folder = new TranscriptFolder()
+    folder.hydrate([
+      event('turn/start', { turn: 2 }, 0),
+      delivery(1, [{ path: 'out/report.md', description: 'a description line' }], 2),
+      assistant(2, 0, 'done', 2),
+      event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 3),
+    ])
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    app.setFullscreen(true)
+    const view = await viewport(vt)
+    const rows = view.split('\n')
+    const pathRow = rows.findIndex(line => line.includes('out/report.md'))
+    assert.ok(pathRow >= 0, view)
+    const descriptionRow = rows.findIndex((line, index) => index > pathRow && line.includes('a description line'))
+    assert.ok(descriptionRow > pathRow, `the description owns the next physical row:\n${view}`)
+    const descriptionColumn = rows[descriptionRow]!.indexOf('a description line') + 2
+    vt.sendInput(`\x1b[<0;${descriptionColumn + 1};${descriptionRow + 1}M`)
+    vt.sendInput(`\x1b[<0;${descriptionColumn + 1};${descriptionRow + 1}m`)
+    const after = await viewport(vt)
+    assert.ok(!after.includes('report.md · Details'), `${preset}: the description is not a file action:\n${after}`)
+  })
+}
+
+test('a regular surface paints no dead Browse all and no dead footer buttons', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'done',
+    deliverables: [
+      { path: 'out/one.md' },
+      { path: 'out/two.md' },
+      { path: 'out/three.md' },
+      { path: 'out/four.md' },
+      { path: 'out/five.md' },
+    ],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('/deliverables'), view)
+  assert.ok(!view.includes('Browse all'), `the regular tail paints no dead list verb:\n${view}`)
+  assert.ok(!view.includes('Details'), `the regular tail paints no dead per-file verb:\n${view}`)
 })

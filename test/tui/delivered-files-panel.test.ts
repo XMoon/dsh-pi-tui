@@ -24,6 +24,7 @@ import {
   type DeliveredFileReadFailureCode,
   type DeliveredFileStat,
 } from '../../src/runtime/deliverables-port.ts'
+import { deliveredFilesOverlayGeometry } from '../../src/tui/deliverables/overlay-size.ts'
 
 /** Friendly key names → the real terminal bytes the component matches. */
 const KEY = {
@@ -80,11 +81,12 @@ function harness(
     },
   })
   const paint = (): readonly string[] => {
-    // The production chain: the overlay's maxHeight is min(24, rows - 2) and
-    // the frame grants the panel its content rows (maxHeight - 2 borders).
-    const maxHeight = Math.min(24, Math.max(1, height - 2))
-    panel.setMaxRows(Math.max(1, maxHeight - 2))
-    return panel.render(width - 4)
+    // The production chain: the SAME geometry authority resolves the overlay
+    // width/height cap, and the frame grants the panel its content rows
+    // (maxHeight - 2 borders, width - 4 borders/padding).
+    const geometry = deliveredFilesOverlayGeometry(width, height)
+    panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    return panel.render(Math.max(1, geometry.width - 4))
   }
   return {
     panel,
@@ -131,6 +133,16 @@ function assertNoOverflow(rows: readonly string[], width: number): void {
   }
 }
 
+/** The frame's granted CONTENT rows (outer cap minus its two borders). */
+function contentRows(columns: number, rows: number): number {
+  return Math.max(1, deliveredFilesOverlayGeometry(columns, rows).maxHeight - 2)
+}
+
+/** The frame's granted CONTENT width (outer width minus borders/padding). */
+function contentWidth(columns: number, rows: number): number {
+  return Math.max(1, deliveredFilesOverlayGeometry(columns, rows).width - 4)
+}
+
 test('the Files page opens on the newest Turn with the first file selected', () => {
   const h = harness(snapshotOf([
     { turn: 24, files: '/ws/docs/report.md' },
@@ -150,8 +162,8 @@ test('Enter opens the selected file Details and Esc returns to the Files page', 
   const rows = h.rows()
   assert.match(rows[0]!, /report\.md · Details/)
   assert.ok(rows.some(row => row.includes('Host: ') && row.includes('/ws/docs/report.md')), rows.join('\n'))
-  assert.ok(rows.at(-1)!.includes('Shift+C Copy path'), `the action bar names the real shifted chord: ${rows.at(-1)}`)
-  assert.ok(rows.at(-1)!.includes('Esc Back'))
+  assert.ok(rows.at(-1)!.includes('[Copy path]'), `the action bar paints the real Copy button: ${rows.at(-1)}`)
+  assert.ok(rows.at(-1)!.includes('[Back]'))
   h.type('esc')
   assert.equal(h.panel.currentPage(), 'files')
 })
@@ -299,12 +311,13 @@ test('200 files keep only the viewport rows and the last item is reachable', () 
   const h = harness(snapshotOf([{ turn: 5, files: many }]))
   h.setSize(100, 30)
   const first = h.rows()
-  assert.equal(first.length, 22, 'the panel fills its granted rows (24-row overlay cap minus borders)')
+  const granted = contentRows(100, 30)
+  assert.equal(first.length, granted, 'the panel fills its granted rows')
   assert.ok(!first.join('\n').includes('file-200.md'), 'older rows are not painted')
   for (let press = 0; press < 40; press += 1) h.type('pageDown')
   const last = h.rows()
   assert.ok(last.join('\n').includes('file-200.md'), 'PageDown reaches the last file')
-  assert.equal(h.rows().length, 22)
+  assert.equal(h.rows().length, granted)
 })
 
 test('40x16, 72x24, 100x30 and 140x40 stay inside their box and keep the exit visible', () => {
@@ -312,10 +325,10 @@ test('40x16, 72x24, 100x30 and 140x40 stay inside their box and keep the exit vi
   for (const [columns, rows] of [[40, 16], [64, 16], [72, 24], [100, 30], [140, 40]] as const) {
     h.setSize(columns, rows)
     const painted = h.rows()
-    assert.equal(painted.length, Math.min(22, rows - 4), `${columns}x${rows}: the panel fills its granted rows`)
-    assertNoOverflow(painted, columns - 4)
+    assert.equal(painted.length, contentRows(columns, rows), `${columns}x${rows}: the panel fills its granted rows`)
+    assertNoOverflow(painted, contentWidth(columns, rows))
     assert.match(painted[0]!, /Delivered files · Turn 7/)
-    assert.ok(painted.at(-1)!.includes('Esc Close'), `${columns}x${rows}: the exit hint stays visible`)
+    assert.ok(painted.at(-1)!.includes('[Close]'), `${columns}x${rows}: the Close button stays visible`)
   }
 })
 
@@ -349,16 +362,170 @@ test('a wide pane shows the declared metadata and never reads the Host', () => {
   assert.deepEqual(h.readCalls(), [], 'the Files page issues no Host read')
 })
 
+test('the frozen overlay geometry follows the percentage formula at every matrix size', () => {
+  const cases: readonly [number, number, number, number][] = [
+    [44, 20, 44, 15],
+    [72, 24, 72, 18],
+    [80, 24, 72, 18],
+    [120, 40, 96, 30],
+    [160, 50, 120, 37],
+    [200, 50, 120, 37],
+    [80, 10, 72, 8],
+  ]
+  for (const [columns, rows, width, maxHeight] of cases) {
+    assert.deepEqual(deliveredFilesOverlayGeometry(columns, rows), { width, maxHeight },
+      `${columns}x${rows}: centered percentage window`)
+  }
+  // Non-finite / negative input never produces an unusable frame.
+  assert.deepEqual(deliveredFilesOverlayGeometry(Number.NaN, Number.POSITIVE_INFINITY), { width: 1, maxHeight: 1 })
+  assert.deepEqual(deliveredFilesOverlayGeometry(-4, -1), { width: 1, maxHeight: 1 })
+})
+
+test('the action-bar buttons are real painted targets: press consumes, click runs', () => {
+  const event = (h: Harness, type: 'press' | 'click', x: number, y: number) => h.panel.handleMouse({
+    type, button: 'left', x, y, screenX: x, screenY: y,
+    width: contentWidth(100, 30), height: contentRows(100, 30),
+    shift: false, alt: false, ctrl: false,
+  })
+  const clickButton = (h: Harness, label: string): void => {
+    const rows = h.rows()
+    const bar = rows.at(-1)!
+    const column = bar.indexOf(label) + 2
+    assert.ok(bar.includes(label), `fixture: the bar paints ${label}: ${bar}`)
+    event(h, 'click', column, rows.length - 1)
+  }
+
+  // PRESS consumes the button but never runs the action; the synthesized CLICK
+  // is the one opener.
+  const closed = harness(ONE_TURN)
+  closed.setSize(100, 30)
+  const closedRows = closed.rows()
+  const closeColumn = closedRows.at(-1)!.indexOf('[Close]') + 2
+  assert.equal(event(closed, 'press', closeColumn, closedRows.length - 1)?.handled, true)
+  assert.equal(closed.closes(), 0, 'a press never closes the overlay')
+  event(closed, 'click', closeColumn, closedRows.length - 1)
+  assert.equal(closed.closes(), 1, 'a complete click runs Close')
+
+  const filter = harness(ONE_TURN)
+  filter.setSize(100, 30)
+  clickButton(filter, '[Filter]')
+  assert.ok(filter.rows().some(row => row.includes('Filter: ')), 'Filter enters the real filter seat')
+  assert.equal(filter.closes(), 0)
+
+  const turns = harness(snapshotOf([
+    { turn: 24, files: ['/ws/newest.md'] },
+    { turn: 18, files: ['/ws/older.md'] },
+  ]))
+  turns.setSize(100, 30)
+  clickButton(turns, '[Turns]')
+  assert.match(turns.rows()[0]!, /Delivered files · 2 Turns/, 'Turns opens the real Turns page')
+})
+
+test('a painted Turns row opens THAT Turn on a complete click; [Back] restores the original', () => {
+  const h = harness(snapshotOf([
+    { turn: 24, files: ['/ws/newest.md'] },
+    { turn: 18, files: ['/ws/older.md'] },
+  ]))
+  h.setSize(100, 30)
+  h.type('T')
+  let rows = h.rows()
+  const olderRow = rows.findIndex(row => row.includes('Turn 18'))
+  assert.ok(olderRow >= 0, rows.join('\n'))
+  const click = (x: number, y: number) => h.panel.handleMouse({
+    type: 'click', button: 'left', x, y, screenX: x, screenY: y,
+    width: contentWidth(100, 30), height: contentRows(100, 30),
+    shift: false, alt: false, ctrl: false,
+  })
+  // A press only consumes the row.
+  h.panel.handleMouse({
+    type: 'press', button: 'left', x: 2, y: olderRow, screenX: 2, screenY: olderRow,
+    width: contentWidth(100, 30), height: contentRows(100, 30),
+    shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(h.panel.currentPage(), 'turns', 'a press never opens a Turn')
+  click(2, olderRow)
+  assert.equal(h.panel.currentPage(), 'files')
+  assert.deepEqual(h.panel.selection(), { turn: 18, path: '/ws/older.md' })
+
+  // Back returns to the Turn the page was on BEFORE the visit, not the cursor.
+  const back = harness(snapshotOf([
+    { turn: 24, files: ['/ws/newest.md'] },
+    { turn: 18, files: ['/ws/older.md'] },
+  ]))
+  back.setSize(100, 30)
+  back.type('T')
+  back.type('down')
+  rows = back.rows()
+  const backColumn = rows.at(-1)!.indexOf('[Back]') + 2
+  assert.ok(rows.at(-1)!.includes('[Back]'))
+  assert.ok(rows.some(row => row.trimStart().startsWith('> Turn 18')), 'fixture: the cursor moved')
+  back.panel.handleMouse({
+    type: 'click', button: 'left', x: backColumn, y: rows.length - 1, screenX: backColumn, screenY: rows.length - 1,
+    width: contentWidth(100, 30), height: contentRows(100, 30),
+    shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(back.panel.currentPage(), 'files')
+  assert.match(back.rows()[0]!, /Turn 24/, 'Back restores the original Turn')
+})
+
+test('Details [Copy path] really settles and [Back] stays a painted target', () => {
+  const h = harness(ONE_TURN)
+  h.setSize(100, 30)
+  h.type('enter')
+  let rows = h.rows()
+  assert.match(rows[0]!, /report\.md · Details/)
+  const click = (label: string) => {
+    const bar = rows.at(-1)!
+    assert.ok(bar.includes(label), `fixture: ${label} is painted: ${bar}`)
+    const x = bar.indexOf(label) + 2
+    h.panel.handleMouse({
+      type: 'click', button: 'left', x, y: rows.length - 1, screenX: x, screenY: rows.length - 1,
+      width: contentWidth(100, 30), height: contentRows(100, 30),
+      shift: false, alt: false, ctrl: false,
+    })
+  }
+  click('[Copy path]')
+  assert.deepEqual(h.copied(), ['/ws/docs/report.md'], 'the click copies the RAW path')
+  assert.ok(!h.rows().at(-1)!.includes('Path copied'), 'no success is painted before the real settlement')
+  h.settleCopy(true)
+  rows = h.rows()
+  assert.ok(rows.at(-1)!.includes('Path copied'), `the settled outcome is painted: ${rows.at(-1)}`)
+  assert.ok(rows.at(-1)!.includes('[Back]'), 'Back stays a real target beside the notice')
+  click('[Back]')
+  assert.equal(h.panel.currentPage(), 'files')
+})
+
+test('a footer or page change retires the previous frame cells before the next paint', () => {
+  const h = harness(ONE_TURN)
+  h.setSize(100, 30)
+  const rows = h.rows()
+  const bar = rows.at(-1)!
+  const closeColumn = bar.indexOf('[Close]') + 2
+  // Enter opens Details and requests a frame; WITHOUT repainting, the old Files
+  // footer cell belongs to a page that no longer exists.
+  h.type('enter')
+  assert.equal(h.panel.currentPage(), 'details')
+  const stale = h.panel.handleMouse({
+    type: 'click', button: 'left', x: closeColumn, y: rows.length - 1, screenX: closeColumn, screenY: rows.length - 1,
+    width: contentWidth(100, 30), height: contentRows(100, 30),
+    shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(stale, undefined, 'the old Files footer is dead after the page change')
+  assert.equal(h.closes(), 0)
+  assert.equal(h.panel.currentPage(), 'details')
+})
+
 test('a list click SELECTS and only the painted Details verb opens the page', () => {
   const h = harness(ONE_TURN)
   h.setSize(100, 30)
   const rows = h.rows()
   const secondRow = rows.findIndex(row => row.includes('report-final.md'))
   assert.ok(secondRow > 0)
+  const width = contentWidth(100, 30)
   // A list click (left of the verb) selects without opening.
   h.panel.handleMouse({
     type: 'click', button: 'left', x: 4, y: secondRow, screenX: 4, screenY: secondRow,
-    width: 96, height: rows.length, shift: false, alt: false, ctrl: false,
+    width, height: rows.length, shift: false, alt: false, ctrl: false,
   })
   assert.equal(h.panel.currentPage(), 'files')
   assert.deepEqual(h.panel.selection(), { turn: 24, path: '/ws/output/report-final.md' })
@@ -367,7 +534,7 @@ test('a list click SELECTS and only the painted Details verb opens the page', ()
   const verbColumn = rows[secondRow]!.lastIndexOf('Details') + 2
   const handled = h.panel.handleMouse({
     type: 'click', button: 'left', x: verbColumn, y: secondRow, screenX: verbColumn, screenY: secondRow,
-    width: 96, height: rows.length, shift: false, alt: false, ctrl: false,
+    width, height: rows.length, shift: false, alt: false, ctrl: false,
   })
   assert.equal(handled?.handled, true)
   assert.equal(h.panel.currentPage(), 'details')
@@ -383,7 +550,7 @@ test('a click at a stale painted size is rejected', () => {
   // rejects it because the LAST PAINTED frame is a different size.
   const rejected = h.panel.handleMouse({
     type: 'click', button: 'left', x: 4, y: secondRow, screenX: 4, screenY: secondRow,
-    width: 76, height: 20, shift: false, alt: false, ctrl: false,
+    width: contentWidth(80, 24), height: contentRows(80, 24), shift: false, alt: false, ctrl: false,
   })
   assert.equal(rejected, undefined, 'a resize invalidates the recorded hit map')
 })
@@ -418,11 +585,11 @@ test('the design-language size matrix keeps one action bar, a body row and whole
     h.setSize(columns, rows)
     const painted = h.rows()
     const label = `${columns}x${rows}`
-    assert.equal(painted.length, Math.min(22, rows - 4), `${label}: fills the granted rows`)
-    assertNoOverflow(painted, columns - 4)
+    assert.equal(painted.length, contentRows(columns, rows), `${label}: fills the granted rows`)
+    assertNoOverflow(painted, contentWidth(columns, rows))
     // The action bar IS the last painted row of the panel.
     const bar = painted.at(-1)!
-    assert.ok(bar.includes('Esc'), `${label}: the action bar is the last row: ${JSON.stringify(bar)}`)
+    assert.ok(bar.includes('[Close]'), `${label}: the action bar is the last row: ${JSON.stringify(bar)}`)
     // The body floor survives: at least one file row between header and bar.
     assert.ok(painted.some(row => row.includes('a.md')), `${label}: at least one result row`)
     // Whole-segment degradation only: a bar still painting more than one
@@ -520,7 +687,7 @@ test('the list, the side pane and the Details title paint the same fitted label'
   assert.ok(listLabel.includes('…'), `precondition: the list cell clamps the label: ${listLabel}`)
 
   // The wide side pane (right column) starts with the same label.
-  const listWidth = Math.max(24, Math.floor(((140 - 4) - 3) * 0.58))
+  const listWidth = Math.max(24, Math.floor((contentWidth(140, 40) - 3) * 0.58))
   const rightJoined = rows.map(row => row.slice(listWidth + 3)).join('')
   assert.ok(rightJoined.includes(listLabel), `the side pane must paint the same label:\n${rightJoined}`)
 
@@ -880,14 +1047,15 @@ function previewHarness(
       options.diagnostics?.push(message)
     },
   })
-  // Honor `setSize` exactly like the plain harness: the production chain grants
-  // `min(24, rows - 2) - 2` content rows and the frame renders `columns - 4`.
+  // Honor `setSize` exactly like the plain harness: the SAME production
+  // geometry resolves the cap, and the frame grants `maxHeight - 2` content
+  // rows at `width - 4` cells.
   let width = 100
   let height = 30
   const paint = (): readonly string[] => {
-    const maxHeight = Math.min(24, Math.max(1, height - 2))
-    panel.setMaxRows(Math.max(1, maxHeight - 2))
-    return panel.render(width - 4)
+    const geometry = deliveredFilesOverlayGeometry(width, height)
+    panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    return panel.render(Math.max(1, geometry.width - 4))
   }
   return {
     panel,
@@ -961,7 +1129,7 @@ test('every refusal paints its FIXED text and keeps the copy affordance', async 
     await settlePreview()
     const rows = h.rows().join('\n')
     assert.ok(rows.includes(text), `${code}: ${rows}`)
-    assert.ok(rows.includes('Shift+C Copy path'), `${code}: Copy stays available`)
+    assert.ok(rows.includes('Shift+C Copy path'), `${code}: the keyboard Copy stays available`)
     assert.equal(h.diagnostics().length, 0, `${code}: a classified refusal is not a diagnostic`)
   }
 })
@@ -1048,6 +1216,9 @@ test('a surface without a real pointer owner paints no dead Details verb', () =>
   const text = rows.join('\n')
   assert.ok(text.includes('a.md') && text.includes('b.md'), text)
   assert.ok(!text.includes('Details'), `no per-row verb may be painted: ${text}`)
+  assert.ok(!text.includes('[Filter]') && !text.includes('[Turns]') && !text.includes('[Close]'),
+    `a mouse-less surface paints no bracketed footer button: ${text}`)
+  assert.ok(rows.at(-1)!.includes('Esc Close'), `the keyboard exit hint stays: ${rows.at(-1)}`)
   // A foreign pointer event is never claimed either.
   const handled = panel.handleMouse({
     type: 'click', button: 'left', x: 90, y: rows.findIndex(row => row.includes('a.md')),
