@@ -24,7 +24,7 @@ import {
   parseKittyApc,
 } from '../../src/tui/graphics/kitty-native.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
-import { NativeKittyImage, admitsNativeKitty } from '../../src/tui/graphics/native-image.ts'
+import { NativeKittyImage, admitsNativeKitty, createNativeKittyGraphics } from '../../src/tui/graphics/native-image.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -609,4 +609,65 @@ test('ordinary text and OSC sequences pass through byte-for-byte', () => {
   const text = 'hello \x1b[31mred\x1b[0m \x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ \x1b]52;c;YWJj\x07'
   facade.write(text)
   assert.equal(terminal.text, text)
+})
+
+
+/**
+ * Image-7B-A — the virtual mode of the SAME Core. These cases prove the one
+ * mode branch (residency slot + writer-delete strategy) without a second
+ * ledger, and that the Native contract above is untouched.
+ */
+test('a tmux virtual Core keeps ONE outer residency slot across both screen buffers', () => {
+  const core = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
+  const image = core.register(source())!
+  assert.ok(core.transmissionFor(image.imageId, 'main').includes('a=t,f=100'))
+  assert.equal(core.transmissionFor(image.imageId, 'alt'), '',
+    'the alternate screen shares the one outer image namespace')
+  core.invalidateResidency('main', '2J')
+  assert.ok(core.transmissionFor(image.imageId, 'alt').includes('a=t,f=100'),
+    'a real clear re-opens the slot for either screen')
+})
+
+test('a tmux virtual writer delete is layout intent; only an unpainted retire emits a delete', () => {
+  const core = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
+  const painted = core.register(source())!
+  assert.equal(core.translateWriterDelete(painted.imageId), '')
+  assert.equal(core.translateGlobalPlacementDelete('main'), '')
+  assert.deepEqual(core.planGlobalImageDelete('main'), { buffer: 'main', wire: '', released: [], retained: [] })
+  assert.equal(core.owns(painted.imageId), true, 'a writer delete never frees ownership')
+
+  core.transmissionFor(painted.imageId, 'alt')
+  core.notePlacement(painted.imageId, 'alt')
+  core.retire(painted)
+  assert.equal(core.owns(painted.imageId), false, 'the painted occurrence leaves the active set')
+  assert.equal(core.hasQueuedRetirements(), false, 'terminal-retained pixels get no hard delete')
+  assert.equal(core.residentPayloadBytes, 0, 'the Core frees only its own payload copy')
+
+  const pending = core.register(source('AAAA', 8, 8))!
+  core.transmissionFor(pending.imageId, 'main')
+  core.retire(pending)
+  assert.equal(core.hasQueuedRetirements(), true, 'a never-placed upload is safe to release')
+  const { wire, ids } = core.takeRetirements()
+  assert.ok(wire.includes(`a=d,d=I,i=${pending.imageId}`))
+  core.rollbackRetirements(ids)
+  assert.equal(core.hasQueuedRetirements(), true, 'a failed retire offer is put back')
+})
+
+test('a virtual write failure clears the shared outer residency slot', () => {
+  const core = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
+  const image = core.register(source())!
+  core.transmissionFor(image.imageId, 'alt')
+  core.noteWriteFailure([image.imageId], 'alt')
+  assert.ok(core.transmissionFor(image.imageId, 'main').includes('a=t,f=100'),
+    'the next placement re-sends after the ambiguous failure')
+})
+
+test('the native factory advertises native mode and always canPaint', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const environment: NodeJS.ProcessEnv = { TERM_PROGRAM: 'kitty', KITTY_WINDOW_ID: '3', TERM: 'xterm-kitty' }
+  const graphics = createNativeKittyGraphics(new RecordingTerminal(), {}, environment)
+  assert.ok(graphics)
+  assert.equal(graphics.mode, 'native')
+  assert.equal(graphics.canPaint(), true)
+  graphics.dispose()
 })

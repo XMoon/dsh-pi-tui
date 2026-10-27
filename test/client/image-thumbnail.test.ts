@@ -799,6 +799,8 @@ test('a GIF keeps the text fallback and never reaches the managed core', async (
   }
   const core = new KittyGraphicsCore()
   const graphics = {
+    mode: 'native' as const,
+    canPaint: () => true,
     image: (source: never, options: never) => new NativeKittyImage(core, source, options),
     terminal: new KittyTerminalFacade(terminal, core),
     dispose: () => {},
@@ -838,6 +840,8 @@ test('a GIF fallback with a long name is clamped to the granted width', async ()
   }
   const core = new KittyGraphicsCore()
   const graphics = {
+    mode: 'native' as const,
+    canPaint: () => true,
     image: (source: never, options: never) => new NativeKittyImage(core, source, options),
     terminal: new KittyTerminalFacade(terminal, core),
     dispose: () => {},

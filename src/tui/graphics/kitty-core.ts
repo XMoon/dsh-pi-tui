@@ -31,6 +31,15 @@ import {
  */
 export type KittyScreenBuffer = 'main' | 'alt'
 
+/**
+ * How the placement reaches the outer terminal. `native` is a cursor-positioned
+ * placement in the terminal's own image store (one store per screen buffer).
+ * `tmux-virtual` is a Unicode-placeholder prototype: the single outer image
+ * namespace is shared by both screen buffers and the image moves with the text
+ * cells, so residency is one slot and writer deletes are layout intent only.
+ */
+export type KittyPlacementMode = 'native' | 'tmux-virtual'
+
 /** The already-prepared display PNG one managed occurrence paints. */
 export interface KittyImageSource {
   /** Base64 PNG payload (already transcoded by the existing image owners). */
@@ -68,6 +77,8 @@ export interface KittyGraphicsEvent {
 export interface KittyGraphicsCoreOptions {
   /** Diagnostic sink; never required for correctness. */
   readonly onEvent?: (event: KittyGraphicsEvent) => void
+  /** Placement transport; `native` (default) keeps the Image-7A contract. */
+  readonly placementMode?: KittyPlacementMode
 }
 
 /**
@@ -164,6 +175,7 @@ export class KittyGraphicsCore {
   /** One past the last id handed out: `[floor, next)` is exactly this Core's. */
   private nextImageId = this.imageIdFloor
   private readonly onEvent: ((event: KittyGraphicsEvent) => void) | undefined
+  private readonly placementMode: KittyPlacementMode
   private nextPlacementId = 1
   private generationCounter = 0
   private payloadBytes = 0
@@ -172,6 +184,16 @@ export class KittyGraphicsCore {
 
   constructor(options: KittyGraphicsCoreOptions = {}) {
     this.onEvent = options.onEvent
+    this.placementMode = options.placementMode ?? 'native'
+  }
+
+  /**
+   * The residency key. The Native backend stores data per screen buffer; the
+   * virtual backend has ONE outer image namespace for the whole tmux pane, so
+   * both buffers share the single slot and a screen switch never discards it.
+   */
+  private residencySlot(buffer: KittyScreenBuffer): KittyScreenBuffer {
+    return this.placementMode === 'tmux-virtual' ? 'main' : buffer
   }
 
   /** How many occurrences currently hold a payload (the budgeted active set). */
@@ -257,9 +279,10 @@ export class KittyGraphicsCore {
   transmissionFor(imageId: number, buffer: KittyScreenBuffer): string {
     const record = this.records.get(imageId)
     if (record === undefined || record.source === undefined) return ''
-    if (record.residentIn.has(buffer)) return ''
+    const slot = this.residencySlot(buffer)
+    if (record.residentIn.has(slot)) return ''
     this.emit({ type: 'transmit-offered', imageId, detail: buffer })
-    record.residentIn.add(buffer)
+    record.residentIn.add(slot)
     record.transmitted = true
     return encodeKittyTransmit(record.source.pngBase64, imageId).join('')
   }
@@ -313,6 +336,14 @@ export class KittyGraphicsCore {
    * free the data.
    */
   translateWriterDelete(imageId: number): string {
+    if (this.placementMode === 'tmux-virtual') {
+      // A writer delete is the text frame saying "this cell is gone now". In
+      // the virtual backend the real placeholder cells are what hides the
+      // image, so a hard/placement delete here would reach old scrollback
+      // prototypes that still refer to the same image data. Translate to no
+      // bytes at all; only the Core's own retire writes a delete.
+      return ''
+    }
     const record = this.records.get(imageId)
     if (record !== undefined) {
       this.emit({ type: 'writer-delete-translated', imageId })
@@ -332,6 +363,11 @@ export class KittyGraphicsCore {
    * main screen's scrollback outlives a leased alternate screen.
    */
   translateGlobalPlacementDelete(buffer: KittyScreenBuffer): string {
+    if (this.placementMode === 'tmux-virtual') {
+      // Global forms (`d=a` / bare `a=d`) never affect a virtual prototype and
+      // may never be used to hide text-driven images; the erased cells do that.
+      return ''
+    }
     let wire = ''
     for (const record of this.records.values()) {
       if (record.buffer !== buffer) continue
@@ -363,6 +399,11 @@ export class KittyGraphicsCore {
    * {@link commitGlobalImageDelete}.
    */
   planGlobalImageDelete(buffer: KittyScreenBuffer): KittyGlobalImageDeletePlan {
+    if (this.placementMode === 'tmux-virtual') {
+      // Invisible prototypes have no physical location, so a writer's global
+      // image delete cannot be re-scoped to them; it is layout intent only.
+      return { buffer, wire: '', released: [], retained: [] }
+    }
     const released: Array<{ imageId: number; record: OwnedRecord }> = []
     const retained: number[] = []
     let wire = ''
@@ -425,12 +466,26 @@ export class KittyGraphicsCore {
    * main screen its data.
    */
   invalidateResidency(buffer: KittyScreenBuffer, reason: string): void {
+    const slot = this.residencySlot(buffer)
     let invalidated = 0
     for (const record of this.records.values()) {
-      if (!record.residentIn.delete(buffer)) continue
+      if (!record.residentIn.delete(slot)) continue
       invalidated += 1
     }
     if (invalidated > 0) this.emit({ type: 'data-invalidated', detail: `${reason}:${buffer}` })
+  }
+
+  /**
+   * Whether any own-ID retirement is waiting to be offered. The tmux facade
+   * must know this BEFORE it writes: a queued retirement makes the next write a
+   * managed batch that has to pass admission, and a revoked handle may not
+   * send those old IDs to a different client.
+   */
+  hasQueuedRetirements(): boolean {
+    for (const record of this.records.values()) {
+      if (record.retireQueued) return true
+    }
+    return false
   }
 
   /**
@@ -483,11 +538,12 @@ export class KittyGraphicsCore {
    * be referenced by the screen or the scrollback.
    */
   noteWriteFailure(ids: readonly number[], buffer: KittyScreenBuffer): void {
+    const slot = this.residencySlot(buffer)
     let touched = 0
     for (const imageId of ids) {
       const record = this.records.get(imageId)
       if (record === undefined) continue
-      record.residentIn.delete(buffer)
+      record.residentIn.delete(slot)
       touched += 1
     }
     this.emit({ type: 'write-failed', detail: `${buffer}:${touched}` })

@@ -215,14 +215,68 @@ retirement and the resident budget.
   it. The facade observes `CSI 2J`, `CSI 3J` and a screen-buffer switch as
   residency invalidations and never rewrites text, OSC 8/52, mouse or keyboard
   modes, or a foreign APC.
-- **Admission is narrower than capability.** The managed path requires a real
-  Kitty terminal directly attached (no multiplexer); Kitty-compatible
-  terminals, iTerm2 and unknown terminals keep the legacy `Image`/text
-  fallback, and no environment override can force admission.
+- **Admission is narrower than capability.** The Native managed path requires a
+  real Kitty terminal directly attached (no multiplexer); Kitty-compatible
+  terminals, iTerm2 and unknown terminals keep the legacy `Image`/text fallback,
+  and no environment override can force admission. The tmux virtual path is a
+  separate strict opt-in with its own live-server admission (below); both paths
+  fail closed.
 
-Proof: `test/tui/kitty-native-protocol.test.ts`,
-`test/tui/kitty-graphics-owner.test.ts`,
-`test/integration/kitty-native-screen.test.ts`.
+### tmux virtual backend (experimental, opt-in)
+
+This is a second transport, never a second owner: one `KittyGraphicsCore` in
+`placementMode: 'tmux-virtual'` behind the same `KittyTerminalFacade`. It is off
+by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it.
+
+- **Admission is a live server fact, not pane environment.** The backend asks
+  the real tmux server (`show-options … allow-passthrough`, `display-message …
+  '#{session_name}'`, `list-clients …`) with fixed argv, no shell, a 500 ms
+  timeout and a bounded reply. It requires the pane option to be exactly `all`,
+  exactly one attached client whose session is the pane's,
+  `client_termname = xterm-kitty` and `client_termtype = kitty[(version)]`.
+  Pane environment (`TMUX`, `TMUX_PANE`, `TERM`) is necessary context only:
+  inherited `TERM_PROGRAM`/`KITTY_WINDOW_ID` never grant admission, and option
+  `on`/`off`, no client, mixed clients, a non-Kitty client, a nested multiplexer
+  or any query failure fails closed before image work.
+- **Revocation is one-way.** Any real probe failure or change to the six
+  identity fields latches the handle revoked for the rest of the process. The
+  component then paints the text fallback, and the facade refuses an entire
+  managed write batch (no DCS and no placeholder cell) once a managed command or
+  retirement needs admission. There is no hot client migration: re-enabling
+  requires a new TUI process. A component render may answer from a real probe at
+  most 250 ms old, while every managed physical write batch re-probes; a
+  cross-process change is therefore caught before the next managed batch, never
+  atomically.
+- **One outer namespace, one residency slot.** A Kitty virtual placement is an
+  invisible prototype attached to ordinary text cells, so `main` and `alt`
+  share the one outer image namespace. A `?1049h`/`?1049l` switch only updates
+  the screen fact; a real `2J`/`3J` clear (or a failed write) invalidates the
+  slot, and the next placement re-transmits before its grid.
+- **Text owns visibility; the wire never hard-deletes by layout.** In this
+  mode, a writer-issued per-id delete of a managed id is the frame saying those
+  cells are gone, so it emits nothing — erased placeholder cells are what
+  removes the image. Global `d=A`/`d=a` (including bare `a=d`) never reach the
+  outer terminal either. Only an occurrence that was never placed retires with
+  the Core's own `d=I`; a painted occurrence stays terminal-retained (payload
+  released, id never re-used), exactly like Native.
+- **Every managed command gets its own passthrough DCS.** Each transmission
+  chunk, the `a=p,U=1` placement and each Core retirement is wrapped separately
+  as `DCS tmux;` with every inner ESC doubled. Text, SGR, OSC 8/52, mouse and
+  cursor sequences and foreign per-id commands stay byte-for-byte. The
+  placeholder grid is real text cells: `U+10EEEE` + row + column +
+  most-significant-image-id-byte diacritics, foreground = low 24 id bits,
+  underline = low 24 placement bits, explicit `39;59m` per row. Image ids keep
+  the full 32-bit value (the upper byte is a diacritic, never truncated), and
+  each grid axis is bounded by the 297-entry diacritic table before encoding.
+- **No metadata shortcut.** The virtual component does not register the fork's
+  Native placement metadata: its clipping is cell clipping by the real text
+  layout, not a source-pixel crop of a cursor-positioned rectangle.
+
+Proof: `test/tui/tmux-kitty-admission.test.ts`,
+`test/tui/kitty-tmux-virtual.test.ts`,
+`test/integration/kitty-tmux-screen.test.ts`, plus the Native and virtual halves
+of `test/tui/kitty-graphics-owner.test.ts` and the geometry parity in
+`test/tui/kitty-native-protocol.test.ts`.
 
 ## Specialized contracts that stay as they are
 

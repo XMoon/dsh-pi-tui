@@ -1,6 +1,6 @@
 /**
  * `KittyTerminalFacade` — the single `Terminal` wrapper the managed graphics
- * Core observes (Image-7A PR1).
+ * Core observes (Image-7A PR1, extended by Image-7B-A).
  *
  * The vendored screens (`TuiMainScreen` / `TuiAltScreen`) keep owning their
  * text frames, scrollback and layout. What this facade owns is the *graphics
@@ -10,23 +10,56 @@
  *   before it when the current screen buffer no longer holds the data;
  * - a legacy writer's per-id delete of a MANAGED image is layout intent, not
  *   ownership: it is translated into a scoped placement removal so the pixels
- *   disappear in that frame while the data stays resident;
- * - a legacy global delete (`d=A` / `d=a`) never reaches the terminal: it is
- *   translated into the same operations scoped to the Core's own ids, so a
- *   foreign owner's image is never touched;
+ *   disappear in that frame while the data stays resident (Native), or into no
+ *   bytes at all because the text cells themselves hide the image (tmux
+ *   virtual);
+ * - a legacy global delete (`d=A` / `d=a`) becomes the same operations scoped
+ *   to the Core's own ids (Native), or nothing at all (tmux virtual, whose
+ *   invisible prototype has no physical place to delete);
  * - a destructive clear or screen-buffer switch invalidates residency, so the
  *   next placement re-transmits after the clear and before the placement;
  * - a foreign per-id delete passes through untouched.
  *
- * Everything else — text, OSC 8, OSC 52, OSC 1337, mouse/keyboard modes,
- * queries, cursor movement — is written through byte-for-byte. This is a
- * stream observer for ONE protocol family, not a general ANSI rewriter.
+ * In the tmux virtual backend every managed Kitty APC — each transmission
+ * chunk, the virtual placement and each Core retirement — is individually
+ * wrapped in the tmux passthrough DCS. Nothing else is rewritten. Before ANY
+ * physical write that carries a managed command, the facade re-probes the real
+ * tmux client binding; a revoked handle throws instead of letting an unwrapped
+ * APC or an unadmitted placeholder grid escape.
  * @module @xmoon76/dsh-pi-tui/tui/graphics/kitty-terminal
  */
 
 import type { ProgramStatus, Terminal, TerminalProgressState } from '@xmoon76/pi-tui'
-import type { KittyGlobalImageDeletePlan, KittyGraphicsCore, KittyScreenBuffer } from './kitty-core.ts'
+import type {
+  KittyGlobalImageDeletePlan,
+  KittyGraphicsCore,
+  KittyPlacementMode,
+  KittyScreenBuffer,
+} from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
+import type { TmuxKittyAdmission } from './tmux-admission.ts'
+import { encodeTmuxPassthrough } from './tmux-virtual.ts'
+
+/**
+ * The physical-write refusal of a tmux virtual handle whose live admission was
+ * revoked. The whole batch is refused: filtering the DCS but still writing the
+ * same batch's placeholder cells would leave an unadmitted grid on screen.
+ * The product layer must paint its text fallback and restart the TUI is the
+ * only way to re-enable images.
+ */
+export class TmuxGraphicsRevokedError extends Error {
+  constructor() {
+    super('tmux graphics admission revoked; restart the TUI to enable images again')
+    this.name = 'TmuxGraphicsRevokedError'
+  }
+}
+
+/** The facade's immutable transport mode plus its tmux-only admission. */
+export interface KittyTerminalFacadeOptions {
+  readonly placementMode?: KittyPlacementMode
+  /** Required for `tmux-virtual`; ignored by `native`. */
+  readonly admission?: TmuxKittyAdmission
+}
 
 /**
  * The largest single Kitty command the stream may hold open across writes.
@@ -81,6 +114,35 @@ function numericControl(value: string | undefined): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+type ParsedSegment =
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'apc'; readonly apc: string }
+
+/**
+ * Split a concatenation of complete Core-owned Kitty commands into individual
+ * APCs so each can get its own passthrough DCS. A non-APC byte in the Core's
+ * own wire is an internal contract breach, not something to forward.
+ */
+function splitKittyApcs(wire: string): string[] {
+  const apcs: string[] = []
+  let index = 0
+  while (index < wire.length) {
+    if (!wire.startsWith(KITTY_APC_INTRODUCER, index)) {
+      throw new Error('tmux graphics: own wire is not a Kitty APC sequence')
+    }
+    const end = wire.indexOf(KITTY_APC_TERMINATOR, index + KITTY_APC_INTRODUCER.length)
+    if (end === -1) throw new Error('tmux graphics: unterminated own Kitty APC')
+    apcs.push(wire.slice(index, end + KITTY_APC_TERMINATOR.length))
+    index = end + KITTY_APC_TERMINATOR.length
+  }
+  return apcs
+}
+
+function wrapManagedWire(wire: string): string {
+  if (wire === '') return ''
+  return splitKittyApcs(wire).map((apc) => encodeTmuxPassthrough(apc)).join('')
+}
+
 /**
  * Wrap one real `Terminal`. All non-graphics behavior delegates unchanged; the
  * caller keeps the returned object as the ONE terminal both screens and every
@@ -89,6 +151,8 @@ function numericControl(value: string | undefined): number | undefined {
 export class KittyTerminalFacade implements Terminal {
   private readonly inner: Terminal
   private readonly core: KittyGraphicsCore
+  private readonly placementMode: KittyPlacementMode
+  private readonly admission: TmuxKittyAdmission | undefined
   /** An incomplete APC carried to the next write (the writer splits a frame at
    *  its own chunk boundary, which can land inside a graphics command). */
   private partialApc = ''
@@ -100,9 +164,14 @@ export class KittyTerminalFacade implements Terminal {
   private pendingGlobalDeletes: KittyGlobalImageDeletePlan[] = []
   private disposed = false
 
-  constructor(inner: Terminal, core: KittyGraphicsCore) {
+  constructor(inner: Terminal, core: KittyGraphicsCore, options: KittyTerminalFacadeOptions = {}) {
     this.inner = inner
     this.core = core
+    this.placementMode = options.placementMode ?? 'native'
+    this.admission = options.admission
+    if (this.placementMode === 'tmux-virtual' && this.admission === undefined) {
+      throw new Error('tmux virtual facade requires an admission handle')
+    }
   }
 
   // --- Terminal: pure delegation ------------------------------------------
@@ -137,7 +206,7 @@ export class KittyTerminalFacade implements Terminal {
     // restored, never swallowed and never left to skip `inner.stop()`.
     let failure: unknown
     try {
-      this.flushRetirements()
+      this.flushPendingRetirementsForStop()
     } catch (error) {
       failure = error
     }
@@ -203,52 +272,25 @@ export class KittyTerminalFacade implements Terminal {
   // --- Terminal.write: the graphics gate -----------------------------------
 
   write(data: string): void {
+    if (this.placementMode === 'native') {
+      this.writeNative(data)
+      return
+    }
+    this.writeTmuxVirtual(data)
+  }
+
+  private writeNative(data: string): void {
     // Queued own-ID retirements go out FIRST, and they are only committed once
     // the sink accepted them: a failed write must be able to put them back.
     this.flushRetirements()
+    const input = this.takeInput(data)
+    if (input === undefined) return
     let wire = ''
     /** The managed ids this frame really offered to the sink. */
     const touched: number[] = []
     this.pendingGlobalDeletes = []
-    let input = data
-    // Join the two bounded hold-backs with this write. They are at most one
-    // incomplete APC plus one escape-sequence prefix, so no full-frame text or
-    // image payload is ever retained here.
-    if (input === '' && this.partialApc === '' && this.pendingText === '') return
-    if (this.partialApc !== '') {
-      input = this.partialApc + input
-      this.partialApc = ''
-    }
-    if (this.pendingText !== '') {
-      input = this.pendingText + input
-      this.pendingText = ''
-    }
-
-    let cursor = 0
-    let textStart = 0
-    for (;;) {
-      const start = input.indexOf(KITTY_APC_INTRODUCER, cursor)
-      if (start === -1) {
-        const tail = input.slice(textStart)
-        const hold = trailingHoldbackLength(tail)
-        wire += this.scanText(hold === 0 ? tail : tail.slice(0, tail.length - hold))
-        if (hold !== 0) this.pendingText = tail.slice(tail.length - hold)
-        break
-      }
-      // A text segment followed by a graphics command is never the end of the
-      // stream: holding any of it back would reorder it past that command.
-      wire += this.scanText(input.slice(textStart, start))
-      const end = input.indexOf(KITTY_APC_TERMINATOR, start + KITTY_APC_INTRODUCER.length)
-      if (end === -1) {
-        this.partialApc = input.slice(start)
-        if (this.partialApc.length > MAX_PARTIAL_APC_CHARS) {
-          throw new Error(`kitty graphics: unterminated APC after ${this.partialApc.length} chars`)
-        }
-        break
-      }
-      wire += this.handleApc(input.slice(start, end + KITTY_APC_TERMINATOR.length), touched)
-      cursor = end + KITTY_APC_TERMINATOR.length
-      textStart = cursor
+    for (const segment of this.scanSegments(input)) {
+      wire += segment.kind === 'text' ? this.scanText(segment.text) : this.handleApc(segment.apc, touched)
     }
     if (wire === '') {
       // Nothing offered: a queued plan cannot have consumed ownership.
@@ -273,7 +315,112 @@ export class KittyTerminalFacade implements Terminal {
     this.pendingGlobalDeletes = []
   }
 
-  /** Offer the queued own-ID retirements; commit or roll back on the result. */
+  private writeTmuxVirtual(data: string): void {
+    const input = this.takeInput(data)
+    if (input === undefined && !this.core.hasQueuedRetirements()) return
+    const segments = input === undefined ? [] : this.scanSegments(input)
+    const managed = this.core.hasQueuedRetirements()
+      || segments.some((segment) => segment.kind === 'apc' && this.managedPlacementId(segment.apc) !== undefined)
+    // The admission check comes BEFORE any managed APC/retirement is written.
+    // A revoked handle must not flush old IDs to a new client, and refusing the
+    // whole batch (including its placeholder text) is deliberate: filtering the
+    // DCS but painting the grid would be an unadmitted image on screen.
+    if (managed && this.admission?.isAllowed(true) !== true) throw new TmuxGraphicsRevokedError()
+    this.pendingGlobalDeletes = []
+    // Queued retirements still go first, each one individually DCS-wrapped.
+    if (this.core.hasQueuedRetirements()) this.flushVirtualRetirements()
+    let wire = ''
+    const touched: number[] = []
+    for (const segment of segments) {
+      wire += segment.kind === 'text' ? this.scanText(segment.text) : this.handleApc(segment.apc, touched)
+    }
+    if (wire === '') {
+      this.pendingGlobalDeletes = []
+      return
+    }
+    try {
+      this.inner.write(wire)
+    } catch (error) {
+      this.pendingGlobalDeletes = []
+      this.core.noteWriteFailure(touched, this.buffer)
+      throw error
+    }
+    for (const plan of this.pendingGlobalDeletes) this.core.commitGlobalImageDelete(plan)
+    this.pendingGlobalDeletes = []
+  }
+
+  /**
+   * Join the two bounded hold-backs with this write. They are at most one
+   * incomplete APC plus one escape-sequence prefix, so no full-frame text or
+   * image payload is ever retained here. `undefined` means the write carries
+   * nothing at all (the queued-retirement check is the caller's business).
+   */
+  private takeInput(data: string): string | undefined {
+    if (data === '' && this.partialApc === '' && this.pendingText === '') return undefined
+    let input = data
+    if (this.partialApc !== '') {
+      input = this.partialApc + input
+      this.partialApc = ''
+    }
+    if (this.pendingText !== '') {
+      input = this.pendingText + input
+      this.pendingText = ''
+    }
+    return input
+  }
+
+  /**
+   * Split one write into ordered text and complete-APC segments, carrying the
+   * incomplete APC and the trailing escape prefix to the next write. A text
+   * segment followed by a graphics command is never held back: holding any of
+   * it would reorder it past that command.
+   */
+  private scanSegments(input: string): ParsedSegment[] {
+    const segments: ParsedSegment[] = []
+    let cursor = 0
+    let textStart = 0
+    for (;;) {
+      const start = input.indexOf(KITTY_APC_INTRODUCER, cursor)
+      if (start === -1) {
+        const tail = input.slice(textStart)
+        const hold = trailingHoldbackLength(tail)
+        if (hold !== 0) {
+          segments.push({ kind: 'text', text: tail.slice(0, tail.length - hold) })
+          this.pendingText = tail.slice(tail.length - hold)
+        } else {
+          segments.push({ kind: 'text', text: tail })
+        }
+        break
+      }
+      segments.push({ kind: 'text', text: input.slice(textStart, start) })
+      const end = input.indexOf(KITTY_APC_TERMINATOR, start + KITTY_APC_INTRODUCER.length)
+      if (end === -1) {
+        this.partialApc = input.slice(start)
+        if (this.partialApc.length > MAX_PARTIAL_APC_CHARS) {
+          throw new Error(`kitty graphics: unterminated APC after ${this.partialApc.length} chars`)
+        }
+        break
+      }
+      segments.push({ kind: 'apc', apc: input.slice(start, end + KITTY_APC_TERMINATOR.length) })
+      cursor = end + KITTY_APC_TERMINATOR.length
+      textStart = cursor
+    }
+    return segments
+  }
+
+  /** The managed placement id in one APC: `a=p,U=1` inside the Core slice. */
+  private managedPlacementId(apc: string): number | undefined {
+    const command = parseKittyApc(apc)
+    if (command === undefined || command.controls.a !== 'p' || command.controls.U !== '1') return undefined
+    const imageId = numericControl(command.controls.i)
+    if (imageId === undefined || !this.core.ownsIdSpace(imageId)) return undefined
+    return imageId
+  }
+
+  /**
+   * Offer the queued own-ID retirements; commit or roll back on the result.
+   * Native: raw Core bytes.
+   */
   private flushRetirements(): void {
     const { wire, ids } = this.core.takeRetirements()
     if (wire === '') {
@@ -291,6 +438,36 @@ export class KittyTerminalFacade implements Terminal {
       throw error
     }
     this.core.commitRetirements(ids)
+  }
+
+  /** tmux virtual: each retirement is its own DCS-wrapped Kitty APC. */
+  private flushVirtualRetirements(): void {
+    const { wire, ids } = this.core.takeRetirements()
+    if (wire === '') return
+    try {
+      this.inner.write(wrapManagedWire(wire))
+    } catch (error) {
+      this.pendingGlobalDeletes = []
+      this.core.rollbackRetirements(ids)
+      throw error
+    }
+    this.core.commitRetirements(ids)
+  }
+
+  /**
+   * A revoked tmux handle may not flush its queued retirements to whatever
+   * client is attached now (it could be a different outer terminal). The state
+   * is simply released by `Core.dispose()` instead. A still-admitted handle
+   * flushes exactly like a native stop.
+   */
+  private flushPendingRetirementsForStop(): void {
+    if (this.placementMode === 'native') {
+      this.flushRetirements()
+      return
+    }
+    if (!this.core.hasQueuedRetirements()) return
+    if (this.admission?.isAllowed(true) !== true) return
+    this.flushVirtualRetirements()
   }
 
   /**
@@ -331,19 +508,21 @@ export class KittyTerminalFacade implements Terminal {
         this.core.invalidateResidency(this.buffer, '3J')
         return
       case 'enter-alt':
-        // The alternate buffer starts empty: anything the Core placed there in
-        // an earlier alternate session is gone. The MAIN buffer keeps its
-        // images (Kitty stores them per screen), so its data stays resident.
+        // Native: the alternate buffer starts empty, so anything the Core
+        // placed there in an earlier alternate session is gone; the MAIN
+        // buffer keeps its images. tmux virtual: the outer image namespace is
+        // shared and the screen switch itself does not clear the text cells of
+        // the other buffer, so residency survives the switch.
         this.buffer = 'alt'
-        this.core.invalidateResidency('alt', 'enter-alt')
+        if (this.placementMode === 'native') this.core.invalidateResidency('alt', 'enter-alt')
         this.core.beginAltSession()
         return
       case 'exit-alt':
-        // Leaving discards the alternate buffer's images; the main buffer's
-        // images and placements survive the round trip untouched. An ordinary
-        // clear INSIDE a session must never take this path: it invalidates
-        // residency without ending the session's placement ownership.
-        this.core.invalidateResidency('alt', 'exit-alt')
+        // Native: leaving discards the alternate buffer's images; the main
+        // buffer's images and placements survive. tmux virtual: the placement
+        // is a text-driven prototype in the one outer namespace; the replayed
+        // main cells still refer to it, so it must not be discarded here.
+        if (this.placementMode === 'native') this.core.invalidateResidency('alt', 'exit-alt')
         this.core.endAltSession()
         this.buffer = 'main'
         return
@@ -352,8 +531,8 @@ export class KittyTerminalFacade implements Terminal {
 
   /**
    * The graphics permission decision for one complete Kitty command. Returns
-   * the exact bytes to write in its place (possibly an injected transmission
-   * plus the command, possibly a translation, possibly nothing).
+   * the exact bytes to write in its place (possibly injected transmissions plus
+   * the command, possibly a translation, possibly nothing).
    */
   private handleApc(apc: string, touched: number[]): string {
     const command = parseKittyApc(apc)
@@ -362,7 +541,19 @@ export class KittyTerminalFacade implements Terminal {
     if (action === 'd') return this.handleDelete(apc, command.controls)
     if (action !== 'p') return apc
     const imageId = numericControl(command.controls.i)
-    if (imageId === undefined || !this.core.owns(imageId)) return apc
+    if (imageId === undefined) return apc
+    if (this.placementMode === 'tmux-virtual') {
+      // Only the Core's own virtual placement is managed. `ownsIdSpace` is the
+      // Core's ownership predicate for the whole reserved slice, including an
+      // already-retired id whose pixels the outer terminal still holds: such an
+      // anchor must still be DCS-wrapped, never leaked raw into tmux.
+      if (command.controls.U !== '1' || !this.core.ownsIdSpace(imageId)) return apc
+      const transmission = this.core.transmissionFor(imageId, this.buffer)
+      this.core.notePlacement(imageId, this.buffer)
+      touched.push(imageId)
+      return wrapManagedWire(transmission) + encodeTmuxPassthrough(apc)
+    }
+    if (!this.core.owns(imageId)) return apc
     // Data must be resident BEFORE the placement lands: the transmission is
     // injected at the placement's own position in the stream, never earlier
     // (a clear between the two writes would invalidate it again).
@@ -375,12 +566,23 @@ export class KittyTerminalFacade implements Terminal {
   private handleDelete(apc: string, controls: Readonly<Record<string, string>>): string {
     const imageId = numericControl(controls.i)
     if (imageId !== undefined) {
+      if (this.placementMode === 'tmux-virtual') {
+        // Writer-issued deletes for OUR ids are layout intent and emit nothing;
+        // a foreign owner's command is never hijacked and keeps its exact bytes.
+        return this.core.ownsIdSpace(imageId) ? '' : apc
+      }
       // A delete for an id inside this Core's own id range — live or retired —
       // is its layout/frame intent: only the Core may free the data, so the
       // placement is what disappears. Anything outside that range is a foreign
       // owner's command and is never touched.
       const translated = this.core.translateWriterDelete(imageId)
       return translated === '' ? apc : translated
+    }
+    if (this.placementMode === 'tmux-virtual') {
+      // No global deletion form may ever reach the outer terminal: virtual
+      // placements have no physical location and scrollback prototypes are not
+      // ours to erase.
+      return ''
     }
     // Kitty's default deletion specifier is `a` ("without any other keys it
     // deletes all images visible on screen"), so a bare `a=d` is the same
