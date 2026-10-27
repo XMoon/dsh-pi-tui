@@ -1630,3 +1630,60 @@ test('tmux virtual: a cut INSIDE the anchor row cells is still proved by that ro
     h.dispose()
   }
 })
+
+test('tmux virtual: a REAL Alt diff of ONE non-anchor grid row keeps its marker and is refused', (t) => {
+  // A highlight/selection changes a single grid row. The alt screen diffs it and
+  // writes only that row with absolute addressing. Its per-row marker must
+  // survive that pipeline, and a revoked handle must refuse the frame.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 40,
+      maxHeightCells: 12,
+      fallback: '[fallback]',
+    })
+    class Root implements Component {
+      highlight = false
+      render(width: number): string[] {
+        const rows = image.render(width)
+        if (!this.highlight) return rows
+        return rows.map((row, index) => index === 2 ? `\x1b[48;2;40;40;40m${row}\x1b[49m` : row)
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const root = new Root()
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.addChild(root)
+    screen.start()
+    screen.renderNow()
+
+    // Capture what the ALT screen offers the facade on the diff frame.
+    const calls: string[] = []
+    const original = h.graphics.terminal.write.bind(h.graphics.terminal)
+    ;(h.graphics.terminal as { write: (data: string) => void }).write = (data: string): void => {
+      calls.push(data)
+      original(data)
+    }
+    root.highlight = true
+    root.invalidate()
+    screen.renderNow()
+    const diff = calls.join('')
+    assert.ok(diff.includes('?2026h'), 'the diff really is a synchronised frame')
+    assert.ok(diff.includes('pi:tmux-grid'), 'the changed row kept its per-row marker')
+    assert.equal(diff.includes('a=p'), false, 'the diff carries NO anchor')
+    assert.ok(diff.includes(P), 'the diff carries the row cells')
+
+    h.terminal.writes.length = 0
+    h.cli.setReply('list-clients', { text: '' })
+    assert.throws(() => h.graphics.terminal.write(diff), TmuxGraphicsRevokedError,
+      'the anchor-less Alt diff frame must be refused')
+    assert.equal(h.terminal.text, '', 'and it emitted nothing')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
