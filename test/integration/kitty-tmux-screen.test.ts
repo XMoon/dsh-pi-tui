@@ -27,7 +27,7 @@ import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { parseKittyApc, type KittyApc } from '../../src/tui/graphics/kitty-native.ts'
 import { KittyTerminalFacade, TmuxGraphicsRevokedError } from '../../src/tui/graphics/kitty-terminal.ts'
 import { createTmuxKittyGraphics, TmuxKittyImage } from '../../src/tui/graphics/tmux-image.ts'
-import type { NativeKittyGraphics, NativeKittyImageOptions } from '../../src/tui/graphics/native-image.ts'
+import type { KittyGraphics, NativeKittyImageOptions } from '../../src/tui/graphics/native-image.ts'
 import { TmuxKittyAdmission, probeTmuxKittyIdentity } from '../../src/tui/graphics/tmux-admission.ts'
 import {
   KITTY_VIRTUAL_PLACEHOLDER,
@@ -144,7 +144,7 @@ function source(payload = PNG, widthPx = 64, heightPx = 64) {
 interface Harness {
   readonly cli: FakeTmuxCli
   readonly terminal: RecordingTerminal
-  readonly graphics: NativeKittyGraphics
+  readonly graphics: KittyGraphics
   dispose(): void
 }
 
@@ -165,7 +165,7 @@ function harness(t: TestContext): Harness {
   }
 }
 
-function imageOf(graphics: NativeKittyGraphics, payload: ReturnType<typeof source>, options: NativeKittyImageOptions): TmuxKittyImage {
+function imageOf(graphics: KittyGraphics, payload: ReturnType<typeof source>, options: NativeKittyImageOptions): TmuxKittyImage {
   return graphics.image(payload, options) as TmuxKittyImage
 }
 

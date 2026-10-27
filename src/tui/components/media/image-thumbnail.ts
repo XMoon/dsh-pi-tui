@@ -37,10 +37,10 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-thumbnail
  */
 
-import { Image, getCapabilities, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { Image, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
-import { NativeKittyImage } from '../../graphics/native-image.ts'
+import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
@@ -130,12 +130,12 @@ export class ImageThumbnail implements Component {
    */
   private readonly fullscreenCollapseControl: (() => boolean) | undefined
   private unsubscribe: (() => void) | undefined
-  /** The ONE native graphics owner of this physical terminal (Image-7A). When
-   *  present, Kitty pixels are painted through the managed Core instead of the
-   *  legacy fork `Image`; iTerm2 and every other terminal keep that path. */
-  private readonly nativeGraphics: NativeKittyGraphics | undefined
+  /** The ONE managed graphics owner of this physical terminal (Image-7A/7B-A).
+   *  When present, Kitty pixels are painted through the managed Core instead of
+   *  the legacy fork `Image`; iTerm2 and every other terminal keep that path. */
+  private readonly graphics: KittyGraphics | undefined
   /** True when `instance` is a managed component (it owns a Core handle). */
-  private instanceNative = false
+  private instanceManaged = false
   private instance: PixelBody | undefined
   /** Which source/protocol the local `Image` was built for. A terminal
    * capability flip (Kitty ↔ iTerm2) or a raw/derived source switch must
@@ -169,7 +169,7 @@ export class ImageThumbnail implements Component {
     collapsedRef?: () => boolean,
     scope?: unknown,
     fullscreenCollapseControl?: () => boolean,
-    nativeGraphics?: NativeKittyGraphics,
+    graphics?: KittyGraphics,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
@@ -179,7 +179,7 @@ export class ImageThumbnail implements Component {
     this.collapsedRef = collapsedRef
     this.scope = scope
     this.fullscreenCollapseControl = fullscreenCollapseControl
-    this.nativeGraphics = nativeGraphics
+    this.graphics = graphics
     // Subscribe to THIS (scope, attachment)'s settles only: N thumbnails loading
     // in parallel never invalidate each other, and another presentation's settle
     // for the same content id never wakes this component (review finding 8 — no
@@ -303,7 +303,7 @@ export class ImageThumbnail implements Component {
   private releaseInstance(): void {
     this.instance?.dispose?.()
     this.instance = undefined
-    this.instanceNative = false
+    this.instanceManaged = false
     this.instanceKind = undefined
   }
 
@@ -323,9 +323,12 @@ export class ImageThumbnail implements Component {
     // collapse bit and the fullscreen-control bit ride the key too: a
     // fullscreen click only repaints — no rebuild, no invalidate — and the
     // flipped bit misses the cache.
-    const capabilities = getCapabilities().images ?? 'none'
+    // The EFFECTIVE protocol (not the fork's process-wide detection) drives the
+    // cache: an admitted tmux virtual handle paints pixels where the fork still
+    // reports none, and its revocation must miss every cached APC/PUA frame.
+    const protocol = effectiveImageProtocol(this.graphics)
     const control = this.controlWanted() ? 'ctl' : 'noctl'
-    const key = `${width}:${capabilities}:${this.collapsed() ? 'collapsed' : 'expanded'}:${control}`
+    const key = `${width}:${protocol ?? 'none'}:${this.collapsed() ? 'collapsed' : 'expanded'}:${control}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
     const lines = this.renderLines(width)
     this.cachedLines = lines
@@ -353,10 +356,11 @@ export class ImageThumbnail implements Component {
     if (width < NARROW_WIDTH_THRESHOLD) {
       return this.infoOnly(width, this.infoLine())
     }
-    // Inline graphics only when the terminal reports them; tmux and other
-    // unsupported terminals keep the text fallback AND never trigger a
-    // pointless read of the full bytes (§17.3, round-2 finding 4).
-    const protocol = getCapabilities().images ?? null
+    // Inline graphics only when THIS surface may really paint them; an
+    // unsupported terminal, a revoked tmux admission and every other fallback
+    // keep the text row AND never trigger a pointless read of the full bytes
+    // (§17.3, round-2 finding 4).
+    const protocol = effectiveImageProtocol(this.graphics)
     if (protocol === null) {
       return this.infoOnly(width, this.infoLine())
     }
@@ -409,11 +413,11 @@ export class ImageThumbnail implements Component {
       return [this.infoRow(width, this.infoLine()), truncateToWidth(fallback, width)]
     }
     const instanceKind = protocol === 'kitty' ? 'raw-kitty' : 'raw-iterm2'
-    const native = this.nativeGraphics !== undefined
-    if (this.instance === undefined || this.instanceKind !== instanceKind || this.instanceNative !== native) {
+    const managed = this.graphics !== undefined
+    if (this.instance === undefined || this.instanceKind !== instanceKind || this.instanceManaged !== managed) {
       this.releaseInstance()
-      this.instance = native
-        ? this.nativeGraphics!.image(
+      this.instance = managed
+        ? this.graphics!.image(
           { pngBase64: state.base64, widthPx: this.ref.width, heightPx: this.ref.height },
           {
             maxHeightCells: MAX_IMAGE_ROWS,
@@ -436,18 +440,20 @@ export class ImageThumbnail implements Component {
           },
           { widthPx: this.ref.width, heightPx: this.ref.height },
         )
-      this.instanceNative = native
+      this.instanceManaged = managed
       this.instanceKind = instanceKind
     }
     const body = this.instance.render(width)
     // Whether those rows are REAL PIXELS is a property of the surface: a raster
     // format this protocol cannot display renders a text fallback, which keeps
     // its informational row but must not become a clickable body.
-    if (imagePixelsSupported(protocol, this.ref.mediaType) && this.instance instanceof NativeKittyImage) {
+    const managedBody = imagePixelsSupported(protocol, this.ref.mediaType)
+      ? this.instance.paintedBodyAt?.(width)
+      : undefined
+    if (managedBody !== undefined) {
       // The managed component reports the exact placement it just built; the
       // same answer covers the budget fallback (no pixels, no hit).
-      const painted = this.instance.paintedBodyAt(width)
-      this.paintedBody = painted === undefined ? undefined : { width, rows: painted.rows, endCol: painted.columns }
+      this.paintedBody = { width, rows: managedBody.rows, endCol: managedBody.columns }
     } else if (imagePixelsSupported(protocol, this.ref.mediaType)) {
       // The hit must cover exactly the cells the image OCCUPIES, which is the
       // protocol's own placement width — NOT the `maxWidthCells` ceiling this
@@ -486,11 +492,11 @@ export class ImageThumbnail implements Component {
       const reason = preview.reason === 'busy' ? 'Preview unavailable (busy)' : 'Preview unavailable'
       return this.infoOnly(width, `${this.infoLine()} · ${reason}`)
     }
-    const native = this.nativeGraphics !== undefined
-    if (this.instance === undefined || this.instanceKind !== 'preview-kitty' || this.instanceNative !== native) {
+    const managed = this.graphics !== undefined
+    if (this.instance === undefined || this.instanceKind !== 'preview-kitty' || this.instanceManaged !== managed) {
       this.releaseInstance()
-      this.instance = native
-        ? this.nativeGraphics!.image(
+      this.instance = managed
+        ? this.graphics!.image(
           { pngBase64: preview.base64, widthPx: preview.width, heightPx: preview.height },
           {
             maxHeightCells: MAX_IMAGE_ROWS,
@@ -513,13 +519,13 @@ export class ImageThumbnail implements Component {
           },
           { widthPx: preview.width, heightPx: preview.height },
         )
-      this.instanceNative = native
+      this.instanceManaged = managed
       this.instanceKind = 'preview-kitty'
     }
     const body = this.instance.render(width)
-    if (this.instance instanceof NativeKittyImage) {
-      const painted = this.instance.paintedBodyAt(width)
-      this.paintedBody = painted === undefined ? undefined : { width, rows: painted.rows, endCol: painted.columns }
+    const managedBody = this.instance.paintedBodyAt?.(width)
+    if (managedBody !== undefined) {
+      this.paintedBody = { width, rows: managedBody.rows, endCol: managedBody.columns }
     } else {
       // The derived body is a REAL Kitty placement only when this render emitted
       // an anchored APC; a missing `c=` registers no hit.

@@ -242,8 +242,10 @@ import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/compone
 import type { VisualFigureOptions } from './tui/components/transcript/visual-figure.ts'
 import {
   createNativeKittyGraphics,
-  type NativeKittyGraphics,
+  type KittyGraphics,
 } from './tui/graphics/native-image.ts'
+import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
+import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
 import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
@@ -2861,10 +2863,11 @@ export class TuiApp {
   private readonly terminal: Terminal
   /**
    * The ONE managed Kitty graphics owner of this physical terminal
-   * (Image-7A). `undefined` on every terminal that never had native Kitty
-   * evidence: those consumers keep the legacy fork `Image`.
+   * (Image-7A native / Image-7B-A tmux virtual). `undefined` on every terminal
+   * that admitted neither transport: those consumers keep the legacy fork
+   * `Image`/text path.
    */
-  private readonly nativeGraphics: NativeKittyGraphics | undefined
+  private readonly graphics: KittyGraphics | undefined
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
   /** The unified status projection store (M0): the footer's single input.
@@ -4254,10 +4257,41 @@ export class TuiApp {
     })
     // The managed graphics handle is created ONCE per physical terminal, from
     // the real terminal the screens will write through, and both screens plus
-    // every first-party native consumer share the SAME facade/Core.
-    const nativeGraphics = createNativeKittyGraphics(resizeAware)
-    this.nativeGraphics = nativeGraphics
-    this.terminal = nativeGraphics?.terminal ?? resizeAware
+    // every first-party graphics consumer share the SAME facade/Core. The
+    // native transport is preferred; only when it is not admitted does the
+    // strict tmux virtual factory get its own chance. Both factories fail
+    // closed, so a terminal that admits neither keeps `getCapabilities()`
+    // untouched and every consumer keeps its legacy `Image`/text path.
+    const graphics = createNativeKittyGraphics(resizeAware) ?? createTmuxKittyGraphics(resizeAware)
+    this.graphics = graphics
+    this.terminal = graphics?.terminal ?? resizeAware
+    // A revoked tmux admission refuses a whole managed physical batch from
+    // inside `Terminal.write()` (the fork screens call it from a render timer,
+    // where a throw would become an uncaughtException and kill the process).
+    // This boundary converts exactly that refusal into one safe text frame:
+    // the admission is already latched revoked, so every consumer's next render
+    // sees `effectiveImageProtocol() === null` and repaints text instead of
+    // placeholders. The refused batch itself wrote nothing managed, and any
+    // OTHER write error keeps propagating unchanged.
+    if (graphics?.mode === 'tmux-virtual') {
+      const virtual = graphics.terminal as Terminal & { write: (data: string) => void }
+      const facadeWrite = virtual.write.bind(virtual)
+      virtual.write = (data: string): void => {
+        try {
+          facadeWrite(data)
+        } catch (error) {
+          if (!(error instanceof TmuxGraphicsRevokedError)) throw error
+          // The refused batch wrote no managed command, and the component
+          // caches were already dropped by the latching admission, so the next
+          // frame paints text. It must be a FORCED full repaint: the refused
+          // write threw inside `doRender()`, before the screen committed this
+          // frame's lines, so a differential retry would diff against a frame
+          // the terminal never received. Scheduled on the next tick because the
+          // screen is still inside `doRender()` here.
+          process.nextTick(() => this.requestRender(true))
+        }
+      }
+    }
     // Scroll profiler (diagnostic, DSH_TUI_SCROLL_PROFILE=1): time write
     // calls and count the per-frame rewrite volume on the SAME terminal
     // instance both screens write through. Disabled builds never wrap.
@@ -4901,7 +4935,7 @@ export class TuiApp {
       // Image-6B: a settled JPEG/WebP derivation must repaint the mounted
       // surface; the component owns no screen and never paints by itself.
       requestRender: () => this.requestRender(),
-      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
     }, this.imageTheme ?? { fallbackColor: text => color.textDim(text) })
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
@@ -5749,7 +5783,7 @@ export class TuiApp {
       // Image-7A: the managed graphics Core dies with the physical terminal.
       // The screens already emitted their own release/retire through the same
       // facade, so this only drops the ledger (never a late terminal write).
-      () => this.nativeGraphics?.dispose(),
+      () => this.graphics?.dispose(),
       () => { this.generation += 1 },
       () => this.clearNotify(),
       () => {
@@ -12234,7 +12268,7 @@ export class TuiApp {
       this.imageScope?.(),
       // The `[-]`/`[+]` control is a FULLSCREEN info-row affordance only.
       () => this.fullscreen !== undefined,
-      this.nativeGraphics,
+      this.graphics,
     )
     const source = thumbnail.viewerSource
     const occurrence: TranscriptImageOccurrence = {
@@ -18375,7 +18409,7 @@ export class TuiApp {
             svgLoader: this.svgRasterLoader,
             svgTheme: this.imageTheme,
             svgAdmissionWidth: source.svgAdmissionWidth,
-            ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
+            ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
           }
         : {}),
     }
@@ -19635,7 +19669,7 @@ export class TuiApp {
         this.imageTheme,
         () => this.settleThumbnailRender(),
         undefined,
-        this.nativeGraphics,
+        this.graphics,
       ))
     }
     if (explicitlyExpanded) {
@@ -19697,7 +19731,7 @@ export class TuiApp {
             this.imageTheme,
             () => this.settleThumbnailRender(),
             MAX_IMAGE_ROWS + 1,
-            this.nativeGraphics,
+            this.graphics,
           )
           thumbnailRows = thumbnail.render(width).length
         }
@@ -24786,7 +24820,7 @@ export class TuiApp {
       columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
-      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates,
       // Currentness at SELECTION time: a candidate that left the mounted
@@ -24829,7 +24863,7 @@ export class TuiApp {
       columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
-      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,
@@ -25033,7 +25067,7 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.svgRasterLoader === undefined ? {} : { svgLoader: this.svgRasterLoader }),
-      ...(this.nativeGraphics === undefined ? {} : { nativeGraphics: this.nativeGraphics }),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,

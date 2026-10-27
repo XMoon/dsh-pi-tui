@@ -46,6 +46,14 @@ export interface NativeKittyImageOptions {
 export interface PixelBody {
   render(width: number): string[]
   invalidate(): void
+  /**
+   * The REAL footprint the last render at `width` painted, or `undefined` when
+   * that render carried no pixels (collapsed, budget fallback, revoked
+   * admission, an empty source). Only a managed component can answer it: the
+   * legacy fork `Image` keeps the caller's sequence-parsing fallback, so a
+   * consumer never has to know which implementation it holds.
+   */
+  paintedBodyAt?(width: number): NativeKittyImageBody | undefined
   dispose?(): void
 }
 
@@ -54,8 +62,15 @@ export interface NativeKittyImageBody extends KittyPlacementGeometry {
   readonly width: number
 }
 
-/** The one graphics handle the real PiTui mount owns per physical terminal. */
-export interface NativeKittyGraphics {
+/**
+ * The one graphics handle the real PiTui mount owns per physical terminal.
+ *
+ * Exactly one of these exists per TUI process: `mode` is the immutable
+ * transport it was admitted for, and `canPaint()` reports whether the live
+ * admission still allows pixels on the current frame. A consumer asks
+ * `effectiveImageProtocol()` rather than inspecting either field itself.
+ */
+export interface KittyGraphics {
   /** The immutable transport this handle uses. */
   readonly mode: 'native' | 'tmux-virtual'
   /** Whether the real admission still allows pixels on the current frame. */
@@ -210,7 +225,7 @@ export function createNativeKittyGraphics(
   terminal: Terminal,
   options: KittyGraphicsCoreOptions = {},
   environment: NodeJS.ProcessEnv = process.env,
-): NativeKittyGraphics | undefined {
+): KittyGraphics | undefined {
   if (!admitsNativeKitty(environment)) return undefined
   const core = new KittyGraphicsCore(options)
   const facade = new KittyTerminalFacade(terminal, core)

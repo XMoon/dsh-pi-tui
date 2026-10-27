@@ -27,9 +27,10 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/image-viewer
  */
 
-import { Image, getCapabilities, imageFallback, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { Image, imageFallback, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import { MAX_KITTY_THUMBNAIL_SOURCE_BYTES } from '../../../client/media/image/kitty-thumbnail.ts'
@@ -70,7 +71,7 @@ export interface ImageViewerInput {
    * Viewer paints Kitty pixels through the Core when it is admitted; iTerm2 and
    * every other surface keep the legacy `Image` path.
    */
-  readonly nativeGraphics?: NativeKittyGraphics
+  readonly graphics?: KittyGraphics
 }
 
 /** One read-only rendered attachment, sized to the frame's content grant. */
@@ -91,8 +92,8 @@ export class ImageViewerPanel implements Component {
   /** The local placement instance; never a cache of loaded bytes. */
   private instance: PixelBody | undefined
   /** Whether `instance` is a managed component (it owns a Core handle). */
-  private instanceNative = false
-  private readonly nativeGraphics: NativeKittyGraphics | undefined
+  private instanceManaged = false
+  private readonly graphics: KittyGraphics | undefined
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
   private instanceProtocol: 'kitty' | 'iterm2' | undefined
@@ -112,7 +113,7 @@ export class ImageViewerPanel implements Component {
     this.requestRender = input.requestRender
     this.onClose = input.onClose
     this.closeHint = input.closeHint === 'back' ? 'Esc back' : 'Esc close'
-    this.nativeGraphics = input.nativeGraphics
+    this.graphics = input.graphics
     // Subscribe ONCE to THIS (scope, attachment)'s settles only: another
     // presentation's settle for the same content id must not wake this panel.
     // The callback only invalidates the local paint and schedules one frame.
@@ -140,7 +141,7 @@ export class ImageViewerPanel implements Component {
   invalidate(): void {
     this.instance?.dispose?.()
     this.instance = undefined
-    this.instanceNative = false
+    this.instanceManaged = false
     this.instanceAttachmentId = undefined
     this.instanceProtocol = undefined
     this.instanceKind = undefined
@@ -216,9 +217,10 @@ export class ImageViewerPanel implements Component {
   private bodyLines(width: number, bodyRows: number): string[] {
     if (bodyRows <= 0) return []
     if (this.loader === undefined) return [this.failedStatus(width, 'Preview unavailable')]
-    const protocol = getCapabilities().images
-    if (protocol === null || protocol === undefined) {
-      // No inline graphics: never start a pointless full-bytes read.
+    const protocol = effectiveImageProtocol(this.graphics)
+    if (protocol === null) {
+      // No paintable protocol on THIS frame (unsupported terminal or a revoked
+      // managed admission): never start a pointless full-bytes read.
       return [this.failedStatus(width, 'Preview unavailable')]
     }
     if (protocol !== 'kitty') {
@@ -343,12 +345,12 @@ export class ImageViewerPanel implements Component {
    * instead of rendering stale cached lines from the wrong protocol/source.
    */
   private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource): PixelBody {
-    const native = this.nativeGraphics !== undefined
+    const native = this.graphics !== undefined
     if (this.instance === undefined
       || this.instanceAttachmentId !== this.ref.attachmentId
       || this.instanceProtocol !== 'kitty'
       || this.instanceKind !== pixel.kind
-      || this.instanceNative !== native
+      || this.instanceManaged !== native
       || this.instanceWidth !== width
       || this.instanceBodyRows !== bodyRows
       || this.instanceBase64 !== pixel.base64
@@ -361,7 +363,7 @@ export class ImageViewerPanel implements Component {
       // hostile name can never reach the terminal through the fallback path.
       const label = sanitizedPhysicalLine(this.ref.name ?? 'image')
       this.instance = native
-        ? this.nativeGraphics!.image(
+        ? this.graphics!.image(
           { pngBase64: pixel.base64, widthPx: pixel.widthPx, heightPx: pixel.heightPx },
           {
             maxWidthCells: Math.max(1, width),
@@ -384,7 +386,7 @@ export class ImageViewerPanel implements Component {
           },
           { widthPx: pixel.widthPx, heightPx: pixel.heightPx },
         )
-      this.instanceNative = native
+      this.instanceManaged = native
       this.instanceAttachmentId = this.ref.attachmentId
       this.instanceProtocol = 'kitty'
       this.instanceKind = pixel.kind

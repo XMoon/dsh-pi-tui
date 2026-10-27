@@ -38,7 +38,7 @@ import { renderActionBarRow, type ActionBarSegment } from '../../presentation/ac
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
-import type { NativeKittyGraphics } from '../../graphics/native-image.ts'
+import type { KittyGraphics } from '../../graphics/native-image.ts'
 import { ImageViewerPanel } from './image-viewer.ts'
 import { SvgViewerPanel, type SvgViewerSource } from './svg-viewer.ts'
 
@@ -66,7 +66,7 @@ export interface ImageWorkspaceInput {
   /** PR2.5: the ONE shared SVG raster cache (a `svg-viewer` state only). */
   readonly svgLoader?: SvgRasterLoader
   /** The ONE managed graphics owner of this physical terminal (Image-7A). */
-  readonly nativeGraphics?: NativeKittyGraphics
+  readonly graphics?: KittyGraphics
   readonly theme: { fallbackColor(text: string): string }
   /** The mounted-window candidate snapshot, in projection order. */
   readonly candidates: readonly ImageWorkspaceCandidate[]
@@ -259,7 +259,7 @@ export class ImageWorkspacePanel implements Component {
       requestRender: this.input.requestRender,
       onClose: fromList ? () => this.backToList() : () => this.input.onClose(),
       closeHint: fromList ? 'back' : 'close',
-      ...(this.input.nativeGraphics === undefined ? {} : { nativeGraphics: this.input.nativeGraphics }),
+      ...(this.input.graphics === undefined ? {} : { graphics: this.input.graphics }),
     })
     this.mode = 'viewer'
     this.input.requestRender()
@@ -276,7 +276,7 @@ export class ImageWorkspacePanel implements Component {
       ...(this.input.svgLoader === undefined ? {} : { loader: this.input.svgLoader }),
       theme: this.input.theme,
       onClose: () => this.input.onClose(),
-      ...(this.input.nativeGraphics === undefined ? {} : { nativeGraphics: this.input.nativeGraphics }),
+      ...(this.input.graphics === undefined ? {} : { graphics: this.input.graphics }),
     })
     this.mode = 'viewer'
     this.input.requestRender()

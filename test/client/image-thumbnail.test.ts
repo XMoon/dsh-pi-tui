@@ -22,6 +22,9 @@ import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../src/dom
 import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
+import { createTmuxKittyGraphics } from '../../src/tui/graphics/tmux-image.ts'
+import { createFakeTmuxCli } from '../support/fake-tmux-cli.ts'
+import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.ts'
 
 const REF: ImageAttachmentRefLike = {
   attachmentId: 'att-1',
@@ -33,6 +36,7 @@ const REF: ImageAttachmentRefLike = {
 }
 
 const THEME = { fallbackColor: (text: string) => `[${text}]` }
+
 
 /** A loader whose underlying read resolves immediately to the given bytes. */
 function loaderOf(bytes: Uint8Array): ImageLoader {
@@ -876,4 +880,59 @@ test('a GIF fallback with a long name is clamped to the granted width', async ()
       `width ${width}: the fallback stays inside the grant (got ${visibleWidth(fallback)})`,
     )
   }
+})
+
+/**
+ * Image-7B-B: the consumer honors the EFFECTIVE protocol, not the fork's
+ * process-wide capability. A tmux pane reports `images: null`, yet an admitted
+ * virtual handle must paint — and its revocation must MISS the cache that held
+ * the placeholder frame.
+ */
+test('an admitted tmux virtual handle paints where the fork reports no protocol, and revocation misses the cache', async (t) => {
+  const cli = createFakeTmuxCli(t)
+  const saved = new Map<string, string | undefined>()
+  for (const key of [...Object.keys(cli.env), 'KITTY_WINDOW_ID', 'TERM_PROGRAM', 'ZELLIJ', 'STY', 'PI_IMAGE_PROTOCOL']) {
+    saved.set(key, process.env[key])
+    const value = cli.env[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const writes: string[] = []
+  const terminal = {
+    writes, columns: 80, rows: 24, kittyProtocolActive: false,
+    start() {}, stop() {}, async drainInput() {}, write(data: string) { writes.push(data) },
+    moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {},
+    clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {}, setProgressState() {},
+  }
+  const graphics = createTmuxKittyGraphics(terminal, {}, { ...cli.env })
+  assert.ok(graphics, 'the scripted server is the admitted topology')
+  const loader = loaderOf(SAMPLE_PNG)
+  const ref = { attachmentId: 'tmux-png', mediaType: 'image/png' as const, bytes: SAMPLE_PNG.length, width: 64, height: 64, name: 'tmux.png' }
+  loader.load(ref)
+  await until(() => loader.get(ref).state === 'ready', 'the PNG read')
+  const component = new ImageThumbnail(ref, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+  const painted = component.render(80).join('\n')
+  assert.ok(painted.includes(KITTY_VIRTUAL_PLACEHOLDER), `the tmux card painted placeholders: ${JSON.stringify(painted.slice(0, 80))}`)
+  assert.ok(!painted.includes('Preview unavailable'))
+  const body = component.paintedImageBody(80)
+  assert.ok(body !== undefined, 'the managed thumbnail owns a clickable body')
+
+  // The live binding changes: the VERY SAME component must repaint text, and its
+  // cache key must miss so no previously painted placeholder row survives.
+  cli.setReply('show-options', { text: 'on\n' })
+  await new Promise<void>(resolve => setTimeout(resolve, 260))
+  const revoked = component.render(80).join('\n')
+  assert.equal(revoked.includes(KITTY_VIRTUAL_PLACEHOLDER), false, 'no placeholder cell survived the revocation')
+  assert.equal(revoked.includes('\x1b_G'), false, 'and no Kitty command either')
+  assert.equal(component.paintedImageBody(80), undefined, 'the revoked card owns no clickable body')
+  assert.ok(revoked.includes('🖼️ tmux.png'), 'the identity row is still painted')
+  graphics.dispose()
 })

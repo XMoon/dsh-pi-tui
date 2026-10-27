@@ -25,7 +25,6 @@
 
 import {
   Image,
-  getCapabilities,
   imageFallback,
   matchesKey,
   truncateToWidth,
@@ -37,7 +36,8 @@ import { SVG_MAX_RASTER_PIXELS, SVG_MAX_RASTER_SIDE } from '../../../domain/visu
 import { admitSvg, type SvgAdmission } from '../../../domain/visual/svg-admission.ts'
 import { isolatedSvgRasterSupported } from '../../../client/media/svg/rasterize.ts'
 import type { SvgRasterLoader, SvgRasterState } from '../../../client/media/svg/raster-loader.ts'
-import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { SVG_VIEWER_CHORDS, SVG_VIEWER_SCROLL_LABEL } from '../../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
@@ -72,7 +72,7 @@ export interface SvgViewerInput {
    * Preview page paints through the Core when it is admitted; the legacy
    * `Image` path stays for every other surface.
    */
-  readonly nativeGraphics?: NativeKittyGraphics
+  readonly graphics?: KittyGraphics
 }
 
 /** The two Viewer pages. */
@@ -129,7 +129,7 @@ export class SvgViewerPanel implements Component {
   private unsubscribe: (() => void) | undefined
   private previewImage: SvgPreviewImage | undefined
   /** Whether the current `previewImage` is a managed Core occurrence. */
-  private previewImageNative = false
+  private previewImageManaged = false
   /** The last painted frame's hit geometry (never re-derived on a press). */
   private painted: SvgViewerPainted | undefined
   private press: SvgViewerPress | undefined
@@ -393,7 +393,7 @@ export class SvgViewerPanel implements Component {
   private previewSupported(): boolean {
     return this.input.loader !== undefined
       && this.admission.ok
-      && getCapabilities().images === 'kitty'
+      && effectiveImageProtocol(this.input.graphics) === 'kitty'
       && isolatedSvgRasterSupported()
   }
 
@@ -454,14 +454,14 @@ export class SvgViewerPanel implements Component {
 
   /** Render the ready PNG at the body grant, rebuilding only on exact input change. */
   private imageLines(width: number, bodyRows: number, state: Extract<SvgRasterState, { state: 'ready' }>): string[] {
-    const native = this.input.nativeGraphics
+    const native = this.input.graphics
     if (this.previewImage === undefined
       || this.previewImage.width !== width
       || this.previewImage.bodyRows !== bodyRows
       || this.previewImage.base64 !== state.base64
       || this.previewImage.widthPx !== state.widthPx
       || this.previewImage.heightPx !== state.heightPx
-      || this.previewImageNative !== (native !== undefined)) {
+      || this.previewImageManaged !== (native !== undefined)) {
       this.previewImage?.instance.dispose?.()
       // The fork's text fallback interpolates this name into a painted row and
       // does NOT strip terminal controls; project it to one safe physical row
@@ -498,7 +498,7 @@ export class SvgViewerPanel implements Component {
         widthPx: state.widthPx,
         heightPx: state.heightPx,
       }
-      this.previewImageNative = native !== undefined
+      this.previewImageManaged = native !== undefined
     }
     return this.previewImage.instance.render(width).slice(0, bodyRows)
   }
