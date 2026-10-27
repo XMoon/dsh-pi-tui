@@ -865,3 +865,54 @@ test('a REAL Assistant publication feeds the SAME app raster loader, Viewer Prev
   assert.ok(restored.includes('Service topology'),
     `the published figure returned to the transcript:\n${restored}`)
 })
+
+test('a malformed SVG tool message is refused by the app and paints text only', async (t) => {
+  // The app's OWN `authorizeSvg` gate decides this: the credential matches the
+  // call source, but the source is not admissible XML, so the card keeps its
+  // readable description and paints NO pixels and NO raster work.
+  const h = product(t, { sink: 'virtual' })
+  assert.ok(h.graphics)
+  const badSource = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10"'
+  const fact = {
+    version: 1 as const,
+    type: 'svg' as const,
+    title: 'Broken drawing',
+    description: 'unparseable',
+    digest: createHash('sha256').update(badSource, 'utf8').digest('hex'),
+    bytes: Buffer.byteLength(badSource, 'utf8'),
+  }
+  const human = svgHumanText(fact)
+  const message = {
+    kind: 'tool',
+    turn: 1,
+    name: SVG_TOOL_NAME,
+    args: JSON.stringify({ title: fact.title, description: fact.description, svg: badSource }),
+    result: human,
+    resultBlocks: [
+      { type: 'text', text: human },
+      { type: 'text', text: `visual-v1:${JSON.stringify(fact)}` },
+    ],
+    status: 'ok',
+  } as never
+  h.terminal.writes.length = 0
+  const appInternal = h.app as unknown as {
+    setTranscript(messages: unknown[]): void
+    messages: readonly unknown[]
+    toggleMessageExpanded(message: unknown): void
+  }
+  appInternal.setTranscript([message])
+  appInternal.toggleMessageExpanded(appInternal.messages[0])
+  await settle(h.app)
+  await new Promise(resolve => setTimeout(resolve, 300))
+
+  const written = h.terminal.writes.join('')
+  assert.ok(written.length > 0, 'the refused card really painted a frame')
+  assert.equal(written.includes(PLACEHOLDER), false, 'no placeholder cell was painted')
+  assert.equal(transmissions(written).length, 0, 'no managed transmission was offered')
+  assert.equal(h.rasterCalls(), 0, 'the refused SVG started NO raster work')
+  const rows = (h.app as unknown as { messagesView: { render(w: number): string[] } })
+    .messagesView.render(100)
+  const painted = rows.join('\n')
+  assert.ok(painted.includes('Broken drawing') || painted.includes('Drawing unavailable'),
+    `the card keeps a truthful text presentation:\n${painted.slice(0, 400)}`)
+})
