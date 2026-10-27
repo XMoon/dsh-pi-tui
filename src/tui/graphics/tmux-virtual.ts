@@ -20,6 +20,17 @@ import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR } from './kitty-native.ts'
 export const KITTY_VIRTUAL_PLACEHOLDER = String.fromCodePoint(0x10eeee)
 
 /**
+ * Private per-row provenance marker for a managed virtual grid.
+ *
+ * The anchor names the image once, but the screen writes can reach the facade as
+ * arbitrary physical chunks — including a differential ALT frame that contains
+ * only ONE changed grid row with no anchor. Every grid row therefore carries its
+ * own zero-width marker; the facade strips it before the terminal and uses it as
+ * the ONLY proof that the row's placeholder cells are ours.
+ */
+export const KITTY_VIRTUAL_GRID_MARKER = '\x1b_pi:tmux-grid:v1\x1b\\'
+
+/**
  * The row/column diacritic table from Kitty's
  * `gen/rowcolumn-diacritics.txt` (the first 297 Unicode 6.0.0 combining marks,
  * combining class 230, without decomposition). Index `i` addresses row or

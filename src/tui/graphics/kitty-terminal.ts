@@ -73,6 +73,31 @@ const MAX_PENDING_MARKER_CHARS = 512
 /** The private marker prefix shared with `tmux-image.ts` and the fork (X067). */
 const MANAGED_VIRTUAL_MARKER_PREFIX = '\x1b_pi:tmux-image:v1:i='
 const MANAGED_VIRTUAL_MARKER_TERMINATOR = '\x1b\\'
+/** Per-row provenance marker; replaced by a sentinel the scanner removes later. */
+const MANAGED_GRID_MARKER = '\x1b_pi:tmux-grid:v1\x1b\\'
+/** Survives into the segment scan, then `scanText` strips it from the wire. */
+const MANAGED_GRID_SENTINEL = '\x01'
+/** Common prefix held back when a marker is split across physical writes. */
+const MANAGED_MARKER_COMMON_PREFIX = '\x1b_pi:tmux-'
+
+/**
+ * The length of a trailing fragment that may still grow into a marker. The
+ * fragment always begins at its own `ESC _pi:` introducer, so a plain suffix
+ * comparison is not enough: the tail can be LONGER than the shared prefix.
+ */
+function markerHoldLength(text: string): number {
+  let best = 0
+  for (const full of [MANAGED_VIRTUAL_MARKER_PREFIX, MANAGED_GRID_MARKER, MANAGED_MARKER_COMMON_PREFIX]) {
+    const limit = Math.min(full.length, text.length)
+    for (let length = limit; length > best; length--) {
+      if (full.startsWith(text.slice(text.length - length))) {
+        best = length
+        break
+      }
+    }
+  }
+  return best
+}
 
 /**
  * Remove every complete provenance marker and return a trailing marker-prefix
@@ -83,24 +108,26 @@ function stripManagedVirtualMarkers(input: string): { text: string; hold: string
   let text = ''
   let index = 0
   for (;;) {
-    const start = input.indexOf(MANAGED_VIRTUAL_MARKER_PREFIX, index)
+    const imageAt = input.indexOf(MANAGED_VIRTUAL_MARKER_PREFIX, index)
+    const gridAt = input.indexOf(MANAGED_GRID_MARKER, index)
+    const useGrid = gridAt !== -1 && (imageAt === -1 || gridAt < imageAt)
+    const start = useGrid ? gridAt : imageAt
     if (start === -1) {
       text += input.slice(index)
       break
     }
     text += input.slice(index, start)
+    if (useGrid) {
+      // Keep a zero-width sentinel so the row scan can see WHICH line was ours.
+      text += MANAGED_GRID_SENTINEL
+      index = start + MANAGED_GRID_MARKER.length
+      continue
+    }
     const end = input.indexOf(MANAGED_VIRTUAL_MARKER_TERMINATOR, start + MANAGED_VIRTUAL_MARKER_PREFIX.length)
     if (end === -1) return { text, hold: input.slice(start) }
     index = end + MANAGED_VIRTUAL_MARKER_TERMINATOR.length
   }
-  let holdLength = 0
-  const limit = Math.min(MANAGED_VIRTUAL_MARKER_PREFIX.length - 1, text.length)
-  for (let length = limit; length > 0; length--) {
-    if (MANAGED_VIRTUAL_MARKER_PREFIX.startsWith(text.slice(text.length - length))) {
-      holdLength = length
-      break
-    }
-  }
+  const holdLength = markerHoldLength(text)
   if (holdLength === 0) return { text, hold: '' }
   return { text: text.slice(0, text.length - holdLength), hold: text.slice(text.length - holdLength) }
 }
@@ -201,13 +228,12 @@ export class KittyTerminalFacade implements Terminal {
   /** Global image deletes offered by THIS write, committed only on success. */
   private pendingGlobalDeletes: KittyGlobalImageDeletePlan[] = []
   /**
-   * Grid ROWS still owed by the managed anchor this stream last wrote. The
-   * anchor's own `r=` is the authority: while this is non-zero every placeholder
-   * in the text belongs to that managed image, however the writer cuts the
-   * bytes. Plain text outside such a block is never managed, even when it
-   * happens to contain a glyph identical to a grid cell.
+   * Whether the previous physical write ended INSIDE a managed grid row: the
+   * row's own marker was seen and its newline has not been written yet. A row
+   * started in a later chunk carries its own marker, so this only has to bridge
+   * a cut inside one row.
    */
-  private managedGridRows = 0
+  private gridLineOpen = false
   /**
    * Whether THIS synchronised frame already refused a managed batch. The app
    * boundary converts that refusal into a forced repaint on the next tick, but
@@ -373,7 +399,7 @@ export class KittyTerminalFacade implements Terminal {
   private writeTmuxVirtual(data: string): void {
     // A synchronised frame starts a fresh text grid: no row spans frames.
     if (data.includes('\x1b[?2026h')) {
-      this.managedGridRows = 0
+      this.gridLineOpen = false
       this.gridFrameRefused = false
     }
     const input = this.takeInput(data)
@@ -527,37 +553,31 @@ export class KittyTerminalFacade implements Terminal {
     const imageId = numericControl(command.controls.i)
     if (imageId === undefined || !this.core.ownsIdSpace(imageId)) return undefined
     const placementId = numericControl(command.controls.p)
-    const rows = numericControl(command.controls.r)
-    if (placementId === undefined || rows === undefined) return undefined
-    // The anchor names how many text rows its grid occupies; the anchor line
-    // itself is row 0, so the whole count is owed from here.
-    this.managedGridRows = rows
+    if (placementId === undefined) return undefined
     return imageId
   }
 
   /**
-   * Account for one TEXT segment against the grid the current anchor opened, and
-   * report whether it carries managed placeholder cells. While rows are owed,
-   * ANY placeholder cell belongs to that image — the writer may cut inside a row
-   * or even between a cell's base and its diacritics. Outside such a block the
-   * same glyph is ordinary text and never classified.
+   * Account for one TEXT segment against the per-row provenance markers and
+   * report whether it carries managed placeholder cells. A row is ours only if
+   * its OWN marker was seen (or the previous write cut that row mid-line); the
+   * bare glyph is never proof. Works for a full frame, a mid-row cut, and a
+   * differential ALT frame that rewrites one row with no anchor at all.
    */
   private consumeGridText(text: string): boolean {
     let managed = false
+    let open = this.gridLineOpen
     let start = 0
     for (;;) {
-      // Once the row budget is exhausted the REST of the text is ordinary text,
-      // even if it contains placeholder-looking characters.
-      if (this.managedGridRows <= 0) break
       const end = text.indexOf('\n', start)
       const line = end === -1 ? text.slice(start) : text.slice(start, end)
-      if (line.includes(KITTY_VIRTUAL_PLACEHOLDER)) managed = true
+      if (line.includes(MANAGED_GRID_SENTINEL)) open = true
+      if (open && line.includes(KITTY_VIRTUAL_PLACEHOLDER)) managed = true
       if (end === -1) break
-      this.managedGridRows -= 1
+      open = false
       start = end + 1
     }
-    // A frame that already refused a managed batch stays poisoned: any later
-    // placeholder cell in it is stale image bytes, however the budget moved.
+    this.gridLineOpen = open
     if (this.gridFrameRefused && text.includes(KITTY_VIRTUAL_PLACEHOLDER)) managed = true
     return managed
   }
@@ -627,6 +647,7 @@ export class KittyTerminalFacade implements Terminal {
    */
   private scanText(text: string): string {
     if (text === '') return ''
+    const wireText = text.replaceAll(MANAGED_GRID_SENTINEL, '')
     let index = 0
     while (index < text.length) {
       const at = text.indexOf('\x1b', index)
@@ -639,7 +660,7 @@ export class KittyTerminalFacade implements Terminal {
       this.applyTextSignal(signal.kind)
       index = at + signal.sequence.length
     }
-    return text
+    return wireText
   }
 
   private applyTextSignal(kind: TextSignal['kind']): void {

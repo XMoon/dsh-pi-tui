@@ -1571,3 +1571,31 @@ test('tmux virtual: ordinary text after a 1-row grid ends is NOT classified as m
     h.dispose()
   }
 })
+
+test('tmux virtual: a differential frame rewriting ONLY a non-anchor grid row is refused', (t) => {
+  // `TuiAltScreen` diffs by changed rows and addresses each one absolutely. A
+  // frame may therefore contain a single grid row with NO anchor. The row's own
+  // provenance marker is what keeps it managed.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 150,
+      maxHeightCells: 40,
+      fallback: '[fallback]',
+    })
+    const rows = image.render(190)
+    h.graphics.terminal.write(rows.join('\r\n'))
+    const before = h.terminal.text
+    h.cli.setReply('list-clients', { text: '' })
+    // The exact ALT-diff shape: new synchronised frame, absolute cursor, clear
+    // line, ONE changed grid row (no anchor), end of frame.
+    const frame = `\x1b[?2026h\x1b[5;1H\x1b[2K${rows[1]!}\x1b[?2026l`
+    assert.throws(() => h.graphics.terminal.write(frame), TmuxGraphicsRevokedError,
+      'an anchor-less differential grid row must be refused')
+    assert.equal(h.terminal.text, before, 'the differential frame emitted nothing')
+  } finally {
+    h.dispose()
+  }
+})
