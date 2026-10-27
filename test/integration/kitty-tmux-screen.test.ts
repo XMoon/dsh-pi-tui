@@ -1243,10 +1243,11 @@ test('tmux virtual: a frame larger than one writer chunk paints its grid across 
       fallback: '[fallback]',
     })
     class BigRoot implements Component {
+      private readonly imageRows = image.render(100)
       render(width: number): string[] {
         return [
           ...Array.from({ length: 12000 }, (_, index) => `pad ${index} ${'z'.repeat(740)}`),
-          ...image.render(width),
+          ...this.imageRows,
         ]
       }
       invalidate(): void {
@@ -1260,12 +1261,29 @@ test('tmux virtual: a frame larger than one writer chunk paints its grid across 
     const text = h.terminal.text
     const chunks = h.terminal.writes.length
     assert.ok(chunks >= 2, `the frame must really split across physical writes, got ${chunks}`)
+    // Record WHERE the anchor and the grid actually landed, so a "pass" can
+    // never come from a single-chunk frame that happened to contain both.
+    const perChunk = h.terminal.writes.map((write, index) => ({
+      index,
+      anchor: write.includes('a=p'),
+      cells: count(write, P),
+    }))
+    const anchorChunks = perChunk.filter(entry => entry.anchor).map(entry => entry.index)
+    const gridChunks = perChunk.filter(entry => entry.cells > 0).map(entry => entry.index)
+    assert.equal(anchorChunks.length, 1, `the anchor must be written exactly once: ${JSON.stringify(perChunk)}`)
+    assert.ok(gridChunks.length >= 1, 'the grid reached the sink')
     const scan = scanOuter(text)
-    assert.equal(scan.commands.some(command => command.controls.a === 't'), true,
-      'the managed payload was transmitted')
-    assert.equal(scan.commands.some(command => command.controls.a === 'p' && command.controls.U === '1'), true,
-      'the virtual placement was written')
-    assert.ok(count(scan.text, P) > 0, 'the placeholder grid reached the sink')
+    assert.equal(scan.commands.filter(command => command.controls.a === 't').length, 1,
+      'exactly ONE managed transmission for the frame')
+    assert.equal(scan.commands.filter(command => command.controls.a === 'p' && command.controls.U === '1').length, 1,
+      'exactly ONE virtual placement')
+    // The viewport clips the placement (the image is tall, the screen is 40 rows),
+    // so assert the exact number of cells the component painted at its own width
+    // rather than the unclipped geometry.
+    const painted = image.paintedBodyAt(100)
+    assert.ok(painted !== undefined, 'the component reported its painted body at its render width')
+    assert.equal(count(scan.text, P), painted.columns * painted.rows,
+      `every painted cell must reach the sink, got ${count(scan.text, P)} of ${painted.columns * painted.rows}`)
     screen.stop()
   } finally {
     h.dispose()
@@ -1301,6 +1319,14 @@ test('tmux virtual: a revocation between writer chunks refuses every later place
     assert.throws(() => h.graphics.terminal.write(grid), TmuxGraphicsRevokedError,
       'a PUA-only managed batch must be refused once the admission is revoked')
     assert.equal(h.terminal.text, before, 'the refused grid emitted nothing at all')
+
+    // NEGATIVE CONTROL: an ordinary transcript line that happens to contain the
+    // SAME `U+10EEEE` code point must NOT be classified as a managed grid. It
+    // has no identity colors, so the revoked handle still writes it as text.
+    const plain = `plain user text with ${P} inside`
+    h.graphics.terminal.write(plain)
+    assert.equal(h.terminal.text.endsWith(plain), true,
+      'plain text containing U+10EEEE must still be written after a revocation')
   } finally {
     h.dispose()
   }
