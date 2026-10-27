@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings document or a Host profile; a same-id HMR re-registration inherits no old confirmation,
   retry or settlement. The former `Extensions → Configure extension settings…` transition entry is
   gone, and Settings no longer jumps to the legacy settings editor.
-- **The transcript's delivered-files tail now shows at most four rows, and a new
+- **The transcript's delivered-files tail now shows at most four files, and a new
   `/deliverables` browser lists, filters and copies their paths in one panel.**
   A final answer's `present` declarations render as a compact tail: each file is
   at most TWO rows. The first row is the path relative to the CURRENT display
