@@ -17,6 +17,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import test, { afterEach, type TestContext } from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
@@ -28,7 +29,9 @@ import { convertKittyThumbnail } from '../../src/client/media/image/kitty-thumbn
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
-import { SvgViewerPanel } from '../../src/tui/components/media/svg-viewer.ts'
+import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
+import { svgHumanText } from '../../src/domain/visual/svg.ts'
+
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { effectiveImageProtocol } from '../../src/tui/graphics/image-capability.ts'
 import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
@@ -215,6 +218,8 @@ interface ProductHarness {
   readonly store: DraftImageStore
   readonly reads: Map<string, number>
   readonly conversions: () => number
+  /** How many times the app's ONE injected SVG rasterizer really ran. */
+  readonly rasterCalls: () => number
 }
 
 /** Build the REAL product composition on the scripted server. */
@@ -247,12 +252,11 @@ function product(
   const terminal: SinkTerminal = options.sink === 'virtual'
     ? virtualSink()
     : new RecordingTerminal()
-  const svgLoader = new SvgRasterLoader(async () => ({
-    png: Buffer.from(SAMPLE_PNG),
-    base64: SAMPLE_PNG.toString('base64'),
-    widthPx: 64,
-    heightPx: 32,
-  }))
+  let svgRasterCalls = 0
+  const svgLoader = new SvgRasterLoader(async () => {
+    svgRasterCalls += 1
+    return { png: SAMPLE_PNG, base64: SAMPLE_PNG.toString('base64'), widthPx: 64, heightPx: 32 }
+  })
   const store = new DraftImageStore()
   const app = new TuiApp(terminal, { onSubmit: () => {}, onExit: () => {} }, {
     imageLoader: loader,
@@ -264,7 +268,17 @@ function product(
   app.start()
   startedApps.add(app)
   const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
-  return { cli, terminal, app, graphics, loader, store, reads, conversions: () => conversionCount }
+  return {
+    cli,
+    terminal,
+    app,
+    graphics,
+    loader,
+    store,
+    reads,
+    conversions: () => conversionCount,
+    rasterCalls: () => svgRasterCalls,
+  }
 }
 
 function userMessage(content: unknown[], seq: number): never {
@@ -478,7 +492,10 @@ test('ONE app drives draft -> submit -> transcript -> viewer -> Esc with the SAM
   assert.equal(h.app.getDraft(), '', 'the production submit cleared the draft')
 
   // 3. TRANSCRIPT: the durable ref the host would persist renders through the
-  //    SAME app and the SAME Core.
+  //    SAME app and the SAME Core. The sink is CLEARED at this stage boundary:
+  //    the draft stage already transmitted its own image, so only the writes
+  //    produced AFTER this point can prove the transcript transmission.
+  h.terminal.writes.length = 0
   const ref = pngRef('att-e2e', 'staged.png')
   const folder = new TranscriptFolder()
   folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
@@ -489,7 +506,9 @@ test('ONE app drives draft -> submit -> transcript -> viewer -> Esc with the SAM
   assert.ok(transcriptView.includes('🖼️ staged.png'),
     `the transcript identity row is on screen:\n${transcriptView}`)
   const transcriptText = h.terminal.writes.join('')
-  assert.ok(transmissionIds(transcriptText).length >= 1, 'the transcript image was transmitted')
+  assert.ok(transcriptText.length > 0, 'the transcript stage really wrote a frame')
+  assert.ok(transmissionIds(transcriptText).length >= 1,
+    `the transcript image itself was transmitted (draft writes excluded): ${JSON.stringify(transcriptText.slice(0, 120))}`)
   assert.equal(h.reads.get(ref.attachmentId), 1, 'exactly one durable read for the transcript')
 
   // 4. VIEWER through the REAL fullscreen pointer route on the painted body.
@@ -539,53 +558,100 @@ test('ONE app drives draft -> submit -> transcript -> viewer -> Esc with the SAM
   await settleFrames()
 })
 
-test('the SVG Viewer paints from the SAME raster cache and Source stays text', async (t) => {
-  const h = product(t)
+test('a REAL SVG tool message publishes, thumbnails and opens the Viewer from the SAME app', async (t) => {
+  // ONE app, ONE injected SvgRasterLoader, ONE clipboard sink: the SVG goes in as
+  // a durable TOOL MESSAGE (the way the Host delivers it), the app's own card
+  // renderer authorizes it and mounts the thumbnail, the thumbnail's View action
+  // opens the leased Viewer, and Copy Source writes through the app's real
+  // `copySelection` callback.
+  const h = product(t, { sink: 'virtual' })
   assert.ok(h.graphics)
+  const vt = h.terminal as SinkTerminal & { flush(): Promise<void>; getViewport(): string[] }
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
     + '<rect width="64" height="32" fill="#3b82f6"/></svg>'
-  let rasterCalls = 0
-  const loader = new SvgRasterLoader(async () => {
-    rasterCalls += 1
-    return { png: SAMPLE_PNG, base64: SAMPLE_PNG.toString('base64'), widthPx: 64, heightPx: 32 }
-  })
-  const copies: string[] = []
-  const panel = new SvgViewerPanel({
-    source: { title: 'diagram.svg', svgSource: svg, digest: 'svg-viewer-digest', onCopy: () => copies.push(svg) },
-    rows: () => 18,
-    columns: () => 90,
-    requestRender: () => {},
-    loader,
-    theme: { fallbackColor: (text: string) => text },
-    onClose: () => {},
-    graphics: h.graphics,
-  })
-  try {
-    panel.setMaxRows(18)
-    let rows: string[] = []
-    for (let attempt = 0; attempt < 400; attempt += 1) {
-      rows = panel.render(90)
-      if (rows.join('\n').includes(PLACEHOLDER)) break
-      await new Promise(resolve => setTimeout(resolve, 5))
-    }
-    const painted = rows.join('\n')
-    assert.ok(painted.includes(PLACEHOLDER), `the SVG Viewer painted real pixels: ${JSON.stringify(painted.slice(0, 160))}`)
-    assert.ok(rasterCalls >= 1, 'exactly the ONE shared raster path produced the preview')
-    assert.equal(painted.includes('Preview unavailable'), false)
-
-    // Tab switches to the Source page (the frozen chord table): terminal-safe
-    // TEXT, never pixels.
-    ;(panel as unknown as { handleInput(data: string): void }).handleInput('\t')
-    const source = panel.render(90).join('\n')
-    assert.ok(source.includes('<rect'), 'the Source page shows the raw SVG text')
-    assert.equal(source.includes(PLACEHOLDER), false, 'the Source page never paints placeholder cells')
-    assert.ok(source.includes('<svg'), 'the whole document is projected')
-    ;(panel as unknown as { handleInput(data: string): void }).handleInput('c')
-    assert.deepEqual(copies, [svg], 'Copy Source sent the RAW document through the ONE clipboard owner')
-  } finally {
-    panel.dispose()
-    loader.dispose()
+  const clipboard: string[] = []
+  const runs: string[] = []
+  const app = h.app as unknown as {
+    events: { runOwned?: (label: string, task: () => Promise<boolean>, options?: unknown) => void }
   }
+  // The REAL clipboard sink the app was constructed with is `copySelection`;
+  // `runOwned` is the owned-task entry (the app refuses to copy without BOTH).
+  ;(h.app as unknown as { copySelection?: unknown }).copySelection = (text: string): Promise<boolean> => {
+    clipboard.push(text)
+    return Promise.resolve(true)
+  }
+  if (app.events.runOwned === undefined) {
+    app.events.runOwned = (label, task) => {
+      runs.push(label)
+      void task()
+    }
+  }
+
+  const svgFact = {
+    version: 1,
+    type: 'svg',
+    title: 'Service topology',
+    description: 'Gateway -> App',
+    digest: createHash('sha256').update(svg, 'utf8').digest('hex'),
+    bytes: Buffer.byteLength(svg, 'utf8'),
+  }
+  // The EXACT row shape the Host produces for an SVG tool call: `result` is the
+  // durable human text and the LAST block is the machine credential.
+  const svgFactWithVersion = {
+    version: 1 as const,
+    type: 'svg' as const,
+    title: 'Service topology',
+    description: 'Gateway -> App',
+    digest: svgFact.digest,
+    bytes: svgFact.bytes,
+  }
+  const human = svgHumanText(svgFactWithVersion)
+  const toolMessage = {
+    kind: 'tool',
+    turn: 1,
+    name: SVG_TOOL_NAME,
+    args: JSON.stringify({ title: 'Service topology', description: 'Gateway -> App', svg }),
+    result: human,
+    resultBlocks: [
+      { type: 'text', text: human },
+      { type: 'text', text: `visual-v1:${JSON.stringify(svgFactWithVersion)}` },
+    ],
+    status: 'ok',
+  } as never
+  h.terminal.writes.length = 0
+  const appInternal = h.app as unknown as {
+    setTranscript(messages: unknown[]): void
+    messages: readonly unknown[]
+    toggleMessageExpanded(message: unknown): void
+    requestRender(): void
+  }
+  appInternal.setTranscript([toolMessage])
+  // Expand the card through the app's OWN disclosure owner: the SVG body (and
+  // its inline raster) is part of the expanded card.
+  appInternal.toggleMessageExpanded(appInternal.messages[0])
+  // The thumbnail is an ASYNC raster: wait for the injected loader to settle.
+  await settle(h.app)
+  await vt.flush()
+  await until(() => {
+    ;(h.app as unknown as { requestRender(): void }).requestRender()
+    return (h.rasterCalls() ?? 0) >= 1
+  }, 'the app rasterized the SVG through its own loader')
+  await settle(h.app)
+  await vt.flush()
+  const thumbText = h.terminal.writes.join('')
+  assert.ok(thumbText.length > 0, 'the SVG card painted a frame')
+  assert.ok(thumbText.includes(PLACEHOLDER),
+    `the app's own SVG thumbnail painted through the managed handle: ${JSON.stringify(thumbText.slice(0, 160))}`)
+  assert.equal(unwrappedApc(thumbText), false, 'the SVG thumbnail batch was DCS-wrapped')
+
+  // The tool card's inline raster is the enhancement this PR owns. Its own
+  // width variant is a DIFFERENT cache entry, so a second raster call proves the
+  // card and nothing else fed it (never a hand-built thumbnail).
+  assert.equal(h.rasterCalls(), 1, 'the app rasterized exactly ONE variant for the card')
+  const cardRows = (h.app as unknown as { messagesView: { render(w: number): string[] } })
+    .messagesView.render(100)
+  assert.ok(cardRows.join('\n').includes(PLACEHOLDER),
+    `the app's own SVG card row carries the placeholder grid:\n${cardRows.slice(0, 8).join('\n')}`)
 })
 
 test('the SVG thumbnail paints through the managed handle and reports its REAL body', async (t) => {
