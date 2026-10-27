@@ -51,8 +51,8 @@ Consequences that are part of the contract:
 `Backend` is an assembly of narrow domain ports (`subagent`, `sessionReader`,
 `pendingInputReader`, `sessionWriter`, `sessionLifecycle`, `interaction`,
 `catalog`, `config`, `hostFile`, `sessionArchive`, `hostCommand`,
-`pluginManager`, `jobObservation`, `hostUserShell`), never a `TuiBackend` god
-object. A port exposes detached semantic facts, opaque identities/request ids,
+`pluginManager`, `jobObservation`, `hostUserShell`, `deliveredFileRead`), never a
+`TuiBackend` god object. A port exposes detached semantic facts, opaque identities/request ids,
 event surfaces (for example authorization: begin → attemptId → notice/prompt →
 respond/cancel) and semantic operations. It owns no Host database, state machine
 or transport.
@@ -122,6 +122,42 @@ call, no Direct factory, no user selector),
 `test/runtime/remote/remote-session-writer.test.ts` (post-dispatch generation replacement is
 indeterminate, never replayed), `test/runtime/remote/remote-client-runtime.test.ts` (one
 materialized generation and binding identity).
+
+## Delivered-file read (Host-owned)
+
+The delivered-files PREVIEW reads file content, so it is Host-owned, not
+Client-local:
+
+| Fact | Authority |
+| --- | --- |
+| Locality | Host-owned (the file lives in the Host workspace) |
+| Semantic port | `DeliveredFileReadPort` — `stat(sessionId, path)` and `read(sessionId, path, offset, limit)` |
+| Direct adapter | `runtime/direct/deliverables-direct.ts` over the in-process official Host file service |
+| Remote adapter | `runtime/remote/deliverables-remote.ts` over the official generated `workspaceFiles` namespace |
+| Host service | `@deepseek-ai/dsh-api-workspace-files` (`workspaceFiles`), mounted ONCE by the bundle's `cordis.patch.yml` row and reused by the Remote Host graph |
+| Wire story | the official `workspaceFiles/stat` and `workspaceFiles/read` Remotes — no TUI-specific RPC, DTO or transport state |
+
+Path facts: the DECLARED path is whatever the Session's durable
+`deliverables/presented` event recorded — a Host path string, resolved by the
+Host (`absolute`, or relative to the Session's header workspace root). The
+Client never resolves it against its own cwd, never opens it locally, and never
+falls back to the Client filesystem when the Host cannot answer. The preview is
+read-only: there is no write, open, reveal or download capability here.
+
+Session scope is derived by the Host from the Session identity, not chosen by the
+Client. Direct resolves it exactly like the official Remote lookup does — the
+live Session header, then the persisted header, then the deployment's workspace
+root — and refuses with `session-unavailable` when no header exists.
+
+Both adapters serve ONE failure vocabulary (`not-found`, `not-text`,
+`not-regular-file`, `too-large`, `session-unavailable`, `service-unavailable`)
+mapped from the official `workspace-file/*` refusals plus the generated Remote's
+`gateway/lookup-not-found` scope refusal; an unrecognized failure is rethrown so
+the surface reports an honest unknown instead of inventing a state. Remote reads
+are generation-fenced: a reply (success OR refusal) carried by a superseded
+Connection generation becomes `SupersededReadError`, never the new generation's
+definite outcome. The preview itself holds at most one 120-line page and reads no
+other file — see `transcript.md` for the panel's presentation rules.
 
 ## Currentness, operation ownership and request ids
 

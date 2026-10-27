@@ -133,6 +133,7 @@ import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder }
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { deliveredTurnsOf, type DeliveredFilesCapability, type DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
+import type { DeliveredFilePreviewCapability } from '../../runtime/deliverables-port.ts'
 import { collectPublishedVisuals, type PublishedVisual } from '../../domain/visual/publication.ts'
 import {
   clearAssistantVisualPresentation,
@@ -471,6 +472,16 @@ export interface SurfaceMountDeps {
    * so the mounted renderer can never re-derive "the current session" itself.
    */
   readonly deliveredFiles: DeliveredFilesCapability
+  /**
+   * Delivered files PR2: the Host READ capability resolver, called once per
+   * browser open. It returns a capability already BOUND to the snapshot's
+   * display subject, or `undefined` when this assembly has no Host read.
+   */
+  readonly deliveredFilePreview?: (
+    snapshot: DeliveredFilesSnapshot,
+  ) => DeliveredFilePreviewCapability | undefined
+  /** Report one UNCLASSIFIED preview failure to the runner diagnostics. */
+  readonly reportDeliveredFileFailure?: (message: string, error: unknown) => void
   /** Headless-test seam (M3-4 PR3 image L6): the runner's live image draft
    * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
    * paths never read it. */
@@ -2094,6 +2105,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // intent and share ONE clipboard policy owned by the runner.
     copySelection: deps.copySelection,
     deliveredFiles: deps.deliveredFiles,
+    deliveredFilePreview: deps.deliveredFilePreview,
+    onDeliveredFileDiagnostic: deps.reportDeliveredFileFailure,
     draftImageStoreForTest: deps.draftImageStoreForTest,
     draftImagePreviewSource: deps.draftImagePreviewSource,
     draftImagePreviewLiveDraft: deps.draftImagePreviewLiveDraft,

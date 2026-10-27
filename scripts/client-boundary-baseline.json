@@ -78,6 +78,11 @@
     "permissionPresets",
     "settings"
   ],
+  "runtime/direct/deliverables-direct.ts": [
+    "sandboxPolicy",
+    "sessionPersistence",
+    "sessions"
+  ],
   "runtime/direct/host-command-direct.ts": [
     "commands"
   ],

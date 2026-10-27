@@ -219,7 +219,11 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     availability: { supported: true, policies: ['bypass'] },
     execute: async () => ({ kind: 'unavailable', reason: { reason: 'policy-unavailable', message: 'stub' } }),
   }
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell)
+  const deliveredFileRead: import('../../src/runtime/deliverables-port.ts').DeliveredFileReadPort = {
+    stat: async () => ({ version: 'v1' }),
+    read: async () => ({ stat: { version: 'v1' }, offset: 1, limit: 1, text: '', lines: 0, eof: true }),
+  }
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)

@@ -9,6 +9,20 @@
 
 ### 新增
 
+- **`/deliverables` 的 Details 页现在会真实读取并预览 Host 文本文件，且明确区分“读不到”的各种原因。**
+  `Enter Preview` 先向 Host 取实时 metadata（不再把交付声明当成快照），随后只读取一页 120 行的
+  UTF-8 文本；内容按等宽纯文本原样显示（保留 Markdown 源码，不做不完整的富文本重排，源码不丢行、
+  也不会有原始 ANSI/OSC 注入）。已知二进制/文档后缀只显示 metadata 与
+  `Preview unavailable for this file type`，不读取任何字节；`↑↓` 滚动当前页，`PgDn`/`PgUp`
+  在本页未到边界时只滚 viewport（`PgDn` 仅在未到文件尾、`PgUp` 仅在非第一页时才请求相邻 120 行），
+  到边界才请求相邻页，不预取、不聚合成整本文件。Host 上文件在两页之间变化时丢弃旧页并重新从
+  metadata + 第 1 行开始，提示 `File changed; preview restarted`，绝不拼接不同版本；空页 + EOF 显示
+  `(end of file)`。文件已删除、非 UTF-8、不再是普通文件、页面超过 Host 读取上限、Session scope
+  不可用、Host 预览服务不可用各有固定、可理解的提示，并始终保留 `Shift+C Copy path` 与返回；
+  无法归类的原因显示 `Unable to preview file` 并写入诊断，不会被伪装成成功。切换文件/轮次、离开
+  该页或退出面板都会撤销进行中的读取，过期回复不会再画到界面上。`C` 复制的仍是原始 Host 路径字符串。
+  Direct 与 experimental Remote 走同一个只读语义端口（Remote 用官方 `workspaceFiles` 生成 Remote），
+  不提供本地文件系统回退、不新增 TUI 专用 RPC，也没有图片/PDF/native 打开或下载能力。
 - **Settings 的 `Extensions` 现在是按插件分组的真实动态设置页。**
   每个 TUI 扩展通过 `registerSetting` 贡献的设置都会以真实条目出现在
   `Settings → Extensions`，并按注册 owner 自动分组分页：一次只显示一个插件的设置，

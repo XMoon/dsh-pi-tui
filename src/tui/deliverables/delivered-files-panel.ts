@@ -1,5 +1,5 @@
 /**
- * Delivered files browser (Delivered files PR1 / M5): the ONE presentation
+ * Delivered files browser (Delivered files PR1 M5 + PR2 preview): the ONE presentation
  * owner of the delivered-files overlay. Files / Turns / Details are pages of a
  * single component behind a single `OverlayBroker` lease — switching a page
  * never mounts a second overlay, so Esc can never peel two layers.
@@ -11,8 +11,12 @@
  * painted rows/columns, so a resize or a stale frame can never resolve a click
  * against geometry the user is not looking at.
  *
- * PR1 reads NO file content: the Details page shows the DECLARED Host path and
- * description only, and Copy copies that raw declared path string.
+ * The Details page also owns the ONE read-only PREVIEW (Delivered files PR2):
+ * the declared Host path/description plus a bounded page of the file's text,
+ * read through {@link DeliveredFilePreviewCapability}. The preview holds AT MOST
+ * one page, starts with a real `stat`, refuses known binary suffixes without a
+ * read, and never paints a reply whose request identity is no longer its own.
+ * Copy always sends the RAW declared path.
  * @module @xmoon76/dsh-pi-tui/tui/deliverables/delivered-files-panel
  */
 
@@ -29,6 +33,15 @@ import {
   type DeliveredFilesSnapshot,
 } from '../../domain/deliverables/catalog.ts'
 import type { PresentedFilePresentation } from '../../domain/transcript/types.ts'
+import {
+  DeliveredFileReadError,
+  type DeliveredFilePage,
+  type DeliveredFilePreviewCapability,
+  type DeliveredFileReadFailureCode,
+  type DeliveredFileStat,
+} from '../../runtime/deliverables-port.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
+import { isCancellation } from '../../runtime/process/tasks.ts'
 
 /** The pages of the ONE managed overlay. */
 export type DeliveredFilesPage = 'files' | 'turns' | 'details'
@@ -41,6 +54,15 @@ export interface DeliveredFilesOpenIntent {
   readonly path?: string
   readonly page?: 'files' | 'details'
 }
+
+/** One preview load state (Delivered files PR2 §7.7). */
+export type DeliveredFilesPreviewState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'loading-stat' }
+  | { readonly kind: 'metadata'; readonly stat: DeliveredFileStat; readonly reason: 'unsupported-type' }
+  | { readonly kind: 'loading-page'; readonly stat: DeliveredFileStat; readonly offset: number }
+  | { readonly kind: 'text-page'; readonly page: DeliveredFilePage; readonly nextOffset: number }
+  | { readonly kind: 'failure'; readonly code: DeliveredFileReadFailureCode | undefined; readonly stat?: DeliveredFileStat }
 
 export interface DeliveredFilesPanelOptions {
   /** The catalog captured by the application owner at open time. */
@@ -56,10 +78,61 @@ export interface DeliveredFilesPanelOptions {
    * renders that outcome (never a fabricated success).
    */
   readonly copyPath: (path: string, settle: (ok: boolean) => void) => void
+  /**
+   * Delivered files PR2: the Host read capability for the Details preview,
+   * bound to this snapshot's subject. Absent means this mount has no Host read
+   * at all — the preview then paints the definite unavailable state.
+   */
+  readonly preview?: DeliveredFilePreviewCapability
+  /**
+   * Report an UNCLASSIFIED preview failure to the host diagnostics (the panel
+   * still paints the generic `Unable to preview file`). Optional.
+   */
+  readonly reportUnclassifiedFailure?: (message: string, error: unknown) => void
+  /**
+   * Whether this surface really routes pointer events to the panel. PiTui
+   * enables terminal mouse reporting ONLY on the fullscreen alt screen, so a
+   * per-row `Details` verb painted on the regular surface would be a dead
+   * affordance — the panel paints (and hit-tests) it only when this is true.
+   * Keyboard selection + `Enter Preview` stays available either way.
+   */
+  readonly pointerActions?: boolean
+  /**
+   * The owned-task runner the host wires (`runOwned`). Every preview request is
+   * an owned async workflow — never a bare `void promise` — so its failure is
+   * reported through the host's diagnostics instead of escaping.
+   */
+  readonly runOwned?: (label: string, task: () => Promise<void>) => void
 }
 
 /** The per-file `Details` verb needs a distinguishable filename beside it. */
 const DETAILS_VERB = 'Details'
+/** One preview page: the plan's fixed 120-line window. */
+const PREVIEW_PAGE_LINES = 120
+/** Declared files with these suffixes are never read: metadata only. */
+const PREVIEW_BINARY_SUFFIXES = [
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf', '.zip', '.gz', '.tar', '.7z',
+  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+] as const
+
+/** The FIXED user-facing text of one preview refusal (never re-invented). */
+function previewFailureText(code: DeliveredFileReadFailureCode | undefined): string {
+  switch (code) {
+    case 'not-found': return 'File no longer exists on Host'
+    case 'not-text': return 'Not a UTF-8 text file'
+    case 'not-regular-file': return 'File is no longer a regular file'
+    case 'too-large': return 'Text page exceeds Host read limit'
+    case 'session-unavailable': return 'Session file scope is unavailable'
+    case 'service-unavailable': return 'Host file preview is unavailable'
+    default: return 'Unable to preview file'
+  }
+}
+
+/** Whether a declared path names a known binary/opaque type (no read). */
+function isPreviewBinary(path: string): boolean {
+  const lower = deliveredFileBasename(path).toLowerCase()
+  return PREVIEW_BINARY_SUFFIXES.some(suffix => lower.endsWith(suffix))
+}
 const ACTION_COLUMN_MIN_WIDTH = 44
 /** The filter row is chrome: a short screen drops it (the `/` seat stays
  * reachable and paints the row while it owns the keyboard). */
@@ -117,7 +190,7 @@ function wrapPlainText(text: string, width: number): string[] {
  * a declared path is IDENTITY, so its safe projection must re-assemble exactly.
  * The break therefore happens between characters and nothing is removed.
  */
-function wrapPathText(text: string, width: number): string[] {
+function wrapPreservingText(text: string, width: number): string[] {
   const limit = Math.max(1, Math.floor(width))
   const lines: string[] = []
   // A declared path is a raw string: the safe projection KEEPS a line feed, and
@@ -156,6 +229,10 @@ export class DeliveredFilesPanel implements Component {
   private readonly requestRender: () => void
   private readonly close: () => void
   private readonly copyPath: (path: string, settle: (ok: boolean) => void) => void
+  private readonly previewCapability: DeliveredFilePreviewCapability | undefined
+  private readonly reportUnclassifiedFailure: ((message: string, error: unknown) => void) | undefined
+  private readonly pointerActions: boolean
+  private readonly runOwned: ((label: string, task: () => Promise<void>) => void) | undefined
   private readonly filterInput = new Input({ prompt: '' })
   private readonly labelsByTurn = new Map<number, readonly string[]>()
 
@@ -171,6 +248,17 @@ export class DeliveredFilesPanel implements Component {
   private copyState: 'idle' | 'ok' | 'failed' = 'idle'
   /** The copy request token: only the LATEST request may paint feedback. */
   private copySerial = 0
+  /** The ONE preview state of this panel (at most one page is ever held). */
+  private preview: DeliveredFilesPreviewState = { kind: 'idle' }
+  /** The request identity: only the LATEST load may paint. */
+  private previewSerial = 0
+  private previewAbort: AbortController | undefined
+  /** One-line restart/EOF notice above the preview body. */
+  private previewNotice = ''
+  /** The metadata already obtained for the current subject (failure context). */
+  private previewStat: DeliveredFileStat | undefined
+  /** One-shot: the next paint scrolls the body to the preview content. */
+  private previewScrollToContent = false
   private maxRows = 20
   private disposed = false
 
@@ -192,6 +280,10 @@ export class DeliveredFilesPanel implements Component {
     this.requestRender = options.requestRender
     this.close = options.close
     this.copyPath = options.copyPath
+    this.previewCapability = options.preview
+    this.reportUnclassifiedFailure = options.reportUnclassifiedFailure
+    this.pointerActions = options.pointerActions === true
+    this.runOwned = options.runOwned
     const first = this.snapshot.turns[0]
     if (first === undefined) throw new Error('the delivered-files panel requires at least one delivered turn')
     const intent = options.initial
@@ -203,6 +295,10 @@ export class DeliveredFilesPanel implements Component {
     const files = this.filesOfTurn(turn)
     this.selectedPath = fileOf(files, intent?.path)?.path ?? files[0]?.path
     this.page = intent?.page === 'details' && this.selectedFile() !== undefined ? 'details' : 'files'
+    if (this.page === 'details') {
+      const file = this.selectedFile()
+      if (file !== undefined) this.startPreview(file.path)
+    }
   }
 
   /** Adopt the granted content row budget (overlay maxHeight minus borders). */
@@ -226,6 +322,7 @@ export class DeliveredFilesPanel implements Component {
 
   dispose(): void {
     this.disposed = true
+    this.cancelPreview()
     this.paintedWidth = 0
     this.paintedRows = 0
     this.paintedListRows = new Map()
@@ -277,7 +374,7 @@ export class DeliveredFilesPanel implements Component {
    */
   private fittedLabelsFor(width: number): ReadonlyMap<string, string> {
     const files = this.currentFiles()
-    const actions = width >= ACTION_COLUMN_MIN_WIDTH
+    const actions = this.pointerActions && width >= ACTION_COLUMN_MIN_WIDTH
     const listWidth = this.twoColumn(width) ? Math.max(24, Math.floor((width - 3) * 0.58)) : width
     const listRoom = Math.max(1, listWidth - (actions ? visibleWidth(DETAILS_VERB) + 2 : 0) - 2)
     const titleRoom = Math.max(8, width - ' · Details'.length)
@@ -422,6 +519,7 @@ export class DeliveredFilesPanel implements Component {
 
   private handleDetailsInput(data: string): void {
     if (matchesKey(data, 'escape')) {
+      this.cancelPreview()
       this.page = 'files'
       this.seat = 'list'
       this.copyState = 'idle'
@@ -430,7 +528,7 @@ export class DeliveredFilesPanel implements Component {
     }
     if (DELIVERED_FILES_CHORDS.copyPath.keys.some(key => matchesKey(data, key))) return this.copySelectedPath()
     const bodyRows = this.detailsBodyRows()
-    const total = this.detailsBodyLines(this.paintedWidth === 0 ? 80 : this.paintedWidth).length
+    const total = this.detailsLayout(this.paintedWidth === 0 ? 80 : this.paintedWidth).lines.length
     if (matchesKey(data, 'up')) {
       this.detailsTop = Math.max(0, this.detailsTop - 1)
       this.requestRender()
@@ -442,13 +540,25 @@ export class DeliveredFilesPanel implements Component {
       return
     }
     if (matchesKey(data, 'pageUp')) {
-      this.detailsTop = Math.max(0, this.detailsTop - Math.max(1, bodyRows))
-      this.requestRender()
+      if (this.detailsTop > 0) {
+        this.detailsTop = Math.max(0, this.detailsTop - Math.max(1, bodyRows))
+        this.requestRender()
+        return
+      }
+      // At the top of the page: the previous 120-line window, when one exists.
+      const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
+      if (page !== undefined && page.offset > 1) this.requestPreviewPage(Math.max(1, page.offset - PREVIEW_PAGE_LINES))
       return
     }
     if (matchesKey(data, 'pageDown')) {
-      this.detailsTop = Math.min(Math.max(0, total - bodyRows), this.detailsTop + Math.max(1, bodyRows))
-      this.requestRender()
+      if (this.detailsTop + bodyRows < total) {
+        this.detailsTop = Math.min(Math.max(0, total - bodyRows), this.detailsTop + Math.max(1, bodyRows))
+        this.requestRender()
+        return
+      }
+      // At the bottom of the page: the next 120-line window, never past EOF.
+      const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
+      if (page !== undefined && !page.eof) this.requestPreviewPage(page.offset + PREVIEW_PAGE_LINES)
     }
   }
 
@@ -484,7 +594,8 @@ export class DeliveredFilesPanel implements Component {
   }
 
   private openDetails(): void {
-    if (this.selectedFile() === undefined) return
+    const file = this.selectedFile()
+    if (file === undefined) return
     this.page = 'details'
     this.seat = 'list'
     this.detailsTop = 0
@@ -492,10 +603,14 @@ export class DeliveredFilesPanel implements Component {
     // A pending clipboard settlement from an EARLIER visit is stale now: this
     // page is a new read of the file, not the old page's outcome.
     this.copySerial += 1
+    // Entering Preview: a REAL stat first. The request identity is
+    // (turn, raw path, panel epoch, serial) — the serial is the epoch.
+    this.startPreview(file.path)
     this.requestRender()
   }
 
   private openTurns(): void {
+    this.cancelPreview()
     this.page = 'turns'
     this.seat = 'list'
     this.turnCursor = this.currentTurn()
@@ -504,8 +619,10 @@ export class DeliveredFilesPanel implements Component {
   }
 
   private openFilesForTurn(turn: number): void {
-    // A Turn switch replaces the whole list: the old cells are dead.
+    // A Turn switch replaces the whole list AND its preview: the old cells are
+    // dead and no in-flight read may paint the new Turn's file.
     this.invalidatePaintedHits()
+    this.cancelPreview()
     this.turnCursor = turn
     this.page = 'files'
     this.seat = 'list'
@@ -537,10 +654,201 @@ export class DeliveredFilesPanel implements Component {
     })
   }
 
+  // ── preview (Delivered files PR2) ────────────────────────────────────────
+
+  /** Run one preview request as an OWNED workflow (never a bare `void`). */
+  private own(label: string, task: () => Promise<void>): void {
+    const runOwned = this.runOwned
+    if (runOwned !== undefined) {
+      runOwned(label, task)
+      return
+    }
+    // A mount without the runner (headless fixtures) still runs the task; its
+    // own try/catch turns every failure into a painted state, so nothing here
+    // can reject.
+    task().catch((error: unknown) => {
+      if (this.disposed) return
+      this.failPreview(error)
+    })
+  }
+
+  /** Revoke the in-flight read: nothing it returns may paint any more. */
+  private cancelPreview(): void {
+    this.previewSerial += 1
+    const controller = this.previewAbort
+    this.previewAbort = undefined
+    controller?.abort(new Error('delivered file preview superseded'))
+    this.preview = { kind: 'idle' }
+    this.previewNotice = ''
+    this.previewStat = undefined
+    this.previewScrollToContent = false
+  }
+
+  /** Enter Preview: a REAL stat first, then (unless binary) the first page. */
+  private startPreview(path: string): void {
+    this.previewNotice = ''
+    this.previewStat = undefined
+    this.detailsTop = 0
+    const capability = this.previewCapability
+    if (capability === undefined) {
+      // No Host read on this mount: a definite state, never a fake preview.
+      this.preview = { kind: 'failure', code: 'service-unavailable' }
+      this.requestRender()
+      return
+    }
+    const serial = this.beginPreviewRequest()
+    const signal = this.previewAbort!.signal
+    this.preview = { kind: 'loading-stat' }
+    this.requestRender()
+    this.own('delivered file preview', () => this.loadPreview(serial, path, signal))
+  }
+
+  /** Take the next request identity and abort the previous read. */
+  private beginPreviewRequest(): number {
+    this.previewSerial += 1
+    this.previewAbort?.abort(new Error('delivered file preview superseded'))
+    this.previewAbort = new AbortController()
+    return this.previewSerial
+  }
+
+  /** Whether a reply still owns the visible Preview (identity, page and life). */
+  private ownsPreview(serial: number): boolean {
+    return !this.disposed && serial === this.previewSerial && this.page === 'details'
+  }
+
+  private async loadPreview(serial: number, path: string, signal: AbortSignal): Promise<void> {
+    const capability = this.previewCapability
+    if (capability === undefined) return
+    try {
+      const stat = await capability.stat(path, signal)
+      if (!this.ownsPreview(serial)) return
+      this.previewStat = stat
+      if (isPreviewBinary(path)) {
+        // A known binary suffix is metadata only: no read, no bytes injected.
+        this.preview = { kind: 'metadata', stat, reason: 'unsupported-type' }
+        this.requestRender()
+        return
+      }
+      this.preview = { kind: 'loading-page', stat, offset: 1 }
+      this.requestRender()
+      const page = await capability.read(path, 1, PREVIEW_PAGE_LINES, signal)
+      if (!this.ownsPreview(serial)) return
+      this.preview = { kind: 'text-page', page, nextOffset: page.offset + PREVIEW_PAGE_LINES }
+      this.previewStat = page.stat
+      this.previewScrollToContent = true
+      this.requestRender()
+    } catch (error) {
+      if (!this.ownsPreview(serial)) return
+      this.failPreview(error)
+    }
+  }
+
+  /** Request one explicit page (PgUp/PgDn at a page edge). */
+  private requestPreviewPage(offset: number): void {
+    const file = this.selectedFile()
+    const capability = this.previewCapability
+    if (file === undefined || capability === undefined) return
+    const stat = this.previewStat
+    if (stat === undefined) return
+    this.previewNotice = ''
+    const serial = this.beginPreviewRequest()
+    const signal = this.previewAbort!.signal
+    this.preview = { kind: 'loading-page', stat, offset }
+    this.requestRender()
+    this.own('delivered file preview page', () => this.loadPage(serial, file.path, offset, signal, stat))
+  }
+
+  private async loadPage(
+    serial: number,
+    path: string,
+    offset: number,
+    signal: AbortSignal,
+    previous: DeliveredFileStat,
+  ): Promise<void> {
+    const capability = this.previewCapability
+    if (capability === undefined) return
+    try {
+      const page = await capability.read(path, offset, PREVIEW_PAGE_LINES, signal)
+      if (!this.ownsPreview(serial)) return
+      if (page.stat.version !== previous.version) {
+        // The Host file changed between pages: never splice two versions.
+        this.startPreview(path)
+        this.previewNotice = 'File changed; preview restarted'
+        this.requestRender()
+        return
+      }
+      this.preview = { kind: 'text-page', page, nextOffset: page.offset + PREVIEW_PAGE_LINES }
+      this.previewStat = page.stat
+      this.previewScrollToContent = true
+      this.requestRender()
+    } catch (error) {
+      if (!this.ownsPreview(serial)) return
+      this.failPreview(error)
+    }
+  }
+
+  /** One DEFINITE state for a refusal; an unknown failure is reported, generic. */
+  private failPreview(error: unknown): void {
+    // A superseded read and the caller's own cancellation are not states.
+    if (error instanceof SupersededReadError || isCancellation(error)) return
+    const stat = this.previewStat
+    if (error instanceof DeliveredFileReadError) {
+      this.preview = { kind: 'failure', code: error.code, ...(stat === undefined ? {} : { stat }) }
+      this.requestRender()
+      return
+    }
+    this.reportUnclassifiedFailure?.('delivered file preview', error)
+    this.preview = { kind: 'failure', code: undefined, ...(stat === undefined ? {} : { stat }) }
+    this.requestRender()
+  }
+
+  /** The preview rows of the Details body for one width. */
+  private previewLines(width: number): string[] {
+    const contentWidth = Math.max(8, Math.floor(width))
+    const lines: string[] = []
+    if (this.previewNotice !== '') lines.push(color.textDim(this.previewNotice))
+    switch (this.preview.kind) {
+      case 'idle':
+        break
+      case 'loading-stat':
+        lines.push(color.textDim('Loading…'))
+        break
+      case 'loading-page':
+        lines.push(color.textDim(`Loading lines ${this.preview.offset}…`))
+        break
+      case 'metadata': {
+        lines.push(color.textDim('Preview unavailable for this file type'))
+        if (this.preview.stat.bytes !== undefined) lines.push(color.textDim(`Size: ${this.preview.stat.bytes} bytes`))
+        break
+      }
+      case 'text-page': {
+        const page = this.preview.page
+        if (page.lines === 0) {
+          // An EOF page is a definite end, never a retry loop.
+          lines.push(color.textDim('(end of file)'))
+        } else {
+          for (const line of page.text.split('\n')) {
+            // Source lines are NEVER dropped: a long line wraps losslessly.
+            lines.push(...wrapPreservingText(sanitizeDisplayText(line), contentWidth))
+          }
+        }
+        break
+      }
+      case 'failure': {
+        lines.push(color.error(previewFailureText(this.preview.code)))
+        const stat = this.preview.stat
+        if (stat !== undefined && stat.bytes !== undefined) lines.push(color.textDim(`Size: ${stat.bytes} bytes`))
+        break
+      }
+    }
+    return lines
+  }
+
   // ── mouse ───────────────────────────────────────────────────────────────
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    if (this.disposed) return undefined
+    // Without a real pointer owner the panel never claims a cell.
+    if (this.disposed || !this.pointerActions) return undefined
     if (event.type !== 'press' && event.type !== 'click') return undefined
     if (event.button !== 'left') return undefined
     // A PRESS may only SELECT a row. Entering a page is a complete gesture:
@@ -605,15 +913,15 @@ export class DeliveredFilesPanel implements Component {
     return Math.max(1, this.maxRows - 2)
   }
 
-  private detailsBodyLines(width: number): string[] {
+  private detailsLayout(width: number): { lines: string[]; previewStart: number } {
     const file = this.selectedFile()
-    if (file === undefined) return []
+    if (file === undefined) return { lines: [], previewStart: 0 }
     const contentWidth = Math.max(8, Math.floor(width))
     const lines: string[] = []
     // The COMPLETE projected path is wrapped, never clipped: it is the identity
     // the (necessarily clamped) title cannot always show.
     const hostPrefix = 'Host: '
-    const hostChunks = wrapPathText(sanitizeDisplayText(file.path), Math.max(8, contentWidth - hostPrefix.length))
+    const hostChunks = wrapPreservingText(sanitizeDisplayText(file.path), Math.max(8, contentWidth - hostPrefix.length))
     hostChunks.forEach((chunk, index) => {
       lines.push(`${index === 0 ? color.textDim(hostPrefix) : ' '.repeat(hostPrefix.length)}${chunk}`)
     })
@@ -624,7 +932,9 @@ export class DeliveredFilesPanel implements Component {
       })
     }
     lines.push('')
-    return lines
+    const previewStart = lines.length
+    lines.push(...this.previewLines(contentWidth))
+    return { lines, previewStart }
   }
 
   // ── rendering ───────────────────────────────────────────────────────────
@@ -646,7 +956,12 @@ export class DeliveredFilesPanel implements Component {
       const title = file === undefined ? 'Details' : `${titleLabel}${titleSuffix}`
       rows.push(truncateToWidth(color.textDim(title), safeWidth, '…'))
       const bodyRows = Math.max(1, this.maxRows - 2)
-      const body = this.detailsBodyLines(safeWidth)
+      const layout = this.detailsLayout(safeWidth)
+      const body = layout.lines
+      if (this.previewScrollToContent) {
+        this.previewScrollToContent = false
+        this.detailsTop = Math.max(0, Math.min(layout.previewStart, Math.max(0, body.length - bodyRows)))
+      }
       const top = Math.min(this.detailsTop, Math.max(0, body.length - bodyRows))
       const windowed = body.slice(top, top + bodyRows)
       while (windowed.length < bodyRows) windowed.push('')
@@ -707,7 +1022,8 @@ export class DeliveredFilesPanel implements Component {
     this.listTop = listTop
     const visible = filtered.slice(listTop, listTop + area)
     const selectedIndex = this.selectedIndex()
-    const actions = safeWidth >= ACTION_COLUMN_MIN_WIDTH
+    // A verb is painted only where a pointer can really reach it.
+    const actions = this.pointerActions && safeWidth >= ACTION_COLUMN_MIN_WIDTH
 
     for (const [offset, file] of visible.entries()) {
       const index = listTop + offset
@@ -764,8 +1080,8 @@ export class DeliveredFilesPanel implements Component {
     if (file === undefined) return lines
     // The SAME fitted label the list and the Details title paint; a path wraps
     // without losing characters.
-    lines.push(...wrapPathText(fittedLabel ?? sanitizeDisplaySegment(this.labelOf(file)), width))
-    const fullPath = wrapPathText(sanitizeDisplayText(file.path), width)
+    lines.push(...wrapPreservingText(fittedLabel ?? sanitizeDisplaySegment(this.labelOf(file)), width))
+    const fullPath = wrapPreservingText(sanitizeDisplayText(file.path), width)
     lines.push(...fullPath.map(line => color.textDim(line)))
     if (file.description !== undefined && file.description !== '') {
       lines.push(...wrapPlainText(sanitizeDisplayText(file.description), width).map(line => color.textDim(line)))
@@ -773,8 +1089,9 @@ export class DeliveredFilesPanel implements Component {
       lines.push(...wrapPlainText('No description', width).map(line => color.textDim(line)))
     }
     lines.push('')
-    lines.push(color.primary('Enter for Details'))
-    lines.push(color.textDim('No Host read in PR1'))
+    lines.push(color.primary('Enter for Preview'))
+    // The Files page itself never reads the Host: the preview belongs to the
+    // Details page, and selecting a row here must not trigger a `stat`/`read`.
     return lines.slice(0, rows)
   }
 
@@ -824,7 +1141,7 @@ export class DeliveredFilesPanel implements Component {
     }
     return {
       select: '↑↓ Select',
-      enter: 'Enter Details',
+      enter: 'Enter Preview',
       filter: '/ Filter',
       turns: `${DELIVERED_FILES_CHORDS.turns.label} Turns`,
       esc: 'Esc Close',

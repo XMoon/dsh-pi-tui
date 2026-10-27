@@ -709,6 +709,8 @@ test('a painted OSC 8 link wins over the delivered tail action (URL first, no ov
       'the delivered action still opens its page from its own painted cells')
     app.stop()
   } finally {
-    setCapabilityOverrides({ hyperlinks: false })
+    // Restore AUTO-DETECTION, not a forced `false`: an override would leak into
+    // every other test in this process and silently disable OSC 8 painting.
+    setCapabilityOverrides({})
   }
 })

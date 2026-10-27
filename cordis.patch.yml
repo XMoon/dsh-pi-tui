@@ -36,6 +36,18 @@
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
 
+    # Workspace file service (the OFFICIAL `@deepseek-ai/dsh-api-workspace-files`):
+    # the ONE Host owner of the `workspaceFiles` Remote namespace the delivered-
+    # files preview reads through — bounded `stat`/`read` under the Session's
+    # header-derived workspace scope, with the composed filesystem's own read
+    # access. Mounted here because dsh-base does not ship it; the row is
+    # registered EXACTLY ONCE per Host graph and reused by the in-process Remote
+    # Host (never remounted by a Client). Gated on `tuiStartup`, so
+    # `dsh --profile pi-tui --help` still mounts no Host file surface.
+    - id: workspace-files
+      name: '@deepseek-ai/dsh-api-workspace-files'
+      inject: [tuiStartup]
+
     # Visual tools: three Host tool definitions — the two generators
     # (`dsh_pi_tui_chart`, `dsh_pi_tui_svg`) and the publication tool
     # (`present_visual`) — on the official `ctx.tools` registry. The row owns the

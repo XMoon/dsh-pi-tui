@@ -135,6 +135,7 @@ import {
   DeliveredFilesPanel,
   type DeliveredFilesOpenIntent,
 } from './tui/deliverables/delivered-files-panel.ts'
+import type { DeliveredFilePreviewCapability } from './runtime/deliverables-port.ts'
 import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
@@ -2093,6 +2094,18 @@ export interface TuiAppOptions {
    */
   deliveredFiles?: DeliveredFilesCapability
   /**
+   * Delivered files PR2: the Host READ capability for the Details preview,
+   * already bound to one display subject. The app passes it through to the ONE
+   * browser panel; absent, the preview paints the definite unavailable state.
+   */
+  deliveredFilePreview?: (snapshot: DeliveredFilesSnapshot) => DeliveredFilePreviewCapability | undefined
+  /**
+   * Delivered files PR2: the surface diagnostic sink for an UNCLASSIFIED preview
+   * failure (the panel still paints the generic readable state). Absent leaves
+   * the failure unlogged — the app never invents a log route of its own.
+   */
+  onDeliveredFileDiagnostic?: (message: string, error: unknown) => void
+  /**
    * The keyboard exit-confirmation window in ms (issue #8);
    * injectable so headless tests never wait the real 1.5s. The footer
    * hint's lifetime is EXACTLY this window — the two share one timer.
@@ -3722,6 +3735,11 @@ export class TuiApp {
   private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
   /** Delivered files (PR1): the injected read capability, if any. */
   private readonly deliveredFiles: DeliveredFilesCapability | undefined
+  /** The Host preview read capability resolver (PR2), if any. */
+  private readonly deliveredFilePreview:
+    | ((snapshot: DeliveredFilesSnapshot) => DeliveredFilePreviewCapability | undefined)
+    | undefined
+  private readonly onDeliveredFileDiagnostic: ((message: string, error: unknown) => void) | undefined
   /** The ONE live delivered-files overlay lease (PR1): a repeated open reuses
    *  it instead of mounting a second overlay. */
   private deliveredFilesOverlay: OverlayHandle | undefined
@@ -4437,6 +4455,8 @@ export class TuiApp {
     this.editorRegistry = options.editorRegistry
     this.copySelection = options.copySelection
     this.deliveredFiles = options.deliveredFiles
+    this.deliveredFilePreview = options.deliveredFilePreview
+    this.onDeliveredFileDiagnostic = options.onDeliveredFileDiagnostic
     this.openExternalUrl = options.openExternalUrl
     this.readClipboardText = options.readClipboardText
     this.overlayBroker = new OverlayBroker({
@@ -18433,6 +18453,15 @@ export class TuiApp {
     result.addChild(new Text('', 0, 0))
     result.addChild(new DeliveredFilesComponent(message.deliverables, expanded, {
       pointerActions: this.deliveredFilesPointerOwned(),
+      // The ONE owned-task entry (AGENTS.md): a preview request is an owned
+      // workflow, so a failure reaches diagnostics instead of escaping.
+      ...(this.events.runOwned === undefined
+        ? {}
+        : {
+            runOwned: (label: string, task: () => Promise<void>) => {
+              this.events.runOwned!(label, () => task(), {})
+            },
+          }),
       // A surface without the injected browser capability has no executable
       // `/deliverables` entry, so the tail must not advertise one.
       commandEntry: this.deliveredFilesEntryAvailable(),
@@ -23470,12 +23499,20 @@ export class TuiApp {
       this.deliveredFilesOverlay?.focus()
       return
     }
+    const preview = this.deliveredFilePreview?.(snapshot)
     const panel = new DeliveredFilesPanel({
       snapshot,
       ...(intent === undefined ? {} : { initial: intent }),
       requestRender: () => this.requestRender(),
       close: () => this.closeDeliveredFiles(),
       copyPath: (path, settle) => this.copyDeliveredFilePath(snapshot, path, settle),
+      // Delivered files PR2: the Host read capability BOUND to this snapshot's
+      // subject, resolved once per open. The panel never chooses a Session.
+      ...(preview === undefined ? {} : { preview }),
+      // A per-row verb is painted only where a pointer can reach it: PiTui
+      // enables terminal mouse reporting on the fullscreen alt screen alone.
+      pointerActions: this.deliveredFilesPointerOwned(),
+      reportUnclassifiedFailure: (message, error) => this.deliverablePreviewFailure(message, error),
     })
     const frame = this.createDeliveredFilesFrame(panel)
     const size = this.deliveredFilesOverlaySize()
@@ -23531,6 +23568,11 @@ export class TuiApp {
       return
     }
     this.deliveredFilesOverlay = handle
+  }
+
+  /** Report one UNCLASSIFIED preview failure to the surface diagnostics. */
+  private deliverablePreviewFailure(message: string, error: unknown): void {
+    this.onDeliveredFileDiagnostic?.(message, error)
   }
 
   /** Close the live delivered-files browser (idempotent). The lease identity is

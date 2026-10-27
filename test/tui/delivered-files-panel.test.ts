@@ -13,7 +13,16 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { DeliveredFilesSnapshot } from '../../src/domain/deliverables/catalog.ts'
-import { DeliveredFilesPanel } from '../../src/tui/deliverables/delivered-files-panel.ts'
+import {
+  DeliveredFilesPanel,
+  type DeliveredFilesPreviewState,
+} from '../../src/tui/deliverables/delivered-files-panel.ts'
+import {
+  DeliveredFileReadError,
+  type DeliveredFilePage,
+  type DeliveredFileReadFailureCode,
+  type DeliveredFileStat,
+} from '../../src/runtime/deliverables-port.ts'
 
 /** Friendly key names → the real terminal bytes the component matches. */
 const KEY = {
@@ -55,6 +64,9 @@ function harness(
   const panel = new DeliveredFilesPanel({
     snapshot,
     ...(options.initial === undefined ? {} : { initial: options.initial }),
+    // These fixtures exercise the POINTER geometry, so they opt in explicitly
+    // (the production regular surface paints no verb).
+    pointerActions: true,
     requestRender: () => { renderCount += 1 },
     close: () => { closeCount += 1 },
     copyPath: (path, settle) => {
@@ -318,8 +330,8 @@ test('a short screen hides the filter chrome but `/` still opens the query row',
   assert.ok(filtered.some(row => row.includes('Filter: r')))
 })
 
-test('a wide pane shows the declared metadata without any Host read', () => {
-  const h = harness(snapshotOf([{
+test('a wide pane shows the declared metadata and never reads the Host', () => {
+  const h = previewHarness(snapshotOf([{
     turn: 2,
     files: [{ path: '/ws/docs/report.md', description: 'Final analysis report' }],
   }]))
@@ -328,7 +340,12 @@ test('a wide pane shows the declared metadata without any Host read', () => {
   const text = rows.join('\n')
   assert.ok(text.includes('/ws/docs/report.md'), text)
   assert.ok(text.includes('Final analysis report'), text)
-  assert.ok(text.includes('No Host read in PR1'), 'PR1 never claims a preview')
+  assert.ok(text.includes('Enter for Preview'), 'the side pane names the real next step')
+  // Selecting rows on the Files page never touches the Host.
+  h.type('down')
+  h.rows()
+  assert.equal(h.statCalls(), 0, 'the Files page issues no Host stat')
+  assert.deepEqual(h.readCalls(), [], 'the Files page issues no Host read')
 })
 
 test('a list click SELECTS and only the painted Details verb opens the page', () => {
@@ -796,4 +813,251 @@ test('PageUp walks back through the list instead of sticking (every step repaint
   pageDown()
   const after = files.findIndex(file => file.endsWith(`/${marked(paint())}`))
   assert.ok(after > before, `PageDown moved forward again: ${before} -> ${after}`)
+})
+
+// ── Delivered files PR2: the Details PREVIEW ─────────────────────────────
+
+interface PreviewHarness extends Harness {
+  readonly statCalls: () => number
+  readonly readCalls: () => readonly { offset: number; limit: number }[]
+  readonly diagnostics: () => readonly string[]
+  readonly resolveStat: (stat: DeliveredFileStat) => void
+  readonly rejectStat: (error: unknown) => void
+  readonly resolveRead: (page: DeliveredFilePage) => void
+  readonly rejectRead: (error: unknown) => void
+  readonly preview: () => DeliveredFilesPreviewState
+}
+
+/** A real panel over a snapshot with a CONTROLLABLE Host read. */
+function previewHarness(
+  snapshot: DeliveredFilesSnapshot,
+  options: {
+    initial?: { turn?: number; path?: string; page?: 'files' | 'details' }
+    preview?: boolean
+    autoResolve?: DeliveredFilePage
+    pointerActions?: boolean
+  } = {},
+): PreviewHarness {
+  let renderCount = 0
+  let statCount = 0
+  const readCalls: { offset: number; limit: number }[] = []
+  const diagnostics: string[] = []
+  const pendingStats: Array<{ resolve(stat: DeliveredFileStat): void; reject(error: unknown): void }> = []
+  const pendingReads: Array<{ resolve(page: DeliveredFilePage): void; reject(error: unknown): void }> = []
+  const panel = new DeliveredFilesPanel({
+    snapshot,
+    ...(options.initial === undefined ? {} : { initial: options.initial }),
+    pointerActions: options.pointerActions === true,
+    requestRender: () => { renderCount += 1 },
+    close: () => {},
+    copyPath: (_path, settle) => settle(true),
+    ...(options.preview === false ? {} : {
+      preview: {
+        stat: (_path, _signal) => {
+          statCount += 1
+          if (options.autoResolve !== undefined) {
+            return Promise.resolve(options.autoResolve.stat)
+          }
+          return new Promise<DeliveredFileStat>((resolve, reject) => { pendingStats.push({ resolve, reject }) })
+        },
+        read: (path, offset, limit, _signal) => {
+          readCalls.push({ offset, limit })
+          if (options.autoResolve !== undefined) {
+            return Promise.resolve({ ...options.autoResolve, offset, limit, text: options.autoResolve.text })
+          }
+          void path
+          return new Promise<DeliveredFilePage>((resolve, reject) => { pendingReads.push({ resolve, reject }) })
+        },
+      },
+    }),
+    reportUnclassifiedFailure: (message) => { diagnostics.push(message) },
+  })
+  // Honor `setSize` exactly like the plain harness: the production chain grants
+  // `min(24, rows - 2) - 2` content rows and the frame renders `columns - 4`.
+  let width = 100
+  let height = 30
+  const paint = (): readonly string[] => {
+    const maxHeight = Math.min(24, Math.max(1, height - 2))
+    panel.setMaxRows(Math.max(1, maxHeight - 2))
+    return panel.render(width - 4)
+  }
+  return {
+    panel,
+    rows: () => paint().map(row => stripTerminalSequences(row)),
+    renders: () => renderCount,
+    closes: () => 0,
+    copied: () => [],
+    settleCopy: () => {},
+    setSize: (columns, rows) => { width = columns; height = rows },
+    paint,
+    type: (data) => panel.handleInput(KEY[data as keyof typeof KEY] ?? data),
+    statCalls: () => statCount,
+    readCalls: () => readCalls,
+    diagnostics: () => diagnostics,
+    resolveStat: (stat) => { pendingStats.shift()?.resolve(stat) },
+    rejectStat: (error) => { pendingStats.shift()?.reject(error) },
+    resolveRead: (page) => { pendingReads.shift()?.resolve(page) },
+    rejectRead: (error) => { pendingReads.shift()?.reject(error) },
+    preview: () => (panel as unknown as { preview: DeliveredFilesPreviewState }).preview,
+  }
+}
+
+const settlePreview = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0))
+
+test('Enter Preview stats first, then reads exactly ONE 120-line page', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]))
+  h.type('enter')
+  assert.equal(h.preview().kind, 'loading-stat', 'the FIRST Host call is the stat')
+  assert.deepEqual(h.readCalls(), [], 'nothing is read before the metadata lands')
+  assert.ok(h.rows().some(row => row.includes('Loading…')))
+
+  h.resolveStat({ version: 'v1', bytes: 42 })
+  await settlePreview()
+  assert.deepEqual(h.readCalls(), [{ offset: 1, limit: 120 }], 'one page, the fixed window')
+  assert.equal(h.preview().kind, 'loading-page')
+
+  h.resolveRead({
+    stat: { version: 'v1', bytes: 42 }, offset: 1, limit: 120,
+    text: 'first line\nsecond line', lines: 2, eof: false,
+  })
+  await settlePreview()
+  const rows = h.rows().join('\n')
+  assert.ok(rows.includes('first line') && rows.includes('second line'), rows)
+  assert.ok(rows.includes('/ws/report.md'), 'the declared Host path stays visible')
+})
+
+test('a known binary suffix shows metadata only and never reads', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/chart.png'] }]))
+  h.type('enter')
+  h.resolveStat({ version: 'v1', bytes: 900 })
+  await settlePreview()
+  assert.deepEqual(h.readCalls(), [], 'no bytes are read for a binary suffix')
+  const rows = h.rows().join('\n')
+  assert.ok(rows.includes('Preview unavailable for this file type'), rows)
+  assert.ok(rows.includes('Size: 900 bytes'), rows)
+})
+
+test('every refusal paints its FIXED text and keeps the copy affordance', async () => {
+  const cases: readonly [DeliveredFileReadFailureCode, string][] = [
+    ['not-found', 'File no longer exists on Host'],
+    ['not-text', 'Not a UTF-8 text file'],
+    ['not-regular-file', 'File is no longer a regular file'],
+    ['too-large', 'Text page exceeds Host read limit'],
+    ['session-unavailable', 'Session file scope is unavailable'],
+    ['service-unavailable', 'Host file preview is unavailable'],
+  ]
+  for (const [code, text] of cases) {
+    const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]))
+    h.type('enter')
+    h.rejectStat(new DeliveredFileReadError(code, 'refused'))
+    await settlePreview()
+    const rows = h.rows().join('\n')
+    assert.ok(rows.includes(text), `${code}: ${rows}`)
+    assert.ok(rows.includes('Shift+C Copy path'), `${code}: Copy stays available`)
+    assert.equal(h.diagnostics().length, 0, `${code}: a classified refusal is not a diagnostic`)
+  }
+})
+
+test('an unclassified failure is generic AND reported to diagnostics', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]))
+  h.type('enter')
+  h.rejectStat(new Error('weird transport'))
+  await settlePreview()
+  assert.ok(h.rows().join('\n').includes('Unable to preview file'))
+  assert.deepEqual(h.diagnostics(), ['delivered file preview'], 'the cause reaches the diagnostic sink')
+})
+
+test('a superseded request never paints over the newer one', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/a.md', '/ws/b.md'] }]))
+  h.type('enter')
+  // Switch to the second file before the first stat lands: the FIRST reply must
+  // be dropped (it no longer owns the page).
+  h.type('esc')
+  h.type('down')
+  h.type('enter')
+  h.resolveStat({ version: 'stale', bytes: 1 })
+  await settlePreview()
+  assert.equal(h.preview().kind, 'loading-stat',
+    'the stale reply never becomes the state (only the CURRENT stat may paint)')
+  assert.deepEqual(h.readCalls(), [], 'a stale metadata reply cannot start a read')
+})
+
+test('a changed version restarts the preview instead of splicing pages', async () => {
+  const snapshot = snapshotOf([{ turn: 1, files: ['/ws/long.md'] }])
+  const h = previewHarness(snapshot)
+  h.type('enter')
+  h.resolveStat({ version: 'v1', bytes: 10 })
+  await settlePreview()
+  h.resolveRead({ stat: { version: 'v1', bytes: 10 }, offset: 1, limit: 120, text: 'one', lines: 1, eof: false })
+  await settlePreview()
+  // Ask for the next page; the Host reports a NEW version for it.
+  h.type('pageDown')
+  h.type('pageDown')
+  assert.deepEqual(h.readCalls().at(-1), { offset: 121, limit: 120 })
+  h.resolveRead({ stat: { version: 'v2', bytes: 12 }, offset: 121, limit: 120, text: 'two', lines: 1, eof: true })
+  await settlePreview()
+  const rows = h.rows().join('\n')
+  assert.ok(rows.includes('File changed; preview restarted'), rows)
+  assert.ok(!rows.includes('two'), 'the other version is never spliced in')
+})
+
+test('an EOF page is a definite end, never a retry loop', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/short.md'] }]))
+  h.type('enter')
+  h.resolveStat({ version: 'v1' })
+  await settlePreview()
+  h.resolveRead({ stat: { version: 'v1' }, offset: 1, limit: 120, text: '', lines: 0, eof: true })
+  await settlePreview()
+  assert.ok(h.rows().join('\n').includes('(end of file)'))
+  const reads = h.readCalls().length
+  h.type('pageDown')
+  h.type('pageDown')
+  assert.equal(h.readCalls().length, reads, 'an EOF page never requests another one')
+})
+
+test('a mount without the Host read paints the definite unavailable state', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]), { preview: false })
+  h.type('enter')
+  assert.equal(h.preview().kind, 'failure')
+  const rows = h.rows().join('\n')
+  assert.ok(rows.includes('Host file preview is unavailable'), rows)
+  assert.equal(h.statCalls(), 0)
+})
+
+test('a surface without a real pointer owner paints no dead Details verb', () => {
+  const snapshot = snapshotOf([{ turn: 1, files: ['/ws/a.md', '/ws/b.md'] }])
+  let renders = 0
+  const panel = new DeliveredFilesPanel({
+    snapshot,
+    // No `pointerActions`: exactly the regular surface, where PiTui never
+    // enables terminal mouse reporting.
+    requestRender: () => { renders += 1 },
+    close: () => {},
+    copyPath: (_path, settle) => settle(true),
+  })
+  panel.setMaxRows(22)
+  const rows = panel.render(96).map(row => stripTerminalSequences(row))
+  const text = rows.join('\n')
+  assert.ok(text.includes('a.md') && text.includes('b.md'), text)
+  assert.ok(!text.includes('Details'), `no per-row verb may be painted: ${text}`)
+  // A foreign pointer event is never claimed either.
+  const handled = panel.handleMouse({
+    type: 'click', button: 'left', x: 90, y: rows.findIndex(row => row.includes('a.md')),
+    screenX: 90, screenY: 4, width: 96, height: rows.length,
+    shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(handled, undefined, 'the panel claims nothing without a pointer owner')
+  assert.equal(panel.currentPage(), 'files')
+  void renders
+
+  // The SAME snapshot with a real pointer owner does paint the verb.
+  const pointerPanel = new DeliveredFilesPanel({
+    snapshot, pointerActions: true,
+    requestRender: () => {},
+    close: () => {},
+    copyPath: (_path, settle) => settle(true),
+  })
+  pointerPanel.setMaxRows(22)
+  const pointerRows = pointerPanel.render(96).map(row => stripTerminalSequences(row))
+  assert.ok(pointerRows.join('\n').includes('Details'), 'a fullscreen surface paints it')
 })

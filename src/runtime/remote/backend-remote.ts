@@ -35,6 +35,7 @@ import type { HostCommandPort } from '../host-command-port.ts'
 import type { PluginManagerPort } from '../plugin-manager-port.ts'
 import type { JobObservationPort } from '../job-observation-port.ts'
 import type { HostUserShellPort } from '../host-user-shell-port.ts'
+import type { DeliveredFileReadPort } from '../deliverables-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
@@ -54,6 +55,8 @@ export interface RemoteBackendParts {
   readonly hostCommand: HostCommandPort
   readonly pluginManager: PluginManagerPort
   readonly jobObservation: JobObservationPort
+  /** The official generated `workspaceFiles` read adapter (Delivered files PR2). */
+  readonly deliveredFileRead: DeliveredFileReadPort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */
