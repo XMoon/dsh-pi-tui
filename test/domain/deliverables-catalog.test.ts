@@ -268,3 +268,17 @@ test('deliveredDisplayPath treats / as a valid root and bare drives as untrusted
   assert.equal(deliveredDisplayPath('C:ws/file.md', 'C:'), 'C:ws/file.md')
   assert.equal(deliveredDisplayPath('C:/ws/file.md', 'C:/ws'), 'file.md')
 })
+
+test('deliveredDisplayPath keeps POSIX and Windows absolute domains distinct', () => {
+  // Cross-domain: a POSIX `/C:` root does not own a Windows `C:/` path.
+  assert.equal(deliveredDisplayPath('C:/ws/a.md', '/C:'), 'C:/ws/a.md')
+  // …and a Windows `C:/ws` root does not own a POSIX `/C:/ws/…` path.
+  assert.equal(deliveredDisplayPath('/C:/ws/a.md', 'C:/ws'), '/C:/ws/a.md')
+  // Same-domain controls still relativize.
+  assert.equal(deliveredDisplayPath('/C:/ws/a.md', '/C:'), 'ws/a.md')
+  assert.equal(deliveredDisplayPath('C:/ws/a.md', 'C:/'), 'ws/a.md')
+  // UNC is its own anchor, not the POSIX path with the same segments.
+  assert.equal(deliveredDisplayPath('//server/share/a.md', '//server/share'), 'a.md')
+  assert.equal(deliveredDisplayPath('/server/share/a.md', '//server/share'), '/server/share/a.md')
+  assert.equal(deliveredDisplayPath('//server/other/a.md', '//server/share'), '//server/other/a.md')
+})
