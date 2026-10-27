@@ -1001,3 +1001,33 @@ test('a revocation between the anchor write and a PUA-ONLY grid write refuses th
   assert.equal(cellsAfter, cellsBefore, 'the refused grid write emitted NO additional cell')
   assert.equal(after.slice(before.length).includes('a=p'), false, 'and no command either')
 })
+
+test('the product boundary swallows a refusal without letting the rest of the frame through', async (t) => {
+  // `TuiApp` converts `TmuxGraphicsRevokedError` into a next-tick repaint instead
+  // of crashing. The fork writer, however, keeps flushing the SAME frame; every
+  // later chunk carrying cells must still be refused by the facade. This drives
+  // the REAL product boundary with more than two physical chunks.
+  const h = product(t)
+  assert.ok(h.graphics)
+  const image = (h.graphics as unknown as {
+    image(source: unknown, options: unknown): { render(width: number): string[] }
+  }).image(
+    { pngBase64: SAMPLE_PNG.toString('base64'), widthPx: 3200, heightPx: 2400 },
+    { maxWidthCells: 150, maxHeightCells: 40, fallback: '[img]' },
+  )
+  const rows = image.render(190)
+  assert.ok(rows.length >= 6, 'fixture: the image paints enough rows to cut mid-frame')
+  h.terminal.writes.length = 0
+  h.graphics.terminal.write(rows[0]!)
+  h.graphics.terminal.write(rows[1]!)
+  const before = h.terminal.writes.join('')
+  assert.ok(before.includes('a=p'), 'the admitted head really reached the sink')
+  h.cli.setReply('list-clients', { text: '' })
+  // The first refused chunk is SWALLOWED by the product boundary (no throw).
+  h.graphics.terminal.write(rows[2]!)
+  // Later chunks of the same frame must also produce no bytes.
+  h.graphics.terminal.write(rows[3]!)
+  h.graphics.terminal.write(rows.slice(4).join('\r\n'))
+  assert.equal(h.terminal.writes.join(''), before,
+    'no cell of the refused frame reached the sink through the product boundary')
+})

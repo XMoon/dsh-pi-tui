@@ -208,6 +208,14 @@ export class KittyTerminalFacade implements Terminal {
    * happens to contain a glyph identical to a grid cell.
    */
   private managedGridRows = 0
+  /**
+   * Whether THIS synchronised frame already refused a managed batch. The app
+   * boundary converts that refusal into a forced repaint on the next tick, but
+   * the writer keeps flushing the SAME frame in the meantime: every later chunk
+   * that still carries placeholder cells is stale image bytes and must be
+   * refused too. A fresh frame clears the latch.
+   */
+  private gridFrameRefused = false
   private disposed = false
 
   constructor(inner: Terminal, core: KittyGraphicsCore, options: KittyTerminalFacadeOptions = {}) {
@@ -364,7 +372,10 @@ export class KittyTerminalFacade implements Terminal {
 
   private writeTmuxVirtual(data: string): void {
     // A synchronised frame starts a fresh text grid: no row spans frames.
-    if (data.includes('\x1b[?2026h')) this.managedGridRows = 0
+    if (data.includes('\x1b[?2026h')) {
+      this.managedGridRows = 0
+      this.gridFrameRefused = false
+    }
     const input = this.takeInput(data)
     if (input === undefined && !this.core.hasQueuedRetirements()) return
     const segments = input === undefined ? [] : this.scanSegments(input)
@@ -404,7 +415,7 @@ export class KittyTerminalFacade implements Terminal {
         // different client and no painted image is affected.
         this.core.discardQueuedRetirements()
         if (hasManagedPlacement) {
-          this.managedGridRows = 0
+          this.gridFrameRefused = true
           throw new TmuxGraphicsRevokedError()
         }
       } else {
@@ -415,7 +426,8 @@ export class KittyTerminalFacade implements Terminal {
     if (hasManagedPlacement && this.admission?.isAllowed(true) !== true) {
       // The frame's managed batch was NOT written: no placeholder cell and no
       // DCS escaped. The scan below (which mutates Core residency) never ran.
-      this.managedGridRows = 0
+      // The refused frame stays latched so its remaining chunks cannot leak.
+      this.gridFrameRefused = true
       throw new TmuxGraphicsRevokedError()
     }
     let wire = ''
@@ -531,10 +543,22 @@ export class KittyTerminalFacade implements Terminal {
    * same glyph is ordinary text and never classified.
    */
   private consumeGridText(text: string): boolean {
-    const managed = this.managedGridRows > 0 && text.includes(KITTY_VIRTUAL_PLACEHOLDER)
-    for (let index = 0; index < text.length && this.managedGridRows > 0; index += 1) {
-      if (text.charCodeAt(index) === 0x0a) this.managedGridRows -= 1
+    let managed = false
+    let start = 0
+    for (;;) {
+      // Once the row budget is exhausted the REST of the text is ordinary text,
+      // even if it contains placeholder-looking characters.
+      if (this.managedGridRows <= 0) break
+      const end = text.indexOf('\n', start)
+      const line = end === -1 ? text.slice(start) : text.slice(start, end)
+      if (line.includes(KITTY_VIRTUAL_PLACEHOLDER)) managed = true
+      if (end === -1) break
+      this.managedGridRows -= 1
+      start = end + 1
     }
+    // A frame that already refused a managed batch stays poisoned: any later
+    // placeholder cell in it is stale image bytes, however the budget moved.
+    if (this.gridFrameRefused && text.includes(KITTY_VIRTUAL_PLACEHOLDER)) managed = true
     return managed
   }
 

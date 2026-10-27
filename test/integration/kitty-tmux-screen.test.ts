@@ -1320,9 +1320,10 @@ test('tmux virtual: a revocation between writer chunks refuses every later place
       'a PUA-only managed batch must be refused once the admission is revoked')
     assert.equal(h.terminal.text, before, 'the refused grid emitted nothing at all')
 
-    // NEGATIVE CONTROL: an ordinary transcript line that happens to contain the
-    // SAME `U+10EEEE` code point must NOT be classified as a managed grid. It
-    // has no identity colors, so the revoked handle still writes it as text.
+    // NEGATIVE CONTROL: the NEXT frame is where the forced repaint paints text.
+    // A frame start clears the refused-frame latch, and an ordinary line that
+    // happens to contain the SAME `U+10EEEE` code point must be written.
+    h.graphics.terminal.write('\x1b[?2026h')
     const plain = `plain user text with ${P} inside`
     h.graphics.terminal.write(plain)
     assert.equal(h.terminal.text.endsWith(plain), true,
@@ -1370,101 +1371,71 @@ test('tmux virtual: a chunk cut INSIDE a grid row is refused as a continuation',
 })
 
 test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on revocation', (t) => {
-  // Same contract at the REAL writer boundary: build a frame larger than 1 MiB
-  // whose image starts just before the boundary, so the first physical chunk
-  // ends inside a grid row and the next chunk begins with cells but no colours.
+  // Construction, not calibration: four maximum-size grids (~370 KB each) put
+  // the fork's 1 MiB chunk boundary INSIDE one of them on any terminal, so the
+  // second physical chunk begins with placeholder cells and no colour prefix.
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   setCellDimensions({ widthPx: 9, heightPx: 18 })
   const h = harness(t)
-  h.terminal.columns = 400
+  const WIDTH = 1200
+  h.terminal.columns = WIDTH
   try {
-    const build = (sink: RecordingTerminal, fill: string[]): {
+    const build = (revokeAfterFirstWrite = false): {
+      calls: string[]
+      text: string
       graphics: NonNullable<ReturnType<typeof createTmuxKittyGraphics>>
       screen: TuiMainScreen
-      image: ReturnType<typeof imageOf>
+      thrown: unknown
     } => {
+      const sink = new RecordingTerminal()
+      sink.columns = WIDTH
       const graphics = createTmuxKittyGraphics(sink, {}, h.cli.env)
       assert.ok(graphics)
-      const image = imageOf(graphics, source(PNG, 3200, 2400), {
-        maxWidthCells: 90,
-        maxHeightCells: 40,
+      const images = Array.from({ length: 8 }, () => imageOf(graphics, source(PNG, 3200, 2400), {
+        maxWidthCells: 297,
+        maxHeightCells: 297,
         fallback: '[fallback]',
-      })
+      }))
       class Root implements Component {
-        private readonly rows = image.render(400)
-        render(width: number): string[] {
-          return [...fill, ...this.rows]
+        private readonly rows = images.flatMap(image => image.render(WIDTH))
+        render(): string[] {
+          return this.rows
         }
         invalidate(): void {
-          image.invalidate()
+          for (const image of images) image.invalidate()
         }
       }
       const screen = new TuiMainScreen(graphics.terminal)
       screen.addChild(new Root())
       screen.start()
-      return { graphics, screen, image }
-    }
-
-    // Calibrate the frame prefix with no filler, then place the image start just
-    // before the 1 MiB boundary so the cut lands inside the grid.
-    const calibSink = new RecordingTerminal()
-    calibSink.columns = 400
-    const calib = build(calibSink, [])
-    calib.screen.renderNow()
-    const calibText = calibSink.text
-    const imageStart = calibText.indexOf('\x1b_Ga=p')
-    assert.ok(imageStart > 0, 'calibration: the anchor is on the wire')
-    const imageChars = calib.image.render(400).reduce((sum, row) => sum + row.length + 2, 0)
-    calib.screen.stop()
-    calib.graphics.dispose()
-
-    // Measure what ONE filler line really contributes after the screen's own
-    // normalisation (padding/reset), so the arithmetic is not a guess.
-    const stepSink = new RecordingTerminal()
-    stepSink.columns = 400
-    const step = build(stepSink, Array.from({ length: 100 }, () => 'x'.repeat(396)))
-    step.screen.renderNow()
-    const stepStart = stepSink.text.indexOf('\x1b_Ga=p')
-    step.screen.stop()
-    step.graphics.dispose()
-    const perLine = (stepStart - imageStart) / 100
-
-    // Aim the 1 MiB boundary at the MIDDLE of the grid so the first chunk really
-    // ends inside a row.
-    const target = 1024 * 1024 - Math.floor(imageChars / 2)
-    const filler: string[] = []
-    let need = target - imageStart
-    while (need > perLine) {
-      filler.push('x'.repeat(396))
-      need -= perLine
-    }
-    if (need > 2) filler.push('x'.repeat(Math.max(1, Math.floor(need - 2))))
-
-    const real = build(h.terminal, filler)
-    const calls: string[] = []
-    const originalWrite = real.graphics.terminal.write.bind(real.graphics.terminal)
-    ;(real.graphics.terminal as { write: (data: string) => void }).write = (data: string): void => {
-      calls.push(data)
-      originalWrite(data)
-    }
-    let revoked = false
-    const originalSinkWrite = h.terminal.write.bind(h.terminal)
-    h.terminal.write = (data: string): void => {
-      originalSinkWrite(data)
-      if (!revoked) {
-        revoked = true
-        h.cli.setReply('list-clients', { text: '' })
+      const calls: string[] = []
+      const original = graphics.terminal.write.bind(graphics.terminal)
+      ;(graphics.terminal as { write: (data: string) => void }).write = (data: string): void => {
+        calls.push(data)
+        original(data)
       }
+      if (revokeAfterFirstWrite) {
+        let fired = false
+        const sinkWrite = sink.write.bind(sink)
+        sink.write = (data: string): void => {
+          sinkWrite(data)
+          if (!fired) {
+            fired = true
+            h.cli.setReply('list-clients', { text: '' })
+          }
+        }
+      }
+      let thrown: unknown
+      try {
+        screen.renderNow()
+      } catch (error) {
+        thrown = error
+      }
+      return { calls, text: sink.text, graphics, screen, thrown }
     }
-    let thrown: unknown
-    try {
-      real.screen.renderNow()
-    } catch (error) {
-      thrown = error
-    }
-    const text = h.terminal.text
-    // The split must REALLY be inside a grid row: chunk 1 ends with cells and
-    // no newline, and chunk 2 starts with cells whose line has no colours.
+
+    const real = build()
+    const calls = real.calls
     assert.ok(calls.length >= 2, `the frame must split into at least two physical writes, got ${calls.length}`)
     const first = calls[0]!
     const second = calls[1]!
@@ -1472,16 +1443,27 @@ test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on rev
     const secondHead = second.split('\n')[0]!
     assert.ok(secondHead.includes(P), 'chunk 2 begins with placeholder cells')
     assert.equal(secondHead.includes('38;2;'), false, 'chunk 2 begins WITHOUT a colour prefix')
-    assert.equal(thrown instanceof TmuxGraphicsRevokedError, true,
-      `the mid-row continuation must be refused, got ${String(thrown)}`)
-    assert.equal((text.match(new RegExp(P, 'gu')) ?? []).length,
-      (first.match(new RegExp(P, 'gu')) ?? []).length,
-      'no cell beyond the first (pre-revocation) chunk reached the sink')
     real.screen.stop()
+    real.graphics.dispose()
+
+    // Fresh screen on the SAME construction: revoke after the first write.
+    const finalRun = build(true)
+    assert.ok(finalRun.calls.length >= 2, 'the revoking run also split physically')
+    const refusedHead = finalRun.calls[0]!
+    assert.ok(refusedHead.includes(P) && !refusedHead.endsWith('\n'),
+      'the first write of the revoking run also ends inside a grid row')
+    assert.equal(finalRun.thrown instanceof TmuxGraphicsRevokedError, true,
+      `the mid-row continuation must be refused, got ${String(finalRun.thrown)}`)
+    assert.equal((finalRun.text.match(new RegExp(P, 'gu')) ?? []).length,
+      (refusedHead.match(new RegExp(P, 'gu')) ?? []).length,
+      'no cell beyond the first (pre-revocation) chunk reached the sink')
+    finalRun.screen.stop()
+    finalRun.graphics.dispose()
   } finally {
     h.dispose()
   }
 })
+
 
 test('tmux virtual: plain text that visually mimics a grid cell stays ordinary text', (t) => {
   // The grid is delimited by PROVENANCE — a Core-owned `a=p,U=1` anchor and its
@@ -1529,6 +1511,62 @@ test('tmux virtual: a chunk holding only a cell BASE is still refused as managed
     assert.throws(() => h.graphics.terminal.write(baseOnly), TmuxGraphicsRevokedError,
       'a base-only chunk inside the anchor budget must be refused')
     assert.equal(h.terminal.text, before, 'and it emitted nothing')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: chunks AFTER the first refusal in the same frame stay refused', (t) => {
+  // The app boundary turns a refusal into a next-tick repaint, but the fork
+  // writer keeps flushing the SAME frame in the meantime. Every later chunk that
+  // still carries cells belongs to the refused image and must be refused too.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 150,
+      maxHeightCells: 40,
+      fallback: '[fallback]',
+    })
+    const rows = image.render(190)
+    h.graphics.terminal.write(rows[0]!)
+    h.graphics.terminal.write(rows[1]!)
+    const before = h.terminal.text
+    h.cli.setReply('list-clients', { text: '' })
+    assert.throws(() => h.graphics.terminal.write(rows[2]!), TmuxGraphicsRevokedError,
+      'the first refused chunk')
+    assert.throws(() => h.graphics.terminal.write(rows[3]!), TmuxGraphicsRevokedError,
+      'a LATER chunk of the same frame must stay refused')
+    assert.throws(() => h.graphics.terminal.write(rows.slice(4).join('\r\n')), TmuxGraphicsRevokedError,
+      'and the frame stays refused to its end')
+    assert.equal(h.terminal.text, before, 'no cell of the refused frame reached the sink')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: ordinary text after a 1-row grid ends is NOT classified as managed', (t) => {
+  // A one-row image owes exactly one line. Once that line ends, the budget is
+  // spent: a following text line containing the placeholder codepoint belongs to
+  // the user, even on a revoked handle.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 320, 18), {
+      maxWidthCells: 20,
+      maxHeightCells: 1,
+      fallback: '[fallback]',
+    })
+    const rows = image.render(80)
+    assert.equal(rows.length, 1, 'fixture: the image really is one row tall')
+    h.graphics.terminal.write(rows[0]!)
+    h.cli.setReply('list-clients', { text: '' })
+    const line = `\r\nordinary text with ${P} inside`
+    h.graphics.terminal.write(line)
+    assert.equal(h.terminal.text.endsWith(line), true,
+      'the user line after the spent budget must still be written')
   } finally {
     h.dispose()
   }
