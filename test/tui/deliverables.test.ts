@@ -2042,10 +2042,41 @@ test('B04: a drag out of EACH of the four frame edges stays inside the content r
       assert.ok(!payload.includes('❯'), `${edge}: the editor is never copied`)
     }
     if (edge === 'top') {
-      // Clamped UP at the first content row: no row above it joins the range.
+      // Clamped UP: the drag target is above the content box, so the anchor is
+      // pinned to the FIRST content row and the range is the content rows from
+      // there DOWN TO the press row — it may not start above the box (chrome /
+      // header) and may not be shortened to start below it either.
       const rows = payload.split('\n')
-      assert.ok(rows.length <= contentBottom - contentTop + 1,
-        `${edge}: the range stops at the content box (${rows.length} rows)`)
+      // The drag moved only VERTICALLY, so the range starts at the FIRST content
+      // row and at the press COLUMN (the range's left edge is the press column).
+      const expectedFirstRow = stripTerminalSequences(lines[contentTop] ?? '')
+      const startColumn = column + 2 // the press column used above
+      const expected = expectedFirstRow.slice(startColumn, startColumn + visibleWidth(rows[0] ?? ''))
+      assert.equal(
+        rows[0],
+        expected,
+        `${edge}: the range starts at the FIRST content row (${JSON.stringify(rows[0])} vs ${JSON.stringify(expected)})`,
+      )
+      // The press row is the LAST row, clipped to the press column.
+      assert.ok(
+        rows.at(-1)!.startsWith('> a'),
+        `${edge}: the press row is the last row of the range: ${JSON.stringify(rows.at(-1))}`,
+      )
+    }
+    if (edge === 'left') {
+      // Clamped LEFT: the target is left of the content box, so the anchor side
+      // is pinned to the FIRST content column and the range runs right from it
+      // — it may not start further right (a wrongly shortened range) nor
+      // include a chrome cell.
+      const firstContentColumn = contentLeft
+      const paintedRow = stripTerminalSequences(lines[row] ?? '')
+      const expectedTail = paintedRow.slice(firstContentColumn)
+      const expectedCells = expectedTail.slice(0, visibleWidth(payload))
+      assert.equal(
+        payload,
+        expectedCells,
+        `${edge}: the range starts at the first content column (${JSON.stringify(payload)} vs ${JSON.stringify(expectedCells)})`,
+      )
     }
     app.stop()
     startedApps.delete(app)
@@ -2431,7 +2462,7 @@ test('B08: resize, close→reopen and a screen swap each retire a selection that
   }
 })
 
-test('B08: switching the selected Turn retires a selection that was LIVE', async () => {
+test('B08: switching the selected Turn really changes the list and retires a LIVE selection', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(100, 30)
   const snapshot = {
@@ -2471,16 +2502,28 @@ test('B08: switching the selected Turn retires a selection that was LIVE', async
   vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
   await vt.waitForRender()
   assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live selection before the Turn switch')
-  // `T` opens the Turns page: the painted list is replaced.
+
+  // A REAL Turn switch: `T` opens the Turns page, then the second Turn is
+  // selected with a key and COMMITTED with Enter (openFilesForTurn).
   vt.sendInput('T')
   await vt.waitForRender()
+  const turnsView = await viewport(vt)
+  assert.ok(turnsView.includes('Turn 1'), `fixture: the Turns page is open:\n${turnsView}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  const switched = await viewport(vt)
+  // The list really changed: the OTHER Turn's file is now the painted list.
+  assert.ok(switched.includes('older.md'), `the Turn switch really changed the list:\n${switched}`)
+  assert.ok(!switched.includes('newest.md'), `the previous Turn's file is gone:\n${switched}`)
+  // The release can no longer copy the retired range.
   vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
   await vt.waitForRender()
   assert.equal(copied.length, 0, `a Turn switch retires the live selection (saw ${JSON.stringify(copied)})`)
   app.stop()
 })
 
-test('B06: a real Question modal keeps the opaque barrier (it never opts in)', async () => {
+test('B06: a seat-frame Question is untouched — its selection matches the pre-PR baseline', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(120, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -2520,13 +2563,114 @@ test('B06: a real Question modal keeps the opaque barrier (it never opts in)', a
   // Baseline (main@2bd4ad5c, before this branch) already copies a drag across
   // the Question body — that pre-existing seat-frame selection is NOT part of
   // this PR's scope and must stay unchanged, which is what this control records.
-  assert.equal(
+  assert.ok(
     copied.length > 0,
-    true,
-    'a Question drag still behaves exactly like the pre-PR baseline (seat-frame selection)',
+    'a Question drag behaves as it did on main@2bd4ad5c (pre-existing seat-frame selection): '
+    + 'this PR neither introduces nor removes it',
   )
   // The opt-in never reaches it: this PR's option appears on NO overlay the
   // Question uses, and the Question's own frame paints its content normally.
   assert.ok(view.includes('Ship the recovery'), 'the Question body is painted')
   app.stop()
+})
+
+test('B06: a real managed plugin overlay never becomes a selection source (no opt-in)', async () => {
+  const copied: string[] = []
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    copySelection: async (text) => {
+      copied.push(text)
+      return true
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  // A REAL managed overlay through the public extension lease (the same
+  // OverlayOptions path the Delivered files modal uses).
+  const lease = app.showExtensionOverlay({
+    kind: 'frame',
+    child: { kind: 'text', spans: [{ text: 'plugin overlay body text' }] },
+  })
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('plugin overlay body'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  assert.ok(view.includes('plugin overlay body'), `fixture: the managed overlay is painted:\n${view}`)
+  const lines = view.split('\n')
+  const row = lines.findIndex(line => line.includes('plugin overlay body'))
+  const column = columnOf(lines, row, 'plugin overlay body')
+  resetWrites(vt)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 12};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 12};${row + 1}m`)
+  await vt.waitForRender()
+  // No opt-in: the overlay keeps the opaque default and copies nothing.
+  assert.equal(copied.length, 0, `a managed overlay without the opt-in copies nothing (saw ${JSON.stringify(copied)})`)
+  assert.ok(
+    !inverseRuns(vt.writes).join('').includes('plugin overlay body'),
+    'a managed overlay without the opt-in paints no selection highlight',
+  )
+  lease.close()
+  app.stop()
+})
+
+test('B08: terminal focus-out and stop each retire an overlay-origin selection that was LIVE', async () => {
+  // (a) FOCUS-OUT: the terminal reports the window lost focus.
+  {
+    const copied: string[] = []
+    const { vt, app } = selectionApp(copied)
+    let view = ''
+    for (let attempt = 0; attempt < 40 && !view.includes('alpha.md'); attempt += 1) {
+      await vt.waitForRender()
+      view = vt.getViewport().join('\n')
+    }
+    const lines = view.split('\n')
+    const frame = modalFrame(lines)
+    const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+    const column = columnOf(lines, row, 'alpha.md')
+    resetWrites(vt)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
+    await vt.waitForRender()
+    assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live overlay selection')
+    vt.sendInput('\x1b[O')
+    await vt.waitForRender()
+    vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
+    await vt.waitForRender()
+    assert.equal(copied.length, 0, `focus-out retires the overlay selection (saw ${JSON.stringify(copied)})`)
+    app.stop()
+    startedApps.delete(app)
+    app.dispose()
+  }
+  // (b) STOP: the alt screen is stopped (a surface teardown / screen swap).
+  {
+    const copied: string[] = []
+    const { vt, app } = selectionApp(copied)
+    let view = ''
+    for (let attempt = 0; attempt < 40 && !view.includes('alpha.md'); attempt += 1) {
+      await vt.waitForRender()
+      view = vt.getViewport().join('\n')
+    }
+    const lines = view.split('\n')
+    const frame = modalFrame(lines)
+    const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+    const column = columnOf(lines, row, 'alpha.md')
+    resetWrites(vt)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
+    await vt.waitForRender()
+    assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live overlay selection')
+    // The real screen-stop path (leaving fullscreen stops the alt screen).
+    app.setFullscreen(false)
+    await vt.waitForRender()
+    vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
+    await vt.waitForRender()
+    assert.equal(copied.length, 0, `a stopped alt screen never copies the retired range (saw ${JSON.stringify(copied)})`)
+    app.stop()
+    startedApps.delete(app)
+    app.dispose()
+  }
 })
