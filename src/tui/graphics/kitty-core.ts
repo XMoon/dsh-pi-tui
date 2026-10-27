@@ -111,7 +111,17 @@ export const MAX_RESIDENT_DECODED_BYTES = 256 * 1024 * 1024
  */
 const ID_SPACE_START_LIMIT = 0x80000000
 
-interface OwnedRecord {
+/** A planned (not yet committed) global image delete for one screen buffer. */
+export interface KittyGlobalImageDeletePlan {
+  readonly buffer: KittyScreenBuffer
+  readonly wire: string
+  /** Live records whose data for `buffer` the write will release. */
+  readonly released: ReadonlyArray<{ readonly imageId: number; readonly record: OwnedRecord }>
+  /** Retained alt-session ids the write will release (no record left). */
+  readonly retained: readonly number[]
+}
+
+export interface OwnedRecord {
   readonly image: KittyImage
   /** Screen buffers whose store currently holds this image's data: Kitty keeps
    *  the main and the alternate screen's images apart, so the SAME id needs one
@@ -124,8 +134,6 @@ interface OwnedRecord {
   transmitted: boolean
   /** The buffer the LAST placement was written into. */
   buffer: KittyScreenBuffer | undefined
-  /** Placements written since the last residency invalidation. */
-  placements: number
   /** Whether this occurrence ever reached a placement in its lifetime. */
   everPlaced: boolean
   retireQueued: boolean
@@ -211,7 +219,6 @@ export class KittyGraphicsCore {
       residentIn: new Set(),
       transmitted: false,
       buffer: undefined,
-      placements: 0,
       everPlaced: false,
       retireQueued: false,
       retirePending: false,
@@ -263,7 +270,6 @@ export class KittyGraphicsCore {
     if (record === undefined) return
     record.buffer = buffer
     if (buffer === 'alt') this.altSessionIds.add(imageId)
-    record.placements += 1
     record.everPlaced = true
     this.emit({ type: 'placement-written', imageId, detail: buffer })
   }
@@ -309,7 +315,6 @@ export class KittyGraphicsCore {
   translateWriterDelete(imageId: number): string {
     const record = this.records.get(imageId)
     if (record !== undefined) {
-      record.placements = 0
       this.emit({ type: 'writer-delete-translated', imageId })
       return encodeKittyDeletePlacement(imageId)
     }
@@ -330,7 +335,6 @@ export class KittyGraphicsCore {
     let wire = ''
     for (const record of this.records.values()) {
       if (record.buffer !== buffer) continue
-      record.placements = 0
       wire += encodeKittyDeletePlacement(record.image.imageId)
     }
     if (buffer === 'alt') {
@@ -350,19 +354,25 @@ export class KittyGraphicsCore {
   }
 
   /**
-   * A legacy global image delete (`d=A`) — translate it into scoped hard
-   * retirements of the Core's own images. The records survive (their
-   * components still hold them) and the next placement re-transmits.
+   * PLAN a legacy global image delete (`d=A`): the scoped hard deletions of the
+   * Core's own ids, plus the ownership that releasing them will consume.
+   *
+   * Nothing is mutated here. `Terminal.write()` is an offer, not an ACK, so the
+   * ownership may only be consumed once the sink accepted the bytes — a failing
+   * write must leave every id RETRYABLE. The facade pairs this with
+   * {@link commitGlobalImageDelete}.
    */
-  translateGlobalImageDelete(buffer: KittyScreenBuffer): string {
+  planGlobalImageDelete(buffer: KittyScreenBuffer): KittyGlobalImageDeletePlan {
+    const released: Array<{ imageId: number; record: OwnedRecord }> = []
+    const retained: number[] = []
     let wire = ''
     for (const [imageId, record] of this.records) {
       // Only the data THIS buffer holds can be released: a record that was
       // never transmitted here has nothing to delete, and the other buffer's
       // copy (the main screen's scrollback) must survive.
-      if (!record.residentIn.delete(buffer)) continue
-      record.placements = 0
-      wire += encodeKittyDeleteImage(record.image.imageId)
+      if (!record.residentIn.has(buffer)) continue
+      released.push({ imageId, record })
+      wire += encodeKittyDeleteImage(imageId)
     }
     if (buffer === 'alt') {
       // An occurrence that was placed in the alternate buffer and then retired
@@ -371,12 +381,25 @@ export class KittyGraphicsCore {
       // screen), so the alternate screen's own exit frees them by id.
       for (const imageId of this.altSessionIds) {
         if (this.records.has(imageId)) continue
+        retained.push(imageId)
         wire += encodeKittyDeleteImage(imageId)
       }
-      this.altSessionIds.clear()
     }
-    if (wire !== '') this.emit({ type: 'global-delete-translated', detail: `images:${buffer}` })
-    return wire
+    return { buffer, wire, released, retained }
+  }
+
+  /**
+   * The global delete write was accepted: consume exactly what the plan
+   * released. A no-op plan (nothing resident in that buffer) is fine to commit.
+   */
+  commitGlobalImageDelete(plan: KittyGlobalImageDeletePlan): void {
+    for (const entry of plan.released) entry.record.residentIn.delete(plan.buffer)
+    if (plan.buffer === 'alt') {
+      for (const imageId of plan.retained) this.altSessionIds.delete(imageId)
+    }
+    if (plan.wire !== '') {
+      this.emit({ type: 'global-delete-translated', detail: `images:${plan.buffer}` })
+    }
   }
 
   /**
@@ -405,7 +428,6 @@ export class KittyGraphicsCore {
     let invalidated = 0
     for (const record of this.records.values()) {
       if (!record.residentIn.delete(buffer)) continue
-      record.placements = 0
       invalidated += 1
     }
     if (invalidated > 0) this.emit({ type: 'data-invalidated', detail: `${reason}:${buffer}` })
