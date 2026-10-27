@@ -402,6 +402,25 @@ export class UserBubbleComponent implements Component {
   }
 }
 
+/** One painted path/description field span of the delivered-files tail, in
+ * THIS component's row coordinates. Consumed by the search source walker. */
+interface DeliveredFilesFieldSpan {
+  readonly index: number
+  readonly pathRow: number
+  readonly pathStart: number
+  readonly pathEnd: number
+  readonly descriptionRows: ReadonlyArray<{ readonly row: number; readonly start: number; readonly end: number }>
+}
+
+/** One complete width-keyed frame: the painted rows AND the hit/span geometry
+ *  that belongs to those exact rows. A cached row array without its geometry
+ *  would leave a stale hit map after an A → B → A resize. */
+interface DeliveredFilesFrame {
+  readonly rows: string[]
+  readonly hits: readonly DeliveredFilesActionHit[]
+  readonly spans: readonly DeliveredFilesFieldSpan[]
+}
+
 /** One painted action cell of the delivered-files tail, in THIS component's
  * row coordinates. Only a real painted cell may be hit: the host resolves the
  * tail's row offset and never reconstructs the geometry itself. */
@@ -451,7 +470,7 @@ export class DeliveredFilesComponent implements Component {
   /** Whether the `/deliverables` entry is REALLY executable on this surface.
    *  A surface without it must not paint a dead command hint. */
   private readonly commandEntry: boolean
-  private readonly cached = new Map<number, string[]>()
+  private readonly cached = new Map<number, DeliveredFilesFrame>()
   /** The width the recorded painted rows/hits belong to (stale-geometry
    * fence for the host's click resolution). */
   private paintedWidth = 0
@@ -459,13 +478,7 @@ export class DeliveredFilesComponent implements Component {
   /** The visible row/column spans of every rendered path/description field,
    * relative to THIS component's rows (render output, refreshed on every
    * width). Consumed by the search source-geometry walker. */
-  lastFieldSpans: ReadonlyArray<{
-    readonly index: number
-    readonly pathRow: number
-    readonly pathStart: number
-    readonly pathEnd: number
-    readonly descriptionRows: ReadonlyArray<{ readonly row: number; readonly start: number; readonly end: number }>
-  }> = []
+  lastFieldSpans: ReadonlyArray<DeliveredFilesFieldSpan> = []
 
   constructor(
     files: readonly PresentedFilePresentation[],
@@ -507,19 +520,21 @@ export class DeliveredFilesComponent implements Component {
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width))
     const previous = this.cached.get(safeWidth)
-    if (previous !== undefined) return previous
+    if (previous !== undefined) {
+      // Restore the COMPLETE frame, not just its row strings: the host asks for
+      // the hits and field spans of the width it just rendered, and an A → B → A
+      // resize must not leave B's (or an empty) hit map behind.
+      this.paintedWidth = safeWidth
+      this.paintedHits = previous.hits
+      this.lastFieldSpans = previous.spans
+      return previous.rows
+    }
 
     const shown = this.expanded ? this.files : this.files.slice(0, DELIVERED_FILES_FOLDED_LIMIT)
     const showActions = this.pointerActions && safeWidth >= DELIVERED_ACTION_MIN_WIDTH
     const rows: string[] = []
     const hits: DeliveredFilesActionHit[] = []
-    const spans: Array<{
-      index: number
-      pathRow: number
-      pathStart: number
-      pathEnd: number
-      descriptionRows: Array<{ row: number; start: number; end: number }>
-    }> = []
+    const spans: DeliveredFilesFieldSpan[] = []
 
     // Header. With a pointer owner the list verb is a painted affordance;
     // without one the tail row (or, when every file is already visible, the
@@ -640,7 +655,7 @@ export class DeliveredFilesComponent implements Component {
     this.lastFieldSpans = spans
     this.paintedWidth = safeWidth
     this.paintedHits = hits
-    this.cached.set(safeWidth, rows)
+    this.cached.set(safeWidth, { rows, hits, spans })
     return rows
   }
 }

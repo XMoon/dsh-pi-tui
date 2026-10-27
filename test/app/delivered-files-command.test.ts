@@ -1056,3 +1056,89 @@ test('a real SGR hold on Details [Back] cannot retarget to Files [Close]', async
   assert.ok(after.includes('Delivered files · Turn 6'),
     `the held Details Back must not run Files Close:\n${after}`)
 })
+
+test('a resize rebind never steals a newer callback focus', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([{ turn: 1, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  let armed = false
+  let callbacks = 0
+  let newer: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  const plugin = {
+    render: () => ({ kind: 'text' as const, spans: [{ text: 'PLUGIN UNDER' }] }),
+    handleInput: () => true,
+    dispose: () => {},
+    onFocus: () => {
+      if (!armed) return
+      callbacks += 1
+      newer ??= app.showAdvancedInteractiveOverlay({
+        render: () => ({ kind: 'text' as const, spans: [{ text: 'NEWER HUD' }] }),
+        handleInput: () => true,
+        dispose: () => {},
+      }, { nonCapturing: true })
+      newer.focus()
+    },
+  }
+  const pluginLease = app.showAdvancedInteractiveOverlay(plugin as never)
+  await viewport(vt)
+  app.openDeliveredFiles(snap)
+  await viewport(vt)
+  armed = true
+  vt.resize(160, 50)
+  const view = await viewport(vt)
+  assert.equal(callbacks, 0, 'the resize must not focus the suppressed plugin under the panel')
+  assert.ok(!view.includes('NEWER HUD'), `no newer overlay may be mounted by a spurious focus:\n${view}`)
+  const delivered = (app as unknown as { deliveredFilesOverlay: { isFocused(): boolean } }).deliveredFilesOverlay
+  assert.equal(delivered.isFocused(), true, 'the delivered panel keeps its focus after the rebind')
+  pluginLease.close()
+  newer?.close()
+})
+
+test('a covered Delivered files overlay rebinds to live geometry when the cover closes', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([{ turn: 1, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snap)
+  await viewport(vt)
+  const cover = app.showAdvancedInteractiveOverlay({
+    render: () => ({ kind: 'text' as const, spans: [{ text: 'TOP COVER' }] }),
+    handleInput: () => true,
+    dispose: () => {},
+  })
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('TOP COVER'), 'fixture: the capturing cover is mounted')
+  vt.resize(160, 50)
+  await viewport(vt)
+  cover.close()
+  const view = await viewport(vt)
+  assert.ok(!view.includes('TOP COVER'), 'the cover is gone')
+  const delivered = (app as unknown as {
+    deliveredFilesOverlay: {
+      getBounds(): { width: number; height: number } | undefined
+      isFocused(): boolean
+    }
+  }).deliveredFilesOverlay
+  const expected = deliveredFilesOverlayGeometry(160, 50)
+  assert.equal(delivered.getBounds()?.width, expected.width, 'the revealed frame width is the live formula')
+  assert.equal(delivered.getBounds()?.height, expected.maxHeight, 'the revealed frame height is the live formula')
+  assert.equal(delivered.isFocused(), true, 'the revealed panel owns the keyboard')
+  const rows = view.split('\n')
+  const turnsRow = rows.findLastIndex(line => line.includes('[Turns]'))
+  assert.ok(turnsRow >= 0, `the revealed footer is painted:\n${view}`)
+  const column = rows[turnsRow]!.indexOf('[Turns]') + 2
+  clickCell(vt, column, turnsRow)
+  assert.ok((await viewport(vt)).includes('Delivered files · 1 Turns'),
+    'the revealed footer button is still clickable at the live geometry')
+})

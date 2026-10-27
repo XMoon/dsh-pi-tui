@@ -4472,7 +4472,14 @@ export class TuiApp {
       // The close path re-derives the final seat from the LIVE surface: a
       // restored dependent capturing overlay keeps keyboard ownership; the
       // editor owns it only when no capturing overlay remains.
-      reconcileFocusSeat: () => this.publishFocusSeat(),
+      reconcileFocusSeat: () => {
+        this.publishFocusSeat()
+        // A suppressed/covered projection skips the resize rebind; the broker's
+        // close/reveal reconciliation is the LAST post-transition point, so a
+        // delivered overlay that just became frontmost gets its live geometry
+        // here even though the reveal only requested a fork frame repaint.
+        this.syncDeliveredFilesOverlayGeometry()
+      },
       focusSeatOwner: () => this.focusSeatOwner(),
     })
 
@@ -23672,10 +23679,14 @@ export class TuiApp {
     const frame = this.createDeliveredFilesFrame(panel)
     this.deliveredFilesFrame = frame
     const wasFocused = handle.isFocused()
-    // Hide the old physical projection AFTER capturing focus intent; the
-    // logical lease still owns the node while the fresh raw is attached.
     const previous = this.overlayBroker.rawOf(handle)
-    previous?.hide()
+    // TRANSACTION ORDER: mount + rebind the fresh projection FIRST. Neither
+    // call runs a focus callback (`initialFocus:false`), so a newer overlay
+    // cannot appear between them. Only then move the keyboard if the OLD raw
+    // was the physical owner. Do NOT hide the old raw first: its focused
+    // `hide()` synchronously falls back to `preFocus`, whose plugin onFocus may
+    // legally open and focus an even newer overlay — the outer rebind must not
+    // then steal that newer focus.
     const raw = this.activeScreen.showOverlay(frame, {
       width: size.width,
       maxHeight: size.maxHeight,
@@ -23684,6 +23695,12 @@ export class TuiApp {
     })
     this.overlayBroker.rebind(handle, raw)
     if (wasFocused) raw.focus({ preserveOrder: true })
+    // No write after the focus transition except retiring the old projection:
+    // the old raw is no longer the physical owner (the new raw was focused, or
+    // a newer callback owner superseded it), so its hide cannot trigger the
+    // fork's focus fallback. If the focus callback closed/replaced this lease,
+    // `previous` is an orphaned projection and hiding it is still safe.
+    previous?.hide()
   }
 
   /** The delivered-files overlay's geometry: the ONE centered percentage
