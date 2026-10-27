@@ -258,3 +258,13 @@ test('deliveredDisplayPath applies the same lexical containment to Windows and m
   assert.equal(deliveredDisplayPath('C:\\other\\report.md', 'C:\\ws'), 'C:\\other\\report.md')
   assert.equal(deliveredDisplayPath('/ws\\docs\\report.md', '/ws'), 'docs/report.md')
 })
+
+test('deliveredDisplayPath treats / as a valid root and bare drives as untrusted', () => {
+  assert.equal(deliveredDisplayPath('/artifacts/a.md', '/'), 'artifacts/a.md')
+  assert.equal(deliveredDisplayPath('/ws/a.md', '/'), 'ws/a.md')
+  assert.equal(deliveredDisplayPath('/', '/'), '/')
+  assert.equal(deliveredDisplayPath('C:/ws/file.md', 'C:'), 'C:/ws/file.md')
+  assert.equal(deliveredDisplayPath('C:/ws/file.md', 'C:/'), 'ws/file.md')
+  assert.equal(deliveredDisplayPath('C:ws/file.md', 'C:'), 'C:ws/file.md')
+  assert.equal(deliveredDisplayPath('C:/ws/file.md', 'C:/ws'), 'file.md')
+})
