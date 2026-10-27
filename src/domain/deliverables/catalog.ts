@@ -202,20 +202,13 @@ function deliveredPathSegments(path: string): readonly string[] {
   return path.split(/[/\\]+/u).filter(segment => segment !== '')
 }
 
-/** One absolute Host path split into its lexical segments (both separators are
- *  separators; `.` is dropped and `..` pops without escaping the absolute
- *  root). `undefined` means the input is not an absolute Host path shape. */
-function absoluteHostSegments(path: string): readonly string[] | undefined {
-  const slashPath = path.replace(/\\/g, '/')
-  // A drive letter is absolute ONLY with its separator. Bare `C:` is a
-  // Windows DRIVE-RELATIVE path, not a workspace root, so it must not establish
-  // a trusted root (and a declared `C:foo` is not an absolute file path).
-  const drive = /^([A-Za-z]:)\//.exec(slashPath)
-  if (drive !== null) {
-    return [drive[1]!, ...lexicalSegments(slashPath.slice(drive[1]!.length + 1))]
-  }
-  if (slashPath.startsWith('/')) return lexicalSegments(slashPath.slice(1))
-  return undefined
+/** One absolute Host path plus its ROOT ANCHOR: a POSIX `/`, one Windows drive
+ *  (`C:/`), or one UNC share (`//server/share`). The anchor is part of identity:
+ *  `/C:` and `C:/` are different absolute domains even though both contain a
+ *  `C:` segment. */
+interface AbsoluteHostPath {
+  readonly anchor: string
+  readonly segments: readonly string[]
 }
 
 /** Normalize one relative segment list without escaping its start. */
@@ -230,6 +223,27 @@ function lexicalSegments(path: string): string[] {
     segments.push(segment)
   }
   return segments
+}
+
+/** Split one absolute Host path into its anchor + lexical segments. `undefined`
+ *  means the input is not an absolute Host path shape (a relative path or a
+ *  bare drive-relative `C:`). */
+function absoluteHostPath(path: string): AbsoluteHostPath | undefined {
+  const slashPath = path.replace(/\\/g, '/')
+  if (slashPath.startsWith('//')) {
+    const segments = lexicalSegments(slashPath.slice(2))
+    if (segments.length < 2) return undefined
+    return { anchor: `unc:${segments[0]}/${segments[1]}`, segments }
+  }
+  // A drive letter is absolute ONLY with its separator. Bare `C:` is a
+  // Windows DRIVE-RELATIVE path, not a workspace root, so it must not establish
+  // a trusted root (and a declared `C:foo` is not an absolute file path).
+  const drive = /^([A-Za-z]:)\//.exec(slashPath)
+  if (drive !== null) {
+    return { anchor: `drive:${drive[1]!}`, segments: lexicalSegments(slashPath.slice(drive[1]!.length + 1)) }
+  }
+  if (slashPath.startsWith('/')) return { anchor: 'posix', segments: lexicalSegments(slashPath.slice(1)) }
+  return undefined
 }
 
 /**
@@ -251,16 +265,19 @@ function lexicalSegments(path: string): string[] {
  */
 export function deliveredDisplayPath(path: string, workspaceRoot: string | undefined): string {
   if (workspaceRoot === undefined || workspaceRoot === '') return path
-  const root = absoluteHostSegments(workspaceRoot)
-  const target = absoluteHostSegments(path)
+  const root = absoluteHostPath(workspaceRoot)
+  const target = absoluteHostPath(path)
   if (root === undefined || target === undefined) return path
-  // An EMPTY root segment list is the valid POSIX root `/` (not a missing
-  // root): every absolute target is inside it, so `/artifacts/a.md` displays as
-  // `artifacts/a.md`. The target-equal-root case below still keeps `/` itself.
-  if (target.length <= root.length) return path
-  for (const [index, segment] of root.entries()) {
-    if (target[index] !== segment) return path
+  // The ANCHOR is identity: a POSIX `/C:/…` can never be inside a Windows
+  // `C:/` workspace (or the reverse), even though both carry a `C:` segment.
+  if (root.anchor !== target.anchor) return path
+  // An EMPTY segment list with the POSIX anchor is the valid root `/`, not a
+  // missing root: every POSIX-absolute target is inside it. The target-equal-
+  // root case below still keeps `/` itself.
+  if (target.segments.length <= root.segments.length) return path
+  for (const [index, segment] of root.segments.entries()) {
+    if (target.segments[index] !== segment) return path
   }
-  const relative = target.slice(root.length)
+  const relative = target.segments.slice(root.segments.length)
   return relative.length === 0 ? path : relative.join('/')
 }
