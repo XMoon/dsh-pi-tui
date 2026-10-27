@@ -89,8 +89,13 @@ export interface DeliveredFilesPanelOptions {
    * per-row `Details` verb painted on the regular surface would be a dead
    * affordance — the panel paints (and hit-tests) it only when this is true.
    * Keyboard selection + `Enter Preview` stays available either way.
+   *
+   * A FUNCTION is re-evaluated on every paint and on every hit test: ONE panel
+   * survives a fullscreen screen swap (the overlay remounts the same instance),
+   * so a value captured at construction would keep claiming a pointer the new
+   * surface does not route.
    */
-  readonly pointerActions?: boolean
+  readonly pointerActions?: boolean | (() => boolean)
   /**
    * The owned-task runner the host wires (`runOwned`). Every preview request is
    * an owned async workflow — never a bare `void promise` — so its failure is
@@ -224,8 +229,14 @@ export class DeliveredFilesPanel implements Component {
   private readonly copyPath: (path: string, settle: (ok: boolean) => void) => void
   private readonly previewCapability: DeliveredFilePreviewCapability | undefined
   private readonly reportUnclassifiedFailure: ((message: string, error: unknown) => void) | undefined
-  private readonly pointerActions: boolean
+  private readonly pointerActionsSource: boolean | (() => boolean)
   private readonly runOwned: ((label: string, task: () => Promise<void>) => void) | undefined
+
+  /** The LIVE pointer ownership of the surface this panel is mounted on. */
+  private pointerOwned(): boolean {
+    const source = this.pointerActionsSource
+    return typeof source === 'function' ? source() : source
+  }
   private readonly filterInput = new Input({ prompt: '' })
   private readonly labelsByTurn = new Map<number, readonly string[]>()
 
@@ -275,7 +286,7 @@ export class DeliveredFilesPanel implements Component {
     this.copyPath = options.copyPath
     this.previewCapability = options.preview
     this.reportUnclassifiedFailure = options.reportUnclassifiedFailure
-    this.pointerActions = options.pointerActions === true
+    this.pointerActionsSource = options.pointerActions ?? false
     this.runOwned = options.runOwned
     const first = this.snapshot.turns[0]
     if (first === undefined) throw new Error('the delivered-files panel requires at least one delivered turn')
@@ -367,7 +378,7 @@ export class DeliveredFilesPanel implements Component {
    */
   private fittedLabelsFor(width: number): ReadonlyMap<string, string> {
     const files = this.currentFiles()
-    const actions = this.pointerActions && width >= ACTION_COLUMN_MIN_WIDTH
+    const actions = this.pointerOwned() && width >= ACTION_COLUMN_MIN_WIDTH
     const listWidth = this.twoColumn(width) ? Math.max(24, Math.floor((width - 3) * 0.58)) : width
     const listRoom = Math.max(1, listWidth - (actions ? visibleWidth(DETAILS_VERB) + 2 : 0) - 2)
     const titleRoom = Math.max(8, width - ' · Details'.length)
@@ -857,7 +868,7 @@ export class DeliveredFilesPanel implements Component {
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     // Without a real pointer owner the panel never claims a cell.
-    if (this.disposed || !this.pointerActions) return undefined
+    if (this.disposed || !this.pointerOwned()) return undefined
     if (event.type !== 'press' && event.type !== 'click') return undefined
     if (event.button !== 'left') return undefined
     // A PRESS may only SELECT a row. Entering a page is a complete gesture:
@@ -1032,7 +1043,7 @@ export class DeliveredFilesPanel implements Component {
     const visible = filtered.slice(listTop, listTop + area)
     const selectedIndex = this.selectedIndex()
     // A verb is painted only where a pointer can really reach it.
-    const actions = this.pointerActions && safeWidth >= ACTION_COLUMN_MIN_WIDTH
+    const actions = this.pointerOwned() && safeWidth >= ACTION_COLUMN_MIN_WIDTH
 
     for (const [offset, file] of visible.entries()) {
       const index = listTop + offset

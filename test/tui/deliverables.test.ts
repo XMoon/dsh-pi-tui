@@ -759,3 +759,40 @@ test('the production app routes a preview request through the owned runner', asy
     `the panel request went through runOwned (saw: ${JSON.stringify(owned)})`)
   app.stop()
 })
+
+test('the panel follows the LIVE surface: swapping fullscreen adds and removes the verb', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path: '/ws/a.md' }, { path: '/ws/b.md' }] }],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+
+  // Open on the REGULAR surface: no terminal mouse reporting, so no verb.
+  app.openDeliveredFiles(snapshot)
+  const regular = await viewport(vt)
+  assert.ok(regular.includes('a.md'), regular)
+  assert.ok(!regular.includes('Details'), `the regular surface paints no dead verb:\n${regular}`)
+
+  // Swap to FULLSCREEN: the SAME panel is remounted on a surface that routes
+  // mouse events, so its painted verb must appear without re-opening.
+  app.setFullscreen(true)
+  const full = await viewport(vt)
+  assert.ok(full.includes('a.md'), full)
+  assert.ok(full.includes('Details'), `the fullscreen surface paints the real verb:\n${full}`)
+
+  // …and back again: the verb must disappear on the regular surface.
+  app.setFullscreen(false)
+  const back = await viewport(vt)
+  assert.ok(back.includes('a.md'), back)
+  assert.ok(!back.includes('Details'), `the verb is withdrawn again after the swap:\n${back}`)
+  app.stop()
+})
