@@ -714,3 +714,48 @@ test('a painted OSC 8 link wins over the delivered tail action (URL first, no ov
     setCapabilityOverrides({})
   }
 })
+
+test('the production app routes a preview request through the owned runner', async () => {
+  // The panel that ISSUES the reads must receive `runOwned`; a tail-component
+  // injection would leave the panel on its fallback branch. This drives the real
+  // TuiApp construction path with NO delivered tail in the transcript, so any
+  // owned label observed can only come from the panel.
+  const vt = new VirtualTerminal(100, 30)
+  const owned: string[] = []
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path: '/ws/a.md' }] }],
+  }
+  // `runOwned` is the EVENTS hook (the host's owned-task entry), not an option.
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (label, task) => {
+      owned.push(label)
+      void task()
+    },
+  }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+    deliveredFilePreview: () => ({
+      stat: async () => ({ version: 'v1', bytes: 3 }),
+      read: async () => ({ stat: { version: 'v1', bytes: 3 }, offset: 1, limit: 120, text: 'a', lines: 1, eof: true }),
+    }),
+  })
+  app.start()
+  startedApps.add(app)
+  // NO deliverables in the message: there is no tail component at all, so any
+  // owned label below can only come from the PANEL.
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snapshot)
+  await viewport(vt)
+  // Enter on the Files page is the action that starts the preview request.
+  vt.sendInput('\r')
+  await viewport(vt)
+  assert.ok(owned.some(label => label.startsWith('delivered file preview')),
+    `the panel request went through runOwned (saw: ${JSON.stringify(owned)})`)
+  app.stop()
+})

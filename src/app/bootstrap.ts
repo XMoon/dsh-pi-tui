@@ -2913,8 +2913,10 @@ export function applyRunnerWithRuntime(
       deliveredFilePreview: (snapshot) => {
         const port = backend.deliveredFileRead
         return {
-          stat: (path, signal) => port.stat(snapshot.sessionId, path, signal),
-          read: (path, offset, limit, signal) => port.read(snapshot.sessionId, path, offset, limit, signal),
+          stat: (path: string, signal: AbortSignal) => port.stat(snapshot.sessionId, path, signal),
+          // The PORT owns the page size; the capability never passes one.
+          read: (path: string, offset: number, signal: AbortSignal) =>
+            port.read(snapshot.sessionId, path, offset, signal),
         }
       },
       reportDeliveredFileFailure: (message, error) => {

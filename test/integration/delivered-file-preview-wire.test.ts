@@ -99,13 +99,13 @@ test('the generated workspaceFiles Remote serves a real Host stat/read and a rea
     // The ADAPTER the preview consumes, over this SAME real wire: the official
     // namespace + the real Connection generation source.
     const port = new RemoteDeliveredFileReadPort(client.remote.workspaceFiles, client.connection.generation)
-    const viaPort = await port.read(sessionId, filePath, 1, 120, abort)
+    const viaPort = await port.read(sessionId, filePath, 1, abort)
     assert.deepEqual(
       { offset: viaPort.offset, limit: viaPort.limit, lines: viaPort.lines, eof: viaPort.eof, text: viaPort.text },
       { offset: 1, limit: 120, lines: 3, eof: true, text: 'line one\nline two\nline three' },
     )
     await assertRejectsCode(port.stat(sessionId, join(workspace, 'missing.md'), abort), 'not-found')
-    await assertRejectsCode(port.read(sessionId, binaryPath, 1, 120, abort), 'not-text')
+    await assertRejectsCode(port.read(sessionId, binaryPath, 1, abort), 'not-text')
     await assertRejectsCode(port.stat('missing-session', filePath, abort), 'session-unavailable')
 
     // ── The REAL chain all the way to the PAINTED page ─────────────────────
@@ -115,8 +115,8 @@ test('the generated workspaceFiles Remote serves a real Host stat/read and a rea
     // snapshot names the declared path, and the capability is the port above.
     const bound = {
       stat: (path: string, signal: AbortSignal) => port.stat(sessionId, path, signal),
-      read: (path: string, offset: number, limit: number, signal: AbortSignal) =>
-        port.read(sessionId, path, offset, limit, signal),
+      read: (path: string, offset: number, signal: AbortSignal) =>
+        port.read(sessionId, path, offset, signal),
     }
     // A UNIQUE token in the real file: no stub, constant or replayed body can
     // satisfy this assertion — only the bytes on the Host filesystem can.

@@ -78,8 +78,12 @@ export class DeliveredFileReadError extends Error {
  */
 export interface DeliveredFilePreviewCapability {
   stat(path: string, signal: AbortSignal): Promise<DeliveredFileStat>
-  read(path: string, offset: number, limit: number, signal: AbortSignal): Promise<DeliveredFilePage>
+  /** The page size is the PORT's, never the caller's: one read is one bounded page. */
+  read(path: string, offset: number, signal: AbortSignal): Promise<DeliveredFilePage>
 }
+
+/** One page of preview text: the port's fixed bound (plan §7.3). */
+export const DELIVERED_FILE_PAGE_LINES = 120
 
 /** The Host file read/preview capability for one Session's declared files. */
 export interface DeliveredFileReadPort {
@@ -90,14 +94,15 @@ export interface DeliveredFileReadPort {
    */
   stat(sessionId: string, path: string, signal: AbortSignal): Promise<DeliveredFileStat>
   /**
-   * Read ONE page of at most `limit` lines starting at `offset` (1-based). The
-   * Host decodes UTF-8 and refuses non-text; the port never reads whole files.
+   * Read ONE page of exactly `DELIVERED_FILE_PAGE_LINES` lines starting at
+   * `offset` (1-based). The page size is the PORT's contract, not a caller
+   * choice: the Host decodes UTF-8 and refuses non-text, and the port never
+   * reads whole files.
    */
   read(
     sessionId: string,
     path: string,
     offset: number,
-    limit: number,
     signal: AbortSignal,
   ): Promise<DeliveredFilePage>
 }
