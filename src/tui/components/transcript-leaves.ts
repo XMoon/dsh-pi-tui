@@ -556,19 +556,26 @@ export class DeliveredFilesComponent implements Component {
           descriptionEnd = descriptionStart + visibleWidth(descriptionText)
         }
       }
-      const body = descriptionText === ''
-        ? `  ${labelText}`
-        : `  ${labelText}  ${descriptionText}`
-      const gap = Math.max(1, bodyWidth - visibleWidth(body))
       const paintedBody = descriptionText === ''
         ? `  ${color.textDim(labelText)}`
         : `  ${color.textDim(labelText)}  ${color.textDim(descriptionText)}`
-      rows.push(showActions
-        ? `${paintedBody}${' '.repeat(gap)}${color.primary(DELIVERED_DETAILS_VERB)}`
-        : paintedBody)
-      if (showActions) {
-        const startCol = safeWidth - visibleWidth(DELIVERED_DETAILS_VERB)
-        hits.push({ row, startCol, endCol: startCol + visibleWidth(DELIVERED_DETAILS_VERB), action: 'details', fileIndex: index })
+      if (!showActions) {
+        rows.push(paintedBody)
+      } else {
+        // The verb is right-aligned against the FULL row width, and its hit
+        // cells are measured from the ACTUAL painted prefix — never assumed
+        // from the room the label left over (that made the painted and the
+        // clickable columns disagree by the whole verb gap).
+        const verbWidth = visibleWidth(DELIVERED_DETAILS_VERB)
+        const gap = Math.max(1, safeWidth - verbWidth - visibleWidth(paintedBody))
+        const prefix = `${paintedBody}${' '.repeat(gap)}`
+        const startCol = visibleWidth(prefix)
+        rows.push(`${prefix}${color.primary(DELIVERED_DETAILS_VERB)}`)
+        // A row too narrow for both keeps its label and paints no verb, so the
+        // hit map never advertises a clipped control.
+        if (startCol + verbWidth <= safeWidth) {
+          hits.push({ row, startCol, endCol: startCol + verbWidth, action: 'details', fileIndex: index })
+        }
       }
       spans.push({
         index,

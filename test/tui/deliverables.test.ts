@@ -606,3 +606,39 @@ test('a middle-only discriminator survives the transcript clamp', async () => {
   assert.notEqual(rows[0]!.trim(), rows[1]!.trim(),
     `a middle-only difference must still produce distinct rows:\n${rows.join('\n')}`)
 })
+
+test('the transcript tail hit cells are the cells the row really painted', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 2, files: [{ path: '/ws/a.md' }] }],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: { snapshot: () => snap, isCurrent: () => true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 2, text: 'done', deliverables: [{ path: '/ws/a.md' }] }], new Map())
+  app.setFullscreen(true)
+  const view = await viewport(vt)
+  const rows = view.split('\n')
+  const row = rows.findIndex(line => line.includes('a.md') && line.includes('Details'))
+  assert.ok(row >= 0, view)
+  const painted = rows[row]!
+  const verbStart = painted.lastIndexOf('Details')
+  const verbEnd = verbStart + 'Details'.length
+  const click = (x: number) => {
+    vt.sendInput(`\x1b[<0;${x + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<0;${x + 1};${row + 1}m`)
+    return viewport(vt)
+  }
+  // The FIRST cell of the verb opens the preview; the cell LEFT of it does not.
+  await click(verbStart - 1)
+  assert.ok(!(await viewport(vt)).includes('a.md · Details'), 'the cell left of the verb is inert')
+  await click(verbStart)
+  assert.ok((await viewport(vt)).includes('a.md · Details'), 'the first painted cell of the verb opens it')
+  app.stop()
+})

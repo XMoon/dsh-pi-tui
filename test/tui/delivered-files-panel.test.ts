@@ -544,3 +544,116 @@ test('a declared path carrying LF stays one physical row in the wide side pane',
     assert.ok(!row.includes('\n'), `a returned row must never embed LF: ${JSON.stringify(row)}`)
   }
 })
+
+test('the Details hit cells are the cells the row really painted', () => {
+  const h = harness(snapshotOf([{ turn: 1, files: ['/ws/a.md', '/ws/b.md'] }]))
+  h.setSize(74, 24)
+  const raw = h.paint().map(row => stripTerminalSequences(row))
+  const row = raw.findIndex(line => line.includes('a.md') && line.includes('Details'))
+  assert.ok(row >= 0, raw.join('\n'))
+  const painted = raw[row]!
+  const verbStart = painted.indexOf('Details')
+  const verbEnd = verbStart + 'Details'.length
+  const click = (x: number) => h.panel.handleMouse({
+    type: 'click', button: 'left', x, y: row, screenX: x, screenY: row,
+    width: painted.length, height: raw.length, shift: false, alt: false, ctrl: false,
+  })
+  // FIRST character, LAST character: both are inside the verb.
+  for (const x of [verbStart, verbEnd - 1]) {
+    assert.equal(click(x)?.handled, true, `column ${x} is the painted verb: ${JSON.stringify(painted)}`)
+    assert.equal(h.panel.currentPage(), 'details')
+    h.type('esc')
+  }
+  // The cells outside the verb never OPEN the page. A list cell may still
+  // SELECT (that is the row's intended behaviour), but it must not enter
+  // Details — which is exactly what a shifted hit range used to do.
+  assert.equal(verbEnd, painted.length, 'fixture: the verb is right-aligned to the row end')
+  for (const x of [2, verbStart - 1] as const) {
+    click(x)
+    assert.equal(h.panel.currentPage(), 'files', `column ${x} must not open Details`)
+  }
+})
+
+
+test('filtering keeps the retained selection VISIBLE, not merely valid', () => {
+  // Interleaved groups: filtering to `a-` RETAINS the selection but moves it to a
+  // much smaller index, while the viewport is parked far below. A top that is
+  // only clamped to the legal scroll range then leaves the marked row off screen.
+  const files = Array.from({ length: 200 }, (_, index) => {
+    const id = String(index + 1).padStart(3, '0')
+    return [{ path: `/ws/a-${id}.md` }, { path: `/ws/b-${id}.md` }]
+  }).flat()
+  const h = harness(snapshotOf([{ turn: 5, files }]))
+  h.setSize(100, 30)
+  h.rows()
+  // Park the selection on a-150 (unfiltered index 299): the viewport is far below.
+  for (let step = 0; step < 299 && h.panel.selection().path !== '/ws/a-150.md'; step += 1) h.type('down')
+  const parked = h.panel.selection().path!
+  assert.equal(parked, '/ws/a-150.md', 'fixture: the selection sits deep in the list')
+
+  h.type('/')
+  for (const char of 'a-') h.type(char)
+  h.type('enter')
+  const filtered = h.rows()
+  const marked = filtered.filter(row => row.startsWith('> '))
+  assert.equal(marked.length, 1, `exactly one selected row is painted:\n${filtered.join('\n')}`)
+  assert.ok(marked[0]!.includes('a-150.md'),
+    `the RETAINED selection stays visible after the filter:\n${filtered.join('\n')}`)
+  assert.equal(h.panel.selection().path, parked)
+})
+
+test('a click cannot resolve against the list the filter just replaced', () => {
+  const h = harness(snapshotOf([{ turn: 1, files: ['/ws/a.md', '/ws/b.md', '/ws/c.md'] }]))
+  h.setSize(74, 24)
+  const raw = h.paint().map(row => stripTerminalSequences(row))
+  const firstRow = raw.findIndex(row => row.includes('a.md') && row.includes('Details'))
+  assert.ok(firstRow >= 0, raw.join('\n'))
+  const verbStart = raw[firstRow]!.lastIndexOf('Details')
+
+  // Commit a filter that REPLACES the first row's file (b.md now paints first)
+  // and click immediately, before the next frame is painted.
+  h.type('/')
+  h.type('b')
+  h.type('enter')
+  const handled = h.panel.handleMouse({
+    type: 'click', button: 'left', x: verbStart + 1, y: firstRow, screenX: verbStart + 1, screenY: firstRow,
+    width: raw[firstRow]!.length, height: raw.length, shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(handled, undefined, 'the stale frame has no hit targets any more')
+  assert.equal(h.panel.currentPage(), 'files', 'no Details page opened from a frame that no longer exists')
+  // Selection may have been normalized to the first filtered row already; the
+  // decisive fact is that the STALE CELL opened nothing.
+  assert.ok(!h.rows().some(line => line.includes('b.md · Details')), 'no Details page opened')
+
+  // After the repaint the same cell is live again — and opens the NEW row.
+  const repainted = h.rows()
+  const row = repainted.findIndex(line => line.includes('b.md') && line.includes('Details'))
+  const freshVerb = repainted[row]!.lastIndexOf('Details')
+  h.panel.handleMouse({
+    type: 'click', button: 'left', x: freshVerb + 1, y: row, screenX: freshVerb + 1, screenY: row,
+    width: repainted[row]!.length, height: repainted.length, shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(h.panel.currentPage(), 'details')
+  assert.ok(h.rows().some(line => line.includes('/ws/b.md')), 'the fresh frame opens the file it paints')
+})
+
+test('a Turns switch invalidates the old hit frame too', () => {
+  const h = harness(snapshotOf([
+    { turn: 9, files: ['/ws/newest.md'] },
+    { turn: 4, files: ['/ws/older.md'] },
+  ]))
+  h.setSize(74, 24)
+  const raw = h.paint().map(row => stripTerminalSequences(row))
+  const row = raw.findIndex(line => line.includes('older.md') === false && line.includes('Details'))
+  assert.ok(row >= 0, raw.join('\n'))
+  const verbStart = raw[row]!.lastIndexOf('Details')
+  h.type('T')
+  h.type('down')
+  h.type('enter')
+  const handled = h.panel.handleMouse({
+    type: 'click', button: 'left', x: verbStart + 1, y: row, screenX: verbStart + 1, screenY: row,
+    width: raw[row]!.length, height: raw.length, shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(handled, undefined, 'the pre-switch frame is dead')
+  assert.equal(h.panel.currentPage(), 'files')
+})

@@ -728,7 +728,14 @@ page filters the selected Turn's declarations by a locale-neutral substring over
 basename/full path/description; `Turns` lists only Turns that declare files,
 newest first. A painted tail verb opens the Turn the CARD belongs to, never the
 newest Turn, and resolves through the last painted frame with column-exact hit
-cells that are checked after OSC 8 link activation and text selection.
+cells that are checked after OSC 8 link activation and text selection. The hit
+cells are the columns the row ACTUALLY painted (measured from the painted
+prefix, never inferred from the room the label left over), and they carry the
+`turn + raw path` identity of the frame that drew them: a state change that can
+reorder or replace the list (a committed filter, a Turn switch) invalidates the
+recorded cells until the next frame, so a click never acts on a row the user did
+not see. The list keeps its selection VISIBLE across a filter — the scroll top is
+re-derived from the retained index in both directions, not merely clamped.
 
 **Details is metadata in this contract**: the declared Host path and
 description, with `C` copying the RAW declared path string (the display is
