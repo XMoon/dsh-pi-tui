@@ -671,3 +671,18 @@ test('the native factory advertises native mode and always canPaint', () => {
   assert.equal(graphics.canPaint(), true)
   graphics.dispose()
 })
+
+
+test('a revoked handle can discard a never-painted retirement without terminal IO', () => {
+  const core = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
+  const pending = core.register(source())!
+  core.transmissionFor(pending.imageId, 'main')
+  core.retire(pending)
+  assert.equal(core.hasQueuedRetirements(), true)
+  core.discardQueuedRetirements()
+  assert.equal(core.hasQueuedRetirements(), false)
+  assert.equal(core.owns(pending.imageId), false)
+  assert.equal(core.residentPayloadBytes, 0, 'the local payload is released')
+  assert.equal(core.takeRetirements().wire, '', 'and no d=I is ever emitted')
+  assert.equal(core.ownsIdSpace(pending.imageId), true, 'the id still belongs to the Core forever')
+})

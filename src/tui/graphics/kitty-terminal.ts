@@ -38,7 +38,7 @@ import type {
 } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 import type { TmuxKittyAdmission } from './tmux-admission.ts'
-import { encodeTmuxPassthrough } from './tmux-virtual.ts'
+import { encodeTmuxPassthrough, stripManagedVirtualMarkers } from './tmux-virtual.ts'
 
 /**
  * The physical-write refusal of a tmux virtual handle whose live admission was
@@ -68,6 +68,8 @@ export interface KittyTerminalFacadeOptions {
  * stream, not a slow one: fail fast instead of buffering without a bound.
  */
 const MAX_PARTIAL_APC_CHARS = 64 * 1024
+/** A complete provenance marker is far below this; a longer hold is a bug. */
+const MAX_PENDING_MARKER_CHARS = 512
 
 interface TextSignal {
   readonly sequence: string
@@ -158,6 +160,8 @@ export class KittyTerminalFacade implements Terminal {
   private partialApc = ''
   /** A trailing escape prefix that may complete the next write's signals. */
   private pendingText = ''
+  /** A split internal provenance marker that must never reach the terminal. */
+  private pendingMarker = ''
   /** Which physical screen buffer the writer is currently drawing into. */
   private buffer: KittyScreenBuffer = 'main'
   /** Global image deletes offered by THIS write, committed only on success. */
@@ -267,6 +271,7 @@ export class KittyTerminalFacade implements Terminal {
     this.disposed = true
     this.partialApc = ''
     this.pendingText = ''
+    this.pendingMarker = ''
   }
 
   // --- Terminal.write: the graphics gate -----------------------------------
@@ -319,13 +324,22 @@ export class KittyTerminalFacade implements Terminal {
     const input = this.takeInput(data)
     if (input === undefined && !this.core.hasQueuedRetirements()) return
     const segments = input === undefined ? [] : this.scanSegments(input)
-    const managed = this.core.hasQueuedRetirements()
-      || segments.some((segment) => segment.kind === 'apc' && this.managedPlacementId(segment.apc) !== undefined)
+    const hasManagedPlacement = segments.some(
+      (segment) => segment.kind === 'apc' && this.managedPlacementId(segment.apc) !== undefined,
+    )
+    const hasRetirements = this.core.hasQueuedRetirements()
     // The admission check comes BEFORE any managed APC/retirement is written.
     // A revoked handle must not flush old IDs to a new client, and refusing the
-    // whole batch (including its placeholder text) is deliberate: filtering the
-    // DCS but painting the grid would be an unadmitted image on screen.
-    if (managed && this.admission?.isAllowed(true) !== true) throw new TmuxGraphicsRevokedError()
+    // whole managed batch (including its placeholder text) is deliberate:
+    // filtering the DCS but painting the grid would be an unadmitted image.
+    if ((hasManagedPlacement || hasRetirements) && this.admission?.isAllowed(true) !== true) {
+      // A never-painted retirement is only a local pending byte set; dropping it
+      // here lets the caller's text-only fallback frame still reach the screen
+      // instead of throwing forever. Nothing is sent to the possibly different
+      // client and no painted image is affected.
+      this.core.discardQueuedRetirements()
+      if (hasManagedPlacement) throw new TmuxGraphicsRevokedError()
+    }
     this.pendingGlobalDeletes = []
     // Queued retirements still go first, each one individually DCS-wrapped.
     if (this.core.hasQueuedRetirements()) this.flushVirtualRetirements()
@@ -356,8 +370,14 @@ export class KittyTerminalFacade implements Terminal {
    * nothing at all (the queued-retirement check is the caller's business).
    */
   private takeInput(data: string): string | undefined {
-    if (data === '' && this.partialApc === '' && this.pendingText === '') return undefined
+    if (data === '' && this.partialApc === '' && this.pendingText === '' && this.pendingMarker === '') {
+      return undefined
+    }
     let input = data
+    if (this.pendingMarker !== '') {
+      input = this.pendingMarker + input
+      this.pendingMarker = ''
+    }
     if (this.partialApc !== '') {
       input = this.partialApc + input
       this.partialApc = ''
@@ -366,7 +386,12 @@ export class KittyTerminalFacade implements Terminal {
       input = this.pendingText + input
       this.pendingText = ''
     }
-    return input
+    const stripped = stripManagedVirtualMarkers(input)
+    if (stripped.hold.length > MAX_PENDING_MARKER_CHARS) {
+      throw new Error(`kitty graphics: unterminated provenance marker after ${stripped.hold.length} chars`)
+    }
+    this.pendingMarker = stripped.hold
+    return stripped.text
   }
 
   /**
@@ -466,7 +491,12 @@ export class KittyTerminalFacade implements Terminal {
       return
     }
     if (!this.core.hasQueuedRetirements()) return
-    if (this.admission?.isAllowed(true) !== true) return
+    if (this.admission?.isAllowed(true) !== true) {
+      // Revoked: do not send old IDs to a possibly different client. These are
+      // never-painted records only, so the local release is safe and invisible.
+      this.core.discardQueuedRetirements()
+      return
+    }
     this.flushVirtualRetirements()
   }
 

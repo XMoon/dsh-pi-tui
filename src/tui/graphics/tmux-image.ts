@@ -29,6 +29,7 @@ import {
   KITTY_VIRTUAL_MAX_CELLS,
   encodeKittyPlaceholderGrid,
   encodeKittyVirtualPlacement,
+  encodeManagedVirtualMarker,
 } from './tmux-virtual.ts'
 
 /**
@@ -133,7 +134,8 @@ export class TmuxKittyImage implements Component {
     const rows = Math.max(1, Math.min(KITTY_VIRTUAL_MAX_CELLS, geometry.rows))
     this.paintedBody = { width, columns, rows }
     const grid = encodeKittyPlaceholderGrid(handle.imageId, handle.placementId, columns, rows)
-    const lines = [encodeKittyVirtualPlacement(handle.imageId, handle.placementId, columns, rows) + grid[0]!]
+    const marker = encodeManagedVirtualMarker(handle.imageId, handle.placementId)
+    const lines = [marker + encodeKittyVirtualPlacement(handle.imageId, handle.placementId, columns, rows) + grid[0]!]
     for (let row = 1; row < rows; row++) lines.push(grid[row]!)
     return lines
   }

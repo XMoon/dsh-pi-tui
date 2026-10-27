@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 67
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 51, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 68
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 52, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -159,6 +159,7 @@
 | X064 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X065 | ACTIVE | LOW | HARD_HOST_API | NO |
 | X066 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X067 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -5648,3 +5649,91 @@ TuiBase.stop() ran its four teardown steps linearly: the screen hook (beforeTerm
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced for Image-7A PR1 after an external review proved the terminal was left unrestored when the Kitty cleanup write failed.
+
+### X067 — Preserve a clipped managed virtual Kitty placement anchor on the first visible placeholder row
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/layout.ts`, `src/terminal-image.ts`
+- Last audited: `2026-10-27`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The host's tmux virtual image backend creates ONE Kitty virtual placement anchor on the image's first source row and paints the rest of the image as real U+10EEEE placeholder cells. Upstream layout.ts clips a box's source lines to the viewport before the alternate-screen writer (and therefore the host's KittyTerminalFacade) sees them. When the image first becomes visible with its first row already above the viewport, only the later placeholder rows reach the facade: no upload, no prototype and no pixels, and the visible cells are pure placeholder text. The Owner approved this bounded fork seam after a real TuiAltScreen + ScrollView reproduction showed zero a=t/a=p bytes on the first visible frame and after a public-API audit found no current-frame pre-write visibility seam. A host-owned zero-width provenance marker (a private APC carrying the already-allocated image/placement ids, emitted only after the Core handle exists) identifies the managed anchor. The layout keeps the EXACT existing anchor APC from a marker-bearing source line and prefixes it to the first actually visible placeholder row of the same image block only when the marker, the adjacent anchor and the placeholder row identity all agree; it invents no id, geometry, row or state. A foreign virtual image with no marker is never relocated, and every output path strips the marker before the real terminal. Native metadata cropping, the host Core/facade ownership, text/foreign protocols and the image ids all stay unchanged.
+
+#### Changed surface
+
+- `terminal-image.ts` adds stateless helpers: `getManagedKittyVirtualMarker(line)` parses the private marker at a source line start and returns its exact bytes plus the already-allocated image/placement ids; `getKittyVirtualPlacementAnchor(line)` parses only an exact `a=p,U=1,q=2` anchor with positive 1..297 i/p/c/r controls and returns the exact source APC substring; `isKittyVirtualPlaceholderLine()` and `matchesKittyVirtualPlaceholderIdentity()` are pure checks on real U+10EEEE cells and their existing id/placement colors. None touches the Native metadata table, capabilities or terminal IO.
+- `layout.ts`'s `paintBox()` strips a valid marker from painted source lines, throws on a malformed marker or a marker/anchor id mismatch, and at most scans the 297 source lines immediately above a box's first visible row. It relocates only when the nearest preceding marker-bearing anchor has a block reaching the visible range and the first visible placeholder row's existing identity colors match the anchor. The original anchor line stays clipped; no anchor is emitted when the original anchor row is visible, the image is fully invisible, the row is foreign/unmarked, or the line already carries a Native image.
+- The host `TmuxKittyImage` emits the marker only with a live Core handle; `KittyTerminalFacade` strips complete or split markers before every write (Main, Alt replay and cross-write holdback), and the marker never becomes a second ownership/registry authority.
+
+#### Dependency map
+
+**Vendor internal**
+- The new helpers are pure string functions in `terminal-image.ts`; they add no mutable state, cache, timer or geometry model.
+- `layout.ts` uses only its existing `box.lines`, `box.rect`, `box.clip`, `box.lineOffset` and visible row range; the source anchor sequence is reused byte-for-byte and no new placement is synthesized.
+- The scan is bounded to 297 rows above the first visible source row (the host component's own maximum image-row count), so painting a viewport never scans the whole transcript or scrollback.
+- Native metadata registration/`cropKittyImageLine` and the existing scroll recovery branch are not read or changed by the seam.
+- Audit note: The seam observes the current layout frame's own source lines and clip; it keeps no cross-frame shadow state.
+
+**Inheritance / structural**
+- `Component` receives no new method or parameter; the component API and every subclass/override stay unchanged.
+- `LayoutBox` gains no field; only `paintBox()`'s local processing changes.
+- `TuiAltScreen`, `TuiMainScreen`, `TuiBase`, `ScrollView` and all other fork files are untouched.
+- Audit note: No structural seam is added or repurposed; the existing layout source/clip facts remain authoritative.
+
+**Host**
+- The host `TmuxKittyImage` is the only producer of a marked anchor: it creates the marker from the same Core handle ids only after `register()` succeeded, and fallback/revoked/budget paths emit no marker.
+- `KittyTerminalFacade` removes markers from the text stream (including a marker split across writes) before Kitty parsing; the marker is not a Kitty command and never reaches the terminal on Main, Alt replay or any other write path.
+- The host `KittyTerminalFacade` still owns transmission insertion, admission, DCS wrapping and placement registration; the marker only authorizes the fork layout to move the existing anchor and grants no upload/delete/admission authority.
+- No additional Core, residency ledger, image id or admission decision is created; the existing RFL-001/003 behavior is unaffected.
+- Audit note: Host ownership and wire construction are unchanged; the fork only preserves the host's existing anchor across its own clipping.
+
+**Public / extension**
+- `src/index.ts` does not export either helper; the extension tiers and public component contract are unchanged.
+- No public component method, option or event is added.
+- Audit note: The helper is module-internal to the vendored package, consumed only by `layout.ts`.
+
+**Behavioral coupling**
+- Normal visible-anchor frames strip the marker and are otherwise byte-identical; the seam returns nothing when the anchor row is visible.
+- A complete foreign virtual anchor+grid without the private marker is never relocated, even if it has valid U+10EEEE cells and the same control shape; a managed marker plus a mismatched anchor id fails fast.
+- Clipped Native `a=T` images, text, OSC and non-placeholder rows are untouched; the moved APC is zero-width and horizontal clipping/visible width are unchanged.
+- The relocation occurs in the current frame before the screen writer, never as a second-frame repair or a terminal-side PUA scan.
+- Audit note: The only behavioural change is preserving an existing managed virtual anchor for the first visible frame.
+
+#### Guarding tests
+
+- packages/pi-tui/test/layout.test.ts: a marked clipped anchor is relocated once onto the first visible placeholder row with the exact bytes; a visible marked anchor is not duplicated and its marker is stripped; a complete unmarked foreign virtual image is never moved; a managed/foreign adjacent pair moves only the managed anchor; marker/anchor id mismatch and malformed markers fail fast; identity-color mismatch, bare anchors, fully invisible images and the 297-row boundary are covered.
+- test/integration/kitty-tmux-screen.test.ts: a real TuiAltScreen + ScrollView first mounts the TmuxKittyImage while already mid-content; the first visible frame carries a=t before exactly one a=p,U=1 and real placeholder cells; Main first paint strips the marker through the facade; a complete foreign virtual image stays unrelocated; the marker never leaks across every split byte; the same image component's revoked fallback plus a queued retirement still writes.
+- External E3 evidence (repo-external): the real-Screen first-middle path in a real Kitty 0.41.1 + tmux 3.5a window, with outer raw, stage offsets, a screenshot of pixels on the first visible frame and zero provenance-marker bytes in terminal/outer/pane streams.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/layout.ts
+- src/terminal-image.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream layout clips the virtual placement anchor row with the rest of the box and has no current-frame visibility or provenance seam; the fork recognizes the host's private marker, keeps the exact anchor sequence and prefixes it to the first visible placeholder row of the same block only when the marker, anchor and cell identity agree, while unmarked foreign virtual images are untouched.
+
+#### Retirement conditions
+
+- Upstream layout preserves a managed Unicode-placeholder placement anchor across vertical clipping, or upstream exposes an equivalent current-frame pre-write visibility/placement seam that the host can consume without this divergence.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced for Image-7B-A RFL-002 after the Owner authorized the bounded fork seam, then extended under the RFL-004 Owner ruling with a private provenance marker so foreign virtual images are never relocated. The real first-visible-middle reproduction had zero graphics bytes before the seam and shows pixels after it; the marker never reaches the terminal.

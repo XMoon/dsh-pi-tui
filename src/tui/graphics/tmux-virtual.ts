@@ -72,8 +72,17 @@ const DIACRITIC_CHARS: readonly string[] = ROWCOLUMN_DIACRITICS.map((codePoint) 
 /** The largest row/column index the diacritic table can express. */
 export const KITTY_VIRTUAL_MAX_CELLS = DIACRITIC_CHARS.length
 
-function clampCells(value: number): number {
-  return Math.max(1, Math.min(KITTY_VIRTUAL_MAX_CELLS, Math.floor(value)))
+/**
+ * The component bounds its geometry BEFORE encoding. The encoder must fail
+ * fast instead of silently truncating a row/column count: a truncated grid and
+ * a placement that still claims the untruncated `c`/`r` would disagree about
+ * the image rectangle, and the painted body would lie.
+ */
+function requireCells(value: number, axis: 'columns' | 'rows'): number {
+  if (!Number.isInteger(value) || value < 1 || value > KITTY_VIRTUAL_MAX_CELLS) {
+    throw new RangeError(`kitty virtual ${axis} must be an integer in 1..${KITTY_VIRTUAL_MAX_CELLS}, got ${value}`)
+  }
+  return value
 }
 
 /**
@@ -105,8 +114,8 @@ export function encodeKittyVirtualPlacement(
   columns: number,
   rows: number,
 ): string {
-  const cols = clampCells(columns)
-  const lineCount = clampCells(rows)
+  const cols = requireCells(columns, 'columns')
+  const lineCount = requireCells(rows, 'rows')
   return `${KITTY_APC_INTRODUCER}a=p,U=1,i=${imageId},p=${placementId},c=${cols},r=${lineCount},q=2;${KITTY_APC_TERMINATOR}`
 }
 
@@ -123,8 +132,8 @@ export function encodeKittyPlaceholderGrid(
   columns: number,
   rows: number,
 ): string[] {
-  const cols = clampCells(columns)
-  const lineCount = clampCells(rows)
+  const cols = requireCells(columns, 'columns')
+  const lineCount = requireCells(rows, 'rows')
   const imageLow = imageId & 0xffffff
   const placementLow = placementId & 0xffffff
   const foreground = `\x1b[38;2;${(imageLow >> 16) & 0xff};${(imageLow >> 8) & 0xff};${imageLow & 0xff}m`
@@ -140,4 +149,51 @@ export function encodeKittyPlaceholderGrid(
     grid.push(line + '\x1b[39;59m')
   }
   return grid
+}
+
+
+/**
+ * The zero-width internal provenance marker the managed component puts before
+ * its virtual anchor. It is NOT a Kitty graphics command and must never reach
+ * the real terminal: the fork layout uses it to authorise a clipped-anchor
+ * relocation, and both the layout and the shared facade remove it.
+ */
+export const MANAGED_VIRTUAL_MARKER_PREFIX = '\x1b_pi:tmux-image:v1:i='
+const MANAGED_VIRTUAL_MARKER_TERMINATOR = '\x1b\\'
+
+/** Encode the marker for ONE already-allocated Core handle. */
+export function encodeManagedVirtualMarker(imageId: number, placementId: number): string {
+  return `${MANAGED_VIRTUAL_MARKER_PREFIX}${imageId},p=${placementId}${MANAGED_VIRTUAL_MARKER_TERMINATOR}`
+}
+
+/**
+ * Remove every complete marker from `input` and return the longest trailing
+ * marker-prefix fragment as `hold` for the next write. The facade owns the
+ * hold across `Terminal.write()` calls, so a marker split at any byte never
+ * leaks and never corrupts the real anchor that follows it.
+ */
+export function stripManagedVirtualMarkers(input: string): { text: string; hold: string } {
+  let text = ''
+  let index = 0
+  for (;;) {
+    const start = input.indexOf(MANAGED_VIRTUAL_MARKER_PREFIX, index)
+    if (start === -1) {
+      text += input.slice(index)
+      break
+    }
+    text += input.slice(index, start)
+    const end = input.indexOf(MANAGED_VIRTUAL_MARKER_TERMINATOR, start + MANAGED_VIRTUAL_MARKER_PREFIX.length)
+    if (end === -1) return { text, hold: input.slice(start) }
+    index = end + MANAGED_VIRTUAL_MARKER_TERMINATOR.length
+  }
+  let holdLength = 0
+  const limit = Math.min(MANAGED_VIRTUAL_MARKER_PREFIX.length - 1, text.length)
+  for (let length = limit; length > 0; length--) {
+    if (MANAGED_VIRTUAL_MARKER_PREFIX.startsWith(text.slice(text.length - length))) {
+      holdLength = length
+      break
+    }
+  }
+  if (holdLength === 0) return { text, hold: '' }
+  return { text: text.slice(0, text.length - holdLength), hold: text.slice(text.length - holdLength) }
 }
