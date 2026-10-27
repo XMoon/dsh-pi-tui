@@ -38,7 +38,7 @@ import type {
 } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 import type { TmuxKittyAdmission } from './tmux-admission.ts'
-import { KITTY_VIRTUAL_PLACEHOLDER, encodeTmuxPassthrough } from './tmux-virtual.ts'
+import { encodeTmuxPassthrough } from './tmux-virtual.ts'
 
 /**
  * The physical-write refusal of a tmux virtual handle whose live admission was
@@ -144,6 +144,20 @@ function trailingHoldbackLength(text: string): number {
   return longest
 }
 
+/**
+ * Whether one placeholder row's OWN colors name the given image/placement. This
+ * validates existing identity bytes (the anchor's `i`/`p` stay authoritative); it
+ * does not reconstruct geometry. A plain-text `U+10EEEE` has no such color pair.
+ */
+function matchesVirtualGridIdentity(line: string, imageId: number, placementId: number): boolean {
+  const foreground = /\x1b\[38;2;(\d{1,3});(\d{1,3});(\d{1,3})m/.exec(line)
+  const underline = /\x1b\[58:2::(\d{1,3}):(\d{1,3}):(\d{1,3})m/.exec(line)
+  if (foreground === null || underline === null) return false
+  const rgb = (match: RegExpExecArray): number =>
+    ((Number(match[1]) & 0xff) << 16) | ((Number(match[2]) & 0xff) << 8) | (Number(match[3]) & 0xff)
+  return rgb(foreground) === (imageId & 0xffffff) && rgb(underline) === (placementId & 0xffffff)
+}
+
 function numericControl(value: string | undefined): number | undefined {
   if (value === undefined || value === '') return undefined
   const parsed = Number(value)
@@ -200,6 +214,14 @@ export class KittyTerminalFacade implements Terminal {
   private buffer: KittyScreenBuffer = 'main'
   /** Global image deletes offered by THIS write, committed only on success. */
   private pendingGlobalDeletes: KittyGlobalImageDeletePlan[] = []
+  /**
+   * The `(imageId, placementId)` pairs this facade wrote as ACTUAL managed
+   * `a=p,U=1` anchors. A grid row is only managed while its own colors name one
+   * of these pairs — the bare `U+10EEEE` code point is ordinary Unicode and can
+   * appear in legal user text (`transcript`, `Source`), so it must never be the
+   * classifier.
+   */
+  private readonly placedVirtual = new Set<string>()
   private disposed = false
 
   constructor(inner: Terminal, core: KittyGraphicsCore, options: KittyTerminalFacadeOptions = {}) {
@@ -359,17 +381,23 @@ export class KittyTerminalFacade implements Terminal {
     if (input === undefined && !this.core.hasQueuedRetirements()) return
     const segments = input === undefined ? [] : this.scanSegments(input)
     // A managed image reaches the OUTER client two ways, and BOTH are managed
-    // bytes: the `a=p,U=1` prototype AND the placeholder TEXT cells that make it
+    // bytes: the `a=p,U=1` prototype AND the placeholder TEXT rows that make it
     // visible. The fork's frame writer splits one frame into multiple physical
     // writes, so a later chunk can carry only grid rows — no `a=p` at all. Such
     // a chunk must pass the same admission gate, or a revocation between chunks
     // would let the old image's cells reach a different client.
-    const hasManagedGrid = segments.some(
-      (segment) => segment.kind === 'text' && segment.text.includes(KITTY_VIRTUAL_PLACEHOLDER),
-    )
-    const hasManagedPlacement = hasManagedGrid || segments.some(
-      (segment) => segment.kind === 'apc' && this.managedPlacementId(segment.apc) !== undefined,
-    )
+    //
+    // The grid is identified by its IDENTITY BYTES, never by the bare presence
+    // of `U+10EEEE`: that code point is ordinary Unicode and legal user text,
+    // so a character test would classify a plain transcript line as an image and
+    // (once revoked) refuse the whole text frame forever. A managed grid row
+    // carries explicit foreground/underline colors naming the image/placement of
+    // an anchor this facade actually wrote (`placedVirtual`).
+    const hasManagedPlacement = segments.some((segment) => {
+      if (segment.kind === 'apc') return this.managedPlacementId(segment.apc) !== undefined
+      this.notePlacedVirtualIds(segment.text)
+      return this.managedGridIn(segment.text)
+    })
     const hasRetirements = this.core.hasQueuedRetirements()
     this.pendingGlobalDeletes = []
     // The retirements and the frame are TWO physical sink batches (the flush
@@ -490,7 +518,51 @@ export class KittyTerminalFacade implements Terminal {
     if (command === undefined || command.controls.a !== 'p' || command.controls.U !== '1') return undefined
     const imageId = numericControl(command.controls.i)
     if (imageId === undefined || !this.core.ownsIdSpace(imageId)) return undefined
+    const placementId = numericControl(command.controls.p)
+    if (placementId === undefined) return undefined
+    this.placedVirtual.add(`${imageId}:${placementId}`)
     return imageId
+  }
+
+  /**
+   * Record the anchor ids in one TEXT segment. The provenance marker is not a
+   * graphics command and is stripped before the terminal write, but it names
+   * exactly the anchor this facade emitted, so a grid-only chunk (no `a=p`) can
+   * still be verified against it after a split.
+   */
+  private notePlacedVirtualIds(text: string): void {
+    let index = 0
+    for (;;) {
+      const start = text.indexOf(MANAGED_VIRTUAL_MARKER_PREFIX, index)
+      if (start === -1) return
+      const bodyStart = start + MANAGED_VIRTUAL_MARKER_PREFIX.length
+      const end = text.indexOf(MANAGED_VIRTUAL_MARKER_TERMINATOR, bodyStart)
+      if (end === -1) return
+      const match = /^(\d{1,10}),p=(\d{1,10})$/.exec(text.slice(bodyStart, end))
+      if (match !== null) {
+        const imageId = Number(match[1])
+        const placementId = Number(match[2])
+        if (this.core.ownsIdSpace(imageId)) this.placedVirtual.add(`${imageId}:${placementId}`)
+      }
+      index = end + MANAGED_VIRTUAL_MARKER_TERMINATOR.length
+    }
+  }
+
+  /**
+   * Whether one TEXT segment carries at least one REAL managed grid row: a row
+   * whose foreground/underline colors name an anchor this facade wrote. Plain
+   * text containing `U+10EEEE` never matches, because it has no such identity
+   * colors (or names an id outside this Core's slice).
+   */
+  private managedGridIn(text: string): boolean {
+    if (this.placedVirtual.size === 0) return false
+    for (const line of text.split('\n')) {
+      for (const pair of this.placedVirtual) {
+        const [imageId, placementId] = pair.split(':').map(Number) as [number, number]
+        if (matchesVirtualGridIdentity(line, imageId, placementId)) return true
+      }
+    }
+    return false
   }
 
   /**
