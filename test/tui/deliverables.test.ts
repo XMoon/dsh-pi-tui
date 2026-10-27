@@ -2699,52 +2699,91 @@ test('B08: terminal focus-out and stop each retire an overlay-origin selection t
   }
 })
 
-test('B08: replacing the display subject retires an overlay-origin selection that was LIVE', async () => {
-  const copied: string[] = []
-  const vt = new VirtualTerminal(100, 30)
-  let current = true
-  const snapshot = {
-    subjectKind: 'main' as const,
-    sessionId: 'session-1',
-    sourceIdentity: {},
-    turns: [{ turn: 1, files: [{ path: '/ws/alpha.md', description: 'first report' }] }],
-  }
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
-    displayState: { preset: 'full' },
-    copySelection: async (text) => {
-      copied.push(text)
-      return true
-    },
-    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => current },
+test('B08: a REAL subject identity switch retires an overlay-origin selection that was LIVE', async () => {
+  // The REAL application owner decides currentness: no injected boolean. Two
+  // real folders with the IDENTICAL path and Turn shape, so only the sampled
+  // subject identity can tell them apart (runtime.ts `captureProjectionTarget`).
+  // The SAME folder instance serves both subjects, and both are the MAIN
+  // subject: ONLY the session identity differs, so the projection token is
+  // identical and a fence that ignored the subject id would call the old
+  // snapshot current.
+  const shared = deliveredFolder([{ turn: 3, files: [{ path: '/ws/same.md', description: 'same' }] }])
+  let currentSession = 'session-a'
+  const routing = deliveredSurfaceRouting({
+    sessionId: () => currentSession,
+    mainFolder: () => shared,
   })
-  app.start()
-  startedApps.add(app)
-  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
-  app.setFullscreen(true)
-  app.openDeliveredFiles(snapshot)
-  let view = ''
-  for (let attempt = 0; attempt < 40 && !view.includes('alpha.md'); attempt += 1) {
+  const surface = mountDeliveredSurface(routing)
+  try {
+    const copied: string[] = []
+    const vt = new VirtualTerminal(100, 30)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      displayState: { preset: 'full' },
+      copySelection: async (text) => {
+        copied.push(text)
+        return true
+      },
+      deliveredFiles: {
+        snapshot: () => surface.deliveredFilesSnapshot(),
+        isCurrent: (snapshot) => surface.isDeliveredFilesSnapshotCurrent(snapshot),
+      },
+    })
+    app.start()
+    startedApps.add(app)
+    app.setTranscript([{ kind: 'assistant', turn: 3, text: 'done' }], new Map())
+    app.setFullscreen(true)
+    const snapshotA = surface.deliveredFilesSnapshot()
+    assert.ok(snapshotA !== undefined, 'fixture: subject A produced a snapshot')
+    app.openDeliveredFiles(snapshotA)
+    let view = ''
+    for (let attempt = 0; attempt < 40 && !view.includes('same.md'); attempt += 1) {
+      await vt.waitForRender()
+      view = vt.getViewport().join('\n')
+    }
+    const lines = view.split('\n')
+    const frame = modalFrame(lines)
+    const row = lines.findIndex((line, index) => index > frame.top && line.includes('same.md'))
+    assert.ok(row > frame.top, `fixture:\n${view}`)
+    const column = columnOf(lines, row, 'same.md')
+    resetWrites(vt)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
     await vt.waitForRender()
-    view = vt.getViewport().join('\n')
-  }
-  const lines = view.split('\n')
-  const frame = modalFrame(lines)
-  const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
-  const column = columnOf(lines, row, 'alpha.md')
-  resetWrites(vt)
-  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
-  vt.sendInput(`\x1b[<32;${column + 7};${row + 1}M`)
-  await vt.waitForRender()
-  assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live overlay selection')
+    assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live overlay selection')
 
-  // The display subject is replaced: the captured catalog no longer describes
-  // the current projection, so the browser is retired before the frame paints.
-  current = false
-  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'the new subject' }], new Map())
-  const replaced = await viewport(vt)
-  assert.ok(!replaced.includes('alpha.md'), `the browser is retired with the old subject:\n${replaced}`)
-  vt.sendInput(`\x1b[<0;${column + 7};${row + 1}m`)
-  await vt.waitForRender()
-  assert.equal(copied.length, 0, `a display-subject replacement never copies the retired range (saw ${JSON.stringify(copied)})`)
-  app.stop()
+    // A REAL subject identity change: the SAME folder and projection token,
+    // now belonging to a different Session.
+    currentSession = 'session-b'
+    assert.equal(
+      surface.isDeliveredFilesSnapshotCurrent(snapshotA),
+      false,
+      'the REAL application owner sees the old subject as stale',
+    )
+    const snapshotB = surface.deliveredFilesSnapshot()
+    assert.ok(snapshotB !== undefined, 'fixture: the new subject produced its own snapshot')
+    // ONLY the session identity differs: same folder, same projection token,
+    // same subject kind.
+    assert.equal(snapshotB.subjectKind, snapshotA.subjectKind, 'the subject kind is unchanged')
+    assert.equal(snapshotB.sessionId !== snapshotA.sessionId, true, 'the session identity changed')
+    assert.equal(snapshotB.sourceIdentity === snapshotA.sourceIdentity, true, 'the projection is unchanged')
+    // The projection commit that reaches `retireStaleDeliveredFiles()`.
+    app.setTranscript([{ kind: 'assistant', turn: 3, text: 'done' }], new Map())
+    // The retirement hides the overlay and still owns one paint of the retired
+    // frame, so let the terminal settle before reading it.
+    for (let settle = 0; settle < 5; settle += 1) await vt.waitForRender()
+    const switched = vt.getViewport().join('\n')
+    // The modal FRAME must be gone: the Files list paints only a basename, so
+    // matching the declared path would pass vacuously.
+    assert.ok(
+      !switched.includes('Delivered files · Turn') && !switched.includes('[Filter]'),
+      `the browser is retired after the real subject switch:\n${switched}`,
+    )
+    // A late release can never copy the retired range.
+    vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
+    await vt.waitForRender()
+    assert.equal(copied.length, 0, `a real subject switch never copies the retired range (saw ${JSON.stringify(copied)})`)
+    app.stop()
+  } finally {
+    surface.dispose()
+  }
 })
