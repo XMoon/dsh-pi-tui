@@ -789,8 +789,27 @@ export class DeliveredFilesPanel implements Component {
 
   /** One DEFINITE state for a refusal; an unknown failure is reported, generic. */
   private failPreview(error: unknown): void {
-    // A superseded read and the caller's own cancellation are not states.
-    if (error instanceof SupersededReadError || isCancellation(error)) return
+    // The caller's own cancellation is not a state: the request was revoked by a
+    // newer navigation, and that newer flow owns the page.
+    if (isCancellation(error)) return
+    // A SUPERSEDED read is not a Host refusal either: the connection generation
+    // moved on, so the reply describes a transport epoch this page no longer
+    // talks to. §7.5 forbids disguising it as `service-unavailable` and forbids
+    // retrying inside the same operation — but it must still settle into a
+    // DEFINITE, honest state instead of a `Loading…` that never ends. It therefore
+    // reports through diagnostics and paints the §7.7 generic sentence; asking
+    // again is the user's next explicit action.
+    if (error instanceof SupersededReadError) {
+      this.reportUnclassifiedFailure?.('delivered file preview superseded by a newer connection generation', error)
+      const supersededStat = this.previewStat
+      this.preview = {
+        kind: 'failure',
+        code: undefined,
+        ...(supersededStat === undefined ? {} : { stat: supersededStat }),
+      }
+      this.requestRender()
+      return
+    }
     const stat = this.previewStat
     if (error instanceof DeliveredFileReadError) {
       this.preview = { kind: 'failure', code: error.code, ...(stat === undefined ? {} : { stat }) }
