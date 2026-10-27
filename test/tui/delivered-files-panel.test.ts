@@ -1125,8 +1125,9 @@ test('a near-limit single line is wrapped for the VIEWPORT, not re-wrapped per k
   h.setSize(40, 16)
   h.type('enter')
   await new Promise(resolve => setTimeout(resolve, 20))
-  interface WrapProbe { readonly wrappedSourceLines: number }
+  interface WrapProbe { readonly wrappedSourceLines: number; readonly wrappedPhysicalRows: number }
   const probe = (): number => (h.panel as unknown as WrapProbe).wrappedSourceLines
+  const physical = (): number => (h.panel as unknown as WrapProbe).wrappedPhysicalRows
 
   // The first paint wraps the ONE source line at most once.
   h.rows()
@@ -1145,6 +1146,12 @@ test('a near-limit single line is wrapped for the VIEWPORT, not re-wrapped per k
   assert.equal(probe(), afterOpen, 'scrolling never re-wraps the source line')
   assert.ok(elapsed < 2_000, `twenty scroll steps stay responsive (${elapsed}ms)`)
 
+  // The MATERIALISED PHYSICAL rows are viewport-bounded, not the ~50k a full
+  // wrap of this line would produce.
+  const rowsMaterialised = physical()
+  assert.ok(rowsMaterialised <= 64,
+    `only viewport-scale physical rows are built (${rowsMaterialised} of ~52k)`)
+
   // The rows really advanced: the viewport moved down within the wrapped line.
   const pageUp = h.rows()
   assert.ok(pageUp.length > 0)
@@ -1152,4 +1159,87 @@ test('a near-limit single line is wrapped for the VIEWPORT, not re-wrapped per k
   h.setSize(64, 16)
   h.rows()
   assert.equal(probe(), 1, 'a width change re-derives exactly one wrapped line')
+})
+
+test('a 12-column terminal wraps a near-limit line without blowing the stack', async () => {
+  // 12 columns turns one ~2 MiB line into ~175k rows: spreading that array into
+  // `push(...)` threw `RangeError: Maximum call stack size exceeded`.
+  const longLine = 'y'.repeat(2 * 1024 * 1024 - 16)
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/narrow.txt'] }]), {
+    autoResolve: {
+      stat: { version: 'v1', bytes: longLine.length },
+      offset: 1,
+      limit: DELIVERED_FILE_PAGE_LINES,
+      text: longLine,
+      lines: 1,
+      eof: true,
+    },
+  })
+  h.setSize(16, 14)
+  h.type('enter')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  interface WrapProbe { readonly wrappedPhysicalRows: number }
+  const physical = (): number => (h.panel as unknown as WrapProbe).wrappedPhysicalRows
+  // Opening at the narrowest usable width must NOT throw, and must not build the
+  // whole 175k-row projection.
+  const rows = h.rows()
+  assert.ok(rows.length > 0, 'the page paints')
+  assert.ok(physical() <= 64, `viewport-bounded physical rows (${physical()})`)
+  // Scrolling stays bounded too.
+  for (let step = 0; step < 10; step += 1) {
+    h.type('down')
+    h.rows()
+  }
+  assert.ok(physical() <= 128, `scrolling stays viewport-bounded (${physical()})`)
+})
+
+test('the restart notice survives the reloaded first page', async () => {
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/report.md'] }]))
+  h.setSize(100, 30)
+  h.type('enter')
+  // First page of version v1.
+  h.resolveStat({ version: 'v1', bytes: 20 })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  h.resolveRead({
+    stat: { version: 'v1', bytes: 20 },
+    offset: 1,
+    limit: DELIVERED_FILE_PAGE_LINES,
+    lines: 1,
+    text: 'version one',
+    eof: false,
+  })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(h.rows().join('\n').includes('version one'))
+
+  // PgDn at the page edge requests the next window; the Host reports a CHANGED
+  // version, so the preview restarts from page one.
+  h.type('pageDown')
+  h.resolveRead({
+    stat: { version: 'v2', bytes: 20 },
+    offset: 2,
+    limit: DELIVERED_FILE_PAGE_LINES,
+    lines: 1,
+    text: 'stale window',
+    eof: true,
+  })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  h.rows()
+  // The restart itself asks for a fresh stat + first page.
+  h.resolveStat({ version: 'v2', bytes: 20 })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  h.resolveRead({
+    stat: { version: 'v2', bytes: 20 },
+    offset: 1,
+    limit: DELIVERED_FILE_PAGE_LINES,
+    lines: 1,
+    text: 'version two',
+    eof: true,
+  })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  const painted = h.rows().join('\n')
+  // The NEW page is painted AND the restart notice is still visible with it.
+  assert.ok(painted.includes('version two'), `the reloaded page is painted:\n${painted}`)
+  assert.ok(painted.includes('File changed; preview restarted'),
+    `the restart notice survives the reloaded page:\n${painted}`)
+  assert.ok(!painted.includes('stale window'), `no version is spliced:\n${painted}`)
 })
