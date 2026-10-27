@@ -266,6 +266,26 @@ export class KittyGraphicsCore {
     return imageId >= this.imageIdFloor && imageId < this.nextImageId
   }
 
+  /**
+   * Whether ANY id in this Core's allocated slice has the given low 24 bits.
+   *
+   * The virtual grid's identity colors carry only the low 24 bits (the high
+   * byte rides a diacritic), so a grid row cannot be matched against a full
+   * 32-bit id without the Core's own authority. The slice is contiguous, so this
+   * is an exact interval test on the low bits, not a second id registry.
+   */
+  ownsLowImageBits(low: number): boolean {
+    const first = this.imageIdFloor & 0xffffff
+    const last = (this.nextImageId - 1) & 0xffffff
+    if (this.nextImageId - 1 < this.imageIdFloor) return false
+    // The slice may wrap the 24-bit boundary; both ends then cover the whole
+    // space, and any low value belongs to some allocated id.
+    if (first <= last && this.nextImageId - 1 - this.imageIdFloor < 0xffffff) {
+      return low >= first && low <= last
+    }
+    return true
+  }
+
 
 
   /**
