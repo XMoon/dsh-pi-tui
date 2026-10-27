@@ -362,21 +362,29 @@ export class KittyTerminalFacade implements Terminal {
       (segment) => segment.kind === 'apc' && this.managedPlacementId(segment.apc) !== undefined,
     )
     const hasRetirements = this.core.hasQueuedRetirements()
-    // The admission check comes BEFORE any managed APC/retirement is written.
-    // A revoked handle must not flush old IDs to a new client, and refusing the
-    // whole managed batch (including its placeholder text) is deliberate:
-    // filtering the DCS but painting the grid would be an unadmitted image.
-    if ((hasManagedPlacement || hasRetirements) && this.admission?.isAllowed(true) !== true) {
-      // A never-painted retirement is only a local pending byte set; dropping it
-      // here lets the caller's text-only fallback frame still reach the screen
-      // instead of throwing forever. Nothing is sent to the possibly different
-      // client and no painted image is affected.
-      this.core.discardQueuedRetirements()
-      if (hasManagedPlacement) throw new TmuxGraphicsRevokedError()
-    }
     this.pendingGlobalDeletes = []
-    // Queued retirements still go first, each one individually DCS-wrapped.
-    if (this.core.hasQueuedRetirements()) this.flushVirtualRetirements()
+    // The retirements and the frame are TWO physical sink batches (the flush
+    // writes first, the frame second), so each managed batch gets its own
+    // forced probe immediately before its own write: a client change between
+    // them must never let the later DCS/PUA reach the new client.
+    if (hasRetirements) {
+      if (this.admission?.isAllowed(true) !== true) {
+        // A never-painted retirement is only a local pending byte set; dropping
+        // it here lets the caller's text-only fallback frame still reach the
+        // screen instead of throwing forever. Nothing is sent to the possibly
+        // different client and no painted image is affected.
+        this.core.discardQueuedRetirements()
+        if (hasManagedPlacement) throw new TmuxGraphicsRevokedError()
+      } else {
+        // Queued retirements go first, each one individually DCS-wrapped.
+        this.flushVirtualRetirements()
+      }
+    }
+    if (hasManagedPlacement && this.admission?.isAllowed(true) !== true) {
+      // The frame's managed batch was NOT written: no placeholder cell and no
+      // DCS escaped. The scan below (which mutates Core residency) never ran.
+      throw new TmuxGraphicsRevokedError()
+    }
     let wire = ''
     const touched: number[] = []
     for (const segment of segments) {
