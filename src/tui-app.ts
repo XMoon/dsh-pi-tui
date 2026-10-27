@@ -1609,7 +1609,7 @@ interface JobWorkspaceRecord {
  * whose physical effect must wait for the user to LEAVE the workspace is
  * applied only on `user-exit`.
  */
-export type SettingsWorkspaceCloseReason = 'user-exit' | 'legacy-handoff' | 'forced'
+export type SettingsWorkspaceCloseReason = 'user-exit' | 'forced'
 
 /**
  * The opening options of ONE Settings workspace (Phase 3B / B2-A). The
