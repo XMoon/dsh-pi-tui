@@ -1660,6 +1660,8 @@ test('tmux virtual: a REAL Alt diff of ONE non-anchor grid row keeps its marker 
     screen.addChild(root)
     screen.start()
     screen.renderNow()
+    assert.equal(h.terminal.text.includes('pi:tmux-grid'), false,
+      'no per-row marker reaches the terminal on the full Alt frame')
 
     // Capture what the ALT screen offers the facade on the diff frame.
     const calls: string[] = []
