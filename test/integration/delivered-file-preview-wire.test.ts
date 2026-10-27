@@ -21,10 +21,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from '../../src/app/remote/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../src/app/remote/host-runtime.ts'
 import { DeliveredFileReadError } from '../../src/runtime/deliverables-port.ts'
+import { DeliveredFilesPanel } from '../../src/tui/deliverables/delivered-files-panel.ts'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { RemoteDeliveredFileReadPort } from '../../src/runtime/remote/deliverables-remote.ts'
 import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -104,6 +107,73 @@ test('the generated workspaceFiles Remote serves a real Host stat/read and a rea
     await assertRejectsCode(port.stat(sessionId, join(workspace, 'missing.md'), abort), 'not-found')
     await assertRejectsCode(port.read(sessionId, binaryPath, 1, 120, abort), 'not-text')
     await assertRejectsCode(port.stat('missing-session', filePath, abort), 'session-unavailable')
+
+    // ── The REAL chain all the way to the PAINTED page ─────────────────────
+    // Host file bytes -> official workspaceFiles over the generated Remote wire
+    // -> RemoteDeliveredFileReadPort -> the panel's preview state machine ->
+    // the rows the Details page paints. Nothing in this leg is a stand-in: the
+    // snapshot names the declared path, and the capability is the port above.
+    const bound = {
+      stat: (path: string, signal: AbortSignal) => port.stat(sessionId, path, signal),
+      read: (path: string, offset: number, limit: number, signal: AbortSignal) =>
+        port.read(sessionId, path, offset, limit, signal),
+    }
+    // A UNIQUE token in the real file: no stub, constant or replayed body can
+    // satisfy this assertion — only the bytes on the Host filesystem can.
+    const token = randomUUID()
+    const panelPath = join(docsDir, 'panel-real.md')
+    writeFileSync(panelPath, `the real report\n${token}\ntail line\n`)
+    const panel = new DeliveredFilesPanel({
+      snapshot: {
+        subjectKind: 'main',
+        sessionId,
+        sourceIdentity: {},
+        turns: [{ turn: 1, files: [{ path: panelPath, description: 'the real report' }] }],
+      },
+      initial: { turn: 1, path: panelPath, page: 'details' },
+      preview: bound,
+      requestRender: () => {},
+      close: () => {},
+      copyPath: (_path, settle) => settle(true),
+    })
+    panel.setMaxRows(20)
+    const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+    // Wait for the REAL wire to settle instead of assuming a tick count.
+    const deadline = Date.now() + 5_000
+    while (!paint().includes(token) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    const painted = paint()
+    assert.ok(painted.includes(token), `the UNIQUE Host bytes reach the painted page:\n${painted}`)
+    assert.ok(painted.includes('the real report'), `the first real line is painted:\n${painted}`)
+    assert.ok(painted.includes('tail line'), `the tail line is painted:\n${painted}`)
+    assert.ok(painted.includes('Host: ') && painted.includes(panelPath), `the declared path is the subject:\n${painted}`)
+    assert.ok(!painted.includes('Loading'), `the page left the loading state:\n${painted}`)
+
+    // The SAME chain on a REAL refusal: the Host's official not-found code maps
+    // to the definite sentence the user reads.
+    const missingPanel = new DeliveredFilesPanel({
+      snapshot: {
+        subjectKind: 'main',
+        sessionId,
+        sourceIdentity: {},
+        turns: [{ turn: 1, files: [{ path: join(workspace, 'missing.md') }] }],
+      },
+      initial: { turn: 1, path: join(workspace, 'missing.md'), page: 'details' },
+      preview: bound,
+      requestRender: () => {},
+      close: () => {},
+      copyPath: (_path, settle) => settle(true),
+    })
+    missingPanel.setMaxRows(20)
+    const missingPaint = (): string =>
+      missingPanel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+    const missingDeadline = Date.now() + 5_000
+    while (!missingPaint().includes('File no longer exists') && Date.now() < missingDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(missingPaint().includes('File no longer exists on Host'),
+      `a real official refusal paints its definite sentence:\n${missingPaint()}`)
   } finally {
     await client?.dispose()
     await hostRuntime?.dispose()

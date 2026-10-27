@@ -18431,15 +18431,6 @@ export class TuiApp {
     result.addChild(new Text('', 0, 0))
     result.addChild(new DeliveredFilesComponent(message.deliverables, expanded, {
       pointerActions: this.deliveredFilesPointerOwned(),
-      // The ONE owned-task entry (AGENTS.md): a preview request is an owned
-      // workflow, so a failure reaches diagnostics instead of escaping.
-      ...(this.events.runOwned === undefined
-        ? {}
-        : {
-            runOwned: (label: string, task: () => Promise<void>) => {
-              this.events.runOwned!(label, () => task(), {})
-            },
-          }),
       // A surface without the injected browser capability has no executable
       // `/deliverables` entry, so the tail must not advertise one.
       commandEntry: this.deliveredFilesEntryAvailable(),
@@ -23487,6 +23478,15 @@ export class TuiApp {
       // A per-row verb is painted only where a pointer can reach it: PiTui
       // enables terminal mouse reporting on the fullscreen alt screen alone.
       pointerActions: this.deliveredFilesPointerOwned(),
+      // The ONE owned-task entry (AGENTS.md): every preview request is an owned
+      // workflow, so its failure reaches diagnostics instead of escaping.
+      ...(this.events.runOwned === undefined
+        ? {}
+        : {
+            runOwned: (label: string, task: () => Promise<void>) => {
+              this.events.runOwned!(label, () => task(), {})
+            },
+          }),
       reportUnclassifiedFailure: (message, error) => this.deliverablePreviewFailure(message, error),
     })
     const frame = this.createDeliveredFilesFrame(panel)
