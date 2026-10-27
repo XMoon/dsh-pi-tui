@@ -1,0 +1,27 @@
+{
+  "display": ":0",
+  "repo": "/home/xmoon/project/dsh-pi-tui-wt/image-7a-pr1",
+  "head": "3a818f4a2f995a3840a8f2d4dd96596f9bc426c7",
+  "dirty": "",
+  "cases": [
+    "S0-1-main",
+    "S0-1-main-mid",
+    "S0-2-foreign-first",
+    "S0-2-core-first",
+    "S0-2-2j-control",
+    "S0-3-alt",
+    "S0-3-main",
+    "S0-4-none",
+    "S0-4-2j",
+    "S0-4-3j",
+    "S0-4-2j3j",
+    "S0-5-permission",
+    "S0-6-product",
+    "S0-7-mixed"
+  ],
+  "kitty": [
+    "kitty 0.41.1 created by Kovid Goyal"
+  ],
+  "node": "v24.21.0",
+  "started_at": "2026-10-27T02:07:06+00:00"
+}
