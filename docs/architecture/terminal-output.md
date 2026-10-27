@@ -242,9 +242,13 @@ by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it
   identity fields latches the handle revoked for the rest of the process. The
   component then paints the text fallback, and the facade refuses an entire
   managed physical write batch (no DCS and no placeholder cell) once that batch
-  carries a managed command or retirement, and every managed physical batch
-  re-probes immediately before its own write (a retirement batch and the frame
-  that follows it are two batches, not one admission decision). A queued
+  carries a managed command, a managed grid row (proved by that row's own
+  provenance marker, never by its bytes), or a retirement; the refusal also
+  latches the remaining physical chunks of that synchronised frame, because the
+  fork writer keeps flushing the same frame after the app boundary swallows the
+  refusal. Every managed physical batch re-probes immediately before its own
+  write (a retirement batch and the frame that follows it are two batches, not
+  one admission decision). A queued
   never-placed retirement is dropped locally instead of being sent to a possibly
   different client (the abandoned upload is invisible and is never reused); a
   text-only fallback frame is still writable. There is no hot client migration: re-enabling requires a new TUI
@@ -288,6 +292,25 @@ by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it
   `src/terminal-image.ts` (vendored divergence X067); proof:
   `packages/pi-tui/test/layout.test.ts` plus the real-Screen first-middle and
   foreign-negative cases in `test/integration/kitty-tmux-screen.test.ts`.
+- **Grid provenance is per row; content is never proof.** Every managed grid row
+  carries its own zero-width private marker (`\x1b_pi:tmux-grid:v1…`); the anchor
+  row carries it immediately AFTER its `a=p,U=1` command so the fork's anchor
+  parser still reads the command first. The facade strips exactly that private
+  sequence from the wire and treats a row as managed only when its own marker was
+  seen, or when the previous physical write cut the same row mid-line. This is
+  independent of frame shape: a full main-screen frame, a 1 MiB chunk cut inside
+  a row, and an `alt` differential frame that rewrites one non-anchor row with
+  absolute addressing all prove provenance from the row itself. A text line that
+  merely contains `U+10EEEE`, or even a full placeholder cell's characters, is
+  ordinary text and stays writable on a revoked handle. The gate never reserves
+  or strips a byte that could come from caller data (`0x01` and every other raw
+  terminal byte pass through unchanged on both transports); only the exact
+  private marker sequence is removed. Because the marker is zero-width
+  (`visibleWidth` strips APC), it never changes layout, clipping or diffing.
+  Authority: `src/tui/graphics/tmux-image.ts`,
+  `src/tui/graphics/kitty-terminal.ts`; proof: the per-row split, ALT-diff,
+  plain-text and raw-byte regressions in
+  `test/integration/kitty-tmux-screen.test.ts`.
 - **No metadata shortcut.** The virtual component does not register the fork's
   Native placement metadata: its clipping is cell clipping by the real text
   layout, not a source-pixel crop of a cursor-positioned rectangle.

@@ -1689,3 +1689,59 @@ test('tmux virtual: a REAL Alt diff of ONE non-anchor grid row keeps its marker 
     h.dispose()
   }
 })
+
+test('a raw 0x01 byte is passed through unchanged on BOTH transports', (t) => {
+  // The provenance mechanism must never reserve real terminal bytes: 0x01 is a
+  // legal raw byte and both facades must forward it exactly.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  try {
+    h.terminal.writes.length = 0
+    h.graphics.terminal.write('\x01')
+    assert.equal(h.terminal.text, '\x01', 'the tmux virtual facade forwards a raw 0x01')
+  } finally {
+    h.dispose()
+  }
+
+  const nativeTerminal = new RecordingTerminal()
+  const nativeCore = new KittyGraphicsCore({ placementMode: 'native' })
+  const nativeFacade = new KittyTerminalFacade(nativeTerminal, nativeCore, { placementMode: 'native' })
+  try {
+    nativeTerminal.writes.length = 0
+    nativeFacade.write('\x01')
+    assert.equal(nativeTerminal.text, '\x01', 'the native facade forwards a raw 0x01')
+    nativeTerminal.writes.length = 0
+    nativeFacade.write('a\x01b')
+    assert.equal(nativeTerminal.text, 'a\x01b', 'and does not damage it inside text')
+  } finally {
+    nativeFacade.dispose()
+    nativeCore.dispose()
+  }
+})
+
+test('tmux virtual: the per-row marker never reaches the terminal across split writes', (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 40,
+      maxHeightCells: 12,
+      fallback: '[fallback]',
+    })
+    const rows = image.render(80)
+    const row = rows[1]!
+    const markerAt = row.indexOf('\x1b_pi:tmux-grid:v1')
+    assert.equal(markerAt, 0, 'fixture: the row starts with its provenance marker')
+    const markerEnd = row.indexOf('\x1b\\', markerAt) + 2
+    for (let cut = 1; cut <= markerEnd; cut++) {
+      h.terminal.writes.length = 0
+      h.graphics.terminal.write(row.slice(0, cut))
+      h.graphics.terminal.write(row.slice(cut))
+      assert.equal(h.terminal.text.includes('pi:tmux-grid'), false,
+        `no grid marker leaks at split ${cut}`)
+      assert.ok(h.terminal.text.includes(P), `the row cells survive split ${cut}`)
+    }
+  } finally {
+    h.dispose()
+  }
+})

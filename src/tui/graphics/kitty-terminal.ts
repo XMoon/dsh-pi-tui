@@ -73,10 +73,8 @@ const MAX_PENDING_MARKER_CHARS = 512
 /** The private marker prefix shared with `tmux-image.ts` and the fork (X067). */
 const MANAGED_VIRTUAL_MARKER_PREFIX = '\x1b_pi:tmux-image:v1:i='
 const MANAGED_VIRTUAL_MARKER_TERMINATOR = '\x1b\\'
-/** Per-row provenance marker; replaced by a sentinel the scanner removes later. */
+/** Per-row provenance marker; survives the segment scan and is stripped EXACTLY. */
 const MANAGED_GRID_MARKER = '\x1b_pi:tmux-grid:v1\x1b\\'
-/** Survives into the segment scan, then `scanText` strips it from the wire. */
-const MANAGED_GRID_SENTINEL = '\x01'
 /** Common prefix held back when a marker is split across physical writes. */
 const MANAGED_MARKER_COMMON_PREFIX = '\x1b_pi:tmux-'
 
@@ -118,8 +116,10 @@ function stripManagedVirtualMarkers(input: string): { text: string; hold: string
     }
     text += input.slice(index, start)
     if (useGrid) {
-      // Keep a zero-width sentinel so the row scan can see WHICH line was ours.
-      text += MANAGED_GRID_SENTINEL
+      // Keep the marker itself so the row scan can see WHICH line was ours; the
+      // wire builder strips this exact private sequence later. Never substitute
+      // a byte that could also come from the caller's own data.
+      text += MANAGED_GRID_MARKER
       index = start + MANAGED_GRID_MARKER.length
       continue
     }
@@ -571,7 +571,7 @@ export class KittyTerminalFacade implements Terminal {
     for (;;) {
       const end = text.indexOf('\n', start)
       const line = end === -1 ? text.slice(start) : text.slice(start, end)
-      if (line.includes(MANAGED_GRID_SENTINEL)) open = true
+      if (line.includes(MANAGED_GRID_MARKER)) open = true
       if (open && line.includes(KITTY_VIRTUAL_PLACEHOLDER)) managed = true
       if (end === -1) break
       open = false
@@ -647,7 +647,7 @@ export class KittyTerminalFacade implements Terminal {
    */
   private scanText(text: string): string {
     if (text === '') return ''
-    const wireText = text.replaceAll(MANAGED_GRID_SENTINEL, '')
+    const wireText = text.replaceAll(MANAGED_GRID_MARKER, '')
     let index = 0
     while (index < text.length) {
       const at = text.indexOf('\x1b', index)
