@@ -904,10 +904,19 @@ test('the ONE overlay paints the frozen percentage geometry at every matrix size
     const bottom = lines.findIndex((line, index) => index > top && line.includes('╰'))
     assert.ok(top >= 0 && bottom > top, `${columns}x${rows}: the frame is painted:\n${lines.join('\n')}`)
     const expected = deliveredFilesOverlayGeometry(columns, rows)
-    assert.equal(visibleWidth(lines[top]!.trim()), expected.width, `${columns}x${rows}: outer width`)
+    const left = lines[top]!.indexOf('╭')
+    const right = lines[top]!.lastIndexOf('╮')
+    assert.equal(right - left + 1, expected.width, `${columns}x${rows}: outer width`)
     assert.equal(bottom - top + 1, expected.maxHeight, `${columns}x${rows}: outer height cap`)
-    assert.equal(lines[top]!.indexOf('╭'), Math.floor((columns - expected.width) / 2),
+    assert.equal(left, Math.floor((columns - expected.width) / 2),
       `${columns}x${rows}: centered with the default anchor`)
+    // The HOST bounds are the visible frame's bounds, never a wider canvas
+    // that would overwrite the transcript beside the frame.
+    const bounds = (app as unknown as {
+      deliveredFilesOverlay: { getBounds(): { width: number; height: number } | undefined }
+    }).deliveredFilesOverlay.getBounds()
+    assert.equal(bounds?.width, expected.width, `${columns}x${rows}: host bounds width`)
+    assert.equal(bounds?.height, expected.maxHeight, `${columns}x${rows}: host bounds height`)
     app.dispose()
     startedApps.delete(app)
   }
@@ -921,21 +930,129 @@ test('the ONE overlay paints the frozen percentage geometry at every matrix size
   })
   app.start()
   startedApps.add(app)
+  // A LONG answer body fills the rows the overlay covers, so leftover text at
+  // the frame's left/right proves the host projection did not blank a wider
+  // canvas over the transcript.
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'BACKGROUND_MARKER '.repeat(400),
+    deliverables: [{ path: '/ws/a.md' }],
+  }], new Map())
   app.setFullscreen(true)
   app.openDeliveredFiles(snap)
-  const frameOf = async (): Promise<{ width: number; maxHeight: number }> => {
-    // The resize/remount batcher runs as a microtask before the throttled
-    // frame is written, so observe the frame only after it settles.
+  const frameOf = async (): Promise<{ width: number; maxHeight: number; left: number; lines: string[] }> => {
+    // The resize/rebind batcher runs as a microtask before the throttled frame
+    // is written, so observe the frame only after it settles.
     for (let step = 0; step < 6; step += 1) await Promise.resolve()
     const lines = (await viewport(vt)).split('\n')
     const top = lines.findIndex(line => line.includes('╭'))
     const bottom = lines.findIndex((line, index) => index > top && line.includes('╰'))
     assert.ok(top >= 0 && bottom > top, lines.join('\n'))
-    return { width: visibleWidth(lines[top]!.trim()), maxHeight: bottom - top + 1 }
+    const left = lines[top]!.indexOf('╭')
+    const right = lines[top]!.lastIndexOf('╮')
+    return {
+      width: right - left + 1,
+      maxHeight: bottom - top + 1,
+      left,
+      lines,
+    }
   }
-  assert.deepEqual(await frameOf(), deliveredFilesOverlayGeometry(120, 40))
+  const hostBounds = () => (app as unknown as {
+    deliveredFilesOverlay: { getBounds(): { width: number; height: number } | undefined }
+  }).deliveredFilesOverlay.getBounds()
+  const assertBackgroundSurvives = async (): Promise<void> => {
+    const frame = await frameOf()
+    const topLine = frame.lines.find(line => line.includes('╭'))!
+    const leftText = topLine.slice(0, frame.left).trim()
+    const rightText = topLine.slice(frame.left + frame.width).trim()
+    assert.ok(leftText.length > 0, `the transcript beside the frame survives:\n${frame.lines.join('\n')}`)
+    assert.ok(rightText.length > 0, `the transcript right of the frame survives:\n${frame.lines.join('\n')}`)
+  }
+  const initial = await frameOf()
+  assert.deepEqual({ width: initial.width, maxHeight: initial.maxHeight, left: initial.left },
+    { ...deliveredFilesOverlayGeometry(120, 40), left: 12 })
+  assert.equal(hostBounds()?.width, 96, 'host bounds match the 96-column frame')
+  await assertBackgroundSurvives()
   vt.sendInput('\r')
-  assert.deepEqual(await frameOf(), deliveredFilesOverlayGeometry(120, 40), 'Details keeps the Files frame')
+  assert.deepEqual((await frameOf()).width, 96, 'Details keeps the Files frame')
+  vt.sendInput('\x1b')
   vt.resize(160, 50)
-  assert.deepEqual(await frameOf(), deliveredFilesOverlayGeometry(160, 50), 'a resize re-resolves the SAME authority')
+  const resized = await frameOf()
+  assert.deepEqual({ width: resized.width, maxHeight: resized.maxHeight }, deliveredFilesOverlayGeometry(160, 50),
+    'a resize re-resolves the SAME authority')
+  const resizedBounds = deliveredFilesOverlayGeometry(160, 50)
+  assert.equal(hostBounds()?.width, resizedBounds.width, 'the rebound host width is the live frame width')
+  assert.equal(hostBounds()?.height, resizedBounds.maxHeight, 'the rebound host height is the live frame height')
+  await assertBackgroundSurvives()
+  // The rebound projection kept the SAME panel and its keyboard owner.
+  vt.sendInput('T')
+  assert.ok((await viewport(vt)).includes('Delivered files · 1 Turns'),
+    `the panel state and keyboard survive the resize rebind:\n${await viewport(vt)}`)
+})
+
+test('a real SGR press on a Turns row cannot retarget across a keyboard scroll', async () => {
+  const turns = Array.from({ length: 30 }, (_, index) => ({ turn: 30 - index, files: [`/ws/f-${index + 1}.md`] }))
+  const snap = snapshot(turns)
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snap)
+  await viewport(vt)
+  vt.sendInput('T')
+  const turnsView = await viewport(vt)
+  assert.ok(turnsView.includes('Delivered files · 30 Turns'), turnsView)
+  const rows = turnsView.split('\n')
+  const pressedRow = rows.findIndex(line => line.includes('> Turn'))
+  assert.ok(pressedRow >= 0, turnsView)
+  const column = rows[pressedRow]!.indexOf('Turn') + 2
+  // PRESS, hold, scroll the list with the keyboard until that CELL paints a
+  // different Turn, then release: the click must not open the new Turn.
+  vt.sendInput(`\x1b[<0;${column + 1};${pressedRow + 1}M`)
+  for (let step = 0; step < 25; step += 1) vt.sendInput('\x1b[B')
+  await viewport(vt)
+  vt.sendInput(`\x1b[<0;${column + 1};${pressedRow + 1}m`)
+  const after = await viewport(vt)
+  assert.ok(after.includes('Delivered files · 30 Turns'),
+    `the stale release must not open a Turn:\n${after}`)
+  // Positive control: the panel/keyboard still works after the rejected click.
+  vt.sendInput('\r')
+  const opened = await viewport(vt)
+  assert.ok(opened.includes('Delivered files · Turn'), `Enter still opens the current Turn:\n${opened}`)
+})
+
+test('a real SGR hold on Details [Back] cannot retarget to Files [Close]', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([{ turn: 6, files: ['/ws/report.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snap)
+  await viewport(vt)
+  vt.sendInput('\r')
+  const details = await viewport(vt)
+  assert.ok(details.includes('report.md · Details'), details)
+  const rows = details.split('\n')
+  const footerRow = rows.findLastIndex(line => line.includes('[Back]') && line.includes('[Copy path]'))
+  assert.ok(footerRow >= 0, details)
+  const column = rows[footerRow]!.indexOf('[Back]') + 2
+  vt.sendInput(`\x1b[<0;${column + 1};${footerRow + 1}M`)
+  // Esc is the same Back transition; the Files [Close] now occupies the same
+  // right-aligned cells under the held pointer.
+  vt.sendInput('\x1b')
+  const files = await viewport(vt)
+  assert.ok(files.includes('Delivered files · Turn 6'), files)
+  vt.sendInput(`\x1b[<0;${column + 1};${footerRow + 1}m`)
+  const after = await viewport(vt)
+  assert.ok(after.includes('Delivered files · Turn 6'),
+    `the held Details Back must not run Files Close:\n${after}`)
 })

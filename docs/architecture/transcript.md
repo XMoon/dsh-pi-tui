@@ -733,10 +733,11 @@ behind ONE lease, opened by `/deliverables` and by a painted tail verb. Its
 geometry is the Delivered-files per-surface exception documented in
 `design-language.md` §12.2 (a percentage window with a hard width/height cap,
 not the old wide-terminal near-fullscreen step). The frame's outer size and the
-panel's row grant come from ONE live geometry result; the host canvas is that
-formula's maximum window (120×38), which the fork re-clamps to the live terminal
-every frame, so a resize grows or shrinks the centered frame without remounting
-the panel or losing its state. Its data is the
+panel's row grant come from ONE live geometry result, and the host overlay
+options use that same result. A terminal resize rebinds the SAME logical lease
+with a fresh frame at the new result (the host options are not a simple
+percentage), so the panel's filter/page/cursor/scroll survive while the old
+physical projection is retired. Its data is the
 CURRENT display subject's FULL grouped projection (`messages()` without a
 `maxTurns` window), derived on demand at open time — never per repaint, and never
 from the bounded display window. Selection identity is `turn + raw Host path`, so
@@ -767,9 +768,10 @@ backward page key stick on one page forever.
 A POINTER gesture follows the terminal layer's own contract: a PRESS may select
 a row and consume the cell, but entering a page requires the synthesized
 `click` (same cell, no drag), so press-then-drag-away opens nothing. A Files
-list row keeps press-and-click selection in this release (the modal does not yet
-turn an unconsumed press into native text selection); only PR B may make that
-row click-only together with the fork's selection opt-in.
+list row selects on BOTH press and click: the opaque overlay consumes the press
+without providing native text selection, so a click-only row would leave that
+first gesture with no selection. A text-selection contract must change those
+two behaviors together; this surface does not implement one.
 
 On a real AltScreen the action bar paints real buttons — Files
 `[Filter] · [Turns] · [Close]`, Turns `[Back]`, Details

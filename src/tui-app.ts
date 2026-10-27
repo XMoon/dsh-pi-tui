@@ -135,7 +135,7 @@ import {
   DeliveredFilesPanel,
   type DeliveredFilesOpenIntent,
 } from './tui/deliverables/delivered-files-panel.ts'
-import { deliveredFilesOverlayCanvas, deliveredFilesOverlayGeometry } from './tui/deliverables/overlay-size.ts'
+import { deliveredFilesOverlayGeometry } from './tui/deliverables/overlay-size.ts'
 import type { DeliveredFilePreviewCapability } from './runtime/deliverables-port.ts'
 import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
@@ -3748,6 +3748,10 @@ export class TuiApp {
   private deliveredFilesPanel: DeliveredFilesPanel | undefined
   /** The catalog the live overlay was opened for (the currentness fence). */
   private deliveredFilesSnapshot: DeliveredFilesSnapshot | undefined
+  /** The terminal geometry the live physical projection was mounted at. A
+   *  change rebinds the SAME logical lease with a fresh frame and live options
+   *  (never a wider host canvas that would erase the background beside it). */
+  private deliveredFilesGeometryKey: string | undefined
   private readonly openExternalUrl: ((url: string) => void) | undefined
   private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
   /**
@@ -20494,6 +20498,7 @@ export class TuiApp {
         this.lastFooterGeometry = { surface, width, height, total: available }
         this.renderFooter()
       }
+      this.syncDeliveredFilesOverlayGeometry()
     } finally {
       this.syncingSurfaceGeometry = false
     }
@@ -23541,12 +23546,11 @@ export class TuiApp {
       reportUnclassifiedFailure: (message, error) => this.deliverablePreviewFailure(message, error),
     })
     const frame = this.createDeliveredFilesFrame(panel)
-    // The HOST CANVAS is the formula's maximum window; the responsive frame
-    // paints the live formula result centered inside it, so a later terminal
-    // resize can grow/shrink the frame without a remount. The frame's own
-    // geometry and the panel's row grant still come from the ONE
-    // `deliveredFilesOverlaySize()` result.
-    const canvas = deliveredFilesOverlayCanvas()
+    // ONE geometry result feeds the host options, the responsive frame's
+    // outer size and the panel's row grant. A terminal resize rebinds this
+    // SAME logical lease with fresh options instead of using a wider canvas
+    // (a wider canvas would overwrite the transcript beside the frame).
+    const size = this.deliveredFilesOverlaySize()
     // PUBLISH THE LEASE BEFORE THE MOUNT. `showOverlayOnHost` can synchronously
     // run a plugin onFocus callback or start a fullscreen swap whose remount
     // pass re-creates this node's projection, and BOTH must observe the
@@ -23555,11 +23559,12 @@ export class TuiApp {
     this.deliveredFilesPanel = panel
     this.deliveredFilesFrame = frame
     this.deliveredFilesSnapshot = snapshot
+    this.deliveredFilesGeometryKey = this.currentDeliveredFilesGeometryKey()
     let handle: OverlayHandle
     try {
       handle = this.showOverlayOnHost(
         frame,
-        { width: canvas.width, maxHeight: canvas.maxHeight },
+        { width: size.width, maxHeight: size.maxHeight },
         {
           // REMOUNTABLE: a fullscreen screen swap must keep the SAME panel
           // (filter/turn/selection/scroll survive it) behind a fresh projection.
@@ -23568,9 +23573,11 @@ export class TuiApp {
             if (this.deliveredFilesPanel !== panel) return
             const next = this.createDeliveredFilesFrame(panel)
             this.deliveredFilesFrame = next
+            const nextSize = this.deliveredFilesOverlaySize()
+            this.deliveredFilesGeometryKey = this.currentDeliveredFilesGeometryKey()
             this.rebindOverlayRaw(logical, next, {
-              width: canvas.width,
-              maxHeight: canvas.maxHeight,
+              width: nextSize.width,
+              maxHeight: nextSize.maxHeight,
             })
           },
         },
@@ -23585,6 +23592,7 @@ export class TuiApp {
         this.deliveredFilesPanel = undefined
         this.deliveredFilesFrame = undefined
         this.deliveredFilesSnapshot = undefined
+        this.deliveredFilesGeometryKey = undefined
       }
       panel.dispose()
       throw error
@@ -23615,6 +23623,7 @@ export class TuiApp {
     this.deliveredFilesFrame = undefined
     this.deliveredFilesPanel = undefined
     this.deliveredFilesSnapshot = undefined
+    this.deliveredFilesGeometryKey = undefined
     if (overlay !== undefined) this.overlayRemounts.delete(overlay)
     overlay?.hide()
     panel?.dispose()
@@ -23629,9 +23638,58 @@ export class TuiApp {
     this.closeDeliveredFiles()
   }
 
+  /** The live terminal key a delivered-files physical projection was mounted
+   *  at. The formula is a pure function of columns/rows, so this is the same
+   *  thing as the derived size key without recomputing the size twice. */
+  private currentDeliveredFilesGeometryKey(): string {
+    return `${Math.max(1, Math.floor(this.terminal.columns))}:${Math.max(1, Math.floor(this.terminal.rows))}`
+  }
+
+  /**
+   * Rebind the ONE delivered-files lease after a terminal geometry change.
+   *
+   * The host overlay options are numeric (the frozen formula is not a simple
+   * percentage), so a new size needs a fresh physical projection. The logical
+   * lease, panel state, filter/cursor/scroll and keyboard intent survive: the
+   * old raw is hidden, the fresh frame is mounted at the SAME live
+   * `deliveredFilesOverlaySize()` result, and a focused panel takes the
+   * keyboard back WITHOUT being promoted (or retargeting a click).
+   *
+   * A hidden/suppressed projection, or one currently behind another visible
+   * root, is not touched: appending a fresh raw would paint it above that
+   * owner. The key stays stale until it is the frontmost visible lease again;
+   * the ordinary render-request funnel then lands here.
+   */
+  private syncDeliveredFilesOverlayGeometry(): void {
+    const panel = this.deliveredFilesPanel
+    const handle = this.deliveredFilesOverlay
+    if (panel === undefined || handle === undefined) return
+    const key = this.currentDeliveredFilesGeometryKey()
+    if (key === this.deliveredFilesGeometryKey) return
+    if (handle.isHidden() || !this.overlayBroker.isFrontmostVisible(handle)) return
+    this.deliveredFilesGeometryKey = key
+    const size = this.deliveredFilesOverlaySize()
+    const frame = this.createDeliveredFilesFrame(panel)
+    this.deliveredFilesFrame = frame
+    const wasFocused = handle.isFocused()
+    // Hide the old physical projection AFTER capturing focus intent; the
+    // logical lease still owns the node while the fresh raw is attached.
+    const previous = this.overlayBroker.rawOf(handle)
+    previous?.hide()
+    const raw = this.activeScreen.showOverlay(frame, {
+      width: size.width,
+      maxHeight: size.maxHeight,
+      disposeOnHide: false,
+      initialFocus: false,
+    })
+    this.overlayBroker.rebind(handle, raw)
+    if (wasFocused) raw.focus({ preserveOrder: true })
+  }
+
   /** The delivered-files overlay's geometry: the ONE centered percentage
-   *  window of the PR A contract (design-language §12.2 per-surface
-   *  exception). The frame and the overlay options both read THIS result. */
+   *  window documented as the design-language §12.2 per-surface exception.
+   *  The frame, the host options and the panel's row grant all read THIS
+   *  result. */
   private deliveredFilesOverlaySize(): { width: number; maxHeight: number; margin: number | undefined } {
     const geometry = deliveredFilesOverlayGeometry(this.terminal.columns, this.terminal.rows)
     return { width: geometry.width, maxHeight: geometry.maxHeight, margin: undefined }
