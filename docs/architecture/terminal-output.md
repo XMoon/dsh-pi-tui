@@ -241,11 +241,13 @@ by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it
 - **Revocation is one-way.** Any real probe failure or change to the six
   identity fields latches the handle revoked for the rest of the process. The
   component then paints the text fallback, and the facade refuses an entire
-  managed write batch (no DCS and no placeholder cell) once a managed command or
-  retirement needs admission. A queued never-placed retirement is dropped
-  locally instead of being sent to a possibly different client (the abandoned
-  upload is invisible and is never reused); a text-only fallback frame is still
-  writable. There is no hot client migration: re-enabling requires a new TUI
+  managed physical write batch (no DCS and no placeholder cell) once that batch
+  carries a managed command or retirement, and every managed physical batch
+  re-probes immediately before its own write (a retirement batch and the frame
+  that follows it are two batches, not one admission decision). A queued
+  never-placed retirement is dropped locally instead of being sent to a possibly
+  different client (the abandoned upload is invisible and is never reused); a
+  text-only fallback frame is still writable. There is no hot client migration: re-enabling requires a new TUI
   process. A component render may answer from a real probe at
   most 250 ms old, while every managed physical write batch re-probes; a
   cross-process change is therefore caught before the next managed batch, never
