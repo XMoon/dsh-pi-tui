@@ -201,3 +201,61 @@ export function deliveredFileBasename(path: string): string {
 function deliveredPathSegments(path: string): readonly string[] {
   return path.split(/[/\\]+/u).filter(segment => segment !== '')
 }
+
+/** One absolute Host path split into its lexical segments (both separators are
+ *  separators; `.` is dropped and `..` pops without escaping the absolute
+ *  root). `undefined` means the input is not an absolute Host path shape. */
+function absoluteHostSegments(path: string): readonly string[] | undefined {
+  const slashPath = path.replace(/\\/g, '/')
+  const drive = /^([A-Za-z]:)(\/|$)/.exec(slashPath)
+  if (drive !== null) {
+    const rest = slashPath.slice(drive[1]!.length + (drive[2] === '/' ? 1 : 0))
+    return [drive[1]!, ...lexicalSegments(rest)]
+  }
+  if (slashPath.startsWith('/')) return lexicalSegments(slashPath.slice(1))
+  return undefined
+}
+
+/** Normalize one relative segment list without escaping its start. */
+function lexicalSegments(path: string): string[] {
+  const segments: string[] = []
+  for (const segment of path.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      segments.pop()
+      continue
+    }
+    segments.push(segment)
+  }
+  return segments
+}
+
+/**
+ * The DISPLAY path of one delivered declaration relative to the CURRENT display
+ * subject's workspace root.
+ *
+ * Unlike a plain prefix strip, this is a LEXICAL containment decision over
+ * normalized Host path segments: `/ws/../outside/report.md` is OUTSIDE `/ws`
+ * even though its text starts with `/ws/`, and an absolute path outside the
+ * root is returned unchanged (including `..` and its original separators).
+ * An absolute path that normalizes INSIDE the root is shortened to its
+ * normalized relative form (`/ws/docs/../a.md` → `a.md`). A relative declaration
+ * and a missing/relative root are returned unchanged: there is no absolute
+ * workspace authority to compare against. This is a DISPLAY projection only;
+ * the raw path stays the Copy/search authority.
+ * @param path - the declared Host path.
+ * @param workspaceRoot - the current display subject's absolute workspace root.
+ * @returns the relative display path, or the original path when not contained.
+ */
+export function deliveredDisplayPath(path: string, workspaceRoot: string | undefined): string {
+  if (workspaceRoot === undefined || workspaceRoot === '') return path
+  const root = absoluteHostSegments(workspaceRoot)
+  const target = absoluteHostSegments(path)
+  if (root === undefined || target === undefined || root.length === 0) return path
+  if (target.length <= root.length) return path
+  for (const [index, segment] of root.entries()) {
+    if (target[index] !== segment) return path
+  }
+  const relative = target.slice(root.length)
+  return relative.length === 0 ? path : relative.join('/')
+}

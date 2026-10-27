@@ -3748,6 +3748,10 @@ export class TuiApp {
   private deliveredFilesPanel: DeliveredFilesPanel | undefined
   /** The catalog the live overlay was opened for (the currentness fence). */
   private deliveredFilesSnapshot: DeliveredFilesSnapshot | undefined
+  /** The screen that physically owns the delivered-files projection. A
+   *  workspace lease can make `activeScreen` a different, temporary screen
+   *  while this projection stays parked on the stopped return screen. */
+  private deliveredFilesScreen: TuiMainScreen | TuiAltScreen | undefined
   /** The terminal geometry the live physical projection was mounted at. A
    *  change rebinds the SAME logical lease with a fresh frame and live options
    *  (never a wider host canvas that would erase the background beside it). */
@@ -23566,6 +23570,7 @@ export class TuiApp {
     this.deliveredFilesPanel = panel
     this.deliveredFilesFrame = frame
     this.deliveredFilesSnapshot = snapshot
+    this.deliveredFilesScreen = this.activeScreen
     this.deliveredFilesGeometryKey = this.currentDeliveredFilesGeometryKey()
     let handle: OverlayHandle
     try {
@@ -23580,6 +23585,7 @@ export class TuiApp {
             if (this.deliveredFilesPanel !== panel) return
             const next = this.createDeliveredFilesFrame(panel)
             this.deliveredFilesFrame = next
+            this.deliveredFilesScreen = this.activeScreen
             const nextSize = this.deliveredFilesOverlaySize()
             this.deliveredFilesGeometryKey = this.currentDeliveredFilesGeometryKey()
             this.rebindOverlayRaw(logical, next, {
@@ -23599,6 +23605,7 @@ export class TuiApp {
         this.deliveredFilesPanel = undefined
         this.deliveredFilesFrame = undefined
         this.deliveredFilesSnapshot = undefined
+        this.deliveredFilesScreen = undefined
         this.deliveredFilesGeometryKey = undefined
       }
       panel.dispose()
@@ -23630,6 +23637,7 @@ export class TuiApp {
     this.deliveredFilesFrame = undefined
     this.deliveredFilesPanel = undefined
     this.deliveredFilesSnapshot = undefined
+    this.deliveredFilesScreen = undefined
     this.deliveredFilesGeometryKey = undefined
     if (overlay !== undefined) this.overlayRemounts.delete(overlay)
     overlay?.hide()
@@ -23670,7 +23678,13 @@ export class TuiApp {
   private syncDeliveredFilesOverlayGeometry(): void {
     const panel = this.deliveredFilesPanel
     const handle = this.deliveredFilesOverlay
-    if (panel === undefined || handle === undefined) return
+    const screen = this.deliveredFilesScreen
+    if (panel === undefined || handle === undefined || screen === undefined) return
+    // A workspace lease temporarily makes `activeScreen` the Settings/Image
+    // screen while this projection stays parked on the STOPPED return screen.
+    // Never move it onto the temporary screen; the return surface's own
+    // `resumeReturnSurface()` request re-enters here after it becomes active.
+    if (this.activeScreen !== screen) return
     const key = this.currentDeliveredFilesGeometryKey()
     if (key === this.deliveredFilesGeometryKey) return
     if (handle.isHidden() || !this.overlayBroker.isFrontmostVisible(handle)) return
@@ -23687,7 +23701,7 @@ export class TuiApp {
     // `hide()` synchronously falls back to `preFocus`, whose plugin onFocus may
     // legally open and focus an even newer overlay — the outer rebind must not
     // then steal that newer focus.
-    const raw = this.activeScreen.showOverlay(frame, {
+    const raw = screen.showOverlay(frame, {
       width: size.width,
       maxHeight: size.maxHeight,
       disposeOnHide: false,

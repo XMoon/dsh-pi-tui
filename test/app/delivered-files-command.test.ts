@@ -1142,3 +1142,51 @@ test('a covered Delivered files overlay rebinds to live geometry when the cover 
   assert.ok((await viewport(vt)).includes('Delivered files · 1 Turns'),
     'the revealed footer button is still clickable at the live geometry')
 })
+
+test('a Settings workspace lease keeps the delivered overlay on the stopped return screen', async () => {
+  const vt = new VirtualTerminal(120, 40)
+  const snap = snapshot([{ turn: 1, files: ['/ws/a.md'] }])
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: capability(snap),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snap)
+  assert.ok((await viewport(vt)).includes('Delivered files · Turn 1'), 'fixture: the overlay is open')
+
+  const settings = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready', capturedAt: Date.now(), rows: [] }) },
+    { aboutVersionFacts: { tui: 'test', dsh: 'test' } },
+  )
+  const workspace = await viewport(vt)
+  assert.ok(!workspace.includes('Delivered files · Turn 1'),
+    `the delivered overlay must not intrude on the temporary workspace screen:\n${workspace}`)
+
+  vt.resize(160, 50)
+  const resizedWorkspace = await viewport(vt)
+  assert.ok(!resizedWorkspace.includes('Delivered files · Turn 1'),
+    `a resize must not move the overlay onto the workspace screen:\n${resizedWorkspace}`)
+
+  settings.close()
+  const restored = await viewport(vt)
+  assert.ok(restored.includes('Delivered files · Turn 1'),
+    `the overlay returns with the restored screen:\n${restored}`)
+  const delivered = (app as unknown as {
+    deliveredFilesOverlay: {
+      getBounds(): { width: number; height: number } | undefined
+      isFocused(): boolean
+    }
+  }).deliveredFilesOverlay
+  const expected = deliveredFilesOverlayGeometry(160, 50)
+  assert.equal(delivered.getBounds()?.width, expected.width, 'the returned overlay has the live width')
+  assert.equal(delivered.getBounds()?.height, expected.maxHeight, 'the returned overlay has the live height')
+  assert.equal(delivered.isFocused(), true, 'the returned overlay owns the keyboard again')
+  const rows = restored.split('\n')
+  const turnsRow = rows.findLastIndex(line => line.includes('[Turns]'))
+  assert.ok(turnsRow >= 0, `the restored footer is painted:\n${restored}`)
+  clickCell(vt, rows[turnsRow]!.indexOf('[Turns]') + 2, turnsRow)
+  assert.ok((await viewport(vt)).includes('Delivered files · 1 Turns'),
+    'the restored footer button works at the live geometry')
+})
