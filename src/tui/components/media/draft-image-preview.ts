@@ -33,9 +33,10 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/draft-image-preview
  */
 
-import { Image, getCapabilities, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { Image, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import type { NativeKittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { color } from '../../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
@@ -110,7 +111,7 @@ export interface DraftImagePreviewOptions {
    * native-admitted Kitty terminal the card's pixels come from the Core; every
    * other terminal keeps the legacy fork `Image` path.
    */
-  nativeGraphics?: NativeKittyGraphics
+  graphics?: KittyGraphics
 }
 
 /** The identity row's admission/derivation state for the current card. */
@@ -149,8 +150,10 @@ export class DraftImagePreview implements Component {
   private readonly convertThumbnail: KittyThumbnailConverter
   /** Per-display-instance cache: id + occurrence + mime + width + protocol. */
   private readonly imageCache = new Map<string, PixelBody>()
-  /** The ONE managed graphics owner of this physical terminal, when admitted. */
-  private readonly nativeGraphics: NativeKittyGraphics | undefined
+  /** The ONE managed graphics owner of this physical terminal, when admitted.
+   *  Present does NOT mean paintable: `effectiveImageProtocol` re-reads the live
+   *  admission, so a revoked tmux handle falls back to text for this frame. */
+  private readonly graphics: KittyGraphics | undefined
   /** Encoded bytes are immutable per draft; keyed by id + byte length. */
   private readonly base64Cache = new Map<string, string>()
   private occurrenceCache: { text: string; occurrences: readonly DraftImageOccurrence[] } | undefined
@@ -185,7 +188,7 @@ export class DraftImagePreview implements Component {
     this.theme = theme
     this.requestRender = options.requestRender
     this.convertThumbnail = convertThumbnail
-    this.nativeGraphics = options.nativeGraphics
+    this.graphics = options.graphics
   }
 
   /** The last-painted geometry, or undefined before the first render. */
@@ -372,8 +375,8 @@ export class DraftImagePreview implements Component {
     usedIds: Set<number>,
   ): string[] {
     const image = occurrence.image
-    const protocol = getCapabilities().images ?? 'none'
-    const native = this.nativeGraphics
+    const protocol = effectiveImageProtocol(this.graphics) ?? 'none'
+    const native = this.graphics
     const key = `${image.id}:${occurrence.ordinal}:${image.mediaType}:${cardWidth}:${maxRows}:${protocol}:${image.byteLength}:direct:${native === undefined ? 'legacy' : 'managed'}`
     usedKeys.add(key)
     usedIds.add(image.id)
@@ -423,8 +426,9 @@ export class DraftImagePreview implements Component {
     usedIds: Set<number>,
   ): string[] {
     const image = occurrence.image
-    const native = this.nativeGraphics
-    const key = `${image.id}:${occurrence.ordinal}:derived-kitty:${this.draftGeneration}:${cardWidth}:${maxRows}:${png.width}:${png.height}:${png.byteLength}:${native === undefined ? 'legacy' : 'managed'}`
+    const native = this.graphics
+    const protocol = effectiveImageProtocol(this.graphics) ?? 'none'
+    const key = `${image.id}:${occurrence.ordinal}:derived-kitty:${this.draftGeneration}:${cardWidth}:${maxRows}:${protocol}:${png.width}:${png.height}:${png.byteLength}:${native === undefined ? 'legacy' : 'managed'}`
     usedKeys.add(key)
     usedIds.add(image.id)
     let cached = this.imageCache.get(key)
@@ -478,8 +482,8 @@ export class DraftImagePreview implements Component {
    * metadata-only. iTerm2 keeps carrying the original format through OSC 1337.
    */
   private pixelMode(image: DraftImage): DraftPreviewPixelMode {
-    const protocol = getCapabilities().images
-    if (protocol === null || protocol === undefined) return 'unavailable'
+    const protocol = effectiveImageProtocol(this.graphics)
+    if (protocol === null) return 'unavailable'
     if (image.source.type === 'recalled') return 'unavailable'
     if (image.bytes.byteLength === 0 || image.bytes.byteLength > DRAFT_PREVIEW_MAX_PIXEL_BYTES) return 'unavailable'
     if (image.byteLength > DRAFT_PREVIEW_MAX_PIXEL_BYTES) return 'unavailable'

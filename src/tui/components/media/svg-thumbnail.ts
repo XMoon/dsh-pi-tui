@@ -22,8 +22,9 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/media/svg-thumbnail
  */
 
-import { Image, getCapabilities, imageFallback, type Component } from '@xmoon76/pi-tui'
-import { NativeKittyImage, type NativeKittyGraphics, type PixelBody } from '../../graphics/native-image.ts'
+import { Image, imageFallback, type Component } from '@xmoon76/pi-tui'
+import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import type { ImageThumbnailTheme } from './image-thumbnail.ts'
 import { MAX_IMAGE_ROWS, MAX_IMAGE_WIDTH, NARROW_WIDTH_THRESHOLD } from './image-thumbnail.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
@@ -67,9 +68,9 @@ export class SvgThumbnail implements Component {
   private lastReady: { readonly base64: string; readonly widthPx: number; readonly heightPx: number } | undefined
   private instance: PixelBody | undefined
   /** Whether `instance` is a managed component (it owns a Core handle). */
-  private instanceNative = false
+  private instanceManaged = false
   /** The ONE managed graphics owner of this physical terminal, when admitted. */
-  private readonly nativeGraphics: NativeKittyGraphics | undefined
+  private readonly graphics: KittyGraphics | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
   /** The real pixel rows and placement width the LAST render at `width`
@@ -86,7 +87,7 @@ export class SvgThumbnail implements Component {
     theme: SvgThumbnailTheme,
     requestRender: () => void,
     fixedRows?: number,
-    nativeGraphics?: NativeKittyGraphics,
+    graphics?: KittyGraphics,
   ) {
     this.digest = digest
     this.source = source
@@ -95,7 +96,7 @@ export class SvgThumbnail implements Component {
     this.theme = theme
     this.requestRender = requestRender
     this.fixedRows = fixedRows
-    this.nativeGraphics = nativeGraphics
+    this.graphics = graphics
     this.unsubscribe = loader.subscribe(digest, targetWidth, () => {
       this.invalidate()
       this.requestRender()
@@ -141,7 +142,7 @@ export class SvgThumbnail implements Component {
   invalidate(): void {
     this.instance?.dispose?.()
     this.instance = undefined
-    this.instanceNative = false
+    this.instanceManaged = false
     this.cachedLines = undefined
     this.cachedKey = undefined
     this.paintedBody = undefined
@@ -149,8 +150,11 @@ export class SvgThumbnail implements Component {
   }
 
   render(width: number): string[] {
-    const capabilities = getCapabilities().images ?? 'none'
-    const key = `${width}:${capabilities}`
+    // The EFFECTIVE protocol (not the fork's process-wide detection) rides the
+    // cache key: a live tmux admission may paint pixels where the fork reports
+    // none, and its revocation must not reuse a cached PUA frame.
+    const protocol = effectiveImageProtocol(this.graphics)
+    const key = `${width}:${protocol ?? 'none'}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
     const rendered = this.renderLines(width)
     // A nested card reserves a FIXED image row budget: a loading placeholder
@@ -174,8 +178,9 @@ export class SvgThumbnail implements Component {
     // SVG preview pixels are a Kitty-only capability in this contract. iTerm2's
     // inline framing is not understood by the fork's ANSI width layer, and the
     // other platforms have no verified native raster bound: the figure keeps
-    // its description and source actions instead of faking a pixel body.
-    if (getCapabilities().images !== 'kitty') return []
+    // its description and source actions instead of faking a pixel body. An
+    // admitted tmux virtual handle is a real Kitty transport here.
+    if (effectiveImageProtocol(this.graphics) !== 'kitty') return []
     const state = this.loader.get(this.digest, this.targetWidth)
     if (state.state === 'ready') this.lastReady = state
     // The loader cache is bounded; an eviction (or a clear) must not turn an
@@ -186,11 +191,11 @@ export class SvgThumbnail implements Component {
       ? state
       : this.lastReady
     if (effective !== undefined) {
-      const native = this.nativeGraphics !== undefined
-      if (this.instance === undefined || this.instanceNative !== native) {
+      const managed = this.graphics !== undefined
+      if (this.instance === undefined || this.instanceManaged !== managed) {
         this.instance?.dispose?.()
-        this.instance = native
-          ? this.nativeGraphics!.image(
+        this.instance = managed
+          ? this.graphics!.image(
             { pngBase64: effective.base64, widthPx: effective.widthPx, heightPx: effective.heightPx },
             {
               maxHeightCells: MAX_IMAGE_ROWS,
@@ -213,12 +218,10 @@ export class SvgThumbnail implements Component {
             },
             { widthPx: effective.widthPx, heightPx: effective.heightPx },
           )
-        this.instanceNative = native
+        this.instanceManaged = managed
       }
       const body = this.instance.render(width)
-      const columns = this.instance instanceof NativeKittyImage
-        ? this.instance.paintedBodyAt(width)?.columns
-        : paintedImageColumns(body)
+      const columns = this.instance.paintedBodyAt?.(width)?.columns ?? paintedImageColumns(body)
       if (columns !== undefined) {
         this.paintedBody = { width, rows: body.length, endCol: columns }
         this.paintedPixel = { width, widthPx: effective.widthPx, heightPx: effective.heightPx }

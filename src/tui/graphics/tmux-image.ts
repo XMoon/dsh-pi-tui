@@ -22,7 +22,7 @@ import {
   type KittyImageSource,
 } from './kitty-core.ts'
 import { calculateNativeCellSize } from './kitty-native.ts'
-import type { NativeKittyGraphics, NativeKittyImageBody, NativeKittyImageOptions } from './native-image.ts'
+import type { KittyGraphics, NativeKittyImageBody, NativeKittyImageOptions } from './native-image.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
 import { TmuxKittyAdmission, probeTmuxKittyIdentity } from './tmux-admission.ts'
 import {
@@ -159,7 +159,7 @@ export function createTmuxKittyGraphics(
   terminal: Terminal,
   options: KittyGraphicsCoreOptions = {},
   environment: NodeJS.ProcessEnv = process.env,
-): NativeKittyGraphics | undefined {
+): KittyGraphics | undefined {
   const identity = probeTmuxKittyIdentity(environment)
   if (identity === undefined) return undefined
   const admission = new TmuxKittyAdmission(identity, environment)

@@ -34,7 +34,7 @@ import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { parseKittyApc } from '../../src/tui/graphics/kitty-native.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
-import type { NativeKittyGraphics } from '../../src/tui/graphics/native-image.ts'
+import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -300,7 +300,7 @@ test('the real transcript thumbnail paints through the managed Core', async () =
   const loader = new ImageLoader(async () => ({ ref: {}, data: bytes }))
   const ref = { attachmentId: 'att-1', mediaType: 'image/png' as const, bytes: 96, width: 64, height: 64, name: 'shot.png' }
   loader.load(ref)
-  const graphics: NativeKittyGraphics = {
+  const graphics: KittyGraphics = {
     mode: 'native',
     canPaint: () => true,
     image: (source, options) => new NativeKittyImage(core, source, options),
