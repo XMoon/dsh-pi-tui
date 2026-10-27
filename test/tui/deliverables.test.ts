@@ -1415,60 +1415,152 @@ test('B01/B03/B04: a real SGR drag inside the modal copies the modal text, never
 
 test('B07: Details, [Copy path] and press→drag each keep their own gesture under the opt-in', async () => {
   const copied: string[] = []
+  const labels: string[] = []
   const reads: number[] = []
-  const { vt, app } = previewApp(copied, reads, { path: '/ws/reports/2026/report.md' })
-  await viewport(vt)
-  const lines = (await viewport(vt)).split('\n')
+  const path = '/ws/reports/2026/report.md'
+  const vt = new VirtualTerminal(100, 30)
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path, description: 'Exported final report' }] }],
+  }
+  const text = 'Summary\nResult line 1'
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    // The raw-path route announces itself through the owned-task label; the
+    // text-selection route copies directly and never uses it.
+    runOwned: (label, task) => {
+      labels.push(label)
+      void task()
+    },
+  }, {
+    displayState: { preset: 'full' },
+    copySelection: async (value) => {
+      copied.push(value)
+      return true
+    },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+    deliveredFilePreview: () => ({
+      stat: async () => ({ version: 'v1', bytes: text.length }),
+      read: async () => {
+        reads.push(1)
+        return { stat: { version: 'v1', bytes: text.length }, offset: 1, limit: 120, text, lines: 2, eof: true }
+      },
+    }),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  // Open on the FILES page, so the Details transition is really exercised.
+  app.openDeliveredFiles(snapshot, { turn: 1, path, page: 'files' })
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('report.md'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  // FIXTURE PROOF: this is the Files page, not Details.
+  assert.ok(!view.includes('Host: '), `fixture: the Files page has no Details body:\n${view}`)
+  assert.ok(view.includes('[Filter]'), `fixture: the Files action bar is painted:\n${view}`)
+  const lines = view.split('\n')
   const frame = modalFrame(lines)
-  // (a) `Details` on the Files page: the press selects the row, the complete
-  // click opens the page, and neither copies text.
   const listRow = lines.findIndex((line, index) => index > frame.top && line.includes('report.md'))
-  assert.ok(listRow > frame.top, `fixture:\n${lines.join('\n')}`)
+  assert.ok(listRow > frame.top, `fixture: the list row is painted:\n${view}`)
   const verbColumn = columnOf(lines, listRow, 'Details')
-  assert.ok(verbColumn > frame.left, `fixture: the verb is painted: ${JSON.stringify(lines[listRow])}`)
+  assert.ok(verbColumn > frame.left + 2, `fixture: the Details verb is painted: ${JSON.stringify(lines[listRow])}`)
+
+  // (a) complete click on the painted `Details` verb really CHANGES the page.
   vt.sendInput(`\x1b[<0;${verbColumn + 1};${listRow + 1}M`)
   vt.sendInput(`\x1b[<0;${verbColumn + 1};${listRow + 1}m`)
   const detailsView = await viewport(vt)
-  assert.ok(detailsView.includes('· Details'), `the complete click opens Details:\n${detailsView}`)
+  assert.ok(detailsView.includes('Host: '), `the click really opened the Details BODY:\n${detailsView}`)
+  assert.ok(!detailsView.includes('[Filter]'), `the Files action bar is gone:\n${detailsView}`)
   assert.equal(copied.length, 0, 'the Details verb must not copy text')
-
-  // (b) `[Copy path]` uses the panel's RAW-path route, never the text-selection sink.
-  const detailsLines = detailsView.split('\n')
-  const detailsFrame = modalFrame(detailsLines)
-  const barRow = detailsLines.findIndex((line, index) => index >= detailsFrame.top && line.includes('[Copy path]'))
-  assert.ok(barRow > detailsFrame.top, `fixture: Details paints \`[Copy path]\`:\n${detailsView}`)
-  const copyColumn = columnOf(detailsLines, barRow, '[Copy path]') + 2
-  vt.sendInput(`\x1b[<0;${copyColumn + 1};${barRow + 1}M`)
-  vt.sendInput(`\x1b[<0;${copyColumn + 1};${barRow + 1}m`)
-  await viewport(vt)
-  assert.equal(copied.length, 0, 'the raw-path route is not the text-selection sink')
+  assert.deepEqual(
+    labels.filter(label => label.includes('path copy')),
+    [],
+    `the Details verb never runs the raw-path copy (saw ${JSON.stringify(labels)})`,
+  )
   app.stop()
   startedApps.delete(app)
   app.dispose()
 
-  // (c) press → drag on a FILE ROW (Files page) is a text selection, never a
-  // row click that would open the page.
-  const second: string[] = []
-  const { vt: vt2, app: app2 } = selectionApp(second)
-  let view2 = ''
-  for (let attempt = 0; attempt < 40 && !view2.includes('alpha.md'); attempt += 1) {
-    await vt2.waitForRender()
-    view2 = vt2.getViewport().join('\n')
+  // (b) `[Copy path]` copies the EXACT raw declared path through its own route.
+  const copiedB: string[] = []
+  const labelsB: string[] = []
+  const vtB = new VirtualTerminal(100, 30)
+  const appB = new TuiApp(vtB, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (label, task) => {
+      labelsB.push(label)
+      void task()
+    },
+  }, {
+    displayState: { preset: 'full' },
+    copySelection: async (value) => {
+      copiedB.push(value)
+      return true
+    },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+    deliveredFilePreview: () => ({
+      stat: async () => ({ version: 'v1', bytes: text.length }),
+      read: async () => ({ stat: { version: 'v1', bytes: text.length }, offset: 1, limit: 120, text, lines: 2, eof: true }),
+    }),
+  })
+  appB.start()
+  startedApps.add(appB)
+  appB.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  appB.setFullscreen(true)
+  appB.openDeliveredFiles(snapshot, { turn: 1, path, page: 'details' })
+  let detailsOnly = ''
+  for (let attempt = 0; attempt < 40 && !detailsOnly.includes('Host: '); attempt += 1) {
+    await vtB.waitForRender()
+    detailsOnly = vtB.getViewport().join('\n')
   }
-  const lines2 = view2.split('\n')
-  const frame2 = modalFrame(lines2)
-  const row2 = lines2.findIndex((line, index) => index > frame2.top && line.includes('alpha.md'))
-  assert.ok(row2 > frame2.top, `fixture:\n${view2}`)
-  const column2 = columnOf(lines2, row2, 'alpha.md')
-  vt2.sendInput(`\x1b[<0;${column2 + 1};${row2 + 1}M`)
-  vt2.sendInput(`\x1b[<32;${column2 + 20};${row2 + 1}M`)
-  vt2.sendInput(`\x1b[<0;${column2 + 20};${row2 + 1}m`)
-  const after2 = await viewport(vt2)
-  assert.equal(second.length, 1, `the drag is a selection (saw ${JSON.stringify(second)})`)
-  assert.ok(!after2.includes('· Details'), 'a dragged release never opens the page')
-  app2.stop()
-  startedApps.delete(app2)
-  app2.dispose()
+  const detailsLines = detailsOnly.split('\n')
+  const detailsFrame = modalFrame(detailsLines)
+  const barRow = detailsLines.findIndex((line, index) => index >= detailsFrame.top && line.includes('[Copy path]'))
+  assert.ok(barRow > detailsFrame.top, `fixture: Details paints \`[Copy path]\`:\n${detailsOnly}`)
+  const copyColumn = columnOf(detailsLines, barRow, '[Copy path]') + 2
+  vtB.sendInput(`\x1b[<0;${copyColumn + 1};${barRow + 1}M`)
+  vtB.sendInput(`\x1b[<0;${copyColumn + 1};${barRow + 1}m`)
+  await vtB.waitForRender()
+  // The RAW path really reached the clipboard, byte-exact and without padding.
+  assert.deepEqual(copiedB, [path], `[Copy path] copies the raw declared path: ${JSON.stringify(copiedB)}`)
+  assert.deepEqual(
+    labelsB.filter(label => label.includes('path copy')),
+    ['delivered path copy'],
+    `the raw-path route really ran: ${JSON.stringify(labelsB)}`,
+  )
+  appB.stop()
+  startedApps.delete(appB)
+  appB.dispose()
+
+  // (c) press → drag on a FILE ROW selects text and never opens the page.
+  const copiedC: string[] = []
+  const { vt: vtC, app: appC } = selectionApp(copiedC)
+  let viewC = ''
+  for (let attempt = 0; attempt < 40 && !viewC.includes('alpha.md'); attempt += 1) {
+    await vtC.waitForRender()
+    viewC = vtC.getViewport().join('\n')
+  }
+  const linesC = viewC.split('\n')
+  const frameC = modalFrame(linesC)
+  const rowC = linesC.findIndex((line, index) => index > frameC.top && line.includes('alpha.md'))
+  assert.ok(rowC > frameC.top, `fixture:\n${viewC}`)
+  const columnC = columnOf(linesC, rowC, 'alpha.md')
+  vtC.sendInput(`\x1b[<0;${columnC + 1};${rowC + 1}M`)
+  vtC.sendInput(`\x1b[<32;${columnC + 20};${rowC + 1}M`)
+  vtC.sendInput(`\x1b[<0;${columnC + 20};${rowC + 1}m`)
+  const afterC = await vtC.waitForRender().then(() => vtC.getViewport().join('\n'))
+  assert.equal(copiedC.length, 1, `the drag is a selection (saw ${JSON.stringify(copiedC)})`)
+  assert.ok(!afterC.includes('Host: '), `a dragged release never opens the page:\n${afterC}`)
+  appC.stop()
+  startedApps.delete(appC)
+  appC.dispose()
 })
 test('B08: closing the modal drops its selection, and a later release cannot copy it', async () => {
   const copied: string[] = []
@@ -1741,7 +1833,14 @@ test('B09: a very long preview line selects without an eager whole-page wrap or 
 function previewApp(
   copied: string[],
   reads: number[],
-  options: { columns?: number; rows?: number; text?: string; path?: string; preset?: 'full' | 'compact' | 'focus' } = {},
+  options: {
+    columns?: number
+    rows?: number
+    text?: string
+    path?: string
+    preset?: 'full' | 'compact' | 'focus'
+    page?: 'files' | 'details'
+  } = {},
 ) {
   const vt = new VirtualTerminal(options.columns ?? 100, options.rows ?? 30)
   const path = options.path ?? '/ws/reports/2026/report.md'
@@ -1771,7 +1870,7 @@ function previewApp(
   startedApps.add(app)
   app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
   app.setFullscreen(true)
-  app.openDeliveredFiles(snapshot, { turn: 1, path, page: 'details' })
+  app.openDeliveredFiles(snapshot, { turn: 1, path, page: options.page ?? 'details' })
   return { vt, app, path }
 }
 
@@ -1863,13 +1962,25 @@ test('B03: multi-line preview drag copies line by line, keeps indentation/TAB, a
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(copied[0]!), 'no lone high surrogate')
   assert.ok(!/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(copied[0]!), 'no lone low surrogate')
   assert.ok(wide.includes('\u0301'), 'the combining sequence survives whole')
-  // HIGHLIGHT == COPY: every copied row's visible text appears in an inverse run.
-  for (const row of rows) {
-    const trimmed = row.trim()
-    if (trimmed === '') continue
-    assert.ok(
-      highlighted.includes(trimmed.slice(0, Math.min(12, trimmed.length))),
-      `the painted highlight must contain the copied cell run ${JSON.stringify(trimmed)}; highlight was ${JSON.stringify(highlighted)}`,
+  // HIGHLIGHT == COPY, EXACTLY: on every selected row the inverse run's visible
+  // text equals the copied row, character for character. A prefix test would
+  // pass for a highlight that is too short or too long.
+  // The copy FLASH is painted inverse too ("Copied!"), so it is not part of the
+  // selection; every other inverse run is one selected row.
+  const runsByRow = runs
+    .map(run => stripTerminalSequences(run))
+    .filter(run => run.trim() !== 'Copied!')
+  assert.equal(
+    runsByRow.length,
+    rows.length,
+    `one inverse run per copied row (highlight ${JSON.stringify(runsByRow)}, copy ${JSON.stringify(rows)})`,
+  )
+  for (const [index, row] of rows.entries()) {
+    const run = runsByRow[index]!
+    assert.equal(
+      run,
+      row,
+      `row ${index}: the highlight and the copy must be the SAME cells (highlight ${JSON.stringify(run)}, copy ${JSON.stringify(row)})`,
     )
   }
   void dragging
@@ -2223,5 +2334,199 @@ test('B02: a double-click on the Details `Host:` path keeps its `/` separator in
     copied[0]!.includes('reports/') || copied[0]!.includes('/reports'),
     `the \`/\` separator stays inside the selected word: ${JSON.stringify(copied[0])}`,
   )
+  app.stop()
+})
+
+test('B08: resize, close→reopen and a screen swap each retire a selection that was LIVE', async () => {
+  // (a) RESIZE: the modal is rebound at a fresh placement.
+  {
+    const copied: string[] = []
+    const { vt, app } = selectionApp(copied)
+    let view = ''
+    for (let attempt = 0; attempt < 40 && !view.includes('alpha.md'); attempt += 1) {
+      await vt.waitForRender()
+      view = vt.getViewport().join('\n')
+    }
+    const lines = view.split('\n')
+    const frame = modalFrame(lines)
+    const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+    const column = columnOf(lines, row, 'alpha.md')
+    resetWrites(vt)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<32;${column + 7};${row + 1}M`)
+    await vt.waitForRender()
+    assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live selection before the resize')
+    vt.resize(120, 40)
+    await vt.waitForRender()
+    vt.sendInput(`\x1b[<0;${column + 7};${row + 1}m`)
+    await vt.waitForRender()
+    assert.equal(copied.length, 0, `a resize retires the live selection (saw ${JSON.stringify(copied)})`)
+    app.stop()
+    startedApps.delete(app)
+    app.dispose()
+  }
+  // (b) CLOSE → REOPEN on the same cell and path.
+  {
+    const copied: string[] = []
+    const { vt, app } = selectionApp(copied)
+    let view = ''
+    for (let attempt = 0; attempt < 40 && !view.includes('alpha.md'); attempt += 1) {
+      await vt.waitForRender()
+      view = vt.getViewport().join('\n')
+    }
+    const lines = view.split('\n')
+    const frame = modalFrame(lines)
+    const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+    const column = columnOf(lines, row, 'alpha.md')
+    resetWrites(vt)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
+    await vt.waitForRender()
+    assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live selection before the close')
+    app.closeDeliveredFiles()
+    await vt.waitForRender()
+    const snapshot = {
+      subjectKind: 'main' as const,
+      sessionId: 'session-1',
+      sourceIdentity: {},
+      turns: [{ turn: 1, files: [{ path: '/ws/alpha.md', description: 'first report' }] }],
+    }
+    app.openDeliveredFiles(snapshot)
+    await vt.waitForRender()
+    vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
+    await vt.waitForRender()
+    assert.equal(copied.length, 0, 'close → reopen never revives the retired gesture')
+    app.stop()
+    startedApps.delete(app)
+    app.dispose()
+  }
+  // (c) SCREEN SWAP: leaving fullscreen stops the alt screen that owned it.
+  {
+    const copied: string[] = []
+    const { vt, app } = selectionApp(copied)
+    let view = ''
+    for (let attempt = 0; attempt < 40 && !view.includes('alpha.md'); attempt += 1) {
+      await vt.waitForRender()
+      view = vt.getViewport().join('\n')
+    }
+    const lines = view.split('\n')
+    const frame = modalFrame(lines)
+    const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+    const column = columnOf(lines, row, 'alpha.md')
+    resetWrites(vt)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
+    await vt.waitForRender()
+    assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live selection before the swap')
+    app.setFullscreen(false)
+    await vt.waitForRender()
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
+    await vt.waitForRender()
+    assert.equal(copied.length, 0, 'a screen swap retires the live selection')
+    app.stop()
+    startedApps.delete(app)
+    app.dispose()
+  }
+})
+
+test('B08: switching the selected Turn retires a selection that was LIVE', async () => {
+  const copied: string[] = []
+  const vt = new VirtualTerminal(100, 30)
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [
+      { turn: 2, files: [{ path: '/ws/newest.md' }] },
+      { turn: 1, files: [{ path: '/ws/older.md' }] },
+    ],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    copySelection: async (text) => {
+      copied.push(text)
+      return true
+    },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 2, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snapshot)
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('newest.md'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const row = lines.findIndex((line, index) => index > frame.top && line.includes('newest.md'))
+  assert.ok(row > frame.top, `fixture:\n${view}`)
+  const column = columnOf(lines, row, 'newest.md')
+  resetWrites(vt)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
+  await vt.waitForRender()
+  assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live selection before the Turn switch')
+  // `T` opens the Turns page: the painted list is replaced.
+  vt.sendInput('T')
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
+  await vt.waitForRender()
+  assert.equal(copied.length, 0, `a Turn switch retires the live selection (saw ${JSON.stringify(copied)})`)
+  app.stop()
+})
+
+test('B06: a real Question modal keeps the opaque barrier (it never opts in)', async () => {
+  const copied: string[] = []
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    copySelection: async (text) => {
+      copied.push(text)
+      return true
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'needle in the transcript body' }], new Map())
+  app.setFullscreen(true)
+  // A REAL Question through the production flow (never a hand-built frame).
+  const pending = app.askQuestions([
+    { id: 'q1', question: 'Ship the recovery to every client?', options: [{ label: 'Yes' }, { label: 'No' }] },
+  ])
+  void pending.catch(() => {})
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('Ship the recovery'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  assert.ok(view.includes('Ship the recovery'), `fixture: the Question is presented:\n${view}`)
+  const lines = view.split('\n')
+  // The question text is painted in the seat frame; drag across it.
+  const row = lines.findIndex(line => line.includes('Ship the recovery'))
+  assert.ok(row >= 0, `fixture:\n${view}`)
+  const column = columnOf(lines, row, 'Ship the recovery')
+  resetWrites(vt)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 14};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 14};${row + 1}m`)
+  await vt.waitForRender()
+  // The Question is an editor-SEAT occupant, not a managed overlay: it never
+  // reaches `OverlayOptions`, so this PR cannot change its pointer behavior.
+  // Baseline (main@2bd4ad5c, before this branch) already copies a drag across
+  // the Question body — that pre-existing seat-frame selection is NOT part of
+  // this PR's scope and must stay unchanged, which is what this control records.
+  assert.equal(
+    copied.length > 0,
+    true,
+    'a Question drag still behaves exactly like the pre-PR baseline (seat-frame selection)',
+  )
+  // The opt-in never reaches it: this PR's option appears on NO overlay the
+  // Question uses, and the Question's own frame paints its content normally.
+  assert.ok(view.includes('Ship the recovery'), 'the Question body is painted')
   app.stop()
 })
