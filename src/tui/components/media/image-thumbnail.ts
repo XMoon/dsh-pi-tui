@@ -398,14 +398,15 @@ export class ImageThumbnail implements Component {
       // raster: the constant identity line plus its styled text fallback.
       this.releaseInstance()
       this.paintedBody = undefined
-      return [
-        this.infoRow(width, this.infoLine()),
-        this.theme.fallbackColor(imageFallback(
-          this.ref.mediaType,
-          { widthPx: this.ref.width, heightPx: this.ref.height },
-          this.label(),
-        )),
-      ]
+      // The legacy path painted `truncateToWidth(fallbackColor(fallback), width)`
+      // — style first, then clamp — and that width contract carries over
+      // unchanged: a long attachment name must never exceed the granted columns.
+      const fallback = this.theme.fallbackColor(imageFallback(
+        this.ref.mediaType,
+        { widthPx: this.ref.width, heightPx: this.ref.height },
+        this.label(),
+      ))
+      return [this.infoRow(width, this.infoLine()), truncateToWidth(fallback, width)]
     }
     const instanceKind = protocol === 'kitty' ? 'raw-kitty' : 'raw-iterm2'
     const native = this.nativeGraphics !== undefined

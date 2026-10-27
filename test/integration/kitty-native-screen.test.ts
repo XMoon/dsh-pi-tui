@@ -19,7 +19,12 @@ import {
   type Terminal,
   type TerminalProgressState,
 } from '@xmoon76/pi-tui'
-import { Image as LegacyImage } from '@xmoon76/pi-tui'
+import {
+  Container as LegacyContainer,
+  Image as LegacyImage,
+  ScrollView as LegacyScrollView,
+  Text as LegacyText,
+} from '@xmoon76/pi-tui'
 import { ImageThumbnail } from '../../src/tui/components/media/image-thumbnail.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
@@ -488,6 +493,67 @@ function croppingCase(kind: 'legacy' | 'native', viewportRows: number): string |
   return match === null ? null : `y=${match[1]},h=${match[2]},r=${match[3]}`
 }
 
+/**
+ * The scroll-into-middle path: the anchor row is ABOVE the viewport and the
+ * image extends into it, so the layout engine must restore the REMAINING part
+ * with a source rectangle (`y`/`h`/`r`) instead of dropping the image. This is
+ * the second half of the crop contract the fork metadata registration serves.
+ */
+function scrollCroppingCase(kind: 'legacy' | 'native', scrollTop: number): { top: number; crop: string | null } {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const terminal = new RecordingTerminal()
+  terminal.columns = 60
+  terminal.rows = 10
+  const core = new KittyGraphicsCore()
+  const image = kind === 'native'
+    ? new NativeKittyImage(core, { pngBase64: PNG, widthPx: 100, heightPx: 500 }, {
+      maxWidthCells: 20,
+      maxHeightCells: 10,
+      fallback: '[image]',
+    })
+    : new LegacyImage(PNG, 'image/png', { fallbackColor: (text: string) => text }, {
+      maxWidthCells: 20,
+      maxHeightCells: 10,
+    }, { widthPx: 100, heightPx: 500 })
+  const content = new LegacyContainer()
+  for (let index = 0; index < 3; index++) content.addChild(new LegacyText(`l${index}`, 0, 0))
+  content.addChild(image)
+  for (let index = 0; index < 20; index++) content.addChild(new LegacyText(`t${index}`, 0, 0))
+  const scroll = new LegacyScrollView(content, { primary: true, follow: 'none' })
+  const screen = new TuiAltScreen(new KittyTerminalFacade(terminal, core), undefined, undefined, { mouse: false })
+  screen.setLayoutRoot(scroll)
+  screen.start()
+  screen.renderNow()
+  scroll.scrollTo(scrollTop)
+  image.invalidate()
+  content.invalidate()
+  terminal.writes.length = 0
+  screen.renderNow()
+  const match = /,y=(\d+),h=(\d+),r=(\d+)/.exec(terminal.text)
+  const top = scroll.scrollTop
+  screen.stop()
+  return { top, crop: match === null ? null : `y=${match[1]},h=${match[2]},r=${match[3]}` }
+}
+
+test('scrolling into a managed image restores the same remaining part as the legacy image', () => {
+  for (const offset of [2, 4, 6]) {
+    const legacy = scrollCroppingCase('legacy', offset)
+    const native = scrollCroppingCase('native', offset)
+    assert.equal(legacy.top, offset, `legacy scroll position ${offset}`)
+    assert.equal(native.top, legacy.top, `native scroll position matches at ${offset}`)
+    assert.ok(legacy.crop !== null, `the control restores a cropped source rectangle at ${offset}`)
+    assert.equal(native.crop, legacy.crop, `the managed placement restores the same rectangle at ${offset}`)
+  }
+  // The restored rectangle really tracks the scroll position.
+  const first = scrollCroppingCase('native', 2).crop
+  const later = scrollCroppingCase('native', 6).crop
+  assert.notEqual(first, later, 'a deeper scroll yields a different source rectangle')
+})
+
+/**
+ * Bottom clipping: the image anchor is INSIDE the viewport but the image is
+ * taller than the remaining rows, so the layout engine must clip its bottom.
+ */
 test('a managed placement is cropped exactly like the legacy image at the viewport edge', () => {
   assert.equal(croppingCase('legacy', 8), 'y=100,h=400,r=8', 'the control crops')
   assert.equal(croppingCase('native', 8), 'y=100,h=400,r=8', 'the managed placement crops to the same rectangle')
