@@ -778,31 +778,22 @@ never completes a button. Both halves of that split belong to ONE contract: a
 row that consumed the press without providing text selection would break the
 browser, and a button that released its press would lose its own gesture.
 
-**Selecting overlay text.** Dragging inside the modal selects exactly the
-painted cells of its CONTENT rectangle (the left-painted frame minus one border
-row top and bottom and two columns — one border plus one padding cell — on each
-side); double-click selects the word under the pointer with the fork's own
-segmenter, and triple-click the visible content row. The rule holds on the
-`Files` body, the wide side pane, the `Details` header lines and the preview
-text: the selection never crosses the frame border, never includes the padding
-or the background the modal covers, and a drag taken outside the frame is
-clamped to its nearest content cell instead of extending. Copy joins the
-selected rows with `\n` and preserves the selected cells byte-for-byte
-(indentation and interior runs of spaces), which is why the transcript's own
-`trimEnd`/indent normalization is deliberately not applied here. Copying is
-the alternate screen's ONE selection path (its injected clipboard sink, its
-`Copied!`/failure feedback, its OSC 52 fallback) — there is no second clipboard
-implementation, and `Copy path` / `Shift+C` remain the ONLY way to get the RAW
-declared path, because a text selection copies what is painted. It is the
-CURRENT viewport's text: a Preview page is only ever selected as painted, never
-by reading neighbouring 120-line windows. The selection is dropped when the
-modal is closed, when its painted placement moves (resize, reflow, remount),
-when any other visible overlay holds a higher focus order (which includes a
-newer modal that is mounted but not painted yet), on a screen swap, and before
-the panel repaints its own content (a page/Turn/filter/scroll change), so a stale range can never
-copy text from another frame. The selection lives on the alt screen only: a
-regular surface has no application-owned text selection and paints no dead
-entry for it.
+**Selecting the panel's own text.** Inside this ONE modal the painted cells of
+its content area are a text-selection source: drag selects them, double-click
+selects the word under the pointer, and triple-click the visible line of the
+`Files` body, the wide side pane, the `Details` header lines or the preview
+text. What the user sees is what they get — the selection never crosses the
+frame border, never includes the padding, and never reaches the transcript the
+modal covers; a drag taken outside the frame stops at its last content cell.
+Copy joins the selected rows and preserves their real spaces and indentation, so
+a preview's code indentation survives. It is the CURRENT page's painted text: a
+preview page is never read beyond what is on screen. `Copy path` / `Shift+C`
+remains the only way to get the RAW declared path, because a text selection
+copies what is painted. The selection lives on the alt screen only — a regular
+surface paints no dead entry for it — and it is dropped whenever the modal
+closes, moves or is repainted, or when another overlay takes the front. The
+pointer, clipping and currentness contract is owned by
+[overlay-focus.md](./overlay-focus.md) §6.1.
 
 On a real AltScreen the action bar paints real buttons — Files
 `[Filter] · [Turns] · [Close]`, Turns `[Back]`, Details
