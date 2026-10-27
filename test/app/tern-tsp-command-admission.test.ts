@@ -65,8 +65,9 @@ test('the Client-local attachment intake is available on the TSP renderer with i
     '/image <path> stages into the mounted composer, so it is admitted')
   assert.deepEqual(tspBuiltinAvailability(tui, 'attach', {}, '<path>'), { kind: 'available' },
     '/attach <path> stages into the mounted composer, so it is admitted')
-  // The PiTui-only chrome beside them stays refused.
-  for (const name of ['view-image', 'export', 'transcript']) {
+  // The PiTui-only chrome beside them stays refused — including the delivered
+  // files browser (PR2 adds no TSP-native command or page).
+  for (const name of ['view-image', 'export', 'transcript', 'deliverables']) {
     assert.deepEqual(tspBuiltinAvailability(tui, name, {}, '<path>'), { kind: 'unsupported' },
       `/${name} still needs a PiTui surface and is never admitted by the intake decision`)
   }
