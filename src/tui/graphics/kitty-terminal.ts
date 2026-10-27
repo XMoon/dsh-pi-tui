@@ -25,7 +25,7 @@
  */
 
 import type { ProgramStatus, Terminal, TerminalProgressState } from '@xmoon76/pi-tui'
-import type { KittyGraphicsCore, KittyScreenBuffer } from './kitty-core.ts'
+import type { KittyGlobalImageDeletePlan, KittyGraphicsCore, KittyScreenBuffer } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 
 /**
@@ -96,6 +96,8 @@ export class KittyTerminalFacade implements Terminal {
   private pendingText = ''
   /** Which physical screen buffer the writer is currently drawing into. */
   private buffer: KittyScreenBuffer = 'main'
+  /** Global image deletes offered by THIS write, committed only on success. */
+  private pendingGlobalDeletes: KittyGlobalImageDeletePlan[] = []
   private disposed = false
 
   constructor(inner: Terminal, core: KittyGraphicsCore) {
@@ -207,6 +209,7 @@ export class KittyTerminalFacade implements Terminal {
     let wire = ''
     /** The managed ids this frame really offered to the sink. */
     const touched: number[] = []
+    this.pendingGlobalDeletes = []
     let input = data
     // Join the two bounded hold-backs with this write. They are at most one
     // incomplete APC plus one escape-sequence prefix, so no full-frame text or
@@ -247,10 +250,17 @@ export class KittyTerminalFacade implements Terminal {
       cursor = end + KITTY_APC_TERMINATOR.length
       textStart = cursor
     }
-    if (wire === '') return
+    if (wire === '') {
+      // Nothing offered: a queued plan cannot have consumed ownership.
+      this.pendingGlobalDeletes = []
+      return
+    }
     try {
       this.inner.write(wire)
     } catch (error) {
+      // The global-delete plans were never committed, so every id they would
+      // have released is still owned and the next cleanup retries them.
+      this.pendingGlobalDeletes = []
       // `Terminal.write()` is an offer, never a terminal ACK: bytes may have
       // partially reached the sink. The touched images are now UNKNOWN, so the
       // next placement re-sends them; nothing is hard-deleted (a partially
@@ -259,15 +269,24 @@ export class KittyTerminalFacade implements Terminal {
       this.core.noteWriteFailure(touched, this.buffer)
       throw error
     }
+    for (const plan of this.pendingGlobalDeletes) this.core.commitGlobalImageDelete(plan)
+    this.pendingGlobalDeletes = []
   }
 
   /** Offer the queued own-ID retirements; commit or roll back on the result. */
   private flushRetirements(): void {
     const { wire, ids } = this.core.takeRetirements()
-    if (wire === '') return
+    if (wire === '') {
+      // Nothing offered: a queued plan cannot have consumed ownership.
+      this.pendingGlobalDeletes = []
+      return
+    }
     try {
       this.inner.write(wire)
     } catch (error) {
+      // The global-delete plans were never committed, so every id they would
+      // have released is still owned and the next cleanup retries them.
+      this.pendingGlobalDeletes = []
       this.core.rollbackRetirements(ids)
       throw error
     }
@@ -367,7 +386,13 @@ export class KittyTerminalFacade implements Terminal {
     // deletes all images visible on screen"), so a bare `a=d` is the same
     // global form and must be scoped too.
     const specifier = controls.d ?? 'a'
-    if (specifier === 'A') return this.core.translateGlobalImageDelete(this.buffer)
+    if (specifier === 'A') {
+      // Ownership may only be consumed once the sink accepted the bytes, so the
+      // plan is committed by `write()` after `inner.write()` returns.
+      const plan = this.core.planGlobalImageDelete(this.buffer)
+      if (plan.wire !== '') this.pendingGlobalDeletes.push(plan)
+      return plan.wire
+    }
     if (specifier === 'a') return this.core.translateGlobalPlacementDelete(this.buffer)
     return apc
   }

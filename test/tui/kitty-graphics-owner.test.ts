@@ -483,6 +483,53 @@ test('a clear inside the alternate session does not end its placement ownership'
     'the alternate screen still releases the id it painted')
 })
 
+test('a failed global delete keeps every id retryable', () => {
+  const { terminal, facade, core } = harness()
+  // One live image placed in alt, plus one already retired (retained) alt id.
+  facade.write('\x1b[?1049h')
+  const live = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(live.render(80).join('\r\n'))
+  const liveId = live.imageId!
+  const retired = new NativeKittyImage(core, source('AAAA', 16, 16), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(retired.render(80).join('\r\n'))
+  const retiredId = retired.imageId!
+  retired.dispose()
+  assert.equal(core.owns(retiredId), false, 'the retired occurrence left the active ledger')
+
+  // The alt screen's own release write fails after possibly reaching the sink.
+  terminal.writes.length = 0
+  terminal.failWhen = (data) => data.includes('a=d')
+  assert.throws(() => facade.write('\x1b_Ga=d,d=A,q=2\x1b\\'), /terminal write failed/)
+
+  // Ownership was NOT consumed: the retry still frees both ids.
+  terminal.writes.length = 0
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  const text = terminal.text
+  assert.ok(text.includes(encodeKittyDeleteImage(liveId)), 'the live id is still released on retry')
+  assert.ok(text.includes(encodeKittyDeleteImage(retiredId)), 'and so is the already-retired one')
+})
+
+test('a committed global delete releases only the ids of its own buffer', () => {
+  const { terminal, facade, core } = harness()
+  // Main-placed image and an alt-placed image, then an alt release.
+  const main = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(main.render(80).join('\r\n'))
+  const mainId = main.imageId!
+  facade.write('\x1b[?1049h')
+  const alt = new NativeKittyImage(core, source('AAAA', 16, 16), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(alt.render(80).join('\r\n'))
+  const altId = alt.imageId!
+
+  terminal.writes.length = 0
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  const text = terminal.text
+  assert.ok(text.includes(encodeKittyDeleteImage(altId)), 'the alt buffer releases its own id')
+  assert.ok(!text.includes(`i=${mainId}`), 'the main screen image is never mentioned')
+  // Committing the alt release did not touch the main image\\'s ownership.
+  assert.equal(core.owns(mainId), true, 'the main image is still owned')
+  assert.equal(core.owns(altId), true, 'the alt record survives (its component still holds it)')
+})
+
 test('a foreign id outside the Core slice still passes through', () => {
   const { core, facade, terminal } = harness()
   // Find an id outside this Core's reserved slice.
