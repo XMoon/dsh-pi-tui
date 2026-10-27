@@ -399,3 +399,49 @@ test('a real Remote generation replacement never paints its late success OR its 
     await hostRuntime?.dispose()
   }
 })
+
+test('F02: the Direct and Remote ports answer the SAME Session file identically', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'pr2-parity-preset')
+  const workspace = life.tempDir('dsh-pr2-parity-ws-')
+  mkdirSync(workspace, { recursive: true })
+  const filePath = join(workspace, 'parity.md')
+  writeFileSync(filePath, 'no parity\nbetween the ports?\nthird line\n')
+  const sessionId = SessionId('pr2-parity-session')
+  await host.harness.create(sessionId, undefined, { cwd: workspace })
+  let hostRuntime: RemoteHostRuntime | undefined
+  let client: RemoteClientRuntime | undefined
+  try {
+    hostRuntime = await createRemoteHostRuntime(host.ctx)
+    client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
+    const direct = new DirectDeliveredFileReadPort(host.ctx)
+    const remote = new RemoteDeliveredFileReadPort(client.remote.workspaceFiles, client.connection.generation)
+
+    // The SAME Session and the SAME declared path through both ports.
+    const [directStat, remoteStat] = await Promise.all([
+      direct.stat(sessionId, filePath, abort),
+      remote.stat(sessionId, filePath, abort),
+    ])
+    assert.equal(remoteStat.bytes, directStat.bytes, 'the byte size is the same Host file')
+    assert.equal(remoteStat.version, directStat.version, 'the freshness token is the same Host fact')
+
+    const [directPage, remotePage] = await Promise.all([
+      direct.read(sessionId, filePath, 1, abort),
+      remote.read(sessionId, filePath, 1, abort),
+    ])
+    assert.deepEqual(
+      { offset: remotePage.offset, limit: remotePage.limit, lines: remotePage.lines, eof: remotePage.eof, text: remotePage.text },
+      { offset: directPage.offset, limit: directPage.limit, lines: directPage.lines, eof: directPage.eof, text: directPage.text },
+      'the two transports serve one semantic page',
+    )
+    assert.equal(remotePage.text, 'no parity\nbetween the ports?\nthird line')
+
+    // The refusals agree too: one Host classification, two transports.
+    const missing = join(workspace, 'nope.md')
+    await assertRejectsCode(direct.stat(sessionId, missing, abort), 'not-found')
+    await assertRejectsCode(remote.stat(sessionId, missing, abort), 'not-found')
+  } finally {
+    await client?.dispose()
+    await hostRuntime?.dispose()
+  }
+})
