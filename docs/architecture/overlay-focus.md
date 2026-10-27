@@ -93,7 +93,7 @@ The callbacks to consider (not just `focus()`): Advanced `onFocus` /
 | fullscreen rebind / restore | the logical graph survives; rebind with `initialFocus:false` | rebind / one restore focus | none |
 | session switch / final teardown | close the Job/Settings workspace before its parent browser; clear refs | — | none |
 | Job workspace open / close | commit the screen lease, latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the workspace panel's `Esc`/`tasks.stop` intents | `activeScreen` derives the physical owner from the lease (see §10.1) |
-| Settings workspace open / close | commit the screen lease (mutually exclusive with the Job lease), latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the Settings panel's `Esc` intents and the legacy handoff | `activeScreen` derives the physical owner from the lease (see §10.3) |
+| Settings workspace open / close | commit the screen lease (mutually exclusive with the Job lease), latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the Settings panel's `Esc` intents, `TuiApp.dispose()`/`stop()` and a blocking owner that pre-empts by closure | `activeScreen` derives the physical owner from the lease (see §10.3) |
 | `custom()` done/close (factory or callback) | `settled` latch; the mounted lease is reclaimed | focus callbacks | no stale `pendingBrokerSettles` entry |
 
 ## 4. Reentrancy matrix
@@ -381,18 +381,19 @@ that grant instead of the whole terminal height.
   grant shorter than that view the compositor clamp applies. It keeps that
   degradation and adds no second scrollport; "every render branch fits the
   grant" holds for the panel's own assemblies, not for the recorder view.
-- Legacy limits are retained deliberately for the independent `SettingsList`
-  consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`): the list
-  keeps `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its
-  nested `Keyboard shortcuts` submenu is bounded by 26 content rows on any
-  terminal taller than 30 rows. This is a viewport/grant rule of the legacy
-  list, NOT the Settings Workspace: `/settings` opens the Settings Workspace,
-  whose Keyboard shortcuts and Footer pages are same-lease pages with their own
-  budget contract above. The fork's SettingsList still lacks filtered-state
-  Home/End paging, and a legacy list still shows at most six visible rows. A
-  blocking owner pre-empts by closure (§10.1 above), so the retired nested
-  submenu's question/approval suspension is no longer a reachable Settings
-  surface.
+- `SettingsList` limits are retained deliberately for the independent consumers
+  (`/help`, `/skill`, `/preset`, `/keybindings conflicts`): the list keeps
+  `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its overlay
+  frame grants at most 26 content rows on any terminal taller than 30 rows. This
+  is a viewport/grant rule of that component, NOT the Settings Workspace:
+  `/settings` opens the Settings Workspace, whose Keyboard shortcuts and Footer
+  pages are same-lease pages with their own budget contract above. No row
+  producer opens a nested submenu any more (the retired complete editor supplied
+  the only one, `Keyboard shortcuts`); the component's `submenu` slot and its
+  budget forwarding stay as the fork's contract, exercised by its own divergences
+  rather than by a live settings row. The fork's SettingsList still lacks
+  filtered-state Home/End paging, and such a list still shows at most six visible
+  rows. A blocking owner pre-empts by closure (§10.1 above).
 
 ## 10. One-shot closure: output viewer and task browser
 
@@ -488,9 +489,10 @@ workspace must return to.
   the predicate for "the active screen is a viewport owner" (for example the
   focus-report pass-through).
 - **One bounded post-close hand-off is the only exception.** The Settings
-  workspace reports HOW it closed (`user-exit`, `legacy-handoff`, `forced`) and
-  the command layer may, on `user-exit` only, hand a VERIFIED stored display
-  preference back to the restored surface as ONE
+  workspace reports HOW it closed (`user-exit` for the panel's own L0
+  Esc/Close gesture, `forced` for every other teardown) and the command layer
+  may, on `user-exit` only, hand a VERIFIED stored display preference back to
+  the restored surface as ONE
   `setFullscreen(value, {persistPreference: false, onlyWhenIdle: true})` call.
   The app re-proves the idle claim synchronously inside `setFullscreen` (no
   Job/workspace lease, no Question/Approval/Save owner, the same return screen),
@@ -723,14 +725,13 @@ owns only the lease, focus and write-lifecycle mechanics.
   `abandonWorkspaceForBlockingOwner()`, which closes the Job AND Settings leases
   under one freeze window before committing their own state. A Settings open that
   finds a blocking owner already active is refused.
-- **The legacy bridge closes before it opens.** A legacy hand-off from a Settings
-  workspace runs the existing settings editor only after the workspace's own
-  `close()` has retired the lease and restored the return surface, so the
-  `SettingsList` mounts on the real return surface instead of stacking under a
-  second physical owner; a failed legacy open reports the real error on the
-  restored surface and never resurrects the closed workspace. The current
-  Settings surface has no such hand-off; the bridge contract stays for the
-  retained compatibility path.
+- **There is no second settings surface behind the workspace.** The retired
+  complete settings editor and its compatibility bridge no longer exist: no
+  Settings level hands the user off to another editor, so nothing can mount a
+  `SettingsList` under or after this lease. The independent `SettingsList`
+  consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`) are their
+  OWN overlays opened by their own commands, never a continuation of a Settings
+  workspace.
 - **Read projection, not a second store.** The panel holds no ConfigPort and no
   subscription: the `/settings` command assembles a detached snapshot at open and
   at the explicit `R` refresh, and the panel renders it. Its only write verb hands

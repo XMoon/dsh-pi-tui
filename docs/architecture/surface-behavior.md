@@ -351,9 +351,8 @@ specialist-page contract below).
     that value and the app is still idle (no Job/workspace lease, no
     Question/Approval/Save owner, same return screen), the restored transcript
     surface receives ONE physical switch with the preference persistence
-    skipped. A Legacy hand-off, a forced teardown, a newer blocking owner or any
-    unverified outcome switches nothing; the stored preference then applies at
-    the next TUI mount.
+    skipped. A forced teardown, a newer blocking owner or any unverified outcome
+    switches nothing; the stored preference then applies at the next TUI mount.
   - `Git attribution`, `Home/End keys`, `Mouse wheel lines`, `Notifications`,
     `Notification method` and `Terminal progress` are APPLY-FIRST like
     `icon-style`/`progress-updates`/`response-style`, each driving its ONE
