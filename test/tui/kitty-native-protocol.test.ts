@@ -24,6 +24,11 @@ import {
   encodeKittyTransmit,
   parseKittyApc,
 } from '../../src/tui/graphics/kitty-native.ts'
+import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
+import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
+import { TmuxKittyImage } from '../../src/tui/graphics/tmux-image.ts'
+import { TmuxKittyAdmission, probeTmuxKittyIdentity } from '../../src/tui/graphics/tmux-admission.ts'
+import { createFakeTmuxCli } from '../support/fake-tmux-cli.ts'
 
 const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -145,5 +150,52 @@ test('the native geometry matches the fork Image placement at every width', () =
       assert.equal(geometry.rows, Number(fork.controls.r), `rows at ${width}/${entry.widthPx}x${entry.heightPx}`)
       assert.equal(lines.length, geometry.rows, 'the reserved row count equals the placement rows')
     }
+  }
+})
+
+
+/**
+ * Image-7B-A — the virtual body must occupy exactly the Native cells at every
+ * width. A drift here would make the text grid and the click band disagree, or
+ * would silently clamp a cell count the painted body still claims.
+ */
+test('the virtual placeholder geometry matches the native placement at every width', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli()
+  try {
+    const identity = probeTmuxKittyIdentity(cli.env)
+    assert.ok(identity)
+    const admission = new TmuxKittyAdmission(identity, cli.env)
+    const nativeCore = new KittyGraphicsCore()
+    const virtualCore = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
+    const cases = [
+      { widthPx: 800, heightPx: 600, maxWidthCells: 40, maxHeightCells: 12 },
+      { widthPx: 100, heightPx: 100, maxWidthCells: 40, maxHeightCells: 12 },
+      { widthPx: 1200, heightPx: 300, maxWidthCells: 80, maxHeightCells: 12 },
+      { widthPx: 300, heightPx: 1600, maxWidthCells: 20, maxHeightCells: 40 },
+      { widthPx: 64, heightPx: 64, maxWidthCells: 60, maxHeightCells: undefined },
+    ]
+    for (const entry of cases) {
+      for (const width of [24, 42, 81, 120, 600]) {
+        const options = {
+          maxWidthCells: entry.maxWidthCells,
+          ...(entry.maxHeightCells === undefined ? {} : { maxHeightCells: entry.maxHeightCells }),
+          fallback: '[image]',
+        }
+        const native = new NativeKittyImage(nativeCore, { pngBase64: TINY_PNG, widthPx: entry.widthPx, heightPx: entry.heightPx }, options)
+        const virtual = new TmuxKittyImage(virtualCore, { pngBase64: TINY_PNG, widthPx: entry.widthPx, heightPx: entry.heightPx }, options, admission)
+        native.render(width)
+        virtual.render(width)
+        const nativeBody = native.paintedBodyAt(width)
+        const virtualBody = virtual.paintedBodyAt(width)
+        assert.ok(nativeBody !== undefined && virtualBody !== undefined)
+        assert.equal(virtualBody.columns, nativeBody.columns,
+          `columns at ${width}/${entry.widthPx}x${entry.heightPx}`)
+        assert.equal(virtualBody.rows, nativeBody.rows,
+          `rows at ${width}/${entry.widthPx}x${entry.heightPx}`)
+      }
+    }
+  } finally {
+    cli.dispose()
   }
 })

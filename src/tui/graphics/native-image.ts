@@ -56,6 +56,10 @@ export interface NativeKittyImageBody extends KittyPlacementGeometry {
 
 /** The one graphics handle the real PiTui mount owns per physical terminal. */
 export interface NativeKittyGraphics {
+  /** The immutable transport this handle uses. */
+  readonly mode: 'native' | 'tmux-virtual'
+  /** Whether the real admission still allows pixels on the current frame. */
+  canPaint(): boolean
   /** Bind one display occurrence. The returned component owns its handle. */
   image(source: KittyImageSource, options: NativeKittyImageOptions): Component
   /** The facade both screens must write through. */
@@ -212,6 +216,8 @@ export function createNativeKittyGraphics(
   const facade = new KittyTerminalFacade(terminal, core)
   let disposed = false
   return {
+    mode: 'native',
+    canPaint: () => true,
     image: (source, imageOptions) => new NativeKittyImage(core, source, imageOptions),
     terminal: facade,
     dispose: () => {

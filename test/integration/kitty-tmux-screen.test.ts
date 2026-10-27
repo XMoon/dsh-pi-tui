@@ -1,0 +1,906 @@
+/**
+ * Image-7B-A — the tmux virtual backend behind the REAL fork screens.
+ *
+ * These cases mount the actual `TuiMainScreen` / `TuiAltScreen` writer with the
+ * production factory, a real `KittyGraphicsCore` and a real
+ * `KittyTerminalFacade`. The tmux server boundary is a scripted executable on
+ * PATH (raw stdout only), so the decision under test is still produced from the
+ * real subprocess output. The only E3 fact these cases cannot provide is a real
+ * outer GUI/passthrough; that is the separate real-terminal qualification.
+ * @module @xmoon76/dsh-pi-tui/integration/kitty-tmux-screen.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  Container as LegacyContainer,
+  ScrollView as LegacyScrollView,
+  Text as LegacyText,
+  TuiAltScreen,
+  TuiMainScreen,
+  setCapabilities,
+  type Component,
+  type Terminal,
+  type TerminalProgressState,
+} from '@xmoon76/pi-tui'
+import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
+import { parseKittyApc, type KittyApc } from '../../src/tui/graphics/kitty-native.ts'
+import { KittyTerminalFacade, TmuxGraphicsRevokedError } from '../../src/tui/graphics/kitty-terminal.ts'
+import { createTmuxKittyGraphics, TmuxKittyImage } from '../../src/tui/graphics/tmux-image.ts'
+import type { NativeKittyGraphics, NativeKittyImageOptions } from '../../src/tui/graphics/native-image.ts'
+import { TmuxKittyAdmission, probeTmuxKittyIdentity } from '../../src/tui/graphics/tmux-admission.ts'
+import {
+  KITTY_VIRTUAL_PLACEHOLDER,
+  encodeKittyPlaceholderGrid,
+  encodeKittyVirtualPlacement,
+} from '../../src/tui/graphics/tmux-virtual.ts'
+import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts'
+
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const DCS_INTRODUCER = '\x1bPtmux;'
+const P = KITTY_VIRTUAL_PLACEHOLDER
+
+class RecordingTerminal implements Terminal {
+  readonly writes: string[] = []
+  columns = 100
+  rows = 40
+  kittyProtocolActive = true
+  failWhen: ((data: string) => boolean) | undefined
+
+  get text(): string {
+    return this.writes.join('')
+  }
+
+  start(): void {}
+  stop(): void {}
+  async drainInput(): Promise<void> {}
+  write(data: string): void {
+    this.writes.push(data)
+    if (this.failWhen?.(data) === true) {
+      this.failWhen = undefined
+      throw new Error('terminal write failed')
+    }
+  }
+  moveBy(): void {}
+  hideCursor(): void {}
+  showCursor(): void {}
+  clearLine(): void {}
+  clearFromCursor(): void {}
+  clearScreen(): void {}
+  setTitle(): void {}
+  setProgress(): void {}
+  setProgramStatus(): void {}
+  setProgressState(_state: TerminalProgressState): void {}
+}
+
+interface OuterScan {
+  /** The stream with every DCS-wrapped command removed (text/control only). */
+  readonly text: string
+  /** Every managed command that was really wrapped in a tmux DCS. */
+  readonly commands: KittyApc[]
+}
+
+/**
+ * Decode the outer stream the way tmux would: a DCS whose payload ESC bytes are
+ * doubled is one passthrough unit. Any `ESC_G` left in `text` is therefore an
+ * unwrapped Kitty command that escaped the gate.
+ */
+function scanOuter(stream: string): OuterScan {
+  let text = ''
+  const commands: KittyApc[] = []
+  let index = 0
+  while (index < stream.length) {
+    const start = stream.indexOf(DCS_INTRODUCER, index)
+    if (start === -1) {
+      text += stream.slice(index)
+      break
+    }
+    text += stream.slice(index, start)
+    let cursor = start + DCS_INTRODUCER.length
+    let inner = ''
+    for (;;) {
+      assert.ok(cursor < stream.length, 'every DCS is terminated')
+      const char = stream[cursor]!
+      if (char === '\x1b') {
+        const next = stream[cursor + 1]
+        if (next === '\x1b') {
+          inner += '\x1b'
+          cursor += 2
+          continue
+        }
+        assert.equal(next, '\\', 'a DCS payload may only contain doubled ESC bytes')
+        cursor += 2
+        break
+      }
+      inner += char
+      cursor += 1
+    }
+    const command = parseKittyApc(inner)
+    assert.ok(command, `each DCS wraps exactly one well-formed Kitty APC: ${JSON.stringify(inner.slice(0, 40))}`)
+    commands.push(command)
+    index = cursor
+  }
+  return { text, commands }
+}
+
+function count(haystack: string, needle: string): number {
+  let total = 0
+  let index = haystack.indexOf(needle)
+  while (index !== -1) {
+    total += 1
+    index = haystack.indexOf(needle, index + needle.length)
+  }
+  return total
+}
+
+function assertNoUnwrappedGraphics(scan: OuterScan): void {
+  assert.equal(scan.text.includes('\x1b_G'), false, 'no managed Kitty APC may escape its DCS')
+}
+
+function source(payload = PNG, widthPx = 64, heightPx = 64) {
+  return { pngBase64: payload, widthPx, heightPx }
+}
+
+interface Harness {
+  readonly cli: FakeTmuxCli
+  readonly terminal: RecordingTerminal
+  readonly graphics: NativeKittyGraphics
+  dispose(): void
+}
+
+function harness(): Harness {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli()
+  const terminal = new RecordingTerminal()
+  const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
+  assert.ok(graphics, 'the default scripted server is the admitted topology')
+  return {
+    cli,
+    terminal,
+    graphics,
+    dispose() {
+      graphics.dispose()
+      cli.dispose()
+    },
+  }
+}
+
+function imageOf(graphics: NativeKittyGraphics, payload: ReturnType<typeof source>, options: NativeKittyImageOptions): TmuxKittyImage {
+  return graphics.image(payload, options) as TmuxKittyImage
+}
+
+function fallbackOptions(): NativeKittyImageOptions {
+  return { maxWidthCells: 30, maxHeightCells: 10, fallback: '[fallback]' }
+}
+
+test('the factory refuses to create a handle unless the live server admits it', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cases: ReadonlyArray<{ name: string; mutate: (cli: FakeTmuxCli) => void }> = [
+    { name: 'opt-in absent', mutate: (cli) => { delete cli.env.PI_TUI_TMUX_KITTY_IMAGES } },
+    { name: 'passthrough on', mutate: (cli) => cli.setReply('show-options', { text: 'on\n' }) },
+    { name: 'no client', mutate: (cli) => cli.setReply('list-clients', { text: '' }) },
+    { name: 'non-Kitty client', mutate: (cli) => cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\ttmux-256color\t\n' }) },
+  ]
+  for (const entry of cases) {
+    const cli = createFakeTmuxCli()
+    const terminal = new RecordingTerminal()
+    try {
+      entry.mutate(cli)
+      assert.equal(createTmuxKittyGraphics(terminal, {}, cli.env), undefined, entry.name)
+      assert.equal(terminal.text, '', `${entry.name}: no bytes and no image work before admission`)
+    } finally {
+      cli.dispose()
+    }
+  }
+})
+
+test('main screen first paint: one wrapped upload, then the placement and real grid cells', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['title', ...image.render(width), 'END']
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    h.terminal.writes.length = 0
+    screen.renderNow()
+
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    const transmissions = scan.commands.filter((command) => command.controls.a === 't')
+    const placements = scan.commands.filter((command) => command.controls.a === 'p')
+    assert.equal(transmissions.length, 1, 'the payload is uploaded exactly once')
+    assert.equal(placements.length, 1, 'one virtual placement anchor')
+    assert.equal(transmissions[0]!.controls.i, placements[0]!.controls.i)
+    assert.equal(transmissions[0]!.controls.q, '2')
+    assert.equal(placements[0]!.controls.U, '1', 'the placement is the virtual prototype')
+    assert.equal(placements[0]!.controls.q, '2')
+    const body = image.paintedBodyAt(100)
+    assert.ok(body !== undefined)
+    assert.equal(Number(placements[0]!.controls.c), body.columns)
+    assert.equal(Number(placements[0]!.controls.r), body.rows)
+    assert.equal(count(scan.text, P), body.columns * body.rows, 'every painted cell is real placeholder text')
+    const grid = encodeKittyPlaceholderGrid(Number(placements[0]!.controls.i), Number(placements[0]!.controls.p), body.columns, body.rows)
+    for (const row of grid) assert.ok(scan.text.includes(row), 'each grid row reached the text stream')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a payload above the APC chunk ceiling uploads as separate wrapped chunks', () => {
+  const h = harness()
+  try {
+    const payload = 'A'.repeat(4096 * 2 + 128)
+    const image = imageOf(h.graphics, { pngBase64: payload, widthPx: 64, heightPx: 64 }, fallbackOptions())
+    h.graphics.terminal.write(image.render(80).join('\r\n'))
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    const transmissions = scan.commands.filter((command) => command.controls.a === 't' || command.controls.m !== undefined)
+    assert.equal(transmissions.length, 3, 'one DCS per transmission chunk')
+    assert.deepEqual(transmissions.map((command) => command.controls.m), ['1', '1', '0'])
+    for (const [index, command] of transmissions.entries()) {
+      assert.equal(command.controls.q, '2', `chunk ${index} is quiet`)
+      assert.ok(command.payload.length <= 4096, `chunk ${index} stays within the ceiling`)
+      assert.equal(command.payload.length % 4, 0)
+    }
+    assert.equal(scan.commands.findIndex((command) => command.controls.a === 'p'), 3,
+      'the placement follows every chunk')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('main screen steady frame: a text change never re-uploads or re-places the image', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    let status = 0
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['title', ...image.render(width), `status ${status}`]
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+    h.terminal.writes.length = 0
+    status = 1
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 0, 'no re-upload')
+    assert.equal(count(scan.text, P), 0, 'the unchanged image lines are not re-painted')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('main screen hide/show is text-cell visibility, never a Kitty delete', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    let show = true
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...(show ? image.render(width) : []), 'tail']
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+
+    h.terminal.writes.length = 0
+    show = false
+    screen.renderNow()
+    const hidden = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(hidden)
+    assert.equal(hidden.commands.length, 0, 'the writer delete translated to no bytes')
+    assert.equal(count(hidden.text, P), 0, 'the placeholder cells were erased')
+
+    h.terminal.writes.length = 0
+    show = true
+    screen.renderNow()
+    const shown = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(shown)
+    assert.equal(shown.commands.filter((command) => command.controls.a === 't').length, 0,
+      'the resident data is reused on re-show')
+    assert.equal(shown.commands.filter((command) => command.controls.a === 'p').length, 1)
+    assert.ok(count(shown.text, P) > 0)
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('main screen clear: the next placement re-uploads after the clear and before the grid', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['title', ...image.render(width)]
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+
+    h.terminal.writes.length = 0
+    h.terminal.columns = 70
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    const clear2 = h.terminal.text.indexOf('\x1b[2J')
+    const clear3 = h.terminal.text.indexOf('\x1b[3J')
+    const firstDcs = h.terminal.text.indexOf(DCS_INTRODUCER)
+    const transmissions = scan.commands.filter((command) => command.controls.a === 't')
+    const placements = scan.commands.filter((command) => command.controls.a === 'p')
+    assert.ok(clear2 !== -1 && clear3 !== -1)
+    assert.equal(transmissions.length, 1, 'the cleared payload is uploaded again')
+    assert.equal(placements.length, 1)
+    assert.ok(clear2 < clear3 && firstDcs > clear3, 'the wrapped upload happens after the invalidating clears')
+    assert.equal(count(scan.text, P), Number(placements[0]!.controls.c) * Number(placements[0]!.controls.r))
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('main screen scrollback: a retired painted image is never hard-deleted, and ids are not reused', () => {
+  const h = harness()
+  try {
+    let current = imageOf(h.graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...current.render(width), 'tail']
+      }
+      invalidate(): void {
+        current.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+    const firstId = current.imageId!
+    screen.renderNow()
+    const seen = new Set<number>([firstId])
+
+    current.dispose()
+    for (let index = 0; index < 30; index++) {
+      current = imageOf(h.graphics, source(PNG, 8, 8), fallbackOptions())
+      screen.invalidate()
+      h.terminal.writes.length = 0
+      screen.renderNow()
+      const id = current.imageId!
+      assert.equal(seen.has(id), false, `occurrence ${index} got a fresh id`)
+      seen.add(id)
+      const scan = scanOuter(h.terminal.text)
+      assertNoUnwrappedGraphics(scan)
+      assert.equal(scan.commands.some((command) => command.controls.a === 'd'), false,
+        'the Core never frees a painted scrollback image')
+      assert.equal(h.terminal.text.includes('a=d'), false, 'and no delete reaches the outer terminal')
+      current.dispose()
+    }
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('alt screen: the upload happens after ?1049h and a non-preserving stop replays the image without deletes', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...image.render(width), 'tail']
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+    const painted = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(painted)
+    assert.ok(h.terminal.text.indexOf('\x1b[?1049h') >= 0)
+    assert.ok(h.terminal.text.indexOf(DCS_INTRODUCER) > h.terminal.text.indexOf('\x1b[?1049h'),
+      'the upload happens inside the alternate screen')
+    assert.equal(painted.commands.filter((command) => command.controls.a === 't').length, 1)
+    assert.equal(painted.commands.filter((command) => command.controls.a === 'p').length, 1)
+
+    h.terminal.writes.length = 0
+    screen.stop({ preserveScreen: false })
+    const replay = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(replay)
+    const exitAt = h.terminal.text.lastIndexOf('\x1b[?1049l')
+    assert.ok(exitAt !== -1)
+    assert.ok(h.terminal.text.lastIndexOf(DCS_INTRODUCER) > exitAt, 'the replayed placement follows ?1049l')
+    assert.equal(replay.commands.filter((command) => command.controls.a === 'd').length, 0,
+      'the replay never frees the image it still refers to')
+    assert.equal(replay.commands.filter((command) => command.controls.a === 't').length, 0,
+      'the data is still resident after leaving the alternate screen')
+    assert.ok(count(h.terminal.text.slice(exitAt), P) > 0, 'the grid really lands on the main screen')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('alt screen: preserveScreen leaves no ghost image behind', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...image.render(width)]
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+    h.terminal.writes.length = 0
+    screen.stop({ preserveScreen: true })
+    const scan = scanOuter(h.terminal.text)
+    const exitAt = h.terminal.text.lastIndexOf('\x1b[?1049l')
+    assert.ok(exitAt !== -1)
+    const after = h.terminal.text.slice(exitAt)
+    assert.equal(count(after, P), 0, 'nothing is replayed onto the main screen')
+    assert.equal(after.includes(DCS_INTRODUCER), false, 'and no placement is re-emitted')
+    assert.equal(scan.text.includes('\x1b_G'), false)
+  } finally {
+    h.dispose()
+  }
+})
+
+test('alt screen: a fresh session re-uploads after its own clear and re-places', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...image.render(width)]
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+    screen.stop({ preserveScreen: true })
+    h.terminal.writes.length = 0
+    screen.start()
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.ok(h.terminal.text.indexOf('\x1b[?1049h') < h.terminal.text.indexOf(DCS_INTRODUCER))
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 1,
+      'the new alternate session starts from an empty image store')
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'p').length, 1)
+    assert.equal(scan.commands.some((command) => command.controls.a === 'd'), false)
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+/**
+ * A scripted facade over the real Core for the permission cases: the factory's
+ * own admission is exercised separately, and this fixture needs direct control
+ * of core ids to pick a guaranteed-foreign id.
+ */
+function directFacade(): {
+  terminal: RecordingTerminal
+  core: KittyGraphicsCore
+  facade: KittyTerminalFacade
+  admission: TmuxKittyAdmission
+  dispose(): void
+} {
+  const cli = createFakeTmuxCli()
+  const identity = probeTmuxKittyIdentity(cli.env)
+  assert.ok(identity)
+  const admission = new TmuxKittyAdmission(identity, cli.env)
+  const terminal = new RecordingTerminal()
+  const core = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
+  const facade = new KittyTerminalFacade(terminal, core, { placementMode: 'tmux-virtual', admission })
+  return {
+    terminal,
+    core,
+    facade,
+    admission,
+    dispose() {
+      facade.dispose()
+      core.dispose()
+      cli.dispose()
+    },
+  }
+}
+
+test('tmux virtual: foreign per-id commands stay byte-for-byte while own/global deletes emit nothing', () => {
+  const { terminal, core, facade, dispose } = directFacade()
+  try {
+  let foreign = 1
+  while (core.ownsIdSpace(foreign)) foreign += 1
+  const foreignTransmit = `\x1b_Ga=T,f=100,q=2,i=${foreign},p=7,c=6,r=3,C=1;AAAA\x1b\\`
+  facade.write(foreignTransmit)
+  assert.equal(terminal.text, foreignTransmit, 'a foreign transmission is never wrapped or hijacked')
+
+  const foreignDelete = `\x1b_Ga=d,d=I,i=${foreign},q=2\x1b\\`
+  terminal.writes.length = 0
+  facade.write(foreignDelete)
+  assert.equal(terminal.text, foreignDelete, 'a foreign per-id delete is untouched')
+
+  const own = core.register(source())!
+  terminal.writes.length = 0
+  facade.write(`\x1b_Ga=d,d=I,i=${own.imageId},q=2\x1b\\`)
+  assert.equal(terminal.text, '', 'the writer delete of an own id is layout intent only')
+  facade.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+  facade.write('\x1b_Ga=d,d=a,q=2\x1b\\')
+  facade.write('\x1b_Ga=d\x1b\\')
+  assert.equal(terminal.text, '', 'no global delete form may reach the outer terminal')
+  assert.equal(core.owns(own.imageId), true, 'a writer delete never frees Core ownership')
+  } finally {
+    dispose()
+  }
+})
+
+test('tmux virtual: an unpainted occurrence retires with a wrapped own-ID delete', () => {
+  const { terminal, core, facade, admission, dispose } = directFacade()
+  try {
+    const component = new TmuxKittyImage(core, source(), fallbackOptions(), admission)
+    component.render(80)
+    const imageId = component.imageId!
+    component.dispose()
+    terminal.writes.length = 0
+    facade.write('after')
+    const scan = scanOuter(terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.deepEqual(scan.commands.map((command) => ({ a: command.controls.a, d: command.controls.d, i: command.controls.i })), [
+      { a: 'd', d: 'I', i: String(imageId) },
+    ])
+    assert.ok(scan.text.endsWith('after'))
+  } finally {
+    dispose()
+  }
+})
+
+test('tmux virtual: a failed frame clears residency and the next placement re-uploads', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...image.render(width)]
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+
+    h.terminal.writes.length = 0
+    h.terminal.columns = 90
+    h.terminal.failWhen = (data) => data.includes(DCS_INTRODUCER)
+    assert.throws(() => screen.renderNow(), /terminal write failed/)
+
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 1,
+      'the payload is sent again after the ambiguous failure')
+    assert.ok(h.terminal.text.indexOf(DCS_INTRODUCER) < h.terminal.text.indexOf(P))
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a revoked client permanently refuses managed batches and paints text fallback', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    const anchor = image.render(100)[0]!
+    h.graphics.terminal.write(anchor)
+    assert.equal(h.graphics.canPaint(), true)
+
+    h.cli.setReply('show-options', { text: 'on\n' })
+    h.terminal.writes.length = 0
+    assert.throws(() => h.graphics.terminal.write(anchor), TmuxGraphicsRevokedError)
+    assert.equal(h.terminal.text, '', 'the whole managed batch is refused, including its grid')
+
+    h.cli.setReply('show-options', { text: 'all\n' })
+    assert.throws(() => h.graphics.terminal.write(anchor), TmuxGraphicsRevokedError)
+    assert.equal(h.graphics.canPaint(), false)
+
+    const fallback = image.render(100)
+    assert.deepEqual(fallback, ['[fallback]'])
+    assert.equal(image.paintedBodyAt(100), undefined)
+    h.terminal.writes.length = 0
+    h.graphics.terminal.write(fallback.join('\r\n'))
+    const scan = scanOuter(h.terminal.text)
+    assert.equal(scan.commands.length, 0)
+    assert.equal(count(scan.text, P), 0, 'no placeholder cell may follow a revoked admission')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a revoked screen repaints its fallback without escaping one grid cell', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    let status = 0
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...image.render(width), `status ${status}`]
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    screen.renderNow()
+    const anchor = image.render(100)[0]!
+
+    h.cli.setReply('show-options', { text: 'off\n' })
+    assert.throws(() => h.graphics.terminal.write(anchor), TmuxGraphicsRevokedError)
+
+    status = 1
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assert.equal(scan.commands.length, 0, 'the fallback frame carries no managed command')
+    assert.equal(count(scan.text, P), 0, 'and no placeholder cell escapes the revoked handle')
+    assert.ok(scan.text.includes('[fallback]'), 'the real screen paints the text fallback')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: the budget falls back to text, and 100 painted images keep their ids and pixels', () => {
+  const { terminal, core, facade, admission, dispose } = directFacade()
+  try {
+  const side = Math.floor(Math.sqrt((256 * 1024 * 1024) / 4)) + 1
+  const oversized = core.register(source(PNG, side, side))
+  assert.equal(oversized, undefined, 'the frozen decoded budget is unchanged')
+  const refused = new TmuxKittyImage(
+    core,
+    source(PNG, side, side),
+    fallbackOptions(),
+    admission,
+  )
+  assert.deepEqual(refused.render(80), ['[fallback]'])
+  assert.equal(refused.paintedBodyAt(80), undefined)
+
+  const seen = new Set<number>()
+  for (let index = 0; index < 100; index++) {
+    const component = new TmuxKittyImage(
+      core,
+      source(PNG, 4, 4),
+      fallbackOptions(),
+      admission,
+    )
+    terminal.writes.length = 0
+    facade.write(component.render(80).join('\r\n'))
+    const scan = scanOuter(terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'p').length, 1,
+      `occurrence ${index} painted`)
+    const imageId = component.imageId!
+    assert.equal(seen.has(imageId), false, `occurrence ${index} got a fresh id`)
+    seen.add(imageId)
+    component.dispose()
+    assert.equal(core.residentImageCount, 0, 'the painted occurrence leaves the active set')
+    assert.equal(core.residentPayloadBytes, 0)
+  }
+  assert.ok(core.register(source(PNG, 4, 4)), 'a new occurrence still admits after 100 images')
+  for (const id of seen) assert.equal(core.ownsIdSpace(id), true)
+  } finally {
+    dispose()
+  }
+})
+
+test('tmux virtual: the component bounds the grid before the encoder, and a narrow width narrows the image', () => {
+  const { core, admission, dispose } = directFacade()
+  try {
+  const image = new TmuxKittyImage(core, source(PNG, 4000, 2000), { maxWidthCells: 700, fallback: '[fallback]' }, admission)
+  const wide = image.render(600)
+  const wideBody = image.paintedBodyAt(600)!
+  assert.equal(wideBody.columns, 297, 'the diacritic table bounds the painted body')
+  assert.ok(wideBody.rows <= 297)
+  assert.equal(wide.length, wideBody.rows)
+  assert.equal(wide[0]!.startsWith(encodeKittyVirtualPlacement(Number(image.imageId), Number(wide[0]!.match(/,p=(\d+)/)?.[1]), wideBody.columns, wideBody.rows)), true)
+
+  image.invalidate()
+  const narrow = image.render(40)
+  const narrowBody = image.paintedBodyAt(40)!
+  assert.ok(narrowBody.columns < wideBody.columns, 'a narrower grant paints fewer columns')
+  assert.equal(narrow.length, narrowBody.rows)
+  const grid = encodeKittyPlaceholderGrid(image.imageId!, Number(narrow[0]!.match(/,p=(\d+)/)?.[1]), narrowBody.columns, narrowBody.rows)
+  assert.ok(narrow[0]!.endsWith(grid[0]!))
+  } finally {
+    dispose()
+  }
+})
+
+test('tmux virtual: scrolling into the middle keeps explicit row cells and never invents a per-row anchor', () => {
+  const h = harness()
+  try {
+    h.terminal.columns = 60
+    h.terminal.rows = 10
+    const image = imageOf(h.graphics, source(PNG, 100, 500), { maxWidthCells: 20, maxHeightCells: 10, fallback: '[image]' })
+    image.render(60)
+    const body = image.paintedBodyAt(60)!
+    assert.equal(body.rows, 10)
+    const grid = encodeKittyPlaceholderGrid(image.imageId!, Number(image.render(60)[0]!.match(/,p=(\d+)/)?.[1]), body.columns, body.rows)
+
+    const content = new LegacyContainer()
+    for (let index = 0; index < 3; index++) content.addChild(new LegacyText(`l${index}`, 0, 0))
+    content.addChild(image)
+    for (let index = 0; index < 20; index++) content.addChild(new LegacyText(`t${index}`, 0, 0))
+    const scroll = new LegacyScrollView(content, { primary: true, follow: 'none' })
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.setLayoutRoot(scroll)
+    screen.start()
+    screen.renderNow()
+    assert.equal(scroll.scrollTop, 0)
+
+    scroll.scrollTo(4)
+    image.invalidate()
+    content.invalidate()
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    assert.equal(scroll.scrollTop, 4)
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.length, 0, 'the anchor is above the viewport: no new placement is invented')
+    for (let row = 1; row < body.rows; row++) {
+      assert.ok(scan.text.includes(grid[row]!), `visible image row ${row} keeps its own diacritics`)
+    }
+    assert.equal(scan.text.includes(grid[0]!), false, 'the anchor row itself is out of view')
+
+    // Scrolling back re-emits the anchor; the data is still resident.
+    scroll.scrollTo(0)
+    image.invalidate()
+    content.invalidate()
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    const restored = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(restored)
+    assert.equal(restored.commands.filter((command) => command.controls.a === 'p').length, 1)
+    assert.equal(restored.commands.filter((command) => command.controls.a === 't').length, 0,
+      're-showing the same cells does not re-upload')
+    assert.ok(restored.text.includes(grid[0]!))
+
+    // Bottom clipping: scroll just past the leading text so the anchor is
+    // visible while the image is taller than the five-row viewport. The screen
+    // must paint only the cells that fit.
+    scroll.scrollTo(3)
+    image.invalidate()
+    content.invalidate()
+    h.terminal.rows = 5
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    const clipped = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(clipped)
+    for (let row = 0; row < 5; row++) {
+      assert.ok(clipped.text.includes(grid[row]!), `visible bottom row ${row}`)
+    }
+    assert.equal(clipped.text.includes(grid[5]!), false, 'rows below the viewport are never painted')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: dispose is idempotent and a factory handle owns exactly one Core lifetime', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    const anchor = image.render(80)
+    h.graphics.terminal.write(anchor.join('\r\n'))
+    assert.equal(h.graphics.mode, 'tmux-virtual')
+    assert.equal(h.graphics.canPaint(), true)
+    h.graphics.dispose()
+    h.graphics.dispose()
+  } finally {
+    h.dispose()
+  }
+})
+
+/**
+ * A user may set `PI_IMAGE_PROTOCOL=kitty`, which makes the fork's screens
+ * believe they have a Native Kitty capability inside tmux. The virtual gate
+ * must still suppress the fork's global cleanup: that global form has no
+ * virtual location and must never reach the outer terminal.
+ */
+test('the fork Kitty capability in a tmux pane never lets a global cleanup escape', () => {
+  const cli = createFakeTmuxCli()
+  const terminal = new RecordingTerminal()
+  const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
+  assert.ok(graphics)
+  try {
+    setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+    const image = imageOf(graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...image.render(width), 'tail']
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+
+    // Main screen: a width change triggers the fork's full redraw, including
+    // its per-id cleanup for the managed anchor.
+    const main = new TuiMainScreen(graphics.terminal)
+    main.addChild(new Root())
+    main.start()
+    main.renderNow()
+    terminal.writes.length = 0
+    terminal.columns = 70
+    main.renderNow()
+    const mainScan = scanOuter(terminal.text)
+    assertNoUnwrappedGraphics(mainScan)
+    assert.equal(mainScan.commands.some((command) => command.controls.a === 'd'), false,
+      'the fork per-id cleanup is layout intent only')
+
+    // Alt screen: its Kitty-only `beforeTerminalStop` global delete is the most
+    // dangerous form; the replay after ?1049l must still own the image.
+    const alt = new TuiAltScreen(graphics.terminal, undefined, undefined, { mouse: false })
+    alt.addChild(new Root())
+    alt.start()
+    alt.renderNow()
+    terminal.writes.length = 0
+    alt.stop({ preserveScreen: false })
+    const altScan = scanOuter(terminal.text)
+    assertNoUnwrappedGraphics(altScan)
+    assert.equal(altScan.commands.some((command) => command.controls.a === 'd'), false,
+      'no global or scoped delete escapes the virtual gate')
+    const exitAt = terminal.text.lastIndexOf('\x1b[?1049l')
+    assert.ok(exitAt !== -1)
+    assert.ok(count(terminal.text.slice(exitAt), P) > 0, 'the replay still paints the grid')
+    assert.equal(altScan.commands.filter((command) => command.controls.a === 't').length, 0,
+      'the payload is still resident across the stop')
+  } finally {
+    graphics.dispose()
+    cli.dispose()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  }
+})
