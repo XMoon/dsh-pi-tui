@@ -38,7 +38,7 @@ import type {
 } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 import type { TmuxKittyAdmission } from './tmux-admission.ts'
-import { encodeTmuxPassthrough, stripManagedVirtualMarkers } from './tmux-virtual.ts'
+import { encodeTmuxPassthrough } from './tmux-virtual.ts'
 
 /**
  * The physical-write refusal of a tmux virtual handle whose live admission was
@@ -70,6 +70,40 @@ export interface KittyTerminalFacadeOptions {
 const MAX_PARTIAL_APC_CHARS = 64 * 1024
 /** A complete provenance marker is far below this; a longer hold is a bug. */
 const MAX_PENDING_MARKER_CHARS = 512
+/** The private marker prefix shared with `tmux-image.ts` and the fork (X067). */
+const MANAGED_VIRTUAL_MARKER_PREFIX = '\x1b_pi:tmux-image:v1:i='
+const MANAGED_VIRTUAL_MARKER_TERMINATOR = '\x1b\\'
+
+/**
+ * Remove every complete provenance marker and return a trailing marker-prefix
+ * fragment to hold for the next write. The marker is not a Kitty command and
+ * must never reach the real terminal; this holds across arbitrary write splits.
+ */
+function stripManagedVirtualMarkers(input: string): { text: string; hold: string } {
+  let text = ''
+  let index = 0
+  for (;;) {
+    const start = input.indexOf(MANAGED_VIRTUAL_MARKER_PREFIX, index)
+    if (start === -1) {
+      text += input.slice(index)
+      break
+    }
+    text += input.slice(index, start)
+    const end = input.indexOf(MANAGED_VIRTUAL_MARKER_TERMINATOR, start + MANAGED_VIRTUAL_MARKER_PREFIX.length)
+    if (end === -1) return { text, hold: input.slice(start) }
+    index = end + MANAGED_VIRTUAL_MARKER_TERMINATOR.length
+  }
+  let holdLength = 0
+  const limit = Math.min(MANAGED_VIRTUAL_MARKER_PREFIX.length - 1, text.length)
+  for (let length = limit; length > 0; length--) {
+    if (MANAGED_VIRTUAL_MARKER_PREFIX.startsWith(text.slice(text.length - length))) {
+      holdLength = length
+      break
+    }
+  }
+  if (holdLength === 0) return { text, hold: '' }
+  return { text: text.slice(0, text.length - holdLength), hold: text.slice(text.length - holdLength) }
+}
 
 interface TextSignal {
   readonly sequence: string
