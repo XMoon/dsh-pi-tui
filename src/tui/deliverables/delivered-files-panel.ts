@@ -64,6 +64,26 @@ interface FooterSegment {
   readonly action?: FooterAction
 }
 
+/** The semantic target under one painted cell. The identity string is the
+ *  press-time fence: a click may only run the EXACT target the press named,
+ *  even if a keyboard action repainted the row underneath the held pointer. */
+interface PointerTarget {
+  readonly kind: 'footer' | 'turn' | 'details' | 'list'
+  readonly identity: string
+  readonly action?: FooterAction
+  readonly turn?: number
+  readonly path?: string
+}
+
+/** One held pointer cell recorded at press time. */
+interface PressedPointerCell {
+  readonly page: DeliveredFilesPage
+  readonly seat: DeliveredFilesSeat
+  readonly x: number
+  readonly y: number
+  readonly identity: string
+}
+
 /** Where the browser opens: the turn/file the user actually acted on. */
 export interface DeliveredFilesOpenIntent {
   readonly turn?: number
@@ -299,6 +319,10 @@ export class DeliveredFilesPanel implements Component {
   private paintedFooterHits: ReadonlyArray<PaintedFooterHit> = []
   /** Painted Turns-page rows: row → Turn. Only a complete click opens one. */
   private paintedTurnRows: ReadonlyMap<number, number> = new Map()
+  /** The cell held by the current mouse press, if any. A synthesized click
+   *  must resolve the SAME page/seat/target identity it recorded here; a
+   *  keyboard repaint between press and release can never retarget the click. */
+  private pressedCell: PressedPointerCell | undefined
 
   constructor(options: DeliveredFilesPanelOptions) {
     this.snapshot = options.snapshot
@@ -904,46 +928,121 @@ export class DeliveredFilesPanel implements Component {
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     // Without a real pointer owner the panel never claims a cell.
     if (this.disposed || !this.pointerOwned()) return undefined
+    if (event.type === 'drag') {
+      // A drag is a text selection, never an activation: the press identity is
+      // retired so no later release can complete it.
+      this.pressedCell = undefined
+      return undefined
+    }
     if (event.type !== 'press' && event.type !== 'click') return undefined
-    if (event.button !== 'left') return undefined
-    // A PRESS may only SELECT / consume. Entering a page, running a footer
-    // action or opening a Turn is a complete gesture: the terminal layer
-    // synthesizes `click` only when the press and the release stayed on the
-    // same cell without a drag.
+    if (event.button !== 'left') {
+      this.pressedCell = undefined
+      return undefined
+    }
     const completeClick = event.type === 'click'
     // Only a frame painted at THIS geometry can be hit: a resize (or a changed
     // content grant) invalidates the recorded rows before the next paint.
-    if (Math.floor(event.width) !== this.paintedWidth || Math.floor(event.height) !== this.paintedRows) return undefined
+    if (Math.floor(event.width) !== this.paintedWidth || Math.floor(event.height) !== this.paintedRows) {
+      this.pressedCell = undefined
+      return undefined
+    }
     // The frame's page/seat must still be the live one: a page or seat change
     // retires every recorded cell until the next paint.
-    if (this.paintedPage !== this.page) return undefined
+    if (this.paintedPage !== this.page) {
+      this.pressedCell = undefined
+      return undefined
+    }
     const liveSeat = this.page === 'files' ? this.seat : 'list'
-    if (this.paintedSeat !== liveSeat) return undefined
+    if (this.paintedSeat !== liveSeat) {
+      this.pressedCell = undefined
+      return undefined
+    }
+    const target = this.pointerTargetAt(event.x, event.y)
+    if (!completeClick) {
+      // A PRESS may select / consume, but never enters a page, runs a footer
+      // action or opens a Turn. Its semantic target identity is the fence the
+      // synthesized click must reproduce.
+      if (target === undefined) {
+        this.pressedCell = undefined
+        return undefined
+      }
+      this.pressedCell = { page: this.page, seat: liveSeat, x: event.x, y: event.y, identity: target.identity }
+      if (target.kind === 'details' && target.path !== undefined) {
+        this.selectedPath = target.path
+        this.requestRender()
+        return { handled: true, render: true }
+      }
+      if (target.kind === 'list' && target.path !== undefined) {
+        // A non-verb Files row selects on BOTH press and click: the opaque
+        // overlay does not turn an unconsumed press into native selection, so
+        // a click-only row would leave that gesture with no selection. They
+        // must change together if text selection is ever added here.
+        this.selectedPath = target.path
+        this.requestRender()
+        return { handled: true, render: true }
+      }
+      return { handled: true }
+    }
 
-    // The action bar owns its painted button cells on EVERY page. A press
-    // consumes but never runs the action; only the synthesized click does.
-    if (event.y === this.paintedFooterRow) {
+    // A synthesized click is only valid for the EXACT cell and semantic target
+    // the press recorded. A keyboard scroll/page/filter between press and
+    // release can repaint a different Turn/file/action under the held pointer;
+    // that click must not transfer.
+    const pressed = this.pressedCell
+    this.pressedCell = undefined
+    if (pressed === undefined || target === undefined) return undefined
+    if (pressed.x !== event.x || pressed.y !== event.y
+      || pressed.page !== this.page || pressed.seat !== liveSeat
+      || pressed.identity !== target.identity) return undefined
+    if (target.kind === 'footer' && target.action !== undefined) {
+      this.runFooterAction(target.action)
+      return { handled: true, render: true }
+    }
+    if (target.kind === 'turn' && target.turn !== undefined) {
+      this.openFilesForTurn(target.turn)
+      return { handled: true, render: true }
+    }
+    if (target.kind === 'details' && target.path !== undefined) {
+      this.selectedPath = target.path
+      this.openDetails()
+      return { handled: true, render: true }
+    }
+    if (target.kind === 'list' && target.path !== undefined) {
+      this.selectedPath = target.path
+      this.requestRender()
+      return { handled: true, render: true }
+    }
+    return undefined
+  }
+
+  /** Resolve the ONE painted semantic target under a cell, or undefined. The
+   *  identity encodes page + seat + kind + the target's own values + the exact
+   *  painted columns/row, so neither a repaint nor a re-layout can retarget a
+   *  held click. */
+  private pointerTargetAt(x: number, y: number): PointerTarget | undefined {
+    const page = this.page
+    const seat = page === 'files' ? this.seat : 'list'
+    const prefix = `${page}\u0000${seat}`
+    // The action bar owns its painted button cells on EVERY page.
+    if (y === this.paintedFooterRow) {
       const hit = this.paintedFooterHits.find(candidate =>
-        event.x >= candidate.startCol && event.x < candidate.endCol)
+        x >= candidate.startCol && x < candidate.endCol)
       if (hit === undefined) return undefined
-      if (!completeClick) return { handled: true }
-      this.runFooterAction(hit.action)
-      return { handled: true, render: true }
+      return {
+        kind: 'footer',
+        action: hit.action,
+        identity: `${prefix}\u0000footer\u0000${hit.action}\u0000${hit.startCol}\u0000${hit.endCol}`,
+      }
     }
-
-    // Turns rows: a complete click moves the cursor to THAT Turn and opens its
-    // Files page — the same effect as Enter Open. A press only consumes.
-    if (this.page === 'turns') {
-      const turn = this.paintedTurnRows.get(event.y)
+    // Turns rows: a complete click opens THAT Turn; the row + Turn are part of
+    // the identity because the list can scroll between press and release.
+    if (page === 'turns') {
+      const turn = this.paintedTurnRows.get(y)
       if (turn === undefined) return undefined
-      if (!completeClick) return { handled: true }
-      this.openFilesForTurn(turn)
-      return { handled: true, render: true }
+      return { kind: 'turn', turn, identity: `${prefix}\u0000turn\u0000${turn}\u0000${y}` }
     }
-
     // The Details body is a read-only preview; only its footer is interactive.
-    if (this.page === 'details') return undefined
-
+    if (page === 'details') return undefined
     // Files body: only the list seat claims rows.
     if (this.seat !== 'list') return undefined
     // LAST-PAINTED identity: the frame's list must still be the live list. A
@@ -951,30 +1050,17 @@ export class DeliveredFilesPanel implements Component {
     // invalidates the recorded cells, so a click can never act on a row the
     // user never saw there.
     if (this.paintedListIdentity !== this.listIdentity()) return undefined
-    const action = this.paintedActionRows.get(event.y)
-    if (action !== undefined && event.x >= action.startCol && event.x < action.endCol) {
-      const file = this.filteredFiles().find(candidate => candidate.path === action.path)
-      if (file === undefined) return undefined
-      this.selectedPath = file.path
-      // The press consumes the cell (so the row does not also change owner) but
-      // opens nothing; only the synthesized click enters the page.
-      if (!completeClick) {
-        this.requestRender()
-        return { handled: true, render: true }
+    const action = this.paintedActionRows.get(y)
+    if (action !== undefined && x >= action.startCol && x < action.endCol) {
+      return {
+        kind: 'details',
+        path: action.path,
+        identity: `${prefix}\u0000details\u0000${action.path}\u0000${action.startCol}\u0000${action.endCol}`,
       }
-      this.openDetails()
-      return { handled: true, render: true }
     }
-    const path = this.paintedListRows.get(event.y)
+    const path = this.paintedListRows.get(y)
     if (path === undefined) return undefined
-    const file = this.filteredFiles().find(candidate => candidate.path === path)
-    if (file === undefined) return undefined
-    // The PR A contract keeps a non-verb Files row selectable on BOTH press and
-    // click: the opaque Modal does not turn an unconsumed press into a native
-    // selection, so a click-only row would be dead until PR B's fork opt-in.
-    this.selectedPath = file.path
-    this.requestRender()
-    return { handled: true, render: true }
+    return { kind: 'list', path, identity: `${prefix}\u0000list\u0000${path}` }
   }
 
   // ── layout ──────────────────────────────────────────────────────────────
@@ -1456,6 +1542,7 @@ export class DeliveredFilesPanel implements Component {
     this.paintedListIdentity = ''
     this.paintedPage = undefined
     this.paintedSeat = undefined
+    this.pressedCell = undefined
   }
 
   private paint(

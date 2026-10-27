@@ -565,6 +565,27 @@ export class OverlayBroker {
       .map(([handle]) => handle)
   }
 
+  /** The node's CURRENT physical projection, if any. Used by an in-place
+   *  geometry rebind that must hide the old projection after attaching the
+   *  fresh one (never to reorder the logical graph). */
+  rawOf(handle: OverlayHandle): OverlayHandle | undefined {
+    const node = this.nodes.get(handle)
+    return node === undefined || node.closed ? undefined : node.raw
+  }
+
+  /** Whether this node's visible projection is the frontmost logical root: a
+   *  fresh raw appended by a geometry rebind would otherwise paint ABOVE an
+   *  overlay that legitimately sits higher in the graph. */
+  isFrontmostVisible(handle: OverlayHandle): boolean {
+    const node = this.nodes.get(handle)
+    if (node === undefined || node.closed || node.raw === undefined || node.raw.isHidden()) return false
+    for (const other of this.nodes.values()) {
+      if (other === node || other.closed || other.raw === undefined || other.raw.isHidden()) continue
+      if (other.zOrder > node.zOrder) return false
+    }
+    return true
+  }
+
   /** Attach a fresh physical projection to an existing logical node. */
   rebind(handle: OverlayHandle, raw: OverlayHandle): void {
     const node = this.nodes.get(handle)

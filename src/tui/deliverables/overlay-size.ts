@@ -1,7 +1,6 @@
 /**
- * The ONE geometry authority of the Delivered files overlay (Delivered files
- * PR A): a centered percentage window instead of the old wide-terminal
- * near-fullscreen exception.
+ * The ONE geometry authority of the Delivered files overlay: a centered
+ * percentage window instead of a wide-terminal near-fullscreen exception.
  *
  * The formula is the Owner-frozen contract:
  *
@@ -25,23 +24,15 @@ export interface DeliveredFilesOverlayGeometry {
   readonly maxHeight: number
 }
 
-/** The formula's maximum window: the host overlay CANVAS the responsive frame
- *  is given. The fork re-clamps these numeric options to the live terminal on
- *  every frame, and the frame paints the formula's live result centered inside
- *  the canvas. Using the ceiling (not the current size) is what lets a window
- *  resize grow the frame without remounting the panel. */
-export const DELIVERED_FILES_OVERLAY_MAX_WIDTH = 120
-export const DELIVERED_FILES_OVERLAY_MAX_HEIGHT = 38
+/** The formula's hard ceiling: the host options must never exceed this even on
+ *  an unbounded terminal. */
+const DELIVERED_FILES_OVERLAY_MAX_WIDTH = 120
+const DELIVERED_FILES_OVERLAY_MAX_HEIGHT = 38
 
 /** Reduce one terminal metric to a non-negative finite integer. */
 function nonNegativeInteger(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.floor(value))
-}
-
-/** The host canvas for the ONE overlay: the formula's maximum window. */
-export function deliveredFilesOverlayCanvas(): DeliveredFilesOverlayGeometry {
-  return { width: DELIVERED_FILES_OVERLAY_MAX_WIDTH, maxHeight: DELIVERED_FILES_OVERLAY_MAX_HEIGHT }
 }
 
 /** Resolve the Delivered files overlay geometry for a terminal size. */

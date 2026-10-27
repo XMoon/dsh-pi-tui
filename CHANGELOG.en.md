@@ -70,7 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regular surface keeps keyboard-only hints instead of paint-less buttons. The
   overlay is now a centered percentage window — full width on narrow terminals
   and at most 120×38 on wide ones, never the old near-fullscreen jump — and a
-  page switch never changes its size. Details shows the declared Host path, its
+  page switch never changes its size. A terminal resize keeps the current page,
+  filter, cursor and scroll position while re-deriving the size. Details shows
+  the declared Host path, its
   description and the existing one-page read-only preview; `Copy path` always
   sends the raw string, and a declaration is never presented as a file snapshot.
   Ctrl+O keeps its existing expand/collapse ownership where it is available;
