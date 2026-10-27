@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -150,4 +150,46 @@ test('the Direct adapter serves the COLD persisted header, an absolute path outs
   const giantStat = await port.stat(sessionId, giantPath, abort)
   assert.equal(giantStat.bytes, 3 * 1024 * 1024)
   await assertRejectionCode(port.read(sessionId, giantPath, 1, abort), 'too-large')
+})
+
+test('symlinks and a renamed declared path follow the REAL Host semantics', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'pr2-direct-link-preset')
+  const workspace = life.tempDir('dsh-pr2-link-ws-')
+  mkdirSync(workspace, { recursive: true })
+  const outsideDir = life.tempDir('dsh-pr2-link-outside-')
+  mkdirSync(outsideDir, { recursive: true })
+  writeFileSync(join(workspace, 'real.md'), 'real-bytes\n')
+  writeFileSync(join(outsideDir, 'secret.md'), 'outside-bytes\n')
+  mkdirSync(join(workspace, 'dir'))
+  const sessionId = SessionId('pr2-direct-link')
+  await host.harness.create(sessionId, undefined, { cwd: workspace })
+  const port = new DirectDeliveredFileReadPort(host.ctx)
+
+  // A symlink is NOT a regular file for the official Host service — whether it
+  // points INSIDE, OUTSIDE (no escape) or at a directory. Probe established the
+  // real classification; the port must not invent a different one.
+  const links = [
+    ['inside', join(workspace, 'inside-link.md'), join(workspace, 'real.md')],
+    ['outside', join(workspace, 'outside-link.md'), join(outsideDir, 'secret.md')],
+    ['directory', join(workspace, 'dir-link'), join(workspace, 'dir')],
+  ] as const
+  for (const [label, linkPath, target] of links) {
+    symlinkSync(target, linkPath)
+    await assertRejectionCode(port.stat(sessionId, linkPath, abort), 'not-regular-file')
+    await assertRejectionCode(port.read(sessionId, linkPath, 1, abort), 'not-regular-file')
+    // The real target stays readable: the refusal is about the LINK, not the file.
+    void label
+  }
+
+  // RENAMED: the declared (old) path is the official `not-found`, and the new
+  // path serves the same bytes — the preview never follows a rename silently.
+  const oldPath = join(workspace, 'moved.md')
+  const newPath = join(workspace, 'renamed.md')
+  writeFileSync(oldPath, 'moved-bytes\n')
+  renameSync(oldPath, newPath)
+  await assertRejectionCode(port.stat(sessionId, oldPath, abort), 'not-found')
+  await assertRejectionCode(port.read(sessionId, oldPath, 1, abort), 'not-found')
+  const renamed = await port.read(sessionId, newPath, 1, abort)
+  assert.equal(renamed.text, 'moved-bytes', 'the NEW declared path serves the file')
 })

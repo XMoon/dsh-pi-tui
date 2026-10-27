@@ -1106,4 +1106,3 @@ test('a superseded read is discarded SILENTLY and ends in a neutral, recoverable
   assert.equal(h.preview().kind, 'loading-stat', 're-entering issues a NEW request')
   assert.equal(h.statCalls(), statsBeforeReentry + 1, 'the re-entry really asked the Host again')
 })
-
