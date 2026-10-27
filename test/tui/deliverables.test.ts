@@ -1283,3 +1283,29 @@ test('a fullscreen transcript Details verb still works after a 120→160→120 r
   const after = await viewport(vt)
   assert.ok(after.includes('report.md · Details'), `the re-painted Details verb is clickable:\n${after}`)
 })
+
+test('the tail keeps an escaping .. path absolute and normalizes an inside .. path', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: '/ws',
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'final',
+    deliverables: [
+      { path: '/ws/../outside/report.md' },
+      { path: '/ws/docs/../inside.md' },
+    ],
+  }])
+  const lines = (await viewport(vt)).split('\n')
+  assert.ok(lines.some(line => line.startsWith('  /ws/../outside/report.md')),
+    `an escaping path keeps its absolute declaration verbatim:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.startsWith('  inside.md')),
+    `a lexically-inside .. path is relativized:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.startsWith('  ../outside/report.md')),
+    `the escaping path must not be painted relative:\n${lines.join('\n')}`)
+})

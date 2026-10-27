@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../src/transcript.ts'
 import {
+  deliveredDisplayPath,
   deliveredFileBasename,
   deliveredFileLabels,
   deliveredTurnsOf,
@@ -230,4 +231,30 @@ test('a generated ordinal never steals a label another declaration naturally has
   assert.equal(labels[2], 'report (2)')
   // RAW declarations remain the Copy/search authority.
   assert.deepEqual(files.map(entry => entry.path), ['/a/report\u001b[31m', '/a/report\u001b[32m', '/b/report (2)'])
+})
+
+
+test('deliveredDisplayPath keeps an absolute outside-root path verbatim, including ..', () => {
+  assert.equal(deliveredDisplayPath('/ws/docs/report.md', '/ws'), 'docs/report.md')
+  assert.equal(deliveredDisplayPath('/ws/docs/../report.md', '/ws'), 'report.md')
+  assert.equal(deliveredDisplayPath('/ws/../ws/docs/report.md', '/ws'), 'docs/report.md')
+  assert.equal(deliveredDisplayPath('/ws/../outside/report.md', '/ws'), '/ws/../outside/report.md')
+  assert.equal(deliveredDisplayPath('/outside/report.md', '/ws'), '/outside/report.md')
+  assert.equal(deliveredDisplayPath('/WS/report.md', '/ws'), '/WS/report.md')
+  assert.equal(deliveredDisplayPath('/ws/..', '/ws'), '/ws/..')
+  assert.equal(deliveredDisplayPath('/ws', '/ws'), '/ws')
+  assert.equal(deliveredDisplayPath('/ws/report.md', '/ws/'), 'report.md')
+  assert.equal(deliveredDisplayPath('/ws/report.md', undefined), '/ws/report.md')
+  assert.equal(deliveredDisplayPath('/ws/report.md', ''), '/ws/report.md')
+  assert.equal(deliveredDisplayPath('docs/report.md', '/ws'), 'docs/report.md')
+  assert.equal(deliveredDisplayPath('../outside/report.md', '/ws'), '../outside/report.md')
+})
+
+test('deliveredDisplayPath applies the same lexical containment to Windows and mixed separators', () => {
+  assert.equal(deliveredDisplayPath('C:\\ws\\docs\\report.md', 'C:\\ws'), 'docs/report.md')
+  assert.equal(deliveredDisplayPath('C:\\ws\\..\\outside\\report.md', 'C:\\ws'), 'C:\\ws\\..\\outside\\report.md')
+  assert.equal(deliveredDisplayPath('C:/ws/docs/report.md', 'C:\\ws'), 'docs/report.md')
+  assert.equal(deliveredDisplayPath('C:\\ws\\docs/../report.md', 'C:\\ws'), 'report.md')
+  assert.equal(deliveredDisplayPath('C:\\other\\report.md', 'C:\\ws'), 'C:\\other\\report.md')
+  assert.equal(deliveredDisplayPath('/ws\\docs\\report.md', '/ws'), 'docs/report.md')
 })

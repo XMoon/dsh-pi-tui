@@ -22,7 +22,7 @@ import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
 import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { fitDeliveredLabels } from '../presentation/labels.ts'
 import { abbreviateName } from '../pickers/name-label.ts'
-import { relativizeToCwd } from '../transcript/tool-presentation.ts'
+import { deliveredDisplayPath } from '../../domain/deliverables/catalog.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 
 /** The assistant delivered-files tail folds after this many files. */
@@ -497,7 +497,7 @@ export class DeliveredFilesComponent implements Component {
     // text that is painted: two declarations that differ only in removed
     // control bytes still produce distinct fitted labels in `render`.
     this.labels = files.map(file =>
-      sanitizeDisplaySegment(relativizeToCwd(file.path, options.workspaceRoot)) || '(unnamed)')
+      sanitizeDisplaySegment(deliveredDisplayPath(file.path, options.workspaceRoot)) || '(unnamed)')
     this.pointerActions = options.pointerActions === true
     this.commandEntry = options.commandEntry === true
   }
