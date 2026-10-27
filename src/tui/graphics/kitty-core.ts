@@ -61,7 +61,6 @@ export interface KittyGraphicsEvent {
     | 'retained'
     | 'writer-delete-translated'
     | 'global-delete-translated'
-    | 'shutdown-unplaced'
   readonly imageId?: number
   readonly detail?: string
 }
@@ -334,6 +333,18 @@ export class KittyGraphicsCore {
       record.placements = 0
       wire += encodeKittyDeletePlacement(record.image.imageId)
     }
+    if (buffer === 'alt') {
+      // A repaint clear in the alternate buffer must also remove the
+      // placement of an occurrence that was retired after it painted: the
+      // screen no longer has a record for it, but the pixels are still on
+      // that buffer, and erasing text does not erase graphics. Its data stays
+      // resident (the session's own release frees it), so this is a scoped
+      // placement removal, exactly like the live case.
+      for (const imageId of this.altSessionIds) {
+        if (this.records.has(imageId)) continue
+        wire += encodeKittyDeletePlacement(imageId)
+      }
+    }
     if (wire !== '') this.emit({ type: 'global-delete-translated', detail: `placements:${buffer}` })
     return wire
   }
@@ -460,26 +471,6 @@ export class KittyGraphicsCore {
     this.emit({ type: 'write-failed', detail: `${buffer}:${touched}` })
   }
 
-
-  /**
-   * Terminal stop: queue the retirement of every owned image whose data never
-   * reached a placement. Those bytes are invisible and nothing can legitimately
-   * reference them, so freeing them cannot erase a scrollback pixel. The
-   * facade's own take/commit/rollback path writes them, so a failing cleanup
-   * write keeps the ids queued instead of losing their accounting. Images that
-   * were placed (or whose placement write failed after possibly painting) are
-   * left to the owner policy the screen already expressed.
-   */
-  queueUnplacedRetirements(): number {
-    let queued = 0
-    for (const [imageId, record] of this.records) {
-      if (record.everPlaced || record.retireQueued || record.retirePending || record.source === undefined) continue
-      record.retireQueued = true
-      this.emit({ type: 'shutdown-unplaced', imageId })
-      queued += 1
-    }
-    return queued
-  }
 
   /** Drop every reference. No terminal IO: the terminal is already gone. */
   dispose(): void {

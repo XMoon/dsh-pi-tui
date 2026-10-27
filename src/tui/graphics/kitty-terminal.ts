@@ -123,15 +123,18 @@ export class KittyTerminalFacade implements Terminal {
 
   stop(): void {
     if (this.disposed) return
-    // Queued retirements and invisible uploads are released while the physical
-    // terminal still accepts bytes; images that were really placed stay under
-    // the screen's own preserve/release policy (the alternate screen emits its
-    // global release through this facade; the main screen preserves its
-    // scrollback). A failing cleanup is reported AFTER the terminal is restored,
-    // never swallowed and never left to skip `inner.stop()`.
+    // A screen stop is NOT the end of its components: a rendered occurrence may
+    // simply not have reached the terminal yet (pre-layout, clipping, a screen
+    // switch, a suspend/resume). Registrations therefore stay owned by their
+    // components — only the component's own retire, the screen's own release,
+    // and the final `dispose()` end them. Queued retirements are still flushed
+    // here while the terminal accepts bytes; images that were really placed
+    // stay under the screen's preserve/release policy (the alternate screen
+    // emits its global release through this facade; the main screen preserves
+    // its scrollback). A failing cleanup is reported AFTER the terminal is
+    // restored, never swallowed and never left to skip `inner.stop()`.
     let failure: unknown
     try {
-      this.core.queueUnplacedRetirements()
       this.flushRetirements()
     } catch (error) {
       failure = error

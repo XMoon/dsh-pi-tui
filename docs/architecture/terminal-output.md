@@ -187,10 +187,13 @@ retirement and the resident budget.
 - **Painted pixels are terminal-retained.** An occurrence that goes away after
   being painted does not hard-delete its image: the pixels may still be in the
   viewport or the scrollback. The Core drops its own payload copy and keeps the
-  id known (never re-used, never deleted by the Core); only an upload that
-  never reached a placement is auto-released. The main screen's `stop()` never
-  sends `d=I` in either `preserveScreen` mode; the alternate screen releases
-  the ids it placed, and only those.
+  id known (never re-used, never deleted by the Core); an upload that never
+  reached a placement is released when its OCCURRENCE retires, never merely
+  because a screen stopped — a stopped screen does not end its components. The
+  main screen's `stop()` never sends `d=I` in either `preserveScreen` mode; the
+  alternate screen releases the ids it placed, and only those, on both of its
+  global forms (`d=A` and a repaint's `d=a`, the latter as a scoped placement
+  removal so a retired-but-visible image cannot leave a ghost).
 - **The budget bounds the working set, not the session.** The Core limits the
   payload and decoded footprint it currently manages; it has no cumulative
   image-id quota, because the main screen's scrollback legitimately grows with
